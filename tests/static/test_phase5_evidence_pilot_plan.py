@@ -8,6 +8,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 EXECUTION_PLAN = ROOT / "plans/phase-5-evidence-pilot-execution.md"
 TEST_BATCHES = ROOT / "plans/phase-5-evidence-pilot-test-batches.yaml"
+OWNER_BRIEFS = ROOT / "plans/phase-5-owner-briefs.yaml"
 CONTRACT_PACK = ROOT / "docs/runbooks/temporal-first/phase-5-p5.0-contract-pack.md"
 BASELINE_INVENTORY = (
     ROOT
@@ -35,6 +36,10 @@ ENGINEERING_EXCEPTION = (
 
 def _batches() -> dict:
     return yaml.safe_load(TEST_BATCHES.read_text(encoding="utf-8"))
+
+
+def _owner_briefs() -> dict:
+    return yaml.safe_load(OWNER_BRIEFS.read_text(encoding="utf-8"))
 
 
 def test_phase5_engineering_exception_is_accepted_and_cross_linked() -> None:
@@ -282,3 +287,124 @@ def test_phase5_review_keeps_d0_and_e0_independent_with_exact_path_closure() -> 
     assert "tests/static/test_phase5_*.py" in closure
     assert "exactly one editor" in closure
     assert "R retains shared plan/evidence gates" in closure
+
+
+def test_phase5_owner_briefs_remain_blocked_until_entry_evidence() -> None:
+    briefs = _owner_briefs()
+
+    assert briefs["document_status"] == "DRAFT_BLOCKED_UNTIL_P5_0_ENTRY_EVIDENCE"
+    assert briefs["entry_gate"]["status"] == "BLOCKED"
+    assert briefs["entry_gate"]["required_before_dispatch"] == [
+        "PHASE_4_ENGINEERING_CHECKPOINT_PASS",
+        "PHASE_5_ENGINEERING_ONLY_PERMISSION_RECORDED",
+        "P5_0_CONTRACT_CANDIDATE_COMMITTED",
+        "P5_0_BATCH_0_PASSED_ON_EXACT_CONTRACT_CANDIDATE_SHA",
+        "P5_0_ENTRY_EVIDENCE_COMMITTED",
+    ]
+    assert set(briefs["owners"]) == {"A", "B", "C", "D", "E"}
+    assert briefs["shared_contract_owner"]["owner"] == "R"
+    assert briefs["shared_contract_owner"]["delegated_owners_may_edit"] is False
+
+
+def test_phase5_owner_briefs_repeat_non_negotiable_scope_guards() -> None:
+    briefs = _owner_briefs()
+
+    for owner in briefs["owners"].values():
+        guard = owner["scope_guard"]
+        assert owner["status"] == "DRAFT_BLOCKED_UNTIL_P5_0_ENTRY_EVIDENCE"
+        assert guard["public_evidence_submission_max"] == 50
+        assert guard["closed_synthetic_manifest_counts"] == [1, 8, 100]
+        assert guard["closed_synthetic_100_is_public_contract"] is False
+        assert guard["formal_evidence_sink_allowed"] is False
+        assert guard["temporal_evidence_allocation_allowed"] is False
+        assert guard["allowed_new_runtime_modes"] == [
+            "DISABLED",
+            "SIGNED_SYNTHETIC_SHADOW",
+        ]
+        assert guard["asset_mode"] == "JAVA_SIGNED_SYNTHETIC_CAPABILITY_ONLY"
+        assert guard["hearing_supplement_max_per_party_unchanged"] == 50
+
+
+def test_phase5_wave_a_initial_owner_write_sets_are_exact_and_disjoint() -> None:
+    briefs = _owner_briefs()
+    initial_tasks = briefs["wave_a_parallel_launch"]["simultaneously_active_tasks"]
+    assert initial_tasks == ["P5-A1", "P5-B1", "P5-C1", "P5-D0", "P5-E0"]
+
+    seen: dict[str, str] = {}
+    for task_id in initial_tasks:
+        owner_id = task_id.split("-")[1][0]
+        task = briefs["owners"][owner_id]["tasks"][task_id]
+        assert task["initial_parallel"] is True
+        assert task["depends_on"] == ["P5-0"]
+        assert task["owned_files"]
+        for path in task["owned_files"]:
+            assert not any(token in path for token in ("*", "?", "[", "]"))
+            assert path not in seen, f"{path} is shared by {seen[path]} and {task_id}"
+            seen[path] = task_id
+
+
+def test_phase5_every_delegated_task_is_executable_and_path_bounded() -> None:
+    briefs = _owner_briefs()
+    token_classes = set(briefs["test_token_policy"]["required_resource_classes"])
+    path_owners: dict[str, str] = {}
+
+    for owner_id, owner in briefs["owners"].items():
+        assert owner["review_partner"] != owner_id
+        assert owner["forbidden_path_prefixes"]
+        assert owner["forbidden_files"]
+        for forbidden in owner["forbidden_path_prefixes"] + owner["forbidden_files"]:
+            assert not any(token in forbidden for token in ("*", "?", "[", "]"))
+        for task_id, task in owner["tasks"].items():
+            assert task_id.startswith(f"P5-{owner_id}")
+            assert task["input_contracts"]
+            assert task["output_contracts"]
+            assert task["owned_files"]
+            assert task["t0_commands"]
+            assert len(task["commit_definition_of_done"]) >= 4
+            for path in task["owned_files"]:
+                assert not any(token in path for token in ("*", "?", "[", "]"))
+                previous_owner = path_owners.setdefault(path, owner_id)
+                assert previous_owner == owner_id, (
+                    f"{path} crosses delegated owners {previous_owner} and {owner_id}"
+                )
+            for command in task["t0_commands"]:
+                assert command["workdir"]
+                assert command["argv"]
+                assert command["max_duration_seconds"] <= 180
+                assert command["test_token_required"] == (
+                    command["resource_class"] in token_classes
+                )
+
+
+def test_phase5_d1_e1_takeovers_require_the_wave_a_integration_barrier() -> None:
+    briefs = _owner_briefs()
+    barrier = briefs["integration_barriers"]["P5-WAVE-A-INTEGRATED"]
+
+    assert barrier["status"] == "BLOCKED"
+    assert "P5_BATCH_1_PASS_ON_MERGED_SHA" in barrier["prerequisites"]
+    transfers = {item["owner"]: item for item in barrier["path_takeovers"]}
+    assert set(transfers) == {"D", "E"}
+    for owner_id, next_task in (("D", "P5-D1"), ("E", "P5-E1")):
+        transfer = transfers[owner_id]
+        task = briefs["owners"][owner_id]["tasks"][next_task]
+        assert "P5-WAVE-A-INTEGRATED" in task["depends_on"]
+        assert transfer["to_task"] == next_task
+        assert set(transfer["files"]).issubset(task["owned_files"])
+
+
+def test_phase5_owner_briefs_reserve_shared_paths_for_primary_integration() -> None:
+    briefs = _owner_briefs()
+    primary_paths = set(briefs["primary_integration_only"]["exact_paths"])
+    delegated_paths = {
+        path
+        for owner in briefs["owners"].values()
+        for task in owner["tasks"].values()
+        for path in task["owned_files"]
+    }
+
+    assert primary_paths.isdisjoint(delegated_paths)
+    assert "tests/static/test_phase5_evidence_pilot_plan.py" in primary_paths
+    assert (
+        "java-api-service/src/main/java/com/example/dispute/workflow/config/TemporalWorkerConfiguration.java"
+        in primary_paths
+    )

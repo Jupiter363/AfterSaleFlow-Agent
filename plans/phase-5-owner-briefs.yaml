@@ -1,0 +1,652 @@
+schema_version: phase-owner-briefs.v1
+phase: 5
+name: evidence-pilot-delegated-owner-briefs
+document_status: DRAFT_BLOCKED_UNTIL_P5_0_ENTRY_EVIDENCE
+
+authority:
+  execution_plan: plans/phase-5-evidence-pilot-execution.md
+  test_schedule: plans/phase-5-evidence-pilot-test-batches.yaml
+  contract_pack: docs/runbooks/temporal-first/phase-5-p5.0-contract-pack.md
+  baseline_inventory: docs/runbooks/temporal-first/phase-5-p5.0-baseline-inventory.md
+  review_closure: docs/runbooks/temporal-first/phase-5-p5.0-review-closure.md
+  engineering_exception: docs/architecture/adr/0012-phase-5-evidence-engineering-exception.md
+
+entry_gate:
+  status: BLOCKED
+  required_before_dispatch:
+    - PHASE_4_ENGINEERING_CHECKPOINT_PASS
+    - PHASE_5_ENGINEERING_ONLY_PERMISSION_RECORDED
+    - P5_0_CONTRACT_CANDIDATE_COMMITTED
+    - P5_0_BATCH_0_PASSED_ON_EXACT_CONTRACT_CANDIDATE_SHA
+    - P5_0_ENTRY_EVIDENCE_COMMITTED
+  dispatch_rule: No owner may create implementation commits while document_status is DRAFT_BLOCKED_UNTIL_P5_0_ENTRY_EVIDENCE.
+
+shared_contract_owner:
+  owner: R
+  delegated_owners_may_edit: false
+  files:
+    - contracts/agent-platform/evidence/v2/compatibility-matrix.yaml
+    - contracts/agent-platform/evidence/v2/evidence-batch-manifest.schema.json
+    - contracts/agent-platform/evidence/v2/evidence-asset-capability.schema.json
+    - contracts/agent-platform/evidence/v2/evidence-item-proposal.schema.json
+    - contracts/agent-platform/evidence/v2/evidence-terminal-proposal.schema.json
+    - contracts/agent-platform/evidence/v2/evidence-finalization-receipt.schema.json
+    - contracts/agent-platform/evidence/v2/evidence-process-projection.schema.json
+
+test_token_policy:
+  grantor: R
+  max_concurrent_heavy_tokens: 1
+  request_fields: [task_id, command_id, expected_duration_seconds, resource_class]
+  required_resource_classes:
+    - maven_test
+    - spring_context
+    - postgresql
+    - testcontainers
+    - temporal_test_server
+    - docker_compose
+    - browser_or_playwright
+    - load_or_soak
+  rules:
+    - A delegated owner may run token-free T0 commands only from its own brief.
+    - A Maven test remains token-controlled even when it is a focused service-free unit test.
+    - T1 and T2 commands are deduplicated and run by R at the declared integration checkpoint.
+    - Full regression browser Docker real shadow load soak failover DR and canary are not delegated.
+    - A granted token is released immediately after its single declared command exits.
+    - A failed command is classified before any same-SHA retry; PRODUCT blocks dependent work.
+
+wave_a_parallel_launch:
+  status: BLOCKED_ON_ENTRY_GATE
+  simultaneously_active_tasks: [P5-A1, P5-B1, P5-C1, P5-D0, P5-E0]
+  exact_write_sets_must_be_disjoint: true
+  owner_count: 5
+  initial_review_pairs:
+    P5-A1: C
+    P5-B1: E
+    P5-C1: A
+    P5-D0: R
+    P5-E0: B
+
+integration_barriers:
+  P5-WAVE-A-INTEGRATED:
+    status: BLOCKED
+    owner: R
+    prerequisites:
+      - P5-A2_COMMITTED_AND_REVIEWED
+      - P5-B2_COMMITTED_AND_REVIEWED
+      - P5-C2_COMMITTED_AND_REVIEWED
+      - P5-D0_COMMITTED_AND_REVIEWED
+      - P5-E0_COMMITTED_AND_REVIEWED
+      - P5_BATCH_1_PASS_ON_MERGED_SHA
+    rules:
+      - D1 and E1 may not edit any takeover file before this barrier is OPEN.
+      - A B and C become dependency-fix-only after this barrier and need an exact-file grant from R.
+      - R records the merged SHA before opening D1 and E1.
+    path_takeovers:
+      - owner: D
+        from_task: P5-D0
+        to_task: P5-D1
+        files:
+          - java-api-service/src/main/java/com/example/dispute/workflow/projection/evidence/EvidenceProcessProjectionAdapter.java
+          - java-api-service/src/main/java/com/example/dispute/workflow/projection/evidence/EvidenceProcessProjectionView.java
+          - java-api-service/src/test/java/com/example/dispute/workflow/projection/EvidenceProcessProjectionAdapterTest.java
+          - frontend/src/api/evidence.test.js
+          - frontend/src/views/disputes/EvidenceRoomView.test.js
+      - owner: E
+        from_task: P5-E0
+        to_task: P5-E1
+        files:
+          - java-api-service/src/main/java/com/example/dispute/workflow/shadow/evidence/EvidenceBulkheadPolicy.java
+          - java-api-service/src/main/java/com/example/dispute/workflow/shadow/evidence/EvidenceNoFormalSinkGuard.java
+          - java-api-service/src/test/java/com/example/dispute/workflow/shadow/evidence/EvidenceBulkheadPolicyTest.java
+          - java-api-service/src/test/java/com/example/dispute/workflow/shadow/evidence/EvidenceNoFormalSinkGuardTest.java
+          - tests/static/test_phase5_evidence_no_sink_bulkhead.py
+
+owners:
+  A:
+    role: Evidence Graph state fanout reducer and recovery
+    status: DRAFT_BLOCKED_UNTIL_P5_0_ENTRY_EVIDENCE
+    review_partner: C
+    scope_guard:
+      public_evidence_submission_max: 50
+      closed_synthetic_manifest_counts: [1, 8, 100]
+      closed_synthetic_100_is_public_contract: false
+      formal_evidence_sink_allowed: false
+      temporal_evidence_allocation_allowed: false
+      allowed_new_runtime_modes: [DISABLED, SIGNED_SYNTHETIC_SHADOW]
+      asset_mode: JAVA_SIGNED_SYNTHETIC_CAPABILITY_ONLY
+      hearing_supplement_max_per_party_unchanged: 50
+    forbidden_path_prefixes:
+      - java-api-service/
+      - frontend/
+      - contracts/agent-platform/evidence/v2/
+      - plans/
+      - docs/
+      - test-reports/
+    forbidden_files:
+      - python-agent-service/app/agents/evidence_clerk/workflow.py
+      - python-agent-service/app/graph_runtime/checkpoint.py
+      - python-agent-service/app/graph_runtime/ledger.py
+      - python-agent-service/app/graph_runtime/registry.py
+      - python-agent-service/app/graph_runtime/recovery.py
+    tasks:
+      P5-A1:
+        initial_parallel: true
+        depends_on: [P5-0]
+        input_contracts:
+          - contracts/agent-platform/evidence/v2/evidence-batch-manifest.schema.json
+          - contracts/agent-platform/evidence/v2/evidence-item-proposal.schema.json
+          - contracts/agent-platform/evidence/v2/evidence-terminal-proposal.schema.json
+        output_contracts:
+          - evidence.v2 state validates one immutable manifest and emits proposal-only terminal coverage
+          - dispatch waves contain at most eight active item assessments for closed synthetic counts 1 8 and 100
+        owned_files:
+          - python-agent-service/app/graphs/evidence/__init__.py
+          - python-agent-service/app/graphs/evidence/contracts.py
+          - python-agent-service/app/graphs/evidence/state.py
+          - python-agent-service/app/graphs/evidence/nodes.py
+          - python-agent-service/app/graphs/evidence/graph.py
+          - python-agent-service/tests/graphs/evidence/__init__.py
+          - python-agent-service/tests/graphs/evidence/conftest.py
+          - python-agent-service/tests/graphs/evidence/test_state.py
+          - python-agent-service/tests/graphs/evidence/test_graph.py
+        t0_commands:
+          - id: A1_PYTEST
+            workdir: python-agent-service
+            argv: [D:/miniconda/python.exe, -m, pytest, tests/graphs/evidence/test_state.py, tests/graphs/evidence/test_graph.py, -q]
+            resource_class: light_pytest
+            test_token_required: false
+            max_duration_seconds: 180
+        commit_definition_of_done:
+          - Only P5-A1 owned_files are staged.
+          - Counts 1 8 and 100 and max-active 8 have positive and negative tests.
+          - State contains no formal merge freeze Hearing-open or trusted business-decision field.
+          - T0 passes and C records P0 review closure.
+          - Commit SHA and exact T0 command result are returned to R.
+      P5-A2:
+        initial_parallel: false
+        depends_on: [P5-A1, P5-C1]
+        input_contracts:
+          - contracts/agent-platform/evidence/v2/evidence-asset-capability.schema.json
+          - contracts/agent-platform/evidence/v2/evidence-terminal-proposal.schema.json
+        output_contracts:
+          - keyed item reduction is associative order-independent replay-idempotent and conflict-failing
+          - recovery resumes the same manifest membership without creating a formal sink
+        owned_files:
+          - python-agent-service/app/graphs/evidence/reducers.py
+          - python-agent-service/app/graphs/evidence/runtime.py
+          - python-agent-service/tests/graphs/evidence/test_reducers.py
+          - python-agent-service/tests/graphs/evidence/test_recovery.py
+        t0_commands:
+          - id: A2_PYTEST
+            workdir: python-agent-service
+            argv: [D:/miniconda/python.exe, -m, pytest, tests/graphs/evidence/test_reducers.py, tests/graphs/evidence/test_recovery.py, -q]
+            resource_class: light_pytest
+            test_token_required: false
+            max_duration_seconds: 180
+        commit_definition_of_done:
+          - Only P5-A2 owned_files are staged.
+          - Duplicate identical keys are idempotent and conflicting keys fail closed.
+          - Random completion order yields one stable proposal hash with complete manifest coverage.
+          - T0 passes and C records P0 review closure.
+          - Commit SHA and exact T0 command result are returned to R.
+
+  B:
+    role: Temporal Evidence process timers and recovery
+    status: DRAFT_BLOCKED_UNTIL_P5_0_ENTRY_EVIDENCE
+    review_partner: E
+    scope_guard:
+      public_evidence_submission_max: 50
+      closed_synthetic_manifest_counts: [1, 8, 100]
+      closed_synthetic_100_is_public_contract: false
+      formal_evidence_sink_allowed: false
+      temporal_evidence_allocation_allowed: false
+      allowed_new_runtime_modes: [DISABLED, SIGNED_SYNTHETIC_SHADOW]
+      asset_mode: JAVA_SIGNED_SYNTHETIC_CAPABILITY_ONLY
+      hearing_supplement_max_per_party_unchanged: 50
+    forbidden_path_prefixes:
+      - python-agent-service/
+      - frontend/
+      - contracts/agent-platform/evidence/v2/
+      - java-api-service/src/main/java/com/example/dispute/hearing/
+      - java-api-service/src/main/resources/db/migration/
+      - plans/
+      - docs/
+    forbidden_files:
+      - java-api-service/src/main/java/com/example/dispute/evidence/application/EvidenceCompletionService.java
+      - java-api-service/src/main/java/com/example/dispute/evidence/application/EvidenceDossierFreezer.java
+      - java-api-service/src/main/java/com/example/dispute/evidence/api/EvidenceSubmissionRequest.java
+      - java-api-service/src/main/java/com/example/dispute/workflow/config/TemporalWorkerConfiguration.java
+    tasks:
+      P5-B1:
+        initial_parallel: true
+        depends_on: [P5-0]
+        input_contracts:
+          - contracts/agent-platform/evidence/v2/evidence-batch-manifest.schema.json
+          - contracts/agent-platform/evidence/v2/evidence-finalization-receipt.schema.json
+        output_contracts:
+          - deterministic Workflow kernel preserves original deadline and one warning at deadline minus 30 minutes
+          - duplicate party completion and expiry races produce ordered commands without writing Domain truth
+        owned_files:
+          - java-api-service/src/main/java/com/example/dispute/workflow/temporal/room/evidence/EvidenceRoomWorkflow.java
+          - java-api-service/src/main/java/com/example/dispute/workflow/temporal/room/evidence/EvidenceRoomWorkflowImpl.java
+          - java-api-service/src/main/java/com/example/dispute/workflow/temporal/room/evidence/EvidenceRoomStart.java
+          - java-api-service/src/main/java/com/example/dispute/workflow/temporal/room/evidence/EvidenceRoomSignal.java
+          - java-api-service/src/main/java/com/example/dispute/workflow/temporal/room/evidence/EvidenceRoomSnapshot.java
+          - java-api-service/src/main/java/com/example/dispute/workflow/temporal/room/evidence/EvidenceRoomPhase.java
+          - java-api-service/src/main/java/com/example/dispute/workflow/temporal/room/evidence/EvidenceTimerPlan.java
+          - java-api-service/src/main/java/com/example/dispute/workflow/temporal/room/evidence/EvidenceOperationKeys.java
+          - java-api-service/src/test/java/com/example/dispute/workflow/room/evidence/EvidenceRoomWorkflowTest.java
+          - java-api-service/src/test/java/com/example/dispute/workflow/room/evidence/EvidenceRoomWorkflowReplayTest.java
+        t0_commands:
+          - id: B1_MAVEN_TEST
+            workdir: java-api-service
+            argv: [./mvnw.cmd, -q, -Dtest=EvidenceRoomWorkflowTest,EvidenceRoomWorkflowReplayTest, test]
+            resource_class: maven_test
+            test_token_required: true
+            max_duration_seconds: 180
+        commit_definition_of_done:
+          - Only P5-B1 owned_files are staged.
+          - Workflow code contains no repository HTTP model or system-time access.
+          - Deadline duplicate signal warning boundary and replay tests exist.
+          - Token-granted T0 passes and E records P0 review closure.
+          - Commit SHA and test-token release are returned to R.
+      P5-B2:
+        initial_parallel: false
+        depends_on: [P5-B1, P5-C1]
+        input_contracts:
+          - contracts/agent-platform/evidence/v2/evidence-finalization-receipt.schema.json
+          - java-api-service/src/main/java/com/example/dispute/evidence/application/graph/EvidenceFinalizationReceipt.java
+        output_contracts:
+          - activity retries consume committed Java receipts and reject stale epoch or fence
+          - cancellation and lost-response recovery never infer a formal commit from Workflow history alone
+        owned_files:
+          - java-api-service/src/main/java/com/example/dispute/workflow/temporal/room/evidence/EvidenceRoomActivities.java
+          - java-api-service/src/main/java/com/example/dispute/workflow/temporal/room/evidence/EvidenceActivityProtocol.java
+          - java-api-service/src/main/java/com/example/dispute/workflow/temporal/room/evidence/EvidenceActivityExecutionState.java
+          - java-api-service/src/main/java/com/example/dispute/workflow/temporal/room/evidence/EvidenceFinalizationReceiptRef.java
+          - java-api-service/src/test/java/com/example/dispute/workflow/room/evidence/EvidenceRoomActivityContractTest.java
+          - java-api-service/src/test/java/com/example/dispute/workflow/room/evidence/EvidenceRoomWorkflowWorkerRecoveryTest.java
+        t0_commands:
+          - id: B2_MAVEN_TEST
+            workdir: java-api-service
+            argv: [./mvnw.cmd, -q, -Dtest=EvidenceRoomActivityContractTest,EvidenceRoomWorkflowWorkerRecoveryTest, test]
+            resource_class: maven_test
+            test_token_required: true
+            max_duration_seconds: 180
+        commit_definition_of_done:
+          - Only P5-B2 owned_files are staged.
+          - Receipt epoch fence manifest hash and idempotency key are checked before progress.
+          - Lost response and cancellation recovery are covered without formal sink activation.
+          - Token-granted T0 passes and E records P0 review closure.
+          - Commit SHA and test-token release are returned to R.
+
+  C:
+    role: Java manifest asset authority ledger and Finalizer
+    status: DRAFT_BLOCKED_UNTIL_P5_0_ENTRY_EVIDENCE
+    review_partner: A
+    scope_guard:
+      public_evidence_submission_max: 50
+      closed_synthetic_manifest_counts: [1, 8, 100]
+      closed_synthetic_100_is_public_contract: false
+      formal_evidence_sink_allowed: false
+      temporal_evidence_allocation_allowed: false
+      allowed_new_runtime_modes: [DISABLED, SIGNED_SYNTHETIC_SHADOW]
+      asset_mode: JAVA_SIGNED_SYNTHETIC_CAPABILITY_ONLY
+      hearing_supplement_max_per_party_unchanged: 50
+    forbidden_path_prefixes:
+      - python-agent-service/
+      - frontend/
+      - contracts/agent-platform/evidence/v2/
+      - java-api-service/src/main/java/com/example/dispute/hearing/
+      - plans/
+      - docs/
+    forbidden_files:
+      - java-api-service/src/main/java/com/example/dispute/evidence/api/EvidenceSubmissionRequest.java
+      - java-api-service/src/main/java/com/example/dispute/workflow/temporal/room/evidence/EvidenceRoomWorkflowImpl.java
+      - java-api-service/src/main/java/com/example/dispute/workflow/config/TemporalWorkerConfiguration.java
+      - java-api-service/src/main/resources/db/migration/V043__intake_graph_bindings.sql
+      - java-api-service/src/main/resources/db/migration/V043_2__intake_shadow_comparisons.sql
+      - java-api-service/src/main/resources/db/migration/V043_3__intake_signed_synthetic_admission.sql
+    tasks:
+      P5-C1:
+        initial_parallel: true
+        depends_on: [P5-0]
+        input_contracts:
+          - contracts/agent-platform/evidence/v2/evidence-batch-manifest.schema.json
+          - contracts/agent-platform/evidence/v2/evidence-asset-capability.schema.json
+          - contracts/agent-platform/evidence/v2/evidence-finalization-receipt.schema.json
+        output_contracts:
+          - Java validates manifest tenant case owner visibility object version MIME size hash expiry nonce epoch and fence
+          - V043_4 stores additive idempotent binding and receipt identity without activating a writer
+        owned_files:
+          - java-api-service/src/main/java/com/example/dispute/evidence/application/graph/EvidenceBatchManifest.java
+          - java-api-service/src/main/java/com/example/dispute/evidence/application/graph/EvidenceAssetCapability.java
+          - java-api-service/src/main/java/com/example/dispute/evidence/application/graph/EvidenceAssetAuthorization.java
+          - java-api-service/src/main/java/com/example/dispute/evidence/application/graph/EvidenceGraphBinding.java
+          - java-api-service/src/main/java/com/example/dispute/evidence/infrastructure/persistence/JdbcEvidenceGraphBindingStore.java
+          - java-api-service/src/main/resources/db/migration/V043_4__evidence_graph_bindings.sql
+          - java-api-service/src/test/java/com/example/dispute/evidence/EvidenceAssetAuthorizationTest.java
+          - java-api-service/src/test/java/com/example/dispute/evidence/JdbcEvidenceGraphBindingStoreTest.java
+        t0_commands:
+          - id: C1_MAVEN_TEST
+            workdir: java-api-service
+            argv: [./mvnw.cmd, -q, -Dtest=EvidenceAssetAuthorizationTest,JdbcEvidenceGraphBindingStoreTest, test]
+            resource_class: maven_test
+            test_token_required: true
+            max_duration_seconds: 180
+        commit_definition_of_done:
+          - Only P5-C1 owned_files are staged and no prior migration changes.
+          - Signed synthetic capabilities reject wrong owner visibility object version hash epoch fence expiry and nonce.
+          - Binding writes are additive and idempotent while formal execution remains disabled.
+          - Token-granted T0 passes and A records P0 review closure.
+          - Commit SHA migration checksum and test-token release are returned to R.
+      P5-C2:
+        initial_parallel: false
+        depends_on: [P5-A1, P5-B1, P5-C1]
+        input_contracts:
+          - contracts/agent-platform/evidence/v2/evidence-terminal-proposal.schema.json
+          - contracts/agent-platform/evidence/v2/evidence-finalization-receipt.schema.json
+        output_contracts:
+          - Java Finalizer validates complete manifest coverage and performs one idempotent ACID merge behind a disabled formal-sink gate
+          - committed receipt is the only authority B may use to advance freeze or transition ordering
+        owned_files:
+          - java-api-service/src/main/java/com/example/dispute/evidence/application/graph/EvidenceGraphCommandFactory.java
+          - java-api-service/src/main/java/com/example/dispute/evidence/application/graph/EvidenceGraphResultFinalizer.java
+          - java-api-service/src/main/java/com/example/dispute/evidence/application/graph/EvidenceFinalizationReceipt.java
+          - java-api-service/src/main/java/com/example/dispute/evidence/application/graph/EvidenceFinalizationLedger.java
+          - java-api-service/src/main/java/com/example/dispute/room/application/EvidenceAgentTurnService.java
+          - java-api-service/src/test/java/com/example/dispute/evidence/EvidenceGraphCommandFactoryTest.java
+          - java-api-service/src/test/java/com/example/dispute/evidence/EvidenceGraphResultFinalizerTest.java
+          - java-api-service/src/test/java/com/example/dispute/evidence/EvidenceFinalizationReceiptTest.java
+        t0_commands:
+          - id: C2_MAVEN_TEST
+            workdir: java-api-service
+            argv: [./mvnw.cmd, -q, -Dtest=EvidenceGraphCommandFactoryTest,EvidenceGraphResultFinalizerTest,EvidenceFinalizationReceiptTest, test]
+            resource_class: maven_test
+            test_token_required: true
+            max_duration_seconds: 180
+        commit_definition_of_done:
+          - Only P5-C2 owned_files are staged.
+          - Missing duplicate foreign or conflicting item proposals fail before any merge.
+          - Commit-response loss returns the same receipt and low relevance remains distinct from suspected forgery.
+          - Formal sink assembly remains unreachable in DISABLED and SIGNED_SYNTHETIC_SHADOW.
+          - Token-granted T0 passes and A records P0 review closure.
+          - Commit SHA and test-token release are returned to R.
+
+  D:
+    role: Evidence projection API and compatible frontend experience
+    status: DRAFT_BLOCKED_UNTIL_P5_0_ENTRY_EVIDENCE
+    review_partner: R
+    scope_guard:
+      public_evidence_submission_max: 50
+      closed_synthetic_manifest_counts: [1, 8, 100]
+      closed_synthetic_100_is_public_contract: false
+      formal_evidence_sink_allowed: false
+      temporal_evidence_allocation_allowed: false
+      allowed_new_runtime_modes: [DISABLED, SIGNED_SYNTHETIC_SHADOW]
+      asset_mode: JAVA_SIGNED_SYNTHETIC_CAPABILITY_ONLY
+      hearing_supplement_max_per_party_unchanged: 50
+    forbidden_path_prefixes:
+      - python-agent-service/
+      - contracts/agent-platform/evidence/v2/
+      - java-api-service/src/main/java/com/example/dispute/workflow/temporal/
+      - java-api-service/src/main/java/com/example/dispute/workflow/shadow/
+      - java-api-service/src/main/resources/db/migration/
+      - plans/
+      - docs/
+    forbidden_files:
+      - java-api-service/src/main/java/com/example/dispute/evidence/api/EvidenceSubmissionRequest.java
+      - java-api-service/src/main/java/com/example/dispute/hearing/api/HearingEvidenceBatchRequest.java
+      - java-api-service/src/main/java/com/example/dispute/evidence/application/EvidenceCompletionService.java
+      - java-api-service/src/main/java/com/example/dispute/evidence/application/EvidenceDossierFreezer.java
+      - java-api-service/src/main/java/com/example/dispute/workflow/config/TemporalWorkerConfiguration.java
+    tasks:
+      P5-D0:
+        initial_parallel: true
+        depends_on: [P5-0]
+        input_contracts:
+          - contracts/agent-platform/evidence/v2/evidence-process-projection.schema.json
+          - java-api-service/src/main/java/com/example/dispute/evidence/api/EvidenceSubmissionRequest.java
+        output_contracts:
+          - legacy projection compatibility and actor privacy remain stable
+          - public API rejects more than 50 while closed synthetic fixtures may render 1 8 and 100
+        owned_files:
+          - java-api-service/src/main/java/com/example/dispute/workflow/projection/evidence/EvidenceProcessProjectionAdapter.java
+          - java-api-service/src/main/java/com/example/dispute/workflow/projection/evidence/EvidenceProcessProjectionView.java
+          - java-api-service/src/test/java/com/example/dispute/workflow/projection/EvidenceProcessProjectionAdapterTest.java
+          - frontend/src/api/evidence.test.js
+          - frontend/src/views/disputes/EvidenceRoomView.test.js
+        t0_commands:
+          - id: D0_MAVEN_TEST
+            workdir: java-api-service
+            argv: [./mvnw.cmd, -q, -Dtest=EvidenceProcessProjectionAdapterTest, test]
+            resource_class: maven_test
+            test_token_required: true
+            max_duration_seconds: 180
+          - id: D0_VITEST
+            workdir: frontend
+            argv: [node, node_modules/vitest/vitest.mjs, run, src/api/evidence.test.js, src/views/disputes/EvidenceRoomView.test.js, --maxWorkers=2, --minWorkers=1]
+            resource_class: light_frontend_unit
+            test_token_required: false
+            max_duration_seconds: 180
+        commit_definition_of_done:
+          - Only P5-D0 owned_files are staged.
+          - Public 51-item submission is negative and no test treats synthetic 100 as public approval.
+          - USER MERCHANT Reviewer history and active-run privacy fixtures remain compatible.
+          - T0 passes under token policy and R records P0 review closure.
+          - Commit SHA and exact T0 results are returned to R.
+      P5-D1:
+        initial_parallel: false
+        depends_on: [P5-D0, P5-A2, P5-B2, P5-C2, P5-WAVE-A-INTEGRATED]
+        input_contracts:
+          - contracts/agent-platform/evidence/v2/evidence-process-projection.schema.json
+          - contracts/agent-platform/evidence/v2/evidence-finalization-receipt.schema.json
+        output_contracts:
+          - versioned projection exposes pending active terminal and recovery state without hidden authority
+          - API and store preserve stale-response role-switch and history locks
+        owned_files:
+          - java-api-service/src/main/java/com/example/dispute/workflow/projection/evidence/EvidenceProcessProjectionAdapter.java
+          - java-api-service/src/main/java/com/example/dispute/workflow/projection/evidence/EvidenceProcessProjectionView.java
+          - java-api-service/src/test/java/com/example/dispute/workflow/projection/EvidenceProcessProjectionAdapterTest.java
+          - frontend/src/api/evidence.js
+          - frontend/src/api/evidence.test.js
+          - frontend/src/stores/evidence.js
+          - frontend/src/stores/evidence.test.js
+          - frontend/src/views/disputes/EvidenceRoomView.vue
+          - frontend/src/views/disputes/EvidenceRoomView.test.js
+        t0_commands:
+          - id: D1_VITEST
+            workdir: frontend
+            argv: [node, node_modules/vitest/vitest.mjs, run, src/api/evidence.test.js, src/stores/evidence.test.js, src/views/disputes/EvidenceRoomView.test.js, --maxWorkers=2, --minWorkers=1]
+            resource_class: light_frontend_unit
+            test_token_required: false
+            max_duration_seconds: 180
+        commit_definition_of_done:
+          - P5-WAVE-A-INTEGRATED is OPEN before the first edit.
+          - Only P5-D1 owned_files are staged.
+          - Projection privacy pending active-run recovery role-switch and history tests pass.
+          - No UI or API enables TEMPORAL allocation formal sink or public 100 submission.
+          - R records P0 review closure and receives the commit SHA.
+      P5-D2:
+        initial_parallel: false
+        depends_on: [P5-D1]
+        input_contracts:
+          - contracts/agent-platform/evidence/v2/evidence-process-projection.schema.json
+        output_contracts:
+          - disabled or signed-synthetic 100-card state is visibly non-public and complete
+        owned_files:
+          - frontend/src/api/evidence.js
+          - frontend/src/api/evidence.test.js
+          - frontend/src/stores/evidence.js
+          - frontend/src/stores/evidence.test.js
+          - frontend/src/views/disputes/EvidenceRoomView.vue
+          - frontend/src/views/disputes/EvidenceRoomView.test.js
+        t0_commands:
+          - id: D2_VITEST
+            workdir: frontend
+            argv: [node, node_modules/vitest/vitest.mjs, run, src/api/evidence.test.js, src/stores/evidence.test.js, src/views/disputes/EvidenceRoomView.test.js, --maxWorkers=2, --minWorkers=1]
+            resource_class: light_frontend_unit
+            test_token_required: false
+            max_duration_seconds: 180
+        commit_definition_of_done:
+          - Only P5-D2 owned_files are staged.
+          - Synthetic counts 1 8 and 100 render without changing the public max-50 submit path.
+          - Accessibility privacy history and recovery states pass focused tests.
+          - R records P0 review closure and receives the commit SHA.
+
+  E:
+    role: Bulkheads signed-synthetic parity selector observability and rollback
+    status: DRAFT_BLOCKED_UNTIL_P5_0_ENTRY_EVIDENCE
+    review_partner: B
+    scope_guard:
+      public_evidence_submission_max: 50
+      closed_synthetic_manifest_counts: [1, 8, 100]
+      closed_synthetic_100_is_public_contract: false
+      formal_evidence_sink_allowed: false
+      temporal_evidence_allocation_allowed: false
+      allowed_new_runtime_modes: [DISABLED, SIGNED_SYNTHETIC_SHADOW]
+      asset_mode: JAVA_SIGNED_SYNTHETIC_CAPABILITY_ONLY
+      hearing_supplement_max_per_party_unchanged: 50
+    forbidden_path_prefixes:
+      - frontend/
+      - contracts/agent-platform/evidence/v2/
+      - java-api-service/src/main/java/com/example/dispute/hearing/
+      - java-api-service/src/main/resources/db/migration/
+      - plans/
+      - docs/
+      - test-reports/
+    forbidden_files:
+      - java-api-service/src/main/java/com/example/dispute/evidence/api/EvidenceSubmissionRequest.java
+      - java-api-service/src/main/java/com/example/dispute/evidence/application/EvidenceCompletionService.java
+      - java-api-service/src/main/java/com/example/dispute/evidence/application/EvidenceDossierFreezer.java
+      - java-api-service/src/main/java/com/example/dispute/workflow/config/TemporalWorkerConfiguration.java
+      - python-agent-service/tests/graphs/evidence/test_recovery.py
+      - tests/static/test_phase5_evidence_pilot_plan.py
+      - tests/static/test_phase5_entry_contract_plan.py
+    tasks:
+      P5-E0:
+        initial_parallel: true
+        depends_on: [P5-0]
+        input_contracts:
+          - contracts/agent-platform/evidence/v2/evidence-batch-manifest.schema.json
+          - contracts/agent-platform/evidence/v2/evidence-finalization-receipt.schema.json
+        output_contracts:
+          - room tenant and global permit policy has bounded queues fairness cancellation and release contracts
+          - static no-sink harness proves disabled and signed-synthetic assembly cannot reach formal writers
+        owned_files:
+          - java-api-service/src/main/java/com/example/dispute/workflow/shadow/evidence/EvidenceBulkheadPolicy.java
+          - java-api-service/src/main/java/com/example/dispute/workflow/shadow/evidence/EvidenceNoFormalSinkGuard.java
+          - java-api-service/src/test/java/com/example/dispute/workflow/shadow/evidence/EvidenceBulkheadPolicyTest.java
+          - java-api-service/src/test/java/com/example/dispute/workflow/shadow/evidence/EvidenceNoFormalSinkGuardTest.java
+          - tests/static/test_phase5_evidence_no_sink_bulkhead.py
+        t0_commands:
+          - id: E0_STATIC
+            workdir: .
+            argv: [D:/miniconda/python.exe, -m, pytest, tests/static/test_phase5_evidence_no_sink_bulkhead.py, -q]
+            resource_class: light_pytest
+            test_token_required: false
+            max_duration_seconds: 180
+          - id: E0_MAVEN_TEST
+            workdir: java-api-service
+            argv: [./mvnw.cmd, -q, -Dtest=EvidenceBulkheadPolicyTest,EvidenceNoFormalSinkGuardTest, test]
+            resource_class: maven_test
+            test_token_required: true
+            max_duration_seconds: 180
+        commit_definition_of_done:
+          - Only P5-E0 owned_files are staged.
+          - Queue bounds fairness timeout cancellation permit release and bounded metric labels are tested.
+          - No-sink proof covers DISABLED and SIGNED_SYNTHETIC_SHADOW and rejects TEMPORAL allocation.
+          - T0 passes under token policy and B records P0 review closure.
+          - Commit SHA and exact T0 results are returned to R.
+      P5-E1:
+        initial_parallel: false
+        depends_on: [P5-E0, P5-A2, P5-B2, P5-C2, P5-WAVE-A-INTEGRATED]
+        input_contracts:
+          - contracts/agent-platform/evidence/v2/evidence-batch-manifest.schema.json
+          - contracts/agent-platform/evidence/v2/evidence-terminal-proposal.schema.json
+          - contracts/agent-platform/evidence/v2/evidence-finalization-receipt.schema.json
+        output_contracts:
+          - signed-synthetic parity uses room tenant and global bulkheads with deterministic hashes
+          - Graph recovery cannot bypass no-sink or asset authority
+        owned_files:
+          - java-api-service/src/main/java/com/example/dispute/workflow/shadow/evidence/EvidenceBulkheadPolicy.java
+          - java-api-service/src/main/java/com/example/dispute/workflow/shadow/evidence/EvidenceNoFormalSinkGuard.java
+          - java-api-service/src/main/java/com/example/dispute/workflow/shadow/evidence/EvidenceBulkhead.java
+          - java-api-service/src/main/java/com/example/dispute/workflow/shadow/evidence/EvidenceShadowParityService.java
+          - java-api-service/src/main/java/com/example/dispute/workflow/shadow/evidence/EvidenceSignedSyntheticDriver.java
+          - java-api-service/src/test/java/com/example/dispute/workflow/shadow/evidence/EvidenceBulkheadPolicyTest.java
+          - java-api-service/src/test/java/com/example/dispute/workflow/shadow/evidence/EvidenceNoFormalSinkGuardTest.java
+          - java-api-service/src/test/java/com/example/dispute/workflow/shadow/evidence/EvidenceBulkheadIntegrationTest.java
+          - java-api-service/src/test/java/com/example/dispute/workflow/shadow/evidence/EvidenceShadowParityServiceTest.java
+          - python-agent-service/tests/graphs/evidence/test_bulkhead_recovery.py
+          - tests/static/test_phase5_evidence_no_sink_bulkhead.py
+        t0_commands:
+          - id: E1_PYTEST
+            workdir: python-agent-service
+            argv: [D:/miniconda/python.exe, -m, pytest, tests/graphs/evidence/test_bulkhead_recovery.py, -q]
+            resource_class: light_pytest
+            test_token_required: false
+            max_duration_seconds: 180
+          - id: E1_MAVEN_TEST
+            workdir: java-api-service
+            argv: [./mvnw.cmd, -q, -Dtest=EvidenceBulkheadIntegrationTest,EvidenceShadowParityServiceTest, test]
+            resource_class: maven_test
+            test_token_required: true
+            max_duration_seconds: 180
+        commit_definition_of_done:
+          - P5-WAVE-A-INTEGRATED is OPEN before the first edit.
+          - Only P5-E1 owned_files are staged.
+          - GRAPH-016 room tenant global bounds fairness cancellation recovery and release evidence passes.
+          - Synthetic parity never uses party data production objects formal sink or TEMPORAL allocation.
+          - T0 passes under token policy and B records P0 review closure.
+          - Commit SHA and exact T0 results are returned to R.
+      P5-E2:
+        initial_parallel: false
+        depends_on: [P5-D2, P5-E1]
+        input_contracts:
+          - contracts/agent-platform/evidence/v2/evidence-process-projection.schema.json
+          - contracts/agent-platform/evidence/v2/evidence-finalization-receipt.schema.json
+        output_contracts:
+          - selector fails closed and crash timer-race rollback preserves Java truth
+        owned_files:
+          - java-api-service/src/main/java/com/example/dispute/workflow/shadow/evidence/EvidenceEpochSelector.java
+          - java-api-service/src/main/java/com/example/dispute/workflow/shadow/evidence/EvidenceCutoverRollback.java
+          - java-api-service/src/test/java/com/example/dispute/workflow/recovery/EvidenceTemporalCutoverIntegrationTest.java
+          - java-api-service/src/test/java/com/example/dispute/workflow/recovery/EvidenceCutoverRollbackTest.java
+          - java-api-service/src/test/java/com/example/dispute/workflow/recovery/EvidenceRoomWorkflowRecoveryTest.java
+          - tests/static/test_phase5_evidence_selector.py
+        t0_commands:
+          - id: E2_STATIC
+            workdir: .
+            argv: [D:/miniconda/python.exe, -m, pytest, tests/static/test_phase5_evidence_selector.py, -q]
+            resource_class: light_pytest
+            test_token_required: false
+            max_duration_seconds: 180
+          - id: E2_MAVEN_TEST
+            workdir: java-api-service
+            argv: [./mvnw.cmd, -q, -Dtest=EvidenceTemporalCutoverIntegrationTest,EvidenceCutoverRollbackTest,EvidenceRoomWorkflowRecoveryTest, test]
+            resource_class: maven_test
+            test_token_required: true
+            max_duration_seconds: 180
+        commit_definition_of_done:
+          - Only P5-E2 owned_files are staged.
+          - First eighth and hundredth item crash plus timer race and lost response are covered.
+          - Unknown unsigned stale or real-case selection fails closed without legacy timer duplication.
+          - MIG-005 remains PENDING_PROMOTION and no canary or formal writer is enabled.
+          - T0 passes under token policy and B records P0 review closure.
+          - Commit SHA and exact T0 results are returned to R.
+
+primary_integration_only:
+  owner: R
+  exact_paths:
+    - plans/phase-5-owner-briefs.yaml
+    - plans/phase-5-evidence-pilot-execution.md
+    - plans/phase-5-evidence-pilot-test-batches.yaml
+    - tests/static/test_phase5_evidence_pilot_plan.py
+    - tests/static/test_phase5_entry_contract_plan.py
+    - java-api-service/src/main/java/com/example/dispute/workflow/config/TemporalWorkerConfiguration.java
+    - java-api-service/src/main/java/com/example/dispute/workflow/config/OrchestrationCutoverProperties.java
+  rules:
+    - Shared contract files and selector assembly are merged only after delegated commits are reviewed.
+    - R owns Batch 1 Batch 2 candidate evidence failure classification and exact-SHA checkpoint execution.
+    - Integration may wire only DISABLED or Java-signed synthetic SHADOW; formal Evidence allocation remains forbidden.
