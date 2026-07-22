@@ -11,7 +11,7 @@ import org.springframework.stereotype.Repository;
 
 /** JDBC publisher used only after the epoch service has asserted both party rows. */
 @Repository
-public final class JdbcEpochBootstrapOutboxPublisher implements EpochBootstrapOutboxPublisher {
+public class JdbcEpochBootstrapOutboxPublisher implements EpochBootstrapOutboxPublisher {
 
     private final NamedParameterJdbcTemplate jdbc;
 
