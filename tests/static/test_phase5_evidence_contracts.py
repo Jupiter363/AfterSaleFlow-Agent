@@ -500,6 +500,7 @@ def test_manifest_uses_direct_java_signature_before_graph_or_checkpoint_mutation
     assert schema["x-signature"] == {
         "algorithm": "ES256",
         "covers": "manifest_hash",
+        "input_encoding": "ASCII_LOWERCASE_HEX_TEXT",
         "encoding": "JOSE_P1363_BASE64URL",
     }
     assert {
@@ -533,6 +534,7 @@ def test_manifest_uses_direct_java_signature_before_graph_or_checkpoint_mutation
         "manifest_ref_field": "domain_snapshot_ref",
         "requires_verified_java_envelope": True,
         "failure": "BEFORE_CHECKPOINT_MUTATION",
+        "room_fence_is_graph_lease_fence": False,
         "command_binds_room_fencing_token": False,
         "room_fencing_token_authority": "JAVA_SIGNED_MANIFEST",
         "checkpoint_lease_fence_authority": "GRAPH_RUNTIME",
@@ -568,9 +570,25 @@ def test_room_and_graph_fences_have_distinct_authorities() -> None:
         manifest_schema, "GATEWAY_COMMAND_EXACT_BINDING"
     ).lower()
     assert "command fencing_token" not in binding_rule
-    assert "manifest fencing_token" in binding_rule
+    assert "signed manifest" in binding_rule and "room fencing_token" in binding_rule
     assert "graph lease" in binding_rule
     assert "java finalizer" in binding_rule
+
+
+def test_es256_signs_lowercase_hash_text_and_never_raw_digest_bytes() -> None:
+    contracts = (
+        ("evidence-batch-manifest.schema.json", "JAVA_SIGNATURE_REQUIRED"),
+        ("evidence-asset-capability.schema.json", "SIGNATURE_SCOPE"),
+    )
+    for schema_name, semantic_id in contracts:
+        schema = _schema(schema_name)
+        assert schema["x-signature"]["input_encoding"] == (
+            "ASCII_LOWERCASE_HEX_TEXT"
+        )
+        assert schema["x-signature"]["encoding"] == "JOSE_P1363_BASE64URL"
+        rule = _semantic_rule(schema, semantic_id).lower()
+        assert "ascii" in rule and "lowercase" in rule and "hex" in rule
+        assert "raw digest" in rule and ("not " in rule or "never " in rule)
 
 
 def test_detached_authorization_proof_refs_are_forbidden_from_closed_contracts() -> None:
@@ -698,7 +716,12 @@ def test_asset_capability_hash_signature_body_expiry_and_nonce_are_bound() -> No
         "preimage": "omit_top_level_fields",
         "omit_fields": ["capability_hash", "signature"],
     }
-    assert schema["x-signature"] == {"algorithm": "ES256", "covers": "capability_hash"}
+    assert schema["x-signature"] == {
+        "algorithm": "ES256",
+        "covers": "capability_hash",
+        "input_encoding": "ASCII_LOWERCASE_HEX_TEXT",
+        "encoding": "JOSE_P1363_BASE64URL",
+    }
     assert {
         "SELF_HASH",
         "EXPIRY_ORDER",
