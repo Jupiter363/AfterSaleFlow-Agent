@@ -3,9 +3,19 @@ package com.example.dispute.workflow.recovery;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
+import com.example.dispute.workflow.shadow.intake.IntakeReliabilityHarness;
+import com.example.dispute.workflow.shadow.intake.IntakeReliabilityHarness.FailureClassification;
+import com.example.dispute.workflow.shadow.intake.IntakeReliabilityHarness.FaultBoundary;
+import com.example.dispute.workflow.shadow.intake.IntakeReliabilityHarness.Invariant;
+import com.example.dispute.workflow.shadow.intake.IntakeReliabilityHarness.Observation;
+import com.example.dispute.workflow.shadow.intake.IntakeReliabilityHarness.Outcome;
+import com.example.dispute.workflow.shadow.intake.IntakeReliabilityHarness.Scenario;
 import com.example.dispute.workflow.temporal.room.intake.IntakeParty;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
@@ -20,6 +30,8 @@ class IntakeCutoverRollbackTest {
   private static final Set<String> INITIATOR_EFFECTS =
       Set.of("invitation://CASE_ROLLBACK/respondent", "summons://CASE_ROLLBACK/respondent");
   private static final String EVIDENCE_RECEIPT = "operation://CASE_ROLLBACK/open-evidence/1";
+  private static final String CANDIDATE = "f3be4633690c121891b5080fda1babdf4faa6cf9";
+  private static final String FIXTURE_HASH = "d".repeat(64);
 
   @Test
   void preTerminalRollbackCreatesHigherFencedLegacyEpochAndRejectsStaleWriter() {
@@ -95,6 +107,137 @@ class IntakeCutoverRollbackTest {
       harness.rollback(writer.roomEpoch(), writer.fencingToken());
       assertThat(harness.activeWriterCount()).isOne();
     }
+  }
+
+  @Test
+  void rollbackBoundariesAreClassifiedAndReproducibleFromFreshState() {
+    IntakeReliabilityHarness reliability = new IntakeReliabilityHarness();
+    List<FaultBoundary> boundaries =
+        List.of(
+            FaultBoundary.ROLLBACK_PRE_TERMINAL,
+            FaultBoundary.ROLLBACK_AFTER_INITIATOR,
+            FaultBoundary.ROLLBACK_AFTER_EVIDENCE);
+
+    for (FaultBoundary boundary : boundaries) {
+      Scenario scenario =
+          new Scenario(
+              IntakeReliabilityHarness.SCENARIO_V1,
+              boundary,
+              FailureClassification.INFRA,
+              CANDIDATE,
+              FIXTURE_HASH,
+              20260722,
+              3);
+
+      var report = reliability.requirePassing(scenario, ignored -> observeRollback(boundary));
+
+      assertThat(report.failureClassification()).isEqualTo(FailureClassification.INFRA);
+      assertThat(report.observationHashes())
+          .hasSize(3)
+          .containsOnly(report.observationHashes().getFirst());
+      assertThat(report.missingInvariants()).isEmpty();
+    }
+  }
+
+  private static Observation observeRollback(FaultBoundary boundary) {
+    return switch (boundary) {
+      case ROLLBACK_PRE_TERMINAL ->
+          observeNewLegacyEpochRollback(
+              boundary,
+              RollbackHarness.syntheticIntake(Boundary.READY_TO_CONFIRM, FORMAL_REFS, Set.of()),
+              false);
+      case ROLLBACK_AFTER_INITIATOR ->
+          observeNewLegacyEpochRollback(
+              boundary,
+              RollbackHarness.syntheticIntake(
+                  Boundary.WAITING_PARTY, FORMAL_REFS, INITIATOR_EFFECTS),
+              true);
+      case ROLLBACK_AFTER_EVIDENCE -> observeEvidenceForwardRecovery();
+      default -> throw new IllegalArgumentException("rollback probe requires a rollback boundary");
+    };
+  }
+
+  private static Observation observeNewLegacyEpochRollback(
+      FaultBoundary boundary, RollbackHarness harness, boolean respondentOnly) {
+    WriterEpoch prior = harness.activeWriter();
+    RollbackOutcome outcome = harness.rollback(prior.roomEpoch(), prior.fencingToken());
+    EnumSet<Invariant> satisfied = EnumSet.noneOf(Invariant.class);
+    if (harness.activeWriterCount() == 1) {
+      satisfied.add(Invariant.ONE_ACTIVE_WRITER);
+    }
+    if (outcome.writer().roomEpoch() > prior.roomEpoch()
+        && outcome.writer().fencingToken() > prior.fencingToken()) {
+      satisfied.add(Invariant.HIGHER_FENCE_SELECTED);
+    }
+    if (outcome.formalRefs().equals(prior.formalRefs())) {
+      satisfied.add(Invariant.FORMAL_REFS_PRESERVED);
+    }
+    try {
+      harness.rollback(prior.roomEpoch(), prior.fencingToken());
+    } catch (IllegalStateException expected) {
+      satisfied.add(Invariant.STALE_FENCE_REJECTED);
+    }
+    if (respondentOnly
+        && outcome.preservedEffects().equals(INITIATOR_EFFECTS)
+        && harness.durableEffects().equals(INITIATOR_EFFECTS)) {
+      satisfied.add(Invariant.INITIATOR_EFFECTS_PRESERVED);
+    }
+    if (respondentOnly && outcome.resumableParties().equals(Set.of(IntakeParty.RESPONDENT))) {
+      satisfied.add(Invariant.RESPONDENT_ONLY_RESUME);
+    }
+    return observation(boundary, Outcome.RECOVERED, outcome, harness, satisfied);
+  }
+
+  private static Observation observeEvidenceForwardRecovery() {
+    RollbackHarness harness = RollbackHarness.evidenceOpen(INITIATOR_EFFECTS, EVIDENCE_RECEIPT);
+    WriterEpoch prior = harness.activeWriter();
+    int epochCount = harness.epochHistory().size();
+    RollbackOutcome outcome = harness.rollback(prior.roomEpoch(), prior.fencingToken());
+    EnumSet<Invariant> satisfied = EnumSet.noneOf(Invariant.class);
+    if (harness.activeWriterCount() == 1) {
+      satisfied.add(Invariant.ONE_ACTIVE_WRITER);
+    }
+    if (EVIDENCE_RECEIPT.equals(outcome.operationReceipt())) {
+      satisfied.add(Invariant.COMMITTED_RECEIPT_REUSED);
+    }
+    if (harness.epochHistory().size() == epochCount
+        && harness.epochHistory().stream()
+            .noneMatch(epoch -> epoch.active() && epoch.roomType() == RoomType.INTAKE)) {
+      satisfied.add(Invariant.FORWARD_ONLY_AFTER_EVIDENCE);
+    }
+    return observation(
+        FaultBoundary.ROLLBACK_AFTER_EVIDENCE,
+        Outcome.RECONCILED_FORWARD,
+        outcome,
+        harness,
+        satisfied);
+  }
+
+  private static Observation observation(
+      FaultBoundary boundary,
+      Outcome outcome,
+      RollbackOutcome rollback,
+      RollbackHarness harness,
+      Set<Invariant> satisfied) {
+    ObjectNode state = JsonNodeFactory.instance.objectNode();
+    state.put("boundary", boundary.name());
+    state.put("action", rollback.action().name());
+    state.put("active_writer_count", harness.activeWriterCount());
+    state.put("room_type", rollback.writer().roomType().name());
+    state.put("writer_mode", rollback.writer().writerMode().name());
+    state.put("room_epoch", rollback.writer().roomEpoch());
+    state.put("fencing_token", rollback.writer().fencingToken());
+    state.put("formal_ref_count", rollback.formalRefs().size());
+    state.put("preserved_effect_count", rollback.preservedEffects().size());
+    state.put("resumable_party_count", rollback.resumableParties().size());
+    state.put("has_operation_receipt", rollback.operationReceipt() != null);
+    String stateHash = ContractJson.sha256Hex(state);
+
+    ObjectNode trace = JsonNodeFactory.instance.objectNode();
+    trace.put("boundary", boundary.name());
+    trace.put("state_hash", stateHash);
+    trace.put("epoch_history_size", harness.epochHistory().size());
+    return new Observation(outcome, satisfied, stateHash, ContractJson.sha256Hex(trace));
   }
 
   private enum Boundary {

@@ -72,7 +72,9 @@ public record IntakeShadowComparison(
         PRIVACY_LEAKAGE,
         STALE_FENCE_SUCCESS,
         UNAUTHORIZED_FIELD,
-        FORMAL_SINK_REACHABILITY
+        FORMAL_SINK_REACHABILITY,
+        DUPLICATE_FORMAL_EFFECT,
+        CROSS_THREAD_CHECKPOINT
     }
 
     public enum Verdict {

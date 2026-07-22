@@ -33,12 +33,16 @@ class IntakeEpochSelectorTest {
     void rejectsNonIntakeBeforeEnablementAndCohortEvaluation() {
         IntakeEpochSelector selector = enabledSelector(10_000, "cohort.v1");
 
-        SelectionDecision decision = selector.decide(
-                RoomType.EVIDENCE, null, null, null);
+        for (RoomType roomType : RoomType.values()) {
+            if (roomType == RoomType.INTAKE) {
+                continue;
+            }
+            SelectionDecision decision = selector.decide(roomType, null, null, null);
 
-        assertThat(decision.writerMode()).isEqualTo(WriterMode.LEGACY);
-        assertThat(decision.reason()).isEqualTo(DecisionReason.NON_INTAKE_ROOM);
-        assertThat(decision.cohortKeyHash()).isNull();
+            assertThat(decision.writerMode()).isEqualTo(WriterMode.LEGACY);
+            assertThat(decision.reason()).isEqualTo(DecisionReason.NON_INTAKE_ROOM);
+            assertThat(decision.cohortKeyHash()).isNull();
+        }
     }
 
     @Test
