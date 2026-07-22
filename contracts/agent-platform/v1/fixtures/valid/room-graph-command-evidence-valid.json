@@ -36,7 +36,7 @@
       "agent_profile_id": "evidence-clerk.v2",
       "prompt_profile_id": "evidence-prompt.v2",
       "model_profile_id": "evidence-model.synthetic.v1",
-      "output_schema_version": "evidence-item-assessment.v1",
+      "output_schema_version": "evidence-batch-proposal.v1",
       "policy_version": "evidence-policy.v2",
       "guardrail_version": "evidence-guardrail.v2",
       "tool_capabilities": [
@@ -52,6 +52,6 @@
     },
     "deadline_at": "2026-07-23T12:00:00Z",
     "traceparent": "00-cd6153b05b81e9362cced88872f596be-a85b862404e1932f-01",
-    "request_hash": "f7b1f3ce543250a12ca7ae89b21fd5cf2a5b81ab7a6b057df95a590a70127ed3"
+    "request_hash": "c45ad6be9ad4579d92a7901b85e06041e7d092df81d869fcd5a500536c7d46bc"
   }
 }
