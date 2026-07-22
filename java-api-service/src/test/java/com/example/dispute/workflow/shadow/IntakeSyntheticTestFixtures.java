@@ -13,10 +13,14 @@ import com.example.dispute.workflow.shadow.intake.IntakeSyntheticComparisonLedge
 import com.example.dispute.workflow.shadow.intake.IntakeSyntheticComparisonLedger.CommitRequest;
 import com.example.dispute.workflow.shadow.intake.IntakeSyntheticComparisonLedger.CommitResult;
 import com.example.dispute.workflow.shadow.intake.IntakeSyntheticComparisonReceiptFactory;
+import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.ActivityEnvelope;
+import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.ActivityInvocation;
+import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.ActivityInvocationMode;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.GraphExecutionReceipt;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.GraphExecutionRequest;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.ImmutablePayloadRef;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.OperationReceipt;
+import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.PinnedVersions;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.RetryBudget;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.SnapshotPublicationReceipt;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.SnapshotPublicationRequest;
@@ -25,13 +29,14 @@ import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.
 import com.example.dispute.workflow.temporal.room.intake.IntakeAgentRunRef;
 import com.example.dispute.workflow.temporal.room.intake.IntakeCommandType;
 import com.example.dispute.workflow.temporal.room.intake.IntakeGraphExecutionRef;
+import com.example.dispute.workflow.temporal.room.intake.IntakeOperationKeys;
 import com.example.dispute.workflow.temporal.room.intake.IntakeParty;
 import com.example.dispute.workflow.temporal.room.intake.IntakeRoomStart;
 import com.example.dispute.workflow.temporal.room.intake.IntakeWorkflowCommand;
-import java.time.OffsetDateTime;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.time.OffsetDateTime;
 import java.util.EnumMap;
 import java.util.HexFormat;
 import java.util.Map;
@@ -189,6 +194,95 @@ public final class IntakeSyntheticTestFixtures {
                         1024));
     }
 
+    public static TurnFinalizationRequest finalizationRequest(
+            String commandId,
+            IntakeParty party,
+            String actorScopeHash,
+            String requestHash) {
+        return finalizationRequest(
+                TENANT,
+                CASE_ID,
+                EPOCH,
+                FENCE,
+                commandId,
+                party,
+                actorScopeHash,
+                THREAD_ID,
+                AGENT_SESSION,
+                requestHash);
+    }
+
+    public static TurnFinalizationRequest finalizationRequest(
+            String tenant,
+            String caseId,
+            long roomEpoch,
+            long fencingToken,
+            String commandId,
+            IntakeParty party,
+            String actorScopeHash,
+            String threadId,
+            String agentSessionId,
+            String requestHash) {
+        RetryBudget invocationBudget =
+                new RetryBudget("intake-retry-budget.v1", 2, 1, 1);
+        ActivityEnvelope envelope = new ActivityEnvelope(
+                "intake-activity-envelope.v1",
+                tenant,
+                caseId,
+                roomEpoch,
+                fencingToken,
+                commandId,
+                1,
+                IntakeCommandType.INTAKE_MESSAGE,
+                party,
+                actorScopeHash,
+                "urn:after-sale-flow:intake-command:" + commandId,
+                hash(1),
+                0,
+                0,
+                Long.MAX_VALUE,
+                invocationBudget,
+                new PinnedVersions(
+                        "intake-pinned-versions.v1",
+                        "intake-workflow.synthetic.v1",
+                        "2.0.0",
+                        "intake-checkpoint.v2",
+                        "intake-prompt.v2",
+                        "intake-model.synthetic.v1",
+                        "intake-turn-proposal.v2",
+                        "intake-policy.v2",
+                        "intake-guardrail.v2",
+                        "no-tools.v1"),
+                new ActivityInvocation(
+                        "intake-activity-invocation.v1",
+                        ActivityInvocationMode.FIRST_EXECUTION,
+                        2));
+        String graphOperationKey = IntakeOperationKeys.graphExecute(
+                caseId, roomEpoch, threadId, commandId);
+        GraphExecutionRequest graphRequest = new GraphExecutionRequest(
+                "intake-graph-execution-request.v1",
+                envelope,
+                threadId,
+                agentSessionId,
+                graphOperationKey,
+                requestHash);
+        GraphExecutionReceipt graph = graphReceipt(graphRequest);
+        String finalizationKey = IntakeOperationKeys.turnFinalize(
+                caseId,
+                roomEpoch,
+                threadId,
+                commandId,
+                graph.operation().resultHash());
+        return new TurnFinalizationRequest(
+                "intake-turn-finalization-request.v1",
+                envelope,
+                threadId,
+                agentSessionId,
+                graph,
+                finalizationKey,
+                requestHash);
+    }
+
     private static OperationReceipt operation(
             String operationKey, String requestHash, String resultHash) {
         return new OperationReceipt(
@@ -216,12 +310,15 @@ public final class IntakeSyntheticTestFixtures {
 
     public static final class Admission implements IntakeSignedSyntheticAdmissionPort {
         private volatile VerifiedAdmission verified;
+        public volatile AdmissionAttempt lastAttempt;
+        public volatile String verifiedRequestHashOverride;
         public final AtomicInteger admissions = new AtomicInteger();
         public volatile boolean activityAuthorized = true;
 
         @Override
         public VerifiedAdmission admit(AdmissionAttempt attempt, IntakeWorkflowCommand command) {
             admissions.incrementAndGet();
+            lastAttempt = attempt;
             verified =
                     new VerifiedAdmission(
                             "intake-verified-synthetic-admission.v1",
@@ -234,7 +331,9 @@ public final class IntakeSyntheticTestFixtures {
                             command.commandType(),
                             command.party(),
                             command.actorScopeHash(),
-                            command.requestHash(),
+                            verifiedRequestHashOverride == null
+                                    ? command.requestHash()
+                                    : verifiedRequestHashOverride,
                             attempt.threadId(),
                             attempt.agentSessionId(),
                             attempt.deadlineEpochMillis(),

@@ -232,6 +232,10 @@ class MigrationIntegrationTest {
                             "uq_r15_graph_thread_authority",
                             "uq_r15_payload_command_route",
                             "uq_r15_command_payload",
+                            "uq_intake_shadow_comparison_party_authority",
+                            "uq_intake_shadow_comparison_command_authority",
+                            "idx_intake_shadow_comparison_epoch",
+                            "idx_intake_shadow_comparison_command",
                             "uq_domain_operation_tenant_key",
                             "idx_payload_snapshot_case_visibility",
                             "uq_agent_execution_manifest_logical_run");
@@ -258,7 +262,9 @@ class MigrationIntegrationTest {
                             "trg_r15_payload_immutable",
                             "trg_r15_command_immutable",
                             "trg_r15_existing_private_event_assertion",
-                            "trg_r15_command_exact_comparison");
+                            "trg_r15_command_exact_comparison",
+                            "trg_intake_shadow_comparison_immutable",
+                            "trg_intake_shadow_comparison_no_truncate");
             assertFormalJuryReportUniqueness(connection);
             assertAppendOnlyTablesRejectMutation(connection);
         }

@@ -19,10 +19,11 @@ class SignedSyntheticIntakeDriverTest {
         SignedSyntheticIntakeDriver driver = new SignedSyntheticIntakeDriver(admission);
         var command = IntakeSyntheticTestFixtures.inertCommand(
                 "CMD_SYNTHETIC_MESSAGE", IntakeCommandType.INTAKE_MESSAGE);
+        var attempt = signedAttempt(TrafficSource.AUTHENTICATED_SIGNED_SYNTHETIC);
         AtomicReference<Object> dispatched = new AtomicReference<>();
 
         var admitted = driver.dispatch(
-                signedAttempt(TrafficSource.AUTHENTICATED_SIGNED_SYNTHETIC),
+                attempt,
                 command,
                 dispatched::set);
 
@@ -31,6 +32,8 @@ class SignedSyntheticIntakeDriverTest {
                 .isEqualTo(IntakeSyntheticTestFixtures.THREAD_ID);
         assertThat(dispatched.get()).isSameAs(admitted);
         assertThat(admission.admissions).hasValue(1);
+        assertThat(admission.lastAttempt).isSameAs(attempt);
+        assertThat(admission.lastAttempt.compactJws()).isEqualTo(attempt.compactJws());
     }
 
     @Test
@@ -65,5 +68,20 @@ class SignedSyntheticIntakeDriverTest {
                 .isInstanceOf(SecurityException.class)
                 .hasMessageContaining("message commands only");
         assertThat(admission.admissions).hasValue(0);
+    }
+
+    @Test
+    void verifiedAdmissionMustMatchThePersistedRequestHashExactly() {
+        IntakeSyntheticTestFixtures.Admission admission =
+                new IntakeSyntheticTestFixtures.Admission();
+        admission.verifiedRequestHashOverride = IntakeSyntheticTestFixtures.hash(63);
+        SignedSyntheticIntakeDriver driver = new SignedSyntheticIntakeDriver(admission);
+        var command = IntakeSyntheticTestFixtures.inertCommand(
+                "CMD_SYNTHETIC_MESSAGE", IntakeCommandType.INTAKE_MESSAGE);
+
+        assertThatThrownBy(() -> driver.admit(
+                        signedAttempt(TrafficSource.AUTHENTICATED_SIGNED_SYNTHETIC), command))
+                .isInstanceOf(SecurityException.class)
+                .hasMessageContaining("exact command tuple");
     }
 }

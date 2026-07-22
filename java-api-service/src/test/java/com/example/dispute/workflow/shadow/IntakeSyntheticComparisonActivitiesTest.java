@@ -3,10 +3,12 @@ package com.example.dispute.workflow.shadow;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.example.dispute.workflow.shadow.intake.IntakeSignedSyntheticGraphExecutionPort;
 import com.example.dispute.workflow.shadow.intake.IntakeSyntheticWorkerRegistration;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.ActivityEnvelope;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.ActivityInvocation;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.ActivityInvocationMode;
+import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.GraphExecutionRequest;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.PinnedVersions;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.RetryBudget;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.SnapshotPublicationRequest;
@@ -52,6 +54,12 @@ class IntakeSyntheticComparisonActivitiesTest {
                                         .getDeclaredFields())
                         .map(field -> field.getType().getName()))
                 .noneMatch(name -> name.contains("Formal") || name.contains("Finalizer"));
+        assertThat(Arrays.stream(
+                                registration.activityImplementation()
+                                        .getClass()
+                                        .getDeclaredFields())
+                        .map(field -> field.getType()))
+                .contains(IntakeSignedSyntheticGraphExecutionPort.class);
     }
 
     @Test
@@ -68,16 +76,10 @@ class IntakeSyntheticComparisonActivitiesTest {
                         new IntakeSyntheticTestFixtures.InMemoryLedger());
         IntakeRoomActivities activities = registration.activityImplementation();
 
-        assertThatThrownBy(() -> activities.acceptInitiator(null))
-                .isInstanceOf(ApplicationFailure.class)
-                .extracting(failure -> ((ApplicationFailure) failure).getType())
-                .isEqualTo("INTAKE_SYNTHETIC_BRANCH_FORBIDDEN");
-        assertThatThrownBy(() -> activities.rejectInitiator(null))
-                .isInstanceOf(ApplicationFailure.class);
-        assertThatThrownBy(() -> activities.cancelIntake(null))
-                .isInstanceOf(ApplicationFailure.class);
-        assertThatThrownBy(() -> activities.confirmRespondent(null))
-                .isInstanceOf(ApplicationFailure.class);
+        assertBranchIsPermanentlyClosed(() -> activities.acceptInitiator(null));
+        assertBranchIsPermanentlyClosed(() -> activities.rejectInitiator(null));
+        assertBranchIsPermanentlyClosed(() -> activities.cancelIntake(null));
+        assertBranchIsPermanentlyClosed(() -> activities.confirmRespondent(null));
     }
 
     @Test
@@ -121,6 +123,75 @@ class IntakeSyntheticComparisonActivitiesTest {
                 .extracting(failure -> ((ApplicationFailure) failure).getType())
                 .isEqualTo("INTAKE_SYNTHETIC_AUTHORIZATION");
         assertThat(snapshotCalls).hasValue(0);
+    }
+
+    @Test
+    void changedRequestHashCannotReachGraphOrComparisonStorage() {
+        IntakeSyntheticTestFixtures.Admission admission =
+                new IntakeSyntheticTestFixtures.Admission();
+        var inert = IntakeSyntheticTestFixtures.inertCommand(
+                "CMD_SYNTHETIC_MESSAGE",
+                com.example.dispute.workflow.temporal.room.intake.IntakeCommandType.INTAKE_MESSAGE);
+        new com.example.dispute.workflow.shadow.intake.SignedSyntheticIntakeDriver(admission)
+                .admit(
+                        IntakeSyntheticTestFixtures.signedAttempt(
+                                com.example.dispute.workflow.application.epoch.RoomEpochSelectionContext.TrafficSource.AUTHENTICATED_SIGNED_SYNTHETIC),
+                        inert);
+        AtomicInteger graphCalls = new AtomicInteger();
+        AtomicInteger comparisonCalls = new AtomicInteger();
+        IntakeSyntheticTestFixtures.InMemoryLedger ledger =
+                new IntakeSyntheticTestFixtures.InMemoryLedger();
+        IntakeSyntheticWorkerRegistration registration =
+                new IntakeSyntheticWorkerRegistration(
+                        admission,
+                        IntakeSyntheticTestFixtures::snapshotReceipt,
+                        request -> {
+                            graphCalls.incrementAndGet();
+                            return IntakeSyntheticTestFixtures.graphReceipt(request);
+                        },
+                        request -> {
+                            comparisonCalls.incrementAndGet();
+                            return new com.example.dispute.workflow.shadow.intake.IntakeSyntheticParityObservationPort.Observation(
+                                    IntakeSyntheticTestFixtures.paritySnapshot(),
+                                    IntakeSyntheticTestFixtures.paritySnapshot(),
+                                    com.example.dispute.workflow.temporal.room.intake.IntakeDomainEventType.TURN_READY_TO_CONFIRM);
+                        },
+                        ledger);
+        String changedHash = IntakeSyntheticTestFixtures.hash(63);
+        var changedFinalization = IntakeSyntheticTestFixtures.finalizationRequest(
+                "CMD_SYNTHETIC_MESSAGE",
+                IntakeParty.INITIATOR,
+                IntakeSyntheticTestFixtures.ACTOR_SCOPE,
+                changedHash);
+        GraphExecutionRequest changedGraph = new GraphExecutionRequest(
+                "intake-graph-execution-request.v1",
+                changedFinalization.envelope(),
+                changedFinalization.threadId(),
+                changedFinalization.agentSessionId(),
+                changedFinalization.graphExecution().operation().operationKey(),
+                changedHash);
+
+        assertAuthorizationFailure(
+                () -> registration.activityImplementation().executeGraph(changedGraph));
+        assertAuthorizationFailure(
+                () -> registration.activityImplementation().finalizeTurn(changedFinalization));
+        assertThat(graphCalls).hasValue(0);
+        assertThat(comparisonCalls).hasValue(0);
+        assertThat(ledger.writes).hasValue(0);
+    }
+
+    private static void assertBranchIsPermanentlyClosed(Runnable invocation) {
+        ApplicationFailure failure = org.assertj.core.api.Assertions.catchThrowableOfType(
+                invocation::run, ApplicationFailure.class);
+        assertThat(failure.getType()).isEqualTo("INTAKE_SYNTHETIC_BRANCH_FORBIDDEN");
+        assertThat(failure.isNonRetryable()).isTrue();
+    }
+
+    private static void assertAuthorizationFailure(Runnable invocation) {
+        ApplicationFailure failure = org.assertj.core.api.Assertions.catchThrowableOfType(
+                invocation::run, ApplicationFailure.class);
+        assertThat(failure.getType()).isEqualTo("INTAKE_SYNTHETIC_AUTHORIZATION");
+        assertThat(failure.isNonRetryable()).isTrue();
     }
 
     private static SnapshotPublicationRequest snapshotRequest(String requestHash) {

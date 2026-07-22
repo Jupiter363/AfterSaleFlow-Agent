@@ -15,8 +15,9 @@ import java.util.Objects;
 
 /**
  * External authentication and durable admission boundary for the engineering-only synthetic path.
- * Implementations must verify the signed envelope and persist the exact admitted tuple before
- * returning it. No default implementation is provided.
+ * Production assembly must supply an ES256 verifier and durably persist the exact admitted tuple
+ * before returning it. Test fakes that return {@link VerifiedAdmission} are not
+ * signature-verification or persistence evidence. No default implementation is provided.
  */
 public interface IntakeSignedSyntheticAdmissionPort {
 
