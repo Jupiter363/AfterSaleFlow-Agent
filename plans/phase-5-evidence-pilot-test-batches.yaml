@@ -389,6 +389,7 @@ batches:
         - frontend/src/stores/agentStream.test.js
     static_tests:
       - tests/static/test_phase5_evidence_pilot_plan.py
+      - tests/static/test_phase5_entry_contract_plan.py
       - tests/static/test_temporal_refactor_traceability.py
       - tests/static/test_graph_import_boundaries.py
       - tests/static/test_agent_platform_schema_contracts.py
