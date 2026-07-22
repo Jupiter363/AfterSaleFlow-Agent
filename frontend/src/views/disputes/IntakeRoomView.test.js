@@ -902,11 +902,11 @@ describe("IntakeRoomView", () => {
       ),
       eventStreamer: vi.fn(async () => {}),
     });
-    expect(readyWrapper.find(".conversation-stream__composer").exists()).toBe(false);
+    expect(readyWrapper.find(".conversation-stream__composer").exists()).toBe(true);
     expect(readyWrapper.get("[data-confirm-admission]").attributes("disabled"))
       .toBeUndefined();
     expect(readyWrapper.get("[data-resolve-without-dispute]").attributes("disabled"))
-      .toBe("");
+      .toBeUndefined();
     expect(openingAction).not.toHaveBeenCalled();
     readyWrapper.unmount();
 

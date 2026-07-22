@@ -356,7 +356,9 @@ const projectionAllowsMessages = computed(() =>
   intakeProcessProjection.value.mode === "LEGACY" ||
   (
     intakeProcessProjection.value.mode === "CURRENT" &&
-    ["OPEN", "WAITING_PARTY"].includes(intakeProcessProjection.value.roomPhase)
+    ["OPEN", "WAITING_PARTY", "READY_TO_CONFIRM"].includes(
+      intakeProcessProjection.value.roomPhase,
+    )
   ),
 );
 const projectionAllowsConfirmation = computed(() =>
@@ -370,7 +372,9 @@ const projectionAllowsCancellation = computed(() =>
   intakeProcessProjection.value.mode === "LEGACY" ||
   (
     intakeProcessProjection.value.mode === "CURRENT" &&
-    ["OPEN", "WAITING_PARTY"].includes(intakeProcessProjection.value.roomPhase)
+    ["OPEN", "WAITING_PARTY", "READY_TO_CONFIRM"].includes(
+      intakeProcessProjection.value.roomPhase,
+    )
   ),
 );
 const projectionAllowsEvidence = computed(() =>
