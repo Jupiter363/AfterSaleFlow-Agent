@@ -56,9 +56,45 @@ const INTAKE_PROCESS_PHASES = new Set([
   "READY_TO_CONFIRM",
   "COMPLETED",
 ]);
+const INTAKE_PENDING_STATE_BY_PHASE = {
+  OPEN: "NONE",
+  WAITING_PARTY: "WAITING_PARTY",
+  AGENT_RUNNING: "AGENT_RUNNING",
+  READY_TO_CONFIRM: "NONE",
+  COMPLETED: "NONE",
+};
 const PROJECTION_FIELD_CONFLICT = Symbol("projection-field-conflict");
+const PROJECTION_MISSING = Symbol("projection-missing");
 const PROJECTION_STATUS_RETRY_LIMIT = 4;
 const PROJECTION_STATUS_RETRY_DELAY_MS = 250;
+
+function projectionValuesEqual(left, right) {
+  if (Object.is(left, right)) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return (
+      Array.isArray(left) &&
+      Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((value, index) => projectionValuesEqual(value, right[index]))
+    );
+  }
+  if (
+    !left ||
+    !right ||
+    typeof left !== "object" ||
+    typeof right !== "object"
+  ) {
+    return false;
+  }
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  return (
+    leftKeys.length === rightKeys.length &&
+    leftKeys.every((key) =>
+      Object.hasOwn(right, key) && projectionValuesEqual(left[key], right[key]),
+    )
+  );
+}
 
 function projectionField(projection, snakeCase, camelCase) {
   const hasSnakeCase = Object.hasOwn(projection, snakeCase);
@@ -66,7 +102,7 @@ function projectionField(projection, snakeCase, camelCase) {
   if (
     hasSnakeCase &&
     hasCamelCase &&
-    projection[snakeCase] !== projection[camelCase]
+    !projectionValuesEqual(projection[snakeCase], projection[camelCase])
   ) {
     return PROJECTION_FIELD_CONFLICT;
   }
@@ -75,68 +111,126 @@ function projectionField(projection, snakeCase, camelCase) {
   return undefined;
 }
 
+function declaredProcessProjection(status) {
+  if (!status || typeof status !== "object") return PROJECTION_MISSING;
+  const hasSnakeCase = Object.hasOwn(status, "process_projection");
+  const hasCamelCase = Object.hasOwn(status, "processProjection");
+  if (!hasSnakeCase && !hasCamelCase) return PROJECTION_MISSING;
+  if (
+    hasSnakeCase &&
+    hasCamelCase &&
+    !projectionValuesEqual(status.process_projection, status.processProjection)
+  ) {
+    return PROJECTION_FIELD_CONFLICT;
+  }
+  return hasSnakeCase ? status.process_projection : status.processProjection;
+}
+
 function projectionEnum(value) {
   return typeof value === "string" ? value.trim().toUpperCase() : "";
 }
 
 function processingProjection() {
-  return { mode: "PROCESSING", activeLogicalRunId: "" };
+  return {
+    mode: "PROCESSING",
+    roomPhase: "",
+    pendingState: "",
+    activeLogicalRunId: "",
+  };
+}
+
+function legacyProjection() {
+  return {
+    mode: "LEGACY",
+    roomPhase: "",
+    pendingState: "",
+    activeLogicalRunId: "",
+  };
 }
 
 function normalizeIntakeProcessProjection(status) {
-  const projection = status?.process_projection ?? status?.processProjection;
-  if (projection == null) {
-    return { mode: "LEGACY", activeLogicalRunId: "" };
-  }
-  if (typeof projection !== "object" || Array.isArray(projection)) {
+  const projection = declaredProcessProjection(status);
+  if (projection === PROJECTION_MISSING) return legacyProjection();
+  if (
+    projection === PROJECTION_FIELD_CONFLICT ||
+    !projection ||
+    typeof projection !== "object" ||
+    Array.isArray(projection)
+  ) {
     return processingProjection();
   }
 
-  const schemaVersion = projectionField(
-    projection,
-    "schema_version",
-    "schemaVersion",
-  );
-  if (schemaVersion !== INTAKE_PROCESS_PROJECTION_SCHEMA) {
+  const fields = {
+    schemaVersion: projectionField(projection, "schema_version", "schemaVersion"),
+    projectionState: projectionField(
+      projection,
+      "projection_state",
+      "projectionState",
+    ),
+    writerMode: projectionField(projection, "writer_mode", "writerMode"),
+    roomEpoch: projectionField(projection, "room_epoch", "roomEpoch"),
+    processRevision: projectionField(
+      projection,
+      "process_revision",
+      "processRevision",
+    ),
+    roomRevision: projectionField(projection, "room_revision", "roomRevision"),
+    fencingToken: projectionField(projection, "fencing_token", "fencingToken"),
+    roomPhase: projectionField(projection, "room_phase", "roomPhase"),
+    pendingState: projectionField(projection, "pending_state", "pendingState"),
+    activeLogicalRunId: projectionField(
+      projection,
+      "active_logical_run_id",
+      "activeLogicalRunId",
+    ),
+    activeAttemptId: projectionField(
+      projection,
+      "active_attempt_id",
+      "activeAttemptId",
+    ),
+    activeRunStatus: projectionField(
+      projection,
+      "active_run_status",
+      "activeRunStatus",
+    ),
+    streamCursor: projectionField(projection, "stream_cursor", "streamCursor"),
+    versionPins: projectionField(projection, "version_pins", "versionPins"),
+    projectedAt: projectionField(projection, "projected_at", "projectedAt"),
+  };
+  if (Object.values(fields).includes(PROJECTION_FIELD_CONFLICT)) {
+    return processingProjection();
+  }
+  if (fields.schemaVersion !== INTAKE_PROCESS_PROJECTION_SCHEMA) {
     return processingProjection();
   }
 
-  const projectionState = projectionEnum(projectionField(
-    projection,
-    "projection_state",
-    "projectionState",
-  ));
+  const projectionState = projectionEnum(fields.projectionState);
   if (!INTAKE_PROCESS_PROJECTION_STATES.has(projectionState)) {
     return processingProjection();
   }
 
-  const writerMode = projectionEnum(projectionField(
-    projection,
-    "writer_mode",
-    "writerMode",
-  ));
-  if (projectionState === "UNAVAILABLE" || writerMode === "LEGACY") {
-    return { mode: "LEGACY", activeLogicalRunId: "" };
+  const writerMode = projectionEnum(fields.writerMode);
+  if (projectionState === "UNAVAILABLE") {
+    return writerMode === "LEGACY" ? legacyProjection() : processingProjection();
   }
   if (projectionState === "PROCESSING") return processingProjection();
+  if (writerMode === "LEGACY") return legacyProjection();
 
-  const roomPhase = projectionEnum(projectionField(
-    projection,
-    "room_phase",
-    "roomPhase",
-  ));
+  const roomPhase = projectionEnum(fields.roomPhase);
+  const pendingState = projectionEnum(fields.pendingState);
   if (
     !INTAKE_PROCESS_WRITERS.has(writerMode) ||
-    !INTAKE_PROCESS_PHASES.has(roomPhase)
+    !INTAKE_PROCESS_PHASES.has(roomPhase) ||
+    pendingState !== INTAKE_PENDING_STATE_BY_PHASE[roomPhase]
   ) {
     return processingProjection();
   }
 
   const revisionFields = [
-    projectionField(projection, "room_epoch", "roomEpoch"),
-    projectionField(projection, "process_revision", "processRevision"),
-    projectionField(projection, "room_revision", "roomRevision"),
-    projectionField(projection, "fencing_token", "fencingToken"),
+    fields.roomEpoch,
+    fields.processRevision,
+    fields.roomRevision,
+    fields.fencingToken,
   ];
   if (revisionFields.some(
     (value) => !Number.isSafeInteger(value) || value < 0,
@@ -144,32 +238,10 @@ function normalizeIntakeProcessProjection(status) {
     return processingProjection();
   }
 
-  const activeLogicalRunId = projectionField(
-    projection,
-    "active_logical_run_id",
-    "activeLogicalRunId",
-  );
-  const activeAttemptId = projectionField(
-    projection,
-    "active_attempt_id",
-    "activeAttemptId",
-  );
-  const activeRunStatus = projectionField(
-    projection,
-    "active_run_status",
-    "activeRunStatus",
-  );
-  const streamCursor = projectionField(
-    projection,
-    "stream_cursor",
-    "streamCursor",
-  );
-  if (
-    [activeLogicalRunId, activeAttemptId, activeRunStatus, streamCursor]
-      .includes(PROJECTION_FIELD_CONFLICT)
-  ) {
-    return processingProjection();
-  }
+  const activeLogicalRunId = fields.activeLogicalRunId;
+  const activeAttemptId = fields.activeAttemptId;
+  const activeRunStatus = fields.activeRunStatus;
+  const streamCursor = fields.streamCursor;
 
   if (activeLogicalRunId == null) {
     if (
@@ -179,7 +251,12 @@ function normalizeIntakeProcessProjection(status) {
     ) {
       return processingProjection();
     }
-    return { mode: "CURRENT", activeLogicalRunId: "" };
+    return {
+      mode: "CURRENT",
+      roomPhase,
+      pendingState,
+      activeLogicalRunId: "",
+    };
   }
 
   if (
@@ -200,7 +277,12 @@ function normalizeIntakeProcessProjection(status) {
     ) {
       return processingProjection();
     }
-    return { mode: "CURRENT", activeLogicalRunId: normalizedRunId };
+    return {
+      mode: "CURRENT",
+      roomPhase,
+      pendingState,
+      activeLogicalRunId: normalizedRunId,
+    };
   }
 
   if (typeof activeAttemptId !== "string" || !activeAttemptId.trim()) {
@@ -210,7 +292,12 @@ function normalizeIntakeProcessProjection(status) {
   if (!cursorMatch || cursorMatch[1] !== activeAttemptId.trim()) {
     return processingProjection();
   }
-  return { mode: "CURRENT", activeLogicalRunId: normalizedRunId };
+  return {
+    mode: "CURRENT",
+    roomPhase,
+    pendingState,
+    activeLogicalRunId: normalizedRunId,
+  };
 }
 
 const props = defineProps({
@@ -265,8 +352,33 @@ const historyMode = computed(() => route.query.view === "history");
 const intakeProcessProjection = computed(() =>
   normalizeIntakeProcessProjection(intakeStatus.value),
 );
-const projectionFailClosed = computed(() =>
-  intakeProcessProjection.value.mode === "PROCESSING",
+const projectionAllowsMessages = computed(() =>
+  intakeProcessProjection.value.mode === "LEGACY" ||
+  (
+    intakeProcessProjection.value.mode === "CURRENT" &&
+    ["OPEN", "WAITING_PARTY"].includes(intakeProcessProjection.value.roomPhase)
+  ),
+);
+const projectionAllowsConfirmation = computed(() =>
+  intakeProcessProjection.value.mode === "LEGACY" ||
+  (
+    intakeProcessProjection.value.mode === "CURRENT" &&
+    intakeProcessProjection.value.roomPhase === "READY_TO_CONFIRM"
+  ),
+);
+const projectionAllowsCancellation = computed(() =>
+  intakeProcessProjection.value.mode === "LEGACY" ||
+  (
+    intakeProcessProjection.value.mode === "CURRENT" &&
+    ["OPEN", "WAITING_PARTY"].includes(intakeProcessProjection.value.roomPhase)
+  ),
+);
+const projectionAllowsEvidence = computed(() =>
+  intakeProcessProjection.value.mode === "LEGACY" ||
+  (
+    intakeProcessProjection.value.mode === "CURRENT" &&
+    intakeProcessProjection.value.roomPhase === "COMPLETED"
+  ),
 );
 const actorPartyPosition = computed(() => {
   const explicit = String(
@@ -334,7 +446,8 @@ const intakeStreamingRuns = computed(() =>
 );
 const intakeCancellationDisabled = computed(() =>
   historyMode.value ||
-  projectionFailClosed.value ||
+  !projectionAllowsCancellation.value ||
+  !serverPartyCanChat.value ||
   submitting.value ||
   admitted.value ||
   intakeStreamingRuns.value.length > 0,
@@ -351,18 +464,20 @@ const caseNoteDescription = computed(() =>
     fallback: "接待官正在整理争议事实，请继续补充案件经过、当前状态和处理诉求。",
   }),
 );
-const partyCanChat = computed(() => {
-  if (projectionFailClosed.value) return false;
+const serverPartyCanChat = computed(() => {
   const serverValue = intakeStatus.value?.can_use_intake ?? intakeStatus.value?.canUseIntake;
   if (typeof serverValue === "boolean") return serverValue;
   return actorPartyPosition.value === "INITIATOR";
 });
+const partyCanChat = computed(() =>
+  serverPartyCanChat.value && projectionAllowsMessages.value,
+);
 const currentActorIntakeCompleted = computed(() => Boolean(
   intakeStatus.value?.current_actor_completed ??
   intakeStatus.value?.currentActorCompleted,
 ));
 const canEnterEvidence = computed(() => Boolean(
-  !projectionFailClosed.value &&
+  projectionAllowsEvidence.value &&
   (intakeStatus.value?.can_enter_evidence ?? intakeStatus.value?.canEnterEvidence),
 ));
 const modelConnected = computed(() => modelConnectionState.value === "connected");
@@ -529,7 +644,8 @@ const currentActorMatrixReady = computed(() =>
 );
 const intakeDossierSubmissionDisabled = computed(() =>
   historyMode.value ||
-  projectionFailClosed.value ||
+  !projectionAllowsConfirmation.value ||
+  !serverPartyCanChat.value ||
   submitting.value ||
   admitted.value ||
   intakeStreamingRuns.value.length > 0 ||
@@ -1060,10 +1176,15 @@ const initiatorRoleCopy = computed(() =>
 const intakeRecipientView = computed(
   () =>
     actorPartyPosition.value === "RESPONDENT" &&
-    !partyCanChat.value &&
+    !serverPartyCanChat.value &&
     !currentActorIntakeCompleted.value,
 );
-const canManageIntake = computed(() => partyCanChat.value);
+const canManageIntake = computed(() =>
+  ["INITIATOR", "RESPONDENT"].includes(actorPartyPosition.value) &&
+  !intakeRecipientView.value &&
+  serverPartyCanChat.value &&
+  (projectionAllowsMessages.value || projectionAllowsConfirmation.value),
+);
 const currentActorIsInitiator = computed(
   () => actorPartyPosition.value === "INITIATOR",
 );
@@ -1293,7 +1414,7 @@ function shouldRequestRespondentOpening(firstMessages) {
   return (
     props.initialMessages === null &&
     !historyMode.value &&
-    !projectionFailClosed.value &&
+    projectionAllowsMessages.value &&
     Array.isArray(firstMessages) &&
     firstMessages.length === 0 &&
     ["USER", "MERCHANT"].includes(actor.role) &&
@@ -1413,8 +1534,12 @@ async function retryProjectionStatus(snapshot) {
 }
 
 function intakeStatusAllowsEvidence(status) {
+  const projection = normalizeIntakeProcessProjection(status);
   return Boolean(
-    normalizeIntakeProcessProjection(status).mode !== "PROCESSING" &&
+    (
+      projection.mode === "LEGACY" ||
+      (projection.mode === "CURRENT" && projection.roomPhase === "COMPLETED")
+    ) &&
     (status?.can_enter_evidence ?? status?.canEnterEvidence),
   );
 }
@@ -1490,6 +1615,57 @@ function applyStreamedCaseDetailEvent(event, snapshot = currentWorkspaceSnapshot
   }
 }
 
+function explicitActiveRunDescriptor(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const candidates = [
+    value,
+    value.agent_run,
+    value.agentRun,
+    value.accepted_run,
+    value.acceptedRun,
+    value.run,
+    value.stream,
+    value.room_message,
+    value.roomMessage,
+  ];
+  const candidate = candidates.find((item) =>
+    item &&
+    typeof item === "object" &&
+    !Array.isArray(item) &&
+    [item.run_id, item.runId, item.agent_run_id, item.agentRunId].some(Boolean),
+  );
+  if (!candidate) return null;
+
+  const runIds = [
+    candidate.run_id,
+    candidate.runId,
+    candidate.agent_run_id,
+    candidate.agentRunId,
+  ].filter((runId) => runId !== undefined && runId !== null);
+  if (
+    !runIds.length ||
+    runIds.some((runId) => typeof runId !== "string" || !runId.trim())
+  ) {
+    return null;
+  }
+  const normalizedRunIds = new Set(runIds.map((runId) => runId.trim()));
+  if (normalizedRunIds.size !== 1) return null;
+
+  const hasSnakeCaseUrl = Object.hasOwn(candidate, "stream_url");
+  const hasCamelCaseUrl = Object.hasOwn(candidate, "streamUrl");
+  if (!hasSnakeCaseUrl && !hasCamelCaseUrl) return null;
+  if (
+    hasSnakeCaseUrl &&
+    hasCamelCaseUrl &&
+    candidate.stream_url !== candidate.streamUrl
+  ) {
+    return null;
+  }
+  const streamUrl = hasSnakeCaseUrl ? candidate.stream_url : candidate.streamUrl;
+  if (typeof streamUrl !== "string" || !streamUrl.trim()) return null;
+  return { descriptor: value, runId: [...normalizedRunIds][0] };
+}
+
 // 业务位置：【前端接待室】resumeActiveIntakeRuns：执行 案件受理信息和接待结论 对应的业务动作，并将结果交给 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 async function resumeActiveIntakeRuns(snapshot = currentWorkspaceSnapshot()) {
   const projection = intakeProcessProjection.value;
@@ -1503,6 +1679,19 @@ async function resumeActiveIntakeRuns(snapshot = currentWorkspaceSnapshot()) {
     return;
   }
   if (projection.mode === "CURRENT" && !projection.activeLogicalRunId) return;
+  if (
+    projection.mode === "CURRENT" &&
+    intakeStreamingRuns.value.some((run) =>
+      run.runId !== projection.activeLogicalRunId,
+    )
+  ) {
+    clearAgentStreams({
+      caseId: snapshot.caseId,
+      roomType: "INTAKE",
+      actorId: snapshot.actor.id,
+      actorRole: snapshot.actor.role,
+    });
+  }
 
   const activeRuns = await loadActiveAgentRuns(
     snapshot.actor,
@@ -1521,11 +1710,15 @@ async function resumeActiveIntakeRuns(snapshot = currentWorkspaceSnapshot()) {
   ) {
     return;
   }
+  const projectedRun = latestProjection.mode === "CURRENT"
+    ? activeRuns
+      .map(explicitActiveRunDescriptor)
+      .find((descriptor) =>
+        descriptor?.runId === latestProjection.activeLogicalRunId,
+      )
+    : null;
   const recoverableRuns = latestProjection.mode === "CURRENT"
-    ? activeRuns.filter((descriptor) =>
-      extractAgentRunDescriptor(descriptor)?.runId ===
-        latestProjection.activeLogicalRunId,
-    ).slice(0, 1)
+    ? projectedRun ? [projectedRun.descriptor] : []
     : activeRuns;
   if (!recoverableRuns.length) return;
   resetStreamedCaseDetail();
@@ -1550,7 +1743,12 @@ async function resumeActiveIntakeRuns(snapshot = currentWorkspaceSnapshot()) {
       }
     },
   })));
-  if (isCurrentWorkspace(snapshot)) agentState.value = "SPEAKING";
+  if (
+    isCurrentWorkspace(snapshot) &&
+    intakeProcessProjection.value.mode !== "PROCESSING"
+  ) {
+    agentState.value = "SPEAKING";
+  }
 }
 
 // 业务位置：【前端接待室】fetchModelHealth：读取 模型请求和结构化结果，并依据当前案件、角色和会话权限裁剪成可用输入。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
@@ -1667,7 +1865,7 @@ function startEventStream(snapshot = currentWorkspaceSnapshot()) {
 
 // 业务位置：【前端接待室】postMessage：执行 房间消息和对话记录 对应的业务动作，并将结果交给 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 async function postMessage(command) {
-  if (historyMode.value || projectionFailClosed.value) return;
+  if (historyMode.value || !projectionAllowsMessages.value) return;
   const snapshot = currentWorkspaceSnapshot();
   if (!modelConnected.value) {
     await checkModelConnection();
@@ -1677,7 +1875,7 @@ async function postMessage(command) {
       return;
     }
   }
-  if (!isCurrentWorkspace(snapshot) || projectionFailClosed.value) return;
+  if (!isCurrentWorkspace(snapshot) || !projectionAllowsMessages.value) return;
   agentState.value = "THINKING";
   submitting.value = true;
   error.value = "";
@@ -1828,7 +2026,7 @@ async function confirmAdmission() {
 
 // 业务位置：【前端接待室】enterEvidenceRoom：切换与 当前可见证据和附件 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 async function enterEvidenceRoom() {
-  if (historyMode.value || projectionFailClosed.value) return;
+  if (historyMode.value || !canEnterEvidence.value) return;
   await router.push(`/disputes/${caseId.value}/evidence`);
 }
 
@@ -1863,7 +2061,17 @@ watch(
   () => intakeProcessProjection.value.mode,
   (mode, previousMode) => {
     if (mode === "PROCESSING") {
-      if (previousMode !== "PROCESSING") projectionStatusRetryAttempts = 0;
+      if (previousMode !== "PROCESSING") {
+        projectionStatusRetryAttempts = 0;
+        clearAgentStreams({
+          caseId: caseId.value,
+          roomType: "INTAKE",
+          actorId: actor.id,
+          actorRole: actor.role,
+        });
+        resetStreamedCaseDetail();
+        if (agentState.value === "STREAMING") agentState.value = "LISTENING";
+      }
       scheduleProjectionStatusRetry();
       return;
     }

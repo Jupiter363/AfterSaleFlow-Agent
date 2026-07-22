@@ -93,7 +93,7 @@ const connectedModelHealth = vi.fn().mockResolvedValue({
 });
 
 function currentProcessProjection(overrides = {}) {
-  return {
+  const projection = {
     schema_version: "intake-process-projection.v1",
     projection_state: "CURRENT",
     writer_mode: "SHADOW",
@@ -111,10 +111,20 @@ function currentProcessProjection(overrides = {}) {
     projected_at: "2026-07-22T03:04:05Z",
     ...overrides,
   };
+  if (!Object.hasOwn(overrides, "pending_state")) {
+    projection.pending_state = {
+      OPEN: "NONE",
+      WAITING_PARTY: "WAITING_PARTY",
+      AGENT_RUNNING: "AGENT_RUNNING",
+      READY_TO_CONFIRM: "NONE",
+      COMPLETED: "NONE",
+    }[projection.room_phase];
+  }
+  return projection;
 }
 
 function currentCamelProcessProjection(overrides = {}) {
-  return {
+  const projection = {
     schemaVersion: "intake-process-projection.v1",
     projectionState: "CURRENT",
     writerMode: "SHADOW",
@@ -132,10 +142,20 @@ function currentCamelProcessProjection(overrides = {}) {
     projectedAt: "2026-07-22T03:04:05Z",
     ...overrides,
   };
+  if (!Object.hasOwn(overrides, "pendingState")) {
+    projection.pendingState = {
+      OPEN: "NONE",
+      WAITING_PARTY: "WAITING_PARTY",
+      AGENT_RUNNING: "AGENT_RUNNING",
+      READY_TO_CONFIRM: "NONE",
+      COMPLETED: "NONE",
+    }[projection.roomPhase];
+  }
+  return projection;
 }
 
 function intakeStatusWithProjection(processProjection, overrides = {}) {
-  return {
+  const status = {
     initiator_role: "USER",
     respondent_role: "MERCHANT",
     initiator_status: "OPEN",
@@ -143,9 +163,12 @@ function intakeStatusWithProjection(processProjection, overrides = {}) {
     current_actor_completed: false,
     can_use_intake: true,
     can_enter_evidence: true,
-    process_projection: processProjection,
     ...overrides,
   };
+  if (processProjection !== undefined) {
+    status.process_projection = processProjection;
+  }
+  return status;
 }
 
 function apiResponse(data) {
@@ -660,7 +683,7 @@ describe("IntakeRoomView", () => {
       {
         schema_version: "intake-process-projection.v1",
         projection_state: "UNAVAILABLE",
-        writer_mode: "UNKNOWN",
+        writer_mode: "LEGACY",
       },
       {
         schema_version: "intake-process-projection.v1",
@@ -705,11 +728,24 @@ describe("IntakeRoomView", () => {
     const confirmAction = vi.fn();
     const cancelAction = vi.fn();
     const openingAction = vi.fn();
+    const abortStaleStream = vi.fn();
+    agentStreamStore.runs["run-stale-fence"] = {
+      runId: "run-stale-fence",
+      caseId: "CASE_INTAKE_1",
+      roomType: "INTAKE",
+      actorId: "user-local",
+      actorRole: "USER",
+      status: "STREAMING",
+      startedAt: 0,
+      abortController: { abort: abortStaleStream },
+      displayPacer: { cancel: vi.fn() },
+    };
     const eventStreamer = vi.fn(async ({ applyEvent }) => {
       await applyEvent({ event: "EVIDENCE_OPENED" });
     });
     const wrapper = await mountInteractiveView({
       initialDispute: null,
+      initialIntakeStatus: processingStatus,
       initialMessages: null,
       initialTurnMemory: readyTurnMemory,
       postMessageAction,
@@ -730,6 +766,8 @@ describe("IntakeRoomView", () => {
     expect(requestedUrls).not.toContain(
       "/api/disputes/CASE_INTAKE_1/rooms/INTAKE/agent-runs/active",
     );
+    expect(abortStaleStream).toHaveBeenCalledTimes(1);
+    expect(agentStreamStore.runs["run-stale-fence"]).toBeUndefined();
     expect(openingAction).not.toHaveBeenCalled();
     expect(postMessageAction).not.toHaveBeenCalled();
     expect(confirmAction).not.toHaveBeenCalled();
@@ -745,6 +783,7 @@ describe("IntakeRoomView", () => {
 
   it("fails closed for unknown or malformed present projections", async () => {
     const invalidProjections = [
+      null,
       {
         schema_version: "intake-process-projection.v2",
         projection_state: "UNAVAILABLE",
@@ -755,7 +794,23 @@ describe("IntakeRoomView", () => {
         projection_state: "FUTURE_STATE",
         writer_mode: "LEGACY",
       },
+      {
+        schema_version: "intake-process-projection.v1",
+        projection_state: "UNAVAILABLE",
+        writer_mode: "SHADOW",
+      },
+      {
+        schema_version: "intake-process-projection.v1",
+        projection_state: "UNAVAILABLE",
+        writer_mode: "LEGACY",
+        writerMode: "SHADOW",
+      },
       currentProcessProjection({ room_phase: "WAITING_TIMER" }),
+      currentProcessProjection({ pending_state: "WAITING_PARTY" }),
+      {
+        ...currentProcessProjection(),
+        roomPhase: "COMPLETED",
+      },
       currentProcessProjection({
         room_phase: "AGENT_RUNNING",
         active_logical_run_id: "run-1",
@@ -764,9 +819,20 @@ describe("IntakeRoomView", () => {
         stream_cursor: "v2:another-attempt:6",
       }),
     ];
+    const outerConflictStatus = intakeStatusWithProjection(
+      currentProcessProjection(),
+    );
+    outerConflictStatus.processProjection = currentCamelProcessProjection({
+      roomPhase: "COMPLETED",
+    });
+    const invalidStatuses = [
+      ...invalidProjections.map((projection) =>
+        intakeStatusWithProjection(projection),
+      ),
+      outerConflictStatus,
+    ];
 
-    for (const processProjection of invalidProjections) {
-      const status = intakeStatusWithProjection(processProjection);
+    for (const status of invalidStatuses) {
       const postMessageAction = vi.fn();
       const wrapper = await mountInteractiveView({
         initialIntakeStatus: status,
@@ -786,6 +852,76 @@ describe("IntakeRoomView", () => {
       expect(wrapper.find("[data-resolve-without-dispute]").exists()).toBe(false);
       wrapper.unmount();
     }
+  });
+
+  it("intersects current projection phases with server intake permissions", async () => {
+    const openWrapper = await mountInteractiveView({
+      initialIntakeStatus: intakeStatusWithProjection(
+        currentProcessProjection({ room_phase: "OPEN" }),
+      ),
+    });
+    expect(openWrapper.find(".conversation-stream__composer").exists()).toBe(true);
+    expect(openWrapper.get("[data-confirm-admission]").attributes("disabled"))
+      .toBe("");
+    expect(openWrapper.get("[data-resolve-without-dispute]").attributes("disabled"))
+      .toBeUndefined();
+    openWrapper.unmount();
+
+    const serverLockedWrapper = await mountInteractiveView({
+      initialIntakeStatus: intakeStatusWithProjection(
+        currentProcessProjection({ room_phase: "WAITING_PARTY" }),
+        { can_use_intake: false },
+      ),
+    });
+    expect(serverLockedWrapper.find(".conversation-stream__composer").exists())
+      .toBe(false);
+    expect(serverLockedWrapper.find("[data-confirm-admission]").exists()).toBe(false);
+    expect(serverLockedWrapper.find("[data-resolve-without-dispute]").exists())
+      .toBe(false);
+    serverLockedWrapper.unmount();
+
+    const agentRunningWrapper = await mountInteractiveView({
+      initialIntakeStatus: intakeStatusWithProjection(
+        currentProcessProjection({ room_phase: "AGENT_RUNNING" }),
+      ),
+    });
+    expect(agentRunningWrapper.find(".conversation-stream__composer").exists())
+      .toBe(false);
+    expect(agentRunningWrapper.find("[data-confirm-admission]").exists()).toBe(false);
+    expect(agentRunningWrapper.find("[data-resolve-without-dispute]").exists())
+      .toBe(false);
+    agentRunningWrapper.unmount();
+
+    const openingAction = vi.fn();
+    const readyWrapper = await mountInteractiveView({
+      initialMessages: null,
+      messagesLoader: vi.fn().mockResolvedValue([]),
+      openingAction,
+      initialIntakeStatus: intakeStatusWithProjection(
+        currentProcessProjection({ room_phase: "READY_TO_CONFIRM" }),
+      ),
+      eventStreamer: vi.fn(async () => {}),
+    });
+    expect(readyWrapper.find(".conversation-stream__composer").exists()).toBe(false);
+    expect(readyWrapper.get("[data-confirm-admission]").attributes("disabled"))
+      .toBeUndefined();
+    expect(readyWrapper.get("[data-resolve-without-dispute]").attributes("disabled"))
+      .toBe("");
+    expect(openingAction).not.toHaveBeenCalled();
+    readyWrapper.unmount();
+
+    const completedWrapper = await mountInteractiveView({
+      initialIntakeStatus: intakeStatusWithProjection(
+        currentProcessProjection({ room_phase: "COMPLETED" }),
+        { current_actor_completed: true, can_enter_evidence: true },
+      ),
+    });
+    expect(completedWrapper.find(".conversation-stream__composer").exists()).toBe(false);
+    expect(completedWrapper.find("[data-confirm-admission]").exists()).toBe(false);
+    expect(completedWrapper.find("[data-resolve-without-dispute]").exists())
+      .toBe(false);
+    expect(completedWrapper.find("[data-enter-evidence-room]").exists()).toBe(true);
+    completedWrapper.unmount();
   });
 
   it("does not treat stale top-level evidence permission as ready during projection processing", async () => {
@@ -865,6 +1001,36 @@ describe("IntakeRoomView", () => {
     expect(requestedUrls.some((url) => url.includes("attempt-target:6"))).toBe(false);
     expect(agentStreamStore.runs["run-other"]).toBeUndefined();
     expect(agentStreamStore.runs["run-target"]).toBeDefined();
+    wrapper.unmount();
+  });
+
+  it("rejects projected recovery when the authorized descriptor omits its stream URL", async () => {
+    const status = intakeStatusWithProjection(currentProcessProjection({
+      room_phase: "AGENT_RUNNING",
+      active_logical_run_id: "run-without-url",
+      active_attempt_id: null,
+      active_run_status: "PENDING",
+      stream_cursor: "-1",
+    }));
+    const fetchMock = installIntakeApiFetch({
+      status,
+      activeRuns: [{ runId: "run-without-url", status: "PENDING" }],
+    });
+    const wrapper = await mountInteractiveView({
+      initialDispute: null,
+      initialMessages: null,
+      initialTurnMemory: readyTurnMemory,
+      eventStreamer: vi.fn(async () => {}),
+    });
+
+    const requestedUrls = fetchMock.mock.calls.map(([input]) => String(input));
+    expect(requestedUrls).toContain(
+      "/api/disputes/CASE_INTAKE_1/rooms/INTAKE/agent-runs/active",
+    );
+    expect(requestedUrls.some((url) =>
+      url.includes("/api/agent-runs/run-without-url/events"),
+    )).toBe(false);
+    expect(agentStreamStore.runs["run-without-url"]).toBeUndefined();
     wrapper.unmount();
   });
 
