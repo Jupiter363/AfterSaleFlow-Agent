@@ -124,8 +124,16 @@ update graph_thread_registry
        cognitive_revision = %s
        or (
            cognitive_revision = %s
-           and last_checkpoint_ns is not distinct from %s
-           and last_checkpoint_id = %s
+           and (
+               (
+                   last_checkpoint_ns is not distinct from %s
+                   and last_checkpoint_id = %s
+               )
+               or (
+                   last_checkpoint_ns is not distinct from %s
+                   and last_checkpoint_id = %s
+               )
+           )
        )
    )
 returning cognitive_revision, last_checkpoint_ns, last_checkpoint_id
@@ -376,12 +384,30 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
                     checkpoint_id=checkpoint_id,
                 )
                 if self._checkpoint_has_applied_revision(checkpoint_to_save):
+                    parent = config.get("configurable") or {}
+                    parent_checkpoint_ns = parent.get("checkpoint_ns", "")
+                    parent_checkpoint_id = parent.get("checkpoint_id")
+                    if (
+                        not isinstance(parent_checkpoint_ns, str)
+                        or len(parent_checkpoint_ns) > 128
+                        or (
+                            parent_checkpoint_id is not None
+                            and (
+                                not isinstance(parent_checkpoint_id, str)
+                                or not parent_checkpoint_id
+                                or len(parent_checkpoint_id) > 128
+                            )
+                        )
+                    ):
+                        raise GraphBindingError("checkpoint parent identity is invalid")
                     await self._advance_thread_checkpoint(
                         connection,
                         effective_fence,
                         cognitive_revision=cognitive_revision,
                         checkpoint_ns=checkpoint_ns,
                         checkpoint_id=checkpoint_id,
+                        parent_checkpoint_ns=parent_checkpoint_ns,
+                        parent_checkpoint_id=parent_checkpoint_id,
                     )
                 if terminal_result is not None:
                     await self._ledger.store_terminal_result(
@@ -475,6 +501,8 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
                     cognitive_revision=commit.cognitive_revision,
                     checkpoint_ns=checkpoint_ns,
                     checkpoint_id=checkpoint_id,
+                    parent_checkpoint_ns=checkpoint_ns,
+                    parent_checkpoint_id=checkpoint_id,
                 )
                 await self._ledger.store_terminal_result(
                     connection,
@@ -687,6 +715,8 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
         cognitive_revision: int,
         checkpoint_ns: str,
         checkpoint_id: str,
+        parent_checkpoint_ns: str,
+        parent_checkpoint_id: str | None,
     ) -> None:
         cursor = await connection.execute(
             ADVANCE_THREAD_CHECKPOINT_SQL,
@@ -703,6 +733,8 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
                 cognitive_revision,
                 checkpoint_ns,
                 checkpoint_id,
+                parent_checkpoint_ns,
+                parent_checkpoint_id,
             ),
         )
         row = await cursor.fetchone()
