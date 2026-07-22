@@ -413,6 +413,7 @@ batches:
           tests/static/test_temporal_refactor_traceability.py
           tests/static/test_graph_import_boundaries.py
           tests/static/test_agent_platform_schema_contracts.py
+          tests/static/test_phase4_no_formal_sink_assembly.py
           -q
       - id: p5_entry_python
         cwd: python-agent-service
@@ -432,7 +433,7 @@ batches:
         resource_class: maven_test
         command: >-
           .\mvnw.cmd -DforkCount=1
-          -Dtest=EvidenceApiIntegrationTest,EvidenceSubmissionServiceTest,EvidenceCompletionServiceTest,EvidenceAgentTurnServiceTest,EvidenceDossierFreezerTest,EvidenceWindowWorkflowTest,EvidenceWindowCoordinatorTest,EvidenceRoomControllerTest,EvidenceRoomIntegrationTest,EvidenceV2ContractFixtureTest
+          -Dtest=EvidenceApiIntegrationTest,EvidenceSubmissionServiceTest,EvidenceCompletionServiceTest,EvidenceAgentTurnServiceTest,EvidenceDossierFreezerTest,EvidenceWindowWorkflowTest,EvidenceWindowCoordinatorTest,EvidenceRoomControllerTest,EvidenceRoomIntegrationTest,EvidenceV2ContractFixtureTest,JdbcEpochBootstrapOutboxPublisherTest,TransactionalEpochAuthorityServiceTest,JdbcIntakePayloadAuthorityStoreTest,IntakeFormalSinkAssemblyTest
           test
       - id: p5_entry_frontend
         cwd: frontend
@@ -464,6 +465,10 @@ batches:
         - EvidenceRoomControllerTest
         - EvidenceRoomIntegrationTest
         - EvidenceV2ContractFixtureTest
+        - JdbcEpochBootstrapOutboxPublisherTest
+        - TransactionalEpochAuthorityServiceTest
+        - JdbcIntakePayloadAuthorityStoreTest
+        - IntakeFormalSinkAssemblyTest
       python:
         - python-agent-service/tests/agents/test_evidence_clerk_turn.py
         - python-agent-service/tests/agents/test_evidence_fact_mapping_policy.py
@@ -485,6 +490,7 @@ batches:
       - tests/static/test_temporal_refactor_traceability.py
       - tests/static/test_graph_import_boundaries.py
       - tests/static/test_agent_platform_schema_contracts.py
+      - tests/static/test_phase4_no_formal_sink_assembly.py
     execution:
       runner: scripts/run_phase5_entry_checkpoint.py
       phase4_checkpoint_argument: --phase4-checkpoint=<tracked-phase-4/phase-metrics.json>

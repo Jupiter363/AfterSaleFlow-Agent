@@ -33,6 +33,23 @@ HANDOFF = {
     "source_execution_manifest_sha256": "2" * 64,
     "source_execution_manifest_git_sha256": "4" * 64,
 }
+EXPECTED_BATCH0_JAVA_CLASSES = (
+    "EvidenceApiIntegrationTest",
+    "EvidenceSubmissionServiceTest",
+    "EvidenceCompletionServiceTest",
+    "EvidenceAgentTurnServiceTest",
+    "EvidenceDossierFreezerTest",
+    "EvidenceWindowWorkflowTest",
+    "EvidenceWindowCoordinatorTest",
+    "EvidenceRoomControllerTest",
+    "EvidenceRoomIntegrationTest",
+    "EvidenceV2ContractFixtureTest",
+    "JdbcEpochBootstrapOutboxPublisherTest",
+    "TransactionalEpochAuthorityServiceTest",
+    "JdbcIntakePayloadAuthorityStoreTest",
+    "IntakeFormalSinkAssemblyTest",
+)
+NO_FORMAL_SINK_STATIC = "tests/static/test_phase4_no_formal_sink_assembly.py"
 
 
 def test_plan_binds_four_entry_sources_to_one_candidate_without_runtime_authority() -> None:
@@ -61,6 +78,30 @@ def test_plan_binds_four_entry_sources_to_one_candidate_without_runtime_authorit
         "entry_decision": "READY_FOR_P5_BATCH_0",
         "execute_allowed": True,
     }
+
+
+def test_batch0_selects_exact_java_safety_set_and_no_formal_sink_static_once() -> None:
+    matrix = runner.load_matrix()
+    batch = matrix["batches"][runner.BATCH_ID]
+    commands = runner.load_source_commands(matrix)
+    java = commands["p5_entry_java"]
+    static = commands["p5_entry_static"]
+
+    selectors = [
+        token for token in java["command"].split() if token.startswith("-Dtest=")
+    ]
+    assert len(selectors) == 1
+    java_classes = tuple(selectors[0].removeprefix("-Dtest=").split(","))
+    assert java_classes == EXPECTED_BATCH0_JAVA_CLASSES
+    assert len(java_classes) == len(set(java_classes)) == 14
+    assert tuple(batch["baseline_suites"]["java"]) == EXPECTED_BATCH0_JAVA_CLASSES
+
+    assert static["command"].split().count(NO_FORMAL_SINK_STATIC) == 1
+    assert batch["static_tests"].count(NO_FORMAL_SINK_STATIC) == 1
+    assert tuple(commands) == runner.COMMAND_ORDER
+    assert java["resource_class"] == "maven_test"
+    assert matrix["resources"]["heavy_test_slots"] == 1
+    assert matrix["resources"]["maven_fork_count"] == 1
 
 
 def test_accepted_phase4_checkpoint_fixture_grants_only_phase5_engineering() -> None:
