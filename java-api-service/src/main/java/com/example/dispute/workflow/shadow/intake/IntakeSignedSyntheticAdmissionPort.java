@@ -203,18 +203,6 @@ public interface IntakeSignedSyntheticAdmissionPort {
         return value != null && value.matches("grt\\.v1\\.[0-9a-f]{32}");
     }
 
-    private static boolean validReference(String value) {
-        return value != null
-                && value.length() <= 1_024
-                && value.matches("(?:s3|minio|urn):.+");
-    }
-
-    private static boolean validOperationKey(String value, String caseId, String commandId) {
-        return value != null
-                && value.equals("intake.operation:" + caseId + ":" + commandId)
-                && value.length() <= 512;
-    }
-
     private static String sha256Hex(String value) {
         try {
             byte[] digest = MessageDigest.getInstance("SHA-256")
