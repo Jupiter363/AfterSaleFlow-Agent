@@ -237,7 +237,7 @@ public final class JdbcIntakeSyntheticComparisonLedger
                            and command.case_command_sequence = :commandSequence
                            and command.request_hash = :requestHash
                            and command.accepted_room_revision = :roomRevision
-                        on conflict (operation_key) do nothing
+                        on conflict do nothing
                         """,
                         parameters);
         Stored stored =
