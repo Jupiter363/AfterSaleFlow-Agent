@@ -9,11 +9,14 @@ import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEnti
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseIntakePartyCompletionEntity;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseIntakePartyCompletionRepository;
+import com.example.dispute.workflow.projection.intake.IntakeProcessProjectionAdapter;
+import com.example.dispute.workflow.projection.intake.IntakeProcessProjectionView;
 import java.time.Clock;
 import java.time.OffsetDateTime;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -27,14 +30,25 @@ public class IntakeProgressService {
     private final FulfillmentCaseRepository caseRepository;
     private final CaseIntakePartyCompletionRepository repository;
     private final Clock clock;
+    private final IntakeProcessProjectionAdapter projectionAdapter;
 
     public IntakeProgressService(
             FulfillmentCaseRepository caseRepository,
             CaseIntakePartyCompletionRepository repository,
             Clock clock) {
+        this(caseRepository, repository, clock, null);
+    }
+
+    @Autowired
+    public IntakeProgressService(
+            FulfillmentCaseRepository caseRepository,
+            CaseIntakePartyCompletionRepository repository,
+            Clock clock,
+            IntakeProcessProjectionAdapter projectionAdapter) {
         this.caseRepository = caseRepository;
         this.repository = repository;
         this.clock = clock;
+        this.projectionAdapter = projectionAdapter;
     }
 
     @Transactional(readOnly = true)
@@ -43,10 +57,16 @@ public class IntakeProgressService {
                 caseRepository.findById(caseId)
                         .orElseThrow(() -> new IllegalArgumentException("case not found"));
         assertCaseActor(dispute, actor, true);
-        return status(dispute, actor);
+        return authorizedStatus(dispute, actor);
     }
 
     public IntakeStatusView status(FulfillmentCaseEntity dispute, AuthenticatedActor actor) {
+        assertCaseActor(dispute, actor, true);
+        return authorizedStatus(dispute, actor);
+    }
+
+    private IntakeStatusView authorizedStatus(
+            FulfillmentCaseEntity dispute, AuthenticatedActor actor) {
         ActorRole initiator = dispute.getInitiatorRole();
         ActorRole respondent = dispute.getRespondentRole();
         Optional<CaseIntakePartyCompletionEntity> initiatorTerminal = terminal(dispute, initiator);
@@ -82,7 +102,20 @@ public class IntakeProgressService {
                 actorCompleted,
                 canUseIntake(dispute, actor, initiatorTerminal, respondentTerminal, legacy),
                 canEnterEvidence(dispute, actor, legacy),
-                dispute.getCurrentDeadlineAt());
+                dispute.getCurrentDeadlineAt(),
+                processProjection(dispute, actor));
+    }
+
+    private IntakeProcessProjectionView processProjection(
+            FulfillmentCaseEntity dispute, AuthenticatedActor actor) {
+        if (projectionAdapter == null) {
+            return IntakeProcessProjectionView.legacyUnavailable(dispute.getUpdatedAt());
+        }
+        return projectionAdapter
+                .read(dispute.getId(), actor)
+                .orElseGet(
+                        () -> IntakeProcessProjectionView.legacyUnavailable(
+                                dispute.getUpdatedAt()));
     }
 
     public CaseIntakePartyCompletionEntity completeInitiator(

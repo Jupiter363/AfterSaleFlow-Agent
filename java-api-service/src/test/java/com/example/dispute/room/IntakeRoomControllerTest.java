@@ -11,12 +11,14 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.example.dispute.common.exception.GlobalExceptionHandler;
 import com.example.dispute.common.trace.TraceIdFilter;
+import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.CommonConfiguration;
 import com.example.dispute.config.HeaderAuthenticationFilter;
 import com.example.dispute.config.JsonAccessDeniedHandler;
@@ -28,9 +30,12 @@ import com.example.dispute.domain.model.RiskLevel;
 import com.example.dispute.room.api.IntakeRoomController;
 import com.example.dispute.room.application.IntakeConfirmationCommand;
 import com.example.dispute.room.application.IntakeConfirmationView;
-import com.example.dispute.room.application.IntakeRoomService;
 import com.example.dispute.room.application.IntakeProgressService;
+import com.example.dispute.room.application.IntakeRoomService;
+import com.example.dispute.room.application.IntakeStatusView;
 import com.example.dispute.room.domain.RoomType;
+import com.example.dispute.workflow.projection.intake.IntakeProcessProjectionView;
+import com.example.dispute.workflow.projection.intake.IntakeProcessProjectionView.VersionPins;
 import java.time.OffsetDateTime;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -62,6 +67,65 @@ class IntakeRoomControllerTest {
     @Autowired private MockMvc mockMvc;
     @MockitoBean private IntakeRoomService service;
     @MockitoBean private IntakeProgressService progressService;
+
+    @Test
+    void statusAddsSanitizedVersionedProjectionWithoutChangingLegacyFields() throws Exception {
+        when(progressService.status(eq("CASE_test"), any()))
+                .thenReturn(
+                        new IntakeStatusView(
+                                "CASE_test",
+                                ActorRole.USER,
+                                ActorRole.MERCHANT,
+                                "COMPLETED",
+                                "OPEN",
+                                false,
+                                true,
+                                false,
+                                OffsetDateTime.parse("2026-07-22T06:00:00Z"),
+                                new IntakeProcessProjectionView(
+                                        "intake-process-projection.v1",
+                                        "CURRENT",
+                                        "SHADOW",
+                                        4,
+                                        12,
+                                        7,
+                                        9,
+                                        "WAITING_PARTY",
+                                        "WAITING_PARTY",
+                                        "run-1",
+                                        "attempt-2",
+                                        "RUNNING",
+                                        "v2:attempt-2:6",
+                                        new VersionPins(
+                                                "case-process.v2",
+                                                "room-epoch-selection.v2",
+                                                "agent-stream.v2",
+                                                "case-build-1",
+                                                "intake-build-1",
+                                                "2.0.0",
+                                                "checkpoint.v2"),
+                                        OffsetDateTime.parse("2026-07-22T03:04:05Z"))));
+
+        mockMvc.perform(
+                        get("/api/disputes/CASE_test/intake/status")
+                                .header(HeaderAuthenticationFilter.USER_ID_HEADER, "merchant-local")
+                                .header(HeaderAuthenticationFilter.ROLE_HEADER, "MERCHANT"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.initiator_status").value("COMPLETED"))
+                .andExpect(jsonPath("$.data.respondent_status").value("OPEN"))
+                .andExpect(jsonPath("$.data.can_use_intake").value(true))
+                .andExpect(jsonPath("$.data.process_projection.schema_version")
+                        .value("intake-process-projection.v1"))
+                .andExpect(jsonPath("$.data.process_projection.writer_mode").value("SHADOW"))
+                .andExpect(jsonPath("$.data.process_projection.room_revision").value(7))
+                .andExpect(jsonPath("$.data.process_projection.active_logical_run_id")
+                        .value("run-1"))
+                .andExpect(jsonPath("$.data.process_projection.stream_cursor")
+                        .value("v2:attempt-2:6"))
+                .andExpect(jsonPath("$.data.process_projection.workflow_id").doesNotExist())
+                .andExpect(jsonPath("$.data.process_projection.projection_ref").doesNotExist())
+                .andExpect(jsonPath("$.data.process_projection.internal_hash").doesNotExist());
+    }
 
     // 所属模块：【房间协作与权限 / 自动化测试层】「IntakeRoomControllerTest.confirmsAdmissionWithoutLegacyConfirmationNoteInput()」。
     // 具体功能：「IntakeRoomControllerTest.confirmsAdmissionWithoutLegacyConfirmationNoteInput()」：复现“核对完整业务行为（场景方法「confirmsAdmissionWithoutLegacyConfirmationNoteInput」）”场景：驱动 「service.confirm」，再用 「verify」、「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_test」、「2026-07-06T02:00:00Z」、「merchant-local」、「MERCHANT」。

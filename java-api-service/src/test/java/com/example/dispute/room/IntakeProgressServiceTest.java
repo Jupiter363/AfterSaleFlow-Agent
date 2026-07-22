@@ -3,6 +3,8 @@ package com.example.dispute.room;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import com.example.dispute.common.exception.ForbiddenException;
@@ -15,6 +17,8 @@ import com.example.dispute.infrastructure.persistence.repository.FulfillmentCase
 import com.example.dispute.room.application.IntakeProgressService;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseIntakePartyCompletionEntity;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseIntakePartyCompletionRepository;
+import com.example.dispute.workflow.projection.intake.IntakeProcessProjectionAdapter;
+import com.example.dispute.workflow.projection.intake.IntakeProcessProjectionView;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.OffsetDateTime;
@@ -23,6 +27,51 @@ import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
 class IntakeProgressServiceTest {
+
+    @Test
+    void authorizedPartyReceivesTheSanitizedProcessProjection() {
+        FulfillmentCaseRepository cases = mock(FulfillmentCaseRepository.class);
+        CaseIntakePartyCompletionRepository completions =
+                mock(CaseIntakePartyCompletionRepository.class);
+        IntakeProcessProjectionAdapter projectionAdapter =
+                mock(IntakeProcessProjectionAdapter.class);
+        IntakeProgressService service = new IntakeProgressService(
+                cases,
+                completions,
+                Clock.fixed(Instant.parse("2026-07-15T00:30:00Z"), ZoneOffset.UTC),
+                projectionAdapter);
+        FulfillmentCaseEntity dispute = evidenceCase();
+        AuthenticatedActor actor = new AuthenticatedActor("user-local", ActorRole.USER);
+        IntakeProcessProjectionView projection =
+                IntakeProcessProjectionView.legacyUnavailable(
+                        OffsetDateTime.parse("2026-07-15T00:20:00Z"));
+        when(projectionAdapter.read(dispute.getId(), actor))
+                .thenReturn(Optional.of(projection));
+
+        assertThat(service.status(dispute, actor).processProjection()).isSameAs(projection);
+        verify(projectionAdapter).read(dispute.getId(), actor);
+    }
+
+    @Test
+    void rejectsNonPartyBeforeReadingProcessProjection() {
+        FulfillmentCaseRepository cases = mock(FulfillmentCaseRepository.class);
+        CaseIntakePartyCompletionRepository completions =
+                mock(CaseIntakePartyCompletionRepository.class);
+        IntakeProcessProjectionAdapter projectionAdapter =
+                mock(IntakeProcessProjectionAdapter.class);
+        IntakeProgressService service = new IntakeProgressService(
+                cases,
+                completions,
+                Clock.fixed(Instant.parse("2026-07-15T00:30:00Z"), ZoneOffset.UTC),
+                projectionAdapter);
+
+        assertThatThrownBy(
+                        () -> service.status(
+                                evidenceCase(),
+                                new AuthenticatedActor("other-user", ActorRole.USER)))
+                .isInstanceOf(ForbiddenException.class);
+        verifyNoInteractions(completions, projectionAdapter);
+    }
 
     @Test
     void respondentMovesFromLockedIntakeToOpenIntakeThenSharedEvidence() {
