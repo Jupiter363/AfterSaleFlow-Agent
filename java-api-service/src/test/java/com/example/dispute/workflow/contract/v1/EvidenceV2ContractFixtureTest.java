@@ -49,8 +49,14 @@ class EvidenceV2ContractFixtureTest {
                     "credential_field_forbidden",
                     "evidence-batch-manifest-formal-action.json",
                     "manifest_formal_action_forbidden",
+                    "evidence-batch-manifest-legacy-output-pin.json",
+                    "legacy_output_schema_version_forbidden",
                     "evidence-batch-manifest-public-51.json",
                     "public_submission_over_50",
+                    "evidence-batch-manifest-signature-algorithm.json",
+                    "invalid_manifest_signature_algorithm",
+                    "evidence-batch-manifest-unsigned.json",
+                    "missing_manifest_signature",
                     "evidence-finalization-receipt-real-formal-write.json",
                     "formal_domain_write_forbidden",
                     "evidence-item-proposal-formal-action.json",
@@ -71,6 +77,26 @@ class EvidenceV2ContractFixtureTest {
                     "policy_version",
                     "guardrail_version",
                     "tool_policy_version");
+    private static final Map<String, String> EXPECTED_VALID_FIXTURE_HASHES =
+            Map.of(
+                    "evidence-asset-capability-valid.json",
+                    "da72b1e2ef63ef2df4d6e6d4eb7fa3af0696f25d2d5525b2ab90b6a3932c6e27",
+                    "evidence-batch-manifest-synthetic-1-valid.json",
+                    "6bc875c51b4b5b20f3bcfa1a378ae373bb051b657e1c633de0c6de1c0180adb1",
+                    "evidence-batch-manifest-synthetic-100-valid.json",
+                    "ed73bff340c633379607f72ed4dac3f06baca92275644175eac1373a32725275",
+                    "evidence-batch-manifest-synthetic-8-valid.json",
+                    "c124add3fe340a004d2bf2137ea0ea05e12255e308baad4f863b60077bef2364",
+                    "evidence-finalization-receipt-valid.json",
+                    "26610a9836e63cc5ef91e7673eb12c5199023080a5fbf31ba080823681eead38",
+                    "evidence-item-proposal-valid.json",
+                    "629688355567e0350ac60cccae3da2bc512ce1b303f23781879c23a1dda38929",
+                    "evidence-process-projection-legacy-unavailable-valid.json",
+                    "73965859c19d9f96c6b662d7d11b628374a0e84dbdb84aaec0de00b3431ab424",
+                    "evidence-process-projection-valid.json",
+                    "18a39b7f1c3a99cec98d7879e633e64922b503e36600fb26493d72475b857297",
+                    "evidence-terminal-proposal-valid.json",
+                    "576449dc4411599966f6819a92de56f35391bb02694c4787ecb4f52580cb64d2");
 
     private static Map<String, ContractSchema> schemasByVersion;
 
@@ -151,6 +177,16 @@ class EvidenceV2ContractFixtureTest {
         }
         assertThat(authoritativeFiles).containsExactlyElementsOf(new TreeSet<>(CONTRACT_FILES));
         assertThat(schemasByVersion).hasSize(6);
+        assertThat(
+                        fixtureFiles("valid").stream()
+                                .map(path -> path.getFileName().toString())
+                                .collect(java.util.stream.Collectors.toCollection(TreeSet::new)))
+                .containsExactlyElementsOf(new TreeSet<>(EXPECTED_VALID_FIXTURE_HASHES.keySet()));
+        assertThat(
+                        fixtureFiles("invalid").stream()
+                                .map(path -> path.getFileName().toString())
+                                .collect(java.util.stream.Collectors.toCollection(TreeSet::new)))
+                .containsExactlyElementsOf(new TreeSet<>(INVALID_FIXTURE_REASONS.keySet()));
 
         JsonNode matrix;
         try (InputStream input =
@@ -185,9 +221,17 @@ class EvidenceV2ContractFixtureTest {
     void validFixturePassesDraft202012AndItsDeclaredSelfHash(Path path) throws IOException {
         JsonNode fixture = MAPPER.readTree(path.toFile());
         ContractSchema schema = schemaFor(fixture, path);
+        String fixtureName = path.getFileName().toString();
 
         assertThat(schema.validator().validate(fixture)).as("schema errors for %s", path).isEmpty();
         assertSelfHash(fixture, schema.document(), path);
+        assertThat(EXPECTED_VALID_FIXTURE_HASHES)
+                .as("frozen expected hash for %s", path)
+                .containsKey(fixtureName);
+        String hashField = schema.document().required("x-self-hash").required("field").asText();
+        assertThat(fixture.required(hashField).asText())
+                .as("frozen fixture hash for %s", path)
+                .isEqualTo(EXPECTED_VALID_FIXTURE_HASHES.get(fixtureName));
     }
 
     @ParameterizedTest(name = "{0}")
@@ -219,7 +263,19 @@ class EvidenceV2ContractFixtureTest {
         assertThat(schema.required("x-signature"))
                 .isEqualTo(
                         MAPPER.valueToTree(
-                                Map.of("algorithm", "ES256", "covers", "manifest_hash")));
+                                Map.of(
+                                        "algorithm", "ES256",
+                                        "covers", "manifest_hash",
+                                        "encoding", "JOSE_P1363_BASE64URL")));
+        assertThat(schema.required("x-gateway-cross-binding"))
+                .isEqualTo(
+                        MAPPER.valueToTree(
+                                Map.of(
+                                        "source_schema_version", "room-graph-command.v1",
+                                        "manifest_ref_field", "domain_snapshot_ref",
+                                        "requires_verified_java_envelope", true,
+                                        "failure", "BEFORE_CHECKPOINT_MUTATION",
+                                        "room_fence_is_graph_lease_fence", false)));
         assertThat(jsonText(schema.required("required")))
                 .contains("signature_algorithm", "signing_key_id", "signature");
 
@@ -227,14 +283,11 @@ class EvidenceV2ContractFixtureTest {
         assertThat(constraints)
                 .containsIgnoringCase("room-graph-command.v1")
                 .containsIgnoringCase("gateway")
-                .containsIgnoringCase("before checkpoint mutation")
                 .contains(
-                        "command_id",
-                        "logical_run_id",
-                        "attempt_id",
-                        "thread_id",
-                        "room_epoch",
-                        "fencing_token");
+                        "GATEWAY_COMMAND_EXACT_BINDING",
+                        "command/run/attempt",
+                        "epoch/room fence",
+                        "registry/profile pins");
     }
 
     @Test
@@ -270,7 +323,7 @@ class EvidenceV2ContractFixtureTest {
                 assertThat(fixture.required("signing_key_id").asText())
                         .matches("^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$");
                 assertThat(fixture.required("signature").asText())
-                        .matches("^[A-Za-z0-9_-]{16,4096}$")
+                        .matches("^[A-Za-z0-9_-]{86}$")
                         .doesNotContain("=");
             }
         }
@@ -390,11 +443,18 @@ class EvidenceV2ContractFixtureTest {
 
         ObjectNode gatewayBinding = verifiedGatewayBinding(manifest);
         assertVerifiedRoomGraphCommandBinding(manifest, gatewayBinding);
-        gatewayBinding.put("fencing_token", manifest.required("fencing_token").longValue() + 1);
+        gatewayBinding.put("room_epoch", manifest.required("room_epoch").longValue() + 1);
         org.assertj.core.api.Assertions.assertThatThrownBy(
                         () -> assertVerifiedRoomGraphCommandBinding(manifest, gatewayBinding))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessage("room_graph_command_binding_mismatch:fencing_token");
+                .hasMessage("room_graph_command_binding_mismatch:room_epoch");
+
+        long currentRoomFence = manifest.required("fencing_token").longValue();
+        assertCurrentRoomFence(manifest, currentRoomFence);
+        org.assertj.core.api.Assertions.assertThatThrownBy(
+                        () -> assertCurrentRoomFence(manifest, currentRoomFence + 1))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("room_fence_mismatch");
     }
 
     @Test
@@ -462,15 +522,12 @@ class EvidenceV2ContractFixtureTest {
                         "registration_id",
                         "tenant_surrogate",
                         "case_id",
-                        "room_id",
+                        "room_type",
                         "room_epoch",
-                        "fencing_token",
                         "thread_id",
                         "actor_id",
                         "actor_role",
-                        "participant_id",
-                        "actor_scope_hash",
-                        "agent_session_id")) {
+                        "actor_scope_hash")) {
             binding.set(field, manifest.required(field));
         }
         binding.set("profile_versions", manifest.required("profile_versions"));
@@ -488,6 +545,12 @@ class EvidenceV2ContractFixtureTest {
                                         "room_graph_command_binding_mismatch:" + field);
                             }
                         });
+    }
+
+    private static void assertCurrentRoomFence(JsonNode manifest, long currentRoomFence) {
+        if (manifest.required("fencing_token").longValue() != currentRoomFence) {
+            throw new IllegalArgumentException("room_fence_mismatch");
+        }
     }
 
     private static String jsonText(JsonNode value) {
