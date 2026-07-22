@@ -47,6 +47,25 @@ public record IntakeProcessProjectionView(
                 projectedAt);
     }
 
+    public static IntakeProcessProjectionView processingUnavailable() {
+        return new IntakeProcessProjectionView(
+                SCHEMA_VERSION,
+                PROCESSING,
+                "UNKNOWN",
+                0,
+                0,
+                0,
+                0,
+                PROCESSING,
+                PROCESSING,
+                null,
+                null,
+                null,
+                null,
+                VersionPins.unavailable(),
+                null);
+    }
+
     @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
     public record VersionPins(
             String processContractVersion,

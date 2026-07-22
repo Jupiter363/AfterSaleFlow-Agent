@@ -53,6 +53,34 @@ class IntakeProgressServiceTest {
     }
 
     @Test
+    void missingProductionProjectionReturnsProcessingWithoutInferringWriterOrRun() {
+        FulfillmentCaseRepository cases = mock(FulfillmentCaseRepository.class);
+        CaseIntakePartyCompletionRepository completions =
+                mock(CaseIntakePartyCompletionRepository.class);
+        IntakeProcessProjectionAdapter projectionAdapter =
+                mock(IntakeProcessProjectionAdapter.class);
+        IntakeProgressService service = new IntakeProgressService(
+                cases,
+                completions,
+                Clock.fixed(Instant.parse("2026-07-15T00:30:00Z"), ZoneOffset.UTC),
+                projectionAdapter);
+        FulfillmentCaseEntity dispute = evidenceCase();
+        AuthenticatedActor actor = new AuthenticatedActor("user-local", ActorRole.USER);
+        when(projectionAdapter.read(dispute.getId(), actor)).thenReturn(Optional.empty());
+
+        IntakeProcessProjectionView projection =
+                service.status(dispute, actor).processProjection();
+
+        assertThat(projection.projectionState()).isEqualTo("PROCESSING");
+        assertThat(projection.writerMode()).isEqualTo("UNKNOWN");
+        assertThat(projection.roomPhase()).isEqualTo("PROCESSING");
+        assertThat(projection.activeLogicalRunId()).isNull();
+        assertThat(projection.activeAttemptId()).isNull();
+        assertThat(projection.streamCursor()).isNull();
+        assertThat(projection.projectedAt()).isNull();
+    }
+
+    @Test
     void rejectsNonPartyBeforeReadingProcessProjection() {
         FulfillmentCaseRepository cases = mock(FulfillmentCaseRepository.class);
         CaseIntakePartyCompletionRepository completions =

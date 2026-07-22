@@ -113,9 +113,7 @@ public class IntakeProgressService {
         }
         return projectionAdapter
                 .read(dispute.getId(), actor)
-                .orElseGet(
-                        () -> IntakeProcessProjectionView.legacyUnavailable(
-                                dispute.getUpdatedAt()));
+                .orElseGet(IntakeProcessProjectionView::processingUnavailable);
     }
 
     public CaseIntakePartyCompletionEntity completeInitiator(
