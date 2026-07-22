@@ -15,8 +15,12 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 CONTRACT_ROOT = ROOT / "contracts/agent-platform/evidence/v2"
+V1_CONTRACT_ROOT = ROOT / "contracts/agent-platform/v1"
 VALID_ROOT = CONTRACT_ROOT / "fixtures/valid"
 INVALID_ROOT = CONTRACT_ROOT / "fixtures/invalid"
+EVIDENCE_COMMAND_FIXTURE = (
+    V1_CONTRACT_ROOT / "fixtures/valid/room-graph-command-evidence-valid.json"
+)
 
 SCHEMA_BY_PREFIX = {
     "evidence-asset-capability": (
@@ -532,6 +536,24 @@ def test_manifest_uses_direct_java_signature_before_graph_or_checkpoint_mutation
     assert gateway == {
         "source_schema_version": "room-graph-command.v1",
         "manifest_ref_field": "domain_snapshot_ref",
+        "manifest_ref_payload_binding": {
+            "canonicalization": "RFC_8785",
+            "encoding": "UTF-8",
+            "sha256_field": "domain_snapshot_ref.sha256",
+            "size_bytes_field": "domain_snapshot_ref.size_bytes",
+            "covers": "FULL_CANONICAL_SIGNED_MANIFEST_PAYLOAD",
+        },
+        "manifest_internal_self_hash": {
+            "field": "manifest_hash",
+            "canonicalization": "RFC_8785",
+            "omit_top_level_fields": ["manifest_hash", "signature"],
+        },
+        "verification_order": [
+            "VERIFY_REFERENCED_PAYLOAD_HASH_AND_SIZE_BEFORE_PARSE",
+            "PARSE_MANIFEST",
+            "VERIFY_MANIFEST_SELF_HASH",
+            "VERIFY_MANIFEST_SIGNATURE",
+        ],
         "requires_verified_java_envelope": True,
         "failure": "BEFORE_CHECKPOINT_MUTATION",
         "room_fence_is_graph_lease_fence": False,
@@ -542,10 +564,13 @@ def test_manifest_uses_direct_java_signature_before_graph_or_checkpoint_mutation
     }
     binding_rule = _semantic_rule(schema, "GATEWAY_COMMAND_EXACT_BINDING").lower()
     for required_text in (
-        "before graph or checkpoint mutation",
+        "before parsing or graph/checkpoint mutation",
+        "domain_snapshot_ref.sha256",
+        "full rfc8785 canonical signed manifest payload bytes",
+        "domain_snapshot_ref.size_bytes",
+        "internal manifest_hash",
+        "distinct and must never be substituted",
         "room-graph-command.v1",
-        "domain_snapshot_ref",
-        "id/schema/uri/hash/size",
         "invocation registry/profile",
         "room fence",
     ):
@@ -573,6 +598,78 @@ def test_room_and_graph_fences_have_distinct_authorities() -> None:
     assert "signed manifest" in binding_rule and "room fencing_token" in binding_rule
     assert "graph lease" in binding_rule
     assert "java finalizer" in binding_rule
+
+
+def test_room_graph_command_binds_the_complete_manifest_without_a_hash_cycle() -> None:
+    wrapper = _load_json(EVIDENCE_COMMAND_FIXTURE)
+    command = wrapper["instance"]
+    command_schema = _load_json(V1_CONTRACT_ROOT / "room-graph-command.schema.json")
+    manifest = _load_json(VALID_ROOT / "evidence-batch-manifest-synthetic-1-valid.json")
+
+    assert wrapper["schema"] == "room-graph-command.schema.json"
+    assert not list(
+        jsonschema.Draft202012Validator(
+            command_schema,
+            format_checker=jsonschema.Draft202012Validator.FORMAT_CHECKER,
+        ).iter_errors(command)
+    )
+
+    actor_scope_hash = hashlib.sha256(
+        rfc8785.dumps(command["actor_scope"])
+    ).hexdigest()
+    assert actor_scope_hash == manifest["actor_scope_hash"]
+    assert command["actor_scope"]["actor_id"] == manifest["actor_id"]
+    assert command["actor_scope"]["actor_role"] == manifest["actor_role"]
+    assert command["actor_scope"]["audience"] == manifest["actor_role"]
+
+    for field in (
+        "tenant_surrogate",
+        "case_id",
+        "room_type",
+        "room_epoch",
+        "thread_id",
+    ):
+        assert command[field] == manifest[field]
+    for field in ("command_id", "logical_run_id", "attempt_id"):
+        assert command[field] == manifest["command_binding"][field]
+    assert command["deadline_at"] == manifest["command_binding"]["deadline_at"]
+
+    invocation = command["invocation_context"]
+    profile = manifest["profile_versions"]
+    assert command["graph_key"] == "evidence.v2"
+    assert command["graph_version"] == profile["graph_version"]
+    assert command["checkpoint_schema_version"] == profile["checkpoint_schema_version"]
+    assert invocation["prompt_profile_id"] == profile["prompt_version"]
+    assert invocation["model_profile_id"] == profile["model_profile_id"]
+    assert invocation["output_schema_version"] == profile[
+        "assessment_output_schema_version"
+    ]
+    assert invocation["policy_version"] == profile["policy_version"]
+    assert invocation["guardrail_version"] == profile["guardrail_version"]
+    assert invocation["tool_capabilities"] == command["actor_scope"]["capabilities"]
+
+    manifest_internal_hash = _canonical_hash(
+        manifest, "manifest_hash", "signature"
+    )
+    manifest_payload = rfc8785.dumps(manifest)
+    manifest_payload_hash = hashlib.sha256(manifest_payload).hexdigest()
+    snapshot = command["domain_snapshot_ref"]
+    assert manifest_internal_hash == manifest["manifest_hash"]
+    assert snapshot["artifact_id"] == manifest["manifest_id"]
+    assert snapshot["schema_version"] == manifest["schema_version"]
+    assert snapshot["sha256"] == manifest_payload_hash
+    assert snapshot["size_bytes"] == len(manifest_payload)
+    assert snapshot["uri"].endswith(f"/{manifest_payload_hash}.json")
+    assert snapshot["sha256"] != manifest["manifest_hash"]
+
+    command_request_hash = _canonical_hash(command, "request_hash")
+    assert command_request_hash == command["request_hash"]
+    assert len(
+        {command_request_hash, manifest_payload_hash, manifest_internal_hash}
+    ) == 3
+    assert "fencing_token" not in command_schema["required"]
+    assert "fencing_token" not in command_schema["properties"]
+    assert "fencing_token" not in command
 
 
 def test_es256_signs_lowercase_hash_text_and_never_raw_digest_bytes() -> None:
