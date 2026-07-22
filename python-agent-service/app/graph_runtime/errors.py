@@ -41,6 +41,29 @@ class GraphGatewayDisabledError(GraphRuntimeError):
     code = "GRAPH_GATEWAY_DISABLED"
 
 
+class GraphBulkheadDisabledError(GraphRuntimeError):
+    code = "GRAPH_BULKHEAD_DISABLED"
+
+
+class GraphBulkheadClosedError(GraphRuntimeError):
+    code = "GRAPH_BULKHEAD_CLOSED"
+    retryable = True
+
+
+class GraphBulkheadSaturatedError(GraphRuntimeError):
+    code = "GRAPH_BULKHEAD_QUEUE_SATURATED"
+    retryable = True
+
+    def __init__(self, scope: str) -> None:
+        self.scope = scope
+        super().__init__(f"{self.code}:{scope}")
+
+
+class GraphBulkheadTimeoutError(GraphRuntimeError):
+    code = "GRAPH_BULKHEAD_WAIT_TIMEOUT"
+    retryable = True
+
+
 class GraphNonceReplayError(GraphRuntimeError):
     code = "GRAPH_INVOCATION_NONCE_REPLAY"
 
