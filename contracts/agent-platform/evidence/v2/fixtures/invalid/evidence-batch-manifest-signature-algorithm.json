@@ -1,7 +1,7 @@
 {
   "schema_version": "evidence-batch-manifest.v1",
   "manifest_id": "MANIFEST_P5_SYNTHETIC_ONE",
-  "manifest_hash": "13409e88551c3424fc5674bb33e3275f8aa15dbbe60350398c616ce1876d5d9f",
+  "manifest_hash": "16108c20b31b99e694467a9fb5aa0908b76545c6be76409dc6f59b444e55232a",
   "execution_scope": "SIGNED_SYNTHETIC_ONLY",
   "writer_mode": "SHADOW",
   "formal_sink_eligible": false,
@@ -18,7 +18,7 @@
   "actor_id": "ACTOR_P5_USER",
   "actor_role": "USER",
   "participant_id": "PARTICIPANT_P5_USER",
-  "actor_scope_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+  "actor_scope_hash": "a85b862404e1932f975696d4b490bedea295fb5c8940eb89d2ef07c7c1d74811",
   "agent_session_id": "AGENT_SESSION_P5_USER",
   "command_binding": {
     "schema_version": "evidence-room-command.v1",

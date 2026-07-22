@@ -1,9 +1,9 @@
 {
   "schema_version": "evidence-finalization-receipt.v1",
   "receipt_id": "RECEIPT_P5_SYNTHETIC_001",
-  "receipt_hash": "831a1d1fde235444f35021de0f1c6ccd6272e40cf306310ad9a142f5bc493e4c",
+  "receipt_hash": "22e2243f8250c198333215c9c554ece42032d31821b9fd35e174728711919560",
   "operation_type": "BATCH_MERGE",
-  "operation_key": "evidence.batch.merge:CASE_P5_SYNTHETIC_1:1:6bc875c51b4b5b20f3bcfa1a378ae373bb051b657e1c633de0c6de1c0180adb1:2",
+  "operation_key": "evidence.batch.merge:CASE_P5_SYNTHETIC_1:1:cd6153b05b81e9362cced88872f596bea0cf8e456889cb27bb34fce290be04e3:2",
   "request_hash": "c6294c8c3f6cfbdcf6c9cd5f7a97d9dc70a585cf204cad0f4d9be23a3212364e",
   "result_hash": "cd8c0057e57d872a60a8ce053a9e4ec29f92b0255a278349352442284690ff5e",
   "commit_scope": "ISOLATED_SYNTHETIC_LEDGER",
@@ -18,9 +18,9 @@
   "process_revision": 4,
   "room_revision": 6,
   "operation_binding": {
-    "manifest_hash": "6bc875c51b4b5b20f3bcfa1a378ae373bb051b657e1c633de0c6de1c0180adb1",
+    "manifest_hash": "cd6153b05b81e9362cced88872f596bea0cf8e456889cb27bb34fce290be04e3",
     "dossier_target_version": 2,
-    "proposal_hash": "576449dc4411599966f6819a92de56f35391bb02694c4787ecb4f52580cb64d2",
+    "proposal_hash": "3648869670940a1475f743cce003faa1389f8fb376cbc8e4078bc2dc76a00d72",
     "logical_run_id": "RUN_P5_ONE",
     "command_id": "COMMAND_P5_ONE",
     "attempt_id": "ATTEMPT_P5_ONE_1",

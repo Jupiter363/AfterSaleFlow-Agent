@@ -1,6 +1,6 @@
 {
   "schema_version": "evidence-process-projection.v1",
-  "projection_hash": "73965859c19d9f96c6b662d7d11b628374a0e84dbdb84aaec0de00b3431ab424",
+  "projection_hash": "ffbd340481fd1647afe2882308c24292d7b4e284e28adb114fce16f785002056",
   "projection_state": "UNAVAILABLE",
   "tenant_surrogate": "TENANT_P5_SYNTHETIC_1",
   "case_id": "CASE_P5_SYNTHETIC_LEGACY",
@@ -14,7 +14,7 @@
   "real_case_shadow_allowed": false,
   "viewer_actor_id": "ACTOR_P5_USER",
   "viewer_actor_role": "USER",
-  "viewer_scope_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+  "viewer_scope_hash": "a85b862404e1932f975696d4b490bedea295fb5c8940eb89d2ef07c7c1d74811",
   "audience": "USER",
   "room_phase": "WAITING_PARTIES",
   "terminal_reason": null,

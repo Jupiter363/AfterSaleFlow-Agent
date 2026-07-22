@@ -1,6 +1,6 @@
 {
   "schema_version": "evidence-batch-proposal.v1",
-  "proposal_hash": "36f95f44f7ce96e567f14d8c0c135164bb4f59e82ad0dd28f3aa60109a84ede8",
+  "proposal_hash": "c40c9c1b05b08d267a65583ca8ae4a51af9bc0940efaf6476febc99814b56ef3",
   "execution_scope": "SIGNED_SYNTHETIC_ONLY",
   "writer_mode": "PROPOSAL_ONLY",
   "formal_sink_eligible": false,
@@ -9,7 +9,7 @@
   "attempt_id": "ATTEMPT_P5_ONE_1",
   "thread_id": "grt.v1.018f6b7ec30a7430982fffc520c8195c",
   "manifest_id": "MANIFEST_P5_SYNTHETIC_ONE",
-  "manifest_hash": "6bc875c51b4b5b20f3bcfa1a378ae373bb051b657e1c633de0c6de1c0180adb1",
+  "manifest_hash": "cd6153b05b81e9362cced88872f596bea0cf8e456889cb27bb34fce290be04e3",
   "item_count": 1,
   "ordered_item_keys": [
     "EVIDENCE_SYNTH_001"
@@ -18,7 +18,7 @@
     {
       "evidence_id": "EVIDENCE_SYNTH_001",
       "assessment_status": "COMPLETED",
-      "assessment_hash": "629688355567e0350ac60cccae3da2bc512ce1b303f23781879c23a1dda38929"
+      "assessment_hash": "2945f7364bce768063509edf28972cad140bddec3d894170f5818e88853ecb23"
     }
   ],
   "coverage_status": "COMPLETE",
