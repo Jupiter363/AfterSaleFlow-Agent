@@ -13,6 +13,8 @@ contracts:
     self_hash_omits: [manifest_hash, signature]
     signature_algorithm: ES256
     signature_covers: manifest_hash
+    signature_input_encoding: ASCII_LOWERCASE_HEX_TEXT
+    signature_encoding: JOSE_P1363_BASE64URL
     signing_authority: JAVA
     profile_output_pins:
       assessment: evidence-item-assessment.v1
@@ -26,6 +28,8 @@ contracts:
     self_hash: capability_hash
     self_hash_omits: [capability_hash, signature]
     signature_covers: capability_hash
+    signature_input_encoding: ASCII_LOWERCASE_HEX_TEXT
+    signature_encoding: JOSE_P1363_BASE64URL
     manifest_authorization: exact_verified_java_signed_manifest
     profile_versions_hash_covers:
       - assessment_output_schema_version
@@ -89,11 +93,16 @@ authorization:
     signature_required: true
     self_hash_omits_exactly: [manifest_hash, signature]
     signature_covers_exactly: manifest_hash
+    signature_input_encoding: ASCII_LOWERCASE_HEX_TEXT
+    signature_encoding: JOSE_P1363_BASE64URL
     signature_metadata_hash_bound: true
     exact_id_hash_replay_allowed: true
     same_id_different_hash: reject
     detached_authorization_proof_ref: forbidden
     python_may_mint_or_sign: false
+  asset_capability:
+    signature_input_encoding: ASCII_LOWERCASE_HEX_TEXT
+    signature_encoding: JOSE_P1363_BASE64URL
   room_graph_command_cross_binding:
     required_before_checkpoint_mutation: true
     source_schema_version: room-graph-command.v1
