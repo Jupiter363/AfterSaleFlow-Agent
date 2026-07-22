@@ -7,7 +7,7 @@ document_status: P5_0_CONTRACT_CANDIDATE
 contract_gate: P5.0 NOT_RUN
 contract_prep_base: b8697ce7a46f4494d250d21f27a076f0711ae04d
 engineering_execution: BLOCKED_PENDING_P5_0_ENTRY_EVIDENCE
-candidate_scope_integrity: REPAIRS_CLASSIFIED_REQUIRES_FRESH_EXACT_SHA_BATCH_0
+candidate_scope_integrity: PRE_ENTRY_CONTRACT_CORRECTION_REQUIRES_FRESH_EXACT_SHA_BATCH_0
 phase_4_engineering_checkpoint: PASS
 engineering_exception: ADR_0012_ACCEPTED
 next_phase_permission: BLOCKED_PENDING_P5_0_ENTRY_EVIDENCE
@@ -20,6 +20,7 @@ temporal_evidence_allocation: FORBIDDEN
 formal_graph_sink: FORBIDDEN
 canary: FORBIDDEN
 promotion: FORBIDDEN
+pre_entry_contract_correction: ADR_0013_ACCEPTED_ATOMIC_ONCE
 ```
 
 This pack freezes the intended P5.0 contract shape for review; it is not entry evidence and grants
@@ -34,6 +35,10 @@ canary or promotion.
 exit evidence. Treating it as P5.0 entry evidence would recreate the dependency cycle that ADR 0012
 resolves. The accepted Phase 4 checkpoint now permits this contract candidate to run Batch 0;
 implementation remains blocked until the separate P5.0 entry-evidence commit.
+
+[ADR 0013](../../architecture/adr/0013-phase-5-evidence-pre-entry-contract-correction.md)
+governs one atomic correction of the still-unaccepted v1 candidate contracts. It does not broaden
+ADR 0012's runtime or promotion exception.
 
 The companion documents are the
 [Phase 5 Evidence Pilot Execution Plan](../../../plans/phase-5-evidence-pilot-execution.md) and its
@@ -66,6 +71,15 @@ representation. It does not change the stored instant, production authorization,
 runtime mode, or promotion boundary. All earlier Batch 0 attempts remain diagnostic only, and the
 complete suite must run afresh on the final exact SHA.
 
+Candidate `45d7f087eafe4f50be0d491b3d612446a3e1e94e` is explicitly quarantined. Its
+diagnostic Batch 0 reported static 122, Python 61, Java 67, and frontend 97 tests green, for 347
+total. The local execution manifest records `status=PASS`, `batch_0=PASS`, source
+`accepted=true`, and `contract_gate=P5.0_AWAITING_ENTRY_EVIDENCE_COMMIT`, but it did
+not cover direct Java ES256 manifest authentication or independent assessment/terminal output
+pins. Source artifacts exist locally, but no repository P5.0 entry-evidence bundle or checkpoint
+was assembled, committed, or accepted. ADR 0013 overrides the local PASS and accepted flags for
+entry-gate purposes; none may be reused to assemble a later evidence bundle.
+
 The 27 focused repair checks ran at source commit `79b8c797522671aa46f2299198eab7ba6f651006`.
 The main integration carries the same three-path patch, but this pack does not claim an exact-main
 test execution for `b9201f0b`.
@@ -79,12 +93,12 @@ test execution for `b9201f0b`.
 | `P5-G2` 100-file product contract | Public `EvidenceSubmissionRequest` still has `@Size(max = 50)`; no approval record found | Keep public maximum 50; engineer 1/8/100 only in closed tests and signed synthetic fixtures until product/API/frontend approval |
 | `P5-G3` fan-out bulkheads | Phase 3 marks `GRAPH-016` `PARTIAL_ENGINEERING`; only the per-room eight-item unit bound is evidenced | `P5-E1` implements tenant/global semaphores, bounded queues, fairness, cancellation and recovery as Phase 5 exit evidence |
 | `P5-G4` production asset boundary | The current loader checks visibility, privacy, MIME, size and hash, but uses the legacy service-secret endpoint and is not bound to an approved P5 immutable manifest/epoch/fence capability | Engineering uses Java-signed synthetic capabilities only; production mTLS/object authorization stays externally gated |
-| `P5-G5` Evidence wire contracts | This candidate freezes six canonical schemas, one compatibility matrix and closed positive/negative fixtures under `contracts/agent-platform/evidence/v2/` | Exact-SHA Batch 0 must prove canonical hashes plus Java/Python fixture parity before implementation |
+| `P5-G5` Evidence wire contracts | Six unaccepted candidate schemas require ADR 0013's atomic trust correction | Direct ES256 manifest signature, separate assessment/terminal pins, regenerated fixture hashes, and Java/Python parity must land together before exact-SHA Batch 0 |
 | `P5-G6` Evidence bindings | V043 through V043_3 are already assigned to Intake; no Evidence graph/manifest/finalizer binding exists | Freeze and implement additive `V043_4__evidence_graph_bindings.sql`; never edit older migrations |
 | `P5-G7` formal transition authority | `EvidenceCompletionService.complete/expire` currently freeze, transition to Hearing, and start Hearing directly; coordinator delivery is post-commit side effect | Mode-aware Java events/receipts, durable dispatch and a single future Temporal ordering path |
 | `P5-G8` durable Evidence graph | Current Evidence clerk is a one-turn graph that returns `memory_frame`; it has no P5 checkpoint registration, 100-item `Send`, keyed reducer, or immutable batch proposal | Version-pinned `evidence.v2` using the Phase 3 durable kernel |
 | `P5-G9` runtime selector and no-sink proof | Evidence has no admitted typed child selector or formal-sink isolation proof | Fail-closed Evidence-specific selector and static assembly evidence, still synthetic-only |
-| `P5-G10` candidate-scope integrity | Post-contract diagnostics required bounded entry tooling, test-fixture and existing Spring baseline repairs | Include only the classified repair ledger, review the final diff, and run a fresh exact-SHA Batch 0; no prior diagnostic result is reusable |
+| `P5-G10` candidate-scope integrity | Classified repairs plus the quarantined `45d7f087` run exposed one pre-entry contract P0 | Apply only ADR 0013's atomic correction, regenerate all fixture hashes, prove Java/Python parity, review the final diff, and run full Batch 0 from a new exact clean SHA; no diagnostic result is reusable |
 
 `P5-G0` is closed for this engineering-only candidate. `P5-G1`, the public activation facet of
 `P5-G2`, and the production facet of `P5-G4` block promotion, not signed synthetic engineering.
@@ -144,8 +158,10 @@ timer in place. A future promoted epoch uses only the typed child; it cannot als
 ## Contract Set
 
 The P5.0 candidate freezes six closed schemas, one compatibility matrix, and positive/negative
-fixtures under `contracts/agent-platform/evidence/v2/`. The file-level boundaries cover the eight
-wire responsibilities without competing aliases:
+fixtures under `contracts/agent-platform/evidence/v2/`. Before the first acceptance, ADR 0013
+permits one atomic in-place correction because these v1 names were never accepted, released,
+promoted, selected, or consumed. The file-level boundaries cover the eight wire responsibilities
+without competing aliases:
 
 | Canonical schema file | Covered responsibility |
 | --- | --- |
@@ -158,7 +174,10 @@ wire responsibilities without competing aliases:
 
 All contracts reject unknown fields, noncanonical hashes, duplicate stable keys, missing version
 pins, unauthorized formal-action fields, and oversized values. Canonical JSON hashing uses the
-existing RFC 8785 convention. Schema changes are additive versions, never silent reinterpretation.
+existing RFC 8785 convention. `authorization_proof_ref` is forbidden across this contract set:
+the batch manifest and asset capability each carry their own Java ES256 signature. After the first
+P5.0 acceptance, schema changes are additive versions, never silent reinterpretation, and every
+authority-bearing change also requires a new accepted ADR.
 
 ## Private Thread And Manifest Registration
 
@@ -178,12 +197,33 @@ Reviewer reads Java-authorized review projections and does not borrow a party Gr
 
 ```text
 schema_version, manifest_id, manifest_hash
+signature_algorithm=ES256, signing_key_id, signature
 tenant_surrogate, case_id, room_id, room_epoch, fencing_token
 actor_id, actor_role, participant_id, actor_scope_hash, agent_session_id
 submission_batch_id, submission_revision, dossier_target_version
-graph/checkpoint/state/prompt/model/output/policy/guardrail/tool versions
+graph/checkpoint/state/prompt/model/assessment-output/terminal-output/policy/guardrail/tool versions
 issued_at, expires_at, item_count, ordered_item_keys, items
 ```
+
+`manifest_hash` is computed from RFC 8785 canonical bytes with exactly `manifest_hash` and
+`signature` omitted. Schema `x-signature` metadata declares
+`input_encoding=ASCII_LOWERCASE_HEX_TEXT` and `encoding=JOSE_P1363_BASE64URL`; ES256 signs the
+64-character lowercase ASCII hash text, not the decoded 32-byte digest. Asset capability uses the
+same input/output encodings. The independent profile pins are
+`assessment_output_schema_version=evidence-item-assessment.v1` and
+`terminal_output_schema_version=evidence-batch-proposal.v1`. The gateway must validate the actual
+`room-graph-command.v1` identity fields (`command_id`, `logical_run_id`, `attempt_id`, tenant/case/
+room identity), `room_epoch`, `thread_id`, `domain_snapshot_ref`, graph/checkpoint pins, and
+applicable invocation/profile fields against the signed manifest. `RoomGraphCommand.v1` has no
+`fencing_token`: the manifest signature binds the Java room fence, while the gateway independently
+enforces the current Graph lease fence before checkpoint mutation. The tokens are distinct and
+Java Finalizer revalidates the room fence. The schema declares `x-gateway-cross-binding` with
+failure `BEFORE_CHECKPOINT_MUTATION`.
+
+The manifest, item assessment, terminal proposal, and process projection carry both output pins.
+An asset capability binds `profile_versions_hash` computed over that exact split profile. The
+finalization receipt does not carry `profile_versions`; its authority derives from revalidation
+against the immutable manifest/profile references and Java ledger state.
 
 `item_count` is 1-50 for the public contract until approval. Closed contract tests and Java-signed
 synthetic fixtures may use 1, 8 and 100 items; those fixtures are ineligible for a formal sink.
@@ -475,13 +515,18 @@ admission receipt is a zero-tolerance stop condition.
 
 ## Versioning And Rollback
 
-An epoch pins Workflow type/build, graph, checkpoint/state, prompt/model/output, policy/guardrail,
-tool, stream and contract versions. Referenced versions remain loadable until no active thread,
+An epoch pins Workflow type/build, graph, checkpoint/state, prompt/model, assessment output,
+terminal output, policy/guardrail, tool, stream and contract versions. Referenced versions remain
+loadable until no active thread,
 command, History, checkpoint, manifest, proposal or evidence report points to them. Deployment never
 implicitly migrates an active epoch.
 
 Engineering rollback disables the synthetic registry entry, fences nonterminal Graph work and
 retains ledgers/checkpoints. It does not delete additive data or enable an unsigned/legacy fallback.
+
+ADR 0013 expires at the first P5.0 acceptance. Any later authority field, hash preimage, signature
+scope, command trust binding, or assessment/terminal pin change requires a new schema version,
+compatibility plan, and accepted ADR; an accepted v1 contract is never edited in place.
 
 A future canary rollback sets new allocation to zero. Active `TEMPORAL` epochs keep their original
 timer and are reconciled at a safe wait boundary using formal Java refs and a higher fence when
@@ -490,8 +535,10 @@ that receipt; it never restarts a legacy timer, reopens Evidence, or deletes an 
 
 ## P5.0 Verification Requirements
 
-`P5-G0` is closed by the accepted Phase 4 handoff, so Batch 0 may run from this exact candidate to
-prove ADR 0012 restrictions. `P5-G1..G4` retain the entry/exit/promotion classifications above;
+`P5-G0` is closed by the accepted Phase 4 handoff, so Batch 0 may run only after ADR 0013's atomic
+contract correction is complete on a new exact candidate. The full run proves ADR 0012
+restrictions and the corrected authority invariants with regenerated fixture hashes plus Java and
+Python parity. `P5-G1..G4` retain the entry/exit/promotion classifications above;
 they are not collectively relabeled as already passed. Implementation remains blocked until the
 separate entry-evidence commit. Later engineering evidence maps:
 
@@ -539,3 +586,6 @@ P5.0 Batch 0 runner; broader regression remains centralized at later checkpoints
     and owns one final candidate checkpoint.
 14. The Phase 4 handoff exists; P5.0 remains blocked until exact-SHA Batch 0 evidence is committed
     separately. External promotion gates remain pending after P5.0 passes.
+15. The `45d7f087` diagnostic is quarantined. Before first acceptance only ADR 0013's complete
+    manifest-signature and split-pin correction is allowed in place; afterward every authority
+    change requires a new schema version and ADR.

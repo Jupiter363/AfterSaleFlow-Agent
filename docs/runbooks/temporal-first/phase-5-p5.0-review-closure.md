@@ -9,10 +9,11 @@ contract_gate: P5.0 NOT_RUN
 historical_engineering_execution_at_review_basis: BLOCKED_PENDING_PHASE_4_ENGINEERING_CHECKPOINT
 current_phase_4_engineering_checkpoint: PASS
 engineering_execution: BLOCKED_PENDING_P5_0_ENTRY_EVIDENCE
-candidate_scope_integrity: REPAIRS_CLASSIFIED_REQUIRES_FRESH_EXACT_SHA_BATCH_0
+candidate_scope_integrity: PRE_ENTRY_CONTRACT_CORRECTION_REQUIRES_FRESH_EXACT_SHA_BATCH_0
 promotion_gate: PENDING
 MIG-004: PENDING_PROMOTION
 MIG-005: PENDING_PROMOTION
+pre_entry_contract_correction: ADR_0013_ACCEPTED_ATOMIC_ONCE
 ```
 
 This closes the independent document and repository-fact review requested before the final P5.0
@@ -23,7 +24,7 @@ reviewed fact set is
 
 ## Reviewed Inputs
 
-- ADR 0012, Phase 5 execution plan, machine test batches and P5.0 contract pack.
+- ADR 0012, ADR 0013, Phase 5 execution plan, machine test batches and P5.0 contract pack.
 - Java Evidence submission, upload/catalog, completion, legacy window Workflow, dossier freezer,
   asset endpoint, Agent turn and migrations through `V043_3`.
 - Python Evidence clerk, context assembler, asset loader, generic reducer and focused tests.
@@ -142,6 +143,40 @@ restrictions, or promotion gates remains forbidden.
 No diagnostic run from an earlier SHA is accepted. `P5-G10` remains blocked until the repair set is
 integrated, the final diff is reviewed, and Batch 0 passes from one fresh clean detached SHA.
 
+### R9: The Unaccepted Authority Contract Requires One Atomic Correction
+
+**Disposition: ACCEPT ADR 0013 AND QUARANTINE THE DIAGNOSTIC RUN.** Candidate
+`45d7f087eafe4f50be0d491b3d612446a3e1e94e` completed static 122, Python 61, Java
+67, and frontend 97 green tests, for 347 total. Its local manifest records `status=PASS`,
+`batch_0=PASS`, source `accepted=true`, and
+`contract_gate=P5.0_AWAITING_ENTRY_EVIDENCE_COMMIT`, but the coverage missed a P0: the batch
+manifest lacked its own Java ES256 signature and one output pin ambiguously represented both item
+assessment and terminal proposal contracts. Source artifacts exist locally, but no repository P5.0
+entry-evidence bundle or
+checkpoint was assembled, committed, or accepted. ADR 0013 overrides the local PASS and accepted
+flags for entry-gate purposes, so the run is diagnostic evidence of a gap, not evidence that closes
+the gate.
+
+The affected v1 names have never been accepted, released, promoted, selected by an epoch, or
+consumed. Review therefore accepts one in-place correction before first P5.0 acceptance, but only
+as an indivisible change: direct ES256 `JOSE_P1363_BASE64URL` manifest signature over a hash
+omitting exactly the hash and signature, signing the ASCII lowercase 64-character hash text
+(`ASCII_LOWERCASE_HEX_TEXT`) rather than decoded digest bytes; independent
+`assessment_output_schema_version=evidence-item-assessment.v1` and
+`terminal_output_schema_version=evidence-batch-proposal.v1` pins propagated through
+manifest/item/terminal/projection, with capability binding the
+exact split `profile_versions_hash` and no false finalization-receipt profile claim; no
+`authorization_proof_ref`; actual `room-graph-command.v1` identity/thread/epoch/snapshot/profile
+`x-gateway-cross-binding` with failure `BEFORE_CHECKPOINT_MUTATION`; independent Graph lease-fence
+enforcement; and Java Finalizer revalidation of the distinct room fence authenticated by the
+manifest. All fixture hashes must be regenerated, with Python plus Java parity over the same bytes.
+
+Any partial correction or attempt to reuse `45d7f087` reports fails `P5-G10`. The corrected
+candidate requires a new exact clean detached SHA and full Batch 0. Once P5.0 is first accepted,
+future authority, hash, signature, trust-binding, or output-pin changes require a new schema version,
+compatibility plan, and accepted ADR. Runtime remains `DISABLED` or Java-signed synthetic
+`SHADOW`; real shadow, `TEMPORAL`, formal sink, canary, and promotion remain forbidden.
+
 ## P5-G Closure Acceptance
 
 | Gate | Review result | May engineering proceed after P5.0? | May promotion proceed? |
@@ -151,12 +186,12 @@ integrated, the final diff is reviewed, and Batch 0 passes from one fresh clean 
 | `P5-G2` | Split: public open, synthetic contracted | Yes for closed 1/8/100 only | No public 100 until approval |
 | `P5-G3` | Assigned to E0/E1 exit | Yes, implementation required | No until engineering and production gates |
 | `P5-G4` | Split: synthetic C1, production external | Yes for signed synthetic only | No |
-| `P5-G5` | Assigned to R/A/C | Yes after P5.0 | No implicit effect |
+| `P5-G5` | ADR 0013 atomic correction assigned to R/A/C | Yes after corrected exact-SHA P5.0 | No implicit effect |
 | `P5-G6` | Assigned to C | Yes after P5.0 | No implicit effect |
 | `P5-G7` | Assigned to B/C, activation closed | Kernel/receipt engineering only | No |
 | `P5-G8` | Assigned to A | Disabled/synthetic engineering only | No |
 | `P5-G9` | Assigned to E, formal sink closed | Disabled/synthetic engineering only | No |
-| `P5-G10` | Classified entry repairs; exact candidate unproved | No, until fresh exact-SHA Batch 0 and evidence commit | No |
+| `P5-G10` | Entry repairs plus atomic contract correction; `45d7f087` quarantined | No, until new exact-SHA full Batch 0 and evidence commit | No |
 
 ## Required Entry Sequence
 
@@ -165,12 +200,16 @@ integrated, the final diff is reviewed, and Batch 0 passes from one fresh clean 
 2. Integrate and independently review only the classified candidate-scope repairs, including both
    sub-repairs in `b9201f0bc1d9ad7fca1cc0ca7b68cd75e62a503a`; no Phase 5 feature implementation
    is allowed.
-3. Freeze a new P5.0 contract candidate containing ADR 0012 restrictions, this factual baseline,
-   the machine schedule, exact owner briefs and the closed repair ledger.
-4. Run P5-BATCH-0 once from the exact clean detached candidate SHA.
-5. Commit entry evidence separately with commands, timestamps, durations, exit codes, JUnit/report
+3. Apply ADR 0013's direct ES256 manifest signature and independent assessment/terminal pins as
+   one atomic correction, remove `authorization_proof_ref`, regenerate every fixture hash, and
+   pass Python validation plus Java parity over the same bytes.
+4. Freeze a new P5.0 contract candidate containing ADR 0012/0013 restrictions, this factual
+   baseline, the machine schedule, exact owner briefs and the closed repair ledger.
+5. Run P5-BATCH-0 once from the new exact clean detached candidate SHA; do not reuse any of the 347
+   passing diagnostic results from `45d7f087`.
+6. Commit entry evidence separately with commands, timestamps, durations, exit codes, JUnit/report
    hashes, environment and the protected unrelated-worktree exception.
-6. Only then start A-E. Runtime remains `LEGACY`/`DISABLED` or Java-signed synthetic `SHADOW`.
+7. Only then start A-E. Runtime remains `LEGACY`/`DISABLED` or Java-signed synthetic `SHADOW`.
 
 ## Required Focused Review Tests
 

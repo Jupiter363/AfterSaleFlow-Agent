@@ -9,12 +9,13 @@ contract_gate: P5.0 NOT_RUN
 engineering_execution_at_observed_commit: BLOCKED_PENDING_PHASE_4_ENGINEERING_CHECKPOINT
 current_phase_4_engineering_checkpoint: PASS
 current_engineering_execution: BLOCKED_PENDING_P5_0_ENTRY_EVIDENCE
-candidate_scope_integrity: REPAIRS_CLASSIFIED_REQUIRES_FRESH_EXACT_SHA_BATCH_0
+candidate_scope_integrity: PRE_ENTRY_CONTRACT_CORRECTION_REQUIRES_FRESH_EXACT_SHA_BATCH_0
 promotion_gate: PENDING
 MIG-004: PENDING_PROMOTION
 MIG-005: PENDING_PROMOTION
 runtime_default: DISABLED
 formal_evidence_writer: JAVA_DOMAIN_POSTGRESQL_ONLY
+pre_entry_contract_correction: ADR_0013_ACCEPTED_ATOMIC_ONCE
 ```
 
 This inventory records facts at the ADR 0012 engineering-exception commit. It is not an entry
@@ -27,6 +28,7 @@ authoritative constraints remain:
 - [`phase-5-evidence-pilot-test-batches.yaml`](../../../plans/phase-5-evidence-pilot-test-batches.yaml)
 - [`phase-5-p5.0-contract-pack.md`](./phase-5-p5.0-contract-pack.md)
 - [`0012-phase-5-evidence-engineering-exception.md`](../../architecture/adr/0012-phase-5-evidence-engineering-exception.md)
+- [`0013-phase-5-evidence-pre-entry-contract-correction.md`](../../architecture/adr/0013-phase-5-evidence-pre-entry-contract-correction.md)
 - [`phase-5-p5.0-review-closure.md`](./phase-5-p5.0-review-closure.md)
 
 ## Immutable Product Boundaries
@@ -195,6 +197,38 @@ The 27/27 focused repair checks ran at source `79b8c797`; main `b9201f0b` carrie
 three-path patch, but no exact-main test execution is claimed. This is diagnostic repair evidence,
 not P5.0 PASS.
 
+### Quarantined Contract Diagnostic
+
+Candidate `45d7f087eafe4f50be0d491b3d612446a3e1e94e` later ran a diagnostic Batch 0:
+static 122, Python 61, Java 67, and frontend 97 tests passed, for 347 total. Its local manifest
+records `status=PASS`, `batch_0=PASS`, source `accepted=true`, and
+`contract_gate=P5.0_AWAITING_ENTRY_EVIDENCE_COMMIT`. It is not an accepted baseline or entry
+result. Review found that the unaccepted `evidence-batch-manifest.v1` did not directly carry
+a Java ES256 `JOSE_P1363_BASE64URL` signature and that its profile did not independently pin item
+assessment and terminal proposal schemas. Source artifacts exist locally, but no repository P5.0
+entry-evidence bundle or checkpoint was assembled, committed, or accepted. ADR 0013 overrides the
+local PASS and accepted flags for entry-gate purposes.
+
+ADR 0013 permits one atomic in-place correction because no affected v1 contract has been accepted,
+released, promoted, selected by a runtime epoch, or consumed. The correction must directly sign
+the ASCII lowercase 64-character `manifest_hash` text
+(`ASCII_LOWERCASE_HEX_TEXT`), whose preimage omits exactly `manifest_hash` and `signature`;
+replace the ambiguous
+pin with `assessment_output_schema_version` and `terminal_output_schema_version`; remove
+`authorization_proof_ref`; declare `x-gateway-cross-binding` for actual
+`room-graph-command.v1` identity/thread/epoch/snapshot/profile fields with failure
+`BEFORE_CHECKPOINT_MUTATION`; and independently enforce the Graph lease fence. The signed manifest
+binds the distinct Java room fence, which Java Finalizer revalidates. Every fixture hash must be
+regenerated and both Python validation and Java parity must pass. A partial correction is not a
+candidate.
+
+The manifest, item, terminal, and projection contracts carry both pins; asset capability binds the
+exact split `profile_versions_hash`. Finalization receipt is not treated as a profile carrier.
+
+After the first P5.0 acceptance, authority-bearing changes require a new schema version,
+compatibility plan, and accepted ADR. The diagnostic 347-test result remains quarantined and cannot
+contribute reports or hashes to the required new full exact-SHA Batch 0.
+
 ## P5-G0 Through P5-G10 Resolution Map
 
 | Gate | Classification after ADR 0012 | Resolution owner/task | Required closure |
@@ -204,12 +238,12 @@ not P5.0 PASS.
 | `P5-G2` 100-file public contract | Public activation blocker | D0 preserves 50; A/C/D use closed synthetic fixtures; product/API/frontend approval is external | Public remains 1-50; synthetic 1/8/100 is visibly non-public and no-sink |
 | `P5-G3` bulkheads | Phase 5 engineering exit obligation | E0 harness, E1 implementation; A supplies graph integration | `GRAPH-016` room/tenant/global permits, bounded queues, fairness, cancellation/recovery evidence |
 | `P5-G4` production assets | Production promotion blocker with an engineering subset | C1 signed synthetic authority; E0 no-sink harness | Synthetic capability proof now; production identity/object authorization later |
-| `P5-G5` Evidence contracts | Engineering foundation | R contract freeze; A/C parity | Closed schemas, fixtures, canonical hashes and cross-language parity |
+| `P5-G5` Evidence contracts | Engineering foundation with one pre-entry correction | R contract freeze; A/C parity | ADR 0013 direct manifest signature, split output pins, all fixture hashes and Java/Python parity land atomically |
 | `P5-G6` Evidence bindings | Engineering foundation | C1/C2 | Add only `V043_4`, idempotent receipts and formal Java ownership |
 | `P5-G7` transition authority | Engineering implementation, activation forbidden | B1/B2 timer kernel; C2 receipts/Finalizer | Deterministic ordering and committed Java receipts; legacy stays active |
 | `P5-G8` durable graph | Engineering implementation | A1/A2 | Versioned `evidence.v2`, 1/8/100 waves, recovery and keyed terminal proposal |
 | `P5-G9` selector/no-sink | Engineering implementation, promotion separately blocked | E0 static harness; E1/E2 selector/parity/recovery | Fail-closed Evidence selector, signed synthetic SHADOW only, formal sink unreachable |
-| `P5-G10` candidate-scope integrity | P5.0 entry blocker | R / final candidate freeze | Integrate only the classified repair set, review the final diff, and pass Batch 0 on one fresh exact clean detached SHA |
+| `P5-G10` candidate-scope integrity | P5.0 entry blocker; `45d7f087` quarantined | R / final candidate freeze | Integrate only classified repairs plus ADR 0013's atomic correction, review regenerated fixtures/parity, and pass full Batch 0 on a new exact clean detached SHA |
 
 ## Ownership And Parallelism Review
 

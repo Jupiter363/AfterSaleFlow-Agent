@@ -6,7 +6,7 @@
 plan_status: P5_0_CONTRACT_CANDIDATE
 engineering_execution: BLOCKED_PENDING_P5_0_ENTRY_EVIDENCE
 contract_gate: P5.0 NOT_RUN
-candidate_scope_integrity: REPAIRS_CLASSIFIED_REQUIRES_FRESH_EXACT_SHA_BATCH_0
+candidate_scope_integrity: PRE_ENTRY_CONTRACT_CORRECTION_REQUIRES_FRESH_EXACT_SHA_BATCH_0
 phase_4_engineering_checkpoint: PASS
 promotion_gate: MIG-004 PENDING_PROMOTION
 phase_5_promotion_gate: MIG-005 PENDING_PROMOTION
@@ -18,6 +18,7 @@ graph_runtime_default: DISABLED
 allowed_pre_promotion_runtime: DISABLED or Java-signed synthetic SHADOW
 temporal_evidence_allocation: FORBIDDEN
 formal_graph_sink: FORBIDDEN
+pre_entry_contract_correction: ADR_0013_ACCEPTED_ATOMIC_ONCE
 ```
 
 This P5.0 contract candidate is based on the accepted Phase 4 evidence commit
@@ -27,7 +28,9 @@ This P5.0 contract candidate is based on the accepted Phase 4 evidence commit
 `test-reports/temporal-first/phase-4-20260722-1ba6e17f/phase-4/phase-metrics.json`.
 This records permission to run P5.0 Batch 0 under the repository-owner-approved
 [ADR 0012](../docs/architecture/adr/0012-phase-5-evidence-engineering-exception.md), but it does not
-authorize Phase 5 implementation yet.
+authorize Phase 5 implementation yet. The one-time correction of the still-unaccepted Evidence v2
+contract is governed by
+[ADR 0013](../docs/architecture/adr/0013-phase-5-evidence-pre-entry-contract-correction.md).
 
 ADR 0012 separates an **engineering lane** from a **promotion lane**. The engineering lane builds
 and proves fail-closed components with disabled or Java-signed synthetic inputs. `MIG-004`, the
@@ -78,6 +81,45 @@ repair checks, and then execute all of Batch 0 from one fresh clean detached SHA
 product source, migration, runtime, public-contract, or authorization change reopens candidate-scope
 review and cannot be classified as an entry repair by assertion alone.
 
+### Quarantined Diagnostic And Atomic Contract Correction
+
+The exact candidate `45d7f087eafe4f50be0d491b3d612446a3e1e94e` ran a diagnostic Batch 0
+whose source suites reported static 122, Python 61, Java 67, and frontend 97 tests passing, for 347
+total. Its local manifest records `status=PASS`, `batch_0=PASS`, source `accepted=true`, and
+`contract_gate=P5.0_AWAITING_ENTRY_EVIDENCE_COMMIT`. It is quarantined because that run
+did not cover a P0 authority invariant: `evidence-batch-manifest.v1` lacked a direct Java ES256
+signature, and its profile used one ambiguous output pin instead of separate assessment and
+terminal proposal pins. Source artifacts exist locally, but no repository P5.0 entry-evidence
+bundle or checkpoint was assembled, committed, or accepted. ADR 0013 overrides the local PASS and
+accepted flags for entry-gate purposes, and no source result is inherited by a later candidate.
+
+ADR 0013 permits one atomic in-place correction only because the affected v1 schemas have never
+been accepted by P5.0, released, promoted, selected by an epoch, or consumed by a compatible
+reader. The corrected contract candidate must contain all of the following together:
+
+- direct manifest `signature_algorithm=ES256`, `signing_key_id`, and `signature` fields, with
+  schema `x-signature` metadata declaring `input_encoding=ASCII_LOWERCASE_HEX_TEXT` and
+  `encoding=JOSE_P1363_BASE64URL`; asset capability uses the same encodings;
+- a lowercase `manifest_hash` preimage omitting exactly `manifest_hash` and `signature`, with ES256
+  signing the ASCII bytes of the 64-character lowercase hex text
+  (`ASCII_LOWERCASE_HEX_TEXT`), not decoded digest bytes;
+- independent `assessment_output_schema_version=evidence-item-assessment.v1` and
+  `terminal_output_schema_version=evidence-batch-proposal.v1` pins;
+- dual-pin propagation through manifest, item, terminal, and projection contracts, while asset
+  capability binds `profile_versions_hash` and finalization receipt does not claim profile fields;
+- no `authorization_proof_ref` field anywhere in the Evidence v2 contract set;
+- fail-closed `RoomGraphCommand` identity, room-epoch, thread, snapshot, graph/checkpoint, and
+  invocation/profile `x-gateway-cross-binding` with failure `BEFORE_CHECKPOINT_MUTATION`, followed
+  by independent Graph lease-fence enforcement; the signed manifest binds the distinct Java room
+  fence and Java Finalizer revalidates it;
+- regenerated hashes for every positive and negative fixture plus Python validation and Java
+  parity for the same corrected bytes.
+
+Partial correction is forbidden. The primary must freeze a new exact clean detached SHA, run the
+full P5-BATCH-0 from a fresh detached worktree, and commit entry evidence separately. After the first
+P5.0 acceptance, any authority field, hash preimage, signature scope, trust binding, or output-pin
+change requires a new schema version, compatibility plan, and accepted ADR.
+
 ## Scope
 
 ### Goals
@@ -106,7 +148,8 @@ review and cannot be classified as an entry repair by assertion alone.
 
 - No Phase 5 feature source, behavior expansion, migration, runtime, public contract, or UI
   implementation is authorized before exact-SHA P5.0 entry evidence is committed. Only the
-  bounded, semantics-preserving entry repairs in the candidate-scope ledger above are permitted.
+  bounded, semantics-preserving entry repairs in the candidate-scope ledger and the atomic
+  still-unaccepted contract correction authorized by ADR 0013 are permitted.
 - No real-case shadow, `TEMPORAL` Evidence allocation, canary, production traffic, formal Graph
   Finalizer, or claim that `MIG-004` or `MIG-005` passed.
 - No Graph write to an Evidence table, verification row, dossier, matrix, completion record, room
@@ -151,8 +194,9 @@ and the new epoch persists the full selection. Current formal Evidence traffic r
    Evidence IDs to build the proposed future capability. Hearing supplementation stays at 0-50 per
    party.
 4. `evidence.v2` consumes one immutable `evidence-batch-manifest.v1` with at most 100 stable item
-   keys. Java signs actor scope, epoch/fence, object version, content hash, owner, visibility, and
-   all version pins; Python never derives authorization from content.
+   keys. The manifest directly carries a Java ES256 signature over its canonical hash, which binds
+   actor scope, epoch/fence, object version, content hash, owner, visibility, and the separate
+   assessment and terminal output pins. Python never derives authorization from content.
 5. `Send` schedules independent item assessments. At most eight are active for one room; tenant and
    global semaphores plus bounded queues are mandatory. The graph dispatches deterministic waves
    until all manifest keys are terminal; 100 simultaneous tasks are forbidden.
@@ -201,7 +245,12 @@ The primary may record P5.0 `PASS` only after all of the following are immutable
 - This execution plan, the test-batch policy, the P5.0 contract pack, the closed Evidence v2
   schemas/fixtures, their static contract tests, and the closed candidate-scope repair ledger are
   frozen in one contract candidate. No Phase 5 feature source, migration, public-contract, runtime,
-  or authorization change is present; every pre-entry baseline repair is listed and reviewed.
+  or authorization change beyond ADR 0013's one-time pre-entry correction is present; every
+  pre-entry baseline repair is listed and reviewed.
+- ADR 0013's manifest signature and split-pin correction is complete as one atomic diff; all
+  fixture hashes are regenerated, Python validation and Java parity pass over the same contract
+  bytes, and the quarantined `45d7f087` diagnostic contributes no accepted repository
+  entry-evidence checkpoint.
 - Batch 0 passes from that exact clean detached contract-candidate SHA and its report hashes,
   commands, durations, exit codes, environment, and protected worktree exceptions are committed in
   a later entry-evidence commit.

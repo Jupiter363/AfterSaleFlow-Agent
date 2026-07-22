@@ -32,6 +32,11 @@ SOURCE_PLAN = ROOT / "plans/temporal-langgraph-room-refactor.md"
 ENGINEERING_EXCEPTION = (
     ROOT / "docs/architecture/adr/0012-phase-5-evidence-engineering-exception.md"
 )
+PRE_ENTRY_CORRECTION = (
+    ROOT
+    / "docs/architecture/adr/"
+    "0013-phase-5-evidence-pre-entry-contract-correction.md"
+)
 
 
 def _batches() -> dict:
@@ -243,6 +248,7 @@ def test_phase5_baseline_and_independent_review_are_cross_referenced() -> None:
         "phase-5-evidence-pilot-test-batches.yaml",
         "phase-5-p5.0-contract-pack.md",
         "0012-phase-5-evidence-engineering-exception.md",
+        "0013-phase-5-evidence-pre-entry-contract-correction.md",
     ):
         assert authority in inventory
     assert "phase-5-p5.0-review-closure.md" in inventory
@@ -298,7 +304,7 @@ def test_phase5_candidate_repairs_are_ledgered_without_inheriting_a_pass() -> No
     for document in documents:
         assert (
             "candidate_scope_integrity: "
-            "REPAIRS_CLASSIFIED_REQUIRES_FRESH_EXACT_SHA_BATCH_0"
+            "PRE_ENTRY_CONTRACT_CORRECTION_REQUIRES_FRESH_EXACT_SHA_BATCH_0"
         ) in document
         assert "P5.0 NOT_RUN" in document
         assert "EvidenceApiIntegrationTest" in document
@@ -333,6 +339,109 @@ def test_phase5_candidate_repairs_are_ledgered_without_inheriting_a_pass() -> No
     assert all("tree-equivalent" not in document for document in documents)
     assert "do not inherit any result" in execution
     assert "No diagnostic run from an earlier SHA is accepted" in closure
+
+
+def test_phase5_pre_entry_contract_correction_is_accepted_and_atomic() -> None:
+    adr = PRE_ENTRY_CORRECTION.read_text(encoding="utf-8")
+    execution = EXECUTION_PLAN.read_text(encoding="utf-8")
+    contract = CONTRACT_PACK.read_text(encoding="utf-8")
+    inventory = BASELINE_INVENTORY.read_text(encoding="utf-8")
+    closure = REVIEW_CLOSURE.read_text(encoding="utf-8")
+
+    assert "# ADR 0013: Phase 5 Evidence Pre-Entry Contract Correction" in adr
+    assert "- Status: ACCEPTED" in adr
+    assert "exactly one atomic, in-place correction" in adr
+    assert "never been accepted" in adr
+    assert "released" in adr and "consumed" in adr
+    assert "After the first P5.0 acceptance, this exception expires" in adr
+
+    governance_documents = (adr, execution, contract, inventory, closure)
+    for document in governance_documents:
+        normalized = " ".join(document.split())
+        assert "authorization_proof_ref" in normalized
+        assert "JOSE_P1363_BASE64URL" in normalized
+        assert "ASCII_LOWERCASE_HEX_TEXT" in normalized
+        assert "assessment_output_schema_version" in normalized
+        assert "terminal_output_schema_version" in normalized
+        assert "BEFORE_CHECKPOINT_MUTATION" in normalized
+        assert "new schema version" in normalized
+        assert "accepted ADR" in normalized
+
+    normalized_adr = " ".join(adr.split())
+    assert "not the decoded 32-byte digest" in normalized_adr
+    assert "schema `x-signature` metadata" in normalized_adr
+    assert "evidence-asset-capability.v1` uses the same signature input" in normalized_adr
+    assert "item assessment, terminal proposal, and process projection" in normalized_adr
+    assert "capability binds `profile_versions_hash`" in normalized_adr
+    assert "finalization receipt" in normalized_adr
+    assert "profile_versions" in normalized_adr
+    assert "RoomGraphCommand.v1` has no such" in normalized_adr
+    assert "current Graph lease fence" in normalized_adr
+    assert "Java Finalizer revalidates the room fence" in normalized_adr
+
+
+def test_phase5_quarantines_green_diagnostic_without_accepted_checkpoint() -> None:
+    documents = (
+        EXECUTION_PLAN.read_text(encoding="utf-8"),
+        CONTRACT_PACK.read_text(encoding="utf-8"),
+        BASELINE_INVENTORY.read_text(encoding="utf-8"),
+        REVIEW_CLOSURE.read_text(encoding="utf-8"),
+    )
+
+    for document in documents:
+        normalized = " ".join(document.split())
+        assert "45d7f087eafe4f50be0d491b3d612446a3e1e94e" in normalized
+        assert "static 122" in normalized
+        assert "Python 61" in normalized
+        assert "Java 67" in normalized
+        assert "frontend 97" in normalized
+        assert "347" in normalized
+        assert "quarantined" in normalized
+        assert "P5.0 NOT_RUN" in normalized
+        assert "status=PASS" in normalized
+        assert "batch_0=PASS" in normalized
+        assert "accepted=true" in normalized
+        assert "contract_gate=P5.0_AWAITING_ENTRY_EVIDENCE_COMMIT" in normalized
+        assert "Source artifacts exist locally" in normalized
+        assert "no repository P5.0 entry-evidence" in normalized
+        assert "assembled, committed, or accepted" in normalized
+        assert "overrides" in normalized and "entry-gate purposes" in normalized
+        assert (
+            "candidate_scope_integrity: "
+            "PRE_ENTRY_CONTRACT_CORRECTION_REQUIRES_FRESH_EXACT_SHA_BATCH_0"
+        ) in normalized
+
+    adr = PRE_ENTRY_CORRECTION.read_text(encoding="utf-8")
+    assert "never been accepted" in adr
+    assert "selected by a runtime epoch" in adr
+    assert "consumed by a compatible reader" in " ".join(adr.split())
+    assert "retroactively quarantines the complete run" in adr
+    assert "After the first P5.0 acceptance, this exception expires" in adr
+    assert "full from a new exact clean detached SHA" in adr
+
+
+def test_phase5_contract_correction_does_not_relax_runtime_or_promotion() -> None:
+    adr = PRE_ENTRY_CORRECTION.read_text(encoding="utf-8")
+    execution = EXECUTION_PLAN.read_text(encoding="utf-8")
+    contract = CONTRACT_PACK.read_text(encoding="utf-8")
+    inventory = BASELINE_INVENTORY.read_text(encoding="utf-8")
+    closure = REVIEW_CLOSURE.read_text(encoding="utf-8")
+
+    assert "Runtime remains `DISABLED` or Java-signed synthetic `SHADOW`" in adr
+    assert "`TEMPORAL` Evidence allocation" in adr
+    assert "formal Graph sink" in adr
+    assert "canary" in adr and "promotion remain forbidden" in adr
+    assert "Java and Domain PostgreSQL remain the only formal Evidence" in adr
+    assert "`MIG-004` and `MIG-005` remain `PENDING_PROMOTION`" in adr
+    for document in (execution, contract, inventory, closure):
+        normalized = " ".join(document.split())
+        assert "P5.0 NOT_RUN" in normalized
+        assert "DISABLED" in normalized
+        assert "Java-signed synthetic `SHADOW`" in normalized
+        assert "TEMPORAL" in normalized
+        assert "formal" in normalized and "sink" in normalized
+        assert "canary" in normalized and "promotion" in normalized
+        assert "PENDING_PROMOTION" in normalized
 
 
 def test_phase5_review_keeps_d0_and_e0_independent_with_exact_path_closure() -> None:
