@@ -1,6 +1,6 @@
 {
   "schema_version": "evidence-process-projection.v1",
-  "projection_hash": "18a39b7f1c3a99cec98d7879e633e64922b503e36600fb26493d72475b857297",
+  "projection_hash": "8dcf00dbf1b08c683237c650832bee3104feb869ef8bd14a7a6c373bfb7d96f5",
   "projection_state": "PROCESSING",
   "tenant_surrogate": "TENANT_P5_SYNTHETIC_1",
   "case_id": "CASE_P5_SYNTHETIC_1",
@@ -19,7 +19,7 @@
   "room_phase": "ASSESSING",
   "terminal_reason": null,
   "pending_state": "AGENT_RUNNING",
-  "pending_operation_key": "evidence.graph.request:CASE_P5_SYNTHETIC_1:1:cae8c13b9ddbb5145fa74cac6c41df0ea0c142768156b00515aba8c858aa9470:RUN_P5_ONE",
+  "pending_operation_key": "evidence.graph.request:CASE_P5_SYNTHETIC_1:1:6bc875c51b4b5b20f3bcfa1a378ae373bb051b657e1c633de0c6de1c0180adb1:RUN_P5_ONE",
   "original_deadline_at": "2026-07-23T12:00:00Z",
   "warning_sent": false,
   "warning_sent_at": null,
