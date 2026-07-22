@@ -9,6 +9,9 @@ import com.example.dispute.workflow.activity.domain.IntakeChildBridgeReadPort;
 import com.example.dispute.workflow.activity.intake.IntakeImmutablePayloadPublisher;
 import com.example.dispute.workflow.activity.intake.IntakeSnapshotPublicationPort;
 import com.example.dispute.workflow.application.intake.IntakeGraphBindingStore;
+import com.example.dispute.workflow.infrastructure.objectstore.intake.IntakeRuntimeMaterialObjectStore;
+import com.example.dispute.workflow.infrastructure.objectstore.intake.PrivateObjectStoreIntakeSyntheticRuntimeMaterialSource;
+import com.example.dispute.workflow.shadow.intake.IntakeRuntimeMaterialManifestReferenceSource;
 import com.example.dispute.workflow.shadow.intake.IntakeSignedSyntheticAdmissionPort;
 import com.example.dispute.workflow.shadow.intake.IntakeSignedSyntheticGraphExecutionPort;
 import com.example.dispute.workflow.shadow.intake.IntakeSyntheticGraphMaterialSource;
@@ -24,6 +27,7 @@ import com.example.dispute.workflow.shadow.intake.admission.IntakeSyntheticAdmis
 import com.example.dispute.workflow.shadow.intake.admission.JdbcIntakeSignedSyntheticAdmissionPort;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.lang.reflect.Method;
+import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.List;
 import java.util.stream.Stream;
@@ -45,6 +49,14 @@ class IntakeSyntheticShadowConfigurationTest {
     private static final String GRAPH_MODE = "app.agent-run-v2.graph-client.mode=SHADOW";
     private static final String GRAPH_ENDPOINT =
             "app.agent-run-v2.graph-client.base-uri=https://python-agent-service:18000";
+    private static final String RUNTIME_MATERIAL_ENABLED =
+            "app.orchestration.intake-synthetic-runtime-material.enabled=true";
+    private static final String RUNTIME_MATERIAL_INDEX =
+            "app.orchestration.intake-synthetic-runtime-material.manifest-reference-index-path="
+                    + Path.of(
+                                    System.getProperty("java.io.tmpdir"),
+                                    "intake-synthetic-runtime-material-index.json")
+                            .toAbsolutePath();
 
     @Test
     void disabledModeBuildsNoSyntheticBeanGraph() {
@@ -97,6 +109,41 @@ class IntakeSyntheticShadowConfigurationTest {
                     .hasMessageContaining(
                             "exactly one real "
                                     + IntakeSignedSyntheticAdmissionPort.class.getName());
+        });
+    }
+
+    @Test
+    void signedShadowBuildsAllMaterialPortsFromOneConcreteProviderWithoutAFormalSink() {
+        runtimeMaterialRunner(true).run(context -> {
+            assertThat(context).hasNotFailed();
+            assertThat(context)
+                    .hasSingleBean(PrivateObjectStoreIntakeSyntheticRuntimeMaterialSource.class)
+                    .hasSingleBean(IntakeSyntheticSnapshotMaterialSource.class)
+                    .hasSingleBean(IntakeSyntheticGraphMaterialSource.class)
+                    .hasSingleBean(IntakeSyntheticParityMaterialSource.class)
+                    .hasSingleBean(IntakeSyntheticRuntimeSource.class);
+
+            Object provider =
+                    context.getBean(PrivateObjectStoreIntakeSyntheticRuntimeMaterialSource.class);
+            assertThat(context.getBean(IntakeSyntheticSnapshotMaterialSource.class))
+                    .isSameAs(provider);
+            assertThat(context.getBean(IntakeSyntheticGraphMaterialSource.class))
+                    .isSameAs(provider);
+            assertThat(context.getBean(IntakeSyntheticParityMaterialSource.class))
+                    .isSameAs(provider);
+        });
+    }
+
+    @Test
+    void runtimeMaterialProviderIsAbsentUnlessExplicitlyEnabled() {
+        runtimeMaterialRunner(false).run(context -> {
+            assertThat(context).hasNotFailed();
+            assertThat(context)
+                    .doesNotHaveBean(PrivateObjectStoreIntakeSyntheticRuntimeMaterialSource.class)
+                    .doesNotHaveBean(IntakeSyntheticSnapshotMaterialSource.class)
+                    .doesNotHaveBean(IntakeSyntheticGraphMaterialSource.class)
+                    .doesNotHaveBean(IntakeSyntheticParityMaterialSource.class)
+                    .doesNotHaveBean(IntakeSyntheticRuntimeSource.class);
         });
     }
 
@@ -280,6 +327,24 @@ class IntakeSyntheticShadowConfigurationTest {
             runner = runner.withBean(
                     IntakeSyntheticAdmissionTrustSet.class,
                     () -> mock(IntakeSyntheticAdmissionTrustSet.class));
+        }
+        return runner;
+    }
+
+    private static ApplicationContextRunner runtimeMaterialRunner(boolean enabled) {
+        ApplicationContextRunner runner = runnerWithRequiredBeans()
+                .withPropertyValues(ENABLED, EPOCH_MODE, COHORT, POLICY, GRAPH_MODE, GRAPH_ENDPOINT)
+                .withBean(
+                        IntakeSyntheticAdmissionTrustSet.class,
+                        () -> mock(IntakeSyntheticAdmissionTrustSet.class))
+                .withBean(
+                        IntakeRuntimeMaterialManifestReferenceSource.class,
+                        () -> mock(IntakeRuntimeMaterialManifestReferenceSource.class))
+                .withBean(
+                        IntakeRuntimeMaterialObjectStore.class,
+                        () -> mock(IntakeRuntimeMaterialObjectStore.class));
+        if (enabled) {
+            runner = runner.withPropertyValues(RUNTIME_MATERIAL_ENABLED, RUNTIME_MATERIAL_INDEX);
         }
         return runner;
     }
