@@ -36,8 +36,17 @@ import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
+import org.springframework.aop.support.AopUtils;
+import org.springframework.context.annotation.AnnotationConfigApplicationContext;
+import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.transaction.IllegalTransactionStateException;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.annotation.EnableTransactionManagement;
+import org.springframework.transaction.support.TransactionTemplate;
 
 class TransactionalEpochAuthorityServiceTest {
 
@@ -115,6 +124,43 @@ class TransactionalEpochAuthorityServiceTest {
                 .isEqualTo("AUTHORITY_REBINDING");
 
         verify(publisher, never()).publish(any());
+    }
+
+    @Test
+    void classProxyPreservesMandatoryCallerTransaction() {
+        when(jdbc.queryForObject(contains("select count"), anyMap(), eq(Integer.class)))
+                .thenReturn(2);
+
+        try (AnnotationConfigApplicationContext context =
+                new AnnotationConfigApplicationContext()) {
+            context.register(TransactionProxyConfiguration.class);
+            context.registerBean(NamedParameterJdbcTemplate.class, () -> jdbc);
+            context.registerBean(EpochAuthorityLockCoordinator.class, () -> locks);
+            context.registerBean(EpochBootstrapOutboxPublisher.class, () -> publisher);
+            context.registerBean(
+                    PlatformTransactionManager.class,
+                    () ->
+                            new DataSourceTransactionManager(
+                                    new DriverManagerDataSource(
+                                            "jdbc:h2:mem:epoch-authority-proxy")));
+            context.register(TransactionalEpochAuthorityService.class);
+            context.refresh();
+
+            TransactionalEpochAuthorityService proxied =
+                    context.getBean(TransactionalEpochAuthorityService.class);
+            assertThat(AopUtils.isCglibProxy(proxied)).isTrue();
+            assertThatThrownBy(() -> proxied.bind(request()))
+                    .isInstanceOf(IllegalTransactionStateException.class)
+                    .hasMessageContaining("existing transaction");
+
+            TransactionTemplate transactions =
+                    new TransactionTemplate(context.getBean(PlatformTransactionManager.class));
+            var receipt = transactions.execute(ignored -> proxied.bind(request()));
+
+            assertThat(receipt).isNotNull();
+            assertThat(receipt.created()).isTrue();
+            verify(publisher).publish(any(EpochBootstrapOutbox.class));
+        }
     }
 
     private static BindRequest request() {
@@ -243,4 +289,8 @@ class TransactionalEpochAuthorityServiceTest {
                 "tool-policy-v2",
                 "cohort-v1"));
     }
+
+    @Configuration(proxyBeanMethods = false)
+    @EnableTransactionManagement(proxyTargetClass = true)
+    static class TransactionProxyConfiguration {}
 }

@@ -16,7 +16,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 /** ACID implementation of epoch selection, bilateral party binding and bootstrap publication. */
 @Service
-public final class TransactionalEpochAuthorityService implements EpochAuthorityService {
+public class TransactionalEpochAuthorityService implements EpochAuthorityService {
 
     private final NamedParameterJdbcTemplate jdbc;
     private final EpochAuthorityLockCoordinator lockCoordinator;
