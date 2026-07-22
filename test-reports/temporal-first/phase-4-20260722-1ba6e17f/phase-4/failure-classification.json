@@ -1,0 +1,22 @@
+{
+  "schema_version": "temporal-first-failure-classification.v1",
+  "phase": 4,
+  "candidate_commit": "1ba6e17fa2182156825f42d7e243978cf23ccdb4",
+  "classifications": {
+    "PRODUCT": "block_candidate_and_fix_the_owning_product_path",
+    "FIXTURE": "prove_the_contract_then_fix_the_fixture_and_rerun_the_exact_scope",
+    "INFRA": "preserve_the_failed_attempt_and_rerun_the_failed_source_on_the_same_sha",
+    "EXTERNAL_GATE": "retain_engineering_evidence_and_keep_formal_traffic_blocked"
+  },
+  "accepted_source_suite_failures": [],
+  "quarantined_source_attempts": [],
+  "open_product_failures": [],
+  "quarantined_attempts_reused": false,
+  "decision": {
+    "engineering_checkpoint": "PASS",
+    "promotion_gate": "PENDING",
+    "next_phase_permission": "PHASE_5_ENGINEERING_ONLY",
+    "MIG-003": "PENDING_PROMOTION",
+    "MIG-004": "PENDING_PROMOTION"
+  }
+}

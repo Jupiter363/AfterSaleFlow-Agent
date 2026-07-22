@@ -1,0 +1,1201 @@
+<?xml version='1.0' encoding='utf-8'?>
+<testsuites name="batch-3-junit" tests="884" failures="0" errors="0" skipped="0" time="193.996783" candidate_commit="1ba6e17fa2182156825f42d7e243978cf23ccdb4">
+  <properties>
+    <property name="source_sha256.frontend-phase4-junit.xml" value="0c6fbeb54cd3d0212ff23aab3c0f6336d4d82b2f8f3494d500049a03a65551d1" />
+    <property name="source_sha256.java-phase4-junit.xml" value="52a541c69f8c6afc54d250c067009ffccb8dcb30e0e2b8a2b22f3daca8cb12b4" />
+    <property name="source_sha256.python-phase4-junit.xml" value="de4c4986c5b4ee7f42e50533912ec4cfb3b2f1fdde5198d2a44ed185adfb6603" />
+    <property name="source_sha256.static-phase4-junit.xml" value="4c8f2d5489f23d1628ddd8616920112aed2d20ad8109840e4b3763d7c78ba078" />
+  </properties>
+  <testsuite name="src/api/agentStream.test.js" source_report="frontend-phase4-junit.xml" tests="27" failures="0" errors="0" skipped="0" time="0.021147">
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; accepts both Java camelCase and public snake_case run descriptors" time="0.0011874">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; discovers active room runs after refresh with actor isolation headers" time="0.0050973">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; fails closed on conflicting SSE and payload event types" time="0.0000807">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; fails closed on conflicting attempt aliases" time="0.0002703">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; fails closed on conflicting cursor sources" time="0.0001413">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; fails closed on conflicting protocol aliases" time="0.0002289">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; fails closed on conflicting run aliases" time="0.000144">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; fails closed on conflicting sequence aliases" time="0.0001892">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; normalizes attempt-scoped V2 reset cursors without collapsing them to numbers" time="0.0006223">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; normalizes the persisted Java SSE event view" time="0.0012997">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; passes the consuming actor role into V2 audience validation" time="0.0058702">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; rejects a missing V2 attempt id" time="0.0001656">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; rejects a missing sequence instead of coercing it" time="0.0006908">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; rejects a negative sequence instead of coercing it" time="0.0002113">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; rejects a non-string V2 attempt id" time="0.0001912">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; rejects a noninteger sequence instead of coercing it" time="0.0002989">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; rejects a string sequence instead of coercing it" time="0.0004193">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; rejects a unsafe sequence instead of coercing it" time="0.0002715">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; rejects missing V1 cursor" time="0.0003322">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; rejects missing V2 cursor" time="0.0001068">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; rejects noncanonical V1 cursor" time="0.0001853">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; rejects noncanonical V2 sequence" time="0.0001136">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; rejects wrong V1 sequence" time="0.0001119">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; rejects wrong V2 attempt" time="0.0001722">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; requires a declared run id instead of filling it from the descriptor" time="0.0001742">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; requires a valid V2 audience and enforces it for non-admin actors" time="0.0004715">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; uses authenticated fetch, resumes at Last-Event-ID and stops at final" time="0.0020999">
+        </testcase>
+  </testsuite>
+  <testsuite name="src/components/room/RoomShell.test.js" source_report="frontend-phase4-junit.xml" tests="3" failures="0" errors="0" skipped="0" time="0.0478">
+    <testcase classname="src/components/room/RoomShell.test.js" name="RoomShell &gt; exposes the workspace as an inline-size container for room layouts" time="0.0030448">
+        </testcase>
+    <testcase classname="src/components/room/RoomShell.test.js" name="RoomShell &gt; keeps room context, server status and human-final boundary visible" time="0.0330349">
+        </testcase>
+    <testcase classname="src/components/room/RoomShell.test.js" name="RoomShell &gt; shortens long case identifiers in the header while preserving the full title" time="0.0117206">
+        </testcase>
+  </testsuite>
+  <testsuite name="src/stores/agentStream.test.js" source_report="frontend-phase4-junit.xml" tests="6" failures="0" errors="0" skipped="0" time="0.797259">
+    <testcase classname="src/stores/agentStream.test.js" name="agentStreamStore &gt; clears the aborted attempt before revealing replacement attempt text" time="0.1230988">
+        </testcase>
+    <testcase classname="src/stores/agentStream.test.js" name="agentStreamStore &gt; collects approved deltas and keeps the temporary message until final refresh completes" time="0.2354172">
+        </testcase>
+    <testcase classname="src/stores/agentStream.test.js" name="agentStreamStore &gt; commits a visible delta before an observer failure reconnects and replays it" time="0.1478393">
+        </testcase>
+    <testcase classname="src/stores/agentStream.test.js" name="agentStreamStore &gt; commits an attempt reset before observer failure replay" time="0.1369941">
+        </testcase>
+    <testcase classname="src/stores/agentStream.test.js" name="agentStreamStore &gt; does not render internal reasoning fields even if a malformed relay emits one" time="0.0297637">
+        </testcase>
+    <testcase classname="src/stores/agentStream.test.js" name="agentStreamStore &gt; replays an overflowed delta without duplicating received or durable fallback text" time="0.1241461">
+        </testcase>
+  </testsuite>
+  <testsuite name="src/stores/room.test.js" source_report="frontend-phase4-junit.xml" tests="5" failures="0" errors="0" skipped="0" time="0.010138">
+    <testcase classname="src/stores/room.test.js" name="room event recovery &gt; isolates durable cursors by case when the user switches disputes" time="0.0008946">
+        </testcase>
+    <testcase classname="src/stores/room.test.js" name="room event recovery &gt; isolates durable cursors by case, room and actor for room streams" time="0.0028422">
+        </testcase>
+    <testcase classname="src/stores/room.test.js" name="room event recovery &gt; persists each durable cursor even when the stream disconnects mid-flight" time="0.0023575">
+        </testcase>
+    <testcase classname="src/stores/room.test.js" name="room event recovery &gt; reloads the authoritative snapshot before applying replayed events" time="0.0031871">
+        </testcase>
+    <testcase classname="src/stores/room.test.js" name="room event recovery &gt; starts a fresh room subscription after the replayed snapshot baseline" time="0.0008561">
+        </testcase>
+  </testsuite>
+  <testsuite name="src/views/disputes/DisputeOverviewView.test.js" source_report="frontend-phase4-junit.xml" tests="38" failures="0" errors="0" skipped="0" time="0.966522">
+    <testcase classname="src/views/disputes/DisputeOverviewView.test.js" name="DisputeOverviewView &gt; applies the respondent intake gate when the current evidence stage is clicked" time="0.0103351">
+        </testcase>
+    <testcase classname="src/views/disputes/DisputeOverviewView.test.js" name="DisputeOverviewView &gt; cancels simulated-case deletion without calling the API" time="0.011051">
+        </testcase>
+    <testcase classname="src/views/disputes/DisputeOverviewView.test.js" name="DisputeOverviewView &gt; creates a minimal dispute ticket before entering the intake room" time="0.0477273">
+        </testcase>
+    <testcase classname="src/views/disputes/DisputeOverviewView.test.js" name="DisputeOverviewView &gt; declares independent rail and cognitive-field map layout contracts" time="0.0015981">
+        </testcase>
+    <testcase classname="src/views/disputes/DisputeOverviewView.test.js" name="DisputeOverviewView &gt; deletes a simulated case once, updates the list and selects the next case" time="0.0238938">
+        </testcase>
+    <testcase classname="src/views/disputes/DisputeOverviewView.test.js" name="DisputeOverviewView &gt; does not create a dispute when the actor becomes a reviewer after opening intake" time="0.0478748">
+        </testcase>
+    <testcase classname="src/views/disputes/DisputeOverviewView.test.js" name="DisputeOverviewView &gt; does not expose case or order identifiers in overview cards" time="0.0173448">
+        </testcase>
+    <testcase classname="src/views/disputes/DisputeOverviewView.test.js" name="DisputeOverviewView &gt; does not expose dispute initiation to platform reviewers" time="0.0452292">
+        </testcase>
+    <testcase classname="src/views/disputes/DisputeOverviewView.test.js" name="DisputeOverviewView &gt; does not expose simulation deletion to MERCHANT actors" time="0.0157262">
+        </testcase>
+    <testcase classname="src/views/disputes/DisputeOverviewView.test.js" name="DisputeOverviewView &gt; does not expose simulation deletion to USER actors" time="0.0423907">
+        </testcase>
+    <testcase classname="src/views/disputes/DisputeOverviewView.test.js" name="DisputeOverviewView &gt; does not expose simulation wording when an imported item lacks optional display fields" time="0.0104422">
+        </testcase>
+    <testcase classname="src/views/disputes/DisputeOverviewView.test.js" name="DisputeOverviewView &gt; does not open intake when a stale party action is triggered after switching to reviewer" time="0.0593073">
+        </testcase>
+    <testcase classname="src/views/disputes/DisputeOverviewView.test.js" name="DisputeOverviewView &gt; enters the selected dispute's current room" time="0.0171093">
+        </testcase>
+    <testcase classname="src/views/disputes/DisputeOverviewView.test.js" name="DisputeOverviewView &gt; ignores duplicate import triggers while an import is pending" time="0.0257049">
+        </testcase>
+    <testcase classname="src/views/disputes/DisputeOverviewView.test.js" name="DisputeOverviewView &gt; keeps a completed review stage locked for merchants after results open" time="0.0239413">
+        </testcase>
+    <testcase classname="src/views/disputes/DisputeOverviewView.test.js" name="DisputeOverviewView &gt; keeps confirmation open and restores actions when deletion fails" time="0.0168521">
+        </testcase>
+    <testcase classname="src/views/disputes/DisputeOverviewView.test.js" name="DisputeOverviewView &gt; keeps dispute initiation available to merchants" time="0.0498067">
+        </testcase>
+    <testcase classname="src/views/disputes/DisputeOverviewView.test.js" name="DisputeOverviewView &gt; keeps terminal review locked for a party after the reviewer starts it" time="0.0177621">
+        </testcase>
+    <testcase classname="src/views/disputes/DisputeOverviewView.test.js" name="DisputeOverviewView &gt; keeps the draft stop available to a reviewer before terminal review starts" time="0.0177811">
+        </testcase>
+    <testcase classname="src/views/disputes/DisputeOverviewView.test.js" name="DisputeOverviewView &gt; keeps the guide card below the title and outside the split rail-and-map layout" time="0.0150071">
+        </testcase>
+    <testcase classname="src/views/disputes/DisputeOverviewView.test.js" name="DisputeOverviewView &gt; keeps the order rail scrollable while the selected case owns the main journey space" time="0.0127123">
+        </testcase>
+    <testcase classname="src/views/disputes/DisputeOverviewView.test.js" name="DisputeOverviewView &gt; lets the platform reviewer re-enter the lit terminal-review stage" time="0.0239062">
+        </testcase>
+    <testcase classname="src/views/disputes/DisputeOverviewView.test.js" name="DisputeOverviewView &gt; lights execution results after terminal review approval" time="0.0314545">
+        </testcase>
+    <testcase classname="src/views/disputes/DisputeOverviewView.test.js" name="DisputeOverviewView &gt; lights intake and locks evidence for the respondent role projection" time="0.0151246">
+        </testcase>
+    <testcase classname="src/views/disputes/DisputeOverviewView.test.js" name="DisputeOverviewView &gt; opens completed stage cards in history mode and keeps future cards locked" time="0.0172248">
+        </testcase>
+    <testcase classname="src/views/disputes/DisputeOverviewView.test.js" name="DisputeOverviewView &gt; opens the current stage without carrying the history lock" time="0.0075809">
+        </testcase>
+    <testcase classname="src/views/disputes/DisputeOverviewView.test.js" name="DisputeOverviewView &gt; places the overview context directly before the intro copy" time="0.0091155">
+        </testcase>
+    <testcase classname="src/views/disputes/DisputeOverviewView.test.js" name="DisputeOverviewView &gt; re-enables the import button after the API request times out" time="0.0118955">
+        </testcase>
+    <testcase classname="src/views/disputes/DisputeOverviewView.test.js" name="DisputeOverviewView &gt; reconciles a reviewer deletion from the server into another actor's open overview" time="0.0737425">
+        </testcase>
+    <testcase classname="src/views/disputes/DisputeOverviewView.test.js" name="DisputeOverviewView &gt; resolves the exact review task before opening a historical terminal review" time="0.0236456">
+        </testcase>
+    <testcase classname="src/views/disputes/DisputeOverviewView.test.js" name="DisputeOverviewView &gt; routes an unfinished respondent to private intake while the initiator uses evidence" time="0.0192868">
+        </testcase>
+    <testcase classname="src/views/disputes/DisputeOverviewView.test.js" name="DisputeOverviewView &gt; shows MERCHANT a disabled waiting action while human review is pending" time="0.0139411">
+        </testcase>
+    <testcase classname="src/views/disputes/DisputeOverviewView.test.js" name="DisputeOverviewView &gt; shows USER a disabled waiting action while human review is pending" time="0.0288001">
+        </testcase>
+    <testcase classname="src/views/disputes/DisputeOverviewView.test.js" name="DisputeOverviewView &gt; shows deletion for reviewer-created and approved simulated sources" time="0.0347852">
+        </testcase>
+    <testcase classname="src/views/disputes/DisputeOverviewView.test.js" name="DisputeOverviewView &gt; simulates external imported disputes from the current demo identity" time="0.0302102">
+        </testcase>
+    <testcase classname="src/views/disputes/DisputeOverviewView.test.js" name="DisputeOverviewView &gt; submits the initiator claim resolution as a claim seed, not an execution action" time="0.0621431">
+        </testcase>
+    <testcase classname="src/views/disputes/DisputeOverviewView.test.js" name="DisputeOverviewView &gt; switches the selected dispute without navigating" time="0.0217353">
+        </testcase>
+    <testcase classname="src/views/disputes/DisputeOverviewView.test.js" name="DisputeOverviewView &gt; translates raw risk, room and pending-action enums into readable labels" time="0.0123329">
+        </testcase>
+  </testsuite>
+  <testsuite name="src/views/disputes/IntakeRoomView.test.js" source_report="frontend-phase4-junit.xml" tests="50" failures="0" errors="0" skipped="0" time="1.851916">
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; asks for the user response when a merchant-initiated dispute has no respondent position" time="0.006743">
+        </testcase>
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; bounds projection retries and ignores a stale refresh after the actor changes" time="0.046623">
+        </testcase>
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; clears intake messages and latest memory immediately when actor changes in-place" time="0.1013598">
+        </testcase>
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; creates one matrix-guided opening when an eligible respondent thread is empty" time="0.0392469">
+        </testcase>
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; does not create a respondent opening for the initiating party" time="0.0352569">
+        </testcase>
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; does not duplicate unknown role and unknown resolution in the claim placeholder" time="0.0073488">
+        </testcase>
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; does not treat stale top-level evidence permission as ready during projection processing" time="0.013896">
+        </testcase>
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; fails closed for unknown or malformed present projections" time="0.1443295">
+        </testcase>
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; fails closed while a projection is processing and blocks opening, writes, navigation, and run discovery" time="0.0656373">
+        </testcase>
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; ignores stale intake refresh results from the previous actor" time="0.0978779">
+        </testcase>
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; infers the initiator from immutable party messages and keeps the respondent locked" time="0.0137561">
+        </testcase>
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; intersects current projection phases with server intake permissions" time="0.0595505">
+        </testcase>
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; isolates the respondent original statement from the initiator dossier" time="0.032005">
+        </testcase>
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; keeps a claim status placeholder visible when the intake memory has no case-detail schema yet" time="0.0145695">
+        </testcase>
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; keeps a legacy counterparty position out of the initiator response card" time="0.007546">
+        </testcase>
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; keeps a reported counterparty attitude out of the initiator response card" time="0.0105392">
+        </testcase>
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; keeps agent memory internals out of the party intake room UI" time="0.0084782">
+        </testcase>
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; keeps four verification previews and opens complete dossier text accessibly" time="0.035555">
+        </testcase>
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; keeps long dossier text bounded while preserving full content for inspection" time="0.0136692">
+        </testcase>
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; keeps persisted handoff remarks out of the right-side judgment area without adding a second input box" time="0.0095742">
+        </testcase>
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; keeps reviewer identities from sending party dialogue to the intake agent" time="0.0656526">
+        </testcase>
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; keeps the initiator in intake after submitting its statement" time="0.017831">
+        </testcase>
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; keeps the intake room outer cards at a fixed non-stretching height" time="0.043419">
+        </testcase>
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; keeps the respondent in a locked intake state before the initiator completes" time="0.087056">
+        </testcase>
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; keeps the respondent locked until the initiator completes intake" time="0.1491382">
+        </testcase>
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; keeps the room header connected while an intake AgentRun is actively streaming" time="0.035111">
+        </testcase>
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; lays out the submit and resolve actions as a two-column action bar" time="0.012462">
+        </testcase>
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; maps backend enum values and missing slot keys into Chinese dossier copy" time="0.0096087">
+        </testcase>
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; never queries active runs in history, observer, locked respondent, or current-without-run views" time="0.0993439">
+        </testcase>
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; opens a private respondent intake and enters evidence only after respondent confirmation" time="0.0499646">
+        </testcase>
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; opens the evidence room only after the server confirms admission" time="0.0166488">
+        </testcase>
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; persists intake cancellation instead of only changing local state" time="0.0225951">
+        </testcase>
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; preserves external reference identifiers without translating enum-like tokens" time="0.0075825">
+        </testcase>
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; preserves legacy intake actions when the process projection is absent or unavailable" time="0.0954254">
+        </testcase>
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; rechecks bilateral completion before routing to evidence" time="0.0447803">
+        </testcase>
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; recovers only the authorized descriptor matching the projected logical run" time="0.0664379">
+        </testcase>
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; refreshes room messages and the live dossier after every intake dialogue turn" time="0.0176468">
+        </testcase>
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; rejects projected recovery when the authorized descriptor omits its stream URL" time="0.0106883">
+        </testcase>
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; renders completed intake as history and blocks every write path" time="0.0317656">
+        </testcase>
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; renders the claim and respondent attitude state from the intake dossier" time="0.0090661">
+        </testcase>
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; renders the current case-detail dossier as the right-side board" time="0.0187769">
+        </testcase>
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; renders the original statement without trimming or replacing internal-looking tokens" time="0.0082499">
+        </testcase>
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; shows claim status and verification gaps for legacy case-detail dossiers without structured claim fields" time="0.0090438">
+        </testcase>
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; shows service errors in a modal notice instead of embedding them in the right dossier card" time="0.0115819">
+        </testcase>
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; shows the party statement immediately while the intake officer is thinking" time="0.02361">
+        </testcase>
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; starts respondent completeness independently from the initiator dossier" time="0.0427018">
+        </testcase>
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; subscribes to the resumable case stream and aborts it on room exit" time="0.0111594">
+        </testcase>
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; turns intake analysis into correctable dossier stickers" time="0.0296802">
+        </testcase>
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; uses the server actor-id party position instead of inferring the side from role alone" time="0.0340145">
+        </testcase>
+    <testcase classname="src/views/disputes/IntakeRoomView.test.js" name="IntakeRoomView &gt; uses the user position as the respondent response when the merchant initiated the dispute" time="0.0073121">
+        </testcase>
+  </testsuite>
+  <testsuite name="com.example.dispute.agentstream.AgentRunStreamEventServiceTest(p4-1ba6e17fa218-44b65803)" source_report="java-phase4-junit.xml" tests="14" failures="0" errors="0" skipped="0" time="6.933">
+    <testcase name="actorAudienceRejectsAnotherUserWithTheSameRole" classname="com.example.dispute.agentstream.AgentRunStreamEventServiceTest" time="0.011" />
+    <testcase name="administratorCanReadAnActorScopedRun" classname="com.example.dispute.agentstream.AgentRunStreamEventServiceTest" time="0.107" />
+    <testcase name="appendIsIdempotentForAnExistingSequence" classname="com.example.dispute.agentstream.AgentRunStreamEventServiceTest" time="0.076" />
+    <testcase name="appendPersistsASequenceOnlyOnce" classname="com.example.dispute.agentstream.AgentRunStreamEventServiceTest" time="0.032" />
+    <testcase name="reconnectRegistrationIsNotLostDuringConcurrentOldConnectionRemoval" classname="com.example.dispute.agentstream.AgentRunStreamEventServiceTest" time="1.076" />
+    <testcase name="replayUsesExclusiveCursorAndPreservesSequenceOrder" classname="com.example.dispute.agentstream.AgentRunStreamEventServiceTest" time="0.012" />
+    <testcase name="roleAudienceRejectsAnActorWithTheWrongRole" classname="com.example.dispute.agentstream.AgentRunStreamEventServiceTest" time="4.744">
+      </testcase>
+    <testcase name="slowConsumerIsDisconnectedAfterABoundedCatchUpBatch" classname="com.example.dispute.agentstream.AgentRunStreamEventServiceTest" time="0.073" />
+    <testcase name="unknownPersistedProtocolIsRejected" classname="com.example.dispute.agentstream.AgentRunStreamEventServiceTest" time="0.006" />
+    <testcase name="v2AttemptRejectsEventsAfterItsTerminalFrame" classname="com.example.dispute.agentstream.AgentRunStreamEventServiceTest" time="0.032" />
+    <testcase name="v2AttemptResetMustReferenceTheImmediatelyPriorAttempt" classname="com.example.dispute.agentstream.AgentRunStreamEventServiceTest" time="0.031" />
+    <testcase name="v2CursorMustIdentifyAnExistingHashBoundEvent" classname="com.example.dispute.agentstream.AgentRunStreamEventServiceTest" time="0.013" />
+    <testcase name="v2EventAudienceMustMatchTheRunAudience" classname="com.example.dispute.agentstream.AgentRunStreamEventServiceTest" time="0.025" />
+    <testcase name="v2ReplayContinuesAcrossAttemptsWithAnAttemptScopedCursor" classname="com.example.dispute.agentstream.AgentRunStreamEventServiceTest" time="0.695" />
+  </testsuite>
+  <testsuite name="com.example.dispute.database.MigrationIntegrationTest(p4-1ba6e17fa218-44b65803)" source_report="java-phase4-junit.xml" tests="1" failures="0" errors="0" skipped="0" time="5.645">
+    <testcase name="migrationsApplyOnceAndCreateTheCompletePostgresqlSchema" classname="com.example.dispute.database.MigrationIntegrationTest" time="5.645">
+      </testcase>
+  </testsuite>
+  <testsuite name="com.example.dispute.room.AgentConversationSessionResolverTest(p4-1ba6e17fa218-44b65803)" source_report="java-phase4-junit.xml" tests="4" failures="0" errors="0" skipped="0" time="0.186">
+    <testcase name="createsSessionWithDeterministicScopeAndAccessSessionLink" classname="com.example.dispute.room.AgentConversationSessionResolverTest" time="0.18" />
+    <testcase name="differentAgentKeysDoNotShareSession" classname="com.example.dispute.room.AgentConversationSessionResolverTest" time="0.002" />
+    <testcase name="initializesMissingAgentSessionInIndependentTransactionWhenCallerIsReadOnly" classname="com.example.dispute.room.AgentConversationSessionResolverTest" time="0.002" />
+    <testcase name="resolvesSameActorRoomAgentAndProfileToExistingSession" classname="com.example.dispute.room.AgentConversationSessionResolverTest" time="0.002" />
+  </testsuite>
+  <testsuite name="com.example.dispute.room.IntakeAgentTurnServiceTest(p4-1ba6e17fa218-44b65803)" source_report="java-phase4-junit.xml" tests="9" failures="0" errors="0" skipped="0" time="1.12">
+    <testcase name="allLegacyAgentWriteEntrypointsRejectBeforeReadingOrPersistingDomainState" classname="com.example.dispute.room.IntakeAgentTurnServiceTest" time="0.025" />
+    <testcase name="initialTurnOmitsShortLobbySeedReferencesBeforeCallingAgent" classname="com.example.dispute.room.IntakeAgentTurnServiceTest" time="0.096" />
+    <testcase name="initialTurnParticipatesInTheCallerTransactionSoFreshCasesCanBeSeeded" classname="com.example.dispute.room.IntakeAgentTurnServiceTest" time="0.85" />
+    <testcase name="initialTurnUsesLobbySeedAndPersistsAgentScrollSnapshot" classname="com.example.dispute.room.IntakeAgentTurnServiceTest" time="0.03" />
+    <testcase name="participantTurnDoesNotRepeatInitialFormFacts" classname="com.example.dispute.room.IntakeAgentTurnServiceTest" time="0.025" />
+    <testcase name="participantTurnFailsClosedWithoutPersistingSyntheticAgentMemory" classname="com.example.dispute.room.IntakeAgentTurnServiceTest" time="0.024">
+      </testcase>
+    <testcase name="participantTurnPersistsUserAnswerAndSendsPreviousScrollSnapshotToAgent" classname="com.example.dispute.room.IntakeAgentTurnServiceTest" time="0.016" />
+    <testcase name="participantTurnSendsTheCompleteOrderedTranscriptBeyondTheRecentTurnWindow" classname="com.example.dispute.room.IntakeAgentTurnServiceTest" time="0.029" />
+    <testcase name="respondentOpeningUsesOnlyTheFrozenMatrixAndDoesNotMutateTheDossier" classname="com.example.dispute.room.IntakeAgentTurnServiceTest" time="0.025" />
+  </testsuite>
+  <testsuite name="com.example.dispute.room.IntakeProgressServiceTest(p4-1ba6e17fa218-44b65803)" source_report="java-phase4-junit.xml" tests="4" failures="0" errors="0" skipped="0" time="0.253">
+    <testcase name="authorizedPartyReceivesTheSanitizedProcessProjection" classname="com.example.dispute.room.IntakeProgressServiceTest" time="0.003" />
+    <testcase name="missingProductionProjectionReturnsProcessingWithoutInferringWriterOrRun" classname="com.example.dispute.room.IntakeProgressServiceTest" time="0.211" />
+    <testcase name="rejectsNonPartyBeforeReadingProcessProjection" classname="com.example.dispute.room.IntakeProgressServiceTest" time="0.004" />
+    <testcase name="respondentMovesFromLockedIntakeToOpenIntakeThenSharedEvidence" classname="com.example.dispute.room.IntakeProgressServiceTest" time="0.035" />
+  </testsuite>
+  <testsuite name="com.example.dispute.room.IntakeRoomControllerTest(p4-1ba6e17fa218-44b65803)" source_report="java-phase4-junit.xml" tests="2" failures="0" errors="0" skipped="0" time="0.467">
+    <testcase name="confirmsAdmissionWithoutLegacyConfirmationNoteInput" classname="com.example.dispute.room.IntakeRoomControllerTest" time="0.091" />
+    <testcase name="statusAddsSanitizedVersionedProjectionWithoutChangingLegacyFields" classname="com.example.dispute.room.IntakeRoomControllerTest" time="0.376">
+      </testcase>
+  </testsuite>
+  <testsuite name="com.example.dispute.room.IntakeRoomServiceIntegrationTest(p4-1ba6e17fa218-44b65803)" source_report="java-phase4-junit.xml" tests="2" failures="0" errors="0" skipped="0" time="1.125">
+    <testcase name="acceptedIntakePersistsParticipantsRoomsAndTheAuthoritativeDeadline" classname="com.example.dispute.room.IntakeRoomServiceIntegrationTest" time="0.949">
+      </testcase>
+    <testcase name="notAdmissiblePersistsOnlyTheInitiatorAndTerminatesAfterIntake" classname="com.example.dispute.room.IntakeRoomServiceIntegrationTest" time="0.176">
+      </testcase>
+  </testsuite>
+  <testsuite name="com.example.dispute.room.IntakeRoomServiceTest(p4-1ba6e17fa218-44b65803)" source_report="java-phase4-junit.xml" tests="13" failures="0" errors="0" skipped="0" time="0.499">
+    <testcase name="acceptedImportedIntakeClosesTheExistingRoomInsteadOfInsertingADuplicate" classname="com.example.dispute.room.IntakeRoomServiceTest" time="0.004" />
+    <testcase name="acceptedInitiatorIntakeInvitesRespondentWithoutOpeningEvidence" classname="com.example.dispute.room.IntakeRoomServiceTest" time="0.007" />
+    <testcase name="acceptedIntakeAllowsEmptyConfirmationNoteAndKeepsHandoffRemarkFromDossier" classname="com.example.dispute.room.IntakeRoomServiceTest" time="0.003" />
+    <testcase name="acceptedIntakeSnapshotsTheLatestAgentDossierIntoTheCase" classname="com.example.dispute.room.IntakeRoomServiceTest" time="0.003" />
+    <testcase name="acceptedSlotCompletionIntakeCanBeConfirmedAfterTheAgentDossierIsReady" classname="com.example.dispute.room.IntakeRoomServiceTest" time="0.002" />
+    <testcase name="cancelFromEvidenceFailsBeforeRoomOrEpochInteractions" classname="com.example.dispute.room.IntakeRoomServiceTest" time="0.44" />
+    <testcase name="completedInitiatorReplayReturnsWithoutRoomOrEpochInteractions" classname="com.example.dispute.room.IntakeRoomServiceTest" time="0.004" />
+    <testcase name="formalDomainMutationLeavesTimelineOwnershipToTheTypedCommitPort" classname="com.example.dispute.room.IntakeRoomServiceTest" time="0.005" />
+    <testcase name="nonCompletedConfirmOutsideIntakeFailsBeforeRoomOrEpochInteractions" classname="com.example.dispute.room.IntakeRoomServiceTest" time="0.005" />
+    <testcase name="notAdmissibleEndsAfterIntakeWithoutInvitingMerchantOrOpeningEvidence" classname="com.example.dispute.room.IntakeRoomServiceTest" time="0.005" />
+    <testcase name="platformReviewerCanAcceptImportedIntakeAndSummonBothParties" classname="com.example.dispute.room.IntakeRoomServiceTest" time="0.012" />
+    <testcase name="resolvedIntakeCancellationClosesTheRoomWithoutOpeningEvidence" classname="com.example.dispute.room.IntakeRoomServiceTest" time="0.005" />
+    <testcase name="respondentCannotCancelTheInitiatorsPendingDispute" classname="com.example.dispute.room.IntakeRoomServiceTest" time="0.004" />
+  </testsuite>
+  <testsuite name="com.example.dispute.room.IntakeSequentialWorkflowTest(p4-1ba6e17fa218-44b65803)" source_report="java-phase4-junit.xml" tests="1" failures="0" errors="0" skipped="0" time="0.012">
+    <testcase name="respondentCompletionStartsTheOnlyEvidenceClock" classname="com.example.dispute.room.IntakeSequentialWorkflowTest" time="0.012" />
+  </testsuite>
+  <testsuite name="com.example.dispute.room.RoomMessageAndEventServiceTest(p4-1ba6e17fa218-44b65803)" source_report="java-phase4-junit.xml" tests="22" failures="0" errors="0" skipped="0" time="0.261">
+    <testcase name="evidencePartyEvidenceReferenceTriggersTheEvidenceAgentTurnAfterTheMessageIsPersisted" classname="com.example.dispute.room.RoomMessageAndEventServiceTest" time="0.008" />
+    <testcase name="evidencePartyTextAndReferenceMessagesAreVisibleOnlyToSamePartyAndTrustedRoles" classname="com.example.dispute.room.RoomMessageAndEventServiceTest" time="0.017" />
+    <testcase name="evidenceRoomPartyMessagesAreScopedToTheSpeakingPartyAndTrustedPlatformRoles" classname="com.example.dispute.room.RoomMessageAndEventServiceTest" time="0.008" />
+    <testcase name="evidenceRoomStillAcceptsBothDisputePartiesAfterAdmission" classname="com.example.dispute.room.RoomMessageAndEventServiceTest" time="0.008" />
+    <testcase name="hearingEvidenceReferenceIsBoundToTheCurrentRoundWithoutCountingAsRoundStatement" classname="com.example.dispute.room.RoomMessageAndEventServiceTest" time="0.009" />
+    <testcase name="hearingPartyTextIsRejectedOutsideStructuredEndpoints" classname="com.example.dispute.room.RoomMessageAndEventServiceTest" time="0.004" />
+    <testcase name="heartbeatRemovesDisconnectedSseSubscriptionWhenSendThrowsRuntimeException" classname="com.example.dispute.room.RoomMessageAndEventServiceTest" time="0.017" />
+    <testcase name="intakeHistoryIsHiddenFromTheNonInitiatingParty" classname="com.example.dispute.room.RoomMessageAndEventServiceTest" time="0.004" />
+    <testcase name="intakeOpeningIsGatedByRespondentProgressAndDelegatedToTheIntakeOfficer" classname="com.example.dispute.room.RoomMessageAndEventServiceTest" time="0.004" />
+    <testcase name="intakePartyTextTriggersTheIntakeAgentTurnAfterTheMessageIsPersisted" classname="com.example.dispute.room.RoomMessageAndEventServiceTest" time="0.007" />
+    <testcase name="intakeRoomUsesThePartyProgressGate" classname="com.example.dispute.room.RoomMessageAndEventServiceTest" time="0.006" />
+    <testcase name="persistedMessagesAndEventsAreMappedAsImmutableAppendOnlyRecords" classname="com.example.dispute.room.RoomMessageAndEventServiceTest" time="0.002" />
+    <testcase name="platformReviewerCannotPostAPartyStatement" classname="com.example.dispute.room.RoomMessageAndEventServiceTest" time="0.005" />
+    <testcase name="rejectsReusingAnIdempotencyKeyForDifferentImmutableMessageContent" classname="com.example.dispute.room.RoomMessageAndEventServiceTest" time="0.005" />
+    <testcase name="replayFiltersPrivateEventsByExactActorWithinTheSameRole" classname="com.example.dispute.room.RoomMessageAndEventServiceTest" time="0.007" />
+    <testcase name="replayStartsAfterTheCursorAndFiltersMerchantPrivateEventsFromUser" classname="com.example.dispute.room.RoomMessageAndEventServiceTest" time="0.105" />
+    <testcase name="roomHistoryFiltersPrivateMessagesByExactActorWithinTheSameRole" classname="com.example.dispute.room.RoomMessageAndEventServiceTest" time="0.005" />
+    <testcase name="roomHistoryFiltersReviewerOnlyMessagesForAParty" classname="com.example.dispute.room.RoomMessageAndEventServiceTest" time="0.007" />
+    <testcase name="roomMessageViewCarriesTheHearingRoundForCourtTimelineGrouping" classname="com.example.dispute.room.RoomMessageAndEventServiceTest" time="0.005" />
+    <testcase name="subscriptionCatchesUpFromDurableStorageBeforeDeliveringANewerLiveEvent" classname="com.example.dispute.room.RoomMessageAndEventServiceTest" time="0.011" />
+    <testcase name="temporalOwnedIntakeRejectsBeforeMessageReplayOrPersistence" classname="com.example.dispute.room.RoomMessageAndEventServiceTest" time="0.006" />
+    <testcase name="writesAnImmutableIdempotentMessageAndMonotonicCaseEventTogether" classname="com.example.dispute.room.RoomMessageAndEventServiceTest" time="0.011" />
+  </testsuite>
+  <testsuite name="com.example.dispute.room.RoomTurnMemoryQueryServiceTest(p4-1ba6e17fa218-44b65803)" source_report="java-phase4-junit.xml" tests="4" failures="0" errors="0" skipped="0" time="0.057">
+    <testcase name="latestAgentMemoryRejectsActorsOutsideTheDispute" classname="com.example.dispute.room.RoomTurnMemoryQueryServiceTest" time="0.009" />
+    <testcase name="latestAgentMemoryReturnsStructuredScrollSnapshotForCaseOwner" classname="com.example.dispute.room.RoomTurnMemoryQueryServiceTest" time="0.029" />
+    <testcase name="latestEvidenceAgentMemoryIsScopedToTheRequestingParty" classname="com.example.dispute.room.RoomTurnMemoryQueryServiceTest" time="0.009" />
+    <testcase name="respondentWithoutPrivateMemoryReceivesOnlyTheStructuredIntakeDossier" classname="com.example.dispute.room.RoomTurnMemoryQueryServiceTest" time="0.01" />
+  </testsuite>
+  <testsuite name="com.example.dispute.workflow.activity.intake.IntakeGraphCommandFactoryTest(p4-1ba6e17fa218-44b65803)" source_report="java-phase4-junit.xml" tests="3" failures="0" errors="0" skipped="0" time="0.093">
+    <testcase name="buildsAnExactProposalOnlyReferenceCommandWithCanonicalHash" classname="com.example.dispute.workflow.activity.intake.IntakeGraphCommandFactoryTest" time="0.012" />
+    <testcase name="firstCommandUsesTheSingleSnapshotAndNoEventReference" classname="com.example.dispute.workflow.activity.intake.IntakeGraphCommandFactoryTest" time="0.015" />
+    <testcase name="rejectsCrossScopeEventReferences" classname="com.example.dispute.workflow.activity.intake.IntakeGraphCommandFactoryTest" time="0.066" />
+  </testsuite>
+  <testsuite name="com.example.dispute.workflow.activity.intake.IntakeGraphResultFinalizerTest(p4-1ba6e17fa218-44b65803)" source_report="java-phase4-junit.xml" tests="10" failures="0" errors="0" skipped="0" time="0.703">
+    <testcase name="commitRacingWithPreflightReturnsThePersistedReceiptWithoutProposalReload" classname="com.example.dispute.workflow.activity.intake.IntakeGraphResultFinalizerTest" time="0.427">
+      </testcase>
+    <testcase name="committedReceiptBypassesProposalReloadAfterActivityCompletionLoss" classname="com.example.dispute.workflow.activity.intake.IntakeGraphResultFinalizerTest" time="0.054" />
+    <testcase name="crossRegistrationSnapshotAndEventNeverReachPreflightOrProposalStorage" classname="com.example.dispute.workflow.activity.intake.IntakeGraphResultFinalizerTest" time="0.041" />
+    <testcase name="crossScopeAuthorityNeverCallsTheFormalPort" classname="com.example.dispute.workflow.activity.intake.IntakeGraphResultFinalizerTest" time="0.028" />
+    <testcase name="databaseAuthorityPreflightRunsBeforeTheProposalIsRead" classname="com.example.dispute.workflow.activity.intake.IntakeGraphResultFinalizerTest" time="0.032" />
+    <testcase name="exactReplayReturnsTheSameReceiptAndOnlyUsesTheFormalPort" classname="com.example.dispute.workflow.activity.intake.IntakeGraphResultFinalizerTest" time="0.031" />
+    <testcase name="invalidGraphHashNeverCallsTheFormalPort" classname="com.example.dispute.workflow.activity.intake.IntakeGraphResultFinalizerTest" time="0.02" />
+    <testcase name="nonCanonicalFinalizationRequestHashNeverReadsTheProposalOrCallsTheFormalPort" classname="com.example.dispute.workflow.activity.intake.IntakeGraphResultFinalizerTest" time="0.025" />
+    <testcase name="shadowBindingCannotResolveTheFormalPort" classname="com.example.dispute.workflow.activity.intake.IntakeGraphResultFinalizerTest" time="0.022" />
+    <testcase name="staleFenceNeverCallsTheFormalPort" classname="com.example.dispute.workflow.activity.intake.IntakeGraphResultFinalizerTest" time="0.023" />
+  </testsuite>
+  <testsuite name="com.example.dispute.workflow.activity.intake.IntakeOuterCommitAcidIntegrationTest(p4-1ba6e17fa218-44b65803)" source_report="java-phase4-junit.xml" tests="3" failures="0" errors="0" skipped="0" time="0.769">
+    <testcase name="failureAfterManifestTerminalizationRollsBackTheEntireOuterTransaction" classname="com.example.dispute.workflow.activity.intake.IntakeOuterCommitAcidIntegrationTest" time="0.174">
+      </testcase>
+    <testcase name="failureBeforeManifestAppendRollsBackTheDomainCommit" classname="com.example.dispute.workflow.activity.intake.IntakeOuterCommitAcidIntegrationTest" time="0.156">
+      </testcase>
+    <testcase name="successAndCompletionLossReplayCommitEveryFormalEffectExactlyOnce" classname="com.example.dispute.workflow.activity.intake.IntakeOuterCommitAcidIntegrationTest" time="0.439">
+      </testcase>
+  </testsuite>
+  <testsuite name="com.example.dispute.workflow.activity.intake.JdbcIntakeFormalCommitPortTest(p4-1ba6e17fa218-44b65803)" source_report="java-phase4-junit.xml" tests="11" failures="0" errors="0" skipped="0" time="8.612">
+    <testcase name="commitFollowedByLostActivityCompletionReplaysThePersistedReceiptExactly" classname="com.example.dispute.workflow.activity.intake.JdbcIntakeFormalCommitPortTest" time="0.859" />
+    <testcase name="failureAfterDomainEffectsRollsBackWhenTheOuterManifestTransactionFails" classname="com.example.dispute.workflow.activity.intake.JdbcIntakeFormalCommitPortTest" time="0.8" />
+    <testcase name="nonResultReadyAttemptRollsBackTheLedgerAndEveryFormalEffect" classname="com.example.dispute.workflow.activity.intake.JdbcIntakeFormalCommitPortTest" time="0.67" />
+    <testcase name="preflightRejectsAnActorNoLongerAssignedAsTheExplicitCaseParty" classname="com.example.dispute.workflow.activity.intake.JdbcIntakeFormalCommitPortTest" time="0.725" />
+    <testcase name="rehashedRequestCannotChangePersistedEventMetadata" classname="com.example.dispute.workflow.activity.intake.JdbcIntakeFormalCommitPortTest" time="0.707" />
+    <testcase name="rehashedRequestCannotChangePersistedSnapshotMetadata" classname="com.example.dispute.workflow.activity.intake.JdbcIntakeFormalCommitPortTest" time="0.712" />
+    <testcase name="respondentRequiresExplicitInitiatorCompletionBeforePreflightAndCommit" classname="com.example.dispute.workflow.activity.intake.JdbcIntakeFormalCommitPortTest" time="0.925" />
+    <testcase name="revokedAgentSessionRollsBackTheLedgerAndEveryFormalEffect" classname="com.example.dispute.workflow.activity.intake.JdbcIntakeFormalCommitPortTest" time="0.811" />
+    <testcase name="sameOperationKeyWithAnotherCanonicalRequestHashIsAConflict" classname="com.example.dispute.workflow.activity.intake.JdbcIntakeFormalCommitPortTest" time="0.843" />
+    <testcase name="staleProjectionAuthorityRollsBackTheInsertedOperationAndWritesNothing" classname="com.example.dispute.workflow.activity.intake.JdbcIntakeFormalCommitPortTest" time="0.796">
+      </testcase>
+    <testcase name="transactionRejectsACompletedPartyWithoutWritingAnyFormalEffect" classname="com.example.dispute.workflow.activity.intake.JdbcIntakeFormalCommitPortTest" time="0.764" />
+  </testsuite>
+  <testsuite name="com.example.dispute.workflow.application.intake.exchange.IntakeExchangeP0Test(p4-1ba6e17fa218-44b65803)" source_report="java-phase4-junit.xml" tests="17" failures="0" errors="0" skipped="0" time="2.224">
+    <testcase name="apiAssemblyExposesIngressAndExchangeWhileGraphClientStaysDisabled" classname="com.example.dispute.workflow.application.intake.exchange.IntakeExchangeP0Test" time="0.911" />
+    <testcase name="codecUsesSnakeCaseAndRejectsUnknownOrDuplicateMembers" classname="com.example.dispute.workflow.application.intake.exchange.IntakeExchangeP0Test" time="0.021" />
+    <testcase name="controllerRejectsWrongSecretBeforeDecodeOrService" classname="com.example.dispute.workflow.application.intake.exchange.IntakeExchangeP0Test" time="0.089" />
+    <testcase name="exchangeAssemblyIsAbsentUnlessSyntheticShadowAndEveryRealPortExist" classname="com.example.dispute.workflow.application.intake.exchange.IntakeExchangeP0Test" time="0.06">
+      </testcase>
+    <testcase name="exchangeAssemblyIsUnreachableFromWorkerRoles" classname="com.example.dispute.workflow.application.intake.exchange.IntakeExchangeP0Test" time="0.008" />
+    <testcase name="exchangeAssemblyRejectsFormalOrIncompleteRuntimeModes" classname="com.example.dispute.workflow.application.intake.exchange.IntakeExchangeP0Test" time="0.05">
+      </testcase>
+    <testcase name="exchangeSourcesDoNotReferenceFinalizerOrGlobalWiring" classname="com.example.dispute.workflow.application.intake.exchange.IntakeExchangeP0Test" time="0.029" />
+    <testcase name="jdbcAuthorityRequiresOneExactCurrentAdmissionAndReturnsItsObjectVersion" classname="com.example.dispute.workflow.application.intake.exchange.IntakeExchangeP0Test" time="0.119" />
+    <testcase name="loadEchoesAuthorityAfterExactGrantAndCanonicalPayloadValidation" classname="com.example.dispute.workflow.application.intake.exchange.IntakeExchangeP0Test" time="0.034" />
+    <testcase name="loadRejectsObjectVersionDriftFromExactGrant" classname="com.example.dispute.workflow.application.intake.exchange.IntakeExchangeP0Test" time="0.011" />
+    <testcase name="minioStorePublishesAndReadsOnlyItsExactContentAddress" classname="com.example.dispute.workflow.application.intake.exchange.IntakeExchangeP0Test" time="0.104" />
+    <testcase name="privateAdapterUsesExactVersionedReadAndPassesPutIdempotency" classname="com.example.dispute.workflow.application.intake.exchange.IntakeExchangeP0Test" time="0.003" />
+    <testcase name="putRejectsBadHashBeforeAuthorityOrStore" classname="com.example.dispute.workflow.application.intake.exchange.IntakeExchangeP0Test" time="0.013" />
+    <testcase name="putValidatesCanonicalProposalBeforeAuthorityAndEchoesTerminalCheckpoint" classname="com.example.dispute.workflow.application.intake.exchange.IntakeExchangeP0Test" time="0.082" />
+    <testcase name="rejectedLoadAuthorityNeverTouchesStore" classname="com.example.dispute.workflow.application.intake.exchange.IntakeExchangeP0Test" time="0.012" />
+    <testcase name="signedSyntheticApiComponentsAreAbsentByDefaultAndOnWorkerRoles" classname="com.example.dispute.workflow.application.intake.exchange.IntakeExchangeP0Test" time="0.322" />
+    <testcase name="syntheticShadowCreatesConcreteJdbcAndMinioExchangeAdapters" classname="com.example.dispute.workflow.application.intake.exchange.IntakeExchangeP0Test" time="0.356" />
+  </testsuite>
+  <testsuite name="com.example.dispute.workflow.architecture.IntakeFormalSinkAssemblyTest(p4-1ba6e17fa218-44b65803)" source_report="java-phase4-junit.xml" tests="3" failures="0" errors="0" skipped="0" time="16.588">
+    <testcase name="assemblyRootsMustNotReachAFormalIntakeSink" classname="IntakeFormalSinkAssemblyTest" time="12.088" />
+    <testcase name="productionServiceDescriptorsMustResolveEveryOwnedProvider" classname="IntakeFormalSinkAssemblyTest" time="0.003" />
+    <testcase name="compiledFixturesProveBytecodeCoverageAndSafeComparisonAssembly(Path)" classname="com.example.dispute.workflow.architecture.IntakeFormalSinkAssemblyTest" time="4.497">
+      </testcase>
+  </testsuite>
+  <testsuite name="com.example.dispute.workflow.authority.bridge.IntakeChildBridgeAuthorityAdapterTest(p4-1ba6e17fa218-44b65803)" source_report="java-phase4-junit.xml" tests="2" failures="0" errors="0" skipped="0" time="0.035">
+    <testcase name="preservesServerResolvedPartyAuthority" classname="com.example.dispute.workflow.authority.bridge.IntakeChildBridgeAuthorityAdapterTest" time="0.001" />
+    <testcase name="rejectsAnyActivityExecutionContextAtTheCurrentGate" classname="com.example.dispute.workflow.authority.bridge.IntakeChildBridgeAuthorityAdapterTest" time="0.034" />
+  </testsuite>
+  <testsuite name="com.example.dispute.workflow.authority.bridge.SignedSyntheticIntakeBridgeReadPortDecoratorTest(p4-1ba6e17fa218-44b65803)" source_report="java-phase4-junit.xml" tests="2" failures="0" errors="0" skipped="0" time="0.017">
+    <testcase name="decoratesExecutionContextOnlyFromExactDurableAdmission" classname="com.example.dispute.workflow.authority.bridge.SignedSyntheticIntakeBridgeReadPortDecoratorTest" time="0.014" />
+    <testcase name="failsClosedWhenAdmissionIsMissingExpiredOrStale" classname="com.example.dispute.workflow.authority.bridge.SignedSyntheticIntakeBridgeReadPortDecoratorTest" time="0.003" />
+  </testsuite>
+  <testsuite name="com.example.dispute.workflow.caseprocess.IntakeChildBridgeActivitiesTest(p4-1ba6e17fa218-44b65803)" source_report="java-phase4-junit.xml" tests="14" failures="0" errors="0" skipped="0" time="0.067">
+    <testcase name="adapterIsPlainAndDependsOnlyOnTheReadPort" classname="com.example.dispute.workflow.caseprocess.IntakeChildBridgeActivitiesTest" time="0.007" />
+    <testcase name="explicitlyMapsActualIntakeDomainEventNames" classname="com.example.dispute.workflow.caseprocess.IntakeChildBridgeActivitiesTest" time="0.006" />
+    <testcase name="keepsCaseAndRoomWorkflowBindingsSeparateAndRejectsTemporalMode" classname="com.example.dispute.workflow.caseprocess.IntakeChildBridgeActivitiesTest" time="0.0" />
+    <testcase name="mapsOnlyReadSideEnrichmentToTheTypedIntakeProtocol" classname="com.example.dispute.workflow.caseprocess.IntakeChildBridgeActivitiesTest" time="0.003" />
+    <testcase name="merchantInitiatedCommandUsesTheAuthoritativeTypedParty" classname="com.example.dispute.workflow.caseprocess.IntakeChildBridgeActivitiesTest" time="0.004" />
+    <testcase name="rejectsMissingAndUnknownDomainEvents" classname="com.example.dispute.workflow.caseprocess.IntakeChildBridgeActivitiesTest" time="0.005" />
+    <testcase name="rejectsMissingOrConflictingPersistedStartBindings" classname="com.example.dispute.workflow.caseprocess.IntakeChildBridgeActivitiesTest" time="0.003" />
+    <testcase name="rejectsNonV2OrGenericWorkflowSelectionsForCommandsAndEvents" classname="com.example.dispute.workflow.caseprocess.IntakeChildBridgeActivitiesTest" time="0.003" />
+    <testcase name="rejectsProvisionedChildWorkflowTypeOrBuildDivergence" classname="com.example.dispute.workflow.caseprocess.IntakeChildBridgeActivitiesTest" time="0.006" />
+    <testcase name="rejectsReturnedCommandTupleIdTypeEpochFenceSequenceHashesAndRevisions" classname="com.example.dispute.workflow.caseprocess.IntakeChildBridgeActivitiesTest" time="0.004" />
+    <testcase name="rejectsReturnedEventTupleIdTypeEpochFenceSequenceHashAndRevisions" classname="com.example.dispute.workflow.caseprocess.IntakeChildBridgeActivitiesTest" time="0.021" />
+    <testcase name="rejectsUnknownCommandAndActorTypes" classname="com.example.dispute.workflow.caseprocess.IntakeChildBridgeActivitiesTest" time="0.002" />
+    <testcase name="requestContractsExposeOnlyTheGenericReferenceAndActiveBinding" classname="com.example.dispute.workflow.caseprocess.IntakeChildBridgeActivitiesTest" time="0.0" />
+    <testcase name="retriesOnlyExplicitReadPortUnavailability" classname="com.example.dispute.workflow.caseprocess.IntakeChildBridgeActivitiesTest" time="0.003" />
+  </testsuite>
+  <testsuite name="com.example.dispute.workflow.config.IntakeSyntheticAdmissionTrustPropertiesTest(p4-1ba6e17fa218-44b65803)" source_report="java-phase4-junit.xml" tests="1" failures="0" errors="0" skipped="0" time="0.002">
+    <testcase name="keepsVerificationTrustDisabledUntilAnAbsolutePublicMountIsExplicit" classname="com.example.dispute.workflow.config.IntakeSyntheticAdmissionTrustPropertiesTest" time="0.002" />
+  </testsuite>
+  <testsuite name="com.example.dispute.workflow.config.IntakeSyntheticShadowConfigurationTest(p4-1ba6e17fa218-44b65803)" source_report="java-phase4-junit.xml" tests="14" failures="0" errors="0" skipped="0" time="1.906">
+    <testcase name="agentRoleBuildsOnlyTheComparisonActivityRegistration" classname="com.example.dispute.workflow.config.IntakeSyntheticShadowConfigurationTest" time="0.029" />
+    <testcase name="apiRoleBuildsTheAdmissionDriverWithoutAgentOrControlRuntime" classname="com.example.dispute.workflow.config.IntakeSyntheticShadowConfigurationTest" time="0.017" />
+    <testcase name="completeRuntimeMaterialStillFailsClosedWithoutAdmissionTrust" classname="com.example.dispute.workflow.config.IntakeSyntheticShadowConfigurationTest" time="0.026">
+      </testcase>
+    <testcase name="configurationBeanSignaturesDoNotReferenceFormalIntakeTypes" classname="com.example.dispute.workflow.config.IntakeSyntheticShadowConfigurationTest" time="0.003" />
+    <testcase name="controlRoleBuildsOnlyTheAdmissionBackedAuthorityBridge" classname="com.example.dispute.workflow.config.IntakeSyntheticShadowConfigurationTest" time="0.171" />
+    <testcase name="controlRoleFailsClosedWithoutTheDurableAdmissionLookup" classname="com.example.dispute.workflow.config.IntakeSyntheticShadowConfigurationTest" time="0.017">
+      </testcase>
+    <testcase name="disabledModeBuildsNoSyntheticBeanGraph" classname="com.example.dispute.workflow.config.IntakeSyntheticShadowConfigurationTest" time="0.009" />
+    <testcase name="enabledFlagRejectsAPartialEpochSelection" classname="com.example.dispute.workflow.config.IntakeSyntheticShadowConfigurationTest" time="0.03">
+      </testcase>
+    <testcase name="enabledFlagRejectsGraphAndAgentRunModeConflicts" classname="com.example.dispute.workflow.config.IntakeSyntheticShadowConfigurationTest" time="0.4">
+      </testcase>
+    <testcase name="enabledModeFailsWhenARequiredPortIsAmbiguousEvenWithAPrimaryCandidate" classname="com.example.dispute.workflow.config.IntakeSyntheticShadowConfigurationTest" time="0.032">
+      </testcase>
+    <testcase name="enabledModeFailsWhenAnyRequiredPortIsMissing" classname="com.example.dispute.workflow.config.IntakeSyntheticShadowConfigurationTest" time="0.071">
+      </testcase>
+    <testcase name="explicitlyTrustedRuntimeBuildsProductionAdaptersWithoutAFormalSink" classname="com.example.dispute.workflow.config.IntakeSyntheticShadowConfigurationTest" time="0.754" />
+    <testcase name="runtimeMaterialProviderIsAbsentUnlessExplicitlyEnabled" classname="com.example.dispute.workflow.config.IntakeSyntheticShadowConfigurationTest" time="0.03" />
+    <testcase name="signedShadowBuildsAllMaterialPortsFromOneConcreteProviderWithoutAFormalSink" classname="com.example.dispute.workflow.config.IntakeSyntheticShadowConfigurationTest" time="0.317" />
+  </testsuite>
+  <testsuite name="com.example.dispute.workflow.config.TemporalWorkerConfigurationTest(p4-1ba6e17fa218-44b65803)" source_report="java-phase4-junit.xml" tests="13" failures="0" errors="0" skipped="0" time="6.967">
+    <testcase name="agentRolePollsOnlyTheAgentExecutionQueue" classname="com.example.dispute.workflow.config.TemporalWorkerConfigurationTest" time="0.886">
+      </testcase>
+    <testcase name="controlRolePollsOnlyControlRoomAndToolQueues" classname="com.example.dispute.workflow.config.TemporalWorkerConfigurationTest" time="0.121">
+      </testcase>
+    <testcase name="controlWorkerRejectsUnversionedRoutingBeforeResolvingAuthorityDependencies" classname="com.example.dispute.workflow.config.TemporalWorkerConfigurationTest" time="0.005">
+      </testcase>
+    <testcase name="disabledAndPartialSyntheticSelectionDoNotResolveTheRegistrationProvider" classname="com.example.dispute.workflow.config.TemporalWorkerConfigurationTest" time="0.539">
+      </testcase>
+    <testcase name="enabledAgentRunWorkerRejectsUnversionedRoutingBeforeResolvingDependencies" classname="com.example.dispute.workflow.config.TemporalWorkerConfigurationTest" time="1.473">
+      </testcase>
+    <testcase name="enabledAgentRunWorkerStartsWithBuildIdVersioningAndPreservesRoleIsolation" classname="com.example.dispute.workflow.config.TemporalWorkerConfigurationTest" time="3.055">
+      </testcase>
+    <testcase name="enabledSyntheticSelectionRejectsAgentRunV2BeforeResolvingDependencies" classname="com.example.dispute.workflow.config.TemporalWorkerConfigurationTest" time="0.005">
+      </testcase>
+    <testcase name="enabledSyntheticSelectionRejectsUnversionedWorkerBeforeResolvingRegistration" classname="com.example.dispute.workflow.config.TemporalWorkerConfigurationTest" time="0.007">
+      </testcase>
+    <testcase name="enabledSyntheticSelectionRequiresExactlyOneRegistration" classname="com.example.dispute.workflow.config.TemporalWorkerConfigurationTest" time="0.278">
+      </testcase>
+    <testcase name="enabledSyntheticWorkerStartsVersionedAndPreservesRoleIsolation" classname="com.example.dispute.workflow.config.TemporalWorkerConfigurationTest" time="0.283">
+      </testcase>
+    <testcase name="rejectsLegacyQueueThatCollidesWithAProtocolQueue" classname="com.example.dispute.workflow.config.TemporalWorkerConfigurationTest" time="0.008">
+      </testcase>
+    <testcase name="signedSyntheticControlWorkerRequiresOneAdmissionBackedAuthorityRegistration" classname="com.example.dispute.workflow.config.TemporalWorkerConfigurationTest" time="0.298">
+      </testcase>
+    <testcase name="v2AgentWorkerFailsClosedWhenExecutionGatewayIsMissing" classname="com.example.dispute.workflow.config.TemporalWorkerConfigurationTest" time="0.009">
+      </testcase>
+  </testsuite>
+  <testsuite name="com.example.dispute.workflow.outbox.TemporalCommandDispatcherTest(p4-1ba6e17fa218-44b65803)" source_report="java-phase4-junit.xml" tests="12" failures="0" errors="0" skipped="0" time="0.371">
+    <testcase name="aDeliveryRecoversAfterTemporalWasUnavailableForFiveMinutes" classname="com.example.dispute.workflow.outbox.TemporalCommandDispatcherTest" time="0.0" />
+    <testcase name="aGenericPermanentUpdateRejectionAfterDeadlinePreservesItsActualReason" classname="com.example.dispute.workflow.outbox.TemporalCommandDispatcherTest" time="0.339" />
+    <testcase name="aGenericPermanentUpdateRejectionBeforeDeadlineRemainsADeadLetter" classname="com.example.dispute.workflow.outbox.TemporalCommandDispatcherTest" time="0.0" />
+    <testcase name="aRetryableFailureAfterTheDeadlineKeepsTheSameUpdatePendingForDisambiguation" classname="com.example.dispute.workflow.outbox.TemporalCommandDispatcherTest" time="0.0" />
+    <testcase name="anExpiredCommandIsPersistedOnlyAfterTemporalDefinitivelyRejectsIt" classname="com.example.dispute.workflow.outbox.TemporalCommandDispatcherTest" time="0.0" />
+    <testcase name="batchDispatchClaimsEachLeaseImmediatelyBeforeItsDelivery" classname="com.example.dispute.workflow.outbox.TemporalCommandDispatcherTest" time="0.01" />
+    <testcase name="marksTheOutboxAndCommandAfterTemporalAdmission" classname="com.example.dispute.workflow.outbox.TemporalCommandDispatcherTest" time="0.0" />
+    <testcase name="permanentFailureAfterLeaseExpiryIsTracedAsStaleLease" classname="com.example.dispute.workflow.outbox.TemporalCommandDispatcherTest" time="0.006">
+      </testcase>
+    <testcase name="permanentFailuresDeadLetterWhileRetryableFailuresIgnoreAttemptCeiling" classname="com.example.dispute.workflow.outbox.TemporalCommandDispatcherTest" time="0.0" />
+    <testcase name="retriesTheSameTemporalUpdateIdAfterAdmissionMarkingCrashes" classname="com.example.dispute.workflow.outbox.TemporalCommandDispatcherTest" time="0.012" />
+    <testcase name="temporalUnavailabilityLeavesTheDurableRowForBackoffRetry" classname="com.example.dispute.workflow.outbox.TemporalCommandDispatcherTest" time="0.0" />
+    <testcase name="terminalCommandPermanentFailureIsTracedAsReconciled" classname="com.example.dispute.workflow.outbox.TemporalCommandDispatcherTest" time="0.004" />
+  </testsuite>
+  <testsuite name="com.example.dispute.workflow.projection.IntakeProcessProjectionAdapterTest(p4-1ba6e17fa218-44b65803)" source_report="java-phase4-junit.xml" tests="9" failures="0" errors="0" skipped="0" time="0.011">
+    <testcase name="legacyProjectionDoesNotRequireAnEpochTuple" classname="com.example.dispute.workflow.projection.IntakeProcessProjectionAdapterTest" time="0.0" />
+    <testcase name="malformedActiveRunTupleReturnsProcessingInsteadOfAClientVisibleCurrentState" classname="com.example.dispute.workflow.projection.IntakeProcessProjectionAdapterTest" time="0.0" />
+    <testcase name="mapsCurrentShadowTupleToVersionedInformationalProjection" classname="com.example.dispute.workflow.projection.IntakeProcessProjectionAdapterTest" time="0.0" />
+    <testcase name="mapsExactTerminalTupleToClosedProjectionWithoutAnActiveRun" classname="com.example.dispute.workflow.projection.IntakeProcessProjectionAdapterTest" time="0.0" />
+    <testcase name="nonReadyFutureProjectionReturnsProcessing" classname="com.example.dispute.workflow.projection.IntakeProcessProjectionAdapterTest" time="0.001" />
+    <testcase name="publicViewContainsNoWorkflowIdentifiersRefsOrHashes" classname="com.example.dispute.workflow.projection.IntakeProcessProjectionAdapterTest" time="0.0" />
+    <testcase name="readScopesActiveRunToAuthorizedActorAndExactIntakeTuple" classname="com.example.dispute.workflow.projection.IntakeProcessProjectionAdapterTest" time="0.01" />
+    <testcase name="staleTupleReturnsProcessingWithoutInferringRoomState" classname="com.example.dispute.workflow.projection.IntakeProcessProjectionAdapterTest" time="0.0" />
+    <testcase name="terminalTupleFailsClosedForNonTerminalPhaseOrActiveRun" classname="com.example.dispute.workflow.projection.IntakeProcessProjectionAdapterTest" time="0.0" />
+  </testsuite>
+  <testsuite name="com.example.dispute.workflow.projection.ProcessProjectionFencingIntegrationTest(p4-1ba6e17fa218-44b65803)" source_report="java-phase4-junit.xml" tests="7" failures="0" errors="0" skipped="0" time="0.845">
+    <testcase name="aProjectionFailureRollsBackEpochOperationAndCommandChanges" classname="com.example.dispute.workflow.projection.ProcessProjectionFencingIntegrationTest" time="0.101">
+      </testcase>
+    <testcase name="concurrentWritersAtOneRevisionHaveExactlyOneCasWinner" classname="com.example.dispute.workflow.projection.ProcessProjectionFencingIntegrationTest" time="0.173">
+      </testcase>
+    <testcase name="delayedWriterThatWasValidAtDispatchCannotOverwriteANewerRevision" classname="com.example.dispute.workflow.projection.ProcessProjectionFencingIntegrationTest" time="0.14">
+      </testcase>
+    <testcase name="projectionAdvancePreservesTheFirstExecutionRunBinding" classname="com.example.dispute.workflow.projection.ProcessProjectionFencingIntegrationTest" time="0.074">
+      </testcase>
+    <testcase name="projectionEpochCommandAndOperationCommitAtomicallyAndReplayFromLedger" classname="com.example.dispute.workflow.projection.ProcessProjectionFencingIntegrationTest" time="0.097">
+      </testcase>
+    <testcase name="sameOperationKeyWithDifferentCanonicalRequestIsRejected" classname="com.example.dispute.workflow.projection.ProcessProjectionFencingIntegrationTest" time="0.073">
+      </testcase>
+    <testcase name="staleRevisionEpochFenceAndRunAreRejectedWithoutOperationRows" classname="com.example.dispute.workflow.projection.ProcessProjectionFencingIntegrationTest" time="0.187">
+      </testcase>
+  </testsuite>
+  <testsuite name="com.example.dispute.workflow.recovery.IntakeCutoverRollbackTest(p4-1ba6e17fa218-44b65803)" source_report="java-phase4-junit.xml" tests="5" failures="0" errors="0" skipped="0" time="0.043">
+    <testcase name="everyRollbackBoundaryRetainsExactlyOneActiveWriter" classname="com.example.dispute.workflow.recovery.IntakeCutoverRollbackTest" time="0.0" />
+    <testcase name="postEvidenceRollbackReusesReceiptAndNeverReopensIntake" classname="com.example.dispute.workflow.recovery.IntakeCutoverRollbackTest" time="0.005" />
+    <testcase name="postInitiatorRollbackPreservesEffectsAndResumesRespondentOnly" classname="com.example.dispute.workflow.recovery.IntakeCutoverRollbackTest" time="0.002" />
+    <testcase name="preTerminalRollbackCreatesHigherFencedLegacyEpochAndRejectsStaleWriter" classname="com.example.dispute.workflow.recovery.IntakeCutoverRollbackTest" time="0.006" />
+    <testcase name="rollbackBoundariesAreClassifiedAndReproducibleFromFreshState" classname="com.example.dispute.workflow.recovery.IntakeCutoverRollbackTest" time="0.03" />
+  </testsuite>
+  <testsuite name="com.example.dispute.workflow.recovery.IntakeTemporalCutoverIntegrationTest(p4-1ba6e17fa218-44b65803)" source_report="java-phase4-junit.xml" tests="1" failures="0" errors="0" skipped="0" time="0.549">
+    <testcase name="signedSyntheticMessageEndsOnlyInComparisonStorageAndReplaysIdempotently" classname="com.example.dispute.workflow.recovery.IntakeTemporalCutoverIntegrationTest" time="0.549">
+      </testcase>
+  </testsuite>
+  <testsuite name="com.example.dispute.workflow.room.intake.IntakeRoomWorkflowActivityTest(p4-1ba6e17fa218-44b65803)" source_report="java-phase4-junit.xml" tests="19" failures="0" errors="0" skipped="0" time="97.882">
+    <testcase name="branchReceiptMustMatchTheExactRequestAuthority" classname="com.example.dispute.workflow.room.intake.IntakeRoomWorkflowActivityTest" time="0.32">
+      </testcase>
+    <testcase name="committedFinalizerCompletionSettlesBeforeTheNextCommandStarts" classname="com.example.dispute.workflow.room.intake.IntakeRoomWorkflowActivityTest" time="0.064">
+      </testcase>
+    <testcase name="committedTurnEventWinsWhenQueuedAfterCancellationBeforeCompletion" classname="com.example.dispute.workflow.room.intake.IntakeRoomWorkflowActivityTest" time="12.331">
+      </testcase>
+    <testcase name="committedTurnEventWinsWhenQueuedBeforeCancellation" classname="com.example.dispute.workflow.room.intake.IntakeRoomWorkflowActivityTest" time="12.34">
+      </testcase>
+    <testcase name="continueAsNewCarriesSequencesDedupeAndOneTimeSnapshotInitialization" classname="com.example.dispute.workflow.room.intake.IntakeRoomWorkflowActivityTest" time="10.411">
+      </testcase>
+    <testcase name="definitiveAbsentFinalizationAllowsCancellationOnlyAfterReconciliation" classname="com.example.dispute.workflow.room.intake.IntakeRoomWorkflowActivityTest" time="12.598">
+      </testcase>
+    <testcase name="finalizationReceiptWithAnotherCheckpointFailsBeforeEventApplication" classname="com.example.dispute.workflow.room.intake.IntakeRoomWorkflowActivityTest" time="0.295">
+      </testcase>
+    <testcase name="finalizationReconciliationInfrastructureFailureKeepsCancellationFailClosed" classname="com.example.dispute.workflow.room.intake.IntakeRoomWorkflowActivityTest" time="12.358">
+      </testcase>
+    <testcase name="finalizerCompletionLossRetriesOnlyTheIdempotentStage" classname="com.example.dispute.workflow.room.intake.IntakeRoomWorkflowActivityTest" time="0.295">
+      </testcase>
+    <testcase name="initialRunRejectsCallerSuppliedCarryState" classname="com.example.dispute.workflow.room.intake.IntakeRoomWorkflowActivityTest" time="0.022">
+      </testcase>
+    <testcase name="initiatorCancellationStopsTheRunningGraphBeforeItsTerminalCommit" classname="com.example.dispute.workflow.room.intake.IntakeRoomWorkflowActivityTest" time="12.543">
+      </testcase>
+    <testcase name="lateCommittedTurnIsReconciledBeforeCancellationStarts" classname="com.example.dispute.workflow.room.intake.IntakeRoomWorkflowActivityTest" time="12.642">
+      </testcase>
+    <testcase name="messageAndAcceptanceUseDistinctStageKeysAndCommitOnlyFromReceipts" classname="com.example.dispute.workflow.room.intake.IntakeRoomWorkflowActivityTest" time="0.289">
+      </testcase>
+    <testcase name="nestedTemporalTimeoutsConsumeTheSharedPoolBeforeReconciliation" classname="com.example.dispute.workflow.room.intake.IntakeRoomWorkflowActivityTest" time="0.294">
+      </testcase>
+    <testcase name="nonRetryableActivityFailureLeavesTheExactStagePending" classname="com.example.dispute.workflow.room.intake.IntakeRoomWorkflowActivityTest" time="0.277">
+      </testcase>
+    <testcase name="policyCapsAndPropagatesTheFrozenActivityRetryBudget" classname="com.example.dispute.workflow.room.intake.IntakeRoomWorkflowActivityTest" time="0.001" />
+    <testcase name="sharedInfrastructureRetryPoolDoesNotChargeTheFirstExecutionOfANewStage" classname="com.example.dispute.workflow.room.intake.IntakeRoomWorkflowActivityTest" time="0.036">
+      </testcase>
+    <testcase name="staleFinalizationReceiptCannotAdvanceThePendingStage" classname="com.example.dispute.workflow.room.intake.IntakeRoomWorkflowActivityTest" time="0.288">
+      </testcase>
+    <testcase name="terminalFinalizationFailureReplaysWithoutActivityAndCommittedEventCanAdvance" classname="com.example.dispute.workflow.room.intake.IntakeRoomWorkflowActivityTest" time="10.478">
+      </testcase>
+  </testsuite>
+  <testsuite name="com.example.dispute.workflow.room.intake.IntakeRoomWorkflowReplayTest(p4-1ba6e17fa218-44b65803)" source_report="java-phase4-junit.xml" tests="1" failures="0" errors="0" skipped="0" time="0.027">
+    <testcase name="terminalNotAdmissibleHistoryReplaysDeterministically" classname="com.example.dispute.workflow.room.intake.IntakeRoomWorkflowReplayTest" time="0.027">
+      </testcase>
+  </testsuite>
+  <testsuite name="com.example.dispute.workflow.room.intake.IntakeRoomWorkflowTest(p4-1ba6e17fa218-44b65803)" source_report="java-phase4-junit.xml" tests="12" failures="0" errors="0" skipped="0" time="0.506">
+    <testcase name="bilateralAdmissionWaitsForIndependentRespondentConfirmation" classname="com.example.dispute.workflow.room.intake.IntakeRoomWorkflowTest" time="0.19">
+      </testcase>
+    <testcase name="commandIdReuseWithDifferentIdentityFailsClosed" classname="com.example.dispute.workflow.room.intake.IntakeRoomWorkflowTest" time="0.04">
+      </testcase>
+    <testcase name="commandSequenceGapDoesNotConsumeSequenceAndCorrectCommandCanRecover" classname="com.example.dispute.workflow.room.intake.IntakeRoomWorkflowTest" time="0.045">
+      </testcase>
+    <testcase name="eventSequenceGapAndEventIdConflictAreFailClosedAndRecoverable" classname="com.example.dispute.workflow.room.intake.IntakeRoomWorkflowTest" time="0.02">
+      </testcase>
+    <testcase name="graphCommandReferenceMustMatchPendingWorkflowCommand" classname="com.example.dispute.workflow.room.intake.IntakeRoomWorkflowTest" time="0.026">
+      </testcase>
+    <testcase name="illegalOrCrossPartyEventsDoNotAdvanceAndCorrectEventCanRecover" classname="com.example.dispute.workflow.room.intake.IntakeRoomWorkflowTest" time="0.028">
+      </testcase>
+    <testcase name="initiatorCancellationAfterReadinessClearsPendingReadiness" classname="com.example.dispute.workflow.room.intake.IntakeRoomWorkflowTest" time="0.035">
+      </testcase>
+    <testcase name="onlyTurnEventsCarryPairedAgentRunAndGraphReferences" classname="com.example.dispute.workflow.room.intake.IntakeRoomWorkflowTest" time="0.009">
+      </testcase>
+    <testcase name="rejectedScopeAndBusinessCommandsDoNotConsumeSequenceOrChangeRoomState" classname="com.example.dispute.workflow.room.intake.IntakeRoomWorkflowTest" time="0.039">
+      </testcase>
+    <testcase name="roomRevisionExplicitlyAcceptsEqualityAndForwardJumps" classname="com.example.dispute.workflow.room.intake.IntakeRoomWorkflowTest" time="0.025">
+      </testcase>
+    <testcase name="temporalPayloadTypesContainOnlyReferencesAndNoPrivateMessageText" classname="com.example.dispute.workflow.room.intake.IntakeRoomWorkflowTest" time="0.024">
+      </testcase>
+    <testcase name="unifiedInboxPreservesCommittedEventBeforeFollowingCommand" classname="com.example.dispute.workflow.room.intake.IntakeRoomWorkflowTest" time="0.025">
+      </testcase>
+  </testsuite>
+  <testsuite name="com.example.dispute.workflow.room.intake.IntakeRoomWorkflowWorkerRecoveryTest(p4-1ba6e17fa218-44b65803)" source_report="java-phase4-junit.xml" tests="1" failures="0" errors="0" skipped="0" time="0.078">
+    <testcase name="replacementWorkerReplaysCommittedStagesWithoutRepeatingTheirActivities" classname="com.example.dispute.workflow.room.intake.IntakeRoomWorkflowWorkerRecoveryTest" time="0.078">
+      </testcase>
+  </testsuite>
+  <testsuite name="com.example.dispute.workflow.shadow.IntakeShadowParityServiceTest(p4-1ba6e17fa218-44b65803)" source_report="java-phase4-junit.xml" tests="4" failures="0" errors="0" skipped="0" time="0.016">
+    <testcase name="everyPrivacyFenceAuthorityOrSinkFindingIsAHardFailure" classname="com.example.dispute.workflow.shadow.IntakeShadowParityServiceTest" time="0.004" />
+    <testcase name="recordsTextFreeParityAcrossEveryFrozenDimension" classname="com.example.dispute.workflow.shadow.IntakeShadowParityServiceTest" time="0.006" />
+    <testcase name="rejectsMalformedHashesAndIncompleteSnapshots" classname="com.example.dispute.workflow.shadow.IntakeShadowParityServiceTest" time="0.004" />
+    <testcase name="reportsOnlyBoundedDimensionDiffsInsteadOfNaturalLanguage" classname="com.example.dispute.workflow.shadow.IntakeShadowParityServiceTest" time="0.002" />
+  </testsuite>
+  <testsuite name="com.example.dispute.workflow.shadow.IntakeSyntheticComparisonActivitiesTest(p4-1ba6e17fa218-44b65803)" source_report="java-phase4-junit.xml" tests="4" failures="0" errors="0" skipped="0" time="0.059">
+    <testcase name="changedRequestHashCannotReachGraphOrComparisonStorage" classname="com.example.dispute.workflow.shadow.IntakeSyntheticComparisonActivitiesTest" time="0.013" />
+    <testcase name="everyBranchActivityIsPermanentlyClosed" classname="com.example.dispute.workflow.shadow.IntakeSyntheticComparisonActivitiesTest" time="0.007" />
+    <testcase name="missingAdmissionOrChangedRequestHashCannotReachSnapshotStorage" classname="com.example.dispute.workflow.shadow.IntakeSyntheticComparisonActivitiesTest" time="0.016" />
+    <testcase name="registrationIsExplicitNonDiscoverableAndHasNoFormalDependency" classname="com.example.dispute.workflow.shadow.IntakeSyntheticComparisonActivitiesTest" time="0.023" />
+  </testsuite>
+  <testsuite name="com.example.dispute.workflow.shadow.JdbcIntakeSyntheticComparisonLedgerIntegrationTest(p4-1ba6e17fa218-44b65803)" source_report="java-phase4-junit.xml" tests="8" failures="0" errors="0" skipped="0" time="2.851">
+    <testcase name="comparisonLedgerIsAppendOnlyIncludingTruncate" classname="com.example.dispute.workflow.shadow.JdbcIntakeSyntheticComparisonLedgerIntegrationTest" time="0.187" />
+    <testcase name="differentOperationCollidingOnComparisonKeyFailsClosedInsteadOfReplaying" classname="com.example.dispute.workflow.shadow.JdbcIntakeSyntheticComparisonLedgerIntegrationTest" time="0.301" />
+    <testcase name="exactCommittedReceiptReplaysAfterTerminalOrRevokedAuthority" classname="com.example.dispute.workflow.shadow.JdbcIntakeSyntheticComparisonLedgerIntegrationTest" time="0.408" />
+    <testcase name="exactConcurrentCommitCreatesOneRowAndReplaysTheStoredReceipt" classname="com.example.dispute.workflow.shadow.JdbcIntakeSyntheticComparisonLedgerIntegrationTest" time="0.267" />
+    <testcase name="sameOperationRejectsRequestAndProposalDriftAndResultCannotReuseTheKey" classname="com.example.dispute.workflow.shadow.JdbcIntakeSyntheticComparisonLedgerIntegrationTest" time="0.282">
+      </testcase>
+    <testcase name="sameOperationWithAnotherProjectedEventTypeIsAConflict" classname="com.example.dispute.workflow.shadow.JdbcIntakeSyntheticComparisonLedgerIntegrationTest" time="0.227" />
+    <testcase name="staleFenceTerminalEpochRevokedAuthorityWrongPartyAndWrongRequestAreRejected" classname="com.example.dispute.workflow.shadow.JdbcIntakeSyntheticComparisonLedgerIntegrationTest" time="0.795" />
+    <testcase name="terminalTransitionRacingComparisonCommitWinsOrLosesAtTheEpochLock" classname="com.example.dispute.workflow.shadow.JdbcIntakeSyntheticComparisonLedgerIntegrationTest" time="0.384" />
+  </testsuite>
+  <testsuite name="com.example.dispute.workflow.shadow.SignedSyntheticIntakeDriverTest(p4-1ba6e17fa218-44b65803)" source_report="java-phase4-junit.xml" tests="3" failures="0" errors="0" skipped="0" time="0.005">
+    <testcase name="admitsOnlyAnExactlyVerifiedSignedSyntheticMessage" classname="com.example.dispute.workflow.shadow.SignedSyntheticIntakeDriverTest" time="0.001" />
+    <testcase name="unsignedRealAndBranchCommandsFailBeforeAdmission" classname="com.example.dispute.workflow.shadow.SignedSyntheticIntakeDriverTest" time="0.002" />
+    <testcase name="verifiedAdmissionMustMatchThePersistedRequestHashExactly" classname="com.example.dispute.workflow.shadow.SignedSyntheticIntakeDriverTest" time="0.002" />
+  </testsuite>
+  <testsuite name="com.example.dispute.workflow.shadow.SignedSyntheticIntakeIngressServiceTest(p4-1ba6e17fa218-44b65803)" source_report="java-phase4-junit.xml" tests="1" failures="0" errors="0" skipped="0" time="0.015">
+    <testcase name="admitsThenEnqueuesOnlyThroughTheCanonicalCaseCommandService" classname="com.example.dispute.workflow.shadow.SignedSyntheticIntakeIngressServiceTest" time="0.015" />
+  </testsuite>
+  <testsuite name="com.example.dispute.workflow.shadow.intake.Es256IntakeSyntheticAdmissionVerifierTest(p4-1ba6e17fa218-44b65803)" source_report="java-phase4-junit.xml" tests="3" failures="0" errors="0" skipped="0" time="0.112">
+    <testcase name="rejectsUnknownHeaderOrClaimFieldsAndNoncanonicalHashes" classname="com.example.dispute.workflow.shadow.intake.Es256IntakeSyntheticAdmissionVerifierTest" time="0.092" />
+    <testcase name="rejectsWrongSignatureKeyIdentityAndValidityWindow" classname="com.example.dispute.workflow.shadow.intake.Es256IntakeSyntheticAdmissionVerifierTest" time="0.015" />
+    <testcase name="verifiesARealP256SignatureAndEveryExactClaim" classname="com.example.dispute.workflow.shadow.intake.Es256IntakeSyntheticAdmissionVerifierTest" time="0.005" />
+  </testsuite>
+  <testsuite name="com.example.dispute.workflow.shadow.intake.IntakeReliabilityHarnessTest(p4-1ba6e17fa218-44b65803)" source_report="java-phase4-junit.xml" tests="6" failures="0" errors="0" skipped="0" time="0.01">
+    <testcase name="aSafeButWrongBoundaryOutcomeCannotPass" classname="com.example.dispute.workflow.shadow.intake.IntakeReliabilityHarnessTest" time="0.0" />
+    <testcase name="everyCrashRaceAndRollbackBoundaryProducesReproducibleTextFreeEvidence" classname="com.example.dispute.workflow.shadow.intake.IntakeReliabilityHarnessTest" time="0.005" />
+    <testcase name="rejectsANondeterministicProbeAndMissingRecoveryInvariant" classname="com.example.dispute.workflow.shadow.intake.IntakeReliabilityHarnessTest" time="0.002" />
+    <testcase name="rejectsRawTextInEveryDigestBearingFieldAndBoundsReplayWork" classname="com.example.dispute.workflow.shadow.intake.IntakeReliabilityHarnessTest" time="0.001" />
+    <testcase name="reproducibleInfrastructureOrInvariantFailuresCannotPass" classname="com.example.dispute.workflow.shadow.intake.IntakeReliabilityHarnessTest" time="0.0" />
+    <testcase name="retainsTheExplicitFailureClassificationWithoutGuessingFromTextOrExceptions" classname="com.example.dispute.workflow.shadow.intake.IntakeReliabilityHarnessTest" time="0.002" />
+  </testsuite>
+  <testsuite name="com.example.dispute.workflow.shadow.intake.IntakeSyntheticRuntimeAdaptersTest(p4-1ba6e17fa218-44b65803)" source_report="java-phase4-junit.xml" tests="7" failures="0" errors="0" skipped="0" time="0.232">
+    <testcase name="buildsTheFactoryCommandInvokesTheSignedClientAndUsesPersistedObjectMetadata" classname="com.example.dispute.workflow.shadow.intake.IntakeSyntheticRuntimeAdaptersTest" time="0.107" />
+    <testcase name="publishesThroughTheAuthoritativeSnapshotPublisherAndBuildsTheReceipt" classname="com.example.dispute.workflow.shadow.intake.IntakeSyntheticRuntimeAdaptersTest" time="0.003" />
+    <testcase name="reconciliationReadsOnlyTheSignedCachedGraphResult" classname="com.example.dispute.workflow.shadow.intake.IntakeSyntheticRuntimeAdaptersTest" time="0.009" />
+    <testcase name="rejectsGraphArtifactMetadataThatDoesNotBindTheSignedResult" classname="com.example.dispute.workflow.shadow.intake.IntakeSyntheticRuntimeAdaptersTest" time="0.009" />
+    <testcase name="rejectsParityThatIsNotBoundToTheExactGraphResult" classname="com.example.dispute.workflow.shadow.intake.IntakeSyntheticRuntimeAdaptersTest" time="0.003" />
+    <testcase name="rejectsSnapshotAuthorityDriftBeforePublishingPrivateData" classname="com.example.dispute.workflow.shadow.intake.IntakeSyntheticRuntimeAdaptersTest" time="0.098" />
+    <testcase name="returnsOnlyHashBasedParityAfterBindingItToTheExactGraphReceipt" classname="com.example.dispute.workflow.shadow.intake.IntakeSyntheticRuntimeAdaptersTest" time="0.003" />
+  </testsuite>
+  <testsuite name="com.example.dispute.workflow.shadow.intake.IntakeSyntheticRuntimeMaterialSourceTest(p4-1ba6e17fa218-44b65803)" source_report="java-phase4-junit.xml" tests="5" failures="0" errors="0" skipped="0" time="0.476">
+    <testcase name="concreteProviderLoadsSnapshotFromAnExactSyntheticManifest" classname="com.example.dispute.workflow.shadow.intake.IntakeSyntheticRuntimeMaterialSourceTest" time="0.386" />
+    <testcase name="concreteProviderRejectsANonExactObjectStoreReceipt" classname="com.example.dispute.workflow.shadow.intake.IntakeSyntheticRuntimeMaterialSourceTest" time="0.026" />
+    <testcase name="concreteProviderRevalidatesAuthorityAfterReferenceResolution" classname="com.example.dispute.workflow.shadow.intake.IntakeSyntheticRuntimeMaterialSourceTest" time="0.04" />
+    <testcase name="mountedIndexRejectsDuplicateAuthorityBindings" classname="com.example.dispute.workflow.shadow.intake.IntakeSyntheticRuntimeMaterialSourceTest" time="0.023" />
+    <testcase name="mountedIndexResolvesOnlyTheExactAdmittedActivityAuthority" classname="com.example.dispute.workflow.shadow.intake.IntakeSyntheticRuntimeMaterialSourceTest" time="0.001" />
+  </testsuite>
+  <testsuite name="com.example.dispute.workflow.shadow.intake.JdbcIntakeSignedSyntheticAdmissionPortIntegrationTest(p4-1ba6e17fa218-44b65803)" source_report="java-phase4-junit.xml" tests="1" failures="0" errors="0" skipped="0" time="0.84">
+    <testcase name="concurrentAdmissionPersistsOneImmutableReceiptAndRevocationClosesActivity" classname="com.example.dispute.workflow.shadow.intake.JdbcIntakeSignedSyntheticAdmissionPortIntegrationTest" time="0.84">
+      </testcase>
+  </testsuite>
+  <testsuite name="com.example.dispute.workflow.shadow.intake.JdbcIntakeSyntheticRuntimeSourceTest(p4-1ba6e17fa218-44b65803)" source_report="java-phase4-junit.xml" tests="16" failures="0" errors="0" skipped="0" time="1.092">
+    <testcase name="admittedThreeAttemptBudgetAllowsAConsumedInfrastructureRetry" classname="com.example.dispute.workflow.shadow.intake.JdbcIntakeSyntheticRuntimeSourceTest" time="0.015" />
+    <testcase name="admittedThreeAttemptBudgetAllowsReceiptOnlyReconciliationAtZero" classname="com.example.dispute.workflow.shadow.intake.JdbcIntakeSyntheticRuntimeSourceTest" time="0.008" />
+    <testcase name="ambiguousAuthorityCandidatesFailOnTheSecondRow" classname="com.example.dispute.workflow.shadow.intake.JdbcIntakeSyntheticRuntimeSourceTest" time="0.005" />
+    <testcase name="ambiguousPersistedAdmissionsFailBeforeDomainOrMaterialReads" classname="com.example.dispute.workflow.shadow.intake.JdbcIntakeSyntheticRuntimeSourceTest" time="0.004" />
+    <testcase name="crossPartyAuthorityFailsClosedWithoutRoleInference" classname="com.example.dispute.workflow.shadow.intake.JdbcIntakeSyntheticRuntimeSourceTest" time="0.013" />
+    <testcase name="crossThreadAuthorityFailsClosed" classname="com.example.dispute.workflow.shadow.intake.JdbcIntakeSyntheticRuntimeSourceTest" time="0.004" />
+    <testcase name="graphLoadUsesOneReadOnlyRepeatableReadSnapshotAndAuthoritativePlan" classname="com.example.dispute.workflow.shadow.intake.JdbcIntakeSyntheticRuntimeSourceTest" time="0.009" />
+    <testcase name="immutableGraphArtifactMetadataIsNeverSynthesizedFromGraphPointers" classname="com.example.dispute.workflow.shadow.intake.JdbcIntakeSyntheticRuntimeSourceTest" time="0.41">
+      </testcase>
+    <testcase name="parityClassificationsComeOnlyFromInjectedAuthoritativeMaterialSource" classname="com.example.dispute.workflow.shadow.intake.JdbcIntakeSyntheticRuntimeSourceTest" time="0.003" />
+    <testcase name="persistedVerifiedAdmissionSurvivesIngressTokenExpirationUntilCommandDeadline" classname="com.example.dispute.workflow.shadow.intake.JdbcIntakeSyntheticRuntimeSourceTest" time="0.005" />
+    <testcase name="replayReadsTheSameImmutableAuthorityWithoutConsumingIt" classname="com.example.dispute.workflow.shadow.intake.JdbcIntakeSyntheticRuntimeSourceTest" time="0.015" />
+    <testcase name="retiredRegistrationFailsBeforeAnyPrivateMaterialRead" classname="com.example.dispute.workflow.shadow.intake.JdbcIntakeSyntheticRuntimeSourceTest" time="0.006" />
+    <testcase name="revokedAccessSessionFailsBeforeAnyPrivateMaterialRead" classname="com.example.dispute.workflow.shadow.intake.JdbcIntakeSyntheticRuntimeSourceTest" time="0.006" />
+    <testcase name="revokedAgentSessionFailsBeforeAnyPrivateMaterialRead" classname="com.example.dispute.workflow.shadow.intake.JdbcIntakeSyntheticRuntimeSourceTest" time="0.581" />
+    <testcase name="snapshotBodyComesOnlyFromInjectedAuthoritativeMaterialSource" classname="com.example.dispute.workflow.shadow.intake.JdbcIntakeSyntheticRuntimeSourceTest" time="0.0" />
+    <testcase name="staleFenceFailsBeforeAnyPrivateMaterialRead" classname="com.example.dispute.workflow.shadow.intake.JdbcIntakeSyntheticRuntimeSourceTest" time="0.008" />
+  </testsuite>
+  <testsuite name="pytest" source_report="python-phase4-junit.xml" tests="327" failures="0" errors="0" skipped="0" time="6.809">
+    <testcase classname="tests.agents.test_intake_case_detail_dossier" name="test_attitude_position_skips_counterparty_used_as_contact_object" time="0.001" />
+    <testcase classname="tests.agents.test_intake_case_detail_dossier" name="test_current_message_is_not_duplicated_in_summary_or_original_statement" time="0.003" />
+    <testcase classname="tests.agents.test_intake_case_detail_dossier" name="test_handoff_remark_is_persisted_when_officer_is_waiting_for_remark" time="0.013" />
+    <testcase classname="tests.agents.test_intake_case_detail_dossier" name="test_intake_case_detail_patch_stays_a_dict_and_keeps_dynamic_branches" time="0.001" />
+    <testcase classname="tests.agents.test_intake_case_detail_dossier" name="test_intake_case_detail_readiness_is_gated_by_score_and_required_references" time="0.011" />
+    <testcase classname="tests.agents.test_intake_case_detail_dossier" name="test_intake_case_detail_translates_llm_missing_field_codes_before_persisting" time="0.013" />
+    <testcase classname="tests.agents.test_intake_case_detail_dossier" name="test_intake_model_output_requires_a_complete_case_summary_each_turn" time="0.001" />
+    <testcase classname="tests.agents.test_intake_case_detail_dossier" name="test_intake_model_output_schema_requires_the_nested_case_summary" time="0.007" />
+    <testcase classname="tests.agents.test_intake_case_detail_dossier" name="test_intake_question_boundary_removes_question_answered_by_claim_seed" time="0.001" />
+    <testcase classname="tests.agents.test_intake_case_detail_dossier" name="test_intake_question_boundary_replaces_evidence_requests_with_case_questions" time="0.001" />
+    <testcase classname="tests.agents.test_intake_case_detail_dossier" name="test_intake_turn_workflow_lives_under_agent_package_and_outputs_case_detail" time="0.011" />
+    <testcase classname="tests.agents.test_intake_case_detail_dossier" name="test_newly_ready_intake_turn_keeps_streamed_final_question" time="0.013" />
+    <testcase classname="tests.agents.test_intake_case_detail_dossier" name="test_pending_ready_board_records_final_answer_then_invites_remark" time="0.013" />
+    <testcase classname="tests.agents.test_intake_case_detail_dossier" name="test_pending_ready_stream_matches_normalized_final_utterance" time="0.020" />
+    <testcase classname="tests.agents.test_intake_case_detail_dossier" name="test_promotion_case_focus_collapses_questions_into_three_audit_actions" time="0.001" />
+    <testcase classname="tests.agents.test_intake_case_detail_dossier" name="test_real_intake_replay_keeps_summary_attitude_statement_and_focus_clean" time="0.008" />
+    <testcase classname="tests.agents.test_intake_case_detail_dossier" name="test_respondent_message_keeps_initiator_claim_but_isolates_original_statement" time="0.001" />
+    <testcase classname="tests.agents.test_intake_case_detail_dossier" name="test_respondent_resolution_question_is_not_replaced_by_initiator_claim" time="0.001" />
+    <testcase classname="tests.agents.test_intake_case_detail_dossier" name="test_subscription_focus_collapses_to_four_business_audit_actions" time="0.001" />
+    <testcase classname="tests.agents.test_intake_case_detail_dossier" name="test_user_respondent_summary_uses_the_matrix_initiator_role" time="0.001" />
+    <testcase classname="tests.agents.test_intake_case_detail_dossier" name="test_verification_focus_merges_names_gaps_questions_and_actions" time="0.001" />
+    <testcase classname="tests.agents.test_intake_case_detail_dossier" name="test_visible_follow_up_questions_replace_stale_structured_questions" time="0.002" />
+    <testcase classname="tests.agents.test_intake_prompt_compaction" name="test_dialogue_projection_keeps_three_system_started_turns_without_ids" time="0.001" />
+    <testcase classname="tests.agents.test_intake_prompt_compaction" name="test_previous_board_prompt_projection_removes_duplicate_and_raw_fields" time="0.001" />
+    <testcase classname="tests.agents.test_intake_resource_bounds" name="test_dossier_drops_context_echo_fields_instead_of_persisting_them" time="0.002" />
+    <testcase classname="tests.agents.test_intake_resource_bounds" name="test_intake_request_rejects_deep_previous_board_before_copying" time="0.001" />
+    <testcase classname="tests.agents.test_intake_resource_bounds" name="test_intake_request_rejects_unbounded_verbatim_transcript" time="0.001" />
+    <testcase classname="tests.agents.test_intake_resource_bounds" name="test_repeated_dossier_turns_do_not_nest_prior_snapshots" time="0.091" />
+    <testcase classname="tests.agents.test_intake_turn" name="test_dossier_appends_unilateral_inputs_verbatim_in_submission_order" time="0.006" />
+    <testcase classname="tests.agents.test_intake_turn" name="test_dossier_does_not_substitute_summary_when_structured_seed_lacks_original" time="0.002" />
+    <testcase classname="tests.agents.test_intake_turn" name="test_dossier_pins_seed_original_statement_and_marks_reported_attitude_subjective" time="0.004" />
+    <testcase classname="tests.agents.test_intake_turn" name="test_dossier_without_structured_seed_keeps_legacy_source_text_verbatim" time="0.003" />
+    <testcase classname="tests.agents.test_intake_turn" name="test_formal_respondent_attitude_seed_and_legacy_snapshot_are_ignored" time="0.002" />
+    <testcase classname="tests.agents.test_intake_turn" name="test_intake_prompt_excludes_formal_respondent_attitude_sources" time="0.012" />
+    <testcase classname="tests.agents.test_intake_turn" name="test_intake_reply_is_limited_to_two_question_sentences" time="0.001" />
+    <testcase classname="tests.agents.test_intake_turn" name="test_intake_request_rejects_cross_party_messages_and_non_private_scope" time="0.001" />
+    <testcase classname="tests.agents.test_intake_turn" name="test_intake_turn_response_exposes_structured_dialogue_window_metadata" time="0.087" />
+    <testcase classname="tests.agents.test_intake_turn" name="test_intake_turn_route_requires_service_secret" time="0.079" />
+    <testcase classname="tests.agents.test_intake_turn" name="test_intake_turn_workflow_uses_agent_case_detail_node_and_memory_context" time="0.019" />
+    <testcase classname="tests.agents.test_intake_turn" name="test_model_backed_lobby_seed_turn_generates_case_detail_board" time="0.466" />
+    <testcase classname="tests.agents.test_intake_turn" name="test_process_question_marks_knowledge_query_intent_without_real_rag" time="0.087" />
+    <testcase classname="tests.agents.test_intake_turn" name="test_respondent_prompt_snapshot_contains_only_the_frozen_matrix_projection" time="0.001" />
+    <testcase classname="tests.agents.test_intake_turn" name="test_subjective_respondent_attitude_seed_keeps_subjective_confidence_note" time="0.002" />
+    <testcase classname="tests.agents.test_intake_turn" name="test_user_message_turn_extracts_logistics_reference_from_current_message" time="0.098" />
+    <testcase classname="tests.agents.test_intake_turn" name="test_user_message_turn_merges_previous_case_detail_board" time="0.088" />
+    <testcase classname="tests.graph_runtime.unit.test_checkpoint_fenced_saver" name="test_active_fence_can_repoint_multiple_checkpoints_at_one_cognitive_revision" time="0.002" />
+    <testcase classname="tests.graph_runtime.unit.test_checkpoint_fenced_saver" name="test_checkpoint_read_rejects_another_graph_binding" time="0.002" />
+    <testcase classname="tests.graph_runtime.unit.test_checkpoint_fenced_saver" name="test_checkpoint_write_locks_fence_and_uses_one_connection" time="0.002" />
+    <testcase classname="tests.graph_runtime.unit.test_checkpoint_fenced_saver" name="test_command_binding_conflict_rolls_back_the_same_connection_checkpoint" time="0.002" />
+    <testcase classname="tests.graph_runtime.unit.test_checkpoint_fenced_saver" name="test_external_terminal_commit_locks_exact_checkpoint_without_rewriting_it" time="0.003" />
+    <testcase classname="tests.graph_runtime.unit.test_checkpoint_fenced_saver" name="test_external_terminal_preflight_rejects_stale_fence_before_store_boundary" time="0.002" />
+    <testcase classname="tests.graph_runtime.unit.test_checkpoint_fenced_saver" name="test_forged_mapping_is_not_a_trusted_fence_capability" time="0.002" />
+    <testcase classname="tests.graph_runtime.unit.test_checkpoint_fenced_saver" name="test_forged_terminal_result_capability_is_rejected_before_database_access" time="0.002" />
+    <testcase classname="tests.graph_runtime.unit.test_checkpoint_fenced_saver" name="test_langgraph_bootstrap_checkpoint_is_fenced_without_advancing_thread_state" time="0.002" />
+    <testcase classname="tests.graph_runtime.unit.test_checkpoint_fenced_saver" name="test_pending_writes_validate_the_parent_under_the_same_fence" time="0.002" />
+    <testcase classname="tests.graph_runtime.unit.test_checkpoint_fenced_saver" name="test_prebuilt_result_cannot_bypass_terminal_checkpoint_materialization" time="0.001" />
+    <testcase classname="tests.graph_runtime.unit.test_checkpoint_fenced_saver" name="test_reconnected_saver_rechecks_fence_after_database_failover" time="0.002" />
+    <testcase classname="tests.graph_runtime.unit.test_checkpoint_fenced_saver" name="test_replacement_saver_restores_a_durable_thread_without_process_state" time="0.002" />
+    <testcase classname="tests.graph_runtime.unit.test_checkpoint_fenced_saver" name="test_stale_fence_rejects_terminal_write_before_materialization" time="0.002" />
+    <testcase classname="tests.graph_runtime.unit.test_checkpoint_fenced_saver" name="test_stale_fence_rolls_back_before_the_saver_is_called" time="0.002" />
+    <testcase classname="tests.graph_runtime.unit.test_checkpoint_fenced_saver" name="test_takeover_that_changes_the_fence_rejects_the_late_writer" time="0.002" />
+    <testcase classname="tests.graph_runtime.unit.test_checkpoint_fenced_saver" name="test_terminal_checkpoint_result_and_command_commit_on_one_connection" time="0.003" />
+    <testcase classname="tests.graph_runtime.unit.test_checkpoint_fenced_saver" name="test_terminal_materializer_failure_rolls_back_after_fence_before_write" time="0.002" />
+    <testcase classname="tests.graph_runtime.unit.test_checkpoint_fenced_saver" name="test_terminal_materializer_requires_a_versioned_result_channel" time="0.002" />
+    <testcase classname="tests.graph_runtime.unit.test_checkpoint_fenced_saver" name="test_terminal_materializer_uses_langgraph_checkpoint_id_after_fence_lock" time="0.002" />
+    <testcase classname="tests.graph_runtime.unit.test_checkpoint_fenced_saver" name="test_terminal_result_failure_rolls_back_checkpoint_and_command_binding" time="0.002" />
+    <testcase classname="tests.graph_runtime.unit.test_checkpoint_fenced_saver" name="test_terminal_result_must_match_the_checkpoint_state[cognitive_revision-5-revision]" time="0.002" />
+    <testcase classname="tests.graph_runtime.unit.test_checkpoint_fenced_saver" name="test_terminal_result_must_match_the_checkpoint_state[terminal_draft-value1-draft]" time="0.003" />
+    <testcase classname="tests.graph_runtime.unit.test_checkpoint_fenced_saver" name="test_terminal_result_must_match_the_checkpoint_state[usage_by_invocation-value2-usage]" time="0.003" />
+    <testcase classname="tests.graph_runtime.unit.test_checkpoint_fenced_saver" name="test_thread_revision_conflict_rolls_back_the_checkpoint_transaction" time="0.002" />
+    <testcase classname="tests.graph_runtime.unit.test_compiled_executor" name="test_compiled_executor_closes_inner_graph_when_consumer_stops" time="0.008" />
+    <testcase classname="tests.graph_runtime.unit.test_compiled_executor" name="test_compiled_executor_never_terminalizes_pending_graph_work[next_nodes0-tasks0-interrupts0]" time="0.005" />
+    <testcase classname="tests.graph_runtime.unit.test_compiled_executor" name="test_compiled_executor_never_terminalizes_pending_graph_work[next_nodes1-tasks1-interrupts1]" time="0.006" />
+    <testcase classname="tests.graph_runtime.unit.test_compiled_executor" name="test_compiled_executor_never_terminalizes_pending_graph_work[next_nodes2-tasks2-interrupts2]" time="0.006" />
+    <testcase classname="tests.graph_runtime.unit.test_compiled_executor" name="test_compiled_executor_rejects_checkpoint_namespace_drift" time="0.005" />
+    <testcase classname="tests.graph_runtime.unit.test_compiled_executor" name="test_compiled_executor_rejects_untrusted_initial_state_identity[bindings]" time="0.005" />
+    <testcase classname="tests.graph_runtime.unit.test_compiled_executor" name="test_compiled_executor_rejects_untrusted_initial_state_identity[version_pins]" time="0.005" />
+    <testcase classname="tests.graph_runtime.unit.test_compiled_executor" name="test_compiled_executor_rejects_untyped_custom_graph_output" time="0.005" />
+    <testcase classname="tests.graph_runtime.unit.test_compiled_executor" name="test_compiled_executor_requires_the_runtime_fenced_saver_instance" time="0.002" />
+    <testcase classname="tests.graph_runtime.unit.test_compiled_executor" name="test_compiled_executor_streams_only_typed_updates_and_checkpointed_final" time="0.008" />
+    <testcase classname="tests.graph_runtime.unit.test_compiled_executor" name="test_real_langgraph_interrupt_cannot_be_mistaken_for_end" time="0.012" />
+    <testcase classname="tests.graph_runtime.unit.test_compiled_executor" name="test_real_langgraph_terminal_update_materializes_the_versioned_result_channel" time="0.016" />
+    <testcase classname="tests.graph_runtime.unit.test_compiled_executor" name="test_terminal_checkpoint_revision_cannot_overflow_postgres_bigint" time="0.002" />
+    <testcase classname="tests.graph_runtime.unit.test_compiled_executor" name="test_terminal_plan_must_match_the_quiescent_durable_state[draft]" time="0.007" />
+    <testcase classname="tests.graph_runtime.unit.test_compiled_executor" name="test_terminal_plan_must_match_the_quiescent_durable_state[public_usage]" time="0.007" />
+    <testcase classname="tests.graph_runtime.unit.test_compiled_executor" name="test_terminal_plan_must_match_the_quiescent_durable_state[revision]" time="0.006" />
+    <testcase classname="tests.graph_runtime.unit.test_compiled_executor" name="test_terminal_plan_must_match_the_quiescent_durable_state[usage]" time="0.006" />
+    <testcase classname="tests.graph_runtime.unit.test_compiled_executor" name="test_terminal_plan_rejects_profile_or_command_drift" time="0.003" />
+    <testcase classname="tests.graph_runtime.unit.test_intake_graph_recovery" name="test_cached_replay_with_different_event_hash_fails_without_model" time="0.067" />
+    <testcase classname="tests.graph_runtime.unit.test_intake_graph_recovery" name="test_crash_after_completion_before_response_returns_same_cached_hash" time="0.091" />
+    <testcase classname="tests.graph_runtime.unit.test_intake_graph_recovery" name="test_crash_after_terminal_checkpoint_reconciles_from_cache_without_model" time="0.096" />
+    <testcase classname="tests.graph_runtime.unit.test_intake_graph_recovery" name="test_crash_before_terminal_checkpoint_resumes_to_identical_proposal_hash[after_model_before_checkpoint-2]" time="0.152" />
+    <testcase classname="tests.graph_runtime.unit.test_intake_graph_recovery" name="test_crash_before_terminal_checkpoint_resumes_to_identical_proposal_hash[before_model-1]" time="0.170" />
+    <testcase classname="tests.graph_runtime.unit.test_intake_graph_recovery" name="test_runtime_bundle_requires_checkpoint_saver[false]" time="0.001" />
+    <testcase classname="tests.graph_runtime.unit.test_intake_graph_recovery" name="test_runtime_bundle_requires_checkpoint_saver[none]" time="0.001" />
+    <testcase classname="tests.graph_runtime.unit.test_intake_graph_recovery" name="test_runtime_bundle_requires_checkpoint_saver[object]" time="0.001" />
+    <testcase classname="tests.graph_runtime.unit.test_intake_graph_recovery" name="test_runtime_bundle_requires_checkpoint_saver[true]" time="0.001" />
+    <testcase classname="tests.graph_runtime.unit.test_production_bindings" name="test_authorized_intake_adapter_builds_the_real_governed_graph_proposal" time="0.043" />
+    <testcase classname="tests.graph_runtime.unit.test_production_bindings" name="test_compiled_intake_executor_persists_one_pointer_without_replacing_state" time="0.047" />
+    <testcase classname="tests.graph_runtime.unit.test_production_bindings" name="test_default_runtime_builder_never_creates_shadow_bindings_implicitly" time="0.006" />
+    <testcase classname="tests.graph_runtime.unit.test_production_bindings" name="test_exact_intake_graph_key_registers_only_the_dedicated_executor" time="0.004" />
+    <testcase classname="tests.graph_runtime.unit.test_production_bindings" name="test_exact_intake_graph_key_requires_all_durable_executor_dependencies" time="0.004" />
+    <testcase classname="tests.graph_runtime.unit.test_production_bindings" name="test_executor_factory_registers_a_real_exact_compiled_executor" time="0.009" />
+    <testcase classname="tests.graph_runtime.unit.test_production_bindings" name="test_intake_continuation_rejects_a_partial_durable_checkpoint_pointer[-None]" time="0.003" />
+    <testcase classname="tests.graph_runtime.unit.test_production_bindings" name="test_intake_continuation_rejects_a_partial_durable_checkpoint_pointer[None-cp-committed]" time="0.003" />
+    <testcase classname="tests.graph_runtime.unit.test_production_bindings" name="test_intake_continuation_resumes_the_durable_checkpoint_not_a_newer_orphan" time="0.012" />
+    <testcase classname="tests.graph_runtime.unit.test_production_bindings" name="test_intake_dispatch_rejects_version_relabeling_before_registration" time="0.004" />
+    <testcase classname="tests.graph_runtime.unit.test_production_bindings" name="test_intake_ingress_rejects_private_contaminants_before_graph_mutation" time="0.003" />
+    <testcase classname="tests.graph_runtime.unit.test_production_bindings" name="test_java_intake_exchange_loads_only_exact_canonical_receipt_bytes" time="0.006" />
+    <testcase classname="tests.graph_runtime.unit.test_production_bindings" name="test_java_intake_exchange_put_returns_exact_versioned_receipt" time="0.008" />
+    <testcase classname="tests.graph_runtime.unit.test_production_bindings" name="test_java_intake_exchange_rejects_payload_hash_mismatch" time="0.006" />
+    <testcase classname="tests.graph_runtime.unit.test_production_bindings" name="test_manifest_cannot_relabel_the_fixed_no_effect_protocol[command_schema_version-room-graph-command.v2]" time="0.005" />
+    <testcase classname="tests.graph_runtime.unit.test_production_bindings" name="test_manifest_cannot_relabel_the_fixed_no_effect_protocol[result_schema_version-room-graph-result.v2]" time="0.006" />
+    <testcase classname="tests.graph_runtime.unit.test_production_bindings" name="test_manifest_cannot_relabel_the_fixed_no_effect_protocol[tool_policy_version-tools.write.v1]" time="0.004" />
+    <testcase classname="tests.graph_runtime.unit.test_production_bindings" name="test_manifest_rejects_runtime_profile_and_tool_overrides" time="0.008" />
+    <testcase classname="tests.graph_runtime.unit.test_production_bindings" name="test_manifest_resolver_and_input_authorizer_accept_only_the_exact_command" time="0.008" />
+    <testcase classname="tests.graph_runtime.unit.test_production_bindings" name="test_settings_allow_no_tools_only_for_exact_intake_graph" time="0.011" />
+    <testcase classname="tests.graph_runtime.unit.test_production_bindings" name="test_synthetic_program_advances_each_checkpoint_and_has_no_effects" time="0.024" />
+    <testcase classname="tests.graph_runtime.unit.test_registry_identity" name="test_corrupt_persisted_actor_scope_hash_fails_closed" time="0.003" />
+    <testcase classname="tests.graph_runtime.unit.test_registry_identity" name="test_disabled_rejects_execution_and_retired_allows_only_restore" time="0.003" />
+    <testcase classname="tests.graph_runtime.unit.test_registry_identity" name="test_inactive_thread_binding_is_readable_but_cannot_grant_execution" time="0.004" />
+    <testcase classname="tests.graph_runtime.unit.test_registry_identity" name="test_migration_safety_requires_every_quiescence_predicate" time="0.001" />
+    <testcase classname="tests.graph_runtime.unit.test_registry_identity" name="test_private_and_shared_hearing_shapes_remain_distinct_and_valid" time="0.001" />
+    <testcase classname="tests.graph_runtime.unit.test_registry_identity" name="test_registry_exposes_only_disabled_shadow_and_retired" time="0.001" />
+    <testcase classname="tests.graph_runtime.unit.test_registry_identity" name="test_review_requires_exact_reviewer_scope" time="0.001" />
+    <testcase classname="tests.graph_runtime.unit.test_registry_identity" name="test_shadow_registry_requires_exact_immutable_profile_binding" time="0.003" />
+    <testcase classname="tests.graph_runtime.unit.test_registry_identity" name="test_shared_hearing_cannot_use_party_scope" time="0.001" />
+    <testcase classname="tests.graph_runtime.unit.test_registry_identity" name="test_thread_repository_compares_full_tuple_including_agent_session" time="0.002" />
+    <testcase classname="tests.graphs.intake.test_graph" name="test_cognition_cannot_overwrite_authority_state" time="0.049" />
+    <testcase classname="tests.graphs.intake.test_graph" name="test_cognition_draft_is_rejected_before_an_oversized_state_patch" time="0.045" />
+    <testcase classname="tests.graphs.intake.test_graph" name="test_dossier_patch_cannot_bypass_the_dedicated_matrix_patch[matrix_patch0]" time="0.047" />
+    <testcase classname="tests.graphs.intake.test_graph" name="test_dossier_patch_cannot_bypass_the_dedicated_matrix_patch[matrix_patch1]" time="0.050" />
+    <testcase classname="tests.graphs.intake.test_graph" name="test_event_applies_once_and_uses_injected_cognition" time="0.060" />
+    <testcase classname="tests.graphs.intake.test_graph" name="test_event_before_snapshot_fails_closed" time="0.025" />
+    <testcase classname="tests.graphs.intake.test_graph" name="test_event_replay_requires_the_exact_cached_command_binding" time="0.059" />
+    <testcase classname="tests.graphs.intake.test_graph" name="test_historical_event_id_remains_hash_bound" time="0.080" />
+    <testcase classname="tests.graphs.intake.test_graph" name="test_identical_event_replay_uses_cached_proposal" time="0.054" />
+    <testcase classname="tests.graphs.intake.test_graph" name="test_identical_snapshot_replay_returns_cached_terminal_without_revision_change" time="0.055" />
+    <testcase classname="tests.graphs.intake.test_graph" name="test_message_id_remains_hash_bound_after_leaving_six_message_window" time="0.165" />
+    <testcase classname="tests.graphs.intake.test_graph" name="test_message_route_fails_closed_until_governed_lcel_is_bound" time="0.042" />
+    <testcase classname="tests.graphs.intake.test_graph" name="test_persisted_state_accepts_command_delta_but_rejects_private_drift" time="0.081" />
+    <testcase classname="tests.graphs.intake.test_graph" name="test_snapshot_cannot_replay_the_latest_event_proposal" time="0.067" />
+    <testcase classname="tests.graphs.intake.test_graph" name="test_snapshot_import_produces_schema_valid_proposal" time="0.037" />
+    <testcase classname="tests.graphs.intake.test_graph" name="test_snapshot_reimport_with_another_hash_fails_closed" time="0.039" />
+    <testcase classname="tests.graphs.intake.test_graph" name="test_stable_event_id_cannot_be_rebound_to_another_hash" time="0.052" />
+    <testcase classname="tests.graphs.intake.test_graph" name="test_topology_is_fixed_and_exhaustive" time="0.019" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_async_wrapper_entrypoint_replacement_fails_closed_on_direct_call[abatch]" time="0.007" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_async_wrapper_entrypoint_replacement_fails_closed_on_direct_call[ainvoke]" time="0.007" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_async_wrapper_entrypoint_replacement_fails_closed_on_direct_call[astream]" time="0.005" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_async_wrapper_entrypoint_replacement_fails_closed_on_direct_call[atransform]" time="0.008" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_compiled_graph_rechecks_delegate_before_async_model_route" time="0.076" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_compiled_graph_rechecks_delegate_before_sync_model_route" time="0.052" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_config_helper_mutation_fails_closed_for_ainvoke" time="0.011" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_governed_usage_allows_provider_overhead" time="0.104" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_guardrail_rejects_reference_actor_and_readiness_violations[document0-INTAKE_LCEL_SOURCE_REF_UNAUTHORIZED]" time="0.057" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_guardrail_rejects_reference_actor_and_readiness_violations[document1-INTAKE_LCEL_ACTOR_ISOLATION_VIOLATION]" time="0.052" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_guardrail_rejects_reference_actor_and_readiness_violations[document2-INTAKE_LCEL_READINESS_PRECONDITION_FAILED]" time="0.047" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_leaf_component_mutation_fails_closed_before_model_invocation[guardrail-ainvoke-method]" time="0.005" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_leaf_component_mutation_fails_closed_before_model_invocation[guardrail-guard-method]" time="0.006" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_leaf_component_mutation_fails_closed_before_model_invocation[guardrail-profile]" time="0.007" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_leaf_component_mutation_fails_closed_before_model_invocation[lens-selector]" time="0.006" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_leaf_component_mutation_fails_closed_before_model_invocation[model-clock]" time="0.005" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_leaf_component_mutation_fails_closed_before_model_invocation[model-convert-input-method]" time="0.005" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_leaf_component_mutation_fails_closed_before_model_invocation[model-generate-method]" time="0.004" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_leaf_component_mutation_fails_closed_before_model_invocation[model-get-invocation-params-method]" time="0.005" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_leaf_component_mutation_fails_closed_before_model_invocation[model-policy-in-place]" time="0.005" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_leaf_component_mutation_fails_closed_before_model_invocation[model-policy]" time="0.004" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_leaf_component_mutation_fails_closed_before_model_invocation[model-profile-in-place]" time="0.005" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_leaf_component_mutation_fails_closed_before_model_invocation[model-profile]" time="0.005" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_leaf_component_mutation_fails_closed_before_model_invocation[model-transport-generate-method]" time="0.006" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_leaf_component_mutation_fails_closed_before_model_invocation[model-transport]" time="0.005" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_leaf_component_mutation_fails_closed_before_model_invocation[model-user-content-parts]" time="0.005" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_leaf_component_mutation_fails_closed_before_model_invocation[model-validated-result-method]" time="0.005" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_leaf_component_mutation_fails_closed_before_model_invocation[parser-get-name-method]" time="0.010" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_leaf_component_mutation_fails_closed_before_model_invocation[parser-invoke-method]" time="0.014" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_leaf_component_mutation_fails_closed_before_model_invocation[parser-output-type]" time="0.005" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_leaf_component_mutation_fails_closed_before_model_invocation[parser-parse-result-method]" time="0.013" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_leaf_component_mutation_fails_closed_before_model_invocation[passthrough-func]" time="0.009" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_leaf_component_mutation_fails_closed_before_model_invocation[patch-projector-call-with-config-method]" time="0.004" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_leaf_component_mutation_fails_closed_before_model_invocation[patch-projector-policy]" time="0.005" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_leaf_component_mutation_fails_closed_before_model_invocation[patch-projector-project-method]" time="0.005" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_leaf_component_mutation_fails_closed_before_model_invocation[preflight-invoke-method]" time="0.004" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_leaf_component_mutation_fails_closed_before_model_invocation[preflight-policy]" time="0.008" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_leaf_component_mutation_fails_closed_before_model_invocation[preflight-validate-method]" time="0.005" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_leaf_component_mutation_fails_closed_before_model_invocation[prompt-format-method]" time="0.006" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_leaf_component_mutation_fails_closed_before_model_invocation[prompt-get-name-method]" time="0.006" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_leaf_component_mutation_fails_closed_before_model_invocation[prompt-messages]" time="0.005" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_nested_mutation_fails_closed_for_all_async_execution_entrypoints[abatch]" time="0.006" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_nested_mutation_fails_closed_for_all_async_execution_entrypoints[ainvoke]" time="0.006" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_nested_mutation_fails_closed_for_all_async_execution_entrypoints[astream]" time="0.006" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_nested_mutation_fails_closed_for_all_async_execution_entrypoints[atransform]" time="0.007" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_nested_mutation_fails_closed_for_all_sync_execution_entrypoints[batch]" time="0.004" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_nested_mutation_fails_closed_for_all_sync_execution_entrypoints[invoke]" time="0.005" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_nested_mutation_fails_closed_for_all_sync_execution_entrypoints[stream]" time="0.003" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_nested_mutation_fails_closed_for_all_sync_execution_entrypoints[transform]" time="0.006" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_normal_async_wrapper_entrypoints_preserve_accounting[abatch]" time="0.052" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_normal_async_wrapper_entrypoints_preserve_accounting[ainvoke]" time="0.060" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_normal_async_wrapper_entrypoints_preserve_accounting[astream]" time="0.068" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_normal_async_wrapper_entrypoints_preserve_accounting[atransform]" time="0.078" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_normal_sync_wrapper_entrypoints_preserve_accounting[batch]" time="0.060" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_normal_sync_wrapper_entrypoints_preserve_accounting[invoke]" time="0.072" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_normal_sync_wrapper_entrypoints_preserve_accounting[stream]" time="0.059" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_normal_sync_wrapper_entrypoints_preserve_accounting[transform]" time="0.063" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_passthrough_behavior_mutation_fails_closed_for_stream" time="0.008" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_projector_instance_override_fails_closed_on_real_event_route" time="0.047" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_raw_callable_is_rejected_without_the_test_only_factory" time="0.001" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_real_intake_lcel_is_governed_object_flow_with_human_text_isolation" time="0.107" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_state_lens_exposes_only_authorized_window_summary_dossier_refs_and_versions" time="0.099" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_strict_parser_accepts_delta_but_requires_explicit_stance" time="0.007" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_strict_parser_rejects_non_numeric_confidence[0.9]" time="0.004" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_strict_parser_rejects_non_numeric_confidence[True]" time="0.006" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_strict_parser_rejects_unknown_and_formal_action_fields[&lt;lambda&gt;0]" time="0.007" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_strict_parser_rejects_unknown_and_formal_action_fields[&lt;lambda&gt;1]" time="0.012" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_strict_parser_rejects_unknown_and_formal_action_fields[&lt;lambda&gt;2]" time="0.008" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_sync_wrapper_entrypoint_replacement_fails_closed_on_direct_call[batch]" time="0.005" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_sync_wrapper_entrypoint_replacement_fails_closed_on_direct_call[invoke]" time="0.005" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_sync_wrapper_entrypoint_replacement_fails_closed_on_direct_call[stream]" time="0.004" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_sync_wrapper_entrypoint_replacement_fails_closed_on_direct_call[transform]" time="0.003" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_system_prompt_preserves_matrix_binding_and_source_scope_semantics" time="0.002" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_test_hook_identity_is_sealed_and_normal_hook_still_runs" time="0.111" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_tool_policy_pin_drift_fails_before_transport" time="0.062" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_unvetted_runnable_is_rejected[binding]" time="0.001" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_unvetted_runnable_is_rejected[branch]" time="0.002" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_unvetted_runnable_is_rejected[direct]" time="0.001" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_unvetted_runnable_is_rejected[router]" time="0.001" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_unvetted_runnable_is_rejected[sequence]" time="0.001" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_unvetted_runnable_is_rejected[with-fallbacks]" time="0.001" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_version_or_tool_profile_drift_fails_before_transport" time="0.053" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_vetted_runnable_identity_and_full_nested_structure_are_sealed" time="0.010" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_wrapper_critical_reference_replacement_fails_closed[_component_seal]" time="0.003" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_wrapper_critical_reference_replacement_fails_closed[_pipeline]" time="0.005" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_wrapper_critical_reference_replacement_fails_closed[_structure_seal]" time="0.005" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_wrapper_critical_reference_replacement_fails_closed[_vetted_token]" time="0.005" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_wrapper_dispatch_method_replacement_fails_closed[_after_execution]" time="0.003" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_wrapper_dispatch_method_replacement_fails_closed[_before_execution]" time="0.006" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_wrapper_dispatch_method_replacement_fails_closed[_is_sealed]" time="0.004" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_wrapper_dispatch_method_replacement_fails_closed[_require_sealed]" time="0.004" />
+    <testcase classname="tests.graphs.intake.test_lcel" name="test_wrapper_dispatch_method_replacement_fails_closed[_run_test_hook]" time="0.003" />
+    <testcase classname="tests.graphs.intake.test_matrix_patch" name="test_contract_union_requires_explicit_delta_stance" time="0.001" />
+    <testcase classname="tests.graphs.intake.test_matrix_patch" name="test_delta_allows_new_fact_with_mixed_scope_under_current_source_authority" time="0.047" />
+    <testcase classname="tests.graphs.intake.test_matrix_patch" name="test_delta_rejects_materiality_rebind_for_every_source_scope[CURRENT_SOURCE]" time="0.069" />
+    <testcase classname="tests.graphs.intake.test_matrix_patch" name="test_delta_rejects_materiality_rebind_for_every_source_scope[PREVIOUS_AND_CURRENT_SOURCE]" time="0.053" />
+    <testcase classname="tests.graphs.intake.test_matrix_patch" name="test_delta_rejects_materiality_rebind_for_every_source_scope[PREVIOUS_MATRIX]" time="0.051" />
+    <testcase classname="tests.graphs.intake.test_matrix_patch" name="test_delta_rejects_unknown_or_rebound_fact_identity[&lt;lambda&gt;-INTAKE_MATRIX_FACT_REBOUND0]" time="0.034" />
+    <testcase classname="tests.graphs.intake.test_matrix_patch" name="test_delta_rejects_unknown_or_rebound_fact_identity[&lt;lambda&gt;-INTAKE_MATRIX_FACT_REBOUND1]" time="0.039" />
+    <testcase classname="tests.graphs.intake.test_matrix_patch" name="test_delta_rejects_unknown_or_rebound_fact_identity[&lt;lambda&gt;-INTAKE_MATRIX_FACT_UNKNOWN]" time="0.035" />
+    <testcase classname="tests.graphs.intake.test_matrix_patch" name="test_delta_shape_and_formal_authority_fields_fail_closed[&lt;lambda&gt;0]" time="0.033" />
+    <testcase classname="tests.graphs.intake.test_matrix_patch" name="test_delta_shape_and_formal_authority_fields_fail_closed[&lt;lambda&gt;1]" time="0.037" />
+    <testcase classname="tests.graphs.intake.test_matrix_patch" name="test_delta_shape_and_formal_authority_fields_fail_closed[&lt;lambda&gt;2]" time="0.034" />
+    <testcase classname="tests.graphs.intake.test_matrix_patch" name="test_delta_shape_and_formal_authority_fields_fail_closed[&lt;lambda&gt;3]" time="0.034" />
+    <testcase classname="tests.graphs.intake.test_matrix_patch" name="test_dossier_patch_keeps_general_fact_and_source_references" time="0.001" />
+    <testcase classname="tests.graphs.intake.test_matrix_patch" name="test_dossier_patch_recursively_rejects_matrix_authority_metadata[fact_indexes-value6]" time="0.001" />
+    <testcase classname="tests.graphs.intake.test_matrix_patch" name="test_dossier_patch_recursively_rejects_matrix_authority_metadata[generation_ref-value3]" time="0.002" />
+    <testcase classname="tests.graphs.intake.test_matrix_patch" name="test_dossier_patch_recursively_rejects_matrix_authority_metadata[matrix_id-CASE_MATRIX_MODEL_DERIVED]" time="0.001" />
+    <testcase classname="tests.graphs.intake.test_matrix_patch" name="test_dossier_patch_recursively_rejects_matrix_authority_metadata[matrix_kind-BILATERAL_FROZEN]" time="0.001" />
+    <testcase classname="tests.graphs.intake.test_matrix_patch" name="test_dossier_patch_recursively_rejects_matrix_authority_metadata[matrix_version-2]" time="0.001" />
+    <testcase classname="tests.graphs.intake.test_matrix_patch" name="test_dossier_patch_recursively_rejects_matrix_authority_metadata[parent_ref-value4]" time="0.001" />
+    <testcase classname="tests.graphs.intake.test_matrix_patch" name="test_dossier_patch_recursively_rejects_matrix_authority_metadata[party_map-value5]" time="0.001" />
+    <testcase classname="tests.graphs.intake.test_matrix_patch" name="test_dossier_patch_recursively_rejects_matrix_authority_metadata[schema_version-case_fact_matrix.v2]" time="0.001" />
+    <testcase classname="tests.graphs.intake.test_matrix_patch" name="test_initiator_can_only_propose_unilateral_matrix" time="0.039" />
+    <testcase classname="tests.graphs.intake.test_matrix_patch" name="test_not_addressed_only_carries_a_prior_fact_without_asserted_value" time="0.037" />
+    <testcase classname="tests.graphs.intake.test_matrix_patch" name="test_respondent_delta_fails_closed_without_locked_initiator_matrix" time="0.033" />
+    <testcase classname="tests.graphs.intake.test_matrix_patch" name="test_respondent_delta_must_carry_every_frozen_fact" time="0.041" />
+    <testcase classname="tests.graphs.intake.test_matrix_patch" name="test_respondent_delta_projects_and_replays_deterministically" time="0.134" />
+    <testcase classname="tests.graphs.intake.test_matrix_patch" name="test_respondent_fact_membership_excludes_unilateral_projection" time="0.035" />
+    <testcase classname="tests.graphs.intake.test_matrix_patch" name="test_respondent_unlock_rejects_rehashed_non_java_frozen_shape[&lt;lambda&gt;0]" time="0.032" />
+    <testcase classname="tests.graphs.intake.test_matrix_patch" name="test_respondent_unlock_rejects_rehashed_non_java_frozen_shape[&lt;lambda&gt;1]" time="0.032" />
+    <testcase classname="tests.graphs.intake.test_matrix_patch" name="test_respondent_unlock_rejects_rehashed_non_java_frozen_shape[&lt;lambda&gt;2]" time="0.038" />
+    <testcase classname="tests.graphs.intake.test_matrix_patch" name="test_respondent_unlock_rejects_rehashed_non_java_frozen_shape[&lt;lambda&gt;3]" time="0.030" />
+    <testcase classname="tests.graphs.intake.test_matrix_patch" name="test_respondent_unlock_rejects_rehashed_non_java_frozen_shape[&lt;lambda&gt;4]" time="0.025" />
+    <testcase classname="tests.graphs.intake.test_matrix_patch" name="test_respondent_unlock_rejects_stale_embedded_matrix_hash" time="0.029" />
+    <testcase classname="tests.graphs.intake.test_matrix_patch" name="test_tampered_checkpoint_authority_fails_closed" time="0.035" />
+    <testcase classname="tests.graphs.intake.test_matrix_patch" name="test_unlocked_respondent_can_only_propose_delta" time="0.045" />
+    <testcase classname="tests.graphs.intake.test_recovery" name="test_projected_proposal_survives_a_crash_before_terminal_checkpoint" time="0.072" />
+    <testcase classname="tests.graphs.intake.test_recovery" name="test_replacement_graph_resumes_after_model_without_a_second_invocation" time="0.095" />
+    <testcase classname="tests.graphs.intake.test_recovery" name="test_resume_from_pre_model_checkpoint_invokes_cognition_once" time="0.102" />
+    <testcase classname="tests.graphs.intake.test_recovery" name="test_terminal_checkpoint_is_reused_after_response_loss" time="0.075" />
+    <testcase classname="tests.graphs.intake.test_state" name="test_binding_reducer_allows_only_per_command_replacement" time="0.002" />
+    <testcase classname="tests.graphs.intake.test_state" name="test_binding_reducer_rejects_private_identity_drift[actor_scope_hash-2222222222222222222222222222222222222222222222222222222222222222]" time="0.002" />
+    <testcase classname="tests.graphs.intake.test_state" name="test_binding_reducer_rejects_private_identity_drift[agent_session_id-AGENT_SESSION_OTHER]" time="0.002" />
+    <testcase classname="tests.graphs.intake.test_state" name="test_binding_reducer_rejects_private_identity_drift[audience-MERCHANT]" time="0.002" />
+    <testcase classname="tests.graphs.intake.test_state" name="test_binding_reducer_rejects_private_identity_drift[case_id-CASE_OTHER]" time="0.002" />
+    <testcase classname="tests.graphs.intake.test_state" name="test_binding_reducer_rejects_private_identity_drift[room_epoch-2]" time="0.002" />
+    <testcase classname="tests.graphs.intake.test_state" name="test_binding_reducer_rejects_private_identity_drift[tenant_surrogate-tenant-other]" time="0.002" />
+    <testcase classname="tests.graphs.intake.test_state" name="test_binding_reducer_rejects_private_identity_drift[thread_id-grt.v1.11111111111111111111111111111111]" time="0.002" />
+    <testcase classname="tests.graphs.intake.test_state" name="test_message_reducer_keeps_the_latest_six_in_sequence_order" time="0.002" />
+    <testcase classname="tests.graphs.intake.test_state" name="test_message_reducer_rejects_stable_id_rebinding" time="0.002" />
+    <testcase classname="tests.graphs.intake.test_state" name="test_message_reducer_replays_identical_stable_id" time="0.001" />
+    <testcase classname="tests.graphs.intake.test_state" name="test_version_pin_reducer_rejects_profile_drift" time="0.001" />
+    <testcase classname="tests.graphs.intake.test_validators" name="test_event_rejects_other_party_audience" time="0.003" />
+    <testcase classname="tests.graphs.intake.test_validators" name="test_event_requires_its_message_in_source_refs" time="0.003" />
+    <testcase classname="tests.graphs.intake.test_validators" name="test_proposal_rejects_explicit_null_dossier_branch" time="0.002" />
+    <testcase classname="tests.graphs.intake.test_validators" name="test_snapshot_enforces_message_limit_in_utf8_bytes" time="0.002" />
+    <testcase classname="tests.graphs.intake.test_validators" name="test_snapshot_rejects_duplicate_or_unordered_sequence[sequences0]" time="0.002" />
+    <testcase classname="tests.graphs.intake.test_validators" name="test_snapshot_rejects_duplicate_or_unordered_sequence[sequences1]" time="0.002" />
+    <testcase classname="tests.graphs.intake.test_validators" name="test_snapshot_rejects_duplicate_stable_message_id" time="0.002" />
+    <testcase classname="tests.graphs.intake.test_validators" name="test_snapshot_rejects_nested_credentials" time="0.002" />
+    <testcase classname="tests.graphs.intake.test_validators" name="test_snapshot_rejects_other_party_private_message" time="0.002" />
+    <testcase classname="tests.graphs.intake.test_validators" name="test_snapshot_rejects_private_binding_mismatch" time="0.002" />
+    <testcase classname="tests.graphs.intake.test_validators" name="test_snapshot_rejects_unknown_authority_field" time="0.002" />
+    <testcase classname="tests.graphs.intake.test_validators" name="test_snapshot_self_hash_is_mandatory" time="0.003" />
+    <testcase classname="tests.graphs.intake.test_validators" name="test_state_rejects_memory_frame_at_any_depth" time="0.002" />
+    <testcase classname="tests.model_runtime.test_runnable_factory" name="test_parser_failure_prevents_guardrail_and_patch" time="0.004" />
+    <testcase classname="tests.model_runtime.test_runnable_factory" name="test_real_chain_ainvoke_uses_native_async_model_path" time="0.008" />
+    <testcase classname="tests.model_runtime.test_runnable_factory" name="test_real_lcel_object_flow_keeps_state_overrides_out_of_system_message" time="0.005" />
+    <testcase classname="tests.security.test_graph_security_runtime" name="test_initial_fetch_failure_never_returns_a_runtime" time="0.002" />
+    <testcase classname="tests.security.test_graph_security_runtime" name="test_jwks_url_rejects_unsafe_shapes[file:///tmp/jwks.json]" time="0.003" />
+    <testcase classname="tests.security.test_graph_security_runtime" name="test_jwks_url_rejects_unsafe_shapes[https://java-api-service/jwks#fragment]" time="0.002" />
+    <testcase classname="tests.security.test_graph_security_runtime" name="test_jwks_url_rejects_unsafe_shapes[https://user:secret@java-api-service/jwks]" time="0.002" />
+    <testcase classname="tests.security.test_graph_security_runtime" name="test_jwks_url_rejects_unsafe_shapes[relative/jwks]" time="0.002" />
+    <testcase classname="tests.security.test_graph_security_runtime" name="test_open_loads_keys_before_reporting_ready_and_closes_idempotently" time="0.004" />
+    <testcase classname="tests.security.test_graph_security_runtime" name="test_refresh_failure_keeps_the_last_immutable_snapshot_available" time="0.004" />
+    <testcase classname="tests.test_streaming" name="test_incremental_projector_only_emits_new_decoded_string_prefix" time="0.001" />
+    <testcase classname="tests.test_streaming" name="test_incremental_projector_streams_completed_case_detail_sections" time="0.001" />
+    <testcase classname="tests.test_streaming" name="test_invalid_streamed_schema_fails_closed_without_second_model_call" time="0.002" />
+    <testcase classname="tests.test_streaming" name="test_ndjson_disconnect_cancels_a_blocked_publisher" time="0.186" />
+    <testcase classname="tests.test_streaming" name="test_ndjson_endpoint_uses_one_versioned_terminal_contract" time="0.010" />
+    <testcase classname="tests.test_streaming" name="test_ndjson_slow_consumer_applies_bounded_backpressure" time="0.140" />
+    <testcase classname="tests.test_streaming" name="test_observer_reorders_events_constructed_by_parallel_model_threads" time="0.001" />
+    <testcase classname="tests.test_streaming" name="test_observer_splits_large_deltas_and_rejects_unbounded_visible_output" time="0.001" />
+    <testcase classname="tests.test_streaming" name="test_projector_rejects_model_document_over_hard_limit" time="0.001" />
+    <testcase classname="tests.test_streaming" name="test_real_provider_stream_projects_answer_and_ignores_reasoning_channel" time="0.002" />
+    <testcase classname="tests.test_streaming_v2" name="test_delta_coalescer_batches_only_compatible_bounded_deltas" time="0.001" />
+    <testcase classname="tests.test_streaming_v2" name="test_v1_adapter_denies_non_public_delta" time="0.001" />
+    <testcase classname="tests.test_streaming_v2" name="test_v1_adapter_preserves_identity_and_drops_raw_final_response" time="0.001" />
+    <testcase classname="tests.test_streaming_v2" name="test_v2_model_enforces_identifier_and_reference_bounds" time="0.001" />
+    <testcase classname="tests.test_streaming_v2" name="test_v2_model_rejects_unknown_payload_and_unbound_final" time="0.001" />
+  </testsuite>
+  <testsuite name="pytest" source_report="static-phase4-junit.xml" tests="134" failures="0" errors="0" skipped="0" time="22.932">
+    <testcase classname="tests.static.test_agent_platform_schema_contracts" name="test_compatibility_matrix_covers_every_contract" time="0.008" />
+    <testcase classname="tests.static.test_agent_platform_schema_contracts" name="test_contract_schema_set_and_root_boundaries" time="0.011" />
+    <testcase classname="tests.static.test_agent_platform_schema_contracts" name="test_reconcile_response_embeds_the_exact_room_graph_result_contract" time="0.002" />
+    <testcase classname="tests.static.test_agent_platform_schema_contracts" name="test_restricted_rfc8785_canonical_hash_vectors_are_fixed" time="0.004" />
+    <testcase classname="tests.static.test_agent_platform_schema_contracts" name="test_valid_and_invalid_contract_fixtures" time="0.024" />
+    <testcase classname="tests.static.test_graph_import_boundaries" name="test_compose_does_not_share_bootstrap_or_graph_credentials_with_services" time="0.002" />
+    <testcase classname="tests.static.test_graph_import_boundaries" name="test_graph_database_bootstrap_and_image_are_least_privilege_and_locked" time="0.003" />
+    <testcase classname="tests.static.test_graph_import_boundaries" name="test_graph_runtime_cannot_bypass_governed_model_transport" time="0.150" />
+    <testcase classname="tests.static.test_graph_import_boundaries" name="test_non_model_http_is_confined_to_fixed_java_intake_exchange_endpoints" time="0.031" />
+    <testcase classname="tests.static.test_graph_import_boundaries" name="test_production_code_has_no_in_memory_graph_recovery_path" time="0.927" />
+    <testcase classname="tests.static.test_graph_import_boundaries" name="test_raw_postgres_saver_is_confined_to_owned_adapters" time="0.826" />
+    <testcase classname="tests.static.test_graph_import_boundaries" name="test_state_kernel_cannot_import_clients_pools_or_model_runtime" time="0.013" />
+    <testcase classname="tests.static.test_phase4_candidate_evidence" name="test_assemble_cannot_turn_an_unvalidated_manifest_dictionary_into_pass" time="0.338" />
+    <testcase classname="tests.static.test_phase4_candidate_evidence" name="test_assemble_reloads_and_rejects_tampered_quarantined_raw_junit" time="0.444" />
+    <testcase classname="tests.static.test_phase4_candidate_evidence" name="test_assembles_exact_bundle_and_keeps_both_migrations_pending" time="0.635" />
+    <testcase classname="tests.static.test_phase4_candidate_evidence" name="test_candidate_preflight_requires_fixed_detached_clean_head" time="0.026" />
+    <testcase classname="tests.static.test_phase4_candidate_evidence" name="test_every_java_policy_selector_class_is_in_the_candidate_union" time="0.126" />
+    <testcase classname="tests.static.test_phase4_candidate_evidence" name="test_execution_manifest_authenticates_commands_environment_logs_and_reports" time="0.264" />
+    <testcase classname="tests.static.test_phase4_candidate_evidence" name="test_frontend_policy_selector_accepts_vitest_suite_prefix" time="0.001" />
+    <testcase classname="tests.static.test_phase4_candidate_evidence" name="test_matrix_expands_java_template_and_declares_exact_artifacts" time="0.097" />
+    <testcase classname="tests.static.test_phase4_candidate_evidence" name="test_policy_coverage_requires_every_real_test_selector" time="0.340" />
+    <testcase classname="tests.static.test_phase4_candidate_evidence" name="test_promotion_or_runtime_relaxation_is_rejected" time="0.044" />
+    <testcase classname="tests.static.test_phase4_candidate_evidence" name="test_pytest_policy_selector_binds_real_candidate_parameter_families[tests.graphs.intake.test_lcel#test_strict_parser_rejects_unknown_and_formal_action_fields-tests.graphs.intake.test_lcel-names1]" time="0.001" />
+    <testcase classname="tests.static.test_phase4_candidate_evidence" name="test_pytest_policy_selector_binds_real_candidate_parameter_families[tests.graphs.intake.test_state#test_binding_reducer_rejects_private_identity_drift-tests.graphs.intake.test_state-names0]" time="0.001" />
+    <testcase classname="tests.static.test_phase4_candidate_evidence" name="test_resealed_manifest_rejects_tampered_quarantined_infra_artifacts[raw_junit-java_phase_4 quarantined raw JUnit SHA-256 drifted]" time="0.511" />
+    <testcase classname="tests.static.test_phase4_candidate_evidence" name="test_resealed_manifest_rejects_tampered_quarantined_infra_artifacts[stderr-java_phase_4 quarantined stderr SHA-256 drifted]" time="0.415" />
+    <testcase classname="tests.static.test_phase4_candidate_evidence" name="test_resealed_manifest_rejects_tampered_quarantined_infra_artifacts[stdout-java_phase_4 quarantined stdout SHA-256 drifted]" time="0.360" />
+    <testcase classname="tests.static.test_phase4_candidate_evidence" name="test_source_reports_reject_mixed_candidate_failure_skip_and_command" time="0.295" />
+    <testcase classname="tests.static.test_phase4_candidate_runner" name="test_candidate_run_directory_is_confined_inside_the_repository" time="0.017" />
+    <testcase classname="tests.static.test_phase4_candidate_runner" name="test_environment_snapshot_hashes_dependency_manifests_without_environment_values" time="0.417" />
+    <testcase classname="tests.static.test_phase4_candidate_runner" name="test_fresh_candidate_run_schedules_all_four_source_suites" time="0.131" />
+    <testcase classname="tests.static.test_phase4_candidate_runner" name="test_junit_transforms_preserve_the_approved_matrix_command" time="0.015" />
+    <testcase classname="tests.static.test_phase4_candidate_runner" name="test_new_candidate_refuses_an_existing_run_with_old_source_reports" time="0.014" />
+    <testcase classname="tests.static.test_phase4_candidate_runner" name="test_only_classified_infra_failure_can_resume_the_same_sha" time="0.001" />
+    <testcase classname="tests.static.test_phase4_candidate_runner" name="test_plan_expands_one_sha_and_the_complete_signed_synthetic_chain" time="0.121" />
+    <testcase classname="tests.static.test_phase4_candidate_runner" name="test_product_blocked_candidate_cannot_resume" time="0.481" />
+    <testcase classname="tests.static.test_phase4_candidate_runner" name="test_report_path_metacharacters_remain_one_non_shell_argument" time="0.011" />
+    <testcase classname="tests.static.test_phase4_candidate_runner" name="test_resume_rejects_bare_command_ids_that_would_skip_all_sources" time="0.641" />
+    <testcase classname="tests.static.test_phase4_candidate_runner" name="test_resume_rejects_commands_that_are_not_the_ordered_source_prefix" time="0.608" />
+    <testcase classname="tests.static.test_phase4_candidate_runner" name="test_resume_rejects_unsealed_and_tampered_manifests" time="0.443" />
+    <testcase classname="tests.static.test_phase4_candidate_runner" name="test_runtime_material_provider_is_an_explicit_engineering_only_evidence_boundary" time="0.037" />
+    <testcase classname="tests.static.test_phase4_candidate_runner" name="test_source_process_receives_argv_with_shell_disabled" time="0.011" />
+    <testcase classname="tests.static.test_phase4_engineering_evidence_policy" name="test_candidate_and_failure_rules_preserve_attempt_provenance" time="0.031" />
+    <testcase classname="tests.static.test_phase4_engineering_evidence_policy" name="test_migration_mapping_names_all_recovery_and_rollback_boundaries" time="0.032" />
+    <testcase classname="tests.static.test_phase4_engineering_evidence_policy" name="test_policy_is_synthetic_only_and_cannot_promote_migrations" time="0.032" />
+    <testcase classname="tests.static.test_phase4_engineering_evidence_policy" name="test_policy_maps_every_phase4_baseline_without_blanket_passes" time="0.133" />
+    <testcase classname="tests.static.test_phase4_engineering_evidence_policy" name="test_policy_maps_every_phase4_check_id_to_the_matrix_status" time="0.137" />
+    <testcase classname="tests.static.test_phase4_engineering_evidence_policy" name="test_policy_selectors_resolve_to_concrete_candidate_tests" time="2.853" />
+    <testcase classname="tests.static.test_phase4_engineering_evidence_policy" name="test_service_free_rollback_harness_is_model_evidence_only" time="0.033" />
+    <testcase classname="tests.static.test_phase4_engineering_evidence_policy" name="test_signed_synthetic_chain_is_required_by_the_candidate_without_promotion" time="1.344" />
+    <testcase classname="tests.static.test_phase4_intake_pilot_plan" name="test_phase4_baselines_and_check_ids_match_normative_documents" time="0.122" />
+    <testcase classname="tests.static.test_phase4_intake_pilot_plan" name="test_phase4_batch_policy_defers_heavy_recovery_and_freezes_one_candidate" time="0.109" />
+    <testcase classname="tests.static.test_phase4_intake_pilot_plan" name="test_phase4_compose_keeps_intake_runtime_fail_closed_for_java_services" time="0.002" />
+    <testcase classname="tests.static.test_phase4_intake_pilot_plan" name="test_phase4_finalization_key_capacity_covers_the_exact_frozen_formula" time="0.002" />
+    <testcase classname="tests.static.test_phase4_intake_pilot_plan" name="test_phase4_gate_is_engineering_only_and_uses_two_commit_evidence" time="0.126" />
+    <testcase classname="tests.static.test_phase4_intake_pilot_plan" name="test_phase4_plan_is_linked_and_forbids_implicit_respondent_timeout" time="0.006" />
+    <testcase classname="tests.static.test_phase4_intake_pilot_plan" name="test_phase4_runtime_defaults_require_two_nonlegacy_activation_locks" time="0.004" />
+    <testcase classname="tests.static.test_phase4_intake_pilot_plan" name="test_phase4_schemas_validate_positive_and_reject_negative_fixtures" time="0.248" />
+    <testcase classname="tests.static.test_phase4_intake_pilot_plan" name="test_phase4_snapshot_and_proposal_reject_forbidden_keys_at_any_depth" time="0.006" />
+    <testcase classname="tests.static.test_phase4_intake_pilot_plan" name="test_phase4_synthetic_runtime_material_is_bounded_and_fail_closed" time="0.040" />
+    <testcase classname="tests.static.test_phase4_intake_pilot_plan" name="test_phase4_uses_one_primary_and_five_unique_implementation_owners" time="0.118" />
+    <testcase classname="tests.static.test_phase4_intake_pilot_plan" name="test_phase4_valid_contracts_exclude_memory_and_formal_authority" time="0.010" />
+    <testcase classname="tests.static.test_phase4_intake_pilot_plan" name="test_phase4_valid_fixtures_have_exact_rfc8785_self_hashes" time="0.010" />
+    <testcase classname="tests.static.test_phase4_matrix_authority_erratum" name="test_delta_row_conditionals_and_cross_row_rules_reject_invalid_mutations" time="0.065" />
+    <testcase classname="tests.static.test_phase4_matrix_authority_erratum" name="test_erratum_requires_exact_sha_reauthentication_without_promotion" time="0.003" />
+    <testcase classname="tests.static.test_phase4_matrix_authority_erratum" name="test_formal_matrix_fields_and_frozen_projection_are_rejected" time="0.104" />
+    <testcase classname="tests.static.test_phase4_matrix_authority_erratum" name="test_matrix_patch_union_and_dual_schema_copies_are_exact" time="0.003" />
+    <testcase classname="tests.static.test_phase4_matrix_authority_erratum" name="test_null_unilateral_and_respondent_delta_fixtures_are_valid_and_hash_bound" time="0.069" />
+    <testcase classname="tests.static.test_phase4_no_formal_sink_assembly" name="test_archunit_rule_and_compiled_fixture_contract_exist" time="0.010" />
+    <testcase classname="tests.static.test_phase4_no_formal_sink_assembly" name="test_formal_intake_adapters_are_not_discoverable_components" time="0.005" />
+    <testcase classname="tests.static.test_phase4_no_formal_sink_assembly" name="test_gate_is_scheduled_in_batch_2_and_inherited_by_batch_3" time="0.095" />
+    <testcase classname="tests.static.test_phase4_no_formal_sink_assembly" name="test_meta_inf_service_descriptors_are_syntactically_valid_and_not_direct_formal" time="0.001" />
+    <testcase classname="tests.static.test_phase4_no_formal_sink_assembly" name="test_production_activity_registration_has_no_direct_formal_sink_reference" time="0.612" />
+    <testcase classname="tests.static.test_phase4_no_formal_sink_assembly" name="test_service_descriptor_parser_is_bom_aware_and_deduplicates_nested_names" time="0.020" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_active_status_is_transactional_and_never_a_foreign_key_pin" time="0.132" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_agent_session_profile_hash_id_fits_varchar_128_at_boundaries[MERCHANT]" time="0.122" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_agent_session_profile_hash_id_fits_varchar_128_at_boundaries[USER]" time="0.124" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_agent_session_profile_uses_exact_versioned_hash_registry" time="0.139" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_all_four_table_column_maps_are_exact_and_complete" time="0.149" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_case_command_ref_compares_only_its_four_wire_fields" time="0.127" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_case_party_and_route_authorities_are_server_owned" time="0.145" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_contract_is_frozen_and_keeps_all_runtime_gates_closed" time="0.168" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_creation_order_keeps_authority_before_outbox_visibility" time="0.249" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_empty_cancellation_reason_preserves_current_cancel_contract" time="0.018" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_epoch_binding_asserts_both_parties_before_bootstrap_delivery" time="0.162" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_event_worker_and_history_boundaries_are_exact" time="0.140" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_existing_event_constraint_trigger_compares_every_artifact_and_route_pin" time="0.142" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_existing_private_event_has_exact_v043_binding_and_route_fk" time="0.180" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_exit_gate_and_phase4_links_cover_every_review_finding" time="0.262" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_fixture_jcs_hash_size_put_key_and_receipt_self_hash_are_linked" time="0.003" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_formal_schema_manifest_links_are_exact" time="0.213" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_formal_wire_schemas_accept_positive_fixtures[intake-branch-command.schema.json-intake-branch-command-cancel-empty-valid.json]" time="0.028" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_formal_wire_schemas_accept_positive_fixtures[intake-branch-command.schema.json-intake-branch-command-valid.json]" time="0.018" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_formal_wire_schemas_accept_positive_fixtures[intake-command-payload-put-receipt.schema.json-intake-command-payload-put-receipt-valid.json]" time="0.024" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_formal_wire_schemas_accept_positive_fixtures[intake-human-input-command.schema.json-intake-human-input-command-valid.json]" time="0.015" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_formal_wire_schemas_reject_negative_fixtures[intake-branch-command.schema.json-intake-branch-command-respondent-cancel.json]" time="0.031" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_formal_wire_schemas_reject_negative_fixtures[intake-command-payload-put-receipt.schema.json-intake-command-payload-put-receipt-branch-oversize.json]" time="0.021" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_formal_wire_schemas_reject_negative_fixtures[intake-command-payload-put-receipt.schema.json-intake-command-payload-put-receipt-unsafe-epoch-micros.json]" time="0.031" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_formal_wire_schemas_reject_negative_fixtures[intake-human-input-command.schema.json-intake-human-input-command-extra-authority.json]" time="0.015" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_long_object_uri_is_not_in_any_primary_unique_or_candidate_key" time="0.125" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_manifest_validates_against_its_schema" time="0.200" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_migration_identity_preserves_phase6_and_outcome_reservations" time="0.148" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_party_authority_binds_exact_agent_session_scope_and_profiles" time="0.203" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_party_authority_binds_exact_epoch_and_registration" time="0.121" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_party_authority_directly_binds_exact_access_session_scope" time="0.130" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_payload_and_command_relations_are_one_to_one_and_atomic" time="0.150" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_payload_source_kind_and_command_schema_matrix_are_closed" time="0.121" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_payload_source_kind_row_shapes_are_database_checked" time="0.215" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_phase4_task_dag_and_batches_enforce_the_gate" time="0.118" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_put_receipt_schema_rejects_invalid_object_uri" time="0.031" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_put_receipt_snapshot_is_persisted_and_rfc8785_recomputed" time="0.125" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_read_linearization_is_replay_stable_and_fail_closed" time="0.143" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_revocation_lock_order_and_conflict_matrix_are_closed" time="0.176" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_schema_rejects_command_fk_without_request_hash" time="0.327" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_schema_rejects_payload_row_shape_drift" time="0.142" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_schema_rejects_payload_source_kind_drift" time="0.159" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_schema_rejects_profile_formula_drift" time="0.185" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_schema_rejects_security_and_ordering_drift[bootstrap-outbox-visible-first]" time="0.255" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_schema_rejects_security_and_ordering_drift[disabled-allows-inert]" time="0.134" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_schema_rejects_security_and_ordering_drift[event-hash-from-event-id]" time="0.168" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_schema_rejects_security_and_ordering_drift[registration-session-membership-disabled]" time="0.158" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_schema_rejects_security_and_ordering_drift[selection-temporal]" time="0.307" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_schema_rejects_security_and_ordering_drift[v1-drain-gate-removed]" time="0.185" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_selection_relation_freezes_exact_epoch_key_and_profile_pins" time="0.131" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_server_canonical_branch_is_closed_and_bounded" time="0.211" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_server_minted_human_input_is_put_before_db_with_exact_receipt" time="0.125" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_server_minted_payload_orphan_cleanup_is_idempotent[server_canonical_branch]" time="0.126" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_server_minted_payload_orphan_cleanup_is_idempotent[server_minted_human_input]" time="0.126" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_server_minted_payload_put_retry_key_is_deterministic[server_canonical_branch]" time="0.119" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_server_minted_payload_put_retry_key_is_deterministic[server_minted_human_input]" time="0.123" />
+    <testcase classname="tests.static.test_phase4_r15_authority_binding_contract" name="test_r15_wire_schema_integer_fields_are_jcs_safe" time="0.008" />
+    <testcase classname="tests.static.test_temporal_refactor_traceability" name="test_architecture_check_manifest_is_complete_and_release_ready" time="0.029" />
+    <testcase classname="tests.static.test_temporal_refactor_traceability" name="test_current_room_baseline_and_gap_manifests_are_complete" time="0.004" />
+    <testcase classname="tests.static.test_temporal_refactor_traceability" name="test_phase_zero_decisions_are_accepted_without_legacy_authority" time="0.014" />
+  </testsuite>
+</testsuites>

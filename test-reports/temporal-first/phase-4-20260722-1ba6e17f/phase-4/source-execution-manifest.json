@@ -1,0 +1,440 @@
+{
+  "schema_version": "phase4-source-execution-manifest.v1",
+  "phase": 4,
+  "candidate_commit": "1ba6e17fa2182156825f42d7e243978cf23ccdb4",
+  "attempt_id": "phase4-run-1ba6e17f-final3",
+  "status": "PASS",
+  "verification_started_at": "2026-07-22T13:01:55.912+00:00",
+  "verification_finished_at": "2026-07-22T13:09:14.178+00:00",
+  "environment": {
+    "environment_id": "local-phase4-candidate-final3",
+    "captured_at": "2026-07-22T13:01:55.918+00:00",
+    "host": {
+      "system": "Windows",
+      "release": "11",
+      "machine": "AMD64"
+    },
+    "tools": {
+      "python": {
+        "available": true,
+        "version": "3.12.3",
+        "implementation": "CPython"
+      },
+      "git": {
+        "available": true,
+        "exit_code": 0,
+        "version": "git version 2.44.0.windows.1"
+      },
+      "java": {
+        "available": true,
+        "exit_code": 0,
+        "version": "java version \"21.0.8\" 2025-07-15 LTS"
+      },
+      "node": {
+        "available": true,
+        "exit_code": 0,
+        "version": "v24.15.0"
+      }
+    },
+    "dependency_manifests": [
+      {
+        "path": "python-agent-service/pyproject.toml",
+        "sha256": "89fa516cf0fce8de32f703a38c1be50dd5c8d51f1076512f1a75c7e136875668"
+      },
+      {
+        "path": "python-agent-service/requirements.lock",
+        "sha256": "ec588b073793e6bb74f1fa5cf8630df830fd34afde9596c8b64e9ccd07ac10e3"
+      },
+      {
+        "path": "java-api-service/pom.xml",
+        "sha256": "1b46df62b207a9f0bd3253bba24d1055a88c83f736313561c1fd9b171ca93c58"
+      },
+      {
+        "path": "java-api-service/.mvn/wrapper/maven-wrapper.properties",
+        "sha256": "fd3f8fa8b791a96b39f10907b71c462bed15ba03f9cfe8d136c137406c3a19a6"
+      },
+      {
+        "path": "frontend/package.json",
+        "sha256": "34970a78a8092e8f11a311e9302ea0baf782b7912e9d4a21242b5afea4432e94"
+      },
+      {
+        "path": "frontend/pnpm-lock.yaml",
+        "sha256": "a7a7ef6a83eccff67d18c19c20ebeb537c6fc9e7cd0603dc54b682b0b06cc1db"
+      },
+      {
+        "path": "docker-compose.yml",
+        "sha256": "014cbf196ed61ee871b3e48de73b65da6d5172ec9addaf0da41fc698ff119766"
+      }
+    ],
+    "snapshot_sha256": "dc6e150c56df8a05f22557a62870343362e9adf14bc95adcabcf942a1a774384"
+  },
+  "commands": [
+    {
+      "id": "python_phase_4",
+      "candidate_commit": "1ba6e17fa2182156825f42d7e243978cf23ccdb4",
+      "cwd": "python-agent-service",
+      "matrix_command": "D:\\miniconda\\python.exe -m pytest tests/graphs/intake tests/agents/test_intake_turn.py tests/agents/test_intake_case_detail_dossier.py tests/agents/test_intake_prompt_compaction.py tests/agents/test_intake_resource_bounds.py tests/test_streaming.py tests/test_streaming_v2.py tests/graph_runtime/unit/test_compiled_executor.py tests/graph_runtime/unit/test_registry_identity.py tests/graph_runtime/unit/test_production_bindings.py tests/graph_runtime/unit/test_intake_graph_recovery.py tests/graph_runtime/unit/test_checkpoint_fenced_saver.py tests/security/test_graph_security_runtime.py tests/model_runtime/test_runnable_factory.py -q",
+      "matrix_command_sha256": "15d3b0c85e66fd697149d025c7e85c24bebf94389fec3ae5c094c0d0ee324eff",
+      "executed_command": "'D:\\miniconda\\python.exe' -m pytest tests/graphs/intake tests/agents/test_intake_turn.py tests/agents/test_intake_case_detail_dossier.py tests/agents/test_intake_prompt_compaction.py tests/agents/test_intake_resource_bounds.py tests/test_streaming.py tests/test_streaming_v2.py tests/graph_runtime/unit/test_compiled_executor.py tests/graph_runtime/unit/test_registry_identity.py tests/graph_runtime/unit/test_production_bindings.py tests/graph_runtime/unit/test_intake_graph_recovery.py tests/graph_runtime/unit/test_checkpoint_fenced_saver.py tests/security/test_graph_security_runtime.py tests/model_runtime/test_runnable_factory.py -q '--junitxml=D:\\学习\\Project\\AfterSaleFlow-Agent\\.codex-run\\phase4-run-1ba6e17f-final3\\attempts\\python_phase_4-01\\raw-junit.xml'",
+      "executed_argv": [
+        "D:\\miniconda\\python.exe",
+        "-m",
+        "pytest",
+        "tests/graphs/intake",
+        "tests/agents/test_intake_turn.py",
+        "tests/agents/test_intake_case_detail_dossier.py",
+        "tests/agents/test_intake_prompt_compaction.py",
+        "tests/agents/test_intake_resource_bounds.py",
+        "tests/test_streaming.py",
+        "tests/test_streaming_v2.py",
+        "tests/graph_runtime/unit/test_compiled_executor.py",
+        "tests/graph_runtime/unit/test_registry_identity.py",
+        "tests/graph_runtime/unit/test_production_bindings.py",
+        "tests/graph_runtime/unit/test_intake_graph_recovery.py",
+        "tests/graph_runtime/unit/test_checkpoint_fenced_saver.py",
+        "tests/security/test_graph_security_runtime.py",
+        "tests/model_runtime/test_runnable_factory.py",
+        "-q",
+        "--junitxml=D:\\学习\\Project\\AfterSaleFlow-Agent\\.codex-run\\phase4-run-1ba6e17f-final3\\attempts\\python_phase_4-01\\raw-junit.xml"
+      ],
+      "executed_command_sha256": "0befd238e3a2599e8ffdf871dcbd9a564779fe5c5e147c84c359a06ae563122e",
+      "started_at": "2026-07-22T13:01:57.004+00:00",
+      "finished_at": "2026-07-22T13:02:24.959+00:00",
+      "duration_seconds": 27.956,
+      "exit_code": 0,
+      "environment_sha256": "dc6e150c56df8a05f22557a62870343362e9adf14bc95adcabcf942a1a774384",
+      "stdout_path": "attempts/python_phase_4-01/stdout.log",
+      "stdout_sha256": "d4e588b64770c07724f68394736bfc49bead9a0482b6af1e60e6588bc5c873e9",
+      "stderr_path": "attempts/python_phase_4-01/stderr.log",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw_reports": [
+        {
+          "path": "attempts/python_phase_4-01/raw-junit.xml",
+          "sha256": "4e5e4a580d9997c9ae3475c1995c31b9ab5aacb5df9c90b01e77df74326e6956"
+        }
+      ],
+      "failure_classification": "NONE",
+      "accepted": true,
+      "report": "python-phase4-junit.xml",
+      "report_path": "source/python-phase4-junit.xml",
+      "report_sha256": "de4c4986c5b4ee7f42e50533912ec4cfb3b2f1fdde5198d2a44ed185adfb6603",
+      "tests": 327,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "id": "java_phase_4",
+      "candidate_commit": "1ba6e17fa2182156825f42d7e243978cf23ccdb4",
+      "cwd": "java-api-service",
+      "matrix_command": ".\\mvnw.cmd -DforkCount=1 -Dtest=IntakeGraphCommandFactoryTest,IntakeGraphResultFinalizerTest,IntakeRoomWorkflowTest,IntakeRoomServiceTest,IntakeAgentTurnServiceTest,IntakeFormalSinkAssemblyTest,IntakeRoomWorkflowActivityTest,IntakeRoomWorkflowReplayTest,IntakeRoomWorkflowWorkerRecoveryTest,IntakeTemporalCutoverIntegrationTest,IntakeSyntheticComparisonActivitiesTest,SignedSyntheticIntakeDriverTest,SignedSyntheticIntakeIngressServiceTest,SignedSyntheticIntakeBridgeReadPortDecoratorTest,IntakeSyntheticAdmissionTrustPropertiesTest,Es256IntakeSyntheticAdmissionVerifierTest,JdbcIntakeSignedSyntheticAdmissionPortIntegrationTest,JdbcIntakeSyntheticRuntimeSourceTest,IntakeSyntheticRuntimeMaterialSourceTest,IntakeSyntheticRuntimeAdaptersTest,IntakeExchangeP0Test,IntakeChildBridgeAuthorityAdapterTest,IntakeChildBridgeActivitiesTest,JdbcIntakeSyntheticComparisonLedgerIntegrationTest,MigrationIntegrationTest,IntakeSyntheticShadowConfigurationTest,TemporalWorkerConfigurationTest,IntakeReliabilityHarnessTest,JdbcIntakeFormalCommitPortTest,IntakeOuterCommitAcidIntegrationTest,IntakeProcessProjectionAdapterTest,IntakeShadowParityServiceTest,IntakeCutoverRollbackTest,IntakeRoomServiceIntegrationTest,IntakeProgressServiceTest,IntakeRoomControllerTest,IntakeSequentialWorkflowTest,AgentConversationSessionResolverTest,RoomTurnMemoryQueryServiceTest,RoomMessageAndEventServiceTest,AgentRunStreamEventServiceTest,ProcessProjectionFencingIntegrationTest,TemporalCommandDispatcherTest test",
+      "matrix_command_sha256": "e106128a5abbb3089f20d3100113332483219f45b1f052f3046613ceadc6fb0e",
+      "executed_command": "'.\\mvnw.cmd' -DforkCount=1 -Dtest=IntakeGraphCommandFactoryTest,IntakeGraphResultFinalizerTest,IntakeRoomWorkflowTest,IntakeRoomServiceTest,IntakeAgentTurnServiceTest,IntakeFormalSinkAssemblyTest,IntakeRoomWorkflowActivityTest,IntakeRoomWorkflowReplayTest,IntakeRoomWorkflowWorkerRecoveryTest,IntakeTemporalCutoverIntegrationTest,IntakeSyntheticComparisonActivitiesTest,SignedSyntheticIntakeDriverTest,SignedSyntheticIntakeIngressServiceTest,SignedSyntheticIntakeBridgeReadPortDecoratorTest,IntakeSyntheticAdmissionTrustPropertiesTest,Es256IntakeSyntheticAdmissionVerifierTest,JdbcIntakeSignedSyntheticAdmissionPortIntegrationTest,JdbcIntakeSyntheticRuntimeSourceTest,IntakeSyntheticRuntimeMaterialSourceTest,IntakeSyntheticRuntimeAdaptersTest,IntakeExchangeP0Test,IntakeChildBridgeAuthorityAdapterTest,IntakeChildBridgeActivitiesTest,JdbcIntakeSyntheticComparisonLedgerIntegrationTest,MigrationIntegrationTest,IntakeSyntheticShadowConfigurationTest,TemporalWorkerConfigurationTest,IntakeReliabilityHarnessTest,JdbcIntakeFormalCommitPortTest,IntakeOuterCommitAcidIntegrationTest,IntakeProcessProjectionAdapterTest,IntakeShadowParityServiceTest,IntakeCutoverRollbackTest,IntakeRoomServiceIntegrationTest,IntakeProgressServiceTest,IntakeRoomControllerTest,IntakeSequentialWorkflowTest,AgentConversationSessionResolverTest,RoomTurnMemoryQueryServiceTest,RoomMessageAndEventServiceTest,AgentRunStreamEventServiceTest,ProcessProjectionFencingIntegrationTest,TemporalCommandDispatcherTest -Dsurefire.reportNameSuffix=p4-1ba6e17fa218-44b65803 test",
+      "executed_argv": [
+        ".\\mvnw.cmd",
+        "-DforkCount=1",
+        "-Dtest=IntakeGraphCommandFactoryTest,IntakeGraphResultFinalizerTest,IntakeRoomWorkflowTest,IntakeRoomServiceTest,IntakeAgentTurnServiceTest,IntakeFormalSinkAssemblyTest,IntakeRoomWorkflowActivityTest,IntakeRoomWorkflowReplayTest,IntakeRoomWorkflowWorkerRecoveryTest,IntakeTemporalCutoverIntegrationTest,IntakeSyntheticComparisonActivitiesTest,SignedSyntheticIntakeDriverTest,SignedSyntheticIntakeIngressServiceTest,SignedSyntheticIntakeBridgeReadPortDecoratorTest,IntakeSyntheticAdmissionTrustPropertiesTest,Es256IntakeSyntheticAdmissionVerifierTest,JdbcIntakeSignedSyntheticAdmissionPortIntegrationTest,JdbcIntakeSyntheticRuntimeSourceTest,IntakeSyntheticRuntimeMaterialSourceTest,IntakeSyntheticRuntimeAdaptersTest,IntakeExchangeP0Test,IntakeChildBridgeAuthorityAdapterTest,IntakeChildBridgeActivitiesTest,JdbcIntakeSyntheticComparisonLedgerIntegrationTest,MigrationIntegrationTest,IntakeSyntheticShadowConfigurationTest,TemporalWorkerConfigurationTest,IntakeReliabilityHarnessTest,JdbcIntakeFormalCommitPortTest,IntakeOuterCommitAcidIntegrationTest,IntakeProcessProjectionAdapterTest,IntakeShadowParityServiceTest,IntakeCutoverRollbackTest,IntakeRoomServiceIntegrationTest,IntakeProgressServiceTest,IntakeRoomControllerTest,IntakeSequentialWorkflowTest,AgentConversationSessionResolverTest,RoomTurnMemoryQueryServiceTest,RoomMessageAndEventServiceTest,AgentRunStreamEventServiceTest,ProcessProjectionFencingIntegrationTest,TemporalCommandDispatcherTest",
+        "-Dsurefire.reportNameSuffix=p4-1ba6e17fa218-44b65803",
+        "test"
+      ],
+      "executed_command_sha256": "6acb9e403f93aceeb73b437e71a3b7f9114be090a0508196bb40b49d7e1b45cb",
+      "started_at": "2026-07-22T13:02:25.413+00:00",
+      "finished_at": "2026-07-22T13:08:26.802+00:00",
+      "duration_seconds": 361.389,
+      "exit_code": 0,
+      "environment_sha256": "dc6e150c56df8a05f22557a62870343362e9adf14bc95adcabcf942a1a774384",
+      "stdout_path": "attempts/java_phase_4-01/stdout.log",
+      "stdout_sha256": "9d698d58478d4d9188a2d80e20734aaea04cb5df6a6ad955e6f21dcee74f02b3",
+      "stderr_path": "attempts/java_phase_4-01/stderr.log",
+      "stderr_sha256": "3762ab30ab7847cf761f31c4962fc8faf5a4e10a85f07c1e7f2372eb384f4a15",
+      "raw_reports": [
+        {
+          "path": "attempts/java_phase_4-01/raw-surefire/TEST-com.example.dispute.agentstream.AgentRunStreamEventServiceTest-p4-1ba6e17fa218-44b65803.xml",
+          "sha256": "7183c7c5cbdacd4e429b3691879418b2f6e804900f5c2f1b8ca0965d2436e45b"
+        },
+        {
+          "path": "attempts/java_phase_4-01/raw-surefire/TEST-com.example.dispute.database.MigrationIntegrationTest-p4-1ba6e17fa218-44b65803.xml",
+          "sha256": "73a9d68a2e38ff2291d9ea9a72638c141d007b8acd1bc5be12d92153199c5d72"
+        },
+        {
+          "path": "attempts/java_phase_4-01/raw-surefire/TEST-com.example.dispute.room.AgentConversationSessionResolverTest-p4-1ba6e17fa218-44b65803.xml",
+          "sha256": "73329a0102f44f3d48a9207e621281b126af40bd0cb1c928c6f6bcfe070fd993"
+        },
+        {
+          "path": "attempts/java_phase_4-01/raw-surefire/TEST-com.example.dispute.room.IntakeAgentTurnServiceTest-p4-1ba6e17fa218-44b65803.xml",
+          "sha256": "59eff65f1d45eb32c8780cdaba2906d713e297535f5e371aa01038e47b2bb30a"
+        },
+        {
+          "path": "attempts/java_phase_4-01/raw-surefire/TEST-com.example.dispute.room.IntakeProgressServiceTest-p4-1ba6e17fa218-44b65803.xml",
+          "sha256": "7f1b2b00b7f527478427f1d4aad794e874cfcfb34268d875716290d81dab9872"
+        },
+        {
+          "path": "attempts/java_phase_4-01/raw-surefire/TEST-com.example.dispute.room.IntakeRoomControllerTest-p4-1ba6e17fa218-44b65803.xml",
+          "sha256": "97203a1c8f559327e628108f6ee1d48edc5421c79b42952f6b547b56368aef41"
+        },
+        {
+          "path": "attempts/java_phase_4-01/raw-surefire/TEST-com.example.dispute.room.IntakeRoomServiceIntegrationTest-p4-1ba6e17fa218-44b65803.xml",
+          "sha256": "d5c1f03e2983b6ebe2e48497648bcd9e9a93738101f38f7a6b80b2bb8e7b040a"
+        },
+        {
+          "path": "attempts/java_phase_4-01/raw-surefire/TEST-com.example.dispute.room.IntakeRoomServiceTest-p4-1ba6e17fa218-44b65803.xml",
+          "sha256": "13aba4301e0d201950ff67e9ce9cd2f786d7031efb38c5437e1187d970cd84f0"
+        },
+        {
+          "path": "attempts/java_phase_4-01/raw-surefire/TEST-com.example.dispute.room.IntakeSequentialWorkflowTest-p4-1ba6e17fa218-44b65803.xml",
+          "sha256": "6d8adeecedc0c3024813d7feea9b99840ad6672f00e4fc05dff9574630ce6570"
+        },
+        {
+          "path": "attempts/java_phase_4-01/raw-surefire/TEST-com.example.dispute.room.RoomMessageAndEventServiceTest-p4-1ba6e17fa218-44b65803.xml",
+          "sha256": "67f56af9b21acdee29c80a890e0add423f89a6d07efa304a684b24e0e2aa37dc"
+        },
+        {
+          "path": "attempts/java_phase_4-01/raw-surefire/TEST-com.example.dispute.room.RoomTurnMemoryQueryServiceTest-p4-1ba6e17fa218-44b65803.xml",
+          "sha256": "54e6c58e3027be06937b0775bcb31149d0297d27c3aaac3659281c155034ca4a"
+        },
+        {
+          "path": "attempts/java_phase_4-01/raw-surefire/TEST-com.example.dispute.workflow.activity.intake.IntakeGraphCommandFactoryTest-p4-1ba6e17fa218-44b65803.xml",
+          "sha256": "407bff1f6d3b3f1a7c5f5c1cb63d5374c043358a0c7c50ce6c3fee583acfd9af"
+        },
+        {
+          "path": "attempts/java_phase_4-01/raw-surefire/TEST-com.example.dispute.workflow.activity.intake.IntakeGraphResultFinalizerTest-p4-1ba6e17fa218-44b65803.xml",
+          "sha256": "d5d45f1b3114091c086786198ecf336b75bea65f0560d62f35443db4511e007c"
+        },
+        {
+          "path": "attempts/java_phase_4-01/raw-surefire/TEST-com.example.dispute.workflow.activity.intake.IntakeOuterCommitAcidIntegrationTest-p4-1ba6e17fa218-44b65803.xml",
+          "sha256": "cec1743b51d54c4e85992a45978a3b786761146a634446619978c59d071c9e73"
+        },
+        {
+          "path": "attempts/java_phase_4-01/raw-surefire/TEST-com.example.dispute.workflow.activity.intake.JdbcIntakeFormalCommitPortTest-p4-1ba6e17fa218-44b65803.xml",
+          "sha256": "1378b40c047eaa89e3858284ef74d02e65692c4cdd6ca71c4c0d5f14687f3b13"
+        },
+        {
+          "path": "attempts/java_phase_4-01/raw-surefire/TEST-com.example.dispute.workflow.application.intake.exchange.IntakeExchangeP0Test-p4-1ba6e17fa218-44b65803.xml",
+          "sha256": "9ec27b0e0ec98e4c9b97823866b2f6ebf6b1d1ad403f2389252836e94ae001b0"
+        },
+        {
+          "path": "attempts/java_phase_4-01/raw-surefire/TEST-com.example.dispute.workflow.architecture.IntakeFormalSinkAssemblyTest-p4-1ba6e17fa218-44b65803.xml",
+          "sha256": "2f5821678d4696739333824e8249d741b58771c63685b8888ebb93bd91b857c6"
+        },
+        {
+          "path": "attempts/java_phase_4-01/raw-surefire/TEST-com.example.dispute.workflow.authority.bridge.IntakeChildBridgeAuthorityAdapterTest-p4-1ba6e17fa218-44b65803.xml",
+          "sha256": "42c6e9f020266359388c7ccb661c932796f6512b403345d3e89ccbb91136a966"
+        },
+        {
+          "path": "attempts/java_phase_4-01/raw-surefire/TEST-com.example.dispute.workflow.authority.bridge.SignedSyntheticIntakeBridgeReadPortDecoratorTest-p4-1ba6e17fa218-44b65803.xml",
+          "sha256": "99cb9c124763a57a0fa4fd71fb629b5a122a2c8ace304466739111ae0156a816"
+        },
+        {
+          "path": "attempts/java_phase_4-01/raw-surefire/TEST-com.example.dispute.workflow.caseprocess.IntakeChildBridgeActivitiesTest-p4-1ba6e17fa218-44b65803.xml",
+          "sha256": "1d7ddbadad959605498a2ef81288814b2bba972a8982325097e3440d32a3e54c"
+        },
+        {
+          "path": "attempts/java_phase_4-01/raw-surefire/TEST-com.example.dispute.workflow.config.IntakeSyntheticAdmissionTrustPropertiesTest-p4-1ba6e17fa218-44b65803.xml",
+          "sha256": "bda3d77e48c13ba53ac622a8d103c93c982ca5f7acfe3db20ce685df302f6a30"
+        },
+        {
+          "path": "attempts/java_phase_4-01/raw-surefire/TEST-com.example.dispute.workflow.config.IntakeSyntheticShadowConfigurationTest-p4-1ba6e17fa218-44b65803.xml",
+          "sha256": "95d2248d7a5d309a167a60165409fbf2796ece381e9fc831a256d56deb70b9ab"
+        },
+        {
+          "path": "attempts/java_phase_4-01/raw-surefire/TEST-com.example.dispute.workflow.config.TemporalWorkerConfigurationTest-p4-1ba6e17fa218-44b65803.xml",
+          "sha256": "3302134eb5f15ac00c96128444720c50165ad0390e041d96434d7a55c2616a1e"
+        },
+        {
+          "path": "attempts/java_phase_4-01/raw-surefire/TEST-com.example.dispute.workflow.outbox.TemporalCommandDispatcherTest-p4-1ba6e17fa218-44b65803.xml",
+          "sha256": "96c080aa2f7d4f6a7bbc673064ddd4cddd5dda0eb6106de9a5e04a0b40c2b500"
+        },
+        {
+          "path": "attempts/java_phase_4-01/raw-surefire/TEST-com.example.dispute.workflow.projection.IntakeProcessProjectionAdapterTest-p4-1ba6e17fa218-44b65803.xml",
+          "sha256": "6671c86e94d0f7b8246abdfcadcface0cc1151ffbf8697cc294907342debdae8"
+        },
+        {
+          "path": "attempts/java_phase_4-01/raw-surefire/TEST-com.example.dispute.workflow.projection.ProcessProjectionFencingIntegrationTest-p4-1ba6e17fa218-44b65803.xml",
+          "sha256": "d9c55c9242071e3a05c0a357986112e5e6810b97ae89296351a04d17bf2c06df"
+        },
+        {
+          "path": "attempts/java_phase_4-01/raw-surefire/TEST-com.example.dispute.workflow.recovery.IntakeCutoverRollbackTest-p4-1ba6e17fa218-44b65803.xml",
+          "sha256": "c8b13b0f0f900adc4b637eb7ce9e775c6cb16eebb0cb6280a6ecd1aa261f8c26"
+        },
+        {
+          "path": "attempts/java_phase_4-01/raw-surefire/TEST-com.example.dispute.workflow.recovery.IntakeTemporalCutoverIntegrationTest-p4-1ba6e17fa218-44b65803.xml",
+          "sha256": "6bb5e896bca9ce8705661812b43b8a9d855c4fad4c46d32bdcb9bfa779c1e2ba"
+        },
+        {
+          "path": "attempts/java_phase_4-01/raw-surefire/TEST-com.example.dispute.workflow.room.intake.IntakeRoomWorkflowActivityTest-p4-1ba6e17fa218-44b65803.xml",
+          "sha256": "a9f6f4b00ef0467c8e351dd4dbc89d2c9d7da8c754f9a6d3533c18a73431c4aa"
+        },
+        {
+          "path": "attempts/java_phase_4-01/raw-surefire/TEST-com.example.dispute.workflow.room.intake.IntakeRoomWorkflowReplayTest-p4-1ba6e17fa218-44b65803.xml",
+          "sha256": "b5a34f149815c53723c462a21ea44d39680030199594f5cf0ff4e2ea0d1dd919"
+        },
+        {
+          "path": "attempts/java_phase_4-01/raw-surefire/TEST-com.example.dispute.workflow.room.intake.IntakeRoomWorkflowTest-p4-1ba6e17fa218-44b65803.xml",
+          "sha256": "754a21dc1493699f3e1f7c8218e80fb583b842b8ea8630a3fe54fbe82cb73ec2"
+        },
+        {
+          "path": "attempts/java_phase_4-01/raw-surefire/TEST-com.example.dispute.workflow.room.intake.IntakeRoomWorkflowWorkerRecoveryTest-p4-1ba6e17fa218-44b65803.xml",
+          "sha256": "f6eb0050cc70a6b32da4a631fdaa830409a2cdc7d4ca7d56c540f5ea36aa3567"
+        },
+        {
+          "path": "attempts/java_phase_4-01/raw-surefire/TEST-com.example.dispute.workflow.shadow.intake.Es256IntakeSyntheticAdmissionVerifierTest-p4-1ba6e17fa218-44b65803.xml",
+          "sha256": "92e8497707882667795e6dcfaf773795e53df9e78281fdf31f88e59857dad134"
+        },
+        {
+          "path": "attempts/java_phase_4-01/raw-surefire/TEST-com.example.dispute.workflow.shadow.intake.IntakeReliabilityHarnessTest-p4-1ba6e17fa218-44b65803.xml",
+          "sha256": "a471b9cec5549c7349dacdbd4d0d2d5d4939708f8b96bb96a6207247dcabae82"
+        },
+        {
+          "path": "attempts/java_phase_4-01/raw-surefire/TEST-com.example.dispute.workflow.shadow.intake.IntakeSyntheticRuntimeAdaptersTest-p4-1ba6e17fa218-44b65803.xml",
+          "sha256": "6b61846d57424b57f5877e3e86e976faefd749faa9ddd978ecd3434af2a6db6d"
+        },
+        {
+          "path": "attempts/java_phase_4-01/raw-surefire/TEST-com.example.dispute.workflow.shadow.intake.IntakeSyntheticRuntimeMaterialSourceTest-p4-1ba6e17fa218-44b65803.xml",
+          "sha256": "7e91f322e48078640d6dcfcae8b94aca1e23079f34b73cbaef1c23a4c361742e"
+        },
+        {
+          "path": "attempts/java_phase_4-01/raw-surefire/TEST-com.example.dispute.workflow.shadow.intake.JdbcIntakeSignedSyntheticAdmissionPortIntegrationTest-p4-1ba6e17fa218-44b65803.xml",
+          "sha256": "3c05e94886cadaeb05858cf357bfd31b1253b57afcd602be5fbde18df54bfbfb"
+        },
+        {
+          "path": "attempts/java_phase_4-01/raw-surefire/TEST-com.example.dispute.workflow.shadow.intake.JdbcIntakeSyntheticRuntimeSourceTest-p4-1ba6e17fa218-44b65803.xml",
+          "sha256": "c37004dca2212c714594d887ddc0e1875542cd1586b7b14266ec046060fe64ab"
+        },
+        {
+          "path": "attempts/java_phase_4-01/raw-surefire/TEST-com.example.dispute.workflow.shadow.IntakeShadowParityServiceTest-p4-1ba6e17fa218-44b65803.xml",
+          "sha256": "6b86440ac0b5d252a48137acb646da6b61167f2cccb4a436f673c3bbd86e22dd"
+        },
+        {
+          "path": "attempts/java_phase_4-01/raw-surefire/TEST-com.example.dispute.workflow.shadow.IntakeSyntheticComparisonActivitiesTest-p4-1ba6e17fa218-44b65803.xml",
+          "sha256": "005b7be3e0cdedcb58f60726d966325c6478960277e6a9feb0f7bed08bfed19c"
+        },
+        {
+          "path": "attempts/java_phase_4-01/raw-surefire/TEST-com.example.dispute.workflow.shadow.JdbcIntakeSyntheticComparisonLedgerIntegrationTest-p4-1ba6e17fa218-44b65803.xml",
+          "sha256": "f17f2b86e8d0241116dc6de9a858e88a3860b8b8e8c69ea98b7eab9bad505c1c"
+        },
+        {
+          "path": "attempts/java_phase_4-01/raw-surefire/TEST-com.example.dispute.workflow.shadow.SignedSyntheticIntakeDriverTest-p4-1ba6e17fa218-44b65803.xml",
+          "sha256": "f314da218f927abc736e1bb31831db0758ef0c2dc18f2712caf0f19217af9064"
+        },
+        {
+          "path": "attempts/java_phase_4-01/raw-surefire/TEST-com.example.dispute.workflow.shadow.SignedSyntheticIntakeIngressServiceTest-p4-1ba6e17fa218-44b65803.xml",
+          "sha256": "3417a0731952562a334d631cf0401d890fc7b4a828a2c52d72dca18b322b5fbd"
+        }
+      ],
+      "failure_classification": "NONE",
+      "accepted": true,
+      "report": "java-phase4-junit.xml",
+      "report_path": "source/java-phase4-junit.xml",
+      "report_sha256": "7a52c4758e1675a65f2cd623ef2caa7e53a9301d810a120ad5b021cd414e0289",
+      "tests": 294,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "id": "frontend_phase_4",
+      "candidate_commit": "1ba6e17fa2182156825f42d7e243978cf23ccdb4",
+      "cwd": "frontend",
+      "matrix_command": "node node_modules/vitest/vitest.mjs run src/views/disputes/IntakeRoomView.test.js src/views/disputes/DisputeOverviewView.test.js src/components/room/RoomShell.test.js src/api/agentStream.test.js src/stores/agentStream.test.js src/stores/room.test.js --minWorkers=1 --maxWorkers=2",
+      "matrix_command_sha256": "63b7059c60b0ab39f343585aa10ef47fb405f6a96dc48ed2ffa4d33f1af56891",
+      "executed_command": "node node_modules/vitest/vitest.mjs run src/views/disputes/IntakeRoomView.test.js src/views/disputes/DisputeOverviewView.test.js src/components/room/RoomShell.test.js src/api/agentStream.test.js src/stores/agentStream.test.js src/stores/room.test.js --minWorkers=1 --maxWorkers=2 --reporter=junit '--outputFile=D:\\学习\\Project\\AfterSaleFlow-Agent\\.codex-run\\phase4-run-1ba6e17f-final3\\attempts\\frontend_phase_4-01\\raw-junit.xml'",
+      "executed_argv": [
+        "node",
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/views/disputes/IntakeRoomView.test.js",
+        "src/views/disputes/DisputeOverviewView.test.js",
+        "src/components/room/RoomShell.test.js",
+        "src/api/agentStream.test.js",
+        "src/stores/agentStream.test.js",
+        "src/stores/room.test.js",
+        "--minWorkers=1",
+        "--maxWorkers=2",
+        "--reporter=junit",
+        "--outputFile=D:\\学习\\Project\\AfterSaleFlow-Agent\\.codex-run\\phase4-run-1ba6e17f-final3\\attempts\\frontend_phase_4-01\\raw-junit.xml"
+      ],
+      "executed_command_sha256": "17492594206f8f08ac5a50735dab3bb87339b9ebb9b6b495c2a6b2e68a65fa6d",
+      "started_at": "2026-07-22T13:08:27.776+00:00",
+      "finished_at": "2026-07-22T13:08:43.379+00:00",
+      "duration_seconds": 15.606,
+      "exit_code": 0,
+      "environment_sha256": "dc6e150c56df8a05f22557a62870343362e9adf14bc95adcabcf942a1a774384",
+      "stdout_path": "attempts/frontend_phase_4-01/stdout.log",
+      "stdout_sha256": "b7094a8d9ef3d53b2f958a72a0540b5799ccdc4bc9546291599b85001949004f",
+      "stderr_path": "attempts/frontend_phase_4-01/stderr.log",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw_reports": [
+        {
+          "path": "attempts/frontend_phase_4-01/raw-junit.xml",
+          "sha256": "b71be1b60519149df774c70b976b2bfa4c40ee96bbf5b7d6d256e5315eeda577"
+        }
+      ],
+      "failure_classification": "NONE",
+      "accepted": true,
+      "report": "frontend-phase4-junit.xml",
+      "report_path": "source/frontend-phase4-junit.xml",
+      "report_sha256": "0c6fbeb54cd3d0212ff23aab3c0f6336d4d82b2f8f3494d500049a03a65551d1",
+      "tests": 129,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "id": "static_phase_4",
+      "candidate_commit": "1ba6e17fa2182156825f42d7e243978cf23ccdb4",
+      "cwd": ".",
+      "matrix_command": "D:\\miniconda\\python.exe -m pytest tests/static/test_phase4_intake_pilot_plan.py tests/static/test_graph_import_boundaries.py tests/static/test_agent_platform_schema_contracts.py tests/static/test_temporal_refactor_traceability.py tests/static/test_phase4_matrix_authority_erratum.py tests/static/test_phase4_no_formal_sink_assembly.py tests/static/test_phase4_r15_authority_binding_contract.py tests/static/test_phase4_engineering_evidence_policy.py tests/static/test_phase4_candidate_evidence.py tests/static/test_phase4_candidate_runner.py -q",
+      "matrix_command_sha256": "8262d43e0e35ee316396e4f39b8a974e5b75608ecacafc0d1685c48b3a1aa3f2",
+      "executed_command": "'D:\\miniconda\\python.exe' -m pytest tests/static/test_phase4_intake_pilot_plan.py tests/static/test_graph_import_boundaries.py tests/static/test_agent_platform_schema_contracts.py tests/static/test_temporal_refactor_traceability.py tests/static/test_phase4_matrix_authority_erratum.py tests/static/test_phase4_no_formal_sink_assembly.py tests/static/test_phase4_r15_authority_binding_contract.py tests/static/test_phase4_engineering_evidence_policy.py tests/static/test_phase4_candidate_evidence.py tests/static/test_phase4_candidate_runner.py -q '--junitxml=D:\\学习\\Project\\AfterSaleFlow-Agent\\.codex-run\\phase4-run-1ba6e17f-final3\\attempts\\static_phase_4-01\\raw-junit.xml'",
+      "executed_argv": [
+        "D:\\miniconda\\python.exe",
+        "-m",
+        "pytest",
+        "tests/static/test_phase4_intake_pilot_plan.py",
+        "tests/static/test_graph_import_boundaries.py",
+        "tests/static/test_agent_platform_schema_contracts.py",
+        "tests/static/test_temporal_refactor_traceability.py",
+        "tests/static/test_phase4_matrix_authority_erratum.py",
+        "tests/static/test_phase4_no_formal_sink_assembly.py",
+        "tests/static/test_phase4_r15_authority_binding_contract.py",
+        "tests/static/test_phase4_engineering_evidence_policy.py",
+        "tests/static/test_phase4_candidate_evidence.py",
+        "tests/static/test_phase4_candidate_runner.py",
+        "-q",
+        "--junitxml=D:\\学习\\Project\\AfterSaleFlow-Agent\\.codex-run\\phase4-run-1ba6e17f-final3\\attempts\\static_phase_4-01\\raw-junit.xml"
+      ],
+      "executed_command_sha256": "ad4e67286865e8284776312d4976ccfd4c6f35efc21db8394deb0af393031729",
+      "started_at": "2026-07-22T13:08:44.026+00:00",
+      "finished_at": "2026-07-22T13:09:13.716+00:00",
+      "duration_seconds": 29.69,
+      "exit_code": 0,
+      "environment_sha256": "dc6e150c56df8a05f22557a62870343362e9adf14bc95adcabcf942a1a774384",
+      "stdout_path": "attempts/static_phase_4-01/stdout.log",
+      "stdout_sha256": "0a53e8f5d407fc1e3cea18ca0b49e8953d50dea98c09b892caba3c3e93b62c04",
+      "stderr_path": "attempts/static_phase_4-01/stderr.log",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw_reports": [
+        {
+          "path": "attempts/static_phase_4-01/raw-junit.xml",
+          "sha256": "3119e31caaf499b7cb536e707c3be4b24872b248adf819b1e56cef4ce56c2683"
+        }
+      ],
+      "failure_classification": "NONE",
+      "accepted": true,
+      "report": "static-phase4-junit.xml",
+      "report_path": "source/static-phase4-junit.xml",
+      "report_sha256": "4c8f2d5489f23d1628ddd8616920112aed2d20ad8109840e4b3763d7c78ba078",
+      "tests": 134,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    }
+  ],
+  "quarantined_attempts": [],
+  "pending_failure": null,
+  "quarantined_attempts_reused": false,
+  "manifest_sha256": "4545f1eb2634834310c7dc93ade0ae54983a1d105694f524dac7641e7c1f547b",
+  "promotion_gate": "PENDING",
+  "MIG-003": "PENDING_PROMOTION",
+  "MIG-004": "PENDING_PROMOTION"
+}

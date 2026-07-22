@@ -5,6 +5,7 @@
 - Prefer focused static checks while editing; keep expensive cross-service verification grouped at the checkpoint.
 - Local debugging uses the frontend on `5173`, the Java dev service on `8080`, and the Python dev service on `18000`. Docker remains the final all-service deployment target.
 - Preserve unrelated working-tree changes. Do not reset or overwrite files outside the active task.
+- Treat a Phase boundary as an internal checkpoint, not a stopping point. Continue automatically through every remaining Phase and the agreed unified verification; stop only for a genuine external authorization, infrastructure, or unavailable-dependency blocker that cannot be resolved locally.
 - Before Phase 2-8 Temporal refactor work, read `docs/runbooks/temporal-first/phase-1-lessons-quick-reference.md`; open the full retrospective only when detailed evidence or root-cause history is needed.
 - For Phase 2 delegation and test scheduling, the primary agent follows `plans/phase-2-agent-run-v2-execution.md` and `plans/phase-2-agent-run-v2-test-batches.yaml`; delegated agents receive only their task brief and relevant batch excerpt, and all implementation remains blocked until the recorded entry gate is satisfied.
 - For Phase 3 delegation and test scheduling, the primary agent follows `plans/phase-3-graph-lcel-execution.md` and `plans/phase-3-graph-lcel-test-batches.yaml`; runtime remains `DISABLED` or signed synthetic `SHADOW`, and implementation starts only from the committed P3.0 contract gate.
