@@ -829,6 +829,15 @@ batches:
       - IntakeTemporalCutoverIntegrationTest
       - IntakeSyntheticComparisonActivitiesTest
       - SignedSyntheticIntakeDriverTest
+      - SignedSyntheticIntakeIngressServiceTest
+      - SignedSyntheticIntakeBridgeReadPortDecoratorTest
+      - IntakeSyntheticAdmissionTrustPropertiesTest
+      - Es256IntakeSyntheticAdmissionVerifierTest
+      - JdbcIntakeSignedSyntheticAdmissionPortIntegrationTest
+      - JdbcIntakeSyntheticRuntimeSourceTest
+      - IntakeExchangeP0Test
+      - IntakeChildBridgeAuthorityAdapterTest
+      - IntakeChildBridgeActivitiesTest
       - JdbcIntakeSyntheticComparisonLedgerIntegrationTest
       - MigrationIntegrationTest
       - IntakeSyntheticShadowConfigurationTest
