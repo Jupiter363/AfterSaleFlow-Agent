@@ -383,6 +383,39 @@ def test_phase4_runtime_defaults_require_two_nonlegacy_activation_locks() -> Non
     assert "APP_ORCHESTRATION_TEMPORAL_WRITER_ENABLED=false" in environment
 
 
+def test_phase4_compose_keeps_intake_runtime_fail_closed_for_java_services() -> None:
+    compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    java_environment = compose.split("x-java-environment:", 1)[1].split(
+        "x-java-core-depends-on:", 1
+    )[0]
+    agent_worker = compose.split("java-agent-worker:", 1)[1].split(
+        "frontend:", 1
+    )[0]
+
+    for required in (
+        "APP_ORCHESTRATION_NON_LEGACY_EPOCH_ALLOCATION_ENABLED: "
+        "${APP_ORCHESTRATION_NON_LEGACY_EPOCH_ALLOCATION_ENABLED:-false}",
+        "APP_ORCHESTRATION_TEMPORAL_WRITER_ENABLED: "
+        "${APP_ORCHESTRATION_TEMPORAL_WRITER_ENABLED:-false}",
+        "APP_ORCHESTRATION_INTAKE_EPOCH_SELECTION_MODE: "
+        "${APP_ORCHESTRATION_INTAKE_EPOCH_SELECTION_MODE:-LEGACY}",
+        "APP_ORCHESTRATION_INTAKE_SHADOW_COHORT_BASIS_POINTS: "
+        "${APP_ORCHESTRATION_INTAKE_SHADOW_COHORT_BASIS_POINTS:-0}",
+        "APP_ORCHESTRATION_INTAKE_COHORT_POLICY_VERSION: "
+        "${APP_ORCHESTRATION_INTAKE_COHORT_POLICY_VERSION:-}",
+        "APP_ORCHESTRATION_INTAKE_SIGNED_SYNTHETIC_SHADOW_ENABLED: "
+        "${APP_ORCHESTRATION_INTAKE_SIGNED_SYNTHETIC_SHADOW_ENABLED:-false}",
+    ):
+        assert required in java_environment
+
+    assert "APP_ORCHESTRATION_INTAKE_EPOCH_SELECTION_MODE:-TEMPORAL" not in compose
+    assert "APP_ORCHESTRATION_TEMPORAL_WRITER_ENABLED:-true" not in compose
+    assert "APP_AGENT_RUN_V2_GRAPH_CLIENT_MODE: ${APP_AGENT_RUN_V2_GRAPH_CLIENT_MODE:-DISABLED}" in agent_worker
+    assert "APP_AGENT_RUN_V2_GRAPH_SIGNING_KEY_DIRECTORY: /run/secrets/graph-signing-keys" in agent_worker
+    assert "APP_AGENT_RUN_V2_GRAPH_TLS_KEY_STORE_PATH: /run/secrets/graph-mtls/client.p12" in agent_worker
+    assert "APP_AGENT_RUN_V2_GRAPH_TLS_TRUST_STORE_PATH: /run/secrets/graph-mtls/trust.p12" in agent_worker
+
+
 def test_phase4_plan_is_linked_and_forbids_implicit_respondent_timeout() -> None:
     plan_text = PLAN.read_text(encoding="utf-8")
     matrix_text = MATRIX.read_text(encoding="utf-8")
