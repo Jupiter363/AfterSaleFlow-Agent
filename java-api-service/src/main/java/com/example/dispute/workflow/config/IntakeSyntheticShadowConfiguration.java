@@ -1,14 +1,31 @@
 package com.example.dispute.workflow.config;
 
-import com.example.dispute.workflow.activity.intake.IntakeSnapshotPublicationPort;
+import com.example.dispute.agentstream.application.AgentRunCommandBindingFactory;
+import com.example.dispute.workflow.activity.agent.AgentGraphCommandClient;
+import com.example.dispute.workflow.activity.agent.AgentGraphReconciliationClient;
 import com.example.dispute.workflow.activity.domain.IntakeChildBridgeActivitiesAdapter;
 import com.example.dispute.workflow.activity.domain.IntakeChildBridgeReadPort;
+import com.example.dispute.workflow.activity.intake.IntakeImmutablePayloadPublisher;
+import com.example.dispute.workflow.activity.intake.IntakeSnapshotPublicationPort;
+import com.example.dispute.workflow.application.intake.IntakeDomainSnapshotPublisher;
+import com.example.dispute.workflow.application.intake.IntakeGraphBindingStore;
+import com.example.dispute.workflow.application.intake.IntakeGraphCommandFactory;
 import com.example.dispute.workflow.infrastructure.persistence.authority.epoch.EpochAuthorityLockCoordinator;
 import com.example.dispute.workflow.shadow.intake.IntakeSignedSyntheticAdmissionPort;
 import com.example.dispute.workflow.shadow.intake.IntakeSignedSyntheticGraphExecutionPort;
+import com.example.dispute.workflow.shadow.intake.IntakeSyntheticAdmissionReader;
+import com.example.dispute.workflow.shadow.intake.IntakeSyntheticGraphMaterialSource;
 import com.example.dispute.workflow.shadow.intake.IntakeSyntheticParityObservationPort;
+import com.example.dispute.workflow.shadow.intake.IntakeSyntheticParityMaterialSource;
+import com.example.dispute.workflow.shadow.intake.IntakeSyntheticParityObservationAdapter;
+import com.example.dispute.workflow.shadow.intake.IntakeSyntheticRuntimeSource;
+import com.example.dispute.workflow.shadow.intake.IntakeSyntheticSignedGraphExecutionAdapter;
+import com.example.dispute.workflow.shadow.intake.IntakeSyntheticSnapshotMaterialSource;
+import com.example.dispute.workflow.shadow.intake.IntakeSyntheticSnapshotPublicationAdapter;
 import com.example.dispute.workflow.shadow.intake.IntakeSyntheticWorkerRegistration;
+import com.example.dispute.workflow.shadow.intake.JdbcIntakeSyntheticAdmissionReader;
 import com.example.dispute.workflow.shadow.intake.JdbcIntakeSyntheticComparisonLedger;
+import com.example.dispute.workflow.shadow.intake.JdbcIntakeSyntheticRuntimeSource;
 import com.example.dispute.workflow.shadow.intake.SignedSyntheticIntakeBridgeReadPortDecorator;
 import com.example.dispute.workflow.shadow.intake.SignedSyntheticIntakeCommandAdmissionLookup;
 import com.example.dispute.workflow.shadow.intake.SignedSyntheticIntakeDriver;
@@ -113,6 +130,79 @@ public class IntakeSyntheticShadowConfiguration {
                 new TransactionTemplate(transactionManager),
                 new EpochAuthorityLockCoordinator(jdbc),
                 Clock.systemUTC());
+    }
+
+    @Bean
+    @ConditionalOnBean(IntakeSyntheticAdmissionTrustSet.class)
+    @ConditionalOnMissingBean(IntakeSyntheticAdmissionReader.class)
+    JdbcIntakeSyntheticAdmissionReader intakeSyntheticAdmissionReader() {
+        return new JdbcIntakeSyntheticAdmissionReader();
+    }
+
+    @Bean
+    @ConditionalOnBean({
+        IntakeSyntheticAdmissionTrustSet.class,
+        IntakeSyntheticAdmissionReader.class,
+        IntakeSyntheticSnapshotMaterialSource.class,
+        IntakeSyntheticGraphMaterialSource.class,
+        IntakeSyntheticParityMaterialSource.class
+    })
+    @ConditionalOnMissingBean(IntakeSyntheticRuntimeSource.class)
+    JdbcIntakeSyntheticRuntimeSource intakeSyntheticRuntimeSource(
+            DataSource dataSource,
+            IntakeSyntheticAdmissionReader admissionReader,
+            IntakeSyntheticSnapshotMaterialSource snapshotMaterialSource,
+            IntakeSyntheticGraphMaterialSource graphMaterialSource,
+            IntakeSyntheticParityMaterialSource parityMaterialSource) {
+        return new JdbcIntakeSyntheticRuntimeSource(
+                dataSource,
+                admissionReader,
+                snapshotMaterialSource,
+                graphMaterialSource,
+                parityMaterialSource);
+    }
+
+    @Bean
+    @ConditionalOnBean({
+        IntakeSyntheticRuntimeSource.class,
+        IntakeImmutablePayloadPublisher.class,
+        IntakeGraphBindingStore.class
+    })
+    @ConditionalOnMissingBean(IntakeSnapshotPublicationPort.class)
+    IntakeSyntheticSnapshotPublicationAdapter intakeSyntheticSnapshotPublicationAdapter(
+            IntakeSyntheticRuntimeSource source,
+            IntakeImmutablePayloadPublisher payloadPublisher,
+            IntakeGraphBindingStore bindingStore) {
+        return new IntakeSyntheticSnapshotPublicationAdapter(
+                source, new IntakeDomainSnapshotPublisher(payloadPublisher, bindingStore));
+    }
+
+    @Bean
+    @ConditionalOnBean({
+        IntakeSyntheticRuntimeSource.class,
+        AgentGraphCommandClient.class,
+        AgentGraphReconciliationClient.class
+    })
+    @ConditionalOnMissingBean(IntakeSignedSyntheticGraphExecutionPort.class)
+    IntakeSyntheticSignedGraphExecutionAdapter intakeSyntheticSignedGraphExecutionAdapter(
+            IntakeSyntheticRuntimeSource source,
+            ObjectMapper objectMapper,
+            AgentGraphCommandClient commandClient,
+            AgentGraphReconciliationClient reconciliationClient) {
+        return new IntakeSyntheticSignedGraphExecutionAdapter(
+                source,
+                new IntakeGraphCommandFactory(),
+                new AgentRunCommandBindingFactory(objectMapper),
+                commandClient,
+                reconciliationClient);
+    }
+
+    @Bean
+    @ConditionalOnBean(IntakeSyntheticRuntimeSource.class)
+    @ConditionalOnMissingBean(IntakeSyntheticParityObservationPort.class)
+    IntakeSyntheticParityObservationAdapter intakeSyntheticParityObservationAdapter(
+            IntakeSyntheticRuntimeSource source) {
+        return new IntakeSyntheticParityObservationAdapter(source);
     }
 
     @Bean

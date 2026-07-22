@@ -3,13 +3,25 @@ package com.example.dispute.workflow.config;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 
+import com.example.dispute.workflow.activity.agent.AgentGraphCommandClient;
+import com.example.dispute.workflow.activity.agent.AgentGraphReconciliationClient;
+import com.example.dispute.workflow.activity.domain.IntakeChildBridgeReadPort;
+import com.example.dispute.workflow.activity.intake.IntakeImmutablePayloadPublisher;
 import com.example.dispute.workflow.activity.intake.IntakeSnapshotPublicationPort;
+import com.example.dispute.workflow.application.intake.IntakeGraphBindingStore;
 import com.example.dispute.workflow.shadow.intake.IntakeSignedSyntheticAdmissionPort;
 import com.example.dispute.workflow.shadow.intake.IntakeSignedSyntheticGraphExecutionPort;
+import com.example.dispute.workflow.shadow.intake.IntakeSyntheticGraphMaterialSource;
+import com.example.dispute.workflow.shadow.intake.IntakeSyntheticParityMaterialSource;
 import com.example.dispute.workflow.shadow.intake.IntakeSyntheticParityObservationPort;
+import com.example.dispute.workflow.shadow.intake.IntakeSyntheticRuntimeSource;
+import com.example.dispute.workflow.shadow.intake.IntakeSyntheticSnapshotMaterialSource;
 import com.example.dispute.workflow.shadow.intake.IntakeSyntheticWorkerRegistration;
 import com.example.dispute.workflow.shadow.intake.JdbcIntakeSyntheticComparisonLedger;
+import com.example.dispute.workflow.shadow.intake.JdbcIntakeSyntheticRuntimeSource;
 import com.example.dispute.workflow.shadow.intake.SignedSyntheticIntakeDriver;
+import com.example.dispute.workflow.shadow.intake.admission.IntakeSyntheticAdmissionTrustSet;
+import com.example.dispute.workflow.shadow.intake.admission.JdbcIntakeSignedSyntheticAdmissionPort;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.lang.reflect.Method;
 import java.util.Arrays;
@@ -58,6 +70,33 @@ class IntakeSyntheticShadowConfigurationTest {
                     context.getBean(IntakeSyntheticWorkerRegistration.class);
             assertThat(context.getBean(SignedSyntheticIntakeDriver.class))
                     .isSameAs(registration.driver());
+        });
+    }
+
+    @Test
+    void explicitlyTrustedRuntimeBuildsProductionAdaptersWithoutAFormalSink() {
+        productionRuntimeRunner(true).run(context -> {
+            assertThat(context).hasNotFailed();
+            assertThat(context).hasSingleBean(JdbcIntakeSignedSyntheticAdmissionPort.class);
+            assertThat(context).hasSingleBean(JdbcIntakeSyntheticRuntimeSource.class);
+            assertThat(context).hasSingleBean(IntakeSyntheticRuntimeSource.class);
+            assertThat(context).hasSingleBean(IntakeSnapshotPublicationPort.class);
+            assertThat(context).hasSingleBean(IntakeSignedSyntheticGraphExecutionPort.class);
+            assertThat(context).hasSingleBean(IntakeSyntheticParityObservationPort.class);
+            assertThat(context).hasSingleBean(IntakeSyntheticWorkerRegistration.class);
+            assertThat(context).hasSingleBean(IntakeAuthorityWorkerRegistration.class);
+        });
+    }
+
+    @Test
+    void completeRuntimeMaterialStillFailsClosedWithoutAdmissionTrust() {
+        productionRuntimeRunner(false).run(context -> {
+            assertThat(context).hasFailed();
+            assertThat(context.getStartupFailure())
+                    .rootCause()
+                    .hasMessageContaining(
+                            "exactly one real "
+                                    + IntakeSignedSyntheticAdmissionPort.class.getName());
         });
     }
 
@@ -203,6 +242,46 @@ class IntakeSyntheticShadowConfigurationTest {
                 .withBean(
                         IntakeSyntheticParityObservationPort.class,
                         () -> mock(IntakeSyntheticParityObservationPort.class));
+    }
+
+    private static ApplicationContextRunner productionRuntimeRunner(boolean trusted) {
+        ApplicationContextRunner runner = baseRunner()
+                .withPropertyValues(ENABLED, EPOCH_MODE, COHORT, POLICY, GRAPH_MODE, GRAPH_ENDPOINT)
+                .withBean(DataSource.class, () -> mock(DataSource.class))
+                .withBean(ObjectMapper.class, () -> new ObjectMapper().findAndRegisterModules())
+                .withBean(
+                        PlatformTransactionManager.class,
+                        () -> mock(PlatformTransactionManager.class))
+                .withBean(
+                        IntakeSyntheticSnapshotMaterialSource.class,
+                        () -> mock(IntakeSyntheticSnapshotMaterialSource.class))
+                .withBean(
+                        IntakeSyntheticGraphMaterialSource.class,
+                        () -> mock(IntakeSyntheticGraphMaterialSource.class))
+                .withBean(
+                        IntakeSyntheticParityMaterialSource.class,
+                        () -> mock(IntakeSyntheticParityMaterialSource.class))
+                .withBean(
+                        IntakeImmutablePayloadPublisher.class,
+                        () -> mock(IntakeImmutablePayloadPublisher.class))
+                .withBean(
+                        IntakeGraphBindingStore.class,
+                        () -> mock(IntakeGraphBindingStore.class))
+                .withBean(
+                        AgentGraphCommandClient.class,
+                        () -> mock(AgentGraphCommandClient.class))
+                .withBean(
+                        AgentGraphReconciliationClient.class,
+                        () -> mock(AgentGraphReconciliationClient.class))
+                .withBean(
+                        IntakeChildBridgeReadPort.class,
+                        () -> mock(IntakeChildBridgeReadPort.class));
+        if (trusted) {
+            runner = runner.withBean(
+                    IntakeSyntheticAdmissionTrustSet.class,
+                    () -> mock(IntakeSyntheticAdmissionTrustSet.class));
+        }
+        return runner;
     }
 
     private static ApplicationContextRunner baseRunner() {
