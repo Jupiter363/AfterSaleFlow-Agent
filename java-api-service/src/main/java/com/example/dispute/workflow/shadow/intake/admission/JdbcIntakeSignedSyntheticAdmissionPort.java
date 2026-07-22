@@ -1,15 +1,21 @@
 package com.example.dispute.workflow.shadow.intake.admission;
 
 import com.example.dispute.workflow.application.epoch.RoomEpochSelectionContext.TrafficSource;
+import com.example.dispute.workflow.activity.domain.IntakeChildBridgeReadPort.CommandSource;
 import com.example.dispute.workflow.infrastructure.persistence.authority.epoch.EpochAuthorityLockCoordinator;
 import com.example.dispute.workflow.infrastructure.persistence.authority.epoch.EpochAuthorityLockCoordinator.LockRequest;
 import com.example.dispute.workflow.shadow.intake.IntakeSignedSyntheticAdmissionPort;
 import com.example.dispute.workflow.shadow.intake.IntakeSignedSyntheticAdmissionPort.ActivityAuthorization;
 import com.example.dispute.workflow.shadow.intake.IntakeSignedSyntheticAdmissionPort.AdmissionAttempt;
 import com.example.dispute.workflow.shadow.intake.IntakeSignedSyntheticAdmissionPort.VerifiedAdmission;
+import com.example.dispute.workflow.shadow.intake.SignedSyntheticIntakeCommandAdmissionLookup;
+import com.example.dispute.workflow.shadow.intake.SignedSyntheticIntakeCommandAdmissionLookup.PersistedCommandAdmission;
 import com.example.dispute.workflow.shadow.intake.admission.Es256IntakeSyntheticAdmissionVerifier.VerifiedToken;
 import com.example.dispute.workflow.shadow.intake.admission.IntakeSyntheticAdmissionClaims.Pins;
+import com.example.dispute.workflow.temporal.caseprocess.IntakeChildBridgeActivities.CommandRequest;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.PinnedVersions;
+import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.RetryBudget;
+import com.example.dispute.workflow.temporal.room.intake.IntakeCommandType;
 import com.example.dispute.workflow.temporal.room.intake.IntakeWorkflowCommand;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -24,7 +30,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 /** PostgreSQL-backed admission boundary. It is deliberately not a discoverable Spring bean. */
 public final class JdbcIntakeSignedSyntheticAdmissionPort
-        implements IntakeSignedSyntheticAdmissionPort {
+        implements IntakeSignedSyntheticAdmissionPort, SignedSyntheticIntakeCommandAdmissionLookup {
 
     private static final ObjectMapper JSON = new ObjectMapper();
 
@@ -290,6 +296,61 @@ public final class JdbcIntakeSignedSyntheticAdmissionPort
                and agent.status = 'ACTIVE'
             """;
 
+    private static final String COMMAND_ADMISSION_SQL = """
+            select admission.epoch_id, admission.access_session_id, admission.agent_session_id,
+                   admission.registration_id, admission.tenant_surrogate, admission.case_id,
+                   admission.room_epoch, admission.fencing_token, admission.command_id,
+                   admission.command_sequence, admission.command_type, admission.party,
+                   admission.payload_ref, admission.payload_hash, admission.command_operation_key,
+                   admission.actor_scope_hash, admission.request_hash,
+                   admission.process_revision, admission.room_revision,
+                   admission.thread_id, admission.deadline_epoch_millis,
+                   admission.retry_provider_attempts, admission.retry_activity_attempts,
+                   admission.retry_repairs
+              from case_intake_synthetic_activity_admission admission
+              join case_room_epoch epoch
+                on epoch.id = admission.epoch_id
+               and epoch.tenant_surrogate = admission.tenant_surrogate
+               and epoch.case_id = admission.case_id
+               and epoch.room_type = admission.room_type
+               and epoch.room_epoch = admission.room_epoch
+               and epoch.fencing_token = admission.fencing_token
+              join case_intake_graph_thread_binding registration
+                on registration.registration_id = admission.registration_id
+               and registration.registration_hash = admission.registration_hash
+              join case_access_session access_row
+                on access_row.id = admission.access_session_id
+              join agent_conversation_session agent
+                on agent.id = admission.agent_session_id
+             where admission.schema_version = 'intake-synthetic-activity-admission.v1'
+               and admission.admission_status = 'VERIFIED'
+               and admission.traffic_source = 'AUTHENTICATED_SIGNED_SYNTHETIC'
+               and admission.tenant_surrogate = :tenant
+               and admission.case_id = :caseId
+               and admission.room_epoch = :roomEpoch
+               and admission.fencing_token = :fence
+               and admission.command_id = :commandId
+               and admission.command_sequence = :commandSequence
+               and admission.command_type = 'INTAKE_MESSAGE'
+               and admission.party = :party
+               and admission.payload_ref = :payloadRef
+               and admission.payload_hash = :payloadHash
+               and admission.command_operation_key = :commandOperationKey
+               and admission.actor_scope_hash = :actorScopeHash
+               and admission.request_hash = :requestHash
+               and admission.process_revision = :processRevision
+               and admission.room_revision = :roomRevision
+               and admission.deadline_epoch_millis = :deadlineEpochMillis
+               and epoch.writer_mode = 'SHADOW'
+               and epoch.lifecycle_status = 'ACTIVE'
+               and epoch.provisioning_status = 'READY'
+               and epoch.process_revision = admission.process_revision
+               and epoch.room_revision = admission.room_revision
+               and registration.registration_status = 'REGISTERED'
+               and access_row.status = 'ACTIVE'
+               and agent.status = 'ACTIVE'
+            """;
+
     private static final String LOCK_EPOCH_SQL = """
             select id
               from case_room_epoch
@@ -353,6 +414,14 @@ public final class JdbcIntakeSignedSyntheticAdmissionPort
         }
     }
 
+    @Override
+    public PersistedCommandAdmission require(CommandRequest request, CommandSource source) {
+        Objects.requireNonNull(request, "request must not be null");
+        Objects.requireNonNull(source, "source must not be null");
+        return Objects.requireNonNull(transactions.execute(status -> lookupCommandAdmission(request, source)),
+                "command admission transaction returned null");
+    }
+
     private VerifiedAdmission persist(VerifiedToken token) {
         MapSqlParameterSource params = claimParameters(token);
         AuthorityRow authority = requireExactAuthority(params);
@@ -402,6 +471,36 @@ public final class JdbcIntakeSignedSyntheticAdmissionPort
         params.addValue("authorizationHash", ids.authorizationHash());
         Integer count = jdbc.queryForObject(CURRENT_AUTHORITY_COUNT_SQL, params, Integer.class);
         return count != null && count == 1;
+    }
+
+    private PersistedCommandAdmission lookupCommandAdmission(
+            CommandRequest request, CommandSource source) {
+        MapSqlParameterSource params = commandAdmissionParameters(request, source);
+        List<CommandAdmissionRow> rows = jdbc.query(
+                COMMAND_ADMISSION_SQL, params, JdbcIntakeSignedSyntheticAdmissionPort::mapCommandAdmission);
+        if (rows.size() != 1) {
+            throw new IntakeSyntheticAdmissionException(
+                    "ADMISSION_AUTHORITY_MISMATCH",
+                    "signed synthetic command admission was not durably admitted");
+        }
+        CommandAdmissionRow row = rows.getFirst();
+        locks.requireActive(locks.lockForShare(new LockRequest(
+                List.of(row.accessSessionId()),
+                List.of(row.agentSessionId()),
+                List.of(row.registrationId()))));
+        params.addValue("epochId", row.epochId());
+        if (!lockEpoch(params, row.epochId())) {
+            throw new IntakeSyntheticAdmissionException(
+                    "ADMISSION_AUTHORITY_MISMATCH", "SHADOW epoch is not current");
+        }
+        rows = jdbc.query(
+                COMMAND_ADMISSION_SQL, params, JdbcIntakeSignedSyntheticAdmissionPort::mapCommandAdmission);
+        if (rows.size() != 1 || !rows.getFirst().equals(row)) {
+            throw new IntakeSyntheticAdmissionException(
+                    "ADMISSION_AUTHORITY_MISMATCH",
+                    "signed synthetic command admission changed during authorization");
+        }
+        return row.toPersisted();
     }
 
     private AuthorityRow requireExactAuthority(MapSqlParameterSource params) {
@@ -577,6 +676,57 @@ public final class JdbcIntakeSignedSyntheticAdmissionPort
                 .addValue("nowEpochMillis", clock.millis());
     }
 
+    private static MapSqlParameterSource commandAdmissionParameters(
+            CommandRequest request, CommandSource source) {
+        var command = request.command();
+        return new MapSqlParameterSource()
+                .addValue("tenant", command.tenantSurrogate())
+                .addValue("caseId", command.caseId())
+                .addValue("roomEpoch", command.roomEpoch())
+                .addValue("fence", source.fencingToken())
+                .addValue("commandId", command.commandId())
+                .addValue("commandSequence", command.caseCommandSequence())
+                .addValue("party", source.party().name())
+                .addValue("payloadRef", command.payloadRef().uri())
+                .addValue("payloadHash", command.payloadRef().sha256())
+                .addValue("commandOperationKey", source.operationKey())
+                .addValue("actorScopeHash", source.actorScopeHash())
+                .addValue("requestHash", command.requestHash())
+                .addValue("processRevision", command.expectedProcessRevision())
+                .addValue("roomRevision", source.roomRevision())
+                .addValue("deadlineEpochMillis", command.deadlineAt().toEpochMilli());
+    }
+
+    private static CommandAdmissionRow mapCommandAdmission(
+            java.sql.ResultSet resultSet, int rowNum) throws java.sql.SQLException {
+        return new CommandAdmissionRow(
+                resultSet.getString("epoch_id"),
+                resultSet.getString("access_session_id"),
+                resultSet.getString("agent_session_id"),
+                resultSet.getString("registration_id"),
+                resultSet.getString("tenant_surrogate"),
+                resultSet.getString("case_id"),
+                resultSet.getLong("room_epoch"),
+                resultSet.getLong("fencing_token"),
+                resultSet.getString("command_id"),
+                resultSet.getLong("command_sequence"),
+                IntakeCommandType.valueOf(resultSet.getString("command_type")),
+                com.example.dispute.workflow.temporal.room.intake.IntakeParty.valueOf(
+                        resultSet.getString("party")),
+                resultSet.getString("payload_ref"),
+                resultSet.getString("payload_hash"),
+                resultSet.getString("command_operation_key"),
+                resultSet.getString("actor_scope_hash"),
+                resultSet.getString("request_hash"),
+                resultSet.getLong("process_revision"),
+                resultSet.getLong("room_revision"),
+                resultSet.getString("thread_id"),
+                resultSet.getLong("deadline_epoch_millis"),
+                resultSet.getInt("retry_provider_attempts"),
+                resultSet.getInt("retry_activity_attempts"),
+                resultSet.getInt("retry_repairs"));
+    }
+
     private static String pinsJson(Pins pins) {
         try {
             return JSON.writeValueAsString(Map.ofEntries(
@@ -649,4 +799,58 @@ public final class JdbcIntakeSignedSyntheticAdmissionPort
             String authorizationHash) {}
 
     private record ExistingAdmission(String envelopeHash, String keyId, String jwtId) {}
+
+    private record CommandAdmissionRow(
+            String epochId,
+            String accessSessionId,
+            String agentSessionId,
+            String registrationId,
+            String tenantSurrogate,
+            String caseId,
+            long roomEpoch,
+            long fencingToken,
+            String commandId,
+            long commandSequence,
+            IntakeCommandType commandType,
+            com.example.dispute.workflow.temporal.room.intake.IntakeParty party,
+            String payloadRef,
+            String payloadHash,
+            String operationKey,
+            String actorScopeHash,
+            String requestHash,
+            long processRevision,
+            long roomRevision,
+            String threadId,
+            long deadlineEpochMillis,
+            int retryProviderAttempts,
+            int retryActivityAttempts,
+            int retryRepairs) {
+
+        PersistedCommandAdmission toPersisted() {
+            return new PersistedCommandAdmission(
+                    tenantSurrogate,
+                    caseId,
+                    roomEpoch,
+                    fencingToken,
+                    commandId,
+                    commandSequence,
+                    commandType,
+                    party,
+                    payloadRef,
+                    payloadHash,
+                    operationKey,
+                    actorScopeHash,
+                    requestHash,
+                    processRevision,
+                    roomRevision,
+                    threadId,
+                    agentSessionId,
+                    deadlineEpochMillis,
+                    new RetryBudget(
+                            "intake-retry-budget.v1",
+                            retryProviderAttempts,
+                            retryActivityAttempts,
+                            retryRepairs));
+        }
+    }
 }

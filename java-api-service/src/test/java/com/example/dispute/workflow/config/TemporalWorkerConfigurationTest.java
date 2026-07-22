@@ -85,6 +85,7 @@ class TemporalWorkerConfigurationTest {
                                             mock(EvidenceWindowActivitiesAdapter.class),
                                             mock(CaseProcessLedgerActivitiesImpl.class),
                                             mock(ProcessProjectionActivitiesImpl.class),
+                                            streamProvider(),
                                             intakeChildBridgeReadPortProvider))
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining(
@@ -419,6 +420,7 @@ class TemporalWorkerConfigurationTest {
                 mock(EvidenceWindowActivitiesAdapter.class),
                 mock(CaseProcessLedgerActivitiesImpl.class),
                 mock(ProcessProjectionActivitiesImpl.class),
+                streamProvider(),
                 provider(mock(IntakeChildBridgeReadPort.class)));
     }
 

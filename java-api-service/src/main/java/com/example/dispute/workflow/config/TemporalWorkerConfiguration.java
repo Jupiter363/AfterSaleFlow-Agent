@@ -63,10 +63,12 @@ public class TemporalWorkerConfiguration {
             EvidenceWindowActivitiesAdapter evidenceWindowActivities,
             CaseProcessLedgerActivitiesImpl ledgerActivities,
             ProcessProjectionActivitiesImpl projectionActivities,
+            ObjectProvider<IntakeAuthorityWorkerRegistration> intakeAuthorityRegistrationProvider,
             ObjectProvider<IntakeChildBridgeReadPort> intakeChildBridgeReadPortProvider) {
         requireVersionedControlWorker(properties);
         IntakeAuthorityWorkerRegistration intakeAuthorityRegistration =
-                IntakeAuthorityWorkerRegistration.fromReadPortProvider(intakeChildBridgeReadPortProvider);
+                resolveIntakeAuthorityRegistration(
+                        intakeAuthorityRegistrationProvider, intakeChildBridgeReadPortProvider);
         WorkerFactory factory =
                 WorkerFactory.newInstance(workflowClient, optionsFactory.factoryOptions());
         return start(
@@ -240,6 +242,20 @@ public class TemporalWorkerConfiguration {
                     "Signed synthetic Intake requires exactly one IntakeSyntheticWorkerRegistration");
         }
         return registrations.getFirst();
+    }
+
+    private static IntakeAuthorityWorkerRegistration resolveIntakeAuthorityRegistration(
+            ObjectProvider<IntakeAuthorityWorkerRegistration> registrationProvider,
+            ObjectProvider<IntakeChildBridgeReadPort> readPortProvider) {
+        List<IntakeAuthorityWorkerRegistration> registrations = registrationProvider.stream().toList();
+        if (registrations.size() == 1) {
+            return registrations.getFirst();
+        }
+        if (registrations.size() > 1) {
+            throw new IllegalStateException(
+                    "CASE_CONTROL requires at most one IntakeAuthorityWorkerRegistration");
+        }
+        return IntakeAuthorityWorkerRegistration.fromReadPortProvider(readPortProvider);
     }
 
     private static void requireVersionedAgentWorker(
