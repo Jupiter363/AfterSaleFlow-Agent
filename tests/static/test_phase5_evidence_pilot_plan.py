@@ -303,6 +303,11 @@ def test_phase5_candidate_repairs_are_ledgered_without_inheriting_a_pass() -> No
         assert "P5.0 NOT_RUN" in document
         assert "EvidenceApiIntegrationTest" in document
         assert "EVIDENCE_OPEN" in document
+        assert "b9201f0bc1d9ad7fca1cc0ca7b68cd75e62a503a" in document
+        assert "79b8c797522671aa46f2299198eab7ba6f651006" in document
+        assert "occurred_at" in document
+        assert "PRODUCT" in document
+        assert "FIXTURE" in document
 
     for commit in (
         "99cdd435",
@@ -318,6 +323,10 @@ def test_phase5_candidate_repairs_are_ledgered_without_inheriting_a_pass() -> No
 
     assert "SecurityConfiguration" in execution
     assert "SecurityConfiguration" in closure
+    assert "withOffsetSameInstant(UTC)" in execution
+    assert "withOffsetSameInstant(UTC)" in closure
+    assert "27/27" in execution
+    assert "27/27" in closure
     assert "do not inherit any result" in execution
     assert "No diagnostic run from an earlier SHA is accepted" in closure
 

@@ -49,14 +49,21 @@ records the tested SHA, commands, durations, exit codes, report paths and hashes
 starts only after that evidence commit says P5.0 `PASS`, the Phase 4 engineering handoff remains
 valid, and every ADR 0012 runtime restriction is still fail closed.
 
-The post-contract changes through `fb69bd4c0d944eccfd6c7f78dfd1faadbbe05ffe` are not Phase 5
-implementation and do not constitute a passed candidate. They are the line-ending authentication,
-LF publication, architecture-fixture isolation, Surefire retention, and three semantics-preserving
-Spring proxyability repairs classified in the execution plan's candidate-scope ledger. The final
-candidate must also correct `EvidenceApiIntegrationTest` to admit its completed Intake case to
-`EVIDENCE_OPEN` before upload; production authentication and authorization remain unchanged. All
-earlier Batch 0 attempts are diagnostic only, and the complete suite must run afresh on the final
-exact SHA.
+The post-contract changes through `fb69bd4c0d944eccfd6c7f78dfd1faadbbe05ffe`, plus the exact main
+candidate repair `b9201f0bc1d9ad7fca1cc0ca7b68cd75e62a503a` (tree-equivalent source
+`79b8c797522671aa46f2299198eab7ba6f651006`), are not Phase 5 implementation and do not
+constitute a passed candidate. The earlier commits are the line-ending authentication, LF
+publication, architecture-fixture isolation, Surefire retention, and three semantics-preserving
+Spring proxyability repairs classified in the execution plan's candidate-scope ledger.
+
+Main commit `b9201f0bc1d9ad7fca1cc0ca7b68cd75e62a503a` contains two separately classified baseline
+repairs. Its `FIXTURE` portion admits the `EvidenceApiIntegrationTest` case through the domain
+transition to `EVIDENCE_OPEN` and performs audited, case-scoped cleanup before rebuilding it. Its
+`PRODUCT` portion canonicalizes non-null `occurred_at` response values to the same instant at UTC
+while preserving null, so direct create and PostgreSQL reload views expose the same JSON `Z`
+representation. It does not change the stored instant, production authorization, formal writer,
+runtime mode, or promotion boundary. All earlier Batch 0 attempts remain diagnostic only, and the
+complete suite must run afresh on the final exact SHA.
 
 ## Open P0 Contract Gaps
 

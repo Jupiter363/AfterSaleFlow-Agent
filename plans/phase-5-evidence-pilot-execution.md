@@ -59,13 +59,21 @@ adds Phase 5 Evidence behavior:
 | `24a705dc` | Test-fixture isolation | Keep formal-sink architecture fixtures outside Spring component discovery; production assembly is unchanged |
 | `a3be6744`, `e97e1341`, `fb69bd4c` | Existing Spring baseline proxyability | Remove only class-level `final` and prove class proxies preserve caller transaction, `MANDATORY` propagation, SQL/lock order, idempotency and Java authority |
 | `c9e6c7ba` | Entry runner report retention | Retain long Surefire reports under deterministic short artifact names without changing selected suites or acceptance rules |
-| `EvidenceApiIntegrationTest` Evidence-open setup | `FIXTURE` correction required in the final candidate | After `completeIntake`, call the domain admission transition so upload is tested from `EVIDENCE_OPEN`; do not change `SecurityConfiguration`, `EvidenceController` authorization, or production access rules |
+| `b9201f0bc1d9ad7fca1cc0ca7b68cd75e62a503a` (`79b8c797522671aa46f2299198eab7ba6f651006` source) `EvidenceApiIntegrationTest` admission and cleanup | `FIXTURE` baseline correction | After `completeIntake`, use the domain admission transition to reach `EVIDENCE_OPEN`; use the existing audited, case-scoped purge service, rebuild unconditionally, and count only this case's Evidence. Do not change `SecurityConfiguration`, `EvidenceController` authorization, or production access rules |
+| `b9201f0bc1d9ad7fca1cc0ca7b68cd75e62a503a` (`79b8c797522671aa46f2299198eab7ba6f651006` source) `occurred_at` response mapping | `PRODUCT` baseline contract repair | Normalize each non-null response value to the same instant at UTC and preserve null so immediate-create and PostgreSQL-reload views have one canonical JSON `Z` representation. Do not alter the stored instant, request acceptance, authorization, writer ownership, or runtime mode |
 
 These repairs do not inherit any result from `6e23c580`, `d76fde17`, or another diagnostic SHA.
-The primary must review the final diff, include the Evidence fixture correction above, run the
-focused repair checks, and then execute all of Batch 0 from one fresh clean detached SHA. Any
-additional product source, migration, runtime, public-contract, or authorization change reopens
-candidate-scope review and cannot be classified as an entry repair by assertion alone.
+The UTC mapping is a baseline `PRODUCT` repair because the accepted API response must not change
+representation depending on whether the same item is returned directly after creation or reloaded
+from PostgreSQL. `withOffsetSameInstant(UTC)` preserves the business instant and only canonicalizes
+the response boundary. At the exact main repair SHA, Evidence API/service tests passed 15/15 and the
+retained Security and Intake progress checks passed 8/8 and 4/4, for 27/27 focused checks. These are
+repair checks, not P5.0 Batch 0 evidence.
+
+The primary must review the final diff, include both classified sub-repairs above, run the focused
+repair checks, and then execute all of Batch 0 from one fresh clean detached SHA. Any additional
+product source, migration, runtime, public-contract, or authorization change reopens candidate-scope
+review and cannot be classified as an entry repair by assertion alone.
 
 ## Scope
 

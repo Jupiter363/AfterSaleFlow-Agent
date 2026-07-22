@@ -117,11 +117,24 @@ authentication/publication, runner retention, test-fixture isolation, and existi
 proxyability. The proxy repairs remove only class-level `final`; they do not change transaction
 annotations, locks, SQL, idempotency, formal writers, runtime modes or Evidence behavior.
 
-The Evidence upload diagnostic is a fixture defect: its case is only `INTAKE_COMPLETED`, while
-production access correctly requires an Evidence-open case. The final candidate may update only
-`EvidenceApiIntegrationTest` to reach `EVIDENCE_OPEN` through the domain admission transition
-before upload. Weakening
-`SecurityConfiguration`, controller/service authorization, or production state checks is forbidden.
+Exact main repair commit `b9201f0bc1d9ad7fca1cc0ca7b68cd75e62a503a`, tree-equivalent to source
+commit `79b8c797522671aa46f2299198eab7ba6f651006`, has two distinct dispositions:
+
+- **`FIXTURE`: Evidence admission and cleanup.** The `EvidenceApiIntegrationTest` case was only
+  `INTAKE_COMPLETED`, while production access correctly requires an Evidence-open case. The fixture
+  now uses the domain admission transition to reach `EVIDENCE_OPEN`, performs cleanup through the
+  existing audited, case-scoped purge service, rebuilds unconditionally, and scopes its Evidence
+  count to that case.
+- **`PRODUCT`: canonical UTC response mapping.** The immediate create view retained the request
+  offset while a PostgreSQL reload returned the same instant at UTC, so one accepted item could have
+  two response representations. `toView` now applies `withOffsetSameInstant(UTC)` to non-null
+  `occurred_at` and preserves null. This canonicalizes the API response only; it does not change the
+  stored instant, request rules, authorization, persistence order, or Java writer authority.
+
+At that exact SHA, Evidence API/service checks passed 15/15, retained Security checks passed 8/8,
+and Intake progress checks passed 4/4, for 27/27 focused checks. They do not substitute for the
+fresh exact-SHA Batch 0. Weakening `SecurityConfiguration`, controller/service authorization,
+production state checks, runtime restrictions, or promotion gates remains forbidden.
 
 No diagnostic run from an earlier SHA is accepted. `P5-G10` remains blocked until the repair set is
 integrated, the final diff is reviewed, and Batch 0 passes from one fresh clean detached SHA.
@@ -146,8 +159,9 @@ integrated, the final diff is reviewed, and Batch 0 passes from one fresh clean 
 
 1. Preserve accepted Phase 4 candidate `1ba6e17f` and evidence commit `b8697ce7` with
    `next_phase_permission: PHASE_5_ENGINEERING_ONLY`.
-2. Integrate and independently review only the classified candidate-scope repairs, including the
-   Evidence-open test fixture correction; no Phase 5 feature implementation is allowed.
+2. Integrate and independently review only the classified candidate-scope repairs, including both
+   sub-repairs in `b9201f0bc1d9ad7fca1cc0ca7b68cd75e62a503a`; no Phase 5 feature implementation
+   is allowed.
 3. Freeze a new P5.0 contract candidate containing ADR 0012 restrictions, this factual baseline,
    the machine schedule, exact owner briefs and the closed repair ledger.
 4. Run P5-BATCH-0 once from the exact clean detached candidate SHA.
