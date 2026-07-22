@@ -532,9 +532,14 @@ services:
       APP_AGENT_RUN_V2_GRAPH_BINDING_AUDIENCE: ${APP_AGENT_RUN_V2_GRAPH_BINDING_AUDIENCE:-SYSTEM}
       APP_AGENT_RUN_V2_GRAPH_BINDING_REGISTRY_HASH: ${APP_AGENT_RUN_V2_GRAPH_BINDING_REGISTRY_HASH:-}
       APP_AGENT_RUN_V2_GRAPH_BINDING_TOOL_POLICY_VERSION: ${APP_AGENT_RUN_V2_GRAPH_BINDING_TOOL_POLICY_VERSION:-}
+      APP_ORCHESTRATION_INTAKE_SYNTHETIC_RUNTIME_MATERIAL_ENABLED: ${APP_ORCHESTRATION_INTAKE_SYNTHETIC_RUNTIME_MATERIAL_ENABLED:-false}
+      APP_ORCHESTRATION_INTAKE_SYNTHETIC_RUNTIME_MATERIAL_BUCKET: ${MINIO_BUCKET_INTAKE_SYNTHETIC_PRIVATE:-intake-synthetic-private}
+      APP_ORCHESTRATION_INTAKE_SYNTHETIC_RUNTIME_MATERIAL_PREFIX: ${APP_ORCHESTRATION_INTAKE_SYNTHETIC_RUNTIME_MATERIAL_PREFIX:-signed-synthetic/intake/runtime-material}
+      APP_ORCHESTRATION_INTAKE_SYNTHETIC_RUNTIME_MATERIAL_MANIFEST_REFERENCE_INDEX_PATH: /run/secrets/intake-synthetic/runtime-material-index.json
     volumes:
       - ${GRAPH_SIGNING_KEYS_HOST_DIRECTORY:-./.runtime/graph-signing-keys}:/run/secrets/graph-signing-keys:ro
       - ${GRAPH_MTLS_HOST_DIRECTORY:-./.runtime/graph-mtls}:/run/secrets/graph-mtls:ro
+      - ${INTAKE_SYNTHETIC_RUNTIME_MATERIAL_INDEX_HOST_PATH:-./.runtime/intake-synthetic/runtime-material-index.json}:/run/secrets/intake-synthetic/runtime-material-index.json:ro
     depends_on: *java-agent-depends-on
     healthcheck:
       test: ["CMD-SHELL", "kill -0 1"]

@@ -10,14 +10,18 @@ import com.example.dispute.workflow.activity.intake.IntakeSnapshotPublicationPor
 import com.example.dispute.workflow.application.intake.IntakeDomainSnapshotPublisher;
 import com.example.dispute.workflow.application.intake.IntakeGraphBindingStore;
 import com.example.dispute.workflow.application.intake.IntakeGraphCommandFactory;
+import com.example.dispute.workflow.infrastructure.objectstore.intake.IntakeRuntimeMaterialObjectStore;
+import com.example.dispute.workflow.infrastructure.objectstore.intake.MinioIntakeRuntimeMaterialObjectStore;
+import com.example.dispute.workflow.infrastructure.objectstore.intake.PrivateObjectStoreIntakeSyntheticRuntimeMaterialSource;
 import com.example.dispute.workflow.infrastructure.persistence.authority.epoch.EpochAuthorityLockCoordinator;
+import com.example.dispute.workflow.shadow.intake.IntakeRuntimeMaterialManifestReferenceSource;
 import com.example.dispute.workflow.shadow.intake.IntakeSignedSyntheticAdmissionPort;
 import com.example.dispute.workflow.shadow.intake.IntakeSignedSyntheticGraphExecutionPort;
 import com.example.dispute.workflow.shadow.intake.IntakeSyntheticAdmissionReader;
 import com.example.dispute.workflow.shadow.intake.IntakeSyntheticGraphMaterialSource;
-import com.example.dispute.workflow.shadow.intake.IntakeSyntheticParityObservationPort;
 import com.example.dispute.workflow.shadow.intake.IntakeSyntheticParityMaterialSource;
 import com.example.dispute.workflow.shadow.intake.IntakeSyntheticParityObservationAdapter;
+import com.example.dispute.workflow.shadow.intake.IntakeSyntheticParityObservationPort;
 import com.example.dispute.workflow.shadow.intake.IntakeSyntheticRuntimeSource;
 import com.example.dispute.workflow.shadow.intake.IntakeSyntheticSignedGraphExecutionAdapter;
 import com.example.dispute.workflow.shadow.intake.IntakeSyntheticSnapshotMaterialSource;
@@ -26,6 +30,7 @@ import com.example.dispute.workflow.shadow.intake.IntakeSyntheticWorkerRegistrat
 import com.example.dispute.workflow.shadow.intake.JdbcIntakeSyntheticAdmissionReader;
 import com.example.dispute.workflow.shadow.intake.JdbcIntakeSyntheticComparisonLedger;
 import com.example.dispute.workflow.shadow.intake.JdbcIntakeSyntheticRuntimeSource;
+import com.example.dispute.workflow.shadow.intake.MountedIntakeRuntimeMaterialManifestReferenceSource;
 import com.example.dispute.workflow.shadow.intake.SignedSyntheticIntakeBridgeReadPortDecorator;
 import com.example.dispute.workflow.shadow.intake.SignedSyntheticIntakeCommandAdmissionLookup;
 import com.example.dispute.workflow.shadow.intake.SignedSyntheticIntakeDriver;
@@ -34,6 +39,7 @@ import com.example.dispute.workflow.shadow.intake.admission.IntakeSyntheticAdmis
 import com.example.dispute.workflow.shadow.intake.admission.JdbcIntakeSignedSyntheticAdmissionPort;
 import com.example.dispute.workflow.shadow.intake.admission.MountedPemIntakeSyntheticAdmissionTrustSet;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.minio.MinioClient;
 import java.time.Clock;
 import java.util.List;
 import javax.sql.DataSource;
@@ -54,7 +60,8 @@ import org.springframework.transaction.support.TransactionTemplate;
     IntakeEpochSelectionProperties.class,
     GraphCommandClientProperties.class,
     AgentRunV2Properties.class,
-    IntakeSyntheticAdmissionTrustProperties.class
+    IntakeSyntheticAdmissionTrustProperties.class,
+    IntakeSyntheticRuntimeMaterialProperties.class
 })
 @ConditionalOnProperty(
         name = "app.orchestration.intake-epoch-selection.signed-synthetic-shadow-enabled",
@@ -137,6 +144,68 @@ public class IntakeSyntheticShadowConfiguration {
     @ConditionalOnMissingBean(IntakeSyntheticAdmissionReader.class)
     JdbcIntakeSyntheticAdmissionReader intakeSyntheticAdmissionReader() {
         return new JdbcIntakeSyntheticAdmissionReader();
+    }
+
+    @Bean
+    @ConditionalOnProperty(
+            name = "app.orchestration.intake-synthetic-runtime-material.enabled",
+            havingValue = "true")
+    @ConditionalOnBean(IntakeSyntheticAdmissionTrustSet.class)
+    @ConditionalOnMissingBean(IntakeRuntimeMaterialManifestReferenceSource.class)
+    MountedIntakeRuntimeMaterialManifestReferenceSource
+            intakeRuntimeMaterialManifestReferenceSource(
+                    ObjectMapper objectMapper,
+                    IntakeSyntheticRuntimeMaterialProperties properties,
+                    IntakeEpochSelectionProperties epochSelection,
+                    GraphCommandClientProperties graphClient,
+                    AgentRunV2Properties agentRunV2) {
+        requireSyntheticShadow(epochSelection, graphClient, agentRunV2);
+        return MountedIntakeRuntimeMaterialManifestReferenceSource.load(
+                properties.requireManifestReferenceIndexPath(), objectMapper);
+    }
+
+    @Bean
+    @ConditionalOnProperty(
+            name = "app.orchestration.intake-synthetic-runtime-material.enabled",
+            havingValue = "true")
+    @ConditionalOnBean(IntakeSyntheticAdmissionTrustSet.class)
+    @ConditionalOnMissingBean(IntakeRuntimeMaterialObjectStore.class)
+    MinioIntakeRuntimeMaterialObjectStore intakeRuntimeMaterialObjectStore(
+            MinioClient minioClient,
+            IntakeSyntheticRuntimeMaterialProperties properties,
+            IntakeEpochSelectionProperties epochSelection,
+            GraphCommandClientProperties graphClient,
+            AgentRunV2Properties agentRunV2) {
+        requireSyntheticShadow(epochSelection, graphClient, agentRunV2);
+        return new MinioIntakeRuntimeMaterialObjectStore(
+                minioClient, properties.bucket(), properties.prefix());
+    }
+
+    @Bean
+    @ConditionalOnProperty(
+            name = "app.orchestration.intake-synthetic-runtime-material.enabled",
+            havingValue = "true")
+    @ConditionalOnBean({
+        IntakeSyntheticAdmissionTrustSet.class,
+        IntakeRuntimeMaterialManifestReferenceSource.class,
+        IntakeRuntimeMaterialObjectStore.class
+    })
+    @ConditionalOnMissingBean({
+        IntakeSyntheticSnapshotMaterialSource.class,
+        IntakeSyntheticGraphMaterialSource.class,
+        IntakeSyntheticParityMaterialSource.class
+    })
+    PrivateObjectStoreIntakeSyntheticRuntimeMaterialSource
+            intakeSyntheticRuntimeMaterialSourceProvider(
+                    ObjectMapper objectMapper,
+                    IntakeRuntimeMaterialManifestReferenceSource referenceSource,
+                    IntakeRuntimeMaterialObjectStore objectStore,
+                    IntakeEpochSelectionProperties epochSelection,
+                    GraphCommandClientProperties graphClient,
+                    AgentRunV2Properties agentRunV2) {
+        requireSyntheticShadow(epochSelection, graphClient, agentRunV2);
+        return new PrivateObjectStoreIntakeSyntheticRuntimeMaterialSource(
+                objectMapper, referenceSource, objectStore);
     }
 
     @Bean
