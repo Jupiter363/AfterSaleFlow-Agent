@@ -69,6 +69,8 @@ def test_configuration_and_keys_fail_closed() -> None:
         GraphBulkheadConfig(global_limit=1)
     with pytest.raises(GraphContractError, match="room <= tenant <= global"):
         _config(global_limit=1, tenant_limit=2)
+    with pytest.raises(GraphContractError, match="cannot exceed 8"):
+        _config(global_limit=9, tenant_limit=9, room_limit=9)
     with pytest.raises(GraphContractError, match="queues"):
         _config(global_queue_limit=1, tenant_queue_limit=2)
     with pytest.raises(GraphContractError, match="timeout"):

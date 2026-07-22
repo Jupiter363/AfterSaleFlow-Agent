@@ -21,6 +21,7 @@ from app.graph_runtime.errors import (
 
 
 _OPAQUE_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_MAX_ROOM_CONCURRENCY = 8
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +56,8 @@ class GraphBulkheadConfig:
             return
         if not 1 <= self.room_limit <= self.tenant_limit <= self.global_limit:
             raise GraphContractError("bulkhead concurrency requires 1 <= room <= tenant <= global")
+        if self.room_limit > _MAX_ROOM_CONCURRENCY:
+            raise GraphContractError("bulkhead room concurrency cannot exceed 8")
         if not (0 <= self.room_queue_limit <= self.tenant_queue_limit <= self.global_queue_limit):
             raise GraphContractError("bulkhead queues require 0 <= room <= tenant <= global")
         if (
