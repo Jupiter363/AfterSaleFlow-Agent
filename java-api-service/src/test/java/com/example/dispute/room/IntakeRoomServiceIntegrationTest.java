@@ -45,10 +45,12 @@ import com.example.dispute.room.infrastructure.persistence.repository.CaseTimeli
 import com.example.dispute.room.infrastructure.persistence.repository.RoomMessageRepository;
 import com.example.dispute.workflow.application.EvidenceWindowCoordinator;
 import com.example.dispute.workflow.application.epoch.TransactionalRoomEpochAllocator;
+import com.example.dispute.workflow.application.intake.LegacyIntakeWriterGuard;
 import com.example.dispute.workflow.contract.v1.ContractTypes;
 import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.EpochLifecycleStatus;
 import com.example.dispute.workflow.infrastructure.persistence.repository.CaseProcessProjectionRepository;
 import com.example.dispute.workflow.infrastructure.persistence.repository.CaseRoomEpochRepository;
+import com.example.dispute.workflow.projection.intake.IntakeProcessProjectionAdapter;
 import com.example.dispute.workflow.room.RoomEpochAllocatorTestConfiguration;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
@@ -88,6 +90,8 @@ import org.testcontainers.utility.DockerImageName;
     CaseEventService.class,
     RoomMessageService.class,
     TransactionalRoomEpochAllocator.class,
+    LegacyIntakeWriterGuard.class,
+    IntakeProcessProjectionAdapter.class,
     RoomEpochAllocatorTestConfiguration.class,
     IntakeRoomServiceIntegrationTest.FixedClockConfiguration.class
 })
