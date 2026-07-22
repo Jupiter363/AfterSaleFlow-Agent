@@ -106,14 +106,40 @@ authorization:
   room_graph_command_cross_binding:
     required_before_checkpoint_mutation: true
     source_schema_version: room-graph-command.v1
+    canonical_command_fixture:
+      path: contracts/agent-platform/v1/fixtures/valid/room-graph-command-evidence-valid.json
+      purpose: canonical_evidence_cross_binding_contract_evidence
     transport_identity: MTLS_JAVA_API_SERVICE
     envelope_signature_algorithm: ES256
     snapshot_ref_bindings:
       domain_snapshot_ref.artifact_id: manifest_id
       domain_snapshot_ref.schema_version: evidence-batch-manifest.v1
-      domain_snapshot_ref.sha256: manifest_hash
-      domain_snapshot_ref.size_bytes: exact_serialized_manifest_bytes
-      domain_snapshot_ref.uri: exact_immutable_allowlisted_uri
+      domain_snapshot_ref.sha256: full_canonical_signed_manifest_payload_sha256
+      domain_snapshot_ref.size_bytes: full_canonical_signed_manifest_payload_size_bytes
+      domain_snapshot_ref.uri: exact_immutable_allowlisted_uri_content_addressed_by_payload_sha256
+    snapshot_artifact_verification:
+      payload_layer:
+        encoding: RFC_8785_CANONICAL_JSON_BYTES
+        includes_top_level_fields: [manifest_hash, signature]
+        sha256_source: verified_command.domain_snapshot_ref.sha256
+        size_bytes_source: verified_command.domain_snapshot_ref.size_bytes
+        uri_content_address_source: verified_command.domain_snapshot_ref.sha256
+      internal_manifest_layer:
+        self_hash_field: manifest_hash
+        self_hash_omits_exactly: [manifest_hash, signature]
+        signature_algorithm: ES256
+        signature_input: ASCII_LOWERCASE_HEX_TEXT_OF_MANIFEST_HASH
+        signature_encoding: JOSE_P1363_BASE64URL
+      verification_order:
+        - LOAD_ARTIFACT_FROM_VERIFIED_COMMAND_DOMAIN_SNAPSHOT_REF
+        - VERIFY_FULL_PAYLOAD_SHA256
+        - VERIFY_FULL_PAYLOAD_SIZE_BYTES
+        - PARSE_EVIDENCE_BATCH_MANIFEST_V1
+        - VERIFY_RFC_8785_REENCODING_EQUALS_LOADED_BYTES
+        - VERIFY_INTERNAL_MANIFEST_HASH
+        - VERIFY_JAVA_ES256_SIGNATURE
+      internal_manifest_hash_is_payload_sha256: false
+      interchangeability: forbidden
     command_bindings:
       - command_id
       - logical_run_id
