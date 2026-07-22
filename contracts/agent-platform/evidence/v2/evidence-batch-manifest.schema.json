@@ -24,6 +24,10 @@
     "source_schema_version": "room-graph-command.v1",
     "manifest_ref_field": "domain_snapshot_ref",
     "requires_verified_java_envelope": true,
+    "command_binds_room_fencing_token": false,
+    "room_fencing_token_authority": "JAVA_SIGNED_MANIFEST",
+    "checkpoint_lease_fence_authority": "GRAPH_RUNTIME",
+    "java_finalizer_revalidates_room_fencing_token": true,
     "failure": "BEFORE_CHECKPOINT_MUTATION",
     "room_fence_is_graph_lease_fence": false
   },
@@ -56,7 +60,7 @@
     },
     {
       "id": "GATEWAY_COMMAND_EXACT_BINDING",
-      "rule": "before Graph or checkpoint mutation, the trusted gateway verifies the Java-signed room-graph-command.v1 envelope and exact domain_snapshot_ref id/schema/URI/hash/size plus command/run/attempt, tenant/case/Evidence room, epoch/room fence, thread/registration, actor role/scope, participant/session, runtime guards, registry/profile pins and deadline; manifest fencing_token is never a Graph lease fence"
+      "rule": "before Graph or checkpoint mutation, the trusted gateway verifies the Java-signed room-graph-command.v1 envelope and exact domain_snapshot_ref id/schema/URI/hash/size plus its actual command/run/attempt, tenant/case, room type/epoch, thread, actor scope, graph/checkpoint, invocation registry/profile, deadline and request bindings; the signed manifest separately binds Java room fencing_token, registration, participant and session, the gateway independently requires the current Graph lease fence for checkpoint writes, the two fences are distinct, and Java Finalizer revalidates the room fence"
     },
     {
       "id": "INITIAL_ADMISSION_AND_RECOVERY",
