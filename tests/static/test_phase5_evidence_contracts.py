@@ -85,7 +85,10 @@ EXPECTED_VALID_FIXTURES = {
 EXPECTED_INVALID_FIXTURES = {
     "evidence-asset-capability-credential.json",
     "evidence-batch-manifest-formal-action.json",
+    "evidence-batch-manifest-legacy-output-pin.json",
     "evidence-batch-manifest-public-51.json",
+    "evidence-batch-manifest-signature-algorithm.json",
+    "evidence-batch-manifest-unsigned.json",
     "evidence-finalization-receipt-real-formal-write.json",
     "evidence-item-proposal-formal-action.json",
     "evidence-process-projection-temporal-real-shadow.json",
@@ -103,6 +106,30 @@ FORBIDDEN_AUTHORITY_KEYS = {
     "real_case_shadow",
     "temporal_allocation",
     "tool_calls",
+}
+PROFILE_VERSION_FIELDS = (
+    "graph_version",
+    "checkpoint_schema_version",
+    "state_schema_version",
+    "prompt_version",
+    "model_profile_id",
+    "assessment_output_schema_version",
+    "terminal_output_schema_version",
+    "policy_version",
+    "guardrail_version",
+    "tool_policy_version",
+)
+INVALID_FIXTURE_FAILURE_VALIDATORS = {
+    "evidence-asset-capability-credential.json": {"additionalProperties"},
+    "evidence-batch-manifest-formal-action.json": {"additionalProperties"},
+    "evidence-batch-manifest-legacy-output-pin.json": {"additionalProperties"},
+    "evidence-batch-manifest-public-51.json": {"maximum", "maxItems"},
+    "evidence-batch-manifest-signature-algorithm.json": {"const"},
+    "evidence-batch-manifest-unsigned.json": {"required"},
+    "evidence-finalization-receipt-real-formal-write.json": {"const"},
+    "evidence-item-proposal-formal-action.json": {"additionalProperties"},
+    "evidence-process-projection-temporal-real-shadow.json": {"const", "enum"},
+    "evidence-terminal-proposal-formal-action.json": {"additionalProperties"},
 }
 
 
@@ -135,8 +162,26 @@ def _canonical_hash(value: dict[str, Any], *omitted: str) -> str:
     return hashlib.sha256(rfc8785.dumps(preimage)).hexdigest()
 
 
+def _declared_hash_omissions(schema: dict[str, Any], hash_field: str) -> tuple[str, ...]:
+    declaration = schema["x-self-hash"]
+    assert declaration["field"] == hash_field
+    omitted = declaration.get("omit_fields", [hash_field])
+    assert isinstance(omitted, list) and omitted
+    assert omitted[0] == hash_field
+    assert len(omitted) == len(set(omitted))
+    return tuple(omitted)
+
+
 def _semantic_ids(schema: dict[str, Any]) -> set[str]:
     return {constraint["id"] for constraint in schema["x-semantic-constraints"]}
+
+
+def _semantic_rule(schema: dict[str, Any], constraint_id: str) -> str:
+    return next(
+        constraint["rule"]
+        for constraint in schema["x-semantic-constraints"]
+        if constraint["id"] == constraint_id
+    )
 
 
 def _parse_time(value: str) -> datetime:
@@ -144,7 +189,10 @@ def _parse_time(value: str) -> datetime:
 
 
 def _validate_manifest_semantics(value: dict[str, Any]) -> None:
-    if _parse_time(value["issued_at"]) >= _parse_time(value["expires_at"]):
+    issued_at = _parse_time(value["issued_at"])
+    not_before = _parse_time(value["not_before"])
+    expires_at = _parse_time(value["expires_at"])
+    if issued_at > not_before or not_before >= expires_at:
         raise ValueError("manifest expiry order is invalid")
     command = value["command_binding"]
     if _parse_time(command["submitted_at"]) >= _parse_time(command["deadline_at"]):
@@ -375,6 +423,9 @@ def test_contract_matrix_and_all_nested_object_schemas_are_closed() -> None:
     capability_matrix = matrix["contracts"]["evidence-asset-capability.v1"]
     assert capability_matrix["self_hash_omits"] == ["capability_hash", "signature"]
     assert capability_matrix["signature_covers"] == "capability_hash"
+    manifest_matrix = matrix["contracts"]["evidence-batch-manifest.v1"]
+    assert manifest_matrix["self_hash_omits"] == ["manifest_hash", "signature"]
+    assert manifest_matrix["signature_covers"] == "manifest_hash"
 
     for contract_name, contract in matrix["contracts"].items():
         schema = _schema(contract["file"])
@@ -404,7 +455,7 @@ def test_valid_fixtures_validate_fit_size_and_have_exact_self_hashes() -> None:
         value = _load_json(path)
         assert not list(_validator(schema_name).iter_errors(value)), path.name
         assert len(rfc8785.dumps(value)) <= schema["x-max-encoded-bytes"], path.name
-        omitted = (hash_field, "signature") if hash_field == "capability_hash" else (hash_field,)
+        omitted = _declared_hash_omissions(schema, hash_field)
         assert value[hash_field] == _canonical_hash(value, *omitted), path.name
         if value["schema_version"] == "evidence-batch-manifest.v1":
             _validate_manifest_semantics(value)
@@ -420,10 +471,161 @@ def test_valid_fixtures_validate_fit_size_and_have_exact_self_hashes() -> None:
 
 def test_invalid_fixtures_are_rejected_by_their_closed_schema() -> None:
     paths = sorted(INVALID_ROOT.glob("*.json"))
-    assert paths
+    assert {path.name for path in paths} == set(INVALID_FIXTURE_FAILURE_VALIDATORS)
     for path in paths:
-        schema_name, _ = _fixture_schema(path)
-        assert list(_validator(schema_name).iter_errors(_load_json(path))), path.name
+        schema_name, hash_field = _fixture_schema(path)
+        schema = _schema(schema_name)
+        value = _load_json(path)
+        assert value[hash_field] == _canonical_hash(
+            value, *_declared_hash_omissions(schema, hash_field)
+        ), f"{path.name}: invalid fixture has a stale canonical hash"
+        errors = list(_validator(schema_name).iter_errors(value))
+        assert errors, path.name
+        assert any(
+            error.validator in INVALID_FIXTURE_FAILURE_VALIDATORS[path.name]
+            for error in errors
+        ), f"{path.name}: rejection no longer proves its named failure reason"
+
+
+def test_manifest_uses_direct_java_signature_before_graph_or_checkpoint_mutation() -> None:
+    schema = _schema("evidence-batch-manifest.schema.json")
+    manifest = _load_json(VALID_ROOT / "evidence-batch-manifest-synthetic-1-valid.json")
+
+    assert schema["x-self-hash"] == {
+        "algorithm": "SHA-256",
+        "field": "manifest_hash",
+        "preimage": "omit_top_level_fields",
+        "omit_fields": ["manifest_hash", "signature"],
+    }
+    assert schema["x-signature"] == {
+        "algorithm": "ES256",
+        "covers": "manifest_hash",
+        "encoding": "JOSE_P1363_BASE64URL",
+    }
+    assert {
+        "JAVA_SIGNATURE_REQUIRED",
+        "GATEWAY_COMMAND_EXACT_BINDING",
+        "INITIAL_ADMISSION_AND_RECOVERY",
+    } <= _semantic_ids(schema)
+    assert {
+        "issued_at",
+        "not_before",
+        "expires_at",
+        "signature_algorithm",
+        "signing_key_id",
+        "signature",
+    } <= set(schema["required"])
+    assert manifest["signature_algorithm"] == "ES256"
+    assert len(manifest["signature"]) == 86
+    assert manifest["manifest_hash"] == _canonical_hash(
+        manifest, "manifest_hash", "signature"
+    )
+
+    self_hash_rule = _semantic_rule(schema, "SELF_HASH").lower()
+    assert "manifest_hash" in self_hash_rule and "signature" in self_hash_rule
+    signature_rule = _semantic_rule(schema, "JAVA_SIGNATURE_REQUIRED").lower()
+    assert "java" in signature_rule and "es256" in signature_rule
+    assert "never mints" in signature_rule or "never signs" in signature_rule
+
+    gateway = schema["x-gateway-cross-binding"]
+    assert gateway == {
+        "source_schema_version": "room-graph-command.v1",
+        "manifest_ref_field": "domain_snapshot_ref",
+        "requires_verified_java_envelope": True,
+        "failure": "BEFORE_CHECKPOINT_MUTATION",
+        "room_fence_is_graph_lease_fence": False,
+    }
+    binding_rule = _semantic_rule(schema, "GATEWAY_COMMAND_EXACT_BINDING").lower()
+    for required_text in (
+        "before graph or checkpoint mutation",
+        "room-graph-command.v1",
+        "domain_snapshot_ref",
+        "id/schema/uri/hash/size",
+        "registry/profile pins",
+        "room fence",
+    ):
+        assert required_text in binding_rule
+
+
+def test_detached_authorization_proof_refs_are_forbidden_from_closed_contracts() -> None:
+    def assert_absent(value: Any, path: str) -> None:
+        if isinstance(value, dict):
+            assert "authorization_proof_ref" not in value, path
+            for key, child in value.items():
+                assert_absent(child, f"{path}/{key}")
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                assert_absent(child, f"{path}/{index}")
+
+    for path in sorted(CONTRACT_ROOT.glob("*.schema.json")):
+        assert_absent(_load_json(path), path.name)
+    for fixture_root in (VALID_ROOT, INVALID_ROOT):
+        for path in sorted(fixture_root.glob("*.json")):
+            assert_absent(_load_json(path), path.name)
+
+
+def test_dual_output_pins_are_exact_and_propagated_across_contracts() -> None:
+    manifest = _load_json(VALID_ROOT / "evidence-batch-manifest-synthetic-1-valid.json")
+    item = _load_json(VALID_ROOT / "evidence-item-proposal-valid.json")
+    terminal = _load_json(VALID_ROOT / "evidence-terminal-proposal-valid.json")
+    projection = _load_json(VALID_ROOT / "evidence-process-projection-valid.json")
+    capability = _load_json(VALID_ROOT / "evidence-asset-capability-valid.json")
+    pins = manifest["profile_versions"]
+
+    assert set(pins) == set(PROFILE_VERSION_FIELDS)
+    assert pins["assessment_output_schema_version"] == "evidence-item-assessment.v1"
+    assert pins["terminal_output_schema_version"] == "evidence-batch-proposal.v1"
+    assert item["profile_versions"] == pins
+    assert terminal["profile_versions"] == pins
+    assert {field: projection["version_pins"][field] for field in PROFILE_VERSION_FIELDS} == pins
+    assert capability["profile_versions_hash"] == hashlib.sha256(
+        rfc8785.dumps(pins)
+    ).hexdigest()
+
+
+def test_legacy_or_drifted_output_pins_are_rejected_everywhere() -> None:
+    cases = (
+        (
+            "evidence-batch-manifest.schema.json",
+            "evidence-batch-manifest-synthetic-1-valid.json",
+            "profile_versions",
+        ),
+        (
+            "evidence-item-proposal.schema.json",
+            "evidence-item-proposal-valid.json",
+            "profile_versions",
+        ),
+        (
+            "evidence-terminal-proposal.schema.json",
+            "evidence-terminal-proposal-valid.json",
+            "profile_versions",
+        ),
+        (
+            "evidence-process-projection.schema.json",
+            "evidence-process-projection-valid.json",
+            "version_pins",
+        ),
+    )
+    for schema_name, fixture_name, pin_field in cases:
+        validator = _validator(schema_name)
+        value = _load_json(VALID_ROOT / fixture_name)
+        assert "output_schema_version" not in value[pin_field]
+
+        legacy = copy.deepcopy(value)
+        legacy[pin_field]["output_schema_version"] = "evidence-batch-proposal.v1"
+        assert list(validator.iter_errors(legacy)), fixture_name
+
+        wrong_assessment = copy.deepcopy(value)
+        wrong_assessment[pin_field]["assessment_output_schema_version"] = (
+            "evidence-batch-proposal.v1"
+        )
+        assert list(validator.iter_errors(wrong_assessment)), fixture_name
+
+        wrong_terminal = copy.deepcopy(value)
+        wrong_terminal[pin_field]["terminal_output_schema_version"] = (
+            "evidence-item-assessment.v1"
+        )
+        assert list(validator.iter_errors(wrong_terminal)), fixture_name
 
 
 def test_public_50_and_closed_synthetic_1_8_100_are_structurally_isolated() -> None:
@@ -579,14 +781,14 @@ def test_schema_rejects_real_production_formal_nested_and_version_confusion() ->
             "evidence-batch-manifest.schema.json",
             "evidence-batch-manifest-synthetic-1-valid.json",
             lambda value: value["profile_versions"].update(
-                output_schema_version="evidence-item-assessment.v1"
+                assessment_output_schema_version="evidence-batch-proposal.v1"
             ),
         ),
         (
             "evidence-item-proposal.schema.json",
             "evidence-item-proposal-valid.json",
             lambda value: value["profile_versions"].update(
-                output_schema_version="evidence-batch-proposal.v1"
+                terminal_output_schema_version="evidence-item-assessment.v1"
             ),
         ),
         (
@@ -610,7 +812,7 @@ def test_schema_rejects_real_production_formal_nested_and_version_confusion() ->
             "evidence-terminal-proposal.schema.json",
             "evidence-terminal-proposal-valid.json",
             lambda value: value["profile_versions"].update(
-                output_schema_version="evidence-item-assessment.v1"
+                assessment_output_schema_version="evidence-batch-proposal.v1"
             ),
         ),
         (
@@ -622,7 +824,7 @@ def test_schema_rejects_real_production_formal_nested_and_version_confusion() ->
             "evidence-process-projection.schema.json",
             "evidence-process-projection-valid.json",
             lambda value: value["version_pins"].update(
-                output_schema_version="evidence-item-assessment.v1"
+                terminal_output_schema_version="evidence-item-assessment.v1"
             ),
         ),
         (
