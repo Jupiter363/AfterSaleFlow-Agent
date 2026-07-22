@@ -491,6 +491,13 @@ def test_phase4_compose_keeps_intake_runtime_fail_closed_for_java_services() -> 
     )
     for java_role in (api_service, control_worker, agent_worker):
         assert public_trust_mount in java_role
+    assert (
+        "APP_ORCHESTRATION_INTAKE_SYNTHETIC_EXCHANGE_ENABLED: "
+        "${APP_ORCHESTRATION_INTAKE_SYNTHETIC_EXCHANGE_ENABLED:-false}"
+        in api_service
+    )
+    assert "APP_ORCHESTRATION_INTAKE_SYNTHETIC_EXCHANGE_ENABLED" not in control_worker
+    assert "APP_ORCHESTRATION_INTAKE_SYNTHETIC_EXCHANGE_ENABLED" not in agent_worker
 
     assert "APP_ORCHESTRATION_INTAKE_EPOCH_SELECTION_MODE:-TEMPORAL" not in compose
     assert "APP_ORCHESTRATION_TEMPORAL_WRITER_ENABLED:-true" not in compose
