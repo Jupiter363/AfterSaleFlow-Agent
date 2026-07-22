@@ -117,6 +117,7 @@ function currentProcessProjection(overrides = {}) {
       WAITING_PARTY: "WAITING_PARTY",
       AGENT_RUNNING: "AGENT_RUNNING",
       READY_TO_CONFIRM: "NONE",
+      CLOSED: "NONE",
       COMPLETED: "NONE",
     }[projection.room_phase];
   }
@@ -148,6 +149,7 @@ function currentCamelProcessProjection(overrides = {}) {
       WAITING_PARTY: "WAITING_PARTY",
       AGENT_RUNNING: "AGENT_RUNNING",
       READY_TO_CONFIRM: "NONE",
+      CLOSED: "NONE",
       COMPLETED: "NONE",
     }[projection.roomPhase];
   }
@@ -923,6 +925,19 @@ describe("IntakeRoomView", () => {
       .toBe(false);
     expect(completedWrapper.find("[data-enter-evidence-room]").exists()).toBe(true);
     completedWrapper.unmount();
+
+    const closedWrapper = await mountInteractiveView({
+      initialIntakeStatus: intakeStatusWithProjection(
+        currentProcessProjection({ room_phase: "CLOSED" }),
+        { current_actor_completed: true, can_enter_evidence: true },
+      ),
+    });
+    expect(closedWrapper.find(".conversation-stream__composer").exists()).toBe(false);
+    expect(closedWrapper.find("[data-confirm-admission]").exists()).toBe(false);
+    expect(closedWrapper.find("[data-resolve-without-dispute]").exists())
+      .toBe(false);
+    expect(closedWrapper.find("[data-enter-evidence-room]").exists()).toBe(false);
+    closedWrapper.unmount();
   });
 
   it("does not treat stale top-level evidence permission as ready during projection processing", async () => {

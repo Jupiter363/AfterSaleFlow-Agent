@@ -48,7 +48,9 @@ public class IntakeProcessProjectionAdapter {
               left join case_room_epoch epoch
                 on epoch.case_id = projection.case_id
                and epoch.room_type = 'INTAKE'
-               and epoch.lifecycle_status = 'ACTIVE'
+               and epoch.room_epoch = projection.room_epoch
+               and epoch.fencing_token = projection.fencing_token
+               and epoch.lifecycle_status in ('ACTIVE', 'TERMINAL')
               left join lateral (
                     select run.id as logical_run_id,
                            run.run_status,
@@ -67,6 +69,7 @@ public class IntakeProcessProjectionAdapter {
                       ) attempt on true
                      where run.case_id = projection.case_id
                        and run.room_id = epoch.room_id
+                       and epoch.lifecycle_status = 'ACTIVE'
                        and run.room_type = 'INTAKE'
                        and run.room_epoch = epoch.room_epoch
                        and run.process_revision = epoch.process_revision
@@ -122,7 +125,9 @@ public class IntakeProcessProjectionAdapter {
         if ("LEGACY".equals(writerMode)) {
             return currentLegacy(row);
         }
-        if (!tupleIsCurrent(row, writerMode) || !phaseIsKnown(row.roomPhase())) {
+        if (!tupleIsCurrent(row, writerMode)
+                || !phaseIsKnown(row.roomPhase())
+                || !activeRunTupleIsCurrent(row)) {
             return processing(row);
         }
         return new IntakeProcessProjectionView(
@@ -182,14 +187,60 @@ public class IntakeProcessProjectionAdapter {
     }
 
     private static boolean tupleIsCurrent(ProjectionRow row, String writerMode) {
+        String lifecycleStatus = normalized(row.epochLifecycleStatus());
         return row.epochPresent()
-                && "READY".equals(normalized(row.writerActivationStatus()))
-                && "ACTIVE".equals(normalized(row.epochLifecycleStatus()))
+                && activationMatchesLifecycle(
+                        normalized(row.writerActivationStatus()), lifecycleStatus)
+                && lifecycleMatchesPhase(lifecycleStatus, row.roomPhase())
                 && "READY".equals(normalized(row.epochProvisioningStatus()))
                 && writerMode.equals(normalized(row.epochWriterMode()))
                 && row.projectionRoomEpoch() == row.epochRoomEpoch()
                 && row.projectionProcessRevision() == row.epochProcessRevision()
                 && row.projectionFencingToken() == row.epochFencingToken();
+    }
+
+    private static boolean activationMatchesLifecycle(
+            String writerActivationStatus, String lifecycleStatus) {
+        return switch (lifecycleStatus) {
+            case "ACTIVE" -> "READY".equals(writerActivationStatus);
+            case "TERMINAL" -> "TERMINAL".equals(writerActivationStatus);
+            default -> false;
+        };
+    }
+
+    private static boolean lifecycleMatchesPhase(String lifecycleStatus, String roomPhase) {
+        if ("ACTIVE".equals(lifecycleStatus)) {
+            return true;
+        }
+        return "TERMINAL".equals(lifecycleStatus)
+                && switch (normalized(roomPhase)) {
+                    case "CLOSED", "COMPLETED", "FAILED" -> true;
+                    default -> false;
+                };
+    }
+
+    private static boolean activeRunTupleIsCurrent(ProjectionRow row) {
+        String logicalRunId = trimmed(row.activeLogicalRunId());
+        String attemptId = trimmed(row.activeAttemptId());
+        String runStatus = normalized(row.activeRunStatus());
+        Long lastSequenceNo = row.lastSequenceNo();
+
+        if (!"ACTIVE".equals(normalized(row.epochLifecycleStatus()))) {
+            return logicalRunId == null
+                    && attemptId == null
+                    && runStatus.isEmpty()
+                    && lastSequenceNo == null;
+        }
+        if (logicalRunId == null) {
+            return attemptId == null && runStatus.isEmpty() && lastSequenceNo == null;
+        }
+        if (!"PENDING".equals(runStatus) && !"RUNNING".equals(runStatus)) {
+            return false;
+        }
+        if (attemptId == null) {
+            return "PENDING".equals(runStatus) && lastSequenceNo == null;
+        }
+        return lastSequenceNo != null && lastSequenceNo >= 0;
     }
 
     private static boolean phaseIsKnown(String roomPhase) {
@@ -201,6 +252,7 @@ public class IntakeProcessProjectionAdapter {
                     "READY_TO_CONFIRM",
                     "REVIEW_PENDING",
                     "TOOL_RUNNING",
+                    "CLOSED",
                     "COMPLETED",
                     "FAILED" -> true;
             default -> false;
@@ -278,6 +330,14 @@ public class IntakeProcessProjectionAdapter {
     private static String normalizedOr(String value, String fallback) {
         String normalized = normalized(value);
         return normalized.isEmpty() ? fallback : normalized;
+    }
+
+    private static String trimmed(String value) {
+        if (value == null) {
+            return null;
+        }
+        String trimmed = value.trim();
+        return trimmed.isEmpty() ? null : trimmed;
     }
 
     public record ProjectionRow(

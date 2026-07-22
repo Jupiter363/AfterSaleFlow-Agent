@@ -47,6 +47,10 @@ class IntakeProcessProjectionAdapterTest {
         verify(jdbc).query(sql.capture(), parameters.capture(), any(RowMapper.class));
         assertThat(sql.getValue())
                 .contains(
+                        "epoch.room_epoch = projection.room_epoch",
+                        "epoch.fencing_token = projection.fencing_token",
+                        "epoch.lifecycle_status in ('ACTIVE', 'TERMINAL')",
+                        "epoch.lifecycle_status = 'ACTIVE'",
                         "run.room_id = epoch.room_id",
                         "run.room_epoch = epoch.room_epoch",
                         "run.fencing_token = epoch.fencing_token",
@@ -151,6 +155,59 @@ class IntakeProcessProjectionAdapterTest {
     }
 
     @Test
+    void mapsExactTerminalTupleToClosedProjectionWithoutAnActiveRun() {
+        ProjectionRow current = currentShadowRow();
+        ProjectionRow terminal = projectionRow(
+                current, "TERMINAL", "CLOSED", "TERMINAL", null, null, null, null);
+
+        IntakeProcessProjectionView view = adapter.adapt(terminal);
+
+        assertThat(view.projectionState()).isEqualTo("CURRENT");
+        assertThat(view.roomPhase()).isEqualTo("CLOSED");
+        assertThat(view.pendingState()).isEqualTo("NONE");
+        assertThat(view.activeLogicalRunId()).isNull();
+        assertThat(view.streamCursor()).isNull();
+    }
+
+    @Test
+    void terminalTupleFailsClosedForNonTerminalPhaseOrActiveRun() {
+        ProjectionRow current = currentShadowRow();
+        ProjectionRow nonTerminalPhase = projectionRow(
+                current, "TERMINAL", "WAITING_PARTY", "TERMINAL", null, null, null, null);
+        ProjectionRow terminalWithRun = projectionRow(
+                current,
+                "TERMINAL",
+                "CLOSED",
+                "TERMINAL",
+                "run-stale",
+                "attempt-stale",
+                "RUNNING",
+                7L);
+
+        assertThat(adapter.adapt(nonTerminalPhase).projectionState()).isEqualTo("PROCESSING");
+        assertThat(adapter.adapt(terminalWithRun).projectionState()).isEqualTo("PROCESSING");
+    }
+
+    @Test
+    void malformedActiveRunTupleReturnsProcessingInsteadOfAClientVisibleCurrentState() {
+        ProjectionRow current = currentShadowRow();
+        ProjectionRow missingAttemptCursor = projectionRow(
+                current,
+                current.writerActivationStatus(),
+                current.roomPhase(),
+                current.epochLifecycleStatus(),
+                "run-1",
+                "attempt-2",
+                "RUNNING",
+                null);
+
+        IntakeProcessProjectionView view = adapter.adapt(missingAttemptCursor);
+
+        assertThat(view.projectionState()).isEqualTo("PROCESSING");
+        assertThat(view.activeLogicalRunId()).isNull();
+    }
+
+    @Test
     void legacyProjectionDoesNotRequireAnEpochTuple() {
         ProjectionRow legacy = new ProjectionRow(
                 "LEGACY",
@@ -225,5 +282,42 @@ class IntakeProcessProjectionAdapterTest {
                 "attempt-2",
                 "RUNNING",
                 6L);
+    }
+
+    private static ProjectionRow projectionRow(
+            ProjectionRow source,
+            String writerActivationStatus,
+            String roomPhase,
+            String epochLifecycleStatus,
+            String activeLogicalRunId,
+            String activeAttemptId,
+            String activeRunStatus,
+            Long lastSequenceNo) {
+        return new ProjectionRow(
+                source.writerMode(),
+                writerActivationStatus,
+                source.projectionRoomEpoch(),
+                source.projectionProcessRevision(),
+                source.projectionFencingToken(),
+                roomPhase,
+                source.projectedAt(),
+                source.epochWriterMode(),
+                epochLifecycleStatus,
+                source.epochProvisioningStatus(),
+                source.epochRoomEpochValue(),
+                source.epochProcessRevisionValue(),
+                source.roomRevisionValue(),
+                source.epochFencingTokenValue(),
+                source.processContractVersion(),
+                source.selectionSchemaVersion(),
+                source.streamProtocol(),
+                source.temporalBuildId(),
+                source.roomWorkflowBuildId(),
+                source.graphVersion(),
+                source.checkpointSchemaVersion(),
+                activeLogicalRunId,
+                activeAttemptId,
+                activeRunStatus,
+                lastSequenceNo);
     }
 }
