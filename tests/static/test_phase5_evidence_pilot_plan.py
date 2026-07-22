@@ -327,6 +327,10 @@ def test_phase5_candidate_repairs_are_ledgered_without_inheriting_a_pass() -> No
     assert "withOffsetSameInstant(UTC)" in closure
     assert "27/27" in execution
     assert "27/27" in closure
+    assert "source repair SHA" in execution
+    assert "no exact-`b9201f0b` test execution is claimed" in execution
+    assert "no exact-main test execution" in closure
+    assert all("tree-equivalent" not in document for document in documents)
     assert "do not inherit any result" in execution
     assert "No diagnostic run from an earlier SHA is accepted" in closure
 

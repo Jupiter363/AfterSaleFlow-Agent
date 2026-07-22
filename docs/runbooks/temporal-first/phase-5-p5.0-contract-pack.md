@@ -50,9 +50,10 @@ starts only after that evidence commit says P5.0 `PASS`, the Phase 4 engineering
 valid, and every ADR 0012 runtime restriction is still fail closed.
 
 The post-contract changes through `fb69bd4c0d944eccfd6c7f78dfd1faadbbe05ffe`, plus the exact main
-candidate repair `b9201f0bc1d9ad7fca1cc0ca7b68cd75e62a503a` (tree-equivalent source
-`79b8c797522671aa46f2299198eab7ba6f651006`), are not Phase 5 implementation and do not
-constitute a passed candidate. The earlier commits are the line-ending authentication, LF
+candidate repair `b9201f0bc1d9ad7fca1cc0ca7b68cd75e62a503a` (patch-equivalent on the three
+changed repair paths to source `79b8c797522671aa46f2299198eab7ba6f651006`), are not Phase 5
+implementation and do not constitute a passed candidate. The earlier commits are the line-ending
+authentication, LF
 publication, architecture-fixture isolation, Surefire retention, and three semantics-preserving
 Spring proxyability repairs classified in the execution plan's candidate-scope ledger.
 
@@ -64,6 +65,10 @@ while preserving null, so direct create and PostgreSQL reload views expose the s
 representation. It does not change the stored instant, production authorization, formal writer,
 runtime mode, or promotion boundary. All earlier Batch 0 attempts remain diagnostic only, and the
 complete suite must run afresh on the final exact SHA.
+
+The 27 focused repair checks ran at source commit `79b8c797522671aa46f2299198eab7ba6f651006`.
+The main integration carries the same three-path patch, but this pack does not claim an exact-main
+test execution for `b9201f0b`.
 
 ## Open P0 Contract Gaps
 

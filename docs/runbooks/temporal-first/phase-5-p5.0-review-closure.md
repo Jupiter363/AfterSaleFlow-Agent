@@ -117,8 +117,9 @@ authentication/publication, runner retention, test-fixture isolation, and existi
 proxyability. The proxy repairs remove only class-level `final`; they do not change transaction
 annotations, locks, SQL, idempotency, formal writers, runtime modes or Evidence behavior.
 
-Exact main repair commit `b9201f0bc1d9ad7fca1cc0ca7b68cd75e62a503a`, tree-equivalent to source
-commit `79b8c797522671aa46f2299198eab7ba6f651006`, has two distinct dispositions:
+Exact main repair commit `b9201f0bc1d9ad7fca1cc0ca7b68cd75e62a503a` is patch-equivalent on the
+three changed repair paths to source commit `79b8c797522671aa46f2299198eab7ba6f651006` and has two
+distinct dispositions:
 
 - **`FIXTURE`: Evidence admission and cleanup.** The `EvidenceApiIntegrationTest` case was only
   `INTAKE_COMPLETED`, while production access correctly requires an Evidence-open case. The fixture
@@ -131,10 +132,12 @@ commit `79b8c797522671aa46f2299198eab7ba6f651006`, has two distinct dispositions
   `occurred_at` and preserves null. This canonicalizes the API response only; it does not change the
   stored instant, request rules, authorization, persistence order, or Java writer authority.
 
-At that exact SHA, Evidence API/service checks passed 15/15, retained Security checks passed 8/8,
-and Intake progress checks passed 4/4, for 27/27 focused checks. They do not substitute for the
-fresh exact-SHA Batch 0. Weakening `SecurityConfiguration`, controller/service authorization,
-production state checks, runtime restrictions, or promotion gates remains forbidden.
+At source SHA `79b8c797522671aa46f2299198eab7ba6f651006`, Evidence API/service checks passed
+15/15, retained Security checks passed 8/8, and Intake progress checks passed 4/4, for 27/27 focused
+checks. Main commit `b9201f0b` carries the identical three-path patch; no exact-main test execution
+is claimed. These checks do not substitute for the fresh exact-SHA Batch 0. Weakening
+`SecurityConfiguration`, controller/service authorization, production state checks, runtime
+restrictions, or promotion gates remains forbidden.
 
 No diagnostic run from an earlier SHA is accepted. `P5-G10` remains blocked until the repair set is
 integrated, the final diff is reviewed, and Batch 0 passes from one fresh clean detached SHA.

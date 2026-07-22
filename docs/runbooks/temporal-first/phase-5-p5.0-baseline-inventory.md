@@ -178,10 +178,11 @@ then exposed only entry-path baseline defects, not permission to implement Evide
 - `a3be6744`, `e97e1341`, and `fb69bd4c` remove class-level `final` from three existing Spring
   beans while retaining transaction propagation, persistence order, idempotency and Java authority.
 - `c9e6c7ba` preserves long Surefire report identity through deterministic short retained paths.
-- Main commit `b9201f0bc1d9ad7fca1cc0ca7b68cd75e62a503a`, tree-equivalent to source commit
-  `79b8c797522671aa46f2299198eab7ba6f651006`, contains a `FIXTURE` correction that transitions
-  the diagnostic case from completed Intake to `EVIDENCE_OPEN` through the domain admission method,
-  uses audited case-scoped cleanup, rebuilds the case unconditionally, and scopes its Evidence count.
+- Main commit `b9201f0bc1d9ad7fca1cc0ca7b68cd75e62a503a`, patch-equivalent on the three changed
+  repair paths to source commit `79b8c797522671aa46f2299198eab7ba6f651006`, contains a `FIXTURE`
+  correction that transitions the diagnostic case from completed Intake to `EVIDENCE_OPEN` through
+  the domain admission method, uses audited case-scoped cleanup, rebuilds the case unconditionally,
+  and scopes its Evidence count.
 - The same exact commit contains a separate baseline `PRODUCT` repair: response mapping converts a
   non-null `occurred_at` to the same instant at UTC while preserving null. This prevents immediate
   create and PostgreSQL reload views from returning different offsets for the same accepted item;
@@ -190,8 +191,9 @@ then exposed only entry-path baseline defects, not permission to implement Evide
 These changes are admissible only as the bounded candidate-scope repair set documented in the
 execution plan. They do not update this inventory's historical product observations, do not grant
 engineering execution, and require a fresh exact-SHA Batch 0 after the complete set is integrated.
-The 27/27 focused repair checks bound to `b9201f0b` / source `79b8c797` are diagnostic repair
-evidence, not P5.0 PASS.
+The 27/27 focused repair checks ran at source `79b8c797`; main `b9201f0b` carries the identical
+three-path patch, but no exact-main test execution is claimed. This is diagnostic repair evidence,
+not P5.0 PASS.
 
 ## P5-G0 Through P5-G10 Resolution Map
 

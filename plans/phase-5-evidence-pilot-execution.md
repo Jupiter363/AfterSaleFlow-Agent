@@ -66,9 +66,12 @@ These repairs do not inherit any result from `6e23c580`, `d76fde17`, or another 
 The UTC mapping is a baseline `PRODUCT` repair because the accepted API response must not change
 representation depending on whether the same item is returned directly after creation or reloaded
 from PostgreSQL. `withOffsetSameInstant(UTC)` preserves the business instant and only canonicalizes
-the response boundary. At the exact main repair SHA, Evidence API/service tests passed 15/15 and the
-retained Security and Intake progress checks passed 8/8 and 4/4, for 27/27 focused checks. These are
-repair checks, not P5.0 Batch 0 evidence.
+the response boundary. At source repair SHA
+`79b8c797522671aa46f2299198eab7ba6f651006`, Evidence API/service tests passed 15/15 and the
+retained Security and Intake progress checks passed 8/8 and 4/4, for 27/27 focused checks. Main
+integration `b9201f0bc1d9ad7fca1cc0ca7b68cd75e62a503a` carries an identical patch on exactly the
+three repair paths; no exact-`b9201f0b` test execution is claimed. These are repair checks, not P5.0
+Batch 0 evidence.
 
 The primary must review the final diff, include both classified sub-repairs above, run the focused
 repair checks, and then execute all of Batch 0 from one fresh clean detached SHA. Any additional
