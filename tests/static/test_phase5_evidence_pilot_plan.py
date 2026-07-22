@@ -9,6 +9,24 @@ ROOT = Path(__file__).resolve().parents[2]
 EXECUTION_PLAN = ROOT / "plans/phase-5-evidence-pilot-execution.md"
 TEST_BATCHES = ROOT / "plans/phase-5-evidence-pilot-test-batches.yaml"
 CONTRACT_PACK = ROOT / "docs/runbooks/temporal-first/phase-5-p5.0-contract-pack.md"
+BASELINE_INVENTORY = (
+    ROOT
+    / "docs/runbooks/temporal-first/phase-5-p5.0-baseline-inventory.md"
+)
+REVIEW_CLOSURE = (
+    ROOT
+    / "docs/runbooks/temporal-first/phase-5-p5.0-review-closure.md"
+)
+EVIDENCE_SUBMISSION_REQUEST = (
+    ROOT
+    / "java-api-service/src/main/java/com/example/dispute/evidence/api/"
+    "EvidenceSubmissionRequest.java"
+)
+HEARING_EVIDENCE_BATCH_REQUEST = (
+    ROOT
+    / "java-api-service/src/main/java/com/example/dispute/hearing/api/"
+    "HearingEvidenceBatchRequest.java"
+)
 SOURCE_PLAN = ROOT / "plans/temporal-langgraph-room-refactor.md"
 ENGINEERING_EXCEPTION = (
     ROOT / "docs/architecture/adr/0012-phase-5-evidence-engineering-exception.md"
@@ -199,3 +217,68 @@ def test_phase5_engineering_lane_cannot_activate_formal_traffic() -> None:
     ]
     assert batch_0["execution"]["real_provider"] == "forbidden"
     assert batch_0["execution"]["formal_finalizer"] == "forbidden"
+
+
+def test_phase5_baseline_and_independent_review_are_cross_referenced() -> None:
+    inventory = BASELINE_INVENTORY.read_text(encoding="utf-8")
+    closure = REVIEW_CLOSURE.read_text(encoding="utf-8")
+
+    for authority in (
+        "phase-5-evidence-pilot-execution.md",
+        "phase-5-evidence-pilot-test-batches.yaml",
+        "phase-5-p5.0-contract-pack.md",
+        "0012-phase-5-evidence-engineering-exception.md",
+    ):
+        assert authority in inventory
+    assert "phase-5-p5.0-review-closure.md" in inventory
+    assert "phase-5-p5.0-baseline-inventory.md" in closure
+    assert "d6f66d6d8634aac20b77b9b66a22cbb77370c4fe" in inventory
+    assert "d6f66d6d8634aac20b77b9b66a22cbb77370c4fe" in closure
+
+
+def test_phase5_baseline_preserves_public_and_hearing_limits() -> None:
+    inventory = BASELINE_INVENTORY.read_text(encoding="utf-8")
+    closure = REVIEW_CLOSURE.read_text(encoding="utf-8")
+    public_request = EVIDENCE_SUBMISSION_REQUEST.read_text(encoding="utf-8")
+    hearing_request = HEARING_EVIDENCE_BATCH_REQUEST.read_text(encoding="utf-8")
+    scope = _batches()["gate"]["engineering_scope"]
+
+    assert "@Size(min = 1, max = 50)" in public_request
+    assert "@Size(max = 50)" in hearing_request
+    assert scope["public_submission_limit"] == 50
+    assert scope["synthetic_manifest_item_counts"] == [1, 8, 100]
+    assert any(
+        "Hearing supplementation remains unchanged and capped at 50 files per party."
+        == invariant
+        for invariant in _batches()["gate"]["invariants"]
+    )
+    for document in (inventory, closure):
+        assert "1/8/100" in document
+        assert "Hearing" in document and "50" in document
+        assert "PENDING_PROMOTION" in document
+
+
+def test_phase5_baseline_maps_every_entry_gap_without_claiming_entry() -> None:
+    inventory = BASELINE_INVENTORY.read_text(encoding="utf-8")
+    closure = REVIEW_CLOSURE.read_text(encoding="utf-8")
+
+    for index in range(10):
+        gate = f"P5-G{index}"
+        assert gate in inventory
+        assert gate in closure
+    assert "contract_gate: P5.0 NOT_RUN" in inventory
+    assert "contract_gate: P5.0 NOT_RUN" in closure
+    assert "review_status: CLOSED_WITH_BLOCKERS_CLASSIFIED" in closure
+    assert "engineering_execution: BLOCKED_PENDING_PHASE_4_ENGINEERING_CHECKPOINT" in closure
+
+
+def test_phase5_review_keeps_d0_and_e0_independent_with_exact_path_closure() -> None:
+    batches = _batches()
+    closure = REVIEW_CLOSURE.read_text(encoding="utf-8")
+
+    assert batches["task_contracts"]["P5-D0"]["depends_on"] == ["P5-0"]
+    assert batches["task_contracts"]["P5-E0"]["depends_on"] == ["P5-0"]
+    assert "tests/graphs/evidence/**" in closure
+    assert "tests/static/test_phase5_*.py" in closure
+    assert "exactly one editor" in closure
+    assert "R retains shared plan/evidence gates" in closure
