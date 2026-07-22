@@ -177,15 +177,17 @@ class EvidenceV2ContractFixtureTest {
         }
         assertThat(authoritativeFiles).containsExactlyElementsOf(new TreeSet<>(CONTRACT_FILES));
         assertThat(schemasByVersion).hasSize(6);
-        assertThat(
-                        fixtureFiles("valid").stream()
-                                .map(path -> path.getFileName().toString())
-                                .collect(java.util.stream.Collectors.toCollection(TreeSet::new)))
+        TreeSet<String> validFixtureFiles =
+                fixtureFiles("valid").stream()
+                        .map(path -> path.getFileName().toString())
+                        .collect(java.util.stream.Collectors.toCollection(TreeSet::new));
+        TreeSet<String> invalidFixtureFiles =
+                fixtureFiles("invalid").stream()
+                        .map(path -> path.getFileName().toString())
+                        .collect(java.util.stream.Collectors.toCollection(TreeSet::new));
+        assertThat(validFixtureFiles)
                 .containsExactlyElementsOf(new TreeSet<>(EXPECTED_VALID_FIXTURE_HASHES.keySet()));
-        assertThat(
-                        fixtureFiles("invalid").stream()
-                                .map(path -> path.getFileName().toString())
-                                .collect(java.util.stream.Collectors.toCollection(TreeSet::new)))
+        assertThat(invalidFixtureFiles)
                 .containsExactlyElementsOf(new TreeSet<>(INVALID_FIXTURE_REASONS.keySet()));
 
         JsonNode matrix;
@@ -202,6 +204,16 @@ class EvidenceV2ContractFixtureTest {
                         CONTRACT_FILES.stream()
                                 .filter(file -> file.endsWith(".schema.json"))
                                 .collect(java.util.stream.Collectors.toCollection(TreeSet::new)));
+        for (String signedContract :
+                List.of("evidence-batch-manifest.v1", "evidence-asset-capability.v1")) {
+            assertThat(matrix
+                            .required("contracts")
+                            .required(signedContract)
+                            .required("signature_input_encoding")
+                            .asText())
+                    .as("unambiguous signing input for %s", signedContract)
+                    .isEqualTo("ASCII_LOWERCASE_HEX_TEXT");
+        }
 
         JsonNode runtimeGate = matrix.required("runtime_gate");
         assertThat(runtimeGate.required("public_submission_max").intValue()).isEqualTo(50);
@@ -249,8 +261,10 @@ class EvidenceV2ContractFixtureTest {
     }
 
     @Test
-    void manifestDeclaresDirectJavaEs256AuthorityAndGatewayBinding() {
+    void manifestAndCapabilityDeclareUnambiguousJavaEs256SigningInput() {
         JsonNode schema = schemasByVersion.get("evidence-batch-manifest.v1").document();
+        JsonNode capabilitySchema =
+                schemasByVersion.get("evidence-asset-capability.v1").document();
 
         assertThat(schema.required("x-self-hash"))
                 .isEqualTo(
@@ -260,13 +274,8 @@ class EvidenceV2ContractFixtureTest {
                                         "field", "manifest_hash",
                                         "preimage", "omit_top_level_fields",
                                         "omit_fields", List.of("manifest_hash", "signature"))));
-        assertThat(schema.required("x-signature"))
-                .isEqualTo(
-                        MAPPER.valueToTree(
-                                Map.of(
-                                        "algorithm", "ES256",
-                                        "covers", "manifest_hash",
-                                        "encoding", "JOSE_P1363_BASE64URL")));
+        assertSignatureDeclaration(schema, "manifest_hash");
+        assertSignatureDeclaration(capabilitySchema, "capability_hash");
         assertThat(schema.required("x-gateway-cross-binding"))
                 .isEqualTo(
                         MAPPER.valueToTree(
@@ -274,6 +283,10 @@ class EvidenceV2ContractFixtureTest {
                                         "source_schema_version", "room-graph-command.v1",
                                         "manifest_ref_field", "domain_snapshot_ref",
                                         "requires_verified_java_envelope", true,
+                                        "command_binds_room_fencing_token", false,
+                                        "room_fencing_token_authority", "JAVA_SIGNED_MANIFEST",
+                                        "checkpoint_lease_fence_authority", "GRAPH_RUNTIME",
+                                        "java_finalizer_revalidates_room_fencing_token", true,
                                         "failure", "BEFORE_CHECKPOINT_MUTATION",
                                         "room_fence_is_graph_lease_fence", false)));
         assertThat(jsonText(schema.required("required")))
@@ -286,8 +299,9 @@ class EvidenceV2ContractFixtureTest {
                 .contains(
                         "GATEWAY_COMMAND_EXACT_BINDING",
                         "command/run/attempt",
-                        "epoch/room fence",
-                        "registry/profile pins");
+                        "room type/epoch",
+                        "invocation registry/profile",
+                        "current Graph lease fence");
     }
 
     @Test
@@ -304,8 +318,19 @@ class EvidenceV2ContractFixtureTest {
                         .doesNotContain("authorization_proof_ref");
             }
         }
-        assertThat(Files.readString(CONTRACT_ROOT.resolve("compatibility-matrix.yaml")))
-                .doesNotContain("authorization_proof_ref");
+        JsonNode matrix;
+        try (InputStream input =
+                Files.newInputStream(CONTRACT_ROOT.resolve("compatibility-matrix.yaml"))) {
+            matrix = MAPPER.valueToTree(new Yaml().load(input));
+        }
+        assertThat(matrix
+                        .required("authorization")
+                        .required("manifest")
+                        .required("detached_authorization_proof_ref")
+                        .asText())
+                .isEqualTo("forbidden");
+        assertThat(matrix.required("rules").required("authorization_proof_ref").asText())
+                .isEqualTo("forbidden");
     }
 
     @Test
@@ -318,7 +343,8 @@ class EvidenceV2ContractFixtureTest {
             if (fixture.has("version_pins")) {
                 assertDualOutputPins(fixture.required("version_pins"), path);
             }
-            if ("evidence-batch-manifest.v1".equals(fixture.path("schema_version").asText())) {
+            if (Set.of("evidence-batch-manifest.v1", "evidence-asset-capability.v1")
+                    .contains(fixture.path("schema_version").asText())) {
                 assertThat(fixture.required("signature_algorithm").asText()).isEqualTo("ES256");
                 assertThat(fixture.required("signing_key_id").asText())
                         .matches("^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$");
@@ -381,6 +407,8 @@ class EvidenceV2ContractFixtureTest {
         JsonNode assessment = readValidObject("evidence-item-proposal-valid.json");
         JsonNode terminal = readValidObject("evidence-terminal-proposal-valid.json");
         JsonNode projection = readValidObject("evidence-process-projection-valid.json");
+        JsonNode finalizationReceipt =
+                readValidObject("evidence-finalization-receipt-valid.json");
         JsonNode item = manifest.required("items").required(0);
         JsonNode command = manifest.required("command_binding");
 
@@ -426,6 +454,7 @@ class EvidenceV2ContractFixtureTest {
                 .isEqualTo(manifest.required("profile_versions"));
         assertThat(capability.required("profile_versions_hash").asText())
                 .isEqualTo(ContractJson.sha256Hex(manifest.required("profile_versions")));
+        assertThat(finalizationReceipt.has("profile_versions")).isFalse();
         assertThat(terminal.required("assessment_refs").required(0).required("assessment_hash"))
                 .isEqualTo(assessment.required("assessment_hash"));
 
@@ -489,6 +518,21 @@ class EvidenceV2ContractFixtureTest {
     private static ObjectNode readValidObject(String fixtureName) throws IOException {
         return (ObjectNode)
                 MAPPER.readTree(FIXTURE_ROOT.resolve("valid").resolve(fixtureName).toFile());
+    }
+
+    private static void assertSignatureDeclaration(JsonNode schema, String hashField) {
+        assertThat(schema.required("x-signature"))
+                .isEqualTo(
+                        MAPPER.valueToTree(
+                                Map.of(
+                                        "algorithm", "ES256",
+                                        "covers", hashField,
+                                        "input_encoding", "ASCII_LOWERCASE_HEX_TEXT",
+                                        "encoding", "JOSE_P1363_BASE64URL")));
+        JsonNode signature = schema.required("properties").required("signature");
+        assertThat(signature.required("minLength").intValue()).isEqualTo(86);
+        assertThat(signature.required("maxLength").intValue()).isEqualTo(86);
+        assertThat(signature.required("pattern").asText()).isEqualTo("^[A-Za-z0-9_-]{86}$");
     }
 
     private static void assertDualOutputPins(JsonNode pins, Path path) {
