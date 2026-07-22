@@ -30,6 +30,7 @@ HANDOFF = {
     "promotion_gate": "PENDING",
     "MIG-004": "PENDING_PROMOTION",
     "source_execution_manifest_sha256": "2" * 64,
+    "source_execution_manifest_git_sha256": "4" * 64,
 }
 
 
@@ -104,7 +105,7 @@ def _bundle_git_reader(
         if object_name in overrides:
             return overrides[object_name]
         relative = object_name.partition(":")[2]
-        return (root / relative).read_bytes()
+        return (root / relative).read_bytes().replace(b"\r\n", b"\n")
 
     return read
 
@@ -122,7 +123,7 @@ def test_authenticated_phase4_handoff_binds_git_blob_and_evidence_commit(
         _, object_name = args
         shown.append(object_name)
         relative = object_name.partition(":")[2]
-        return (tmp_path / relative).read_bytes()
+        return (tmp_path / relative).read_bytes().replace(b"\r\n", b"\n")
 
     monkeypatch.setattr(
         runner,
@@ -144,11 +145,16 @@ def test_authenticated_phase4_handoff_binds_git_blob_and_evidence_commit(
 
     assert handoff["checkpoint_path"] == "evidence/phase-metrics.json"
     assert handoff["checkpoint_sha256"] == hashlib.sha256(
-        checkpoint.read_bytes()
+        checkpoint.read_bytes().replace(b"\r\n", b"\n")
     ).hexdigest()
-    assert handoff["candidate_commit_file_sha256"] == runner.shared._sha256(
-        source_manifest.parent / "candidate-commit.txt"
-    )
+    assert handoff["candidate_commit_file_sha256"] == hashlib.sha256(
+        (source_manifest.parent / "candidate-commit.txt")
+        .read_bytes()
+        .replace(b"\r\n", b"\n")
+    ).hexdigest()
+    assert handoff["source_execution_manifest_git_sha256"] == hashlib.sha256(
+        source_manifest.read_bytes().replace(b"\r\n", b"\n")
+    ).hexdigest()
     assert handoff["evidence_commit"] == "d" * 40
     assert handoff["next_phase_permission"] == "PHASE_5_ENGINEERING_ONLY"
     assert ancestors == [
@@ -218,6 +224,14 @@ def test_phase4_handoff_rejects_symlink_bundle_member(
 
     with pytest.raises(runner.shared.EvidenceError, match="regular non-symlink"):
         runner.authenticate_phase4_handoff(_accepted_matrix(), checkpoint, CANDIDATE)
+
+
+def test_phase4_handoff_rejects_non_eol_carriage_returns(tmp_path: Path) -> None:
+    artifact = tmp_path / "invalid-carriage-return.json"
+    artifact.write_bytes(b'{"value":"a\rb"}\n')
+
+    with pytest.raises(runner.shared.EvidenceError, match="unsupported carriage returns"):
+        runner._canonical_text_bytes(artifact)
 
 
 def test_phase4_handoff_rejects_bundle_changed_after_evidence_commit(

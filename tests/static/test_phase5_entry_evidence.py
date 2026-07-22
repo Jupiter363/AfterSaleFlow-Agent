@@ -26,6 +26,7 @@ HANDOFF = {
     "promotion_gate": "PENDING",
     "MIG-004": "PENDING_PROMOTION",
     "source_execution_manifest_sha256": "2" * 64,
+    "source_execution_manifest_git_sha256": "4" * 64,
 }
 
 

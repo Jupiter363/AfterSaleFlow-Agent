@@ -213,6 +213,20 @@ def _assert_ancestor(ancestor: str, candidate: str, context: str) -> None:
         raise shared.EvidenceError(f"{context} is not an ancestor of the P5 candidate")
 
 
+def _canonical_text_bytes(path: Path) -> bytes:
+    raw = path.read_bytes()
+    canonical = raw.replace(b"\r\n", b"\n")
+    if b"\r" in canonical:
+        raise shared.EvidenceError(
+            f"Phase 4 bundle file contains unsupported carriage returns: {path}"
+        )
+    return canonical
+
+
+def _bytes_sha256(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
 def _assert_git_blob(commit: str, relative: str, expected: bytes, context: str) -> None:
     if _git_bytes("show", f"{commit}:{relative}") != expected:
         raise shared.EvidenceError(f"{context} is not the authenticated Git blob")
@@ -263,18 +277,23 @@ def authenticate_phase4_handoff(
         raise shared.EvidenceError(
             "Phase 4 checkpoint bundle must contain regular non-symlink files"
         )
-    if candidate_file.read_text(encoding="utf-8") != (
-        authenticated["phase4_candidate_commit"] + "\n"
-    ):
+    candidate_bytes = _canonical_text_bytes(candidate_file)
+    if candidate_bytes.decode("utf-8") != authenticated["phase4_candidate_commit"] + "\n":
         raise shared.EvidenceError("Phase 4 candidate-commit.txt drifted")
-    if shared._sha256(source_manifest) != authenticated[
-        "source_execution_manifest_sha256"
-    ]:
+    source_raw = source_manifest.read_bytes()
+    source_canonical = _canonical_text_bytes(source_manifest)
+    source_crlf = source_canonical.replace(b"\n", b"\r\n")
+    recorded_source_hash = authenticated["source_execution_manifest_sha256"]
+    if recorded_source_hash not in {
+        _bytes_sha256(source_raw),
+        _bytes_sha256(source_canonical),
+        _bytes_sha256(source_crlf),
+    }:
         raise shared.EvidenceError("Phase 4 source execution manifest SHA-256 drifted")
     bundle = {
-        relative: checkpoint.read_bytes(),
-        candidate_file.relative_to(ROOT.resolve()).as_posix(): candidate_file.read_bytes(),
-        source_manifest.relative_to(ROOT.resolve()).as_posix(): source_manifest.read_bytes(),
+        relative: _canonical_text_bytes(checkpoint),
+        candidate_file.relative_to(ROOT.resolve()).as_posix(): candidate_bytes,
+        source_manifest.relative_to(ROOT.resolve()).as_posix(): source_canonical,
     }
     for bundle_path, expected in bundle.items():
         _assert_git_blob(
@@ -316,8 +335,9 @@ def authenticate_phase4_handoff(
     _assert_ancestor(evidence_commit, candidate, "Phase 4 evidence commit")
     return {
         "checkpoint_path": relative,
-        "checkpoint_sha256": shared._sha256(checkpoint),
-        "candidate_commit_file_sha256": shared._sha256(candidate_file),
+        "checkpoint_sha256": _bytes_sha256(bundle[relative]),
+        "candidate_commit_file_sha256": _bytes_sha256(candidate_bytes),
+        "source_execution_manifest_git_sha256": _bytes_sha256(source_canonical),
         "evidence_commit": evidence_commit,
         **authenticated,
     }
@@ -337,6 +357,7 @@ def _validate_embedded_handoff(value: Any) -> dict[str, Any]:
         "promotion_gate",
         "MIG-004",
         "source_execution_manifest_sha256",
+        "source_execution_manifest_git_sha256",
     }
     if set(value) != required:
         raise shared.EvidenceError("manifest Phase 4 checkpoint fields drifted")
@@ -344,6 +365,7 @@ def _validate_embedded_handoff(value: Any) -> dict[str, Any]:
         "checkpoint_sha256",
         "candidate_commit_file_sha256",
         "source_execution_manifest_sha256",
+        "source_execution_manifest_git_sha256",
     ):
         if not re.fullmatch(r"[0-9a-f]{64}", str(value.get(field, ""))):
             raise shared.EvidenceError(f"manifest Phase 4 {field} is invalid")
