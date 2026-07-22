@@ -677,7 +677,7 @@ public class EvidenceApplicationService {
                 entity.getParseStatus().name(),
                 entity.getVisibility(),
                 entity.isDesensitized(),
-                entity.getOccurredAt(),
+                utc(entity.getOccurredAt()),
                 entity.getCreatedAt(),
                 entity.getSubmissionStatus().name(),
                 entity.getSubmittedAt(),
@@ -689,6 +689,10 @@ public class EvidenceApplicationService {
                 metadataText(metadata, "attestation_version"),
                 metadataText(metadata, "forgery_consequence_code"),
                 metadataText(metadata, "enforcement_gate"));
+    }
+
+    private static OffsetDateTime utc(OffsetDateTime value) {
+        return value == null ? null : value.withOffsetSameInstant(ZoneOffset.UTC);
     }
 
     private static String metadataText(Map<String, Object> metadata, String key) {

@@ -34,6 +34,7 @@ import com.example.dispute.infrastructure.persistence.repository.EvidenceDossier
 import com.example.dispute.infrastructure.persistence.repository.EvidenceItemRepository;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
@@ -122,7 +123,7 @@ class EvidenceApplicationServiceTest {
                         true,
                         "物流截图用于证明包裹签收状态",
                         true,
-                        null,
+                        OffsetDateTime.parse("2026-07-14T10:05:00+08:00"),
                         actor());
 
         assertThat(result.fileHash()).matches("[0-9a-f]{64}");
@@ -130,6 +131,8 @@ class EvidenceApplicationServiceTest {
         assertThat(result.parseStatus()).isEqualTo("PENDING");
         assertThat(result.submissionStatus()).isEqualTo("PENDING_SUBMISSION");
         assertThat(result.desensitized()).isFalse();
+        assertThat(result.occurredAt())
+                .isEqualTo(OffsetDateTime.parse("2026-07-14T02:05:00Z"));
         assertThat(result.claimedFact()).isEqualTo("物流截图用于证明包裹签收状态");
         assertThat(result.truthAttested()).isTrue();
         assertThat(result.attestationScope())

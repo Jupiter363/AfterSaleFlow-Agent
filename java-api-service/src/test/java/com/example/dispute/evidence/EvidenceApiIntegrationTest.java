@@ -11,15 +11,20 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.when;
 
+import com.example.dispute.casecore.application.DemoCasePurgeService;
+import com.example.dispute.config.ActorRole;
+import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.config.HeaderAuthenticationFilter;
 import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.RiskLevel;
 import com.example.dispute.evidence.application.EvidenceSearchIndexer;
 import com.example.dispute.evidence.application.EvidenceStorage;
 import com.example.dispute.evidence.application.OcrTaskClient;
+import com.example.dispute.infrastructure.persistence.entity.EvidenceItemEntity;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.repository.EvidenceItemRepository;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
+import java.time.OffsetDateTime;
 import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -94,6 +99,7 @@ class EvidenceApiIntegrationTest {
     @Autowired private TestRestTemplate restTemplate;
     @Autowired private FulfillmentCaseRepository caseRepository;
     @Autowired private EvidenceItemRepository evidenceRepository;
+    @Autowired private DemoCasePurgeService purgeService;
     @MockitoBean private EvidenceStorage storage;
     @MockitoBean private OcrTaskClient ocrTaskClient;
     @MockitoBean private EvidenceSearchIndexer searchIndexer;
@@ -105,31 +111,40 @@ class EvidenceApiIntegrationTest {
     // 系统意义：「EvidenceApiIntegrationTest.seedCase()」守住「证据与版本化卷宗」的可执行规格，尤其防止 「CASE_evidenceapi」、「order-evidence-api」、「user-evidence-api」、「merchant-evidence-api」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @BeforeEach
     void seedCase() {
-        if (!caseRepository.existsById("CASE_evidenceapi")) {
-            FulfillmentCaseEntity entity =
-                    FulfillmentCaseEntity.create(
-                            "CASE_evidenceapi",
-                            "order-evidence-api",
-                            null,
-                            "user-evidence-api",
-                            "merchant-evidence-api",
-                            "idem-evidence-api",
-                            "DISPUTE",
-                            "物流争议",
-                            "签收状态存在争议",
-                            RiskLevel.HIGH,
-                            "user-evidence-api");
-            entity.completeIntake(
-                    "NON_RECEIPT",
-                    CaseStatus.INTAKE_COMPLETED,
-                    RiskLevel.HIGH,
-                    """
-                    {"potentialDispute":true,"missingSlots":[],"agentDegraded":false,\
-"analyzedAt":"2026-06-28T00:00:00Z"}
-                    """,
-                    "user-evidence-api");
-            caseRepository.saveAndFlush(entity);
+        if (caseRepository.existsById("CASE_evidenceapi")) {
+            purgeService.purge(
+                    "CASE_evidenceapi",
+                    new AuthenticatedActor("evidence-api-test-cleanup", ActorRole.PLATFORM_REVIEWER));
         }
+        FulfillmentCaseEntity entity =
+                FulfillmentCaseEntity.create(
+                        "CASE_evidenceapi",
+                        "order-evidence-api",
+                        null,
+                        "user-evidence-api",
+                        "merchant-evidence-api",
+                        "idem-evidence-api",
+                        "DISPUTE",
+                        "物流争议",
+                        "签收状态存在争议",
+                        RiskLevel.HIGH,
+                        "user-evidence-api");
+        entity.completeIntake(
+                "NON_RECEIPT",
+                CaseStatus.INTAKE_COMPLETED,
+                RiskLevel.HIGH,
+                """
+                {"potentialDispute":true,"missingSlots":[],"agentDegraded":false,\
+"analyzedAt":"2026-06-28T00:00:00Z"}
+                """,
+                "user-evidence-api");
+        entity.admitToEvidence(
+                "NON_RECEIPT",
+                RiskLevel.HIGH,
+                entity.getIntakeResultJson(),
+                OffsetDateTime.parse("2030-01-01T00:00:00Z"),
+                "user-evidence-api");
+        caseRepository.saveAndFlush(entity);
     }
 
     // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceApiIntegrationTest.uploadsMetadataAndAcceptsTrustedOcrCallbackWhenOcrIsDown()」。
@@ -188,7 +203,15 @@ class EvidenceApiIntegrationTest {
                 .containsEntry("parse_status", "PENDING")
                 .containsEntry("desensitized", false)
                 .containsEntry("occurred_at", "2026-07-14T02:05:00Z");
-        assertThat(evidenceRepository.count()).isEqualTo(1);
+        assertThat(
+                        evidenceRepository
+                                .findAllByCaseIdAndDeletedAtIsNullOrderByOccurredAtAscCreatedAtAsc(
+                                        "CASE_evidenceapi"))
+                .hasSize(1);
+        EvidenceItemEntity persisted =
+                evidenceRepository.findById((String) evidence.get("id")).orElseThrow();
+        assertThat(persisted.getOccurredAt())
+                .isEqualTo(OffsetDateTime.parse("2026-07-14T02:05:00Z"));
 
         ResponseEntity<Map> callback =
                 restTemplate.exchange(
