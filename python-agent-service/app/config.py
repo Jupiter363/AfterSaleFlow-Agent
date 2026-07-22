@@ -24,9 +24,7 @@ class GraphShadowBindingSettings(BaseModel):
 
     graph_key: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
     graph_version: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
-    checkpoint_schema_version: str = Field(
-        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
-    )
+    checkpoint_schema_version: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
     state_schema_version: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
     state_schema_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     command_schema_version: Literal["room-graph-command.v1"]
@@ -37,12 +35,12 @@ class GraphShadowBindingSettings(BaseModel):
     output_schema_version: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
     policy_version: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
     guardrail_version: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
-    tool_policy_version: Literal["tools.none.v1"]
+    tool_policy_version: Literal["tools.none.v1", "no-tools.v1"]
     binding_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     code_build_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
-    allowed_room_types: tuple[
-        Literal["INTAKE", "EVIDENCE", "HEARING", "REVIEW"], ...
-    ] = Field(min_length=1, max_length=4)
+    allowed_room_types: tuple[Literal["INTAKE", "EVIDENCE", "HEARING", "REVIEW"], ...] = Field(
+        min_length=1, max_length=4
+    )
     allowed_stage_codes: tuple[str, ...] = Field(min_length=1, max_length=32)
 
     @field_validator("allowed_stage_codes")
@@ -61,6 +59,13 @@ class GraphShadowBindingSettings(BaseModel):
         if len(values) != len(set(values)):
             raise ValueError("Graph SHADOW room types must be unique")
         return values
+
+    @model_validator(mode="after")
+    def validate_tool_policy(self) -> Self:
+        expected = "no-tools.v1" if self.graph_key == "intake.v2" else "tools.none.v1"
+        if self.tool_policy_version != expected:
+            raise ValueError(f"{self.graph_key} requires the exact {expected} tool policy")
+        return self
 
 
 class GraphShadowInputSettings(BaseModel):
@@ -115,9 +120,7 @@ class GraphShadowThreadSettings(BaseModel):
     shared_session: bool = False
     graph_key: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
     graph_version: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
-    checkpoint_schema_version: str = Field(
-        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
-    )
+    checkpoint_schema_version: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
     request_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     allowed_inputs: tuple[GraphShadowInputSettings, ...] = Field(
         min_length=1,
@@ -143,9 +146,7 @@ class GraphShadowThreadSettings(BaseModel):
 
     @model_validator(mode="after")
     def validate_scope(self) -> Self:
-        party_scope = (
-            self.actor_role == "USER" and self.audience == "USER"
-        ) or (
+        party_scope = (self.actor_role == "USER" and self.audience == "USER") or (
             self.actor_role == "MERCHANT" and self.audience == "MERCHANT"
         )
         if self.shared_session:
@@ -161,10 +162,7 @@ class GraphShadowThreadSettings(BaseModel):
         elif self.room_type in {"INTAKE", "EVIDENCE", "HEARING"}:
             if not party_scope:
                 raise ValueError("private SHADOW room threads require an exact party scope")
-        elif (
-            self.actor_role != "PLATFORM_REVIEWER"
-            or self.audience != "PLATFORM_REVIEWER"
-        ):
+        elif self.actor_role != "PLATFORM_REVIEWER" or self.audience != "PLATFORM_REVIEWER":
             raise ValueError("SHADOW Review threads require platform reviewer scope")
         input_keys = {
             (item.artifact_id, item.schema_version, item.uri, item.sha256, item.size_bytes)
@@ -265,9 +263,7 @@ class Settings(BaseSettings):
             if self.graph_jwks_url is None:
                 raise ValueError("SHADOW graph mode requires graph_jwks_url")
             if self.graph_expected_environment_generation is None:
-                raise ValueError(
-                    "SHADOW graph mode requires graph_expected_environment_generation"
-                )
+                raise ValueError("SHADOW graph mode requires graph_expected_environment_generation")
             if self.graph_expected_restore_verification_hash is None:
                 raise ValueError(
                     "SHADOW graph mode requires graph_expected_restore_verification_hash"

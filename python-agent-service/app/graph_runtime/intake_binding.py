@@ -10,7 +10,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
-from typing import Any, cast
+import re
+from typing import Any, Protocol, cast
+from urllib.parse import unquote, urlsplit
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 
@@ -56,7 +58,17 @@ class LoadedIntakePayload:
     uri: str
     sha256: str
     size_bytes: int
+    object_version: str
     canonical_payload: bytes
+
+    def __post_init__(self) -> None:
+        if (
+            re.fullmatch(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$", self.object_version) is None
+            or not isinstance(self.canonical_payload, bytes)
+            or not self.canonical_payload
+            or len(self.canonical_payload) != self.size_bytes
+        ):
+            raise TypeError("loaded Intake payload receipt is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +80,50 @@ class CanonicalIntakeProposal:
     sha256: str
     size_bytes: int
     canonical_payload: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class StoredIntakeProposal:
+    """Immutable proposal-store receipt used by the generic result pointer."""
+
+    artifact_id: str
+    schema_version: str
+    uri: str
+    object_version: str
+    sha256: str
+    size_bytes: int
+
+    def __post_init__(self) -> None:
+        if (
+            self.schema_version != INTAKE_OUTPUT_SCHEMA
+            or re.fullmatch(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$", self.artifact_id) is None
+            or re.fullmatch(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$", self.object_version) is None
+            or re.fullmatch(r"^[0-9a-f]{64}$", self.sha256) is None
+            or self.size_bytes < 1
+            or self.size_bytes > INTAKE_PROPOSAL_MAX_BYTES
+            or not _is_immutable_object_uri(self.uri)
+        ):
+            raise TypeError("stored Intake proposal receipt is invalid")
+
+
+class IntakeInputLoader(Protocol):
+    """Load only the exact immutable object authorized by one admitted execution."""
+
+    async def load(self, execution: GatewayExecution) -> LoadedIntakePayload: ...
+
+
+class IntakeProposalStore(Protocol):
+    """Idempotently store one canonical proposal under its exact terminal authority."""
+
+    async def put(
+        self,
+        execution: GatewayExecution,
+        *,
+        proposal: CanonicalIntakeProposal,
+        checkpoint_ns: str,
+        checkpoint_id: str,
+        cognitive_revision: int,
+    ) -> StoredIntakeProposal: ...
 
 
 def require_exact_intake_binding(configured: GraphShadowBindingSettings) -> None:
@@ -167,10 +223,13 @@ def build_intake_execution_state(execution: GatewayExecution) -> IntakeGraphStat
         },
         "command": _command_binding(command),
     }
-    return IntakeRuntimeBundle.initial_state(
+    state = IntakeRuntimeBundle.initial_state(
         bindings=bindings,
         version_pins=_version_pins(execution),
     )
+    # The process saver requires the first durable command checkpoint to advance revision 0.
+    state["cognitive_revision"] = 1
+    return state
 
 
 def build_intake_command_patch(execution: GatewayExecution) -> dict[str, IntakeGraphBindings]:
@@ -348,9 +407,30 @@ def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return value
 
 
+def _is_immutable_object_uri(value: str) -> bool:
+    parsed = urlsplit(value)
+    path = unquote(parsed.path)
+    return bool(
+        parsed.scheme in {"s3", "minio"}
+        and parsed.netloc
+        and parsed.username is None
+        and parsed.password is None
+        and not parsed.query
+        and not parsed.fragment
+        and path.startswith("/")
+        and not path.endswith("/")
+        and "\\" not in path
+        and "//" not in path
+        and all(part not in {"", ".", ".."} for part in path.split("/")[1:])
+    )
+
+
 __all__ = [
     "CanonicalIntakeProposal",
+    "IntakeInputLoader",
+    "IntakeProposalStore",
     "LoadedIntakePayload",
+    "StoredIntakeProposal",
     "build_governed_intake_runtime",
     "build_intake_command_patch",
     "build_intake_execution_state",

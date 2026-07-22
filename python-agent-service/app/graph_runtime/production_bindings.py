@@ -43,6 +43,8 @@ from app.graph_runtime.identity import (
     ThreadRecord,
 )
 from app.graph_runtime.intake_binding import require_exact_intake_binding
+from app.graph_runtime.intake_exchange import JavaIntakeExchangeClient
+from app.graph_runtime.intake_executor import CompiledIntakeGraphShadowExecutor
 from app.graph_runtime.registry import VersionBinding
 from app.graph_runtime.result import ResultBindings, TERMINAL_DRAFT_ADAPTER
 from app.graph_runtime.state import CommonGraphState, validate_graph_state
@@ -54,6 +56,8 @@ from app.security.invocation_envelope import (
     VerifiedReconciliation,
     invocation_binding_claims,
 )
+from app.llm import LiteLlmProxyClient
+from app.model_runtime.transports import StructuredClientTransport
 
 
 _MAX_COGNITIVE_REVISION = (1 << 63) - 1
@@ -68,13 +72,9 @@ class DeploymentManifestThreadResolver:
         bindings: tuple[GraphShadowBindingSettings, ...],
         threads: tuple[GraphShadowThreadSettings, ...],
     ) -> None:
-        self._bindings = {
-            _binding_key(binding): binding for binding in bindings
-        }
+        self._bindings = {_binding_key(binding): binding for binding in bindings}
         self._settings = {thread.thread_id: thread for thread in threads}
-        self._identities = {
-            thread.thread_id: _thread_identity(thread) for thread in threads
-        }
+        self._identities = {thread.thread_id: _thread_identity(thread) for thread in threads}
 
     async def resolve(
         self,
@@ -104,9 +104,7 @@ class DeploymentManifestThreadResolver:
         expected = self._identities.get(command.thread_id)
         if configured is None or expected is None:
             raise GraphThreadBindingError("thread is absent from the synthetic manifest")
-        actual_scope = ActorScopeBinding.from_json(
-            command.actor_scope.model_dump(mode="json")
-        )
+        actual_scope = ActorScopeBinding.from_json(command.actor_scope.model_dump(mode="json"))
         actual = (
             command.thread_id,
             command.tenant_surrogate,
@@ -146,17 +144,11 @@ class DeploymentManifestInputAuthorizer:
         bindings: tuple[GraphShadowBindingSettings, ...],
         threads: tuple[GraphShadowThreadSettings, ...],
     ) -> None:
-        self._bindings = {
-            _binding_key(binding): binding for binding in bindings
-        }
+        self._bindings = {_binding_key(binding): binding for binding in bindings}
         self._threads = {thread.thread_id: thread for thread in threads}
-        self._identities = {
-            thread.thread_id: _thread_identity(thread) for thread in threads
-        }
+        self._identities = {thread.thread_id: _thread_identity(thread) for thread in threads}
         self._inputs = {
-            thread.thread_id: {
-                _configured_input_key(item): item for item in thread.allowed_inputs
-            }
+            thread.thread_id: {_configured_input_key(item): item for item in thread.allowed_inputs}
             for thread in threads
         }
 
@@ -217,12 +209,38 @@ def build_graph_runtime_bindings(settings: Settings) -> GraphRuntimeBindings:
 
     resolver = DeploymentManifestThreadResolver(bindings, threads)
     authorizer = DeploymentManifestInputAuthorizer(bindings, threads)
+    structured_client: LiteLlmProxyClient | None = None
+    intake_transport: StructuredClientTransport | None = None
+    intake_exchange: JavaIntakeExchangeClient | None = None
+    if any(binding.graph_key == "intake.v2" for binding in bindings):
+        structured_client = LiteLlmProxyClient(
+            settings.resolved_llm_base_url,
+            settings.resolved_llm_model,
+            settings.resolved_llm_api_key,
+            settings.llm_timeout_seconds,
+        )
+        intake_transport = StructuredClientTransport(structured_client)
+        intake_exchange = JavaIntakeExchangeClient(
+            java_api_service_url=settings.java_api_service_url,
+            java_service_secret=settings.java_service_secret,
+        )
 
     def executor_registry_factory(
         kernel: GraphExecutorKernel,
     ) -> ExactShadowExecutorRegistry:
         registrations = [
-            _executor_registration(binding, kernel)
+            _executor_registration(
+                binding,
+                kernel,
+                intake_transport=intake_transport,
+                intake_exchange=intake_exchange,
+                intake_provider=(
+                    structured_client.governed_provider if structured_client is not None else None
+                ),
+                intake_model=(
+                    structured_client.governed_model if structured_client is not None else None
+                ),
+            )
             for binding in bindings
         ]
         return ExactShadowExecutorRegistry(registrations)
@@ -237,9 +255,21 @@ def build_graph_runtime_bindings(settings: Settings) -> GraphRuntimeBindings:
 def _executor_registration(
     configured: GraphShadowBindingSettings,
     kernel: GraphExecutorKernel,
+    *,
+    intake_transport: Any = None,
+    intake_exchange: Any = None,
+    intake_provider: str | None = None,
+    intake_model: str | None = None,
 ) -> ShadowExecutorRegistration:
     if configured.graph_key == "intake.v2":
-        return _intake_executor_registration(configured, kernel)
+        return _intake_executor_registration(
+            configured,
+            kernel,
+            transport=intake_transport,
+            exchange=intake_exchange,
+            provider=intake_provider,
+            model=intake_model,
+        )
     binding = _version_binding(configured)
     builder = build_shadow_kernel_graph(
         validate_command=_validate_synthetic_state,
@@ -269,21 +299,47 @@ def _executor_registration(
 def _intake_executor_registration(
     configured: GraphShadowBindingSettings,
     kernel: GraphExecutorKernel,
+    *,
+    transport: Any,
+    exchange: Any,
+    provider: str | None,
+    model: str | None,
 ) -> ShadowExecutorRegistration:
-    del kernel
     require_exact_intake_binding(configured)
-    raise ValueError(
-        "intake.v2 production binding is unavailable: the generic terminal checkpoint protocol "
-        "overwrites Intake proposal state, and immutable payload/proposal storage ports are absent"
+    if (
+        transport is None
+        or exchange is None
+        or not provider
+        or not model
+        or not callable(getattr(exchange, "load", None))
+        or not callable(getattr(exchange, "put", None))
+    ):
+        raise ValueError("intake.v2 production binding dependencies are incomplete")
+    binding = _version_binding(configured)
+    executor = CompiledIntakeGraphShadowExecutor(
+        saver=kernel.saver,
+        transport=transport,
+        provider=provider,
+        model=model,
+        input_loader=exchange,
+        proposal_store=exchange,
+    )
+    return ShadowExecutorRegistration(
+        binding=binding,
+        executor=executor,
+        provider_binding=ProviderRuntimeBinding(
+            model_profile_id=binding.model_profile_id,
+            provider=provider,
+            model=model,
+            allowed_nodes=frozenset({"intake_lcel"}),
+        ),
     )
 
 
 def _initial_state(execution: GatewayExecution) -> Mapping[str, Any]:
     record = execution.thread_record
     if not isinstance(record, ThreadRecord):
-        raise GraphContractError(
-            "signed-synthetic execution has no authoritative thread revision"
-        )
+        raise GraphContractError("signed-synthetic execution has no authoritative thread revision")
     command = execution.admission.command
     invocation = command.invocation_context
     registry = execution.admission.registry.binding
@@ -305,9 +361,7 @@ def _initial_state(execution: GatewayExecution) -> Mapping[str, Any]:
             "case_id": command.case_id,
             "room_type": command.room_type,
             "room_epoch": command.room_epoch,
-            "actor_scope_hash": canonical_sha256(
-                command.actor_scope.model_dump(mode="json")
-            ),
+            "actor_scope_hash": canonical_sha256(command.actor_scope.model_dump(mode="json")),
             "thread_id": command.thread_id,
         },
         "version_pins": {
@@ -462,7 +516,10 @@ def _require_verified_credential(
     verified_reconciliation: VerifiedReconciliation | None,
 ) -> None:
     if verified_invocation is not None:
-        if verified_reconciliation is not None or type(verified_invocation) is not VerifiedInvocation:
+        if (
+            verified_reconciliation is not None
+            or type(verified_invocation) is not VerifiedInvocation
+        ):
             raise GraphThreadBindingError("trusted invocation credential type differs")
         verified: VerifiedInvocation | VerifiedReconciliation = verified_invocation
         if type(verified.claims) is not InvocationClaims:
@@ -497,9 +554,7 @@ def _require_verified_credential(
         else:
             matches = isinstance(candidate, str) and hmac.compare_digest(candidate, value)
         if not matches:
-            raise GraphThreadBindingError(
-                f"trusted invocation differs from the manifest at {name}"
-            )
+            raise GraphThreadBindingError(f"trusted invocation differs from the manifest at {name}")
     if (
         not hmac.compare_digest(command.request_hash, str(expected["request_hash"]))
         or not hmac.compare_digest(verified.request_hash, command.request_hash)

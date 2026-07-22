@@ -99,6 +99,15 @@ select metadata
  for share
 """
 
+LOCK_TERMINAL_CHECKPOINT_SQL: Final[str] = """
+select metadata
+  from checkpoints
+ where thread_id = %s
+   and checkpoint_ns = %s
+   and checkpoint_id = %s
+ for update
+"""
+
 ADVANCE_THREAD_CHECKPOINT_SQL: Final[str] = """
 update graph_thread_registry
    set cognitive_revision = %s,
@@ -238,6 +247,25 @@ class TerminalResultMaterializer:
             result_hash=result.output_hash,
             usage_json=result.usage.model_dump(mode="json"),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class ExternalTerminalCommit:
+    """Typed generic result publication against an already durable terminal checkpoint."""
+
+    result: ResultRecord
+    cognitive_revision: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.result, ResultRecord):
+            raise TypeError("external terminal commit result is invalid")
+        if (
+            not isinstance(self.cognitive_revision, int)
+            or isinstance(self.cognitive_revision, bool)
+            or self.cognitive_revision < 1
+            or self.result.cognitive_revision != self.cognitive_revision
+        ):
+            raise TypeError("external terminal commit revision is invalid")
 
 
 class FencedPostgresSaver(BaseCheckpointSaver[Any]):
@@ -381,6 +409,84 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
                 await self._validate_pending_write_target(connection, config, fence)
                 saver = self._direct_saver_factory(connection, self.serde)
                 await saver.aput_writes(config, writes, task_id, task_path)
+
+    async def avalidate_external_terminal_checkpoint(
+        self,
+        config: RunnableConfig,
+        *,
+        cognitive_revision: int,
+    ) -> None:
+        """Reject stale storage writers before they create an immutable external object."""
+
+        fence = self._require_fence(config)
+        async with self._connection() as connection:
+            async with connection.transaction():
+                await self._lock_fence(connection, fence)
+                await self._lock_external_terminal_checkpoint(
+                    connection,
+                    config,
+                    fence,
+                    cognitive_revision=cognitive_revision,
+                )
+
+    async def acommit_external_terminal(
+        self,
+        config: RunnableConfig,
+        commit: ExternalTerminalCommit,
+    ) -> RunnableConfig:
+        """Atomically publish a generic result without rewriting domain-owned checkpoint state."""
+
+        if type(commit) is not ExternalTerminalCommit:
+            raise GraphBindingError("external terminal commit capability has an invalid type")
+        fence = self._require_fence(config)
+        result = commit.result
+        configurable = config.get("configurable") or {}
+        checkpoint_ns = str(configurable.get("checkpoint_ns") or "")
+        checkpoint_id = str(configurable.get("checkpoint_id") or "")
+        if (
+            result.thread_id != fence.thread_id
+            or result.command_id != fence.command_id
+            or result.request_hash != fence.request_hash
+            or result.checkpoint_ns != checkpoint_ns
+            or result.checkpoint_id != checkpoint_id
+        ):
+            raise GraphBindingError(
+                "external terminal result differs from its exact checkpoint fence"
+            )
+        effective_fence = self._terminal_fence(fence, result)
+        async with self._connection() as connection:
+            async with connection.transaction():
+                await self._lock_fence(connection, fence)
+                await self._lock_external_terminal_checkpoint(
+                    connection,
+                    config,
+                    fence,
+                    cognitive_revision=commit.cognitive_revision,
+                )
+                await self._bind_command_checkpoint(
+                    connection,
+                    effective_fence,
+                    checkpoint_ns=checkpoint_ns,
+                    checkpoint_id=checkpoint_id,
+                )
+                await self._advance_thread_checkpoint(
+                    connection,
+                    effective_fence,
+                    cognitive_revision=commit.cognitive_revision,
+                    checkpoint_ns=checkpoint_ns,
+                    checkpoint_id=checkpoint_id,
+                )
+                await self._ledger.store_terminal_result(
+                    connection,
+                    fence=effective_fence,
+                    result=result,
+                    expected_result_schema_version=ROOM_GRAPH_RESULT_SCHEMA_VERSION,
+                )
+        rebound = dict(config)
+        rebound_configurable = dict(config.get("configurable") or {})
+        rebound_configurable.pop(FENCE_CONTEXT_KEY, None)
+        rebound["configurable"] = rebound_configurable
+        return bind_fence_context(rebound, effective_fence)
 
     async def adelete_thread(self, thread_id: str) -> None:
         raise GraphFenceError("runtime saver cannot delete Graph threads")
@@ -629,6 +735,40 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
             raise GraphBindingError("pending-write checkpoint does not exist")
         self._validate_checkpoint_metadata(row["metadata"], fence)
 
+    async def _lock_external_terminal_checkpoint(
+        self,
+        connection: Any,
+        config: RunnableConfig,
+        fence: GraphFenceContext,
+        *,
+        cognitive_revision: int,
+    ) -> None:
+        configurable = config.get("configurable") or {}
+        checkpoint_ns = str(configurable.get("checkpoint_ns") or "")
+        checkpoint_id = str(configurable.get("checkpoint_id") or "")
+        if (
+            not checkpoint_id
+            or len(checkpoint_id) > 128
+            or len(checkpoint_ns) > 128
+            or not isinstance(cognitive_revision, int)
+            or isinstance(cognitive_revision, bool)
+            or cognitive_revision < 1
+        ):
+            raise GraphBindingError("external terminal checkpoint identity is invalid")
+        row = await (
+            await connection.execute(
+                LOCK_TERMINAL_CHECKPOINT_SQL,
+                (fence.thread_id, checkpoint_ns, checkpoint_id),
+            )
+        ).fetchone()
+        if row is None:
+            raise GraphBindingError("external terminal checkpoint does not exist")
+        self._validate_exact_checkpoint_metadata(
+            row["metadata"],
+            fence,
+            cognitive_revision=cognitive_revision,
+        )
+
     @staticmethod
     def _require_fence(config: RunnableConfig) -> GraphFenceContext:
         configurable = config.get("configurable") or {}
@@ -665,11 +805,7 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
             pending_input = values.get("__start__")
             if revision is None and isinstance(pending_input, Mapping):
                 revision = pending_input.get("cognitive_revision")
-        if (
-            not isinstance(revision, int)
-            or isinstance(revision, bool)
-            or revision < 1
-        ):
+        if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
             raise GraphBindingError(
                 "every Graph checkpoint must carry a positive cognitive revision"
             )
@@ -734,6 +870,26 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
         result_ref = metadata.get("graph_result_ref")
         if (result_hash is None) != (result_ref is None):
             raise GraphBindingError("checkpoint metadata has an incomplete result binding")
+
+    @classmethod
+    def _validate_exact_checkpoint_metadata(
+        cls,
+        metadata: Any,
+        fence: GraphFenceContext,
+        *,
+        cognitive_revision: int,
+    ) -> None:
+        cls._validate_checkpoint_metadata(metadata, fence)
+        exact = {
+            "graph_command_id": fence.command_id,
+            "graph_request_hash": fence.request_hash,
+            "graph_fencing_token": fence.fencing_token,
+            "graph_cognitive_revision": cognitive_revision,
+        }
+        if any(metadata.get(key) != value for key, value in exact.items()):
+            raise GraphBindingError(
+                "external terminal checkpoint differs from the active command fence"
+            )
 
     @staticmethod
     def _bind_tuple(item: CheckpointTuple, fence: GraphFenceContext) -> CheckpointTuple:

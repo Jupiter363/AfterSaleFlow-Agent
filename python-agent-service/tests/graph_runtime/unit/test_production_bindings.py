@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from dataclasses import replace
 import json
 from pathlib import Path
@@ -7,6 +8,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+import httpx
 from langgraph.checkpoint.memory import InMemorySaver
 
 from app.api.graph_lifecycle import GraphExecutorKernel
@@ -29,12 +31,20 @@ from app.graph_runtime.identity import (
 )
 from app.graph_runtime.intake_binding import (
     LoadedIntakePayload,
+    StoredIntakeProposal,
     build_governed_intake_runtime,
     build_intake_execution_state,
     canonical_intake_proposal,
     decode_authorized_intake_ingress,
 )
+from app.graph_runtime.intake_exchange import (
+    INTAKE_PAYLOAD_LOAD_PATH,
+    INTAKE_PROPOSAL_PUT_PATH,
+    JavaIntakeExchangeClient,
+)
+from app.graph_runtime.intake_executor import CompiledIntakeGraphShadowExecutor
 from app.graph_runtime.persistence_models import GraphFenceContext
+from app.graph_runtime.checkpoint import FENCE_CONTEXT_KEY, bind_fence_context
 from app.graph_runtime.production_bindings import (
     _advance_revision,
     _initial_state,
@@ -56,9 +66,7 @@ from app.model_runtime.transports import ModelTransportRequest
 
 
 ROOT = Path(__file__).resolve().parents[4]
-COMMAND_FIXTURE = (
-    ROOT / "contracts/agent-platform/v1/fixtures/valid/room-graph-command-valid.json"
-)
+COMMAND_FIXTURE = ROOT / "contracts/agent-platform/v1/fixtures/valid/room-graph-command-valid.json"
 BASE_SETTINGS = {
     "litellm_master_key": "test-litellm-master-key",
     "langfuse_public_key": "test-public-key",
@@ -214,9 +222,7 @@ def _settings(
     return Settings(
         **BASE_SETTINGS,
         graph_gateway_mode="SHADOW",
-        graph_database_dsn=(
-            "postgresql://graph_runtime:secret@postgresql:5432/dispute_graph"
-        ),
+        graph_database_dsn=("postgresql://graph_runtime:secret@postgresql:5432/dispute_graph"),
         graph_jwks_url="http://java-api-service:8080/.well-known/graph-jwks.json",
         graph_expected_environment_generation="graphenv-test-001",
         graph_expected_restore_verification_hash="c" * 64,
@@ -340,9 +346,7 @@ def _intake_execution(
         case_id=command.case_id,
         room_type=RoomType.INTAKE,
         room_epoch=command.room_epoch,
-        actor_scope=ActorScopeBinding.from_json(
-            command.actor_scope.model_dump(mode="json")
-        ),
+        actor_scope=ActorScopeBinding.from_json(command.actor_scope.model_dump(mode="json")),
         agent_session_id="AGENT_SESSION_P4_USER_1",
         shared_session=False,
         graph_key=command.graph_key,
@@ -395,10 +399,13 @@ async def test_manifest_resolver_and_input_authorizer_accept_only_the_exact_comm
         verified_invocation=_verified(command),
     )
     await runtime.input_authorizer.authorize(command=command, thread=thread)
-    assert await runtime.thread_identity_resolver.resolve(
-        command=command,
-        verified_reconciliation=_verified_reconciliation(command),
-    ) == thread
+    assert (
+        await runtime.thread_identity_resolver.resolve(
+            command=command,
+            verified_reconciliation=_verified_reconciliation(command),
+        )
+        == thread
+    )
 
     forged_hash = command.model_copy(update={"request_hash": "e" * 64})
     with pytest.raises(GraphThreadBindingError, match="self-hash|manifest"):
@@ -449,9 +456,7 @@ async def test_manifest_rejects_runtime_profile_and_tool_overrides() -> None:
 
     profile_drift = replace(
         _verified(command),
-        claims=_verified(command).claims.model_copy(
-            update={"profile_bindings_hash": "e" * 64}
-        ),
+        claims=_verified(command).claims.model_copy(update={"profile_bindings_hash": "e" * 64}),
     )
     with pytest.raises(GraphThreadBindingError, match="profile_bindings_hash"):
         await runtime.thread_identity_resolver.resolve(
@@ -489,16 +494,39 @@ def test_executor_factory_registers_a_real_exact_compiled_executor() -> None:
         registry.resolve_registration(drifted)
 
 
-def test_exact_intake_graph_key_never_falls_back_to_the_phase3_kernel() -> None:
+def test_exact_intake_graph_key_requires_all_durable_executor_dependencies() -> None:
     command, _, _ = _intake_command()
 
-    with pytest.raises(ValueError, match="terminal checkpoint protocol.*proposal storage"):
+    with pytest.raises(ValueError, match="dependencies are incomplete"):
         _executor_registration(
             _intake_config(command),
-            GraphExecutorKernel(
-                saver=cast(Any, InMemorySaver()), gateway=cast(Any, object())
-            ),
+            GraphExecutorKernel(saver=cast(Any, InMemorySaver()), gateway=cast(Any, object())),
         )
+
+
+def test_exact_intake_graph_key_registers_only_the_dedicated_executor() -> None:
+    command, _, _ = _intake_command()
+
+    class Exchange:
+        async def load(self, execution):  # pragma: no cover - registration only
+            raise AssertionError
+
+        async def put(self, execution, **kwargs):  # pragma: no cover - registration only
+            raise AssertionError
+
+    registration = _executor_registration(
+        _intake_config(command),
+        GraphExecutorKernel(saver=cast(Any, InMemorySaver()), gateway=cast(Any, object())),
+        intake_transport=cast(Any, object()),
+        intake_exchange=Exchange(),
+        intake_provider="litellm",
+        intake_model="intake-model",
+    )
+
+    assert isinstance(registration.executor, CompiledIntakeGraphShadowExecutor)
+    assert registration.provider_binding.provider == "litellm"
+    assert registration.provider_binding.model == "intake-model"
+    assert registration.provider_binding.allowed_nodes == frozenset({"intake_lcel"})
 
 
 @pytest.mark.asyncio
@@ -514,6 +542,7 @@ async def test_authorized_intake_adapter_builds_the_real_governed_graph_proposal
             uri=command.domain_snapshot_ref.uri,
             sha256=command.domain_snapshot_ref.sha256,
             size_bytes=len(payload),
+            object_version="version-1",
             canonical_payload=payload,
         ),
     )
@@ -549,6 +578,133 @@ async def test_authorized_intake_adapter_builds_the_real_governed_graph_proposal
     assert b"formal_action" not in artifact.canonical_payload
 
 
+@pytest.mark.asyncio
+async def test_compiled_intake_executor_persists_one_pointer_without_replacing_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command, _, payload = _intake_command()
+    execution = _intake_execution(command)
+    loaded = LoadedIntakePayload(
+        artifact_id=command.domain_snapshot_ref.artifact_id,
+        schema_version=command.domain_snapshot_ref.schema_version,
+        uri=command.domain_snapshot_ref.uri,
+        sha256=command.domain_snapshot_ref.sha256,
+        size_bytes=len(payload),
+        object_version="version-1",
+        canonical_payload=payload,
+    )
+    context = decode_authorized_intake_ingress(command=command, loaded=loaded)
+    source_bundle = build_governed_intake_runtime(
+        execution=execution,
+        transport=cast(Any, _NoCallIntakeTransport()),
+        provider="synthetic",
+        model="intake-model",
+        checkpointer=InMemorySaver(),
+    )
+    durable_state = await source_bundle.graph.ainvoke(
+        build_intake_execution_state(execution),
+        {"configurable": {"thread_id": command.thread_id}},
+        context=context,
+    )
+    proposal_before = dict(durable_state["result_json"])
+
+    class Saver:
+        def __init__(self) -> None:
+            self.preflights = 0
+            self.commits = []
+
+        async def avalidate_external_terminal_checkpoint(self, config, **kwargs):
+            self.preflights += 1
+
+        async def acommit_external_terminal(self, config, commit):
+            self.commits.append(commit)
+            effective = replace(
+                execution.fence,
+                result_ref=commit.result.result_ref,
+                result_hash=commit.result.result_hash,
+            )
+            configurable = dict(config["configurable"])
+            configurable[FENCE_CONTEXT_KEY] = effective
+            return {"configurable": configurable}
+
+    saver = Saver()
+    final_config = bind_fence_context(
+        {
+            "configurable": {
+                "thread_id": command.thread_id,
+                "checkpoint_ns": "",
+                "checkpoint_id": "cp-intake-terminal",
+            }
+        },
+        execution.fence,
+    )
+
+    class Graph:
+        checkpointer = saver
+
+        async def astream(self, input, config, **kwargs):
+            if False:
+                yield None
+
+        async def aget_state(self, config):
+            return SimpleNamespace(
+                values=durable_state,
+                config=final_config,
+                next=(),
+                tasks=(),
+                interrupts=(),
+            )
+
+    monkeypatch.setattr(
+        "app.graph_runtime.intake_executor.build_governed_intake_runtime",
+        lambda **kwargs: SimpleNamespace(
+            graph=Graph(),
+            terminal_proposal=source_bundle.terminal_proposal,
+        ),
+    )
+
+    class Loader:
+        async def load(self, selected_execution):
+            return loaded
+
+    class Store:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def put(self, selected_execution, *, proposal, **kwargs):
+            self.calls += 1
+            return StoredIntakeProposal(
+                artifact_id=proposal.artifact_id,
+                schema_version=proposal.schema_version,
+                uri=f"s3://intake-proposals/{proposal.artifact_id}.json",
+                object_version="version-1",
+                sha256=proposal.sha256,
+                size_bytes=proposal.size_bytes,
+            )
+
+    store = Store()
+    executor = CompiledIntakeGraphShadowExecutor(
+        saver=cast(Any, saver),
+        transport=cast(Any, object()),
+        provider="synthetic",
+        model="intake-model",
+        input_loader=Loader(),
+        proposal_store=store,
+    )
+
+    events = [event async for event in executor.stream(execution)]
+
+    assert [event.event_type for event in events] == ["attempt_started", "final"]
+    assert saver.preflights == 1
+    assert store.calls == 1
+    assert len(saver.commits) == 1
+    result_json = saver.commits[0].result.result_json
+    assert len(result_json["artifact_operations"]) == 1
+    assert result_json["artifact_operations"][0]["operation"] == "PROPOSE_PATCH"
+    assert durable_state["terminal_draft"] == proposal_before
+    assert durable_state["result_json"] == proposal_before
+
+
 def test_intake_ingress_rejects_private_contaminants_before_graph_mutation() -> None:
     command, snapshot, _ = _intake_command()
     contaminated = {**snapshot, "memory_frame": {"other_party": "private"}}
@@ -571,9 +727,173 @@ def test_intake_ingress_rejects_private_contaminants_before_graph_mutation() -> 
                 uri=reference.uri,
                 sha256=reference.sha256,
                 size_bytes=reference.size_bytes,
+                object_version="version-1",
                 canonical_payload=payload,
             ),
         )
+
+
+@pytest.mark.asyncio
+async def test_java_intake_exchange_loads_only_exact_canonical_receipt_bytes() -> None:
+    command, _, payload = _intake_command()
+    execution = _intake_execution(command)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == INTAKE_PAYLOAD_LOAD_PATH
+        assert request.headers["X-Service-Secret"] == "test-java-service-secret"
+        body = json.loads(request.content)
+        reference = body["object_ref"]
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            json={
+                "schema_version": "intake-payload-load-response.v1",
+                "authority": body["authority"],
+                "receipt": {
+                    "schema_version": "intake-payload-load-receipt.v1",
+                    "artifact_id": reference["artifact_id"],
+                    "content_schema_version": reference["schema_version"],
+                    "uri": reference["uri"],
+                    "object_version": "version-1",
+                    "sha256": reference["sha256"],
+                    "size_bytes": reference["size_bytes"],
+                },
+                "canonical_payload_base64": base64.b64encode(payload).decode("ascii"),
+            },
+        )
+
+    client = JavaIntakeExchangeClient(
+        java_api_service_url="http://java-api-service:8080",
+        java_service_secret="test-java-service-secret",
+        transport=httpx.MockTransport(handler),
+    )
+
+    loaded = await client.load(execution)
+
+    assert loaded.object_version == "version-1"
+    assert loaded.canonical_payload == payload
+    assert loaded.sha256 == command.domain_snapshot_ref.sha256
+
+
+@pytest.mark.asyncio
+async def test_java_intake_exchange_rejects_payload_hash_mismatch() -> None:
+    command, _, payload = _intake_command()
+    execution = _intake_execution(command)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        reference = body["object_ref"]
+        tampered = json.loads(payload)
+        tampered["case_id"] = "CASE_TAMPERED"
+        tampered_payload = canonicalize(tampered)
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            json={
+                "schema_version": "intake-payload-load-response.v1",
+                "authority": body["authority"],
+                "receipt": {
+                    "schema_version": "intake-payload-load-receipt.v1",
+                    "artifact_id": reference["artifact_id"],
+                    "content_schema_version": reference["schema_version"],
+                    "uri": reference["uri"],
+                    "object_version": "version-1",
+                    "sha256": reference["sha256"],
+                    "size_bytes": len(tampered_payload),
+                },
+                "canonical_payload_base64": base64.b64encode(tampered_payload).decode("ascii"),
+            },
+        )
+
+    client = JavaIntakeExchangeClient(
+        java_api_service_url="http://java-api-service:8080",
+        java_service_secret="test-java-service-secret",
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(GraphContractError, match="receipt|hash"):
+        await client.load(execution)
+
+
+@pytest.mark.asyncio
+async def test_java_intake_exchange_put_returns_exact_versioned_receipt() -> None:
+    command, _, _ = _intake_command()
+    execution = _intake_execution(command)
+    proposal_document = json.loads(
+        (
+            ROOT
+            / "contracts/agent-platform/intake/v2/fixtures/valid/intake-turn-proposal-valid.json"
+        ).read_text(encoding="utf-8")
+    )
+    proposal_document.update(
+        {
+            "command_id": command.command_id,
+            "logical_run_id": command.logical_run_id,
+            "attempt_id": command.attempt_id,
+            "source_snapshot_hash": command.domain_snapshot_ref.sha256,
+        }
+    )
+    proposal_document.pop("source_event_hash", None)
+    proposal_document["proposal_hash"] = canonical_sha256_omitting(
+        proposal_document, "proposal_hash"
+    )
+    proposal = canonical_intake_proposal(proposal_document)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == INTAKE_PROPOSAL_PUT_PATH
+        body = json.loads(request.content)
+        assert base64.b64decode(body["proposal"]["canonical_payload_base64"]) == (
+            proposal.canonical_payload
+        )
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            json={
+                "schema_version": "intake-proposal-put-response.v1",
+                "authority": body["authority"],
+                "checkpoint_ns": body["checkpoint_ns"],
+                "checkpoint_id": body["checkpoint_id"],
+                "cognitive_revision": body["cognitive_revision"],
+                "receipt": {
+                    "schema_version": "intake-proposal-put-receipt.v1",
+                    "artifact_id": proposal.artifact_id,
+                    "content_schema_version": proposal.schema_version,
+                    "uri": f"s3://intake-proposals/{proposal.artifact_id}.json",
+                    "object_version": "version-1",
+                    "sha256": proposal.sha256,
+                    "size_bytes": proposal.size_bytes,
+                },
+            },
+        )
+
+    client = JavaIntakeExchangeClient(
+        java_api_service_url="http://java-api-service:8080",
+        java_service_secret="test-java-service-secret",
+        transport=httpx.MockTransport(handler),
+    )
+
+    stored = await client.put(
+        execution,
+        proposal=proposal,
+        checkpoint_ns="",
+        checkpoint_id="cp-terminal",
+        cognitive_revision=2,
+    )
+
+    assert stored.object_version == "version-1"
+    assert stored.sha256 == proposal.sha256
+
+
+def test_settings_allow_no_tools_only_for_exact_intake_graph() -> None:
+    command, _, _ = _intake_command()
+
+    intake = _settings(command, binding=_intake_binding(command))
+
+    assert intake.graph_shadow_bindings[0].tool_policy_version == "no-tools.v1"
+    invalid = _binding(_command())
+    invalid["tool_policy_version"] = "no-tools.v1"
+    with pytest.raises(ValueError, match="exact tools.none.v1"):
+        _settings(binding=invalid)
 
 
 def test_intake_dispatch_rejects_version_relabeling_before_registration() -> None:
@@ -671,9 +991,7 @@ async def test_synthetic_program_advances_each_checkpoint_and_has_no_effects() -
     )
     final_snapshot = await graph.aget_state(saved)
     assert final_snapshot.values["cognitive_revision"] == 12
-    assert final_snapshot.values["result_json"] == {
-        "status": "PENDING_TERMINAL_COMMIT"
-    }
+    assert final_snapshot.values["result_json"] == {"status": "PENDING_TERMINAL_COMMIT"}
 
     with pytest.raises(GraphContractError, match="model, tool, or domain effects"):
         _terminal_plan(
@@ -693,9 +1011,7 @@ def test_default_runtime_builder_never_creates_shadow_bindings_implicitly() -> N
     incomplete = Settings(
         **BASE_SETTINGS,
         graph_gateway_mode="SHADOW",
-        graph_database_dsn=(
-            "postgresql://graph_runtime:secret@postgresql:5432/dispute_graph"
-        ),
+        graph_database_dsn=("postgresql://graph_runtime:secret@postgresql:5432/dispute_graph"),
         graph_jwks_url="http://java-api-service:8080/.well-known/graph-jwks.json",
         graph_expected_environment_generation="graphenv-test-001",
         graph_expected_restore_verification_hash="c" * 64,

@@ -7,6 +7,7 @@ import pytest
 
 from app.contracts.v1.models import ExecutionMetadata, Usage
 from app.graph_runtime.checkpoint import (
+    ExternalTerminalCommit,
     FENCE_CONTEXT_KEY,
     TERMINAL_RESULT_CONTEXT_KEY,
     FencedPostgresSaver,
@@ -157,11 +158,13 @@ class _Connection:
         fence_current: bool = True,
         binding_current: bool = True,
         thread_current: bool = True,
+        checkpoint_revision: int = 1,
     ) -> None:
         self.events: list[str] = []
         self.fence_current = fence_current
         self.binding_current = binding_current
         self.thread_current = thread_current
+        self.checkpoint_revision = checkpoint_revision
 
     def transaction(self) -> _Transaction:
         return _Transaction(self.events)
@@ -173,7 +176,9 @@ class _Connection:
             return _Cursor({"fencing_token": 1} if self.fence_current else None)
         if "from checkpoints" in normalized:
             self.events.append("sql:checkpoint-metadata")
-            return _Cursor({"metadata": _metadata()})
+            return _Cursor(
+                {"metadata": _metadata(graph_cognitive_revision=self.checkpoint_revision)}
+            )
         if "update agent_graph_command" in normalized:
             self.events.append("sql:bind-command")
             result_hash = params[0]
@@ -370,6 +375,8 @@ async def test_thread_revision_conflict_rolls_back_the_checkpoint_transaction() 
         "sql:advance-thread",
         "transaction:rollback",
     ]
+
+
 @pytest.mark.asyncio
 async def test_terminal_checkpoint_result_and_command_commit_on_one_connection() -> None:
     connection = _Connection()
@@ -411,6 +418,50 @@ async def test_terminal_checkpoint_result_and_command_commit_on_one_connection()
     )
     assert saved["configurable"][FENCE_CONTEXT_KEY] == terminal_fence
     assert TERMINAL_RESULT_CONTEXT_KEY not in saved["configurable"]
+
+
+@pytest.mark.asyncio
+async def test_external_terminal_commit_locks_exact_checkpoint_without_rewriting_it() -> None:
+    connection = _Connection(checkpoint_revision=4)
+    ledger = _TerminalLedger(connection.events)
+    saver, direct_savers = _saver(connection, ledger=ledger)
+    result = _result(checkpoint_id="cp-parent")
+
+    saved = await saver.acommit_external_terminal(
+        _config(checkpoint=True),
+        ExternalTerminalCommit(result=result, cognitive_revision=4),
+    )
+
+    assert connection.events == [
+        "transaction:enter",
+        "sql:fence",
+        "sql:checkpoint-metadata",
+        "sql:bind-command",
+        "sql:advance-thread",
+        "ledger:store-result",
+        "transaction:commit",
+    ]
+    assert direct_savers == []
+    assert ledger.calls[0][2] == result
+    assert saved["configurable"][FENCE_CONTEXT_KEY].result_hash == result.result_hash
+
+
+@pytest.mark.asyncio
+async def test_external_terminal_preflight_rejects_stale_fence_before_store_boundary() -> None:
+    connection = _Connection(fence_current=False)
+    saver, direct_savers = _saver(connection)
+
+    with pytest.raises(GraphFenceError, match="stale"):
+        await saver.avalidate_external_terminal_checkpoint(
+            _config(checkpoint=True), cognitive_revision=4
+        )
+
+    assert direct_savers == []
+    assert connection.events == [
+        "transaction:enter",
+        "sql:fence",
+        "transaction:rollback",
+    ]
 
 
 @pytest.mark.asyncio
