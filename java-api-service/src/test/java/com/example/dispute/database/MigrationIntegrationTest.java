@@ -70,7 +70,7 @@ class MigrationIntegrationTest {
         MigrateResult first = flyway.migrate();
         MigrateResult second = flyway.migrate();
 
-        assertThat(first.migrationsExecuted).isEqualTo(48);
+        assertThat(first.migrationsExecuted).isEqualTo(49);
         assertThat(second.migrationsExecuted).isZero();
 
         try (Connection connection =
@@ -150,6 +150,7 @@ class MigrationIntegrationTest {
                             "case_intake_epoch_party_authority",
                             "case_intake_command_payload_authority",
                             "case_intake_command_authority",
+                            "case_intake_shadow_comparison",
                             "domain_operation",
                             "process_reconciliation_issue",
                             "immutable_payload_snapshot",

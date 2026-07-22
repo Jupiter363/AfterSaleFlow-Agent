@@ -26,6 +26,16 @@ public final class IntakeShadowParityService {
             String comparisonKeyHash,
             ParitySnapshot legacy,
             ParitySnapshot shadow) {
+        IntakeShadowComparison comparison = evaluate(comparisonKeyHash, legacy, shadow);
+        sink.record(comparison);
+        return comparison;
+    }
+
+    /** Builds the bounded comparison without selecting a storage implementation. */
+    public IntakeShadowComparison evaluate(
+            String comparisonKeyHash,
+            ParitySnapshot legacy,
+            ParitySnapshot shadow) {
         Objects.requireNonNull(legacy, "legacy must not be null");
         Objects.requireNonNull(shadow, "shadow must not be null");
 
@@ -41,13 +51,11 @@ public final class IntakeShadowParityService {
         hardZeroFindings.addAll(legacy.hardZeroFindings());
         hardZeroFindings.addAll(shadow.hardZeroFindings());
 
-        IntakeShadowComparison comparison = new IntakeShadowComparison(
+        return new IntakeShadowComparison(
                 IntakeShadowComparison.V1,
                 comparisonKeyHash,
                 dimensions,
                 hardZeroFindings);
-        sink.record(comparison);
-        return comparison;
     }
 
     public record ParitySnapshot(
