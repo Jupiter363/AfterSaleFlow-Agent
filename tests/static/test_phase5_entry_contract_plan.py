@@ -245,8 +245,12 @@ def test_phase5_evidence_room_command_binds_full_signed_manifest_payload() -> No
 
 def test_phase5_wave_a_authority_owners_share_corrected_admission_contract() -> None:
     briefs = _owner_briefs()
-    assert briefs["document_status"] == "DRAFT_BLOCKED_UNTIL_P5_0_ENTRY_EVIDENCE"
-    assert briefs["entry_gate"]["status"] == "BLOCKED"
+    assert briefs["document_status"] == "P5_0_PASS_ENGINEERING_ACTIVE"
+    assert briefs["entry_gate"]["status"] == "PASS"
+    assert briefs["wave_a_parallel_launch"]["status"] == "READY"
+    assert briefs["integration_barriers"]["P5-WAVE-A-INTEGRATED"]["status"] == (
+        "BLOCKED"
+    )
     assert "P5_0_ENTRY_EVIDENCE_COMMITTED" in briefs["entry_gate"][
         "required_before_dispatch"
     ]

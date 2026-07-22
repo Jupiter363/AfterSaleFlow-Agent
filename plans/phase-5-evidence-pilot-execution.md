@@ -3,34 +3,46 @@
 ## Status
 
 ```text
-plan_status: P5_0_CONTRACT_CANDIDATE
-engineering_execution: BLOCKED_PENDING_P5_0_ENTRY_EVIDENCE
-contract_gate: P5.0 NOT_RUN
-candidate_scope_integrity: PRE_ENTRY_CONTRACT_CORRECTION_REQUIRES_FRESH_EXACT_SHA_BATCH_0
+plan_status: PHASE_5_ENGINEERING_ACTIVE
+engineering_execution: ALLOWED_WITH_DISABLED_JAVA_SIGNED_SYNTHETIC_SHADOW_RESTRICTIONS
+contract_gate: P5.0 PASS
+candidate_scope_integrity: PASS_AT_e70492a11e23307382ea762d0e8e7f57ab58870b
 phase_4_engineering_checkpoint: PASS
-promotion_gate: MIG-004 PENDING_PROMOTION
-phase_5_promotion_gate: MIG-005 PENDING_PROMOTION
-contract_candidate_permission: GRANTED
-next_phase_permission: BLOCKED_PENDING_P5_0_ENTRY_EVIDENCE
+promotion_gate: PENDING
+MIG-004: PENDING_PROMOTION
+MIG-005: PENDING_PROMOTION
+contract_candidate_permission: CONSUMED_BY_ACCEPTED_P5_0
+next_phase_permission: PHASE_5_ENGINEERING_ONLY
 team_shape: primary + 5 simultaneously active delegated implementation owners
 java_evidence_ledger_writer: SOLE_FORMAL_WRITER
 graph_runtime_default: DISABLED
 allowed_pre_promotion_runtime: DISABLED or Java-signed synthetic SHADOW
 temporal_evidence_allocation: FORBIDDEN
 formal_graph_sink: FORBIDDEN
-pre_entry_contract_correction: ADR_0013_ACCEPTED_ATOMIC_ONCE
+real_case_shadow: FORBIDDEN
+canary: FORBIDDEN
+promotion: FORBIDDEN
+pre_entry_contract_correction: ADR_0013_CONSUMED_AND_EXPIRED_AT_P5_0_ACCEPTANCE
 ```
 
-This P5.0 contract candidate is based on the accepted Phase 4 evidence commit
+P5.0 passed at contract candidate `e70492a11e23307382ea762d0e8e7f57ab58870b`. The separate entry
+evidence commit `e5f6019b71a90174c09aecdcba336bd12788b75b` archives 396 passing
+tests and is authenticated by the
+[P5.0 entry checkpoint](../docs/runbooks/temporal-first/phase-5-p5.0-entry-checkpoint.md).
+This grants Phase 5 engineering only. It is not a Phase 5 engineering checkpoint or Phase 6
+permission, and it does not relax any runtime or promotion gate.
+
+The accepted contract candidate is based on the Phase 4 evidence commit
 `b8697ce7a46f4494d250d21f27a076f0711ae04d`. Its candidate
 `1ba6e17fa2182156825f42d7e243978cf23ccdb4` passed the Phase 4 engineering checkpoint and grants
 `PHASE_5_ENGINEERING_ONLY`. The exact tracked checkpoint is
 `test-reports/temporal-first/phase-4-20260722-1ba6e17f/phase-4/phase-metrics.json`.
-This records permission to run P5.0 Batch 0 under the repository-owner-approved
-[ADR 0012](../docs/architecture/adr/0012-phase-5-evidence-engineering-exception.md), but it does not
-authorize Phase 5 implementation yet. The one-time correction of the still-unaccepted Evidence v2
-contract is governed by
+That handoff permitted P5.0 Batch 0 under the repository-owner-approved
+[ADR 0012](../docs/architecture/adr/0012-phase-5-evidence-engineering-exception.md). The one-time
+correction of the then-unaccepted Evidence v2 contract was governed by
 [ADR 0013](../docs/architecture/adr/0013-phase-5-evidence-pre-entry-contract-correction.md).
+ADR 0013 expired when P5.0 was accepted; later authority-bearing contract changes require a new
+schema version, compatibility plan, and accepted ADR.
 
 ADR 0012 separates an **engineering lane** from a **promotion lane**. The engineering lane builds
 and proves fail-closed components with disabled or Java-signed synthetic inputs. `MIG-004`, the
@@ -44,11 +56,26 @@ machine-readable [Phase 5 test batches](./phase-5-evidence-pilot-test-batches.ya
 is `plans/temporal-langgraph-room-refactor.md` section 7.6 plus the platform acceptance checklist,
 machine manifest, and current-room behavior baseline.
 
-Implementation remains blocked until Batch 0 runs from this contract candidate's exact clean
-detached SHA and the resulting entry evidence is committed separately. No green source suite may
-be relabeled as P5.0 `PASS` before that evidence commit.
+Implementation was blocked until Batch 0 ran from the exact clean detached candidate and the
+resulting evidence was committed separately. Those conditions are now satisfied only by the
+candidate/evidence pair above. No later green source suite or engineering commit may be relabeled
+as P5.0 entry evidence.
+
+The reviewed generic bulkhead foundation is integrated as
+`ca18e53e6f051004d20c6f8879f6ed440ab0dc20` followed by the Evidence room-cap correction
+`09d65875ff6edfbc76d0d2a0e42610690e500bfd`. This proves a process-local primitive and the
+per-room cap of eight; it does not close cross-replica tenant/global `GRAPH-016`. That check remains
+an engineering exit obligation owned by `P5-E1`.
 
 ### Candidate-Scope Repair Ledger
+
+The following status is retained only as the historical pre-entry context for this ledger:
+
+```text
+contract_gate: P5.0 NOT_RUN
+candidate_scope_integrity: PRE_ENTRY_CONTRACT_CORRECTION_REQUIRES_FRESH_EXACT_SHA_BATCH_0
+engineering_execution: BLOCKED_PENDING_P5_0_ENTRY_EVIDENCE
+```
 
 The contract material frozen by `6e23c580dc4ac53f2c3b8e8ca2894388fd9c3500` was not a successful
 P5.0 candidate. Diagnostic Batch 0 attempts exposed baseline and evidence-capture defects. The

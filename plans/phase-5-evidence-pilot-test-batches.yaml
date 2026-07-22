@@ -1,12 +1,14 @@
 schema_version: phase-test-batches.v1
 phase: 5
 name: evidence-pilot-engineering-shadow
-document_status: P5_0_CONTRACT_CANDIDATE_AWAITING_BATCH0
+document_status: P5_0_PASS_ENGINEERING_ACTIVE
 
 documents:
   execution_plan: plans/phase-5-evidence-pilot-execution.md
   contract_pack: docs/runbooks/temporal-first/phase-5-p5.0-contract-pack.md
   engineering_exception: docs/architecture/adr/0012-phase-5-evidence-engineering-exception.md
+  entry_checkpoint: docs/runbooks/temporal-first/phase-5-p5.0-entry-checkpoint.md
+  entry_evidence: test-reports/temporal-first/phase-5-entry-20260723-e70492a1/phase-5-entry
   source_plan: plans/temporal-langgraph-room-refactor.md
   acceptance_checklist: docs/acceptance/temporal-first-agent-platform-verification-checklist.md
   acceptance_manifest: tests/acceptance/temporal-first-check-manifest.yaml
@@ -14,7 +16,7 @@ documents:
 
 gate:
   contract_gate: P5.0
-  contract_gate_status: NOT_RUN
+  contract_gate_status: PASS
   required_entry: PHASE_4_ENGINEERING_CHECKPOINT
   engineering_exception: ADR_0012_ACCEPTED
   observed_base_sha: b8697ce7a46f4494d250d21f27a076f0711ae04d
@@ -29,7 +31,19 @@ gate:
     product_100_file_approval: NOT_RECORDED
     fanout_bulkhead_evidence: PARTIAL_ENGINEERING
     authorized_asset_boundary: NOT_APPROVED_FOR_PHASE_5
-  entry_decision: READY_FOR_P5_BATCH_0
+  entry_decision: ENGINEERING_ONLY
+  accepted_entry_state:
+    candidate_commit: e70492a11e23307382ea762d0e8e7f57ab58870b
+    evidence_commit: e5f6019b71a90174c09aecdcba336bd12788b75b
+    evidence_path: test-reports/temporal-first/phase-5-entry-20260723-e70492a1/phase-5-entry
+    batch_0_result: PASS
+    tests: 396
+    engineering_execution: ALLOWED_WITH_DISABLED_JAVA_SIGNED_SYNTHETIC_SHADOW_RESTRICTIONS
+    next_phase_permission: PHASE_5_ENGINEERING_ONLY
+    phase_6_permission: FORBIDDEN
+    promotion_gate: PENDING
+    MIG-004: PENDING_PROMOTION
+    MIG-005: PENDING_PROMOTION
   contract_candidate_allowed_when:
     - PHASE_4_ENGINEERING_CHECKPOINT_PASS
     - PHASE_5_ENGINEERING_ONLY_PERMISSION_RECORDED
@@ -358,20 +372,24 @@ task_contracts:
 
 waves:
   wave_0:
+    status: COMPLETE
     active_roles: [R]
     tasks: [P5-0]
     test_batch: P5-BATCH-0
   wave_a:
+    status: READY
     active_roles: [R, A, B, C, D, E]
     delegated_tasks: [P5-A1, P5-A2, P5-B1, P5-B2, P5-C1, P5-C2, P5-D0, P5-E0]
     integration_task: P5-R1
     test_batch: P5-BATCH-1
   wave_b:
+    status: BLOCKED_ON_WAVE_A_INTEGRATION
     active_roles: [R, A, B, C, D, E]
     delegated_tasks: [P5-D1, P5-D2, P5-E1, P5-E2]
     foundation_roles_supply_dependency_fixes_and_review: true
     test_batch: P5-BATCH-2
   candidate_wave:
+    status: BLOCKED_ON_WAVE_B_AND_ENGINEERING_EVIDENCE
     active_roles: [R]
     tasks: [P5-R2]
     requires_cross_review: true
@@ -379,7 +397,7 @@ waves:
 
 batches:
   P5-BATCH-0:
-    status: READY
+    status: PASS
     tier: T1
     trigger: P5_0_contract_candidate_commit
     purpose: Authenticate the Phase 4 engineering handoff and ADR 0012 restrictions, then freeze the exact legacy Evidence baseline before implementation.
@@ -688,10 +706,13 @@ failure_classification:
     - formal_writer_or_real_traffic_in_engineering
 
 current_contract_prep:
-  static_checks_only: true
+  static_checks_only: false
   engineering_exception_accepted: true
   contract_candidate_freeze_requires_phase_4_engineering_checkpoint: true
-  regression_suites_run: false
+  regression_suites_run: true
   browser_or_service_execution_run: false
-  batch_0_run: false
-  status_must_remain: P5_0_CONTRACT_CANDIDATE_AWAITING_BATCH0
+  batch_0_run: true
+  batch_0_result: PASS
+  accepted_candidate_commit: e70492a11e23307382ea762d0e8e7f57ab58870b
+  entry_evidence_commit: e5f6019b71a90174c09aecdcba336bd12788b75b
+  status_must_remain: P5_0_PASS_ENGINEERING_ACTIVE

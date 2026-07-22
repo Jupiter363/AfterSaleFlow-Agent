@@ -86,9 +86,29 @@ def test_phase5_machine_gate_requires_only_engineering_entry_authority() -> None
     batches = _batches()
     gate = batches["gate"]
 
+    assert batches["document_status"] == "P5_0_PASS_ENGINEERING_ACTIVE"
     assert gate["required_entry"] == "PHASE_4_ENGINEERING_CHECKPOINT"
     assert gate["engineering_exception"] == "ADR_0012_ACCEPTED"
-    assert gate["entry_decision"] == "READY_FOR_P5_BATCH_0"
+    assert gate["contract_gate_status"] == "PASS"
+    assert gate["entry_decision"] == "ENGINEERING_ONLY"
+    assert gate["accepted_entry_state"] == {
+        "candidate_commit": "e70492a11e23307382ea762d0e8e7f57ab58870b",
+        "evidence_commit": "e5f6019b71a90174c09aecdcba336bd12788b75b",
+        "evidence_path": (
+            "test-reports/temporal-first/phase-5-entry-20260723-e70492a1/"
+            "phase-5-entry"
+        ),
+        "batch_0_result": "PASS",
+        "tests": 396,
+        "engineering_execution": (
+            "ALLOWED_WITH_DISABLED_JAVA_SIGNED_SYNTHETIC_SHADOW_RESTRICTIONS"
+        ),
+        "next_phase_permission": "PHASE_5_ENGINEERING_ONLY",
+        "phase_6_permission": "FORBIDDEN",
+        "promotion_gate": "PENDING",
+        "MIG-004": "PENDING_PROMOTION",
+        "MIG-005": "PENDING_PROMOTION",
+    }
     assert gate["observed_entry_state"]["phase_4_engineering_checkpoint"] == "PASS"
     assert gate["observed_entry_state"]["next_phase_permission"] == (
         "PHASE_5_ENGINEERING_ONLY"
@@ -488,11 +508,21 @@ def test_phase5_review_keeps_d0_and_e0_independent_with_exact_path_closure() -> 
     assert "R retains shared plan/evidence gates" in closure
 
 
-def test_phase5_owner_briefs_remain_blocked_until_entry_evidence() -> None:
+def test_phase5_owner_briefs_unlock_only_wave_a_after_entry_evidence() -> None:
     briefs = _owner_briefs()
 
-    assert briefs["document_status"] == "DRAFT_BLOCKED_UNTIL_P5_0_ENTRY_EVIDENCE"
-    assert briefs["entry_gate"]["status"] == "BLOCKED"
+    assert briefs["document_status"] == "P5_0_PASS_ENGINEERING_ACTIVE"
+    assert briefs["entry_gate"]["status"] == "PASS"
+    assert briefs["entry_gate"]["accepted_candidate_commit"] == (
+        "e70492a11e23307382ea762d0e8e7f57ab58870b"
+    )
+    assert briefs["entry_gate"]["entry_evidence_commit"] == (
+        "e5f6019b71a90174c09aecdcba336bd12788b75b"
+    )
+    assert briefs["entry_gate"]["engineering_permission"] == (
+        "PHASE_5_ENGINEERING_ONLY"
+    )
+    assert briefs["entry_gate"]["phase_6_permission"] == "FORBIDDEN"
     assert briefs["entry_gate"]["required_before_dispatch"] == [
         "PHASE_4_ENGINEERING_CHECKPOINT_PASS",
         "PHASE_5_ENGINEERING_ONLY_PERMISSION_RECORDED",
@@ -501,6 +531,10 @@ def test_phase5_owner_briefs_remain_blocked_until_entry_evidence() -> None:
         "P5_0_ENTRY_EVIDENCE_COMMITTED",
     ]
     assert set(briefs["owners"]) == {"A", "B", "C", "D", "E"}
+    assert briefs["wave_a_parallel_launch"]["status"] == "READY"
+    assert briefs["integration_barriers"]["P5-WAVE-A-INTEGRATED"]["status"] == (
+        "BLOCKED"
+    )
     shared = briefs["shared_contract_owner"]
     assert shared["owner"] == "R"
     assert shared["delegated_owners_may_edit"] is False
@@ -520,7 +554,7 @@ def test_phase5_owner_briefs_repeat_non_negotiable_scope_guards() -> None:
 
     for owner in briefs["owners"].values():
         guard = owner["scope_guard"]
-        assert owner["status"] == "DRAFT_BLOCKED_UNTIL_P5_0_ENTRY_EVIDENCE"
+        assert owner["status"] == "READY_FOR_WAVE_A_DISPATCH"
         assert guard["public_evidence_submission_max"] == 50
         assert guard["closed_synthetic_manifest_counts"] == [1, 8, 100]
         assert guard["closed_synthetic_100_is_public_contract"] is False
@@ -639,13 +673,21 @@ def test_phase5_owner_briefs_reserve_shared_paths_for_primary_integration() -> N
     foundation = primary["prebuilt_foundation_candidates"]
     assert foundation == [
         {
-            "commit": "58b8300da23ff8725efc27b9df1b8aec5c8c0552",
+            "commit": "09d65875ff6edfbc76d0d2a0e42610690e500bfd",
+            "reviewed_chain": [
+                "ca18e53e6f051004d20c6f8879f6ed440ab0dc20",
+                "09d65875ff6edfbc76d0d2a0e42610690e500bfd",
+            ],
             "purpose": (
-                "Generic hierarchical room tenant and global fanout bulkhead "
-                "primitives for GRAPH-016."
+                "Process-local hierarchical fanout primitives with the Evidence "
+                "room cap fixed at eight."
             ),
-            "integration_gate": "P5_0_ENTRY_EVIDENCE_COMMITTED",
+            "integration_gate": (
+                "SATISFIED_BY_e5f6019b71a90174c09aecdcba336bd12788b75b"
+            ),
             "runtime_effect": "NONE_UNTIL_EXPLICIT_EVIDENCE_WIRING",
+            "GRAPH-016": "PARTIAL_ENGINEERING_PROCESS_LOCAL_ONLY",
+            "cross_replica_tenant_global_closure": "PENDING_P5_E1",
             "exact_paths": [
                 "python-agent-service/app/graph_runtime/bulkhead.py",
                 "python-agent-service/app/graph_runtime/errors.py",
@@ -659,6 +701,10 @@ def test_phase5_owner_briefs_reserve_shared_paths_for_primary_integration() -> N
         }
     ]
     assert set(foundation[0]["exact_paths"]).issubset(primary_paths)
+    assert _batches()["waves"]["wave_a"]["status"] == "READY"
+    assert _batches()["waves"]["wave_b"]["status"] == (
+        "BLOCKED_ON_WAVE_A_INTEGRATION"
+    )
 
 
 def test_phase5_batch0_source_commands_execute_every_declared_baseline_suite() -> None:

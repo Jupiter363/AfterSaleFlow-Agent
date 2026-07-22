@@ -54,7 +54,7 @@ EXPECTED_BATCH0_JAVA_CLASSES = (
 NO_FORMAL_SINK_STATIC = "tests/static/test_phase4_no_formal_sink_assembly.py"
 
 
-def test_plan_binds_four_entry_sources_to_one_candidate_without_runtime_authority() -> None:
+def test_post_entry_plan_binds_sources_but_refuses_a_second_batch0_run() -> None:
     plan = runner.candidate_plan(CANDIDATE)
     records = {record["id"]: record for record in plan["commands"]}
 
@@ -73,12 +73,12 @@ def test_plan_binds_four_entry_sources_to_one_candidate_without_runtime_authorit
     }
     assert set(plan["runtime_restrictions"].values()) == {"forbidden"}
     assert plan["execution_gate"] == {
-        "document_status": "P5_0_CONTRACT_CANDIDATE_AWAITING_BATCH0",
+        "document_status": "P5_0_PASS_ENGINEERING_ACTIVE",
         "phase_4_engineering_checkpoint": "PASS",
         "next_phase_permission": "PHASE_5_ENGINEERING_ONLY",
         "evidence_v2_closed_contract_set": "FROZEN",
-        "entry_decision": "READY_FOR_P5_BATCH_0",
-        "execute_allowed": True,
+        "entry_decision": "ENGINEERING_ONLY",
+        "execute_allowed": False,
     }
 
 
