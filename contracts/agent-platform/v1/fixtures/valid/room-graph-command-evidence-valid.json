@@ -1,0 +1,57 @@
+{
+  "case": "signed Evidence graph command bound to the one-item synthetic manifest",
+  "schema": "room-graph-command.schema.json",
+  "instance": {
+    "schema_version": "room-graph-command.v1",
+    "command_id": "COMMAND_P5_ONE",
+    "logical_run_id": "RUN_P5_ONE",
+    "attempt_id": "ATTEMPT_P5_ONE_1",
+    "tenant_surrogate": "TENANT_P5_SYNTHETIC_1",
+    "case_id": "CASE_P5_SYNTHETIC_1",
+    "room_type": "EVIDENCE",
+    "room_epoch": 1,
+    "graph_key": "evidence.v2",
+    "graph_version": "evidence.v2.0.0",
+    "checkpoint_schema_version": "evidence-checkpoint.v2",
+    "thread_id": "grt.v1.018f6b7ec30a7430982fffc520c8195c",
+    "actor_scope": {
+      "actor_id": "ACTOR_P5_USER",
+      "actor_role": "USER",
+      "audience": "USER",
+      "capabilities": [
+        "evidence_parser.read"
+      ]
+    },
+    "process_revision": 1,
+    "stage_code": "EVIDENCE_ACTIVE",
+    "stage_sequence": 1,
+    "domain_snapshot_ref": {
+      "artifact_id": "MANIFEST_P5_SYNTHETIC_ONE",
+      "schema_version": "evidence-batch-manifest.v1",
+      "uri": "s3://evidence-synthetic-manifests/CASE_P5_SYNTHETIC_1/epoch-1/80ed42b9e360d2433c51a91651237f36ae7a7f20b2d9a8846d82145dc0de793f.json",
+      "sha256": "80ed42b9e360d2433c51a91651237f36ae7a7f20b2d9a8846d82145dc0de793f",
+      "size_bytes": 2873
+    },
+    "invocation_context": {
+      "agent_profile_id": "evidence-clerk.v2",
+      "prompt_profile_id": "evidence-prompt.v2",
+      "model_profile_id": "evidence-model.synthetic.v1",
+      "output_schema_version": "evidence-item-assessment.v1",
+      "policy_version": "evidence-policy.v2",
+      "guardrail_version": "evidence-guardrail.v2",
+      "tool_capabilities": [
+        "evidence_parser.read"
+      ],
+      "envelope_key_id": "JAVA_GRAPH_COMMAND_ES256_P5_1",
+      "envelope_nonce": "NONCE_COMMAND_P5_ONE"
+    },
+    "retry_budget": {
+      "provider_attempts_remaining": 2,
+      "activity_attempts_remaining": 3,
+      "repairs_remaining": 1
+    },
+    "deadline_at": "2026-07-23T12:00:00Z",
+    "traceparent": "00-cd6153b05b81e9362cced88872f596be-a85b862404e1932f-01",
+    "request_hash": "f7b1f3ce543250a12ca7ae89b21fd5cf2a5b81ab7a6b057df95a590a70127ed3"
+  }
+}
