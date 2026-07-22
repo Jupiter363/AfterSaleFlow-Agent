@@ -81,6 +81,7 @@ class TemporalWorkerConfigurationTest {
                                             environment.getWorkflowClient(),
                                             appProperties,
                                             properties,
+                                            disabledIntakeSelection(),
                                             new TemporalWorkerOptionsFactory(properties),
                                             mock(EvidenceWindowActivitiesAdapter.class),
                                             mock(CaseProcessLedgerActivitiesImpl.class),
@@ -90,6 +91,34 @@ class TemporalWorkerConfigurationTest {
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining(
                             "requires Temporal versioningMode BUILD_ID or DEPLOYMENT");
+        }
+
+        verifyNoInteractions(intakeChildBridgeReadPortProvider);
+    }
+
+    @Test
+    void signedSyntheticControlWorkerRequiresOneAdmissionBackedAuthorityRegistration() {
+        TemporalWorkerProperties properties =
+                properties(WorkerRole.CONTROL, VersioningMode.BUILD_ID);
+        org.springframework.beans.factory.ObjectProvider<IntakeChildBridgeReadPort>
+                intakeChildBridgeReadPortProvider = mockProvider(IntakeChildBridgeReadPort.class);
+
+        try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+            TemporalWorkerConfiguration configuration = new TemporalWorkerConfiguration();
+            assertThatThrownBy(() -> configuration.temporalControlWorkerFactory(
+                            environment.getWorkflowClient(),
+                            mock(AppProperties.class),
+                            properties,
+                            enabledIntakeSelection(),
+                            new TemporalWorkerOptionsFactory(properties),
+                            mock(EvidenceWindowActivitiesAdapter.class),
+                            mock(CaseProcessLedgerActivitiesImpl.class),
+                            mock(ProcessProjectionActivitiesImpl.class),
+                            streamProvider(),
+                            intakeChildBridgeReadPortProvider))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining(
+                            "exactly one admission-backed IntakeAuthorityWorkerRegistration");
         }
 
         verifyNoInteractions(intakeChildBridgeReadPortProvider);
@@ -416,6 +445,7 @@ class TemporalWorkerConfigurationTest {
                 environment.getWorkflowClient(),
                 appProperties,
                 properties,
+                disabledIntakeSelection(),
                 optionsFactory,
                 mock(EvidenceWindowActivitiesAdapter.class),
                 mock(CaseProcessLedgerActivitiesImpl.class),

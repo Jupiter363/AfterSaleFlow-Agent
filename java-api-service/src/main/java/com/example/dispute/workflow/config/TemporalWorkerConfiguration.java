@@ -59,6 +59,7 @@ public class TemporalWorkerConfiguration {
             WorkflowClient workflowClient,
             AppProperties appProperties,
             TemporalWorkerProperties properties,
+            IntakeEpochSelectionProperties intakeEpochSelectionProperties,
             TemporalWorkerOptionsFactory optionsFactory,
             EvidenceWindowActivitiesAdapter evidenceWindowActivities,
             CaseProcessLedgerActivitiesImpl ledgerActivities,
@@ -68,7 +69,9 @@ public class TemporalWorkerConfiguration {
         requireVersionedControlWorker(properties);
         IntakeAuthorityWorkerRegistration intakeAuthorityRegistration =
                 resolveIntakeAuthorityRegistration(
-                        intakeAuthorityRegistrationProvider, intakeChildBridgeReadPortProvider);
+                        intakeEpochSelectionProperties,
+                        intakeAuthorityRegistrationProvider,
+                        intakeChildBridgeReadPortProvider);
         WorkerFactory factory =
                 WorkerFactory.newInstance(workflowClient, optionsFactory.factoryOptions());
         return start(
@@ -245,9 +248,17 @@ public class TemporalWorkerConfiguration {
     }
 
     private static IntakeAuthorityWorkerRegistration resolveIntakeAuthorityRegistration(
+            IntakeEpochSelectionProperties intakeEpochSelectionProperties,
             ObjectProvider<IntakeAuthorityWorkerRegistration> registrationProvider,
             ObjectProvider<IntakeChildBridgeReadPort> readPortProvider) {
         List<IntakeAuthorityWorkerRegistration> registrations = registrationProvider.stream().toList();
+        if (intakeEpochSelectionProperties.shadowSelectionConfigured()) {
+            if (registrations.size() != 1) {
+                throw new IllegalStateException(
+                        "Signed synthetic Intake CONTROL requires exactly one admission-backed IntakeAuthorityWorkerRegistration");
+            }
+            return registrations.getFirst();
+        }
         if (registrations.size() == 1) {
             return registrations.getFirst();
         }
