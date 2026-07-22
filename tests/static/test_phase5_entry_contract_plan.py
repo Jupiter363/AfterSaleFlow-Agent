@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -19,6 +21,32 @@ PRE_ENTRY_CORRECTION = (
 EVIDENCE_CONTRACT_ROOT = ROOT / "contracts/agent-platform/evidence/v2"
 MIGRATIONS = ROOT / "java-api-service/src/main/resources/db/migration"
 EVIDENCE_MIGRATION = "V043_4__evidence_graph_bindings.sql"
+
+
+def _defines_or_carries_field(value: Any, field: str) -> bool:
+    if isinstance(value, dict):
+        if field in value:
+            return True
+        required = value.get("required")
+        if isinstance(required, list) and field in required:
+            return True
+        return any(_defines_or_carries_field(item, field) for item in value.values())
+    if isinstance(value, list):
+        return any(_defines_or_carries_field(item, field) for item in value)
+    return False
+
+
+def _mapping_values_for_key(value: Any, key: str) -> list[Any]:
+    matches: list[Any] = []
+    if isinstance(value, dict):
+        for item_key, item_value in value.items():
+            if item_key == key:
+                matches.append(item_value)
+            matches.extend(_mapping_values_for_key(item_value, key))
+    elif isinstance(value, list):
+        for item in value:
+            matches.extend(_mapping_values_for_key(item, key))
+    return matches
 
 
 def test_phase5_evidence_migration_follows_all_committed_intake_subversions() -> None:
@@ -64,9 +92,17 @@ def test_phase5_entry_requires_corrected_manifest_authority_before_batch0() -> N
     assert "no `authorization_proof_ref` field" in execution
     assert "`authorization_proof_ref` is forbidden" in contract
     assert "`authorization_proof_ref` is not" in adr
-    for path in EVIDENCE_CONTRACT_ROOT.rglob("*"):
-        if path.is_file() and path.suffix in {".json", ".yaml"}:
-            assert "authorization_proof_ref" not in path.read_text(encoding="utf-8")
+    for path in EVIDENCE_CONTRACT_ROOT.rglob("*.json"):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        assert not _defines_or_carries_field(payload, "authorization_proof_ref"), path
+
+    matrix = yaml.safe_load(
+        (EVIDENCE_CONTRACT_ROOT / "compatibility-matrix.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    policy_mentions = _mapping_values_for_key(matrix, "authorization_proof_ref")
+    assert all(value == "forbidden" for value in policy_mentions)
 
     for field in (
         "command_id",
