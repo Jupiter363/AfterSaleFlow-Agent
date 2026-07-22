@@ -6,6 +6,27 @@ real_case_shadow_allowed: false
 temporal_intake_allocation_allowed: false
 canary_allowed: false
 
+# These tests authenticate the complete production-shaped synthetic chain at the candidate SHA.
+# Their result is engineering evidence only and has no promotion effect.
+signed_synthetic_chain_evidence:
+  claim_ceiling: ENGINEERING_ONLY
+  evidence: java-phase4-junit.xml
+  promotion_effect: NONE
+  required_java_test_classes:
+    - SignedSyntheticIntakeDriverTest
+    - SignedSyntheticIntakeIngressServiceTest
+    - SignedSyntheticIntakeBridgeReadPortDecoratorTest
+    - IntakeSyntheticAdmissionTrustPropertiesTest
+    - Es256IntakeSyntheticAdmissionVerifierTest
+    - JdbcIntakeSignedSyntheticAdmissionPortIntegrationTest
+    - JdbcIntakeSyntheticRuntimeSourceTest
+    - IntakeSyntheticRuntimeAdaptersTest
+    - IntakeExchangeP0Test
+    - IntakeChildBridgeAuthorityAdapterTest
+    - IntakeChildBridgeActivitiesTest
+    - IntakeSyntheticShadowConfigurationTest
+    - TemporalWorkerConfigurationTest
+
 # Defaults define status and source-report scope. Every Phase 4 Check ID still has an explicit
 # selector mapping below, and the two promotion gates remain independent of engineering results.
 defaults:

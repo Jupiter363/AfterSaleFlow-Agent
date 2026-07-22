@@ -835,6 +835,7 @@ batches:
       - Es256IntakeSyntheticAdmissionVerifierTest
       - JdbcIntakeSignedSyntheticAdmissionPortIntegrationTest
       - JdbcIntakeSyntheticRuntimeSourceTest
+      - IntakeSyntheticRuntimeAdaptersTest
       - IntakeExchangeP0Test
       - IntakeChildBridgeAuthorityAdapterTest
       - IntakeChildBridgeActivitiesTest

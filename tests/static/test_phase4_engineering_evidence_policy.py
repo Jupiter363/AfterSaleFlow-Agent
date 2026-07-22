@@ -172,6 +172,48 @@ def test_policy_is_synthetic_only_and_cannot_promote_migrations() -> None:
     )
 
 
+def test_signed_synthetic_chain_is_required_by_the_candidate_without_promotion() -> None:
+    matrix = _load(MATRIX)
+    policy = _load(POLICY)
+    chain = policy["signed_synthetic_chain_evidence"]
+    required = set(chain["required_java_test_classes"])
+
+    assert chain["claim_ceiling"] == "ENGINEERING_ONLY"
+    assert chain["evidence"] == "java-phase4-junit.xml"
+    assert chain["promotion_effect"] == "NONE"
+    assert required == {
+        "SignedSyntheticIntakeDriverTest",
+        "SignedSyntheticIntakeIngressServiceTest",
+        "SignedSyntheticIntakeBridgeReadPortDecoratorTest",
+        "IntakeSyntheticAdmissionTrustPropertiesTest",
+        "Es256IntakeSyntheticAdmissionVerifierTest",
+        "JdbcIntakeSignedSyntheticAdmissionPortIntegrationTest",
+        "JdbcIntakeSyntheticRuntimeSourceTest",
+        "IntakeSyntheticRuntimeAdaptersTest",
+        "IntakeExchangeP0Test",
+        "IntakeChildBridgeAuthorityAdapterTest",
+        "IntakeChildBridgeActivitiesTest",
+        "IntakeSyntheticShadowConfigurationTest",
+        "TemporalWorkerConfigurationTest",
+    }
+    assert all(_java_test_source(class_name).is_file() for class_name in required)
+
+    batch_2 = matrix["batches"]["P4-BATCH-2"]
+    assert required <= set(batch_2["java_test_classes"])
+    java_candidate = next(
+        command
+        for command in matrix["batches"]["P4-BATCH-3"]["source_commands"]
+        if command["id"] == "java_phase_4"
+    )
+    assert "P4-BATCH-2" in java_candidate["inherits_java_test_classes_from"]
+    assert matrix["gate"]["traffic_constraints"]["promotion_allowed"] is False
+    assert matrix["external_gates"]["current_engineering_result_must_report"] == {
+        "promotion_gate": "PENDING",
+        "MIG-003": "PENDING_PROMOTION",
+        "MIG-004": "PENDING_PROMOTION",
+    }
+
+
 def test_policy_selectors_resolve_to_concrete_candidate_tests() -> None:
     policy = _load(POLICY)
 
