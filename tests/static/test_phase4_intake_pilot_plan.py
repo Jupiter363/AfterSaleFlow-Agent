@@ -451,6 +451,7 @@ def test_phase4_runtime_defaults_require_two_nonlegacy_activation_locks() -> Non
 
 def test_phase4_compose_keeps_intake_runtime_fail_closed_for_java_services() -> None:
     compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    environment = (ROOT / ".env.example").read_text(encoding="utf-8")
     java_environment = compose.split("x-java-environment:", 1)[1].split(
         "x-java-core-depends-on:", 1
     )[0]
@@ -498,6 +499,17 @@ def test_phase4_compose_keeps_intake_runtime_fail_closed_for_java_services() -> 
     )
     assert "APP_ORCHESTRATION_INTAKE_SYNTHETIC_EXCHANGE_ENABLED" not in control_worker
     assert "APP_ORCHESTRATION_INTAKE_SYNTHETIC_EXCHANGE_ENABLED" not in agent_worker
+    assert (
+        "TEMPORAL_WORKER_VERSIONING_MODE: "
+        "${TEMPORAL_CONTROL_WORKER_VERSIONING_MODE:-BUILD_ID}"
+        in control_worker
+    )
+    assert (
+        "TEMPORAL_WORKER_VERSIONING_MODE: "
+        "${TEMPORAL_WORKER_VERSIONING_MODE:-NONE}"
+        in agent_worker
+    )
+    assert "TEMPORAL_CONTROL_WORKER_VERSIONING_MODE=BUILD_ID" in environment
 
     assert "APP_ORCHESTRATION_INTAKE_EPOCH_SELECTION_MODE:-TEMPORAL" not in compose
     assert "APP_ORCHESTRATION_TEMPORAL_WRITER_ENABLED:-true" not in compose
