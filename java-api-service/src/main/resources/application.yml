@@ -108,6 +108,11 @@ app:
     new-epoch-mode: ${APP_ORCHESTRATION_NEW_EPOCH_MODE:LEGACY}
     non-legacy-epoch-allocation-enabled: ${APP_ORCHESTRATION_NON_LEGACY_EPOCH_ALLOCATION_ENABLED:false}
     temporal-writer-enabled: ${APP_ORCHESTRATION_TEMPORAL_WRITER_ENABLED:false}
+    intake-epoch-selection:
+      mode: ${APP_ORCHESTRATION_INTAKE_EPOCH_SELECTION_MODE:LEGACY}
+      shadow-cohort-basis-points: ${APP_ORCHESTRATION_INTAKE_SHADOW_COHORT_BASIS_POINTS:0}
+      cohort-policy-version: ${APP_ORCHESTRATION_INTAKE_COHORT_POLICY_VERSION:}
+      signed-synthetic-shadow-enabled: ${APP_ORCHESTRATION_INTAKE_SIGNED_SYNTHETIC_SHADOW_ENABLED:false}
     command-outbox:
       enabled: ${APP_ORCHESTRATION_COMMAND_OUTBOX_ENABLED:false}
       batch-size: ${APP_ORCHESTRATION_COMMAND_OUTBOX_BATCH_SIZE:32}

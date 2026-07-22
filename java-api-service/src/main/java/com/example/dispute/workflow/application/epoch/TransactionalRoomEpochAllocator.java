@@ -77,7 +77,8 @@ public class TransactionalRoomEpochAllocator implements RoomEpochAllocator {
 
         long roomEpoch = nextRoomEpoch(command.caseId(), command.roomType());
         long fencingToken = nextFencingToken(command.caseId());
-        RoomEpochSelection selection = selector.selectForNewEpoch(command.roomType());
+        RoomEpochSelection selection = selector.selectForNewEpoch(
+                command.roomType(), RoomEpochSelectionContext.realCase(tenant, command.caseId()));
         requireProvisionable(selection);
         CaseRoomEpochEntity epoch =
                 newEpoch(
@@ -136,7 +137,9 @@ public class TransactionalRoomEpochAllocator implements RoomEpochAllocator {
         long nextFencingToken = nextFencingToken(command.caseId());
         long nextProcessRevision = Math.addExact(active.getProcessRevision(), 1);
         long closedRoomRevision = Math.addExact(active.getRoomRevision(), 1);
-        RoomEpochSelection selection = selector.selectForNewEpoch(command.nextRoomType());
+        RoomEpochSelection selection = selector.selectForNewEpoch(
+                command.nextRoomType(),
+                RoomEpochSelectionContext.realCase(tenant, command.caseId()));
         requireProvisionable(selection);
 
         active.terminalize(

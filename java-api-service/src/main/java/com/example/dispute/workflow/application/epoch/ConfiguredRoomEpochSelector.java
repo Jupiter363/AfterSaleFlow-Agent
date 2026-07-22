@@ -1,10 +1,16 @@
 package com.example.dispute.workflow.application.epoch;
 
+import com.example.dispute.workflow.application.epoch.RoomEpochSelectionContext.TrafficSource;
+import com.example.dispute.workflow.config.IntakeEpochSelectionProperties;
+import com.example.dispute.workflow.config.IntakeEpochSelector;
+import com.example.dispute.workflow.config.IntakeEpochSelector.ShadowAuthorization;
 import com.example.dispute.workflow.config.OrchestrationCutoverProperties;
 import com.example.dispute.workflow.config.TemporalWorkerProperties;
 import com.example.dispute.workflow.contract.v1.CaseProcessWorkflowProtocol;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
+import java.util.Objects;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 @Component
@@ -25,46 +31,80 @@ public final class ConfiguredRoomEpochSelector implements RoomEpochSelector {
 
     private final OrchestrationCutoverProperties cutoverProperties;
     private final TemporalWorkerProperties workerProperties;
+    private final IntakeEpochSelector intakeEpochSelector;
 
     public ConfiguredRoomEpochSelector(
             OrchestrationCutoverProperties cutoverProperties,
             TemporalWorkerProperties workerProperties) {
+        this(
+                cutoverProperties,
+                workerProperties,
+                new IntakeEpochSelectionProperties(WriterMode.LEGACY, 0, null, false));
+    }
+
+    @Autowired
+    public ConfiguredRoomEpochSelector(
+            OrchestrationCutoverProperties cutoverProperties,
+            TemporalWorkerProperties workerProperties,
+            IntakeEpochSelectionProperties intakeSelectionProperties) {
         this.cutoverProperties = cutoverProperties;
         this.workerProperties = workerProperties;
+        this.intakeEpochSelector = new IntakeEpochSelector(intakeSelectionProperties);
     }
 
     @Override
     public RoomEpochSelection selectForNewEpoch(RoomType roomType) {
-        WriterMode writerMode = cutoverProperties.newEpochMode();
-        if (writerMode != WriterMode.LEGACY && roomType != RoomType.INTAKE) {
+        Objects.requireNonNull(roomType, "roomType must not be null");
+        if (roomType != RoomType.INTAKE) {
+            return terminalLegacySelection(roomType);
+        }
+        rejectTemporalSelection();
+        return terminalLegacySelection(roomType);
+    }
+
+    @Override
+    public RoomEpochSelection selectForNewEpoch(
+            RoomType roomType, RoomEpochSelectionContext context) {
+        Objects.requireNonNull(roomType, "roomType must not be null");
+        Objects.requireNonNull(context, "context must not be null");
+        if (roomType != RoomType.INTAKE) {
+            return terminalLegacySelection(roomType);
+        }
+        rejectTemporalSelection();
+        if (cutoverProperties.newEpochMode() != WriterMode.SHADOW) {
+            return terminalLegacySelection(roomType);
+        }
+
+        WriterMode writerMode = intakeEpochSelector.select(
+                roomType,
+                context.tenantSurrogate(),
+                context.caseId(),
+                shadowAuthorization(context.trafficSource()));
+        if (writerMode != WriterMode.SHADOW) {
             return terminalLegacySelection(roomType);
         }
         requireAllocationEnabled(writerMode);
-        boolean legacy = writerMode == WriterMode.LEGACY;
-        if (!legacy) {
-            return new RoomEpochSelection(
-                    writerMode,
-                    INTAKE_SELECTION_SCHEMA_VERSION,
-                    PROCESS_CONTRACT_VERSION,
-                    CaseProcessWorkflowProtocol.CASE_WORKFLOW_TYPE,
-                    workerProperties.legacyBuildId(),
-                    INTAKE_ROOM_WORKFLOW_TYPE,
-                    INTAKE_ROOM_WORKFLOW_BUILD_ID,
-                    graphKey(roomType),
-                    INTAKE_GRAPH_VERSION,
-                    INTAKE_CHECKPOINT_SCHEMA_VERSION,
-                    STREAM_PROTOCOL);
-        }
         return new RoomEpochSelection(
                 writerMode,
-                SELECTION_SCHEMA_VERSION,
+                INTAKE_SELECTION_SCHEMA_VERSION,
                 PROCESS_CONTRACT_VERSION,
-                LEGACY_WORKFLOW_TYPE,
-                LEGACY_BUILD_ID,
+                CaseProcessWorkflowProtocol.CASE_WORKFLOW_TYPE,
+                workerProperties.legacyBuildId(),
+                INTAKE_ROOM_WORKFLOW_TYPE,
+                INTAKE_ROOM_WORKFLOW_BUILD_ID,
                 graphKey(roomType),
-                GRAPH_VERSION,
-                CHECKPOINT_SCHEMA_VERSION,
+                INTAKE_GRAPH_VERSION,
+                INTAKE_CHECKPOINT_SCHEMA_VERSION,
                 STREAM_PROTOCOL);
+    }
+
+    private void rejectTemporalSelection() {
+        if (cutoverProperties.newEpochMode() != WriterMode.TEMPORAL) {
+            return;
+        }
+        requireAllocationEnabled(WriterMode.TEMPORAL);
+        throw new IllegalStateException(
+                "TEMPORAL Intake epoch selection is forbidden under the current gate");
     }
 
     private void requireAllocationEnabled(WriterMode writerMode) {
@@ -77,6 +117,12 @@ public final class ConfiguredRoomEpochSelector implements RoomEpochSelector {
                 && !cutoverProperties.temporalWriterEnabled()) {
             throw new IllegalStateException("TEMPORAL room writer activation is disabled");
         }
+    }
+
+    private static ShadowAuthorization shadowAuthorization(TrafficSource source) {
+        return source == TrafficSource.AUTHENTICATED_SIGNED_SYNTHETIC
+                ? ShadowAuthorization.AUTHENTICATED_SIGNED_SYNTHETIC
+                : ShadowAuthorization.AUTHENTICATED_SIGNED_REAL_CASE;
     }
 
     public static RoomEpochSelection terminalLegacySelection(RoomType roomType) {

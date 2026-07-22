@@ -6,6 +6,8 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import com.example.dispute.workflow.application.epoch.ConfiguredRoomEpochSelector;
+import com.example.dispute.workflow.application.epoch.RoomEpochSelectionContext;
+import com.example.dispute.workflow.config.IntakeEpochSelectionProperties;
 import com.example.dispute.workflow.config.OrchestrationCutoverProperties;
 import com.example.dispute.workflow.config.TemporalWorkerProperties;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
@@ -31,18 +33,29 @@ class ConfiguredRoomEpochSelectorTest {
     @Test
     void rejectsShadowWhenNonLegacyAllocationIsNotExplicitlyEnabled() {
         var selector =
-                selector(new OrchestrationCutoverProperties(WriterMode.SHADOW, false, false));
+                selector(
+                        new OrchestrationCutoverProperties(WriterMode.SHADOW, false, false),
+                        shadowProperties());
 
-        assertThatThrownBy(() -> selector.selectForNewEpoch(RoomType.INTAKE))
+        assertThatThrownBy(
+                        () ->
+                                selector.selectForNewEpoch(
+                                        RoomType.INTAKE,
+                                        RoomEpochSelectionContext.verifiedSignedSynthetic(
+                                                "tenant-1", "case-1")))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessage("non-LEGACY room epoch allocation is disabled");
     }
 
     @Test
-    void permitsExplicitShadowWithoutOpeningTheTemporalWriter() {
+    void permitsOnlyExplicitSignedSyntheticShadowWithoutOpeningTheTemporalWriter() {
         var properties = new OrchestrationCutoverProperties(WriterMode.SHADOW, true, false);
 
-        var selection = selector(properties).selectForNewEpoch(RoomType.INTAKE);
+        var selection = selector(properties, shadowProperties())
+                .selectForNewEpoch(
+                        RoomType.INTAKE,
+                        RoomEpochSelectionContext.verifiedSignedSynthetic(
+                                "tenant-1", "case-1"));
 
         assertThat(selection.writerMode()).isEqualTo(WriterMode.SHADOW);
         assertThat(selection.selectionSchemaVersion())
@@ -54,6 +67,29 @@ class ConfiguredRoomEpochSelectorTest {
         assertThat(selection.graphKey()).isEqualTo("intake.v2");
         assertThat(selection.graphVersion()).isEqualTo("2.0.0");
         assertThat(selection.checkpointSchemaVersion()).isEqualTo("intake-checkpoint.v2");
+    }
+
+    @Test
+    void forcesAuthenticatedRealCasesToLegacyEvenWhenShadowControlsAreOpen() {
+        var properties = new OrchestrationCutoverProperties(WriterMode.SHADOW, true, false);
+
+        var selection = selector(properties, shadowProperties())
+                .selectForNewEpoch(
+                        RoomType.INTAKE,
+                        RoomEpochSelectionContext.realCase("tenant-1", "case-1"));
+
+        assertThat(selection.writerMode()).isEqualTo(WriterMode.LEGACY);
+        assertThat(selection.selectionSchemaVersion()).isEqualTo("room-epoch-selection.v1");
+    }
+
+    @Test
+    void contextFreeSelectionCannotOpenShadow() {
+        var properties = new OrchestrationCutoverProperties(WriterMode.SHADOW, true, false);
+
+        var selection = selector(properties, shadowProperties())
+                .selectForNewEpoch(RoomType.INTAKE);
+
+        assertThat(selection.writerMode()).isEqualTo(WriterMode.LEGACY);
     }
 
     @Test
@@ -78,13 +114,12 @@ class ConfiguredRoomEpochSelectorTest {
     }
 
     @Test
-    void requiresBothLocksForAnExplicitTemporalSelection() {
+    void rejectsTemporalEvenWhenBothLegacyLocksAreOpen() {
         var properties = new OrchestrationCutoverProperties(WriterMode.TEMPORAL, true, true);
 
-        var selection = selector(properties).selectForNewEpoch(RoomType.INTAKE);
-
-        assertThat(selection.writerMode()).isEqualTo(WriterMode.TEMPORAL);
-        assertThat(selection.roomWorkflowType()).isEqualTo("IntakeRoomWorkflow");
+        assertThatThrownBy(() -> selector(properties).selectForNewEpoch(RoomType.INTAKE))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("TEMPORAL Intake epoch selection is forbidden under the current gate");
     }
 
     @Test
@@ -126,8 +161,21 @@ class ConfiguredRoomEpochSelectorTest {
 
     private static ConfiguredRoomEpochSelector selector(
             OrchestrationCutoverProperties properties) {
+        return selector(
+                properties,
+                new IntakeEpochSelectionProperties(WriterMode.LEGACY, 0, null, false));
+    }
+
+    private static ConfiguredRoomEpochSelector selector(
+            OrchestrationCutoverProperties properties,
+            IntakeEpochSelectionProperties intakeProperties) {
         TemporalWorkerProperties worker = mock(TemporalWorkerProperties.class);
         when(worker.legacyBuildId()).thenReturn("after-sale-control.local-dev");
-        return new ConfiguredRoomEpochSelector(properties, worker);
+        return new ConfiguredRoomEpochSelector(properties, worker, intakeProperties);
+    }
+
+    private static IntakeEpochSelectionProperties shadowProperties() {
+        return new IntakeEpochSelectionProperties(
+                WriterMode.SHADOW, 10_000, "intake-shadow.v1", true);
     }
 }
