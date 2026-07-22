@@ -22,6 +22,7 @@ CANDIDATE = "a" * 40
 HANDOFF = {
     "checkpoint_path": "test-reports/temporal-first/p4/phase-4/phase-metrics.json",
     "checkpoint_sha256": "1" * 64,
+    "candidate_commit_file_sha256": "3" * 64,
     "evidence_commit": "d" * 40,
     "phase4_candidate_commit": "e" * 40,
     "engineering_checkpoint": "PASS",
@@ -72,28 +73,60 @@ def test_accepted_phase4_checkpoint_fixture_grants_only_phase5_engineering() -> 
     }
 
 
-def test_authenticated_phase4_handoff_binds_git_blob_and_evidence_commit(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def _write_phase4_bundle(tmp_path: Path) -> tuple[Path, Path]:
     source_manifest = tmp_path / "evidence" / "source-execution-manifest.json"
     source_manifest.parent.mkdir(parents=True)
     source_manifest.write_text('{"status":"PASS"}\n', encoding="utf-8")
-    source_sha = runner.shared._sha256(source_manifest)
     checkpoint = source_manifest.parent / "phase-metrics.json"
     checkpoint.write_text(
-        json.dumps(_accepted_checkpoint_document(source_sha)) + "\n",
+        json.dumps(
+            _accepted_checkpoint_document(runner.shared._sha256(source_manifest))
+        )
+        + "\n",
         encoding="utf-8",
     )
     (source_manifest.parent / "candidate-commit.txt").write_text(
         "e" * 40 + "\n", encoding="utf-8"
     )
+    return checkpoint, source_manifest
+
+
+def _bundle_git_reader(
+    root: Path, overrides: dict[str, bytes] | None = None
+):
+    overrides = overrides or {}
+
+    def read(*args: str) -> bytes:
+        if args[:1] == ("log",):
+            return ("d" * 40 + "\n").encode("ascii")
+        _, object_name = args
+        if object_name in overrides:
+            return overrides[object_name]
+        relative = object_name.partition(":")[2]
+        return (root / relative).read_bytes()
+
+    return read
+
+
+def test_authenticated_phase4_handoff_binds_git_blob_and_evidence_commit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    checkpoint, source_manifest = _write_phase4_bundle(tmp_path)
     monkeypatch.setattr(runner, "ROOT", tmp_path)
+    shown: list[str] = []
+
+    def git_bytes(*args: str) -> bytes:
+        if args[:1] == ("log",):
+            return ("d" * 40 + "\n").encode("ascii")
+        _, object_name = args
+        shown.append(object_name)
+        relative = object_name.partition(":")[2]
+        return (tmp_path / relative).read_bytes()
+
     monkeypatch.setattr(
         runner,
         "_git_bytes",
-        lambda *args: checkpoint.read_bytes()
-        if args[:1] == ("show",)
-        else ("d" * 40 + "\n").encode("ascii"),
+        git_bytes,
     )
     ancestors: list[tuple[str, str, str]] = []
     monkeypatch.setattr(
@@ -112,12 +145,112 @@ def test_authenticated_phase4_handoff_binds_git_blob_and_evidence_commit(
     assert handoff["checkpoint_sha256"] == hashlib.sha256(
         checkpoint.read_bytes()
     ).hexdigest()
+    assert handoff["candidate_commit_file_sha256"] == runner.shared._sha256(
+        source_manifest.parent / "candidate-commit.txt"
+    )
     assert handoff["evidence_commit"] == "d" * 40
     assert handoff["next_phase_permission"] == "PHASE_5_ENGINEERING_ONLY"
     assert ancestors == [
-        ("e" * 40, CANDIDATE, "Phase 4 candidate"),
+        (
+            "e" * 40,
+            "d" * 40,
+            "Phase 4 candidate before its evidence commit",
+        ),
         ("d" * 40, CANDIDATE, "Phase 4 evidence commit"),
     ]
+    bundle_paths = {
+        "evidence/phase-metrics.json",
+        "evidence/candidate-commit.txt",
+        "evidence/source-execution-manifest.json",
+    }
+    assert set(shown) == {
+        *(f"{CANDIDATE}:{path}" for path in bundle_paths),
+        *(f"{'d' * 40}:{path}" for path in bundle_paths),
+    }
+
+
+def test_phase4_handoff_rejects_candidate_tree_bundle_blob_drift(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    checkpoint, _ = _write_phase4_bundle(tmp_path)
+    candidate_file_object = f"{CANDIDATE}:evidence/candidate-commit.txt"
+    monkeypatch.setattr(runner, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        runner,
+        "_git_bytes",
+        _bundle_git_reader(tmp_path, {candidate_file_object: b"wrong candidate\n"}),
+    )
+
+    with pytest.raises(runner.shared.EvidenceError, match="P5 candidate.*Git blob"):
+        runner.authenticate_phase4_handoff(_accepted_matrix(), checkpoint, CANDIDATE)
+
+
+def test_phase4_handoff_rejects_missing_candidate_tree_bundle_blob(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    checkpoint, _ = _write_phase4_bundle(tmp_path)
+    read_bundle = _bundle_git_reader(tmp_path)
+    monkeypatch.setattr(runner, "ROOT", tmp_path)
+
+    def missing_blob(*args: str) -> bytes:
+        if args[:1] == ("show",) and args[1].endswith(":evidence/candidate-commit.txt"):
+            raise runner.shared.EvidenceError("missing Git bundle blob")
+        return read_bundle(*args)
+
+    monkeypatch.setattr(runner, "_git_bytes", missing_blob)
+
+    with pytest.raises(runner.shared.EvidenceError, match="missing Git bundle blob"):
+        runner.authenticate_phase4_handoff(_accepted_matrix(), checkpoint, CANDIDATE)
+
+
+def test_phase4_handoff_rejects_symlink_bundle_member(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    checkpoint, _ = _write_phase4_bundle(tmp_path)
+    original = Path.is_symlink
+    monkeypatch.setattr(
+        Path,
+        "is_symlink",
+        lambda path: path.name == "candidate-commit.txt" or original(path),
+    )
+    monkeypatch.setattr(runner, "ROOT", tmp_path)
+
+    with pytest.raises(runner.shared.EvidenceError, match="regular non-symlink"):
+        runner.authenticate_phase4_handoff(_accepted_matrix(), checkpoint, CANDIDATE)
+
+
+def test_phase4_handoff_rejects_bundle_changed_after_evidence_commit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    checkpoint, _ = _write_phase4_bundle(tmp_path)
+    evidence_source_object = f"{'d' * 40}:evidence/source-execution-manifest.json"
+    monkeypatch.setattr(runner, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        runner,
+        "_git_bytes",
+        _bundle_git_reader(tmp_path, {evidence_source_object: b"older source manifest\n"}),
+    )
+    monkeypatch.setattr(runner, "_assert_ancestor", lambda *_args: None)
+
+    with pytest.raises(runner.shared.EvidenceError, match="evidence commit.*Git blob"):
+        runner.authenticate_phase4_handoff(_accepted_matrix(), checkpoint, CANDIDATE)
+
+
+def test_phase4_handoff_rejects_reversed_or_parallel_candidate_evidence_histories(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    checkpoint, _ = _write_phase4_bundle(tmp_path)
+    monkeypatch.setattr(runner, "ROOT", tmp_path)
+    monkeypatch.setattr(runner, "_git_bytes", _bundle_git_reader(tmp_path))
+
+    def reject_parallel(ancestor: str, candidate: str, context: str) -> None:
+        if context.startswith("Phase 4 candidate before"):
+            raise runner.shared.EvidenceError("parallel Phase 4 histories")
+
+    monkeypatch.setattr(runner, "_assert_ancestor", reject_parallel)
+
+    with pytest.raises(runner.shared.EvidenceError, match="parallel Phase 4 histories"):
+        runner.authenticate_phase4_handoff(_accepted_matrix(), checkpoint, CANDIDATE)
 
 
 def _accepted_checkpoint_document(source_sha: str) -> dict:

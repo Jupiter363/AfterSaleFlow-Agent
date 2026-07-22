@@ -206,6 +206,11 @@ def _assert_ancestor(ancestor: str, candidate: str, context: str) -> None:
         raise shared.EvidenceError(f"{context} is not an ancestor of the P5 candidate")
 
 
+def _assert_git_blob(commit: str, relative: str, expected: bytes, context: str) -> None:
+    if _git_bytes("show", f"{commit}:{relative}") != expected:
+        raise shared.EvidenceError(f"{context} is not the authenticated Git blob")
+
+
 def authenticate_phase4_handoff(
     matrix: dict[str, Any], checkpoint_path: Path, candidate_commit: str
 ) -> dict[str, Any]:
@@ -214,7 +219,14 @@ def authenticate_phase4_handoff(
             "P5 matrix remains BLOCKED/NOT_RECORDED; P5-BATCH-0 execute is forbidden"
         )
     candidate = shared._assert_candidate(candidate_commit)
-    checkpoint = checkpoint_path.resolve()
+    checkpoint_input = (
+        checkpoint_path if checkpoint_path.is_absolute() else ROOT / checkpoint_path
+    ).absolute()
+    if checkpoint_input.is_symlink() or not checkpoint_input.is_file():
+        raise shared.EvidenceError(
+            "Phase 4 checkpoint must be a regular non-symlink file"
+        )
+    checkpoint = checkpoint_input.resolve()
     if not checkpoint.is_relative_to(ROOT.resolve()) or checkpoint.name != "phase-metrics.json":
         raise shared.EvidenceError(
             "Phase 4 checkpoint must be a repository phase-metrics.json"
@@ -227,6 +239,11 @@ def authenticate_phase4_handoff(
     authenticated = _validate_phase4_checkpoint_document(document)
     candidate_file = checkpoint.parent / "candidate-commit.txt"
     source_manifest = checkpoint.parent / "source-execution-manifest.json"
+    bundle_paths = (checkpoint, candidate_file, source_manifest)
+    if any(path.is_symlink() or not path.is_file() for path in bundle_paths):
+        raise shared.EvidenceError(
+            "Phase 4 checkpoint bundle must contain regular non-symlink files"
+        )
     if candidate_file.read_text(encoding="utf-8") != (
         authenticated["phase4_candidate_commit"] + "\n"
     ):
@@ -235,20 +252,45 @@ def authenticate_phase4_handoff(
         "source_execution_manifest_sha256"
     ]:
         raise shared.EvidenceError("Phase 4 source execution manifest SHA-256 drifted")
-    candidate_blob = _git_bytes("show", f"{candidate}:{relative}")
-    if candidate_blob != checkpoint.read_bytes():
-        raise shared.EvidenceError("Phase 4 checkpoint is not the candidate Git blob")
+    bundle = {
+        relative: checkpoint.read_bytes(),
+        candidate_file.relative_to(ROOT.resolve()).as_posix(): candidate_file.read_bytes(),
+        source_manifest.relative_to(ROOT.resolve()).as_posix(): source_manifest.read_bytes(),
+    }
+    for bundle_path, expected in bundle.items():
+        _assert_git_blob(
+            candidate,
+            bundle_path,
+            expected,
+            f"Phase 4 bundle file {bundle_path} in the P5 candidate",
+        )
     evidence_commit = (
         _git_bytes("log", "-1", "--format=%H", candidate, "--", relative)
         .decode("ascii")
         .strip()
     )
     evidence_commit = shared._assert_candidate(evidence_commit, "Phase 4 evidence commit")
-    _assert_ancestor(authenticated["phase4_candidate_commit"], candidate, "Phase 4 candidate")
+    if evidence_commit == authenticated["phase4_candidate_commit"]:
+        raise shared.EvidenceError(
+            "Phase 4 candidate and evidence commit must be separate commits"
+        )
+    for bundle_path, expected in bundle.items():
+        _assert_git_blob(
+            evidence_commit,
+            bundle_path,
+            expected,
+            f"Phase 4 bundle file {bundle_path} in the evidence commit",
+        )
+    _assert_ancestor(
+        authenticated["phase4_candidate_commit"],
+        evidence_commit,
+        "Phase 4 candidate before its evidence commit",
+    )
     _assert_ancestor(evidence_commit, candidate, "Phase 4 evidence commit")
     return {
         "checkpoint_path": relative,
         "checkpoint_sha256": shared._sha256(checkpoint),
+        "candidate_commit_file_sha256": shared._sha256(candidate_file),
         "evidence_commit": evidence_commit,
         **authenticated,
     }
@@ -260,6 +302,7 @@ def _validate_embedded_handoff(value: Any) -> dict[str, Any]:
     required = {
         "checkpoint_path",
         "checkpoint_sha256",
+        "candidate_commit_file_sha256",
         "evidence_commit",
         "phase4_candidate_commit",
         "engineering_checkpoint",
@@ -272,6 +315,7 @@ def _validate_embedded_handoff(value: Any) -> dict[str, Any]:
         raise shared.EvidenceError("manifest Phase 4 checkpoint fields drifted")
     for field in (
         "checkpoint_sha256",
+        "candidate_commit_file_sha256",
         "source_execution_manifest_sha256",
     ):
         if not re.fullmatch(r"[0-9a-f]{64}", str(value.get(field, ""))):

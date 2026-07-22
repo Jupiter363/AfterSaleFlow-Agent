@@ -18,6 +18,7 @@ RELEASE_ID = "phase-5-entry-fixture"
 HANDOFF = {
     "checkpoint_path": "test-reports/temporal-first/p4/phase-4/phase-metrics.json",
     "checkpoint_sha256": "1" * 64,
+    "candidate_commit_file_sha256": "3" * 64,
     "evidence_commit": "d" * 40,
     "phase4_candidate_commit": "e" * 40,
     "engineering_checkpoint": "PASS",
