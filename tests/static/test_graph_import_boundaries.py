@@ -28,6 +28,11 @@ MODEL_HTTP_MODULES = {
     "requests",
     "urllib.request",
 }
+JAVA_INTAKE_EXCHANGE = GRAPH_RUNTIME / "intake_exchange.py"
+JAVA_INTAKE_EXCHANGE_ENDPOINTS = {
+    "INTAKE_PAYLOAD_LOAD_PATH": "/internal/graph/intake/v2/payload:load",
+    "INTAKE_PROPOSAL_PUT_PATH": "/internal/graph/intake/v2/proposals:put",
+}
 STATE_KERNEL_FORBIDDEN_MODULES = {
     *MODEL_HTTP_MODULES,
     "app.llm",
@@ -130,13 +135,70 @@ def test_graph_runtime_cannot_bypass_governed_model_transport() -> None:
             for module in _imports(path)
             if _matches_prefix(module, MODEL_HTTP_MODULES)
         )
-        if imported:
+        if imported and path != JAVA_INTAKE_EXCHANGE:
             violations[path.relative_to(ROOT).as_posix()] = imported
 
     assert not violations, (
         "Graph orchestration must call the governed model Runnable instead of issuing model HTTP: "
         f"{violations}"
     )
+
+
+def test_non_model_http_is_confined_to_fixed_java_intake_exchange_endpoints() -> None:
+    tree = ast.parse(
+        JAVA_INTAKE_EXCHANGE.read_text(encoding="utf-8"),
+        filename=str(JAVA_INTAKE_EXCHANGE),
+    )
+    assert {
+        module
+        for module in _imports(JAVA_INTAKE_EXCHANGE)
+        if _matches_prefix(module, MODEL_HTTP_MODULES)
+    } == {"httpx"}
+    assignments = {
+        target.id: node.value.value
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and isinstance(node.value, ast.Constant)
+        and isinstance(node.value.value, str)
+        for target in node.targets
+        if isinstance(target, ast.Name)
+        and target.id in JAVA_INTAKE_EXCHANGE_ENDPOINTS
+    }
+    assert assignments == JAVA_INTAKE_EXCHANGE_ENDPOINTS
+
+    exchange_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "self"
+        and node.func.attr == "_post"
+    ]
+    assert {
+        node.args[0].id
+        for node in exchange_calls
+        if node.args and isinstance(node.args[0], ast.Name)
+    } == set(JAVA_INTAKE_EXCHANGE_ENDPOINTS)
+    assert len(exchange_calls) == len(JAVA_INTAKE_EXCHANGE_ENDPOINTS)
+
+    assert [
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "httpx"
+    ] == ["AsyncClient"]
+    http_client_calls = [
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "client"
+    ]
+    assert http_client_calls == ["stream"]
 
 
 def test_compose_does_not_share_bootstrap_or_graph_credentials_with_services() -> None:
