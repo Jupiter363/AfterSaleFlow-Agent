@@ -42,6 +42,177 @@ import {
 } from "../../utils/displayText";
 import { normalizeVerificationFocus } from "../../utils/verificationFocus";
 
+const INTAKE_PROCESS_PROJECTION_SCHEMA = "intake-process-projection.v1";
+const INTAKE_PROCESS_PROJECTION_STATES = new Set([
+  "CURRENT",
+  "PROCESSING",
+  "UNAVAILABLE",
+]);
+const INTAKE_PROCESS_WRITERS = new Set(["SHADOW", "TEMPORAL"]);
+const INTAKE_PROCESS_PHASES = new Set([
+  "OPEN",
+  "WAITING_PARTY",
+  "AGENT_RUNNING",
+  "READY_TO_CONFIRM",
+  "COMPLETED",
+]);
+const PROJECTION_FIELD_CONFLICT = Symbol("projection-field-conflict");
+const PROJECTION_STATUS_RETRY_LIMIT = 4;
+const PROJECTION_STATUS_RETRY_DELAY_MS = 250;
+
+function projectionField(projection, snakeCase, camelCase) {
+  const hasSnakeCase = Object.hasOwn(projection, snakeCase);
+  const hasCamelCase = Object.hasOwn(projection, camelCase);
+  if (
+    hasSnakeCase &&
+    hasCamelCase &&
+    projection[snakeCase] !== projection[camelCase]
+  ) {
+    return PROJECTION_FIELD_CONFLICT;
+  }
+  if (hasSnakeCase) return projection[snakeCase];
+  if (hasCamelCase) return projection[camelCase];
+  return undefined;
+}
+
+function projectionEnum(value) {
+  return typeof value === "string" ? value.trim().toUpperCase() : "";
+}
+
+function processingProjection() {
+  return { mode: "PROCESSING", activeLogicalRunId: "" };
+}
+
+function normalizeIntakeProcessProjection(status) {
+  const projection = status?.process_projection ?? status?.processProjection;
+  if (projection == null) {
+    return { mode: "LEGACY", activeLogicalRunId: "" };
+  }
+  if (typeof projection !== "object" || Array.isArray(projection)) {
+    return processingProjection();
+  }
+
+  const schemaVersion = projectionField(
+    projection,
+    "schema_version",
+    "schemaVersion",
+  );
+  if (schemaVersion !== INTAKE_PROCESS_PROJECTION_SCHEMA) {
+    return processingProjection();
+  }
+
+  const projectionState = projectionEnum(projectionField(
+    projection,
+    "projection_state",
+    "projectionState",
+  ));
+  if (!INTAKE_PROCESS_PROJECTION_STATES.has(projectionState)) {
+    return processingProjection();
+  }
+
+  const writerMode = projectionEnum(projectionField(
+    projection,
+    "writer_mode",
+    "writerMode",
+  ));
+  if (projectionState === "UNAVAILABLE" || writerMode === "LEGACY") {
+    return { mode: "LEGACY", activeLogicalRunId: "" };
+  }
+  if (projectionState === "PROCESSING") return processingProjection();
+
+  const roomPhase = projectionEnum(projectionField(
+    projection,
+    "room_phase",
+    "roomPhase",
+  ));
+  if (
+    !INTAKE_PROCESS_WRITERS.has(writerMode) ||
+    !INTAKE_PROCESS_PHASES.has(roomPhase)
+  ) {
+    return processingProjection();
+  }
+
+  const revisionFields = [
+    projectionField(projection, "room_epoch", "roomEpoch"),
+    projectionField(projection, "process_revision", "processRevision"),
+    projectionField(projection, "room_revision", "roomRevision"),
+    projectionField(projection, "fencing_token", "fencingToken"),
+  ];
+  if (revisionFields.some(
+    (value) => !Number.isSafeInteger(value) || value < 0,
+  )) {
+    return processingProjection();
+  }
+
+  const activeLogicalRunId = projectionField(
+    projection,
+    "active_logical_run_id",
+    "activeLogicalRunId",
+  );
+  const activeAttemptId = projectionField(
+    projection,
+    "active_attempt_id",
+    "activeAttemptId",
+  );
+  const activeRunStatus = projectionField(
+    projection,
+    "active_run_status",
+    "activeRunStatus",
+  );
+  const streamCursor = projectionField(
+    projection,
+    "stream_cursor",
+    "streamCursor",
+  );
+  if (
+    [activeLogicalRunId, activeAttemptId, activeRunStatus, streamCursor]
+      .includes(PROJECTION_FIELD_CONFLICT)
+  ) {
+    return processingProjection();
+  }
+
+  if (activeLogicalRunId == null) {
+    if (
+      activeAttemptId != null ||
+      activeRunStatus != null ||
+      streamCursor != null
+    ) {
+      return processingProjection();
+    }
+    return { mode: "CURRENT", activeLogicalRunId: "" };
+  }
+
+  if (
+    typeof activeLogicalRunId !== "string" ||
+    !activeLogicalRunId.trim() ||
+    typeof activeRunStatus !== "string" ||
+    !["PENDING", "RUNNING"].includes(activeRunStatus.trim().toUpperCase()) ||
+    typeof streamCursor !== "string"
+  ) {
+    return processingProjection();
+  }
+
+  const normalizedRunId = activeLogicalRunId.trim();
+  if (streamCursor === "-1") {
+    if (
+      activeAttemptId != null &&
+      (typeof activeAttemptId !== "string" || !activeAttemptId.trim())
+    ) {
+      return processingProjection();
+    }
+    return { mode: "CURRENT", activeLogicalRunId: normalizedRunId };
+  }
+
+  if (typeof activeAttemptId !== "string" || !activeAttemptId.trim()) {
+    return processingProjection();
+  }
+  const cursorMatch = /^v2:(.+):(0|[1-9]\d*)$/.exec(streamCursor);
+  if (!cursorMatch || cursorMatch[1] !== activeAttemptId.trim()) {
+    return processingProjection();
+  }
+  return { mode: "CURRENT", activeLogicalRunId: normalizedRunId };
+}
+
 const props = defineProps({
   initialDispute: { type: Object, default: null },
   initialAnalysis: { type: Object, default: null },
@@ -84,9 +255,19 @@ const workspaceGeneration = ref(0);
 let eventAbortController = new AbortController();
 let modelHealthTimer = null;
 let modelHealthInFlight = null;
+let projectionStatusRetryTimer = null;
+let projectionStatusRetryInFlight = null;
+let projectionStatusRetryAttempts = 0;
+let componentUnmounted = false;
 
 const caseId = computed(() => dispute.value?.id || route.params.caseId);
 const historyMode = computed(() => route.query.view === "history");
+const intakeProcessProjection = computed(() =>
+  normalizeIntakeProcessProjection(intakeStatus.value),
+);
+const projectionFailClosed = computed(() =>
+  intakeProcessProjection.value.mode === "PROCESSING",
+);
 const actorPartyPosition = computed(() => {
   const explicit = String(
     dispute.value?.party_position || dispute.value?.partyPosition || "",
@@ -153,6 +334,7 @@ const intakeStreamingRuns = computed(() =>
 );
 const intakeCancellationDisabled = computed(() =>
   historyMode.value ||
+  projectionFailClosed.value ||
   submitting.value ||
   admitted.value ||
   intakeStreamingRuns.value.length > 0,
@@ -170,6 +352,7 @@ const caseNoteDescription = computed(() =>
   }),
 );
 const partyCanChat = computed(() => {
+  if (projectionFailClosed.value) return false;
   const serverValue = intakeStatus.value?.can_use_intake ?? intakeStatus.value?.canUseIntake;
   if (typeof serverValue === "boolean") return serverValue;
   return actorPartyPosition.value === "INITIATOR";
@@ -179,7 +362,8 @@ const currentActorIntakeCompleted = computed(() => Boolean(
   intakeStatus.value?.currentActorCompleted,
 ));
 const canEnterEvidence = computed(() => Boolean(
-  intakeStatus.value?.can_enter_evidence ?? intakeStatus.value?.canEnterEvidence,
+  !projectionFailClosed.value &&
+  (intakeStatus.value?.can_enter_evidence ?? intakeStatus.value?.canEnterEvidence),
 ));
 const modelConnected = computed(() => modelConnectionState.value === "connected");
 const modelConnectionLabel = computed(() => {
@@ -345,6 +529,7 @@ const currentActorMatrixReady = computed(() =>
 );
 const intakeDossierSubmissionDisabled = computed(() =>
   historyMode.value ||
+  projectionFailClosed.value ||
   submitting.value ||
   admitted.value ||
   intakeStreamingRuns.value.length > 0 ||
@@ -901,6 +1086,7 @@ function currentWorkspaceSnapshot() {
 // 业务位置：【前端接待室】isCurrentWorkspace：判断 页面工作区和业务快照 是否满足当前流程分支的进入条件。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 function isCurrentWorkspace(snapshot) {
   return (
+    !componentUnmounted &&
     snapshot &&
     snapshot.generation === workspaceGeneration.value &&
     snapshot.caseId === caseId.value &&
@@ -911,6 +1097,7 @@ function isCurrentWorkspace(snapshot) {
 
 // 业务位置：【前端接待室】resetWorkspaceForActorChange：更新 页面工作区和业务快照 的消息、缓存或持久记录，避免旧回合数据影响当前处理。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 function resetWorkspaceForActorChange() {
+  clearProjectionStatusRetry();
   clearAgentStreams({ caseId: caseId.value, roomType: "INTAKE" });
   workspaceGeneration.value += 1;
   messages.value = [];
@@ -1106,6 +1293,7 @@ function shouldRequestRespondentOpening(firstMessages) {
   return (
     props.initialMessages === null &&
     !historyMode.value &&
+    !projectionFailClosed.value &&
     Array.isArray(firstMessages) &&
     firstMessages.length === 0 &&
     ["USER", "MERCHANT"].includes(actor.role) &&
@@ -1162,8 +1350,73 @@ async function refreshIntakeStatus(snapshot = currentWorkspaceSnapshot()) {
   return loaded;
 }
 
+function clearProjectionStatusRetry({ resetAttempts = true } = {}) {
+  if (projectionStatusRetryTimer !== null) {
+    window.clearTimeout(projectionStatusRetryTimer);
+    projectionStatusRetryTimer = null;
+  }
+  projectionStatusRetryInFlight = null;
+  if (resetAttempts) projectionStatusRetryAttempts = 0;
+}
+
+function scheduleProjectionStatusRetry(
+  snapshot = currentWorkspaceSnapshot(),
+) {
+  if (
+    componentUnmounted ||
+    historyMode.value ||
+    !isCurrentWorkspace(snapshot) ||
+    intakeProcessProjection.value.mode !== "PROCESSING" ||
+    projectionStatusRetryTimer !== null ||
+    projectionStatusRetryInFlight !== null ||
+    projectionStatusRetryAttempts >= PROJECTION_STATUS_RETRY_LIMIT
+  ) {
+    return;
+  }
+  projectionStatusRetryTimer = window.setTimeout(() => {
+    projectionStatusRetryTimer = null;
+    void retryProjectionStatus(snapshot);
+  }, PROJECTION_STATUS_RETRY_DELAY_MS);
+}
+
+async function retryProjectionStatus(snapshot) {
+  if (
+    componentUnmounted ||
+    historyMode.value ||
+    !isCurrentWorkspace(snapshot) ||
+    intakeProcessProjection.value.mode !== "PROCESSING" ||
+    projectionStatusRetryAttempts >= PROJECTION_STATUS_RETRY_LIMIT
+  ) {
+    return;
+  }
+
+  projectionStatusRetryAttempts += 1;
+  const request = refreshIntakeStatus(snapshot);
+  projectionStatusRetryInFlight = request;
+  try {
+    await request;
+  } catch (_failure) {
+    // Projection lag is retried silently; the legacy page error remains untouched.
+  } finally {
+    if (projectionStatusRetryInFlight === request) {
+      projectionStatusRetryInFlight = null;
+    }
+  }
+  if (
+    !componentUnmounted &&
+    isCurrentWorkspace(snapshot) &&
+    !historyMode.value &&
+    intakeProcessProjection.value.mode === "PROCESSING"
+  ) {
+    scheduleProjectionStatusRetry(snapshot);
+  }
+}
+
 function intakeStatusAllowsEvidence(status) {
-  return Boolean(status?.can_enter_evidence ?? status?.canEnterEvidence);
+  return Boolean(
+    normalizeIntakeProcessProjection(status).mode !== "PROCESSING" &&
+    (status?.can_enter_evidence ?? status?.canEnterEvidence),
+  );
 }
 
 function waitForEvidenceStatus(delayMs) {
@@ -1239,16 +1492,45 @@ function applyStreamedCaseDetailEvent(event, snapshot = currentWorkspaceSnapshot
 
 // 业务位置：【前端接待室】resumeActiveIntakeRuns：执行 案件受理信息和接待结论 对应的业务动作，并将结果交给 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 async function resumeActiveIntakeRuns(snapshot = currentWorkspaceSnapshot()) {
-  if (historyMode.value) return;
+  const projection = intakeProcessProjection.value;
+  if (
+    historyMode.value ||
+    !isCurrentWorkspace(snapshot) ||
+    projection.mode === "PROCESSING" ||
+    actorPartyPosition.value === "OBSERVER" ||
+    intakeRecipientView.value
+  ) {
+    return;
+  }
+  if (projection.mode === "CURRENT" && !projection.activeLogicalRunId) return;
+
   const activeRuns = await loadActiveAgentRuns(
     snapshot.actor,
     snapshot.caseId,
     "INTAKE",
   );
-  if (!isCurrentWorkspace(snapshot) || !activeRuns?.length) return;
+  const latestProjection = intakeProcessProjection.value;
+  if (
+    !isCurrentWorkspace(snapshot) ||
+    !Array.isArray(activeRuns) ||
+    latestProjection.mode !== projection.mode ||
+    (
+      projection.mode === "CURRENT" &&
+      latestProjection.activeLogicalRunId !== projection.activeLogicalRunId
+    )
+  ) {
+    return;
+  }
+  const recoverableRuns = latestProjection.mode === "CURRENT"
+    ? activeRuns.filter((descriptor) =>
+      extractAgentRunDescriptor(descriptor)?.runId ===
+        latestProjection.activeLogicalRunId,
+    ).slice(0, 1)
+    : activeRuns;
+  if (!recoverableRuns.length) return;
   resetStreamedCaseDetail();
   agentState.value = "STREAMING";
-  await Promise.all(activeRuns.map((descriptor) => consumeAgentRun({
+  await Promise.all(recoverableRuns.map((descriptor) => consumeAgentRun({
     actor: snapshot.actor,
     caseId: snapshot.caseId,
     roomType: "INTAKE",
@@ -1385,7 +1667,7 @@ function startEventStream(snapshot = currentWorkspaceSnapshot()) {
 
 // 业务位置：【前端接待室】postMessage：执行 房间消息和对话记录 对应的业务动作，并将结果交给 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 async function postMessage(command) {
-  if (historyMode.value) return;
+  if (historyMode.value || projectionFailClosed.value) return;
   const snapshot = currentWorkspaceSnapshot();
   if (!modelConnected.value) {
     await checkModelConnection();
@@ -1395,6 +1677,7 @@ async function postMessage(command) {
       return;
     }
   }
+  if (!isCurrentWorkspace(snapshot) || projectionFailClosed.value) return;
   agentState.value = "THINKING";
   submitting.value = true;
   error.value = "";
@@ -1545,7 +1828,7 @@ async function confirmAdmission() {
 
 // 业务位置：【前端接待室】enterEvidenceRoom：切换与 当前可见证据和附件 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 async function enterEvidenceRoom() {
-  if (historyMode.value) return;
+  if (historyMode.value || projectionFailClosed.value) return;
   await router.push(`/disputes/${caseId.value}/evidence`);
 }
 
@@ -1576,15 +1859,39 @@ watch(
     }
   },
 );
+watch(
+  () => intakeProcessProjection.value.mode,
+  (mode, previousMode) => {
+    if (mode === "PROCESSING") {
+      if (previousMode !== "PROCESSING") projectionStatusRetryAttempts = 0;
+      scheduleProjectionStatusRetry();
+      return;
+    }
+
+    clearProjectionStatusRetry();
+    if (
+      previousMode === "PROCESSING" &&
+      ["CURRENT", "LEGACY"].includes(mode) &&
+      shouldDiscoverActiveIntakeRuns.value &&
+      actorPartyPosition.value !== "OBSERVER" &&
+      !intakeRecipientView.value
+    ) {
+      void resumeActiveIntakeRuns(currentWorkspaceSnapshot());
+    }
+  },
+  { immediate: true },
+);
 watch(historyMode, (historical) => {
   if (!historical) {
     startModelHealthPolling();
+    scheduleProjectionStatusRetry();
     if (props.eventStreamer || props.initialMessages === null) {
       startEventStream(currentWorkspaceSnapshot());
     }
     return;
   }
   stopModelHealthPolling();
+  clearProjectionStatusRetry();
   workspaceGeneration.value += 1;
   submitting.value = false;
   eventAbortController.abort();
@@ -1594,6 +1901,8 @@ watch(historyMode, (historical) => {
   clearAgentStreams({ caseId: caseId.value, roomType: "INTAKE" });
 });
 onBeforeUnmount(() => {
+  componentUnmounted = true;
+  clearProjectionStatusRetry();
   stopModelHealthPolling();
   eventAbortController.abort();
   clearAgentStreams({ caseId: caseId.value, roomType: "INTAKE" });
