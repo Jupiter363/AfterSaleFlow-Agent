@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.networknt.schema.JsonSchema;
 import com.networknt.schema.JsonSchemaFactory;
@@ -33,6 +34,24 @@ class EvidenceV2ContractFixtureTest {
     private static final Path CONTRACT_ROOT =
             Path.of("..", "contracts", "agent-platform", "evidence", "v2").normalize();
     private static final Path FIXTURE_ROOT = CONTRACT_ROOT.resolve("fixtures");
+    private static final Path ROOM_GRAPH_COMMAND_FIXTURE =
+            Path.of(
+                            "..",
+                            "contracts",
+                            "agent-platform",
+                            "v1",
+                            "fixtures",
+                            "valid",
+                            "room-graph-command-evidence-valid.json")
+                    .normalize();
+    private static final Path ROOM_GRAPH_COMMAND_SCHEMA =
+            Path.of(
+                            "..",
+                            "contracts",
+                            "agent-platform",
+                            "v1",
+                            "room-graph-command.schema.json")
+                    .normalize();
     private static final ObjectMapper MAPPER = JsonMapper.builder().findAndAddModules().build();
     private static final Set<String> CONTRACT_FILES =
             Set.of(
@@ -80,23 +99,23 @@ class EvidenceV2ContractFixtureTest {
     private static final Map<String, String> EXPECTED_VALID_FIXTURE_HASHES =
             Map.of(
                     "evidence-asset-capability-valid.json",
-                    "da72b1e2ef63ef2df4d6e6d4eb7fa3af0696f25d2d5525b2ab90b6a3932c6e27",
+                    "bdd7c2d9065320c2d55e398589d6b46f25f38a26fefb9dc966566163670a44ba",
                     "evidence-batch-manifest-synthetic-1-valid.json",
-                    "6bc875c51b4b5b20f3bcfa1a378ae373bb051b657e1c633de0c6de1c0180adb1",
+                    "cd6153b05b81e9362cced88872f596bea0cf8e456889cb27bb34fce290be04e3",
                     "evidence-batch-manifest-synthetic-100-valid.json",
-                    "ed73bff340c633379607f72ed4dac3f06baca92275644175eac1373a32725275",
+                    "45946fb38d24320317650c117a2eee69ad6dbb233bcdf353cc4b00f4c7c09dbf",
                     "evidence-batch-manifest-synthetic-8-valid.json",
-                    "c124add3fe340a004d2bf2137ea0ea05e12255e308baad4f863b60077bef2364",
+                    "c0b5ef18c5578cd903d86e4affe1d546e0f9a741f309d1426746e9db6906c18f",
                     "evidence-finalization-receipt-valid.json",
-                    "26610a9836e63cc5ef91e7673eb12c5199023080a5fbf31ba080823681eead38",
+                    "22e2243f8250c198333215c9c554ece42032d31821b9fd35e174728711919560",
                     "evidence-item-proposal-valid.json",
-                    "629688355567e0350ac60cccae3da2bc512ce1b303f23781879c23a1dda38929",
+                    "2945f7364bce768063509edf28972cad140bddec3d894170f5818e88853ecb23",
                     "evidence-process-projection-legacy-unavailable-valid.json",
-                    "73965859c19d9f96c6b662d7d11b628374a0e84dbdb84aaec0de00b3431ab424",
+                    "ffbd340481fd1647afe2882308c24292d7b4e284e28adb114fce16f785002056",
                     "evidence-process-projection-valid.json",
-                    "18a39b7f1c3a99cec98d7879e633e64922b503e36600fb26493d72475b857297",
+                    "2f1037416b62ae524ec7882eeb2e57bfcf773a2267e09449e77cbf82bf170908",
                     "evidence-terminal-proposal-valid.json",
-                    "576449dc4411599966f6819a92de56f35391bb02694c4787ecb4f52580cb64d2");
+                    "3648869670940a1475f743cce003faa1389f8fb376cbc8e4078bc2dc76a00d72");
 
     private static Map<String, ContractSchema> schemasByVersion;
 
@@ -214,6 +233,28 @@ class EvidenceV2ContractFixtureTest {
                     .as("unambiguous signing input for %s", signedContract)
                     .isEqualTo("ASCII_LOWERCASE_HEX_TEXT");
         }
+        JsonNode commandBinding =
+                matrix.required("authorization").required("room_graph_command_cross_binding");
+        assertThat(commandBinding
+                        .required("canonical_command_fixture")
+                        .required("path")
+                        .asText())
+                .isEqualTo(
+                        "contracts/agent-platform/v1/fixtures/valid/"
+                                + "room-graph-command-evidence-valid.json");
+        JsonNode profileVersioning = matrix.required("profile_versioning");
+        assertThat(profileVersioning
+                        .required("room_graph_command_output_schema_maps_to")
+                        .asText())
+                .isEqualTo("terminal_output_schema_version");
+        assertThat(profileVersioning
+                        .required("graph_registry_output_schema_maps_to")
+                        .asText())
+                .isEqualTo("terminal_output_schema_version");
+        assertThat(profileVersioning
+                        .required("internal_item_lcel_parser_output_schema_maps_to")
+                        .asText())
+                .isEqualTo("assessment_output_schema_version");
 
         JsonNode runtimeGate = matrix.required("runtime_gate");
         assertThat(runtimeGate.required("public_submission_max").intValue()).isEqualTo(50);
@@ -276,7 +317,33 @@ class EvidenceV2ContractFixtureTest {
                                         "omit_fields", List.of("manifest_hash", "signature"))));
         assertSignatureDeclaration(schema, "manifest_hash");
         assertSignatureDeclaration(capabilitySchema, "capability_hash");
-        assertThat(schema.required("x-gateway-cross-binding"))
+        ObjectNode gateway = (ObjectNode) schema.required("x-gateway-cross-binding").deepCopy();
+        assertThat(gateway.remove("manifest_ref_payload_binding"))
+                .isEqualTo(
+                        MAPPER.valueToTree(
+                                Map.of(
+                                        "canonicalization", "RFC_8785",
+                                        "encoding", "UTF-8",
+                                        "sha256_field", "domain_snapshot_ref.sha256",
+                                        "size_bytes_field", "domain_snapshot_ref.size_bytes",
+                                        "covers", "FULL_CANONICAL_SIGNED_MANIFEST_PAYLOAD")));
+        assertThat(gateway.remove("manifest_internal_self_hash"))
+                .isEqualTo(
+                        MAPPER.valueToTree(
+                                Map.of(
+                                        "field", "manifest_hash",
+                                        "canonicalization", "RFC_8785",
+                                        "omit_top_level_fields",
+                                                List.of("manifest_hash", "signature"))));
+        assertThat(gateway.remove("verification_order"))
+                .isEqualTo(
+                        MAPPER.valueToTree(
+                                List.of(
+                                        "VERIFY_REFERENCED_PAYLOAD_HASH_AND_SIZE_BEFORE_PARSE",
+                                        "PARSE_MANIFEST",
+                                        "VERIFY_MANIFEST_SELF_HASH",
+                                        "VERIFY_MANIFEST_SIGNATURE")));
+        assertThat(gateway)
                 .isEqualTo(
                         MAPPER.valueToTree(
                                 Map.of(
@@ -457,6 +524,36 @@ class EvidenceV2ContractFixtureTest {
         assertThat(finalizationReceipt.has("profile_versions")).isFalse();
         assertThat(terminal.required("assessment_refs").required(0).required("assessment_hash"))
                 .isEqualTo(assessment.required("assessment_hash"));
+        assertThat(finalizationReceipt.required("operation_binding").required("manifest_hash"))
+                .isEqualTo(manifest.required("manifest_hash"));
+        assertThat(finalizationReceipt.required("operation_binding").required("proposal_hash"))
+                .isEqualTo(terminal.required("proposal_hash"));
+        JsonNode receiptBinding = finalizationReceipt.required("operation_binding");
+        assertEqualFields(
+                command,
+                receiptBinding,
+                "command_id",
+                "logical_run_id",
+                "attempt_id");
+        assertThat(receiptBinding.required("thread_id"))
+                .isEqualTo(manifest.required("thread_id"));
+        assertThat(receiptBinding.required("dossier_target_version"))
+                .isEqualTo(manifest.required("dossier_target_version"));
+        assertEqualFields(
+                manifest,
+                finalizationReceipt,
+                "tenant_surrogate",
+                "case_id",
+                "room_epoch",
+                "fencing_token");
+        assertThat(finalizationReceipt.required("operation_key").asText())
+                .isEqualTo(
+                        "evidence.batch.merge:%s:%d:%s:%d"
+                                .formatted(
+                                        manifest.required("case_id").asText(),
+                                        manifest.required("room_epoch").longValue(),
+                                        manifest.required("manifest_hash").asText(),
+                                        manifest.required("dossier_target_version").longValue()));
 
         JsonNode activeRun = projection.required("active_graph_run");
         assertEqualFields(command, activeRun, "command_id", "logical_run_id", "attempt_id");
@@ -464,26 +561,55 @@ class EvidenceV2ContractFixtureTest {
         assertThat(projection.required("room_epoch")).isEqualTo(manifest.required("room_epoch"));
         assertThat(projection.required("fencing_token"))
                 .isEqualTo(manifest.required("fencing_token"));
+        assertThat(projection.required("pending_operation_key").asText())
+                .isEqualTo(
+                        "evidence.graph.request:%s:%d:%s:%s"
+                                .formatted(
+                                        manifest.required("case_id").asText(),
+                                        manifest.required("room_epoch").longValue(),
+                                        manifest.required("manifest_hash").asText(),
+                                        command.required("logical_run_id").asText()));
         for (String field : PROFILE_PIN_FIELDS) {
             assertThat(projection.required("version_pins").required(field))
                     .as("projection version pin %s", field)
                     .isEqualTo(manifest.required("profile_versions").required(field));
         }
 
-        ObjectNode gatewayBinding = verifiedGatewayBinding(manifest);
-        assertVerifiedRoomGraphCommandBinding(manifest, gatewayBinding);
-        gatewayBinding.put("room_epoch", manifest.required("room_epoch").longValue() + 1);
+        ObjectNode verifiedRoomGraphCommand = readVerifiedEvidenceRoomGraphCommand();
+        assertVerifiedRoomGraphCommandBinding(manifest, verifiedRoomGraphCommand);
+        ObjectNode mismatchedRoomEpoch = verifiedRoomGraphCommand.deepCopy();
+        mismatchedRoomEpoch.put("room_epoch", manifest.required("room_epoch").longValue() + 1);
         org.assertj.core.api.Assertions.assertThatThrownBy(
-                        () -> assertVerifiedRoomGraphCommandBinding(manifest, gatewayBinding))
+                        () ->
+                                assertVerifiedRoomGraphCommandBinding(
+                                        manifest, mismatchedRoomEpoch))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("room_graph_command_binding_mismatch:room_epoch");
+        ObjectNode mismatchedActorScope = verifiedRoomGraphCommand.deepCopy();
+        ((ArrayNode) mismatchedActorScope.required("actor_scope").required("capabilities"))
+                .add("evidence_parser.write");
+        org.assertj.core.api.Assertions.assertThatThrownBy(
+                        () ->
+                                assertVerifiedRoomGraphCommandBinding(
+                                        manifest, mismatchedActorScope))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("room_graph_command_binding_mismatch:actor_scope_hash");
 
         long currentRoomFence = manifest.required("fencing_token").longValue();
+        long currentGraphLeaseFence = 7001L;
+        assertThat(currentGraphLeaseFence).isNotEqualTo(currentRoomFence);
+        assertThat(verifiedRoomGraphCommand.has("fencing_token")).isFalse();
+        assertThat(verifiedRoomGraphCommand.has("graph_lease_fencing_token")).isFalse();
         assertCurrentRoomFence(manifest, currentRoomFence);
+        assertCurrentGraphLeaseFence(7001L, currentGraphLeaseFence);
         org.assertj.core.api.Assertions.assertThatThrownBy(
                         () -> assertCurrentRoomFence(manifest, currentRoomFence + 1))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("room_fence_mismatch");
+        org.assertj.core.api.Assertions.assertThatThrownBy(
+                        () -> assertCurrentGraphLeaseFence(7002L, currentGraphLeaseFence))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("graph_lease_fence_mismatch");
     }
 
     @Test
@@ -555,45 +681,148 @@ class EvidenceV2ContractFixtureTest {
         }
     }
 
-    private static ObjectNode verifiedGatewayBinding(JsonNode manifest) {
-        ObjectNode binding = MAPPER.createObjectNode();
-        JsonNode command = manifest.required("command_binding");
-        for (String field : List.of("command_id", "logical_run_id", "attempt_id")) {
-            binding.set(field, command.required(field));
-        }
-        for (String field :
-                List.of(
-                        "registration_id",
-                        "tenant_surrogate",
-                        "case_id",
-                        "room_type",
-                        "room_epoch",
-                        "thread_id",
-                        "actor_id",
-                        "actor_role",
-                        "actor_scope_hash")) {
-            binding.set(field, manifest.required(field));
-        }
-        binding.set("profile_versions", manifest.required("profile_versions"));
-        return binding;
+    private static ObjectNode readVerifiedEvidenceRoomGraphCommand() throws IOException {
+        JsonNode document = MAPPER.readTree(ROOM_GRAPH_COMMAND_FIXTURE.toFile());
+        assertThat(document.required("schema").asText())
+                .isEqualTo("room-graph-command.schema.json");
+        ObjectNode command = (ObjectNode) document.required("instance").deepCopy();
+        JsonNode schemaDocument = MAPPER.readTree(ROOM_GRAPH_COMMAND_SCHEMA.toFile());
+        JsonSchema schema =
+                JsonSchemaFactory.getInstance(SpecVersion.VersionFlag.V202012)
+                        .getSchema(schemaDocument);
+        assertThat(schema.validate(command)).as("canonical Evidence RoomGraphCommand").isEmpty();
+        ObjectNode requestPreimage = command.deepCopy();
+        requestPreimage.remove("request_hash");
+        assertThat(command.required("request_hash").asText())
+                .isEqualTo(ContractJson.sha256Hex(requestPreimage));
+        return command;
     }
 
     private static void assertVerifiedRoomGraphCommandBinding(
-            JsonNode manifest, JsonNode gatewayBinding) {
-        ObjectNode expected = verifiedGatewayBinding(manifest);
-        expected.fieldNames()
-                .forEachRemaining(
-                        field -> {
-                            if (!expected.required(field).equals(gatewayBinding.path(field))) {
-                                throw new IllegalArgumentException(
-                                        "room_graph_command_binding_mismatch:" + field);
-                            }
-                        });
+            JsonNode manifest, JsonNode verifiedCommand) {
+        JsonNode manifestCommand = manifest.required("command_binding");
+        for (String field : List.of("command_id", "logical_run_id", "attempt_id")) {
+            requireBinding(
+                    verifiedCommand.required(field), manifestCommand.required(field), field);
+        }
+        for (String field :
+                List.of("tenant_surrogate", "case_id", "room_type", "room_epoch", "thread_id")) {
+            requireBinding(verifiedCommand.required(field), manifest.required(field), field);
+        }
+        requireText(verifiedCommand, "schema_version", "room-graph-command.v1");
+        requireText(verifiedCommand, "graph_key", "evidence.v2");
+        requireBinding(
+                verifiedCommand.required("graph_version"),
+                manifest.required("profile_versions").required("graph_version"),
+                "graph_version");
+        requireBinding(
+                verifiedCommand.required("checkpoint_schema_version"),
+                manifest.required("profile_versions").required("checkpoint_schema_version"),
+                "checkpoint_schema_version");
+        requireBinding(
+                verifiedCommand.required("deadline_at"),
+                manifestCommand.required("deadline_at"),
+                "deadline_at");
+
+        JsonNode actorScope = verifiedCommand.required("actor_scope");
+        requireBinding(actorScope.required("actor_id"), manifest.required("actor_id"), "actor_id");
+        requireBinding(
+                actorScope.required("actor_role"), manifest.required("actor_role"), "actor_role");
+        requireBinding(
+                actorScope.required("audience"), manifest.required("actor_role"), "audience");
+        if (!ContractJson.sha256Hex(actorScope)
+                .equals(manifest.required("actor_scope_hash").asText())) {
+            throw new IllegalArgumentException(
+                    "room_graph_command_binding_mismatch:actor_scope_hash");
+        }
+
+        JsonNode invocation = verifiedCommand.required("invocation_context");
+        JsonNode profile = manifest.required("profile_versions");
+        requireBinding(
+                invocation.required("prompt_profile_id"),
+                profile.required("prompt_version"),
+                "prompt_version");
+        requireBinding(
+                invocation.required("model_profile_id"),
+                profile.required("model_profile_id"),
+                "model_profile_id");
+        requireBinding(
+                invocation.required("output_schema_version"),
+                profile.required("terminal_output_schema_version"),
+                "terminal_output_schema_version");
+        requireBinding(
+                invocation.required("policy_version"),
+                profile.required("policy_version"),
+                "policy_version");
+        requireBinding(
+                invocation.required("guardrail_version"),
+                profile.required("guardrail_version"),
+                "guardrail_version");
+        requireBinding(
+                invocation.required("tool_capabilities"),
+                actorScope.required("capabilities"),
+                "tool_capabilities");
+        if (invocation
+                .required("output_schema_version")
+                .equals(profile.required("assessment_output_schema_version"))) {
+            throw new IllegalArgumentException(
+                    "room_graph_command_binding_mismatch:outer_output_uses_assessment_pin");
+        }
+
+        JsonNode snapshot = verifiedCommand.required("domain_snapshot_ref");
+        requireBinding(
+                snapshot.required("artifact_id"), manifest.required("manifest_id"), "manifest_id");
+        requireText(snapshot, "schema_version", "evidence-batch-manifest.v1");
+        String payloadHash = ContractJson.sha256Hex(manifest);
+        requireText(snapshot, "sha256", payloadHash);
+        if (snapshot.required("size_bytes").longValue()
+                != ContractJson.canonicalize(manifest).length) {
+            throw new IllegalArgumentException(
+                    "room_graph_command_binding_mismatch:domain_snapshot_ref.size_bytes");
+        }
+        if (!snapshot.required("uri").asText().endsWith("/" + payloadHash + ".json")) {
+            throw new IllegalArgumentException(
+                    "room_graph_command_binding_mismatch:domain_snapshot_ref.uri");
+        }
+        if (payloadHash.equals(manifest.required("manifest_hash").asText())) {
+            throw new IllegalArgumentException("manifest_payload_hash_must_differ_from_self_hash");
+        }
+        for (String nonCommandField :
+                List.of(
+                        "fencing_token",
+                        "graph_lease_fencing_token",
+                        "registration_id",
+                        "participant_id",
+                        "agent_session_id")) {
+            if (verifiedCommand.has(nonCommandField)) {
+                throw new IllegalArgumentException(
+                        "room_graph_command_binding_mismatch:" + nonCommandField);
+            }
+        }
+    }
+
+    private static void requireBinding(JsonNode actual, JsonNode expected, String reason) {
+        if (!actual.equals(expected)) {
+            throw new IllegalArgumentException("room_graph_command_binding_mismatch:" + reason);
+        }
+    }
+
+    private static void requireText(JsonNode actual, String field, String expected) {
+        if (!expected.equals(actual.path(field).asText())) {
+            throw new IllegalArgumentException("room_graph_command_binding_mismatch:" + field);
+        }
     }
 
     private static void assertCurrentRoomFence(JsonNode manifest, long currentRoomFence) {
         if (manifest.required("fencing_token").longValue() != currentRoomFence) {
             throw new IllegalArgumentException("room_fence_mismatch");
+        }
+    }
+
+    private static void assertCurrentGraphLeaseFence(
+            long expectedGraphLeaseFence, long currentGraphLeaseFence) {
+        if (expectedGraphLeaseFence != currentGraphLeaseFence) {
+            throw new IllegalArgumentException("graph_lease_fence_mismatch");
         }
     }
 
