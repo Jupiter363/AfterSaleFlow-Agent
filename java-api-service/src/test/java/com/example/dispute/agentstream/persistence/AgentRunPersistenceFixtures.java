@@ -329,6 +329,7 @@ public final class AgentRunPersistenceFixtures {
                 Map.of(
                         "graph_command", "room-graph-command.v1",
                         "graph_result", "room-graph-result.v1",
+                        "output_schema", "room-graph-result.v1",
                         "stream", "agent-stream.v2"),
                 "policy-v2",
                 "guardrail-v2",

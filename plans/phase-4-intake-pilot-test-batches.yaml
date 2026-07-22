@@ -828,6 +828,7 @@ batches:
     java_test_classes:
       - IntakeFormalSinkAssemblyTest
       - IntakeRoomWorkflowTest
+      - IntakeRoomWorkflowActivityTest
       - IntakeRoomWorkflowReplayTest
       - IntakeRoomWorkflowWorkerRecoveryTest
       - IntakeTemporalCutoverIntegrationTest
@@ -851,6 +852,8 @@ batches:
       - IntakeReliabilityHarnessTest
       - IntakeGraphCommandFactoryTest
       - IntakeGraphResultFinalizerTest
+      - JdbcIntakeFormalCommitPortTest
+      - IntakeOuterCommitAcidIntegrationTest
       - IntakeProcessProjectionAdapterTest
       - IntakeShadowParityServiceTest
       - IntakeCutoverRollbackTest

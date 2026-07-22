@@ -22,6 +22,42 @@ SPEC.loader.exec_module(evidence)
 
 CANDIDATE = "a" * 40
 BASE = "b" * 40
+GRAPH_007_BINDING_SELECTOR = (
+    "tests.graphs.intake.test_state#"
+    "test_binding_reducer_rejects_private_identity_drift"
+)
+GRAPH_007_PARAMETERIZED_NAMES = (
+    "test_binding_reducer_rejects_private_identity_drift[actor_scope_hash-"
+    + "2" * 64
+    + "]",
+    "test_binding_reducer_rejects_private_identity_drift[agent_session_id-AGENT_SESSION_OTHER]",
+    "test_binding_reducer_rejects_private_identity_drift[audience-MERCHANT]",
+    "test_binding_reducer_rejects_private_identity_drift[case_id-CASE_OTHER]",
+    "test_binding_reducer_rejects_private_identity_drift[room_epoch-2]",
+    "test_binding_reducer_rejects_private_identity_drift[tenant_surrogate-tenant-other]",
+    "test_binding_reducer_rejects_private_identity_drift[thread_id-grt.v1."
+    + "1" * 32
+    + "]",
+)
+SEC_005_PARSER_SELECTOR = (
+    "tests.graphs.intake.test_lcel#"
+    "test_strict_parser_rejects_unknown_and_formal_action_fields"
+)
+SEC_005_PARAMETERIZED_NAMES = (
+    "test_strict_parser_rejects_unknown_and_formal_action_fields[<lambda>0]",
+    "test_strict_parser_rejects_unknown_and_formal_action_fields[<lambda>1]",
+    "test_strict_parser_rejects_unknown_and_formal_action_fields[<lambda>2]",
+)
+PYTEST_PARAMETER_FAMILIES = {
+    GRAPH_007_BINDING_SELECTOR: (
+        "tests.graphs.intake.test_state",
+        GRAPH_007_PARAMETERIZED_NAMES,
+    ),
+    SEC_005_PARSER_SELECTOR: (
+        "tests.graphs.intake.test_lcel",
+        SEC_005_PARAMETERIZED_NAMES,
+    ),
+}
 
 
 def _case(
@@ -123,7 +159,20 @@ def _fixture_source_reports(
                 filename = "frontend-phase4-junit.xml"
             else:
                 filename = "java-phase4-junit.xml"
-            add(filename, _selector_case(filename, selector))
+            parameter_family = PYTEST_PARAMETER_FAMILIES.get(selector)
+            if parameter_family is not None:
+                classname, names = parameter_family
+                for name in names:
+                    add(
+                        filename,
+                        _case(
+                            source=filename,
+                            classname=classname,
+                            name=name,
+                        ),
+                    )
+            else:
+                add(filename, _selector_case(filename, selector))
 
     filename_to_command = {
         filename: command_id
@@ -496,6 +545,72 @@ def test_frontend_policy_selector_accepts_vitest_suite_prefix() -> None:
         "frontend-phase4-junit.xml",
         case,
         "frontend/src/api/agentStream.test.js#discovers active room runs after refresh with actor isolation headers",
+    )
+
+
+@pytest.mark.parametrize(
+    ("selector", "classname", "names"),
+    [
+        (selector, classname, names)
+        for selector, (classname, names) in PYTEST_PARAMETER_FAMILIES.items()
+    ],
+)
+def test_pytest_policy_selector_binds_real_candidate_parameter_families(
+    selector: str, classname: str, names: tuple[str, ...]
+) -> None:
+    cases = [
+        _case(
+            source="python-phase4-junit.xml",
+            classname=classname,
+            name=name,
+        )
+        for name in names
+    ]
+
+    assert all(
+        evidence._selector_matches("python-phase4-junit.xml", case, selector)
+        for case in cases
+    )
+    exact_selector = selector + names[0].removeprefix(selector.partition("#")[2])
+    assert evidence._selector_matches(
+        "python-phase4-junit.xml",
+        cases[0],
+        exact_selector,
+    )
+    assert not evidence._selector_matches(
+        "python-phase4-junit.xml",
+        cases[1],
+        exact_selector,
+    )
+    unrelated = _case(
+        source="python-phase4-junit.xml",
+        classname=classname,
+        name=selector.partition("#")[2] + "_unrelated",
+    )
+    assert not evidence._selector_matches(
+        "python-phase4-junit.xml", unrelated, selector
+    )
+
+
+def test_every_java_policy_selector_class_is_in_the_candidate_union() -> None:
+    matrix = evidence.load_matrix()
+    policy = evidence._load_yaml(evidence.POLICY_PATH)
+    candidate_classes = set(evidence._deduplicated_java_classes(matrix))
+    selectors = [
+        selector
+        for section in ("overrides", "baseline_overrides")
+        for mapping in policy[section].values()
+        for selector in mapping["test_selectors"]
+        if selector.partition("#")[0].startswith("*")
+    ]
+
+    missing = sorted(
+        selector
+        for selector in selectors
+        if selector.partition("#")[0].removeprefix("*") not in candidate_classes
+    )
+    assert not missing, "Java policy selectors outside candidate class union: " + ", ".join(
+        missing
     )
 
 

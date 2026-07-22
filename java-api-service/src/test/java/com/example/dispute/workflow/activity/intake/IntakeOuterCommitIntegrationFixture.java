@@ -548,6 +548,26 @@ final class IntakeOuterCommitIntegrationFixture {
         String attemptId = fixture.command().attemptId();
         String requestHash = fixture.command().requestHash();
         String resultHash = fixture.graphResult().outputHash();
+        ArtifactPointer output = fixture.facts().output();
+        jdbc.update(
+                """
+                insert into immutable_payload_snapshot (
+                    id, tenant_surrogate, case_id, room_type, snapshot_type,
+                    source_type, source_id, schema_version, object_uri,
+                    content_sha256, size_bytes, content_type, visibility,
+                    created_at, created_by
+                ) values (?, ?, ?, 'INTAKE', 'AGENT_OUTPUT', 'AGENT_RUN', ?, ?, ?,
+                    ?, ?, 'application/json', 'INTERNAL', ?, 'test')
+                """,
+                output.artifactId(),
+                fixture.tenant(),
+                caseId,
+                runId,
+                output.schemaVersion(),
+                output.uri(),
+                output.sha256(),
+                ContractJson.canonicalize(mapper.valueToTree(fixture.graphResult())).length,
+                now);
         jdbc.update(
                 """
                 insert into agent_run (
@@ -563,10 +583,10 @@ final class IntakeOuterCommitIntegrationFixture {
                     lineage_schema_version, logical_input_hash
                 ) values (?, ?, ?, 'agent-stream:intake', 'SYSTEM', 'runtime',
                     'intake-prompt.v2', 'intake-skill.v2', 'agent-stream.v2', 'synthetic',
-                    'RESULT_READY', '{}'::jsonb, '{}'::jsonb, '[]'::jsonb, ?, 'trace-outer',
+                    'RUNNING', '{}'::jsonb, '{}'::jsonb, '[]'::jsonb, ?, 'trace-outer',
                     'test', 'INTAKE_TURN', 'internal://graph', '{}'::jsonb, ?, '[]'::jsonb,
                     '[]'::jsonb, ?, ?, ?, ?, 'agent-stream.v2', ?, 'TEMPORAL_ACTIVITY',
-                    'UNCOMMITTED', ?, 'INTAKE', 1, 5, 2, ?, 1, ?, ?, ?,
+                    'UNCOMMITTED', ?, 'INTAKE', 1, 5, 2, ?, 1, ?, null, null,
                     'agent-run-lineage.v1', ?)
                 """,
                 runId,
@@ -582,8 +602,6 @@ final class IntakeOuterCommitIntegrationFixture {
                 epochId,
                 requestHash,
                 now.plusMinutes(5),
-                attemptId,
-                resultHash,
                 fixture.executionRequest().logicalInputHash());
         jdbc.update(
                 """
@@ -599,7 +617,7 @@ final class IntakeOuterCommitIntegrationFixture {
                     updated_at, created_by
                 ) values (?, ?, 1, 'RESULT_READY', 'TEMPORAL_ACTIVITY', 'synthetic',
                     'intake-model.synthetic.v1', 'synthetic-1', 'intake.v2', '2.0.0',
-                    'intake-checkpoint.v2', ?, 'intake-prompt.v2', 'room-graph-result.v1',
+                    'intake-checkpoint.v2', ?, 'intake-prompt.v2', 'intake-turn-proposal.v2',
                     'intake-policy.v2', 'intake-guardrail.v2', ?,
                     'agent-run-attempt-lineage.v1', ?, ?, ?, cast(? as jsonb), false, 0, ?,
                     cast(? as jsonb), 10, 5, 15, 1, true, true, 7, ?, ?, ?, ?, 'test')
@@ -618,6 +636,25 @@ final class IntakeOuterCommitIntegrationFixture {
                 now,
                 now,
                 now);
+        int transitioned = jdbc.update(
+                """
+                update agent_run
+                   set run_status = 'RESULT_READY',
+                       result_ready_attempt_id = ?,
+                       final_result_hash = ?,
+                       updated_at = ?
+                 where id = ?
+                   and run_status = 'RUNNING'
+                   and result_ready_attempt_id is null
+                   and final_result_hash is null
+                """,
+                attemptId,
+                resultHash,
+                now,
+                runId);
+        if (transitioned != 1) {
+            throw new IllegalStateException("fixture AgentRun did not transition to RESULT_READY");
+        }
     }
 
     private static String logicalKey(String runId) {

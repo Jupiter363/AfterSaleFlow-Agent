@@ -38,6 +38,7 @@
     "contract_versions": {
       "graph_command": "room-graph-command.v1",
       "graph_result": "room-graph-result.v1",
+      "output_schema": "intake-dossier.v2",
       "stream": "agent-stream.v2"
     },
     "policy_version": "intake-policy.v1",

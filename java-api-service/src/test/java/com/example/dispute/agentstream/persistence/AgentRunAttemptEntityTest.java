@@ -8,9 +8,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.dispute.infrastructure.persistence.entity.AgentRunAttemptEntity;
+import com.example.dispute.workflow.contract.v1.AgentExecutionManifest;
 import com.example.dispute.workflow.contract.v1.AgentRunAttemptHeartbeat;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunRecoveryAction;
+import java.util.HashMap;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 class AgentRunAttemptEntityTest {
@@ -213,6 +216,41 @@ class AgentRunAttemptEntityTest {
     }
 
     @Test
+    void formalCommitRequiresSeparateGraphEnvelopeAndOutputSchemaContracts() {
+        String attemptId = "ATTEMPT_V2_SCHEMA_CONTRACTS";
+        AgentRunAttemptEntity attempt =
+                AgentRunAttemptEntity.start(
+                        RUN_ID,
+                        AgentRunPersistenceFixtures.allocation(1, attemptId),
+                        null,
+                        false,
+                        0,
+                        STARTED_AT);
+        attempt.recordResultReady(
+                AgentRunPersistenceFixtures.result(1, attemptId),
+                "{\"result_hash\":\"" + RESULT_HASH + "\"}");
+        AgentExecutionManifest manifest = AgentRunPersistenceFixtures.manifest(attemptId);
+
+        Map<String, String> missingOutputSchema = new HashMap<>(manifest.contractVersions());
+        missingOutputSchema.remove("output_schema");
+        assertThatThrownBy(
+                        () ->
+                                attempt.markCommitted(
+                                        withContractVersions(manifest, missingOutputSchema), 3))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("outputSchemaVersion");
+
+        Map<String, String> wrongGraphEnvelope = new HashMap<>(manifest.contractVersions());
+        wrongGraphEnvelope.put("graph_result", "intake-turn-proposal.v2");
+        assertThatThrownBy(
+                        () ->
+                                attempt.markCommitted(
+                                        withContractVersions(manifest, wrongGraphEnvelope), 3))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("graphResultSchemaVersion");
+    }
+
+    @Test
     void resultReadyRejectsResolvedExecutionMetadataOutsideTheAuthorizedRequest() {
         AgentRunAttemptEntity attempt =
                 AgentRunAttemptEntity.start(
@@ -238,5 +276,30 @@ class AgentRunAttemptEntityTest {
                 .hasMessageContaining("modelProfileId");
         assertThat(attempt.getAttemptStatus()).isEqualTo(AgentRunAttemptStatus.RUNNING);
         assertThat(attempt.getResultHash()).isNull();
+    }
+
+    private static AgentExecutionManifest withContractVersions(
+            AgentExecutionManifest source, Map<String, String> contractVersions) {
+        return new AgentExecutionManifest(
+                source.schemaVersion(),
+                source.manifestId(),
+                source.tenantSurrogate(),
+                source.caseId(),
+                source.roomEpoch(),
+                source.processRevision(),
+                source.fencingToken(),
+                source.workflow(),
+                source.agentRun(),
+                source.graph(),
+                source.model(),
+                contractVersions,
+                source.policyVersion(),
+                source.guardrailVersion(),
+                source.toolVersions(),
+                source.inputs(),
+                source.output(),
+                source.usage(),
+                source.traceparent(),
+                source.finalizedAt());
     }
 }

@@ -83,6 +83,18 @@ class AgentRunV2ManifestFactoryTest {
         assertThat(first.manifest().model().model()).isEqualTo("model-a-2026-07");
         assertThat(first.manifest().fencingToken()).isEqualTo(7);
         assertThat(first.manifest().inputs()).hasSize(1);
+        assertThat(first.manifest().contractVersions())
+                .containsEntry("graph_result", "room-graph-result.v1")
+                .containsEntry(
+                        "output_schema",
+                        result.graphResult().executionMetadata().schemaVersion());
+        assertThat(first.manifest().manifestId())
+                .hasSize(64)
+                .matches("agent-manifest-v2-[0-9a-f]{46}");
+        assertThat(factory.create(request, result, facts(8, result.resultHash()))
+                        .manifest()
+                        .manifestId())
+                .isNotEqualTo(first.manifest().manifestId());
         assertThat(first.manifestHash()).matches("[0-9a-f]{64}");
     }
 

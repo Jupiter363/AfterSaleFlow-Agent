@@ -29,6 +29,8 @@ import java.util.Objects;
 public final class AgentRunV2ManifestFactory {
 
     private static final String MANIFEST_SCHEMA_VERSION = "agent-execution-manifest.v1";
+    private static final String MANIFEST_ID_PREFIX = "agent-manifest-v2-";
+    private static final int MANIFEST_ID_MAX_LENGTH = 64;
 
     private final ObjectMapper objectMapper;
 
@@ -77,6 +79,7 @@ public final class AgentRunV2ManifestFactory {
                         Map.of(
                                 "graph_command", command.schemaVersion(),
                                 "graph_result", graph.schemaVersion(),
+                                "output_schema", metadata.schemaVersion(),
                                 "stream", request.streamProtocol(),
                                 "execute_agent_run_request", request.schemaVersion(),
                                 "execute_agent_run_result", result.schemaVersion()),
@@ -113,7 +116,8 @@ public final class AgentRunV2ManifestFactory {
                                         request.attemptNo(),
                                         facts.fencingToken(),
                                         result.resultHash())));
-        return "agent-manifest-v2-" + identityHash;
+        return MANIFEST_ID_PREFIX
+                + identityHash.substring(0, MANIFEST_ID_MAX_LENGTH - MANIFEST_ID_PREFIX.length());
     }
 
     private static List<ArtifactPointer> inputs(

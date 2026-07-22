@@ -62,6 +62,10 @@ SOURCE_REPORTS = {
     "frontend_phase_4": "frontend-phase4-junit.xml",
     "static_phase_4": "static-phase4-junit.xml",
 }
+PYTEST_SOURCE_REPORTS = {
+    SOURCE_REPORTS["python_phase_4"],
+    SOURCE_REPORTS["static_phase_4"],
+}
 DERIVED_REPORTS = {
     "P4-BATCH-0": "batch-0-junit.xml",
     "P4-BATCH-1": "batch-1-junit.xml",
@@ -834,6 +838,25 @@ def _baseline_owners(matrix: dict[str, Any]) -> dict[str, list[str]]:
     return owners
 
 
+def _name_pattern_matches(name: str, pattern: str) -> bool:
+    if name == pattern:
+        return True
+    if "*" not in pattern and "?" not in pattern:
+        return False
+    return fnmatch.fnmatch(name, pattern)
+
+
+def _pytest_parameter_family_matches(name: str, logical_name: str) -> bool:
+    if any(character in logical_name for character in "*?[]"):
+        return False
+    parameter_prefix = f"{logical_name}["
+    return (
+        name.startswith(parameter_prefix)
+        and name.endswith("]")
+        and len(name) > len(parameter_prefix) + 1
+    )
+
+
 def _selector_matches(report_name: str, case: TestCase, selector: str) -> bool:
     class_pattern, separator, name_pattern = selector.partition("#")
     if not separator or not class_pattern or not name_pattern:
@@ -841,7 +864,9 @@ def _selector_matches(report_name: str, case: TestCase, selector: str) -> bool:
     frontend = report_name == "frontend-phase4-junit.xml"
     if frontend:
         class_pattern = class_pattern.removeprefix("frontend/")
-    name_matches = fnmatch.fnmatch(case.name, name_pattern)
+    name_matches = _name_pattern_matches(case.name, name_pattern)
+    if not name_matches and report_name in PYTEST_SOURCE_REPORTS:
+        name_matches = _pytest_parameter_family_matches(case.name, name_pattern)
     if frontend and not name_matches:
         name_matches = fnmatch.fnmatch(case.name, f"* > {name_pattern}")
     return fnmatch.fnmatch(case.classname, class_pattern) and name_matches

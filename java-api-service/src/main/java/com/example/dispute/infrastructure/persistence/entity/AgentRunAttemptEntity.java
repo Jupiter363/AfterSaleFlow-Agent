@@ -505,8 +505,12 @@ public class AgentRunAttemptEntity extends AbstractEntity {
                 manifest.contractVersions().get("graph_command"),
                 "graphCommandSchemaVersion");
         requireEqual(
-                outputSchemaVersion,
+                "room-graph-result.v1",
                 manifest.contractVersions().get("graph_result"),
+                "graphResultSchemaVersion");
+        requireEqual(
+                outputSchemaVersion,
+                manifest.contractVersions().get("output_schema"),
                 "outputSchemaVersion");
         requireEqual(
                 AgentRunProtocol.V2.wireValue(),
