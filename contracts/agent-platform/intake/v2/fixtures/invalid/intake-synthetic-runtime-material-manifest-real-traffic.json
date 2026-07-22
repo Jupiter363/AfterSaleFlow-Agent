@@ -1,0 +1,19 @@
+{
+  "schema_version": "intake-synthetic-runtime-material-manifest.v1",
+  "manifest_id": "INTAKE_RUNTIME_MATERIAL_REAL_CASE_FORBIDDEN",
+  "traffic_source": "REAL_CASE",
+  "room_type": "INTAKE",
+  "writer_mode": "SHADOW",
+  "synthetic_only": false,
+  "contains_real_party_data": true,
+  "formal_effects_allowed": false,
+  "output_sink": "ISOLATED_COMPARISON_LEDGER",
+  "authority_binding": {},
+  "version_pins": {},
+  "snapshot_material": {},
+  "graph_plan": {},
+  "graph_artifacts": {},
+  "parity_material": {},
+  "created_at": "2026-07-20T08:00:00Z",
+  "manifest_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+}

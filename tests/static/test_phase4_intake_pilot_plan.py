@@ -37,6 +37,10 @@ SCHEMA_BY_FIXTURE = {
         "intake-finalization-receipt.schema.json",
         "receipt_hash",
     ),
+    "intake-synthetic-runtime-material-manifest": (
+        "intake-synthetic-runtime-material-manifest.schema.json",
+        "manifest_hash",
+    ),
 }
 
 
@@ -338,6 +342,68 @@ def test_phase4_valid_contracts_exclude_memory_and_formal_authority() -> None:
         "hidden_reasoning",
     }
     assert not (forbidden & set(re.findall(r'"([a-z_]+)"\s*:', valid_text)))
+
+
+def test_phase4_synthetic_runtime_material_is_bounded_and_fail_closed() -> None:
+    schema = json.loads(
+        (CONTRACT_ROOT / "intake-synthetic-runtime-material-manifest.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    valid_path = (
+        CONTRACT_ROOT
+        / "fixtures/valid/intake-synthetic-runtime-material-manifest-valid.json"
+    )
+    valid = json.loads(valid_path.read_text(encoding="utf-8"))
+    validator = jsonschema.Draft202012Validator(
+        schema,
+        format_checker=jsonschema.Draft202012Validator.FORMAT_CHECKER,
+    )
+
+    assert not list(validator.iter_errors(valid))
+    assert len(rfc8785.dumps(valid)) <= schema["x-max-encoded-bytes"]
+    assert valid["traffic_source"] == "SIGNED_SYNTHETIC"
+    assert valid["writer_mode"] == "SHADOW"
+    assert valid["formal_effects_allowed"] is False
+    assert valid["output_sink"] == "ISOLATED_COMPARISON_LEDGER"
+
+    for field in ("authority_binding", "version_pins"):
+        value = copy.deepcopy(valid[field])
+        hash_field = (
+            "authority_binding_hash" if field == "authority_binding" else "pin_set_hash"
+        )
+        expected = value.pop(hash_field)
+        assert hashlib.sha256(rfc8785.dumps(value)).hexdigest() == expected
+
+    mutations = (
+        lambda value: value.update({"traffic_source": "REAL_CASE"}),
+        lambda value: value.update({"formal_effects_allowed": True}),
+        lambda value: value["graph_plan"].update({"private_key": "forbidden"}),
+        lambda value: value["snapshot_material"]["own_messages"][0].update(
+            {"audience": "MERCHANT"}
+        ),
+        lambda value: value["graph_artifacts"]["result"].update(
+            {"object_uri": "urn:intake:result:not-an-object-store-location"}
+        ),
+    )
+    for mutate in mutations:
+        invalid = copy.deepcopy(valid)
+        mutate(invalid)
+        assert list(validator.iter_errors(invalid))
+
+    matrix = yaml.safe_load(
+        (CONTRACT_ROOT / "compatibility-matrix.yaml").read_text(encoding="utf-8")
+    )
+    row = matrix["contracts"]["intake-synthetic-runtime-material-manifest.v1"]
+    assert row == {
+        "current": "intake-synthetic-runtime-material-manifest.v1",
+        "accepts": ["intake-synthetic-runtime-material-manifest.v1"],
+        "synthetic_only": True,
+        "writer_mode": "SHADOW",
+        "formal_effects_allowed": False,
+        "max_serialized_bytes": schema["x-max-encoded-bytes"],
+        "rejects_unknown_future": True,
+    }
 
 
 def test_phase4_finalization_key_capacity_covers_the_exact_frozen_formula() -> None:

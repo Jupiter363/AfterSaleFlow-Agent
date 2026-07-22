@@ -25,6 +25,14 @@ contracts:
     current: intake-finalization-receipt.v1
     accepts: [intake-finalization-receipt.v1]
     rejects_unknown_future: true
+  intake-synthetic-runtime-material-manifest.v1:
+    current: intake-synthetic-runtime-material-manifest.v1
+    accepts: [intake-synthetic-runtime-material-manifest.v1]
+    synthetic_only: true
+    writer_mode: SHADOW
+    formal_effects_allowed: false
+    max_serialized_bytes: 131072
+    rejects_unknown_future: true
 rules:
   unknown_fields: reject
   missing_required_fields: reject

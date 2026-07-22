@@ -1,0 +1,198 @@
+{
+  "schema_version": "intake-synthetic-runtime-material-manifest.v1",
+  "manifest_id": "INTAKE_RUNTIME_MATERIAL_SYNTHETIC_1",
+  "traffic_source": "SIGNED_SYNTHETIC",
+  "room_type": "INTAKE",
+  "writer_mode": "SHADOW",
+  "synthetic_only": true,
+  "contains_real_party_data": false,
+  "formal_effects_allowed": false,
+  "output_sink": "ISOLATED_COMPARISON_LEDGER",
+  "authority_binding": {
+    "schema_version": "intake-synthetic-authority-binding.v1",
+    "admission_schema_version": "intake-synthetic-activity-admission.v1",
+    "admission_status": "VERIFIED",
+    "epoch_id": "EPOCH_P4_SYNTHETIC_1",
+    "party_authority_id": "PARTY_AUTHORITY_P4_SYNTHETIC_1",
+    "case_command_id": "CASE_COMMAND_P4_SYNTHETIC_1",
+    "payload_authority_id": "PAYLOAD_AUTHORITY_P4_SYNTHETIC_1",
+    "access_session_id": "ACCESS_P4_SYNTHETIC_1",
+    "registration_id": "REG_P4_INTAKE_USER_1",
+    "tenant_surrogate": "tenant-synthetic",
+    "case_id": "CASE_P4_SYNTHETIC_1",
+    "room_epoch": 1,
+    "fencing_token": 2,
+    "actor_id": "user-synthetic",
+    "actor_role": "USER",
+    "command_id": "CMD_P4_SYNTHETIC_1",
+    "command_sequence": 1,
+    "command_type": "INTAKE_MESSAGE",
+    "party": "INITIATOR",
+    "actor_scope_hash": "52f01901287fe5e5465ddcd7d7baf9074aa77e3d88a64da747bf1f530916a5d2",
+    "command_payload_ref": "urn:intake:event:synthetic-1",
+    "command_payload_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+    "command_operation_key": "intake.operation:CASE_P4_SYNTHETIC_1:CMD_P4_SYNTHETIC_1",
+    "request_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+    "accepted_room_revision": 2,
+    "thread_id": "grt.v1.018f6b7ec30a7430982fffc520c8195c",
+    "agent_session_id": "AGENT_SESSION_P4_USER_1",
+    "process_revision": 7,
+    "room_revision": 2,
+    "deadline_epoch_millis": 1784538000000,
+    "logical_run_id": "RUN_P4_SYNTHETIC_1",
+    "attempt_id": "ATTEMPT_P4_SYNTHETIC_1",
+    "selection_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+    "registration_hash": "d4cdcf3fa79c2e00a7c46799eb9682277a33ca2d9c9c5b09eea71ee80fdbca79",
+    "authorization_hash": "4444444444444444444444444444444444444444444444444444444444444444",
+    "authority_binding_hash": "9c08a11507201df8c26b706b392bbd67cf029c94c55a865210ad488841c47d0f"
+  },
+  "version_pins": {
+    "case_workflow_type": "CaseProcessWorkflow",
+    "case_workflow_build_id": "case-workflow.synthetic.v1",
+    "room_workflow_type": "IntakeRoomWorkflow",
+    "room_workflow_build_id": "intake-workflow.synthetic.v1",
+    "process_contract_version": "case-process-contract.v1",
+    "graph_key": "intake.v2",
+    "graph_version": "2.0.0",
+    "checkpoint_schema_version": "intake-checkpoint.v2",
+    "state_schema_version": "intake-graph-state.v2",
+    "stream_protocol": "agent-stream.v2",
+    "prompt_version": "intake-prompt.v2",
+    "model_profile_id": "intake-model.synthetic.v1",
+    "output_schema_version": "intake-turn-proposal.v2",
+    "policy_version": "intake-policy.v2",
+    "guardrail_version": "intake-guardrail.v2",
+    "tool_policy_version": "no-tools.v1",
+    "cohort_policy_version": "synthetic-only.v1",
+    "agent_key": "DISPUTE_INTAKE_OFFICER",
+    "agent_session_profile_version": "agent-session-profile.v1",
+    "memory_policy_id": "GRAPH_PRIVATE_NO_MEMORY_FRAME_V1",
+    "pin_set_hash": "357db8cd540491ec0d5031ae3e2968243ffee51409e5a8115749a8b1ba75d14d"
+  },
+  "snapshot_material": {
+    "snapshot": {
+      "artifact_id": "SNAPSHOT_ARTIFACT_P4_SYNTHETIC_1",
+      "artifact_type": "INTAKE_SNAPSHOT",
+      "schema_version": "intake-domain-snapshot.v2",
+      "object_uri": "s3://intake-synthetic-material/CASE_P4_SYNTHETIC_1/snapshot.json",
+      "object_version": "version-1",
+      "content_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+      "size_bytes": 1024,
+      "stored_at": "2026-07-20T08:01:00Z"
+    },
+    "domain_revision": 4,
+    "room_revision": 2,
+    "projection_revision": 4,
+    "visibility": "PRIVATE_SYNTHETIC",
+    "source_refs": ["MESSAGE_P4_SYNTHETIC_1"],
+    "initial_case_facts": [
+      {
+        "name": "form_description",
+        "value": "Synthetic order arrived damaged.",
+        "value_hash": "6666666666666666666666666666666666666666666666666666666666666666"
+      }
+    ],
+    "shareable_projection": [
+      {
+        "name": "intake_status",
+        "value": "OPEN",
+        "value_hash": "7777777777777777777777777777777777777777777777777777777777777777"
+      }
+    ],
+    "own_messages": [
+      {
+        "message_id": "MESSAGE_P4_SYNTHETIC_1",
+        "role": "HUMAN",
+        "audience": "USER",
+        "sequence": 1,
+        "text": "Synthetic order arrived damaged.",
+        "source_hash": "8888888888888888888888888888888888888888888888888888888888888888"
+      }
+    ],
+    "current_dossier": [
+      {
+        "name": "schema_version",
+        "value": "intake-dossier.v2",
+        "value_hash": "9999999999999999999999999999999999999999999999999999999999999999"
+      }
+    ],
+    "created_at": "2026-07-20T08:01:00Z"
+  },
+  "graph_plan": {
+    "logical_run_id": "RUN_P4_SYNTHETIC_1",
+    "attempt_id": "ATTEMPT_P4_SYNTHETIC_1",
+    "attempt_no": 1,
+    "attempt_limit": 3,
+    "reset_required": false,
+    "public_sequence_offset": 0,
+    "stage_code": "INTAKE_MESSAGE",
+    "agent_profile_id": "DISPUTE_INTAKE_OFFICER",
+    "operation": "INTAKE_MESSAGE",
+    "logical_idempotency_key": "intake.graph:CASE_P4_SYNTHETIC_1:CMD_P4_SYNTHETIC_1",
+    "envelope_key_id": "synthetic-envelope-key.v1",
+    "envelope_nonce": "synthetic-envelope-nonce.v1"
+  },
+  "graph_artifacts": {
+    "result": {
+      "artifact_id": "RESULT_P4_SYNTHETIC_1",
+      "artifact_type": "GRAPH_RESULT",
+      "schema_version": "room-graph-result.v1",
+      "object_uri": "s3://intake-synthetic-material/CASE_P4_SYNTHETIC_1/result.json",
+      "object_version": "version-1",
+      "content_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "size_bytes": 2048,
+      "stored_at": "2026-07-20T08:02:00Z"
+    },
+    "proposal": {
+      "artifact_id": "PROPOSAL_P4_SYNTHETIC_1",
+      "artifact_type": "INTAKE_PROPOSAL",
+      "schema_version": "intake-turn-proposal.v2",
+      "object_uri": "s3://intake-synthetic-material/CASE_P4_SYNTHETIC_1/proposal.json",
+      "object_version": "version-1",
+      "content_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "size_bytes": 1024,
+      "stored_at": "2026-07-20T08:02:00Z"
+    }
+  },
+  "parity_material": {
+    "parity_baseline": {
+      "artifact_id": "PARITY_BASELINE_P4_SYNTHETIC_1",
+      "artifact_type": "PARITY_BASELINE",
+      "schema_version": "intake-parity-baseline.v1",
+      "object_uri": "s3://intake-synthetic-material/CASE_P4_SYNTHETIC_1/parity-baseline.json",
+      "object_version": "version-1",
+      "content_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "size_bytes": 1536,
+      "stored_at": "2026-07-20T08:00:00Z"
+    },
+    "result_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "proposal_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "projected_event_type": "TURN_NEEDS_INPUT",
+    "legacy": {
+      "schema": {"classification": "VALID", "value_hash": "0101010101010101010101010101010101010101010101010101010101010101"},
+      "stable_facts": {"classification": "VALUE", "value_hash": "0202020202020202020202020202020202020202020202020202020202020202"},
+      "source_hash_membership": {"classification": "PRESENT", "value_hash": "0303030303030303030303030303030303030303030303030303030303030303"},
+      "readiness": {"classification": "NOT_READY", "value_hash": "0404040404040404040404040404040404040404040404040404040404040404"},
+      "normalized_patch": {"classification": "VALUE", "value_hash": "0505050505050505050505050505050505050505050505050505050505050505"},
+      "recommendation": {"classification": "REVIEW", "value_hash": "0606060606060606060606060606060606060606060606060606060606060606"},
+      "guardrail": {"classification": "ALLOW", "value_hash": "0707070707070707070707070707070707070707070707070707070707070707"},
+      "terminal": {"classification": "NON_TERMINAL", "value_hash": "0808080808080808080808080808080808080808080808080808080808080808"},
+      "privacy": {"classification": "CLEAN", "value_hash": "0909090909090909090909090909090909090909090909090909090909090909"},
+      "hard_zero_findings": []
+    },
+    "shadow": {
+      "schema": {"classification": "VALID", "value_hash": "0101010101010101010101010101010101010101010101010101010101010101"},
+      "stable_facts": {"classification": "VALUE", "value_hash": "0202020202020202020202020202020202020202020202020202020202020202"},
+      "source_hash_membership": {"classification": "PRESENT", "value_hash": "0303030303030303030303030303030303030303030303030303030303030303"},
+      "readiness": {"classification": "NOT_READY", "value_hash": "0404040404040404040404040404040404040404040404040404040404040404"},
+      "normalized_patch": {"classification": "VALUE", "value_hash": "0505050505050505050505050505050505050505050505050505050505050505"},
+      "recommendation": {"classification": "REVIEW", "value_hash": "0606060606060606060606060606060606060606060606060606060606060606"},
+      "guardrail": {"classification": "ALLOW", "value_hash": "0707070707070707070707070707070707070707070707070707070707070707"},
+      "terminal": {"classification": "NON_TERMINAL", "value_hash": "0808080808080808080808080808080808080808080808080808080808080808"},
+      "privacy": {"classification": "CLEAN", "value_hash": "0909090909090909090909090909090909090909090909090909090909090909"},
+      "hard_zero_findings": []
+    }
+  },
+  "created_at": "2026-07-20T08:00:00Z",
+  "manifest_hash": "f6bc855b6d5a5e09d3aef80fa6e575985449d21bc511402477ee93b1cdcc4d42"
+}

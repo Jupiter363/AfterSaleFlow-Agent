@@ -1,0 +1,532 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.after-sale-flow.example/agent-platform/intake/v2/intake-synthetic-runtime-material-manifest.schema.json",
+  "title": "Intake Signed Synthetic Runtime Material Manifest v1",
+  "description": "Bounded material for the engineering-only signed synthetic Intake SHADOW runtime. The manifest carries no credentials, hidden model fields, real-party data, or formal-action authority.",
+  "type": "object",
+  "additionalProperties": false,
+  "x-max-encoded-bytes": 131072,
+  "required": [
+    "schema_version",
+    "manifest_id",
+    "traffic_source",
+    "room_type",
+    "writer_mode",
+    "synthetic_only",
+    "contains_real_party_data",
+    "formal_effects_allowed",
+    "output_sink",
+    "authority_binding",
+    "version_pins",
+    "snapshot_material",
+    "graph_plan",
+    "graph_artifacts",
+    "parity_material",
+    "created_at",
+    "manifest_hash"
+  ],
+  "properties": {
+    "schema_version": {"const": "intake-synthetic-runtime-material-manifest.v1"},
+    "manifest_id": {"$ref": "#/$defs/identifier"},
+    "traffic_source": {"const": "SIGNED_SYNTHETIC"},
+    "room_type": {"const": "INTAKE"},
+    "writer_mode": {"const": "SHADOW"},
+    "synthetic_only": {"const": true},
+    "contains_real_party_data": {"const": false},
+    "formal_effects_allowed": {"const": false},
+    "output_sink": {"const": "ISOLATED_COMPARISON_LEDGER"},
+    "authority_binding": {"$ref": "#/$defs/authority_binding"},
+    "version_pins": {"$ref": "#/$defs/version_pins"},
+    "snapshot_material": {"$ref": "#/$defs/snapshot_material"},
+    "graph_plan": {"$ref": "#/$defs/graph_plan"},
+    "graph_artifacts": {"$ref": "#/$defs/graph_artifacts"},
+    "parity_material": {"$ref": "#/$defs/parity_material"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "manifest_hash": {"$ref": "#/$defs/sha256"}
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "authority_binding": {
+            "properties": {"actor_role": {"const": "USER"}}
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "snapshot_material": {
+            "properties": {
+              "own_messages": {
+                "items": {"properties": {"audience": {"const": "USER"}}}
+              }
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "snapshot_material": {
+            "properties": {
+              "own_messages": {
+                "items": {"properties": {"audience": {"const": "MERCHANT"}}}
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "thread_id": {"type": "string", "pattern": "^grt\\.v1\\.[0-9a-f]{32}$"},
+    "object_uri": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^(s3|minio|urn):",
+      "maxLength": 1024
+    },
+    "storage_uri": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^(s3|minio):",
+      "maxLength": 1024
+    },
+    "bounded_epoch_millis": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "authority_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "admission_schema_version",
+        "admission_status",
+        "epoch_id",
+        "party_authority_id",
+        "case_command_id",
+        "payload_authority_id",
+        "access_session_id",
+        "registration_id",
+        "tenant_surrogate",
+        "case_id",
+        "room_epoch",
+        "fencing_token",
+        "actor_id",
+        "actor_role",
+        "command_id",
+        "command_sequence",
+        "command_type",
+        "party",
+        "actor_scope_hash",
+        "command_payload_ref",
+        "command_payload_hash",
+        "command_operation_key",
+        "request_hash",
+        "accepted_room_revision",
+        "thread_id",
+        "agent_session_id",
+        "process_revision",
+        "room_revision",
+        "deadline_epoch_millis",
+        "logical_run_id",
+        "attempt_id",
+        "selection_hash",
+        "registration_hash",
+        "authorization_hash",
+        "authority_binding_hash"
+      ],
+      "properties": {
+        "schema_version": {"const": "intake-synthetic-authority-binding.v1"},
+        "admission_schema_version": {"const": "intake-synthetic-activity-admission.v1"},
+        "admission_status": {"const": "VERIFIED"},
+        "epoch_id": {"$ref": "#/$defs/identifier"},
+        "party_authority_id": {"$ref": "#/$defs/identifier"},
+        "case_command_id": {"$ref": "#/$defs/identifier"},
+        "payload_authority_id": {"$ref": "#/$defs/identifier"},
+        "access_session_id": {"$ref": "#/$defs/identifier"},
+        "registration_id": {"$ref": "#/$defs/identifier"},
+        "tenant_surrogate": {"$ref": "#/$defs/identifier"},
+        "case_id": {"$ref": "#/$defs/identifier"},
+        "room_epoch": {"type": "integer", "minimum": 0},
+        "fencing_token": {"type": "integer", "minimum": 1},
+        "actor_id": {"$ref": "#/$defs/identifier"},
+        "actor_role": {"enum": ["USER", "MERCHANT"]},
+        "command_id": {"$ref": "#/$defs/identifier"},
+        "command_sequence": {"type": "integer", "minimum": 1},
+        "command_type": {"const": "INTAKE_MESSAGE"},
+        "party": {"enum": ["INITIATOR", "RESPONDENT"]},
+        "actor_scope_hash": {"$ref": "#/$defs/sha256"},
+        "command_payload_ref": {"$ref": "#/$defs/object_uri"},
+        "command_payload_hash": {"$ref": "#/$defs/sha256"},
+        "command_operation_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^intake\\.operation:[A-Za-z0-9._:-]+:[A-Za-z0-9._:-]+$"
+        },
+        "request_hash": {"$ref": "#/$defs/sha256"},
+        "accepted_room_revision": {"type": "integer", "minimum": 0},
+        "thread_id": {"$ref": "#/$defs/thread_id"},
+        "agent_session_id": {"$ref": "#/$defs/identifier"},
+        "process_revision": {"type": "integer", "minimum": 0},
+        "room_revision": {"type": "integer", "minimum": 0},
+        "deadline_epoch_millis": {"$ref": "#/$defs/bounded_epoch_millis"},
+        "logical_run_id": {"$ref": "#/$defs/identifier"},
+        "attempt_id": {"$ref": "#/$defs/identifier"},
+        "selection_hash": {"$ref": "#/$defs/sha256"},
+        "registration_hash": {"$ref": "#/$defs/sha256"},
+        "authorization_hash": {"$ref": "#/$defs/sha256"},
+        "authority_binding_hash": {
+          "description": "SHA-256 of the RFC 8785 authority binding with authority_binding_hash omitted.",
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "version_pins": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "case_workflow_type",
+        "case_workflow_build_id",
+        "room_workflow_type",
+        "room_workflow_build_id",
+        "process_contract_version",
+        "graph_key",
+        "graph_version",
+        "checkpoint_schema_version",
+        "state_schema_version",
+        "stream_protocol",
+        "prompt_version",
+        "model_profile_id",
+        "output_schema_version",
+        "policy_version",
+        "guardrail_version",
+        "tool_policy_version",
+        "cohort_policy_version",
+        "agent_key",
+        "agent_session_profile_version",
+        "memory_policy_id",
+        "pin_set_hash"
+      ],
+      "properties": {
+        "case_workflow_type": {"const": "CaseProcessWorkflow"},
+        "case_workflow_build_id": {"$ref": "#/$defs/identifier"},
+        "room_workflow_type": {"const": "IntakeRoomWorkflow"},
+        "room_workflow_build_id": {"$ref": "#/$defs/identifier"},
+        "process_contract_version": {"$ref": "#/$defs/identifier"},
+        "graph_key": {"const": "intake.v2"},
+        "graph_version": {"$ref": "#/$defs/identifier"},
+        "checkpoint_schema_version": {"$ref": "#/$defs/identifier"},
+        "state_schema_version": {"const": "intake-graph-state.v2"},
+        "stream_protocol": {"const": "agent-stream.v2"},
+        "prompt_version": {"$ref": "#/$defs/identifier"},
+        "model_profile_id": {"$ref": "#/$defs/identifier"},
+        "output_schema_version": {"const": "intake-turn-proposal.v2"},
+        "policy_version": {"$ref": "#/$defs/identifier"},
+        "guardrail_version": {"$ref": "#/$defs/identifier"},
+        "tool_policy_version": {"const": "no-tools.v1"},
+        "cohort_policy_version": {"const": "synthetic-only.v1"},
+        "agent_key": {"const": "DISPUTE_INTAKE_OFFICER"},
+        "agent_session_profile_version": {"const": "agent-session-profile.v1"},
+        "memory_policy_id": {"const": "GRAPH_PRIVATE_NO_MEMORY_FRAME_V1"},
+        "pin_set_hash": {
+          "description": "SHA-256 of the RFC 8785 version pin set with pin_set_hash omitted.",
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "synthetic_scalar_field": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "value", "value_hash"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^(?!(?:memory_frame|internal_handoff|handoff_notes|hidden_reasoning|chain_of_thought|tool_calls|tool_parameters|credential|credentials|password|secret|token|api_key|private_key|compact_jws|signing_key)$)[a-z][a-z0-9_]{0,63}$"
+        },
+        "value": {
+          "oneOf": [
+            {"type": "string", "maxLength": 8192},
+            {"type": "integer", "minimum": -9007199254740991, "maximum": 9007199254740991},
+            {"type": "boolean"},
+            {"type": "null"}
+          ]
+        },
+        "value_hash": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "message": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["message_id", "role", "audience", "sequence", "text", "source_hash"],
+      "properties": {
+        "message_id": {"$ref": "#/$defs/identifier"},
+        "role": {"enum": ["HUMAN", "AI"]},
+        "audience": {"enum": ["USER", "MERCHANT"]},
+        "sequence": {"type": "integer", "minimum": 0},
+        "text": {"type": "string", "minLength": 1, "maxLength": 8192},
+        "source_hash": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "artifact_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact_id",
+        "artifact_type",
+        "schema_version",
+        "object_uri",
+        "object_version",
+        "content_sha256",
+        "size_bytes",
+        "stored_at"
+      ],
+      "properties": {
+        "artifact_id": {"$ref": "#/$defs/identifier"},
+        "artifact_type": {
+          "enum": ["INTAKE_SNAPSHOT", "GRAPH_RESULT", "INTAKE_PROPOSAL", "PARITY_BASELINE"]
+        },
+        "schema_version": {"$ref": "#/$defs/identifier"},
+        "object_uri": {"$ref": "#/$defs/storage_uri"},
+        "object_version": {"$ref": "#/$defs/identifier"},
+        "content_sha256": {"$ref": "#/$defs/sha256"},
+        "size_bytes": {"type": "integer", "minimum": 1, "maximum": 1048576},
+        "stored_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "snapshot_material": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "snapshot",
+        "domain_revision",
+        "room_revision",
+        "projection_revision",
+        "visibility",
+        "source_refs",
+        "initial_case_facts",
+        "shareable_projection",
+        "own_messages",
+        "current_dossier",
+        "created_at"
+      ],
+      "properties": {
+        "snapshot": {
+          "allOf": [
+            {"$ref": "#/$defs/artifact_ref"},
+            {
+              "properties": {
+                "artifact_type": {"const": "INTAKE_SNAPSHOT"},
+                "schema_version": {"const": "intake-domain-snapshot.v2"},
+                "size_bytes": {"maximum": 262144}
+              }
+            }
+          ]
+        },
+        "domain_revision": {"type": "integer", "minimum": 0},
+        "room_revision": {"type": "integer", "minimum": 0},
+        "projection_revision": {"type": "integer", "minimum": 0},
+        "visibility": {"const": "PRIVATE_SYNTHETIC"},
+        "source_refs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/identifier"}
+        },
+        "initial_case_facts": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {"$ref": "#/$defs/synthetic_scalar_field"}
+        },
+        "shareable_projection": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {"$ref": "#/$defs/synthetic_scalar_field"}
+        },
+        "own_messages": {
+          "type": "array",
+          "maxItems": 6,
+          "items": {"$ref": "#/$defs/message"}
+        },
+        "current_dossier": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {"$ref": "#/$defs/synthetic_scalar_field"}
+        },
+        "created_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "graph_plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "logical_run_id",
+        "attempt_id",
+        "attempt_no",
+        "attempt_limit",
+        "reset_required",
+        "public_sequence_offset",
+        "stage_code",
+        "agent_profile_id",
+        "operation",
+        "logical_idempotency_key",
+        "envelope_key_id",
+        "envelope_nonce"
+      ],
+      "properties": {
+        "logical_run_id": {"$ref": "#/$defs/identifier"},
+        "attempt_id": {"$ref": "#/$defs/identifier"},
+        "attempt_no": {"type": "integer", "minimum": 1, "maximum": 3},
+        "attempt_limit": {"type": "integer", "minimum": 1, "maximum": 3},
+        "previous_attempt_id": {"$ref": "#/$defs/identifier"},
+        "reset_required": {"type": "boolean"},
+        "public_sequence_offset": {"type": "integer", "minimum": 0},
+        "stage_code": {"const": "INTAKE_MESSAGE"},
+        "agent_profile_id": {"const": "DISPUTE_INTAKE_OFFICER"},
+        "operation": {"const": "INTAKE_MESSAGE"},
+        "logical_idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^intake\\.graph:[A-Za-z0-9._:-]+:[A-Za-z0-9._:-]+$"
+        },
+        "envelope_key_id": {"$ref": "#/$defs/identifier"},
+        "envelope_nonce": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9._:-]+$"
+        }
+      }
+    },
+    "graph_artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["result", "proposal"],
+      "properties": {
+        "result": {
+          "allOf": [
+            {"$ref": "#/$defs/artifact_ref"},
+            {
+              "properties": {
+                "artifact_type": {"const": "GRAPH_RESULT"},
+                "schema_version": {"const": "room-graph-result.v1"},
+                "size_bytes": {"maximum": 65536}
+              }
+            }
+          ]
+        },
+        "proposal": {
+          "allOf": [
+            {"$ref": "#/$defs/artifact_ref"},
+            {
+              "properties": {
+                "artifact_type": {"const": "INTAKE_PROPOSAL"},
+                "schema_version": {"const": "intake-turn-proposal.v2"},
+                "size_bytes": {"maximum": 65536}
+              }
+            }
+          ]
+        }
+      }
+    },
+    "observed_value": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["classification", "value_hash"],
+      "properties": {
+        "classification": {
+          "enum": [
+            "VALID", "INVALID", "PRESENT", "ABSENT", "READY", "NOT_READY",
+            "ACCEPT", "REJECT", "REVIEW", "ALLOW", "BLOCK", "TERMINAL",
+            "NON_TERMINAL", "CLEAN", "VIOLATION", "VALUE"
+          ]
+        },
+        "value_hash": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "parity_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "stable_facts",
+        "source_hash_membership",
+        "readiness",
+        "normalized_patch",
+        "recommendation",
+        "guardrail",
+        "terminal",
+        "privacy",
+        "hard_zero_findings"
+      ],
+      "properties": {
+        "schema": {"$ref": "#/$defs/observed_value"},
+        "stable_facts": {"$ref": "#/$defs/observed_value"},
+        "source_hash_membership": {"$ref": "#/$defs/observed_value"},
+        "readiness": {"$ref": "#/$defs/observed_value"},
+        "normalized_patch": {"$ref": "#/$defs/observed_value"},
+        "recommendation": {"$ref": "#/$defs/observed_value"},
+        "guardrail": {"$ref": "#/$defs/observed_value"},
+        "terminal": {"$ref": "#/$defs/observed_value"},
+        "privacy": {"$ref": "#/$defs/observed_value"},
+        "hard_zero_findings": {
+          "type": "array",
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "PRIVACY_LEAKAGE",
+              "STALE_FENCE_SUCCESS",
+              "UNAUTHORIZED_FIELD",
+              "FORMAL_SINK_REACHABILITY"
+            ]
+          }
+        }
+      }
+    },
+    "parity_material": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "parity_baseline",
+        "result_hash",
+        "proposal_hash",
+        "projected_event_type",
+        "legacy",
+        "shadow"
+      ],
+      "properties": {
+        "parity_baseline": {
+          "allOf": [
+            {"$ref": "#/$defs/artifact_ref"},
+            {
+              "properties": {
+                "artifact_type": {"const": "PARITY_BASELINE"},
+                "schema_version": {"const": "intake-parity-baseline.v1"},
+                "size_bytes": {"maximum": 65536}
+              }
+            }
+          ]
+        },
+        "result_hash": {"$ref": "#/$defs/sha256"},
+        "proposal_hash": {"$ref": "#/$defs/sha256"},
+        "projected_event_type": {"enum": ["TURN_NEEDS_INPUT", "TURN_READY_TO_CONFIRM"]},
+        "legacy": {"$ref": "#/$defs/parity_snapshot"},
+        "shadow": {"$ref": "#/$defs/parity_snapshot"}
+      }
+    }
+  }
+}
