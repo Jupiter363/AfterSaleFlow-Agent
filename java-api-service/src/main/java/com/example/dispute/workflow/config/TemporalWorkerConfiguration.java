@@ -25,9 +25,11 @@ import com.example.dispute.workflow.temporal.caseprocess.IntakeChildBridgeActivi
 import com.example.dispute.workflow.temporal.room.common.RoomControlWorkflowImpl;
 import com.example.dispute.workflow.temporal.room.intake.IntakeRoomWorkflowImpl;
 import com.example.dispute.workflow.infrastructure.persistence.authority.bridge.JdbcIntakeChildBridgeReadPort;
+import com.example.dispute.workflow.shadow.intake.IntakeSyntheticWorkerRegistration;
 import io.temporal.client.WorkflowClient;
 import io.temporal.worker.Worker;
 import io.temporal.worker.WorkerFactory;
+import java.util.ArrayList;
 import java.util.List;
 import javax.sql.DataSource;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -91,10 +93,13 @@ public class TemporalWorkerConfiguration {
             TemporalWorkerProperties properties,
             TemporalWorkerOptionsFactory optionsFactory,
             AgentRunV2Properties agentRunV2Properties,
+            IntakeEpochSelectionProperties intakeEpochSelectionProperties,
+            ObjectProvider<IntakeSyntheticWorkerRegistration> syntheticRegistrationProvider,
             ObjectProvider<AgentRunLedger> ledgerProvider,
             ObjectProvider<AgentRunExecutionGateway> executionGatewayProvider,
             ObjectProvider<AgentRunFinalizationGateway> finalizationGatewayProvider) {
-        requireVersionedAgentRunWorker(properties, agentRunV2Properties);
+        requireVersionedAgentWorker(
+                properties, agentRunV2Properties, intakeEpochSelectionProperties);
         WorkerFactory factory =
                 WorkerFactory.newInstance(workflowClient, optionsFactory.factoryOptions());
         return start(
@@ -105,6 +110,8 @@ public class TemporalWorkerConfiguration {
                                 properties,
                                 optionsFactory,
                                 agentRunV2Properties,
+                                intakeEpochSelectionProperties,
+                                syntheticRegistrationProvider,
                                 ledgerProvider,
                                 executionGatewayProvider,
                                 finalizationGatewayProvider));
@@ -179,31 +186,41 @@ public class TemporalWorkerConfiguration {
             TemporalWorkerProperties properties,
             TemporalWorkerOptionsFactory optionsFactory,
             AgentRunV2Properties agentRunV2Properties,
+            IntakeEpochSelectionProperties intakeEpochSelectionProperties,
+            ObjectProvider<IntakeSyntheticWorkerRegistration> syntheticRegistrationProvider,
             ObjectProvider<AgentRunLedger> ledgerProvider,
             ObjectProvider<AgentRunExecutionGateway> executionGatewayProvider,
             ObjectProvider<AgentRunFinalizationGateway> finalizationGatewayProvider) {
         Worker agentExecution =
                 factory.newWorker(
                         AGENT_EXECUTION, optionsFactory.workerOptions(AGENT_EXECUTION));
+        List<Class<?>> workflowTypes = new ArrayList<>();
+        List<Object> activityImplementations = new ArrayList<>();
         if (!agentRunV2Properties.enabled()) {
-            agentExecution.registerWorkflowImplementationTypes(
-                    TemporalWorkerProbeWorkflowImpl.class);
-            agentExecution.registerActivitiesImplementations(
+            workflowTypes.add(TemporalWorkerProbeWorkflowImpl.class);
+            activityImplementations.add(
                     new TemporalWorkerProbeActivitiesImpl(properties, AGENT_EXECUTION));
-            return;
+        } else {
+            AgentRunLedger ledger = requireUnique(ledgerProvider, "AgentRunLedger");
+            AgentRunExecutionGateway executionGateway =
+                    requireUnique(executionGatewayProvider, "AgentRunExecutionGateway");
+            AgentRunFinalizationGateway finalizationGateway =
+                    requireUnique(finalizationGatewayProvider, "AgentRunFinalizationGateway");
+            workflowTypes.add(AgentRunWorkflowImpl.class);
+            workflowTypes.add(TemporalWorkerProbeWorkflowImpl.class);
+            activityImplementations.add(new ExecuteAgentRunActivityImpl(ledger, executionGateway));
+            activityImplementations.add(new FinalizeAgentRunActivityImpl(finalizationGateway));
+            activityImplementations.add(
+                    new TemporalWorkerProbeActivitiesImpl(properties, AGENT_EXECUTION));
         }
 
-        AgentRunLedger ledger = requireUnique(ledgerProvider, "AgentRunLedger");
-        AgentRunExecutionGateway executionGateway =
-                requireUnique(executionGatewayProvider, "AgentRunExecutionGateway");
-        AgentRunFinalizationGateway finalizationGateway =
-                requireUnique(finalizationGatewayProvider, "AgentRunFinalizationGateway");
-        agentExecution.registerWorkflowImplementationTypes(
-                AgentRunWorkflowImpl.class, TemporalWorkerProbeWorkflowImpl.class);
-        agentExecution.registerActivitiesImplementations(
-                new ExecuteAgentRunActivityImpl(ledger, executionGateway),
-                new FinalizeAgentRunActivityImpl(finalizationGateway),
-                new TemporalWorkerProbeActivitiesImpl(properties, AGENT_EXECUTION));
+        if (intakeEpochSelectionProperties.shadowSelectionConfigured()) {
+            activityImplementations.add(
+                    requireExactlyOneSyntheticRegistration(syntheticRegistrationProvider)
+                            .activityImplementation());
+        }
+        agentExecution.registerWorkflowImplementationTypes(workflowTypes.toArray(Class[]::new));
+        agentExecution.registerActivitiesImplementations(activityImplementations.toArray());
     }
 
     private static <T> T requireUnique(ObjectProvider<T> provider, String dependency) {
@@ -215,14 +232,36 @@ public class TemporalWorkerConfiguration {
         return value;
     }
 
-    private static void requireVersionedAgentRunWorker(
+    private static IntakeSyntheticWorkerRegistration requireExactlyOneSyntheticRegistration(
+            ObjectProvider<IntakeSyntheticWorkerRegistration> provider) {
+        List<IntakeSyntheticWorkerRegistration> registrations = provider.stream().toList();
+        if (registrations.size() != 1) {
+            throw new IllegalStateException(
+                    "Signed synthetic Intake requires exactly one IntakeSyntheticWorkerRegistration");
+        }
+        return registrations.getFirst();
+    }
+
+    private static void requireVersionedAgentWorker(
             TemporalWorkerProperties properties,
-            AgentRunV2Properties agentRunV2Properties) {
+            AgentRunV2Properties agentRunV2Properties,
+            IntakeEpochSelectionProperties intakeEpochSelectionProperties) {
         if (agentRunV2Properties.enabled()
                 && properties.versioningMode()
                         == TemporalWorkerProperties.VersioningMode.NONE) {
             throw new IllegalStateException(
                     "AgentRun v3 requires Temporal versioningMode BUILD_ID or DEPLOYMENT");
+        }
+        if (intakeEpochSelectionProperties.shadowSelectionConfigured()
+                && properties.versioningMode()
+                        == TemporalWorkerProperties.VersioningMode.NONE) {
+            throw new IllegalStateException(
+                    "Signed synthetic Intake requires Temporal versioningMode BUILD_ID or DEPLOYMENT");
+        }
+        if (intakeEpochSelectionProperties.shadowSelectionConfigured()
+                && agentRunV2Properties.enabled()) {
+            throw new IllegalStateException(
+                    "Signed synthetic Intake cannot share AGENT_EXECUTION with AgentRunV2");
         }
     }
 

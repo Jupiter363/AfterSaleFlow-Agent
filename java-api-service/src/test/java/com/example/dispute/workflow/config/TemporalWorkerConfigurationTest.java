@@ -17,6 +17,7 @@ import com.example.dispute.workflow.activity.agent.AgentRunFinalizationGateway;
 import com.example.dispute.workflow.activity.domain.CaseProcessLedgerActivitiesImpl;
 import com.example.dispute.workflow.activity.domain.IntakeChildBridgeReadPort;
 import com.example.dispute.workflow.activity.domain.ProcessProjectionActivitiesImpl;
+import com.example.dispute.workflow.activity.intake.IntakeSnapshotPublicationPort;
 import com.example.dispute.workflow.activity.system.TemporalWorkerProbeActivities.TemporalWorkerDescription;
 import com.example.dispute.workflow.activity.system.TemporalWorkerProbeWorkflow;
 import com.example.dispute.workflow.application.EvidenceWindowActivitiesAdapter;
@@ -24,11 +25,18 @@ import com.example.dispute.workflow.config.TemporalWorkerProperties.QueueCapacit
 import com.example.dispute.workflow.config.TemporalWorkerProperties.VersioningMode;
 import com.example.dispute.workflow.config.TemporalWorkerProperties.WorkerRole;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunProtocol;
+import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
+import com.example.dispute.workflow.shadow.intake.IntakeSignedSyntheticAdmissionPort;
+import com.example.dispute.workflow.shadow.intake.IntakeSignedSyntheticGraphExecutionPort;
+import com.example.dispute.workflow.shadow.intake.IntakeSyntheticComparisonLedger;
+import com.example.dispute.workflow.shadow.intake.IntakeSyntheticParityObservationPort;
+import com.example.dispute.workflow.shadow.intake.IntakeSyntheticWorkerRegistration;
+import io.temporal.client.WorkflowOptions;
 import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.worker.WorkerFactory;
-import io.temporal.client.WorkflowOptions;
 import java.time.Duration;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 
 class TemporalWorkerConfigurationTest {
@@ -132,6 +140,8 @@ class TemporalWorkerConfigurationTest {
                 executionGatewayProvider = mockProvider(AgentRunExecutionGateway.class);
         org.springframework.beans.factory.ObjectProvider<AgentRunFinalizationGateway>
                 finalizationGatewayProvider = mockProvider(AgentRunFinalizationGateway.class);
+        org.springframework.beans.factory.ObjectProvider<IntakeSyntheticWorkerRegistration>
+                syntheticRegistrationProvider = mockProvider(IntakeSyntheticWorkerRegistration.class);
 
         try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
             TemporalWorkerConfiguration configuration = new TemporalWorkerConfiguration();
@@ -140,6 +150,8 @@ class TemporalWorkerConfigurationTest {
                             properties,
                             new TemporalWorkerOptionsFactory(properties),
                             v2Properties,
+                            disabledIntakeSelection(),
+                            syntheticRegistrationProvider,
                             ledgerProvider,
                             executionGatewayProvider,
                             finalizationGatewayProvider))
@@ -149,7 +161,10 @@ class TemporalWorkerConfigurationTest {
         }
 
         verifyNoInteractions(
-                ledgerProvider, executionGatewayProvider, finalizationGatewayProvider);
+                syntheticRegistrationProvider,
+                ledgerProvider,
+                executionGatewayProvider,
+                finalizationGatewayProvider);
     }
 
     @Test
@@ -164,6 +179,8 @@ class TemporalWorkerConfigurationTest {
                     properties,
                     new TemporalWorkerOptionsFactory(properties),
                     enabledAgentRunProperties(),
+                    disabledIntakeSelection(),
+                    mockProvider(IntakeSyntheticWorkerRegistration.class),
                     provider(mock(AgentRunLedger.class)),
                     provider(mock(AgentRunExecutionGateway.class)),
                     provider(mock(AgentRunFinalizationGateway.class)));
@@ -193,11 +210,175 @@ class TemporalWorkerConfigurationTest {
                             properties,
                             new TemporalWorkerOptionsFactory(properties),
                             v2Properties,
+                            disabledIntakeSelection(),
+                            mockProvider(IntakeSyntheticWorkerRegistration.class),
                             provider(mock(AgentRunLedger.class)),
                             mockProvider(AgentRunExecutionGateway.class),
                             provider(mock(AgentRunFinalizationGateway.class))))
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining("exactly one AgentRunExecutionGateway");
+        }
+    }
+
+    @Test
+    void disabledAndPartialSyntheticSelectionDoNotResolveTheRegistrationProvider() {
+        for (IntakeEpochSelectionProperties selection :
+                new IntakeEpochSelectionProperties[] {
+                    disabledIntakeSelection(), partialIntakeSelection()
+                }) {
+            TemporalWorkerProperties properties = properties(WorkerRole.AGENT);
+            org.springframework.beans.factory.ObjectProvider<IntakeSyntheticWorkerRegistration>
+                    syntheticRegistrationProvider =
+                            mockProvider(IntakeSyntheticWorkerRegistration.class);
+
+            try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+                TemporalWorkerConfiguration configuration = new TemporalWorkerConfiguration();
+                WorkerFactory factory = configuration.temporalAgentWorkerFactory(
+                        environment.getWorkflowClient(),
+                        properties,
+                        new TemporalWorkerOptionsFactory(properties),
+                        disabledAgentRunProperties(),
+                        selection,
+                        syntheticRegistrationProvider,
+                        mockProvider(AgentRunLedger.class),
+                        mockProvider(AgentRunExecutionGateway.class),
+                        mockProvider(AgentRunFinalizationGateway.class));
+                try {
+                    assertThat(factory.isStarted()).isTrue();
+                } finally {
+                    shutdown(factory);
+                }
+            }
+
+            verifyNoInteractions(syntheticRegistrationProvider);
+        }
+    }
+
+    @Test
+    void enabledSyntheticSelectionRequiresExactlyOneRegistration() {
+        assertSyntheticRegistrationRejected(streamProvider());
+        assertSyntheticRegistrationRejected(
+                streamProvider(syntheticRegistration(), syntheticRegistration()));
+    }
+
+    @Test
+    void enabledSyntheticSelectionRejectsUnversionedWorkerBeforeResolvingRegistration() {
+        TemporalWorkerProperties properties = properties(WorkerRole.AGENT, VersioningMode.NONE);
+        org.springframework.beans.factory.ObjectProvider<IntakeSyntheticWorkerRegistration>
+                syntheticRegistrationProvider = mockProvider(IntakeSyntheticWorkerRegistration.class);
+
+        try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+            TemporalWorkerConfiguration configuration = new TemporalWorkerConfiguration();
+            assertThatThrownBy(() -> configuration.temporalAgentWorkerFactory(
+                            environment.getWorkflowClient(),
+                            properties,
+                            new TemporalWorkerOptionsFactory(properties),
+                            disabledAgentRunProperties(),
+                            enabledIntakeSelection(),
+                            syntheticRegistrationProvider,
+                            mockProvider(AgentRunLedger.class),
+                            mockProvider(AgentRunExecutionGateway.class),
+                            mockProvider(AgentRunFinalizationGateway.class)))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining(
+                            "Signed synthetic Intake requires Temporal versioningMode BUILD_ID or DEPLOYMENT");
+        }
+
+        verifyNoInteractions(syntheticRegistrationProvider);
+    }
+
+    @Test
+    void enabledSyntheticWorkerStartsVersionedAndPreservesRoleIsolation() {
+        TemporalWorkerProperties properties =
+                properties(WorkerRole.AGENT, VersioningMode.BUILD_ID);
+
+        try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+            TemporalWorkerConfiguration configuration = new TemporalWorkerConfiguration();
+            WorkerFactory factory = configuration.temporalAgentWorkerFactory(
+                    environment.getWorkflowClient(),
+                    properties,
+                    new TemporalWorkerOptionsFactory(properties),
+                    disabledAgentRunProperties(),
+                    enabledIntakeSelection(),
+                    streamProvider(syntheticRegistration()),
+                    mockProvider(AgentRunLedger.class),
+                    mockProvider(AgentRunExecutionGateway.class),
+                    mockProvider(AgentRunFinalizationGateway.class));
+            try {
+                assertThat(factory.isStarted()).isTrue();
+                assertThat(factory.tryGetWorker(AGENT_EXECUTION)).isNotNull();
+                assertThat(factory.tryGetWorker(CASE_CONTROL)).isNull();
+                assertThat(factory.tryGetWorker(ROOM_CONTROL)).isNull();
+                assertThat(factory.tryGetWorker(NOTIFICATION_AND_TOOLS)).isNull();
+                assertThat(factory.tryGetWorker(LEGACY_EVIDENCE_WINDOW)).isNull();
+                assertProbe(
+                        environment,
+                        AGENT_EXECUTION,
+                        WorkerRole.AGENT,
+                        VersioningMode.BUILD_ID);
+            } finally {
+                shutdown(factory);
+            }
+        }
+    }
+
+    @Test
+    void enabledSyntheticSelectionRejectsAgentRunV2BeforeResolvingDependencies() {
+        TemporalWorkerProperties properties =
+                properties(WorkerRole.AGENT, VersioningMode.BUILD_ID);
+        org.springframework.beans.factory.ObjectProvider<IntakeSyntheticWorkerRegistration>
+                syntheticRegistrationProvider = mockProvider(IntakeSyntheticWorkerRegistration.class);
+        org.springframework.beans.factory.ObjectProvider<AgentRunLedger> ledgerProvider =
+                mockProvider(AgentRunLedger.class);
+        org.springframework.beans.factory.ObjectProvider<AgentRunExecutionGateway>
+                executionGatewayProvider = mockProvider(AgentRunExecutionGateway.class);
+        org.springframework.beans.factory.ObjectProvider<AgentRunFinalizationGateway>
+                finalizationGatewayProvider = mockProvider(AgentRunFinalizationGateway.class);
+
+        try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+            TemporalWorkerConfiguration configuration = new TemporalWorkerConfiguration();
+            assertThatThrownBy(() -> configuration.temporalAgentWorkerFactory(
+                            environment.getWorkflowClient(),
+                            properties,
+                            new TemporalWorkerOptionsFactory(properties),
+                            enabledAgentRunProperties(),
+                            enabledIntakeSelection(),
+                            syntheticRegistrationProvider,
+                            ledgerProvider,
+                            executionGatewayProvider,
+                            finalizationGatewayProvider))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining(
+                            "Signed synthetic Intake cannot share AGENT_EXECUTION with AgentRunV2");
+        }
+
+        verifyNoInteractions(
+                syntheticRegistrationProvider,
+                ledgerProvider,
+                executionGatewayProvider,
+                finalizationGatewayProvider);
+    }
+
+    private static void assertSyntheticRegistrationRejected(
+            org.springframework.beans.factory.ObjectProvider<IntakeSyntheticWorkerRegistration>
+                    syntheticRegistrationProvider) {
+        TemporalWorkerProperties properties =
+                properties(WorkerRole.AGENT, VersioningMode.BUILD_ID);
+        try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+            TemporalWorkerConfiguration configuration = new TemporalWorkerConfiguration();
+            assertThatThrownBy(() -> configuration.temporalAgentWorkerFactory(
+                            environment.getWorkflowClient(),
+                            properties,
+                            new TemporalWorkerOptionsFactory(properties),
+                            disabledAgentRunProperties(),
+                            enabledIntakeSelection(),
+                            syntheticRegistrationProvider,
+                            mockProvider(AgentRunLedger.class),
+                            mockProvider(AgentRunExecutionGateway.class),
+                            mockProvider(AgentRunFinalizationGateway.class)))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining(
+                            "exactly one IntakeSyntheticWorkerRegistration");
         }
     }
 
@@ -223,13 +404,9 @@ class TemporalWorkerConfigurationTest {
                     environment.getWorkflowClient(),
                     properties,
                     optionsFactory,
-                    new AgentRunV2Properties(
-                            false,
-                            AgentRunProtocol.V1,
-                            AgentRunV2Properties.SchedulerMode.EXECUTOR,
-                            Duration.ofMinutes(10),
-                            Duration.ofSeconds(15),
-                            Duration.ofSeconds(5)),
+                    disabledAgentRunProperties(),
+                    disabledIntakeSelection(),
+                    mockProvider(IntakeSyntheticWorkerRegistration.class),
                     mockProvider(AgentRunLedger.class),
                     mockProvider(AgentRunExecutionGateway.class),
                     mockProvider(AgentRunFinalizationGateway.class));
@@ -256,6 +433,16 @@ class TemporalWorkerConfigurationTest {
         org.springframework.beans.factory.ObjectProvider<T> provider =
                 mock(org.springframework.beans.factory.ObjectProvider.class);
         when(provider.getIfUnique()).thenReturn(value);
+        return provider;
+    }
+
+    @SafeVarargs
+    @SuppressWarnings("unchecked")
+    private static <T> org.springframework.beans.factory.ObjectProvider<T> streamProvider(
+            T... values) {
+        org.springframework.beans.factory.ObjectProvider<T> provider =
+                mock(org.springframework.beans.factory.ObjectProvider.class);
+        when(provider.stream()).thenReturn(Stream.of(values));
         return provider;
     }
 
@@ -296,8 +483,52 @@ class TemporalWorkerConfigurationTest {
                 Duration.ofSeconds(5));
     }
 
+    private static AgentRunV2Properties disabledAgentRunProperties() {
+        return new AgentRunV2Properties(
+                false,
+                AgentRunProtocol.V1,
+                AgentRunV2Properties.SchedulerMode.EXECUTOR,
+                Duration.ofMinutes(10),
+                Duration.ofSeconds(15),
+                Duration.ofSeconds(5));
+    }
+
+    private static IntakeEpochSelectionProperties disabledIntakeSelection() {
+        return new IntakeEpochSelectionProperties(WriterMode.LEGACY, 0, null, false);
+    }
+
+    private static IntakeEpochSelectionProperties partialIntakeSelection() {
+        return new IntakeEpochSelectionProperties(WriterMode.SHADOW, 0, null, true);
+    }
+
+    private static IntakeEpochSelectionProperties enabledIntakeSelection() {
+        return new IntakeEpochSelectionProperties(
+                WriterMode.SHADOW, 1, "synthetic.v1", true);
+    }
+
+    private static IntakeSyntheticWorkerRegistration syntheticRegistration() {
+        return new IntakeSyntheticWorkerRegistration(
+                mock(IntakeSignedSyntheticAdmissionPort.class),
+                mock(IntakeSnapshotPublicationPort.class),
+                mock(IntakeSignedSyntheticGraphExecutionPort.class),
+                mock(IntakeSyntheticParityObservationPort.class),
+                mock(IntakeSyntheticComparisonLedger.class));
+    }
+
     private static void assertProbe(
             TestWorkflowEnvironment environment, String taskQueue, WorkerRole role) {
+        assertProbe(
+                environment,
+                taskQueue,
+                role,
+                role == WorkerRole.CONTROL ? VersioningMode.BUILD_ID : VersioningMode.NONE);
+    }
+
+    private static void assertProbe(
+            TestWorkflowEnvironment environment,
+            String taskQueue,
+            WorkerRole role,
+            VersioningMode versioningMode) {
         TemporalWorkerProbeWorkflow probe =
                 environment.getWorkflowClient()
                         .newWorkflowStub(
@@ -314,8 +545,7 @@ class TemporalWorkerConfigurationTest {
         assertThat(description.role()).isEqualTo(role.name());
         assertThat(description.taskQueue()).isEqualTo(taskQueue);
         assertThat(description.buildId()).isEqualTo("test-build");
-        assertThat(description.versioningMode())
-                .isEqualTo(role == WorkerRole.CONTROL ? "BUILD_ID" : "NONE");
+        assertThat(description.versioningMode()).isEqualTo(versioningMode.name());
     }
 
     private static void shutdown(WorkerFactory factory) {
