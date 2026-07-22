@@ -43,9 +43,16 @@ public final class IntakeChildBridgeActivitiesAdapter implements IntakeChildBrid
     private static final String GRAPH_KEY = "intake.v2";
 
     private final IntakeChildBridgeReadPort readPort;
+    private final boolean permitExecutionContext;
 
     public IntakeChildBridgeActivitiesAdapter(IntakeChildBridgeReadPort readPort) {
+        this(readPort, false);
+    }
+
+    public IntakeChildBridgeActivitiesAdapter(
+            IntakeChildBridgeReadPort readPort, boolean permitExecutionContext) {
         this.readPort = Objects.requireNonNull(readPort, "readPort");
+        this.permitExecutionContext = permitExecutionContext;
     }
 
     @Override
@@ -59,7 +66,7 @@ public final class IntakeChildBridgeActivitiesAdapter implements IntakeChildBrid
     public CommandBinding bindCommand(CommandRequest request) {
         CommandRequest expected = requireRequest(request);
         CommandSource source = read(() -> readPort.readCommand(expected));
-        return validate(() -> commandBinding(expected, source));
+        return validate(() -> commandBinding(expected, source, permitExecutionContext));
     }
 
     @Override
@@ -119,7 +126,8 @@ public final class IntakeChildBridgeActivitiesAdapter implements IntakeChildBrid
                 start);
     }
 
-    private static CommandBinding commandBinding(CommandRequest request, CommandSource source) {
+    private static CommandBinding commandBinding(
+            CommandRequest request, CommandSource source, boolean permitExecutionContext) {
         Objects.requireNonNull(source, "command source");
         CaseCommandRef command = request.command();
         ActiveChildBinding active = request.activeBinding();
@@ -148,7 +156,7 @@ public final class IntakeChildBridgeActivitiesAdapter implements IntakeChildBrid
         requireParticipantRole(command.actorRef().actorRole());
         Objects.requireNonNull(source.party(), "authoritative Intake party");
         IntakeCommandType type = commandType(command.commandType());
-        if (source.executionContext() != null) {
+        if (source.executionContext() != null && !permitExecutionContext) {
             throw new IllegalArgumentException(
                     "current Intake authority gate permits only inert external events");
         }

@@ -7,7 +7,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.example.dispute.workflow.application.epoch.RoomEpochSelectionContext.TrafficSource;
 import com.example.dispute.workflow.shadow.intake.SignedSyntheticIntakeDriver;
 import com.example.dispute.workflow.temporal.room.intake.IntakeCommandType;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.Arrays;
 import org.junit.jupiter.api.Test;
 
 class SignedSyntheticIntakeDriverTest {
@@ -20,20 +20,17 @@ class SignedSyntheticIntakeDriverTest {
         var command = IntakeSyntheticTestFixtures.inertCommand(
                 "CMD_SYNTHETIC_MESSAGE", IntakeCommandType.INTAKE_MESSAGE);
         var attempt = signedAttempt(TrafficSource.AUTHENTICATED_SIGNED_SYNTHETIC);
-        AtomicReference<Object> dispatched = new AtomicReference<>();
 
-        var admitted = driver.dispatch(
-                attempt,
-                command,
-                dispatched::set);
+        var admitted = driver.admit(attempt, command);
 
-        assertThat(admitted.executionContext()).isNotNull();
-        assertThat(admitted.executionContext().threadId())
-                .isEqualTo(IntakeSyntheticTestFixtures.THREAD_ID);
-        assertThat(dispatched.get()).isSameAs(admitted);
+        assertThat(admitted).isSameAs(command);
+        assertThat(admitted.executionContext()).isNull();
         assertThat(admission.admissions).hasValue(1);
         assertThat(admission.lastAttempt).isSameAs(attempt);
         assertThat(admission.lastAttempt.compactJws()).isEqualTo(attempt.compactJws());
+        assertThat(Arrays.stream(SignedSyntheticIntakeDriver.class.getDeclaredMethods())
+                        .map(method -> method.getName()))
+                .doesNotContain("dispatch");
     }
 
     @Test

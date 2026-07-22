@@ -357,15 +357,14 @@ class IntakeChildBridgeActivitiesTest {
         assertThat(Arrays.stream(IntakeChildBridgeActivitiesAdapter.class.getDeclaredFields())
                         .filter(field -> !Modifier.isStatic(field.getModifiers()))
                         .map(field -> field.getType().getName()))
-                .containsExactly(IntakeChildBridgeReadPort.class.getName());
+                .containsExactly(IntakeChildBridgeReadPort.class.getName(), boolean.class.getName());
         assertThat(IntakeChildBridgeActivitiesAdapter.class.getDeclaredFields())
                 .extracting(field -> field.getType().getName())
-                .containsOnly(String.class.getName(), IntakeChildBridgeReadPort.class.getName());
-        assertThat(IntakeChildBridgeActivitiesAdapter.class.getDeclaredConstructors()).hasSize(1);
-        assertThat(IntakeChildBridgeActivitiesAdapter.class
-                        .getDeclaredConstructors()[0]
-                        .getParameterTypes())
-                .containsExactly(IntakeChildBridgeReadPort.class);
+                .containsOnly(
+                        String.class.getName(),
+                        IntakeChildBridgeReadPort.class.getName(),
+                        boolean.class.getName());
+        assertThat(IntakeChildBridgeActivitiesAdapter.class.getDeclaredConstructors()).hasSize(2);
     }
 
     private void assertCommandInvariant(CommandSource source) {

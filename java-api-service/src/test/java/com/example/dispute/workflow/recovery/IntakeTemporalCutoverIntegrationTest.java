@@ -9,11 +9,13 @@ import com.example.dispute.workflow.shadow.IntakeSyntheticTestFixtures;
 import com.example.dispute.workflow.shadow.intake.IntakeSyntheticParityObservationPort.Observation;
 import com.example.dispute.workflow.shadow.intake.IntakeSyntheticWorkerRegistration;
 import com.example.dispute.workflow.temporal.room.intake.IntakeCommandType;
+import com.example.dispute.workflow.temporal.room.intake.IntakeCommandExecutionContext;
 import com.example.dispute.workflow.temporal.room.intake.IntakeDomainEventType;
 import com.example.dispute.workflow.temporal.room.intake.IntakeRoomPhase;
 import com.example.dispute.workflow.temporal.room.intake.IntakeRoomSnapshot;
 import com.example.dispute.workflow.temporal.room.intake.IntakeRoomWorkflow;
 import com.example.dispute.workflow.temporal.room.intake.IntakeRoomWorkflowImpl;
+import com.example.dispute.workflow.temporal.room.intake.IntakeWorkflowCommand;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowOptions;
 import io.temporal.testing.TestWorkflowEnvironment;
@@ -73,10 +75,10 @@ class IntakeTemporalCutoverIntegrationTest {
             var inert = IntakeSyntheticTestFixtures.inertCommand(
                     "CMD_SYNTHETIC_MESSAGE", IntakeCommandType.INTAKE_MESSAGE);
 
-            var admitted = registration.driver().dispatch(
-                    signedAttempt(TrafficSource.AUTHENTICATED_SIGNED_SYNTHETIC),
-                    inert,
-                    workflow::commandAccepted);
+            registration.driver().admit(
+                    signedAttempt(TrafficSource.AUTHENTICATED_SIGNED_SYNTHETIC), inert);
+            var admitted = commandWithExecutionContext(inert);
+            workflow.commandAccepted(admitted);
             IntakeRoomSnapshot completed = awaitState(
                     workflow, snapshot -> snapshot.roomPhase() == IntakeRoomPhase.READY_TO_CONFIRM);
 
@@ -91,10 +93,9 @@ class IntakeTemporalCutoverIntegrationTest {
             assertThat(comparisons).hasValue(1);
             assertThat(ledger.writes).hasValue(1);
 
-            registration.driver().dispatch(
-                    signedAttempt(TrafficSource.AUTHENTICATED_SIGNED_SYNTHETIC),
-                    inert,
-                    workflow::commandAccepted);
+            registration.driver().admit(
+                    signedAttempt(TrafficSource.AUTHENTICATED_SIGNED_SYNTHETIC), inert);
+            workflow.commandAccepted(admitted);
             environment.sleep(Duration.ofMillis(250));
 
             IntakeRoomSnapshot replayed = workflow.state();
@@ -124,5 +125,30 @@ class IntakeTemporalCutoverIntegrationTest {
             }
         }
         throw new AssertionError("synthetic Intake workflow did not converge: " + last);
+    }
+
+    private static IntakeWorkflowCommand commandWithExecutionContext(IntakeWorkflowCommand inert) {
+        return new IntakeWorkflowCommand(
+                inert.schemaVersion(),
+                inert.commandId(),
+                inert.tenantSurrogate(),
+                inert.caseId(),
+                inert.roomEpoch(),
+                inert.fencingToken(),
+                inert.sequence(),
+                inert.commandType(),
+                inert.party(),
+                inert.actorScopeHash(),
+                inert.payloadRef(),
+                inert.payloadHash(),
+                inert.operationKey(),
+                inert.requestHash(),
+                new IntakeCommandExecutionContext(
+                        "intake-command-execution-context.v1",
+                        IntakeSyntheticTestFixtures.THREAD_ID,
+                        IntakeSyntheticTestFixtures.AGENT_SESSION,
+                        Long.MAX_VALUE,
+                        IntakeSyntheticTestFixtures.retryBudget(),
+                        null));
     }
 }

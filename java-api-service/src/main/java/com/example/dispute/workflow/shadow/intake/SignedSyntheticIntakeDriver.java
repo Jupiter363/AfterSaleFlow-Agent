@@ -3,7 +3,6 @@ package com.example.dispute.workflow.shadow.intake;
 import com.example.dispute.workflow.application.epoch.RoomEpochSelectionContext.TrafficSource;
 import com.example.dispute.workflow.shadow.intake.IntakeSignedSyntheticAdmissionPort.AdmissionAttempt;
 import com.example.dispute.workflow.shadow.intake.IntakeSignedSyntheticAdmissionPort.VerifiedAdmission;
-import com.example.dispute.workflow.temporal.room.intake.IntakeCommandExecutionContext;
 import com.example.dispute.workflow.temporal.room.intake.IntakeCommandType;
 import com.example.dispute.workflow.temporal.room.intake.IntakeWorkflowCommand;
 import java.util.Objects;
@@ -26,37 +25,7 @@ public final class SignedSyntheticIntakeDriver {
                 admission.admit(attempt, inertCommand), "verified admission must not be null");
         requireExactAdmission(attempt, inertCommand, verified);
 
-        return new IntakeWorkflowCommand(
-                inertCommand.schemaVersion(),
-                inertCommand.commandId(),
-                inertCommand.tenantSurrogate(),
-                inertCommand.caseId(),
-                inertCommand.roomEpoch(),
-                inertCommand.fencingToken(),
-                inertCommand.sequence(),
-                inertCommand.commandType(),
-                inertCommand.party(),
-                inertCommand.actorScopeHash(),
-                inertCommand.payloadRef(),
-                inertCommand.payloadHash(),
-                inertCommand.operationKey(),
-                inertCommand.requestHash(),
-                new IntakeCommandExecutionContext(
-                        "intake-command-execution-context.v1",
-                        verified.threadId(),
-                        verified.agentSessionId(),
-                        verified.deadlineEpochMillis(),
-                        verified.retryBudget(),
-                        null));
-    }
-
-    public IntakeWorkflowCommand dispatch(
-            AdmissionAttempt attempt,
-            IntakeWorkflowCommand inertCommand,
-            CommandTarget target) {
-        IntakeWorkflowCommand admitted = admit(attempt, inertCommand);
-        Objects.requireNonNull(target, "target must not be null").signal(admitted);
-        return admitted;
+        return inertCommand;
     }
 
     private static void requireAdmissibleAttempt(
@@ -102,10 +71,5 @@ public final class SignedSyntheticIntakeDriver {
             throw new SecurityException(
                     "verified synthetic admission does not match the exact command tuple");
         }
-    }
-
-    @FunctionalInterface
-    public interface CommandTarget {
-        void signal(IntakeWorkflowCommand command);
     }
 }
