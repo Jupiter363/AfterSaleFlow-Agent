@@ -23,7 +23,7 @@ import org.springframework.transaction.annotation.Transactional;
  * The caller must already have persisted the immutable case_command row in the same transaction.
  */
 @Repository
-public final class JdbcIntakePayloadAuthorityStore implements IntakePayloadAuthorityStore {
+public class JdbcIntakePayloadAuthorityStore implements IntakePayloadAuthorityStore {
 
     private final NamedParameterJdbcTemplate jdbc;
     private final EpochAuthorityLockCoordinator lockCoordinator;

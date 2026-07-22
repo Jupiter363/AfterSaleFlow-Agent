@@ -34,8 +34,17 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
+import org.springframework.aop.support.AopUtils;
+import org.springframework.context.annotation.AnnotationConfigApplicationContext;
+import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.transaction.IllegalTransactionStateException;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.annotation.EnableTransactionManagement;
+import org.springframework.transaction.support.TransactionTemplate;
 
 class JdbcIntakePayloadAuthorityStoreTest {
 
@@ -44,12 +53,13 @@ class JdbcIntakePayloadAuthorityStoreTest {
             OffsetDateTime.of(2026, 7, 22, 0, 0, 0, 0, ZoneOffset.UTC);
 
     private NamedParameterJdbcTemplate jdbc;
+    private EpochAuthorityLockCoordinator locks;
     private JdbcIntakePayloadAuthorityStore store;
 
     @BeforeEach
     void setUp() {
         jdbc = mock(NamedParameterJdbcTemplate.class);
-        EpochAuthorityLockCoordinator locks = mock(EpochAuthorityLockCoordinator.class);
+        locks = mock(EpochAuthorityLockCoordinator.class);
         when(locks.lockForShare(any(LockRequest.class))).thenReturn(new LockedRows(
                 List.of(new LockedRow("ACCESS-1", "ACTIVE")),
                 List.of(new LockedRow("AGENT-1", "ACTIVE")),
@@ -111,6 +121,41 @@ class JdbcIntakePayloadAuthorityStoreTest {
                 contains("insert into case_intake_command_authority"), any(MapSqlParameterSource.class));
         verify(jdbc, never()).update(
                 contains("insert into case_command_outbox"), any(MapSqlParameterSource.class));
+    }
+
+    @Test
+    void classProxyPreservesMandatoryCallerTransaction() {
+        try (AnnotationConfigApplicationContext context =
+                new AnnotationConfigApplicationContext()) {
+            context.register(TransactionProxyConfiguration.class);
+            context.registerBean(NamedParameterJdbcTemplate.class, () -> jdbc);
+            context.registerBean(EpochAuthorityLockCoordinator.class, () -> locks);
+            context.registerBean(
+                    PlatformTransactionManager.class,
+                    () ->
+                            new DataSourceTransactionManager(
+                                    new DriverManagerDataSource(
+                                            "jdbc:h2:mem:payload-authority-proxy")));
+            context.register(JdbcIntakePayloadAuthorityStore.class);
+            context.refresh();
+
+            JdbcIntakePayloadAuthorityStore proxied =
+                    context.getBean(JdbcIntakePayloadAuthorityStore.class);
+            assertThat(AopUtils.isCglibProxy(proxied)).isTrue();
+            assertThatThrownBy(() -> proxied.accept(acceptance()))
+                    .isInstanceOf(IllegalTransactionStateException.class)
+                    .hasMessageContaining("existing transaction");
+
+            TransactionTemplate transactions =
+                    new TransactionTemplate(context.getBean(PlatformTransactionManager.class));
+            var receipt = transactions.execute(ignored -> proxied.accept(acceptance()));
+
+            assertThat(receipt).isNotNull();
+            assertThat(receipt.payloadAuthorityId()).isEqualTo("PAYLOAD-1");
+            assertThat(receipt.caseCommandId()).isEqualTo("CASE-COMMAND-1");
+            assertThat(receipt.outboxId()).isEqualTo("OUTBOX-1");
+            assertThat(receipt.replay()).isFalse();
+        }
     }
 
     private static int indexOf(List<String> values, String needle) {
@@ -177,4 +222,8 @@ class JdbcIntakePayloadAuthorityStoreTest {
                 "AGENT-1",
                 Party.INITIATOR);
     }
+
+    @Configuration(proxyBeanMethods = false)
+    @EnableTransactionManagement(proxyTargetClass = true)
+    static class TransactionProxyConfiguration {}
 }
