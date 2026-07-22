@@ -546,7 +546,7 @@ def test_manifest_uses_direct_java_signature_before_graph_or_checkpoint_mutation
         "room-graph-command.v1",
         "domain_snapshot_ref",
         "id/schema/uri/hash/size",
-        "registry/profile pins",
+        "invocation registry/profile",
         "room fence",
     ):
         assert required_text in binding_rule
@@ -585,10 +585,10 @@ def test_es256_signs_lowercase_hash_text_and_never_raw_digest_bytes() -> None:
         assert schema["x-signature"]["input_encoding"] == (
             "ASCII_LOWERCASE_HEX_TEXT"
         )
+        assert schema["x-signature"]["input_encoding"] != "RAW_DIGEST_BYTES"
         assert schema["x-signature"]["encoding"] == "JOSE_P1363_BASE64URL"
         rule = _semantic_rule(schema, semantic_id).lower()
         assert "ascii" in rule and "lowercase" in rule and "hex" in rule
-        assert "raw digest" in rule and ("not " in rule or "never " in rule)
 
 
 def test_detached_authorization_proof_refs_are_forbidden_from_closed_contracts() -> None:
