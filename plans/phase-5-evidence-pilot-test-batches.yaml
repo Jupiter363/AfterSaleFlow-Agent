@@ -198,7 +198,7 @@ owners:
     change_routes:
       - java-api-service/src/main/java/com/example/dispute/evidence/**
       - java-api-service/src/main/java/com/example/dispute/room/application/EvidenceAgentTurnService.java
-      - java-api-service/src/main/resources/db/migration/V043_2__evidence_graph_bindings.sql
+      - java-api-service/src/main/resources/db/migration/V043_4__evidence_graph_bindings.sql
       - java-api-service/src/test/java/com/example/dispute/evidence/**
     forbidden_routes:
       - python-agent-service/app/graph_runtime/**

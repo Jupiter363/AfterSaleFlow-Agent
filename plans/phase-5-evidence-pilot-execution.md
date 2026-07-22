@@ -126,9 +126,11 @@ and the new epoch persists the full selection. Current formal Evidence traffic r
     may complete with zero. Hearing can open only from a committed Java admission/freeze receipt.
 12. Legacy `evidence-window-{caseId}` remains pinned to `LEGACY`. A new Evidence child and the legacy
     workflow cannot own timers for the same case/epoch.
-13. Additive Evidence binding DDL uses the next compatible V043 sub-version after
-    `V043_1__intake_authority_bindings.sql`; the candidate must freeze the exact migration name and
-    schema before implementation. V044 and V045 remain reserved by existing plans.
+13. Additive Evidence binding DDL uses
+    `V043_4__evidence_graph_bindings.sql`, after the existing Intake migrations
+    `V043_2__intake_shadow_comparisons.sql` and
+    `V043_3__intake_signed_synthetic_admission.sql`. The candidate must freeze its exact schema
+    before implementation. V044 and V045 remain reserved by existing plans.
 14. Runtime before promotion is only `DISABLED` or Java-signed synthetic `SHADOW`. Real party data,
     a formal sink, `TEMPORAL` allocation, canary, and promotion remain unreachable.
 15. Phase 5 does not alter Hearing supplementation contracts or behavior.

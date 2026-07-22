@@ -48,7 +48,7 @@ starts only after that evidence commit says P5.0 `PASS` and all upstream approva
 | `P5-G3` fan-out bulkheads | Phase 3 marks `GRAPH-016` `PARTIAL_ENGINEERING`; only the per-room eight-item unit bound is evidenced | Tenant/global semaphores, bounded queues, fairness, cancellation and recovery evidence |
 | `P5-G4` authorized asset boundary | The current loader checks visibility, privacy, MIME, size and hash, but uses the legacy service-secret endpoint and is not bound to an approved P5 immutable manifest/epoch/fence capability | Approved mTLS/signed capability, immutable object version, owner/visibility and actual-load receipt contract |
 | `P5-G5` Evidence wire contracts | No `contracts/agent-platform/evidence/v2/**` contract set exists | Closed schemas, canonical hashes, fixtures and Java/Python parity before implementation |
-| `P5-G6` Evidence bindings | Existing V043/V043_1 migrations are Intake-only; no Evidence graph/manifest/finalizer binding exists | Freeze and implement additive `V043_2__evidence_graph_bindings.sql`; never edit older migrations |
+| `P5-G6` Evidence bindings | V043 through V043_3 are already assigned to Intake; no Evidence graph/manifest/finalizer binding exists | Freeze and implement additive `V043_4__evidence_graph_bindings.sql`; never edit older migrations |
 | `P5-G7` formal transition authority | `EvidenceCompletionService.complete/expire` currently freeze, transition to Hearing, and start Hearing directly; coordinator delivery is post-commit side effect | Mode-aware Java events/receipts, durable dispatch and a single future Temporal ordering path |
 | `P5-G8` durable Evidence graph | Current Evidence clerk is a one-turn graph that returns `memory_frame`; it has no P5 checkpoint registration, 100-item `Send`, keyed reducer, or immutable batch proposal | Version-pinned `evidence.v2` using the Phase 3 durable kernel |
 | `P5-G9` runtime selector and no-sink proof | Evidence has no admitted typed child selector or formal-sink isolation proof | Fail-closed Evidence-specific selector and static assembly evidence, still synthetic-only |
@@ -370,8 +370,9 @@ manifest/dossier target must be exactly one.
 
 ## Additive Domain Persistence
 
-The frozen migration identity is `V043_2__evidence_graph_bindings.sql`, sequenced after the existing
-`V043_1__intake_authority_bindings.sql`. V044 and V045 remain reserved. The future migration is
+The frozen migration identity is `V043_4__evidence_graph_bindings.sql`, sequenced after the existing
+`V043_2__intake_shadow_comparisons.sql` and
+`V043_3__intake_signed_synthetic_admission.sql`. V044 and V045 remain reserved. The future migration is
 expand-only and may add only the Evidence-specific authorization/version/reference/idempotency
 bindings needed by Java, including:
 
@@ -487,7 +488,7 @@ Only static document cross-reference and YAML parsing checks are permitted for t
    admission receipt.
 10. Runtime remains `LEGACY`, `DISABLED`, or Java-signed synthetic `SHADOW`; real shadow,
     `TEMPORAL`, formal sink, canary and promotion are forbidden at entry.
-11. Additive Evidence bindings use `V043_2__evidence_graph_bindings.sql`; older migrations are
+11. Additive Evidence bindings use `V043_4__evidence_graph_bindings.sql`; older migrations are
     immutable and V044/V045 stay reserved.
 12. Hearing supplementation is outside Phase 5 and remains unchanged at its existing 50-file limit.
 13. The team is primary plus five logical owners in two waves; the primary centralizes expensive
