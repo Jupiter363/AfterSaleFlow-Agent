@@ -515,6 +515,10 @@ def _validate_executed_argv(
     return junit_output
 
 
+def _portable_report_name_key(name: str) -> bytes:
+    return name.encode("utf-8")
+
+
 def _validate_record(
     record: Any,
     *,
@@ -626,7 +630,8 @@ def _validate_record(
         if (
             any(not isinstance(name, str) for name in original_names)
             or len(set(original_names)) != len(original_names)
-            or original_names != sorted(original_names)
+            or original_names
+            != sorted(original_names, key=_portable_report_name_key)
         ):
             raise shared.EvidenceError(
                 "p5_entry_java: retained Surefire original names are not unique and sorted"
@@ -902,7 +907,10 @@ def _raw_reports(
 ) -> list[Path]:
     if command_id != "p5_entry_java":
         return [raw_path] if raw_path.is_file() else []
-    return sorted((cwd / "target/surefire-reports").glob(f"TEST-*-{report_suffix}.xml"))
+    return sorted(
+        (cwd / "target/surefire-reports").glob(f"TEST-*-{report_suffix}.xml"),
+        key=lambda report: _portable_report_name_key(report.name),
+    )
 
 
 def _retain_java_reports(

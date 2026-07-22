@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from scripts import generate_phase5_entry_evidence as generator
+
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts/run_phase5_entry_checkpoint.py"
@@ -452,6 +454,118 @@ def test_java_source_rejects_stale_candidate_specific_surefire_report(
             },
             environment_sha256="b" * 64,
         )
+
+
+def test_mixed_case_java_reports_use_generator_compatible_portable_order(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    run_root = tmp_path / ".codex-run" / "phase5-entry-mixed-case-java"
+    dependency = tmp_path / "dependency.lock"
+    dependency.write_bytes(b"locked\n")
+    for relative in (
+        "python-agent-service",
+        "java-api-service",
+        "frontend/node_modules/vitest",
+    ):
+        (tmp_path / relative).mkdir(parents=True)
+    (tmp_path / "frontend/node_modules/vitest/vitest.mjs").write_bytes(b"locked\n")
+
+    def junit_payload(command_id: str, name: str) -> bytes:
+        return (
+            f"<testsuite name='{name}' tests='1' failures='0' errors='0' "
+            f"skipped='0' time='0.01'><testcase classname='{command_id}' "
+            f"name='{name}' time='0.01'/></testsuite>\n"
+        ).encode("utf-8")
+
+    java_original_names: list[str] = []
+
+    def run_source(
+        argv: list[str], cwd: Path, stdout_path: Path, stderr_path: Path
+    ) -> tuple[str, str, float, int]:
+        timestamp = runner.shared._utc_now()
+        suffix_arguments = [
+            argument
+            for argument in argv
+            if argument.startswith("-Dsurefire.reportNameSuffix=")
+        ]
+        if suffix_arguments:
+            suffix = suffix_arguments[0].partition("=")[2]
+            report_dir = cwd / "target" / "surefire-reports"
+            report_dir.mkdir(parents=True)
+            for class_name in ("alphaCase", "BetaCase"):
+                name = f"TEST-org.example.{class_name}-{suffix}.xml"
+                (report_dir / name).write_bytes(
+                    junit_payload("p5_entry_java", class_name)
+                )
+                java_original_names.append(name)
+        else:
+            output_argument = next(
+                argument
+                for argument in argv
+                if argument.startswith(("--junitxml=", "--outputFile="))
+            )
+            command_id = stdout_path.parent.name.rpartition("-")[0]
+            Path(output_argument.partition("=")[2]).write_bytes(
+                junit_payload(command_id, "passes")
+            )
+        stdout_path.write_bytes(b"")
+        stderr_path.write_bytes(b"")
+        return timestamp, timestamp, 0.0, 0
+
+    monkeypatch.setattr(runner, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        runner.shared,
+        "assert_clean_detached_candidate",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(runner, "_assert_candidate_unchanged", lambda *_args: None)
+    monkeypatch.setattr(
+        runner.shared,
+        "capture_environment",
+        lambda environment_id: {
+            "environment_id": environment_id,
+            "dependency_manifests": [
+                {
+                    "path": dependency.name,
+                    "sha256": runner.shared._sha256(dependency),
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        runner,
+        "authenticate_phase4_handoff",
+        lambda *_args, **_kwargs: HANDOFF,
+    )
+    monkeypatch.setattr(runner.shared, "_run_shell", run_source)
+
+    manifest = runner.execute_checkpoint(
+        candidate_commit=CANDIDATE,
+        run_root=run_root,
+        environment_id="phase5-mixed-case-java-test",
+        phase4_checkpoint_path=tmp_path / "phase-metrics.json",
+        resume=False,
+        classifications=(),
+    )
+
+    java_record = next(
+        record for record in manifest["commands"] if record["id"] == "p5_entry_java"
+    )
+    original_names = [item["original_name"] for item in java_record["raw_reports"]]
+    assert original_names == sorted(
+        java_original_names, key=runner._portable_report_name_key
+    )
+    assert original_names != sorted(java_original_names, key=str.casefold)
+
+    monkeypatch.setattr(generator, "ROOT", tmp_path)
+    monkeypatch.setattr(generator.runner, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        generator.runner,
+        "authenticate_phase4_handoff",
+        lambda *_args, **_kwargs: HANDOFF,
+    )
+    manifest_path = run_root / runner.MANIFEST_NAME
+    assert generator.load_pass_manifest(manifest_path, CANDIDATE) == manifest
 
 
 def test_java_failure_retains_long_surefire_names_and_seals_pending_manifest(
