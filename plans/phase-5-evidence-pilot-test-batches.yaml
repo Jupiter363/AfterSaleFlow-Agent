@@ -1,11 +1,12 @@
 schema_version: phase-test-batches.v1
 phase: 5
 name: evidence-pilot-engineering-shadow
-document_status: DRAFT_BLOCKED
+document_status: ENGINEERING_EXCEPTION_ACCEPTED_AWAITING_PHASE4_CHECKPOINT
 
 documents:
   execution_plan: plans/phase-5-evidence-pilot-execution.md
   contract_pack: docs/runbooks/temporal-first/phase-5-p5.0-contract-pack.md
+  engineering_exception: docs/architecture/adr/0012-phase-5-evidence-engineering-exception.md
   source_plan: plans/temporal-langgraph-room-refactor.md
   acceptance_checklist: docs/acceptance/temporal-first-agent-platform-verification-checklist.md
   acceptance_manifest: tests/acceptance/temporal-first-check-manifest.yaml
@@ -14,8 +15,9 @@ documents:
 gate:
   contract_gate: P5.0
   contract_gate_status: NOT_RUN
-  required_entry: PHASE_4_ENGINEERING_CHECKPOINT_AND_MIG_004
-  observed_base_sha: 49e1c22f0e7203478cde2ea568058db86231092d
+  required_entry: PHASE_4_ENGINEERING_CHECKPOINT
+  engineering_exception: ADR_0012_ACCEPTED
+  observed_base_sha: 1191e0cc419515b5af835aa3e61e9fc976f8be42
   observed_entry_state:
     phase_4_engineering_checkpoint: NOT_RECORDED
     next_phase_permission: BLOCKED
@@ -23,17 +25,27 @@ gate:
     product_100_file_approval: NOT_RECORDED
     fanout_bulkhead_evidence: PARTIAL_ENGINEERING
     authorized_asset_boundary: NOT_APPROVED_FOR_PHASE_5
-  entry_decision: BLOCKED
+  entry_decision: BLOCKED_PENDING_PHASE_4_ENGINEERING_CHECKPOINT
+  contract_candidate_allowed_when:
+    - PHASE_4_ENGINEERING_CHECKPOINT_PASS
+    - PHASE_5_ENGINEERING_ONLY_PERMISSION_RECORDED
+    - ADR_0012_ACCEPTED
   implementation_allowed_when:
     - PHASE_4_ENGINEERING_CHECKPOINT_PASS
     - PHASE_5_ENGINEERING_ONLY_PERMISSION_RECORDED
-    - MIG_004_PASS_RECORDED
-    - EVIDENCE_100_FILE_PRODUCT_API_UI_APPROVAL_RECORDED
-    - GRAPH_016_ROOM_TENANT_GLOBAL_BULKHEAD_PASS_RECORDED
-    - AUTHORIZED_EVIDENCE_ASSET_BOUNDARY_PASS_RECORDED
+    - ADR_0012_ACCEPTED
     - P5_0_CONTRACT_CANDIDATE_COMMITTED
     - P5_0_BATCH_0_PASSED_ON_EXACT_CONTRACT_CANDIDATE_SHA
     - P5_0_ENTRY_EVIDENCE_COMMITTED
+  external_promotion_gates:
+    MIG-004: PENDING_PROMOTION
+    evidence_100_file_product_api_ui_approval: PENDING_EXTERNAL_APPROVAL
+    production_asset_authorization: PENDING_EXTERNAL_APPROVAL
+    real_shadow_and_canary: FORBIDDEN
+  engineering_scope:
+    public_submission_limit: 50
+    synthetic_manifest_item_counts: [1, 8, 100]
+    asset_loading: JAVA_SIGNED_SYNTHETIC_CAPABILITY_ONLY
   runtime_modes_allowed: [LEGACY, DISABLED, SIGNED_SYNTHETIC_SHADOW]
   traffic_constraints:
     formal_evidence_graph_sink_allowed: false
@@ -47,20 +59,23 @@ gate:
     - Java Evidence ledger remains the sole formal writer.
     - Temporal owns Evidence wait timer and party completion ordering only for a future admitted TEMPORAL epoch.
     - Graph results remain proposals and cannot merge freeze or open Hearing.
-    - Evidence batch size is at most 100 and room assessment concurrency is at most 8.
-    - Tenant and global bulkheads plus bounded queues are required before parallel Graph admission.
+    - The public Evidence submission limit remains 50 until separate product API and UI approval.
+    - Synthetic engineering manifests cover 1 8 and 100 items and room assessment concurrency is at most 8.
+    - GRAPH-016 tenant and global bulkheads plus bounded queues are Phase 5 engineering exit evidence.
+    - Production asset authorization remains external; engineering uses only Java-signed synthetic capabilities.
     - Hearing supplementation remains unchanged and capped at 50 files per party.
     - MIG-005 cannot pass from synthetic engineering evidence.
   gate_change_policy:
     - An upstream approval does not implicitly relax this matrix.
     - Every changed gate requires an amended candidate and a new exact-SHA checkpoint.
-    - No implementation task may start from this draft.
+    - No implementation task may start before exact-SHA P5.0 entry evidence is committed.
+    - External promotion gates cannot be relabeled as engineering entry evidence.
 
 resources:
   active_primary_agents: 1
   logical_child_owners: 5
-  max_active_child_agents: 3
-  max_active_agents_total: 4
+  max_active_child_agents: 5
+  max_active_agents_total: 6
   execution_waves: 2
   heavy_test_slots: 1
   light_test_slots: 2
@@ -208,7 +223,7 @@ owners:
     primary_check_ids: [ROOM-EVIDENCE-001, ROOM-EVIDENCE-004, ROOM-EVIDENCE-006, GRAPH-009, LCEL-009]
   D:
     role: Evidence projection API and compatible frontend experience
-    tasks: [P5-D1, P5-D2]
+    tasks: [P5-D0, P5-D1, P5-D2]
     slices: [P5-S4]
     change_routes:
       - java-api-service/src/main/java/com/example/dispute/workflow/projection/evidence/**
@@ -224,7 +239,7 @@ owners:
     primary_check_ids: [ROOM-EVIDENCE-001, ROOM-EVIDENCE-004]
   E:
     role: Bulkheads synthetic parity selector observability and rollback
-    tasks: [P5-E1, P5-E2]
+    tasks: [P5-E0, P5-E1, P5-E2]
     slices: [P5-S5]
     change_routes:
       - java-api-service/src/main/java/com/example/dispute/workflow/shadow/evidence/**
@@ -258,13 +273,10 @@ owners:
 task_contracts:
   P5-0:
     owner: R
-    status: BLOCKED
+    status: BLOCKED_PENDING_PHASE_4_ENGINEERING_CHECKPOINT
     depends_on:
       - PHASE_4_ENGINEERING_CHECKPOINT_PASS
-      - MIG_004_PASS_RECORDED
-      - EVIDENCE_100_FILE_APPROVAL
-      - GRAPH_016_COMPLETE
-      - AUTHORIZED_ASSET_BOUNDARY_APPROVED
+      - ADR_0012_ACCEPTED
     definition_of_done:
       - exact_contract_candidate_committed
       - batch_0_passed_on_candidate_sha
@@ -299,20 +311,31 @@ task_contracts:
     depends_on: [P5-A1, P5-B1, P5-C1]
     output: exact_once_java_merge_freeze_and_additive_bindings
     t0_checks: [terminal_coverage, transaction_idempotency, low_relevance_semantics]
+  P5-D0:
+    owner: D
+    depends_on: [P5-0]
+    output: compatible_projection_contracts_and_baseline_ui_api_fixtures
+    t0_checks: [legacy_projection_contract, public_limit_50, role_privacy_fixtures]
   P5-D1:
     owner: D
-    depends_on: [P5-A2, P5-B2, P5-C2]
+    depends_on: [P5-D0, P5-A2, P5-B2, P5-C2]
     output: versioned_evidence_projection_and_api_compatibility
     t0_checks: [privacy_matrix, pending_state, active_run, history_mode]
   P5-D2:
     owner: D
     depends_on: [P5-D1]
-    output: evidence_100_card_frontend_behavior
+    output: disabled_signed_synthetic_evidence_100_card_frontend_behavior
     t0_checks: [component, store, api, accessibility]
+  P5-E0:
+    owner: E
+    depends_on: [P5-0]
+    output: bulkhead_no_sink_metrics_and_signed_synthetic_test_harnesses
+    t0_checks: [bulkhead_contract, no_formal_sink_static, bounded_metric_labels]
   P5-E1:
     owner: E
-    depends_on: [P5-A2, P5-B2, P5-C2]
+    depends_on: [P5-E0, P5-0, P5-A2, P5-B2, P5-C2]
     output: tenant_global_bulkheads_and_signed_synthetic_parity
+    closes_engineering_checks: [GRAPH-016]
     t0_checks: [bounded_queue, no_formal_sink, privacy, deterministic_hash]
   P5-E2:
     owner: E
@@ -334,14 +357,14 @@ waves:
     tasks: [P5-0]
     test_batch: P5-BATCH-0
   wave_a:
-    active_roles: [R, A, B, C]
-    delegated_tasks: [P5-A1, P5-A2, P5-B1, P5-B2, P5-C1, P5-C2]
+    active_roles: [R, A, B, C, D, E]
+    delegated_tasks: [P5-A1, P5-A2, P5-B1, P5-B2, P5-C1, P5-C2, P5-D0, P5-E0]
     integration_task: P5-R1
     test_batch: P5-BATCH-1
   wave_b:
-    active_roles: [R, D, E]
+    active_roles: [R, A, B, C, D, E]
     delegated_tasks: [P5-D1, P5-D2, P5-E1, P5-E2]
-    released_wave_a_roles_are_reviewers: true
+    foundation_roles_supply_dependency_fixes_and_review: true
     test_batch: P5-BATCH-2
   candidate_wave:
     active_roles: [R]
@@ -351,19 +374,24 @@ waves:
 
 batches:
   P5-BATCH-0:
-    status: BLOCKED_BY_ENTRY_GATES
+    status: BLOCKED_PENDING_PHASE_4_ENGINEERING_CHECKPOINT
     tier: T1
     trigger: P5_0_contract_candidate_commit
-    purpose: Authenticate every upstream gate and freeze the exact legacy Evidence baseline before implementation.
+    purpose: Authenticate the Phase 4 engineering handoff and ADR 0012 restrictions, then freeze the exact legacy Evidence baseline before implementation.
     requires:
       - phase_4_engineering_checkpoint_pass
       - PHASE_5_ENGINEERING_ONLY_permission
-      - MIG_004_pass
-      - evidence_100_file_product_api_ui_approval
-      - graph_room_tenant_global_bulkhead_pass
-      - authorized_asset_boundary_pass
+      - ADR_0012_accepted
+      - public_evidence_submission_limit_remains_50
+      - synthetic_manifest_counts_restricted_to_1_8_100
+      - graph_016_recorded_as_phase_5_exit_evidence
+      - asset_loader_restricted_to_java_signed_synthetic_capabilities
       - runtime_restricted_to_DISABLED_or_SIGNED_SYNTHETIC_SHADOW
       - protected_unrelated_worktree_changes_recorded
+    asserts_pending_external_gates:
+      - MIG-004
+      - EVIDENCE_100_FILE_PRODUCT_API_UI_APPROVAL
+      - PRODUCTION_ASSET_AUTHORIZATION
     baseline_suites:
       java:
         - EvidenceApiIntegrationTest
@@ -406,7 +434,7 @@ batches:
     tier: T1
     trigger: wave_a_merged
     purpose: Verify Graph reducer Workflow kernel Java authority and additive persistence once after Wave A integration.
-    requires_tasks: [P5-A1, P5-A2, P5-B1, P5-B2, P5-C1, P5-C2, P5-R1]
+    requires_tasks: [P5-A1, P5-A2, P5-B1, P5-B2, P5-C1, P5-C2, P5-D0, P5-E0, P5-R1]
     planned_python_tests:
       - python-agent-service/tests/graphs/evidence
       - python-agent-service/tests/agents/test_evidence_clerk_turn.py
@@ -559,7 +587,9 @@ failure_classification:
 
 current_contract_prep:
   static_checks_only: true
+  engineering_exception_accepted: true
+  contract_candidate_freeze_requires_phase_4_engineering_checkpoint: true
   regression_suites_run: false
   browser_or_service_execution_run: false
   batch_0_run: false
-  status_must_remain: DRAFT_BLOCKED
+  status_must_remain: BLOCKED_PENDING_PHASE_4_ENGINEERING_CHECKPOINT

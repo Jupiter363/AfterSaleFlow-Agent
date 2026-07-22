@@ -592,6 +592,17 @@ conflict、room transition latency；任何 leakage/duplicate transition 立即�
 
 ### 7.6 Phase 5: Evidence (`MIG-005`)
 
+The repository-owner-approved engineering exception is
+[`ADR 0012`](../docs/architecture/adr/0012-phase-5-evidence-engineering-exception.md). After an
+accepted Phase 4 engineering checkpoint grants `PHASE_5_ENGINEERING_ONLY`, P5.0 may admit only
+disabled or Java-signed synthetic engineering while `MIG-004` remains `PENDING_PROMOTION`.
+`GRAPH-016` is completed by Phase 5 task `P5-E1` and is mandatory engineering exit evidence, not a
+P5.0 prerequisite. The public Evidence submission limit remains 50; only closed tests and signed
+synthetic fixtures may exercise 1/8/100 items until product/API/frontend approval. Production asset
+authorization, real case shadow, a formal Graph sink, `TEMPORAL` Evidence allocation, canary and
+promotion remain forbidden. This exception does not relax the formal promotion entry condition
+below.
+
 **目标**：迁移证据室 wait/timer/phase，使用有界 `Send` 和 keyed reducer 处理最多 100 文件，Java 证据、核验、
 批次、卷宗账本保持唯一正式 writer。
 **非目标**：不让 Graph 判定正式真伪或直接封卷；庭审补证仍在 Phase 6。

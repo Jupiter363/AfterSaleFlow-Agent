@@ -3,14 +3,15 @@
 ## Status
 
 ```text
-plan_status: DRAFT
-engineering_execution: BLOCKED
+plan_status: ENGINEERING_EXCEPTION_ACCEPTED
+engineering_execution: BLOCKED_PENDING_PHASE_4_ENGINEERING_CHECKPOINT
 contract_gate: P5.0 NOT_RUN
 phase_4_engineering_checkpoint: NOT_RECORDED
 promotion_gate: MIG-004 PENDING_PROMOTION
-phase_5_promotion_gate: MIG-005 PENDING
-next_phase_permission: BLOCKED
-team_shape: primary + 5 logical delegated owners in two waves
+phase_5_promotion_gate: MIG-005 PENDING_PROMOTION
+contract_candidate_permission: AFTER_PHASE_4_ENGINEERING_PASS
+next_phase_permission: BLOCKED_PENDING_PHASE_4_ENGINEERING_PASS
+team_shape: primary + 5 simultaneously active delegated implementation owners
 java_evidence_ledger_writer: SOLE_FORMAL_WRITER
 graph_runtime_default: DISABLED
 allowed_pre_promotion_runtime: DISABLED or Java-signed synthetic SHADOW
@@ -18,11 +19,18 @@ temporal_evidence_allocation: FORBIDDEN
 formal_graph_sink: FORBIDDEN
 ```
 
-This is the P5.0 entry-contract draft, prepared from repository commit
-`49e1c22f0e7203478cde2ea568058db86231092d`. It authorizes no Phase 5 implementation. The current
-repository has not recorded the Phase 4 engineering checkpoint or `MIG-004=PASS`; the 100-file
-product contract, tenant/global fan-out bulkhead, and production-shaped authorized asset boundary
-also lack the approvals and evidence required by the Phase 5 source plan.
+This P5.0 entry contract is prepared from repository commit
+`1191e0cc419515b5af835aa3e61e9fc976f8be42`. The repository has not yet recorded the Phase 4
+engineering checkpoint, so it authorizes no Phase 5 implementation at this commit. Once that
+checkpoint grants `PHASE_5_ENGINEERING_ONLY`, the repository may freeze and test a P5.0 candidate
+under the repository-owner-approved
+[ADR 0012](../docs/architecture/adr/0012-phase-5-evidence-engineering-exception.md).
+
+ADR 0012 separates an **engineering lane** from a **promotion lane**. The engineering lane builds
+and proves fail-closed components with disabled or Java-signed synthetic inputs. `MIG-004`, the
+100-file public product contract, production asset authorization, real shadow, canary and
+production promotion remain external to P5.0 and stay pending. `GRAPH-016` is implemented and
+proved inside Phase 5 by `P5-E1`; it is an engineering exit condition, not its own prerequisite.
 
 This plan is governed by the
 [P5.0 Evidence Contract Pack](../docs/runbooks/temporal-first/phase-5-p5.0-contract-pack.md) and the
@@ -30,9 +38,10 @@ machine-readable [Phase 5 test batches](./phase-5-evidence-pilot-test-batches.ya
 is `plans/temporal-langgraph-room-refactor.md` section 7.6 plus the platform acceptance checklist,
 machine manifest, and current-room behavior baseline.
 
-Implementation remains blocked until a later P5.0 contract candidate records every entry gate,
-runs Batch 0 from that exact clean detached candidate SHA, and commits the resulting entry evidence
-separately. No result produced from this draft may be relabeled as a P5.0 `PASS`.
+Implementation remains blocked until the Phase 4 engineering checkpoint is committed, a later
+P5.0 contract candidate freezes the engineering-only restrictions, Batch 0 runs from that exact
+clean detached candidate SHA, and the resulting entry evidence is committed separately. No result
+from the current pre-checkpoint document may be relabeled as a P5.0 `PASS`.
 
 ## Scope
 
@@ -61,7 +70,7 @@ separately. No result produced from this draft may be relabeled as a P5.0 `PASS`
 ### Non-Goals
 
 - No Phase 5 source, test, migration, schema, fixture, runtime, or UI implementation is authorized
-  by this draft.
+  before exact-SHA P5.0 entry evidence is committed.
 - No real-case shadow, `TEMPORAL` Evidence allocation, canary, production traffic, formal Graph
   Finalizer, or claim that `MIG-004` or `MIG-005` passed.
 - No Graph write to an Evidence table, verification row, dossier, matrix, completion record, room
@@ -96,13 +105,15 @@ and the new epoch persists the full selection. Current formal Evidence traffic r
 
 ## P5.0 Frozen Decisions
 
-1. The logical team is one primary plus five delegated implementation owners. With four total
-   active-agent slots, owners A-C run in Wave A and D-E reuse released slots in Wave B.
+1. The team is one primary plus five simultaneously active delegated implementation owners. Wave A
+   gives D and E independent contract/test-harness work while A-C build the three foundations;
+   dependency-ordered integration continues in Wave B without releasing either owner.
 2. The primary owns shared contracts, exact path grants, integration order, the single heavy-test
    token, failure classification, and the final immutable candidate checkpoint.
-3. One Evidence submission batch contains 1-100 unique Evidence IDs only after the product/API/UI
-   approval is recorded. Existing 1-50 behavior remains compatible. Hearing supplementation stays
-   at 0-50 per party.
+3. The public Evidence submission batch remains 1-50 until product/API/UI approval is recorded.
+   Closed contract tests and disabled or signed synthetic fixtures may exercise 1, 8 and 100 unique
+   Evidence IDs to build the proposed future capability. Hearing supplementation stays at 0-50 per
+   party.
 4. `evidence.v2` consumes one immutable `evidence-batch-manifest.v1` with at most 100 stable item
    keys. Java signs actor scope, epoch/fence, object version, content hash, owner, visibility, and
    all version pins; Python never derives authorization from content.
@@ -143,14 +154,14 @@ The primary may record P5.0 `PASS` only after all of the following are immutable
 
 - A Phase 4 engineering checkpoint from one accepted candidate grants
   `next_phase_permission: PHASE_5_ENGINEERING_ONLY`.
-- `MIG-004=PASS` is independently recorded. A pending promotion gate cannot be replaced by local or
-  synthetic evidence.
-- Product/API/frontend owners approve the Evidence submission expansion from 50 to 100 while
-  preserving 1-50 behavior and the separate Hearing limit of 50.
-- `GRAPH-016` has complete tenant/global semaphore and bounded-queue evidence, not only the existing
-  per-room unit bound.
-- The authorized asset-loading boundary is approved with immutable object version, tenant/case,
-  epoch/fence, actor/owner/visibility, manifest, MIME/size, SHA-256, and actual-load receipt checks.
+- ADR 0012 remains accepted and the candidate explicitly records `MIG-004`, the public 100-file
+  approval and production asset authorization as pending external promotion gates.
+- The public Evidence submission limit remains 50. Only closed schemas, tests and Java-signed
+  synthetic manifests may exercise 1, 8 and 100 items before product approval.
+- `GRAPH-016` is assigned to `P5-E1` and remains mandatory Phase 5 engineering exit evidence; it is
+  not represented as an already-passed P5.0 prerequisite.
+- Asset loading is restricted to Java-signed synthetic capabilities and immutable synthetic
+  fixtures; real party data and production object references remain unreachable.
 - This execution plan, the test-batch policy, and the P5.0 contract pack are frozen in one contract
   candidate with no source/test/migration changes.
 - Batch 0 passes from that exact clean detached contract-candidate SHA and its report hashes,
@@ -159,17 +170,19 @@ The primary may record P5.0 `PASS` only after all of the following are immutable
 - Each delegated brief names exact owned and forbidden paths, input contracts, T0 checks, deferred
   centralized batch, review partner, and commit-sized definition of done.
 
-Any missing condition leaves `engineering_execution: BLOCKED`. The current draft fails the first
-five conditions and therefore cannot start Batch 0 or delegate implementation.
+Any missing condition leaves `engineering_execution: BLOCKED`. At this commit the Phase 4
+engineering checkpoint is not recorded, so the primary cannot yet freeze the final P5.0 candidate,
+start Batch 0, or delegate implementation.
 
 ### Promotion Entry Gate
 
-Engineering completion never implies promotion. Real shadow, a formal sink, or a `TEMPORAL`
-Evidence epoch additionally requires approved production identity/key rotation, private object
-ACLs, immutable storage, real-data authority, exact image/workflow/graph/profile versions,
-minimum sample/observation windows, SLO/error budgets, rollback authority, and compatible readers.
-The promotion candidate must pass authorized real shadow before a separately approved new-epoch
-cohort sequence. This draft cannot mark that gate `PASS`.
+Engineering completion never implies promotion. Promotion also requires independent
+`MIG-004=PASS`, product/API/frontend approval of the public 100-file contract, approved production
+asset authorization, production identity/key rotation, private object ACLs, immutable storage,
+real-data authority, exact image/workflow/graph/profile versions, minimum sample/observation
+windows, SLO/error budgets, rollback authority, and compatible readers. The promotion candidate
+must pass authorized real shadow before a separately approved new-epoch cohort sequence. This plan
+cannot mark any of those gates `PASS`.
 
 ## Vertical Slices
 
@@ -178,7 +191,7 @@ cohort sequence. This draft cannot mark that gate `PASS`.
 | `P5-S1` graph and reducer | A | Manifest-backed 1/8/100 item graph, deterministic dispatch waves and keyed proposal | bounds, recovery, order, duplicate/conflict properties | disable `evidence.v2`; retain checkpoints |
 | `P5-S2` Temporal process | B | Shared deadline, warning, completion/expiry ordering, Java receipt orchestration | time-skipping, duplicate Signal, kill/replay, commit-response loss | stop new child provisioning; retain active History |
 | `P5-S3` Java authority | C | Manifest minting, asset authorization, formal assessment/finalizer, additive bindings | transaction/idempotency/fence/privacy/admission tests | stop formal adapter; reconcile receipts; no DDL rollback |
-| `P5-S4` compatible experience | D | 100-card rendering, private/reviewer views, active run, timer and history projection | API/store/view/a11y/role-switch focused tests | select legacy reader; retain additive fields |
+| `P5-S4` compatible experience | D | Disabled/synthetic 100-card rendering, private/reviewer views, active run, timer and history projection; public requests remain capped at 50 | API/store/view/a11y/role-switch focused tests | select legacy reader; retain additive fields |
 | `P5-S5` reliability/release | E | signed synthetic shadow, bulkheads, parity, fault matrix, selector and rollback controls | crash/race/queue/hash/privacy/no-formal-sink evidence | set cohort zero/disable Graph; preserve ledgers |
 
 ## Team, Ownership, And Waves
@@ -198,22 +211,26 @@ candidate evidence remain primary-controlled. No owner stages unrelated changes.
 
 ### Wave 0: Contract And Entry Evidence
 
-R freezes the P5.0 candidate only after upstream gates exist, runs Batch 0 from that SHA, and commits
-entry evidence separately. Owners receive only their brief and relevant YAML excerpt. No owner may
-implement from this draft or from an untested candidate.
+R freezes the P5.0 candidate only after the Phase 4 engineering handoff exists and ADR 0012 remains
+accepted, runs Batch 0 from that SHA, and commits entry evidence separately. Owners receive only
+their brief and relevant YAML excerpt. No owner may implement from this pre-checkpoint plan or from
+an untested candidate.
 
-### Wave A: Three Parallel Foundations
+### Wave A: Five Parallel Foundations
 
 - A owns `P5-S1` Graph/reducer work.
 - B owns `P5-S2` Workflow/timer work.
 - C owns `P5-S3` Java authority and additive persistence.
+- D owns compatible projection contracts and baseline API/UI test fixtures that do not depend on
+  the final Graph/Workflow implementation.
+- E owns bulkhead/no-formal-sink harnesses, metrics contracts and signed-synthetic test fixtures.
 - R integrates one reviewed commit at a time and runs one deduplicated affected batch.
 
 ### Wave B: Experience And Hardening
 
-- D owns `P5-S4` projections and compatible frontend behavior.
-- E owns `P5-S5` bulkhead, synthetic parity, recovery, selector, and release controls.
-- Released Wave A owners perform bounded cross-review.
+- D completes `P5-S4` projections and compatible frontend behavior.
+- E completes `P5-S5` bulkhead, synthetic parity, recovery, selector, and release controls.
+- A-C remain active for dependency fixes and bounded cross-review.
 - R integrates, closes findings, freezes one candidate, and alone runs the final checkpoint.
 
 ## Review Gates
@@ -287,6 +304,7 @@ The report shape is:
 engineering_checkpoint: PASS | FAIL
 promotion_gate: PENDING | FAIL
 next_phase_permission: PHASE_6_ENGINEERING_ONLY | BLOCKED
+MIG-004: PENDING_PROMOTION
 MIG-005: PENDING_PROMOTION
 ```
 
