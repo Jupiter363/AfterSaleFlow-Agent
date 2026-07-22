@@ -5,7 +5,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -559,8 +558,9 @@ def _validate_record(
     wall_duration = (finished - started).total_seconds()
     if abs(float(duration) - wall_duration) > max(5.0, wall_duration * 0.05):
         raise shared.EvidenceError(f"{command_id}: duration is not bound to timestamps")
+    stream_paths = {}
     for stream in ("stdout", "stderr"):
-        shared._artifact_path(
+        stream_paths[stream] = shared._artifact_path(
             run_root,
             record.get(f"{stream}_path"),
             record.get(f"{stream}_sha256"),
@@ -570,17 +570,86 @@ def _validate_record(
     if not isinstance(raw_reports, list):
         raise shared.EvidenceError(f"{command_id}: raw JUnit records are invalid")
     retained: set[Path] = set()
+    retained_order: list[Path] = []
+    has_original_names: list[bool] = []
     for raw in raw_reports:
         if not isinstance(raw, dict):
             raise shared.EvidenceError(f"{command_id}: raw JUnit record is invalid")
-        retained.add(
-            shared._artifact_path(
-                run_root,
-                raw.get("path"),
-                raw.get("sha256"),
-                f"{command_id} raw JUnit",
+        has_original_name = "original_name" in raw
+        if command_id != "p5_entry_java" and has_original_name:
+            raise shared.EvidenceError(
+                f"{command_id}: non-Java raw JUnit has an original name"
             )
+        expected_raw_fields = {"path", "sha256"}
+        if command_id == "p5_entry_java" and has_original_name:
+            expected_raw_fields.add("original_name")
+        if set(raw) != expected_raw_fields:
+            raise shared.EvidenceError(
+                f"{command_id}: raw JUnit fields drifted"
+            )
+        has_original_names.append(has_original_name)
+        retained_path = shared._artifact_path(
+            run_root,
+            raw.get("path"),
+            raw.get("sha256"),
+            f"{command_id} raw JUnit",
         )
+        if retained_path in retained:
+            raise shared.EvidenceError(f"{command_id}: duplicate raw JUnit path")
+        retained.add(retained_path)
+        retained_order.append(retained_path)
+    strict_java_raw = command_id == "p5_entry_java"
+    if strict_java_raw:
+        attempt_dir = stream_paths["stdout"].parent
+        if (
+            stream_paths["stderr"].parent != attempt_dir
+            or not re.fullmatch(r"p5_entry_java-[0-9]{2,}", attempt_dir.name)
+        ):
+            raise shared.EvidenceError(
+                "p5_entry_java: retained stream attempt directory drifted"
+            )
+        executed_argv = record["executed_argv"]
+        report_suffix = executed_argv[-2].partition("=")[2]
+        expected_suffix = (
+            f"p5-entry-{candidate[:12]}-"
+            f"{hashlib.sha256(str(attempt_dir).encode('utf-8')).hexdigest()[:8]}"
+        )
+        if report_suffix != expected_suffix:
+            raise shared.EvidenceError(
+                "p5_entry_java: current Surefire report suffix drifted"
+            )
+        if raw_reports and not all(has_original_names):
+            raise shared.EvidenceError(
+                "p5_entry_java: retained Surefire original name is missing"
+            )
+        original_names = [raw.get("original_name") for raw in raw_reports]
+        if (
+            any(not isinstance(name, str) for name in original_names)
+            or len(set(original_names)) != len(original_names)
+            or original_names != sorted(original_names)
+        ):
+            raise shared.EvidenceError(
+                "p5_entry_java: retained Surefire original names are not unique and sorted"
+            )
+        retained_dir = attempt_dir / "raw-surefire"
+        for sequence, (raw, retained_path) in enumerate(
+            zip(raw_reports, retained_order, strict=True), start=1
+        ):
+            original_name = raw["original_name"]
+            if (
+                "/" in original_name
+                or "\\" in original_name
+                or not original_name.startswith("TEST-")
+                or not original_name.endswith(f"-{report_suffix}.xml")
+            ):
+                raise shared.EvidenceError(
+                    "p5_entry_java: retained Surefire original name drifted"
+                )
+            expected_name = f"{sequence:04d}-{raw['sha256'][:16]}.xml"
+            if retained_path.parent != retained_dir or retained_path.name != expected_name:
+                raise shared.EvidenceError(
+                    "p5_entry_java: retained Surefire short path drifted"
+                )
     if accepted:
         if (
             record.get("accepted") is not True
@@ -817,6 +886,39 @@ def _raw_reports(
     return sorted((cwd / "target/surefire-reports").glob(f"TEST-*-{report_suffix}.xml"))
 
 
+def _retain_java_reports(
+    reports: Sequence[Path], retained_dir: Path
+) -> tuple[list[Path], dict[Path, str], str | None]:
+    try:
+        retained_dir.mkdir()
+    except OSError as exception:
+        return [], {}, f"cannot create retained Surefire directory: {exception}"
+    retained_reports: list[Path] = []
+    original_names: dict[Path, str] = {}
+    for sequence, report in enumerate(reports, start=1):
+        retained: Path | None = None
+        try:
+            payload = report.read_bytes()
+            digest = hashlib.sha256(payload).hexdigest()
+            retained = retained_dir / f"{sequence:04d}-{digest[:16]}.xml"
+            with retained.open("xb") as stream:
+                stream.write(payload)
+        except OSError as exception:
+            if retained is not None:
+                try:
+                    retained.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            return (
+                retained_reports,
+                original_names,
+                f"cannot retain Surefire report {report.name}: {exception}",
+            )
+        retained_reports.append(retained)
+        original_names[retained] = report.name
+    return retained_reports, original_names, None
+
+
 def _record_source(
     *,
     command_id: str,
@@ -866,15 +968,22 @@ def _record_source(
         )
     _assert_candidate_unchanged(candidate, run_root)
     raw_reports = _raw_reports(command_id, raw_path, report_suffix, cwd)
+    raw_report_original_names: dict[Path, str] = {}
+    retention_failure: str | None = None
     if command_id == "p5_entry_java" and raw_reports:
-        retained_dir = attempt_dir / "raw-surefire"
-        retained_dir.mkdir()
-        retained_reports = []
-        for report in raw_reports:
-            retained = retained_dir / report.name
-            shutil.copy2(report, retained)
-            retained_reports.append(retained)
-        raw_reports = retained_reports
+        raw_reports, raw_report_original_names, retention_failure = (
+            _retain_java_reports(raw_reports, attempt_dir / "raw-surefire")
+        )
+    raw_report_records = []
+    for path in raw_reports:
+        raw_report = {
+            "path": shared._relative(path, run_root),
+            "sha256": shared._sha256(path),
+        }
+        original_name = raw_report_original_names.get(path)
+        if original_name is not None:
+            raw_report["original_name"] = original_name
+        raw_report_records.append(raw_report)
     record: dict[str, Any] = {
         "id": command_id,
         "candidate_commit": candidate,
@@ -897,15 +1006,17 @@ def _record_source(
         "stdout_sha256": shared._sha256(stdout_path),
         "stderr_path": shared._relative(stderr_path, run_root),
         "stderr_sha256": shared._sha256(stderr_path),
-        "raw_reports": [
-            {"path": shared._relative(path, run_root), "sha256": shared._sha256(path)}
-            for path in raw_reports
-        ],
+        "raw_reports": raw_report_records,
         "failure_classification": "NONE" if exit_code == 0 else "UNCLASSIFIED",
         "accepted": False,
     }
     if preflight_failure:
         record["failure_reason"] = preflight_failure
+    if retention_failure:
+        record["exit_code"] = 2
+        record["failure_classification"] = "UNCLASSIFIED"
+        record["failure_reason"] = retention_failure
+        return record, False
     if exit_code != 0:
         return record, False
     if not raw_reports:

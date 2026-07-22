@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -74,10 +75,29 @@ def _build_pass_run(tmp_path: Path, candidate: str = CANDIDATE) -> Path:
     records = []
     for offset, command_id in enumerate(runner.COMMAND_ORDER, start=1):
         attempt_dir = run_root / "attempts" / f"{command_id}-01"
-        raw_path = attempt_dir / "raw-junit.xml"
+        report_suffix = f"p5-entry-{candidate[:12]}-{offset:08x}"
         if command_id == "p5_entry_java":
-            raw_path = attempt_dir / "raw-surefire" / "TEST-fixture.xml"
+            report_suffix = (
+                f"p5-entry-{candidate[:12]}-"
+                f"{hashlib.sha256(str(attempt_dir).encode('utf-8')).hexdigest()[:8]}"
+            )
+        raw_path = attempt_dir / "raw-junit.xml"
         _write_junit(raw_path, candidate, command_id)
+        raw_record = {
+            "path": runner.shared._relative(raw_path, run_root),
+            "sha256": runner.shared._sha256(raw_path),
+        }
+        if command_id == "p5_entry_java":
+            digest = raw_record["sha256"]
+            retained = attempt_dir / "raw-surefire" / f"0001-{digest[:16]}.xml"
+            retained.parent.mkdir()
+            raw_path.replace(retained)
+            raw_path = retained
+            raw_record = {
+                "path": runner.shared._relative(raw_path, run_root),
+                "sha256": digest,
+                "original_name": f"TEST-fixture-{report_suffix}.xml",
+            }
         report_path = source_dir / runner.SOURCE_REPORTS[command_id]
         shutil_source = raw_path.read_bytes()
         report_path.write_bytes(shutil_source)
@@ -85,7 +105,6 @@ def _build_pass_run(tmp_path: Path, candidate: str = CANDIDATE) -> Path:
         stderr_path = attempt_dir / "stderr.log"
         stdout_path.write_text("fixture pass\n", encoding="utf-8")
         stderr_path.write_text("", encoding="utf-8")
-        report_suffix = f"p5-entry-{candidate[:12]}-{offset:08x}"
         argv = runner._command_argv_for_source(
             command_id,
             commands[command_id]["command"],
@@ -113,12 +132,7 @@ def _build_pass_run(tmp_path: Path, candidate: str = CANDIDATE) -> Path:
                 "stdout_sha256": runner.shared._sha256(stdout_path),
                 "stderr_path": runner.shared._relative(stderr_path, run_root),
                 "stderr_sha256": runner.shared._sha256(stderr_path),
-                "raw_reports": [
-                    {
-                        "path": runner.shared._relative(raw_path, run_root),
-                        "sha256": runner.shared._sha256(raw_path),
-                    }
-                ],
+                "raw_reports": [raw_record],
                 "failure_classification": "NONE",
                 "accepted": True,
                 "report": runner.SOURCE_REPORTS[command_id],
@@ -584,6 +598,24 @@ def test_generator_rejects_an_old_run_from_another_candidate(tmp_path: Path) -> 
     manifest_path = _build_pass_run(tmp_path, candidate="c" * 40)
 
     with pytest.raises(generator.shared.EvidenceError, match="candidate SHA drifted"):
+        generator.load_pass_manifest(manifest_path, CANDIDATE)
+
+
+def test_generator_rejects_resealed_accepted_java_without_original_name(
+    tmp_path: Path,
+) -> None:
+    manifest_path = _build_pass_run(tmp_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    java_record = next(
+        record for record in manifest["commands"] if record["id"] == "p5_entry_java"
+    )
+    java_record["raw_reports"][0].pop("original_name")
+    generator.runner._write_manifest(manifest_path, manifest)
+
+    with pytest.raises(
+        generator.shared.EvidenceError,
+        match="retained Surefire original name is missing",
+    ):
         generator.load_pass_manifest(manifest_path, CANDIDATE)
 
 

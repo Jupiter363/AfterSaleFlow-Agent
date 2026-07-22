@@ -412,6 +412,276 @@ def test_java_source_rejects_stale_candidate_specific_surefire_report(
         )
 
 
+def test_java_failure_retains_long_surefire_names_and_seals_pending_manifest(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    run_root = tmp_path / ".codex-run" / "phase5-entry-long-java-report"
+    java_root = tmp_path / "java-api-service"
+    java_root.mkdir()
+    (tmp_path / "python-agent-service").mkdir()
+    dependency = tmp_path / "dependency.lock"
+    dependency.write_bytes(b"locked\n")
+    payload = b"<testsuite tests='1' failures='1'/>\n"
+    original_names: list[str] = []
+
+    def run_source(
+        argv: list[str], cwd: Path, stdout_path: Path, stderr_path: Path
+    ) -> tuple[str, str, float, int]:
+        timestamp = runner.shared._utc_now()
+        if not stdout_path.parent.name.startswith("p5_entry_java-"):
+            junit_argument = next(
+                argument for argument in argv if argument.startswith("--junitxml=")
+            )
+            Path(junit_argument.partition("=")[2]).write_bytes(
+                b"<testsuite tests='1' failures='0' errors='0' skipped='0' "
+                b"time='0.01'><testcase classname='fixture' name='passes'/>"
+                b"</testsuite>\n"
+            )
+            stdout_path.write_bytes(b"")
+            stderr_path.write_bytes(b"")
+            return timestamp, timestamp, 0.0, 0
+        suffix_argument = next(
+            argument
+            for argument in argv
+            if argument.startswith("-Dsurefire.reportNameSuffix=")
+        )
+        suffix = suffix_argument.partition("=")[2]
+        report_dir = cwd / "target" / "surefire-reports"
+        report_dir.mkdir(parents=True)
+        retained_dir = (
+            run_root / "attempts" / "p5_entry_java-01" / "raw-surefire"
+        )
+        fixed_length = len(f"TEST--A-{suffix}.xml")
+        target_length = min(240, 245 - len(str(report_dir.resolve())) - 1)
+        class_length = target_length - fixed_length
+        assert class_length > 0
+        for marker in ("A", "B"):
+            name = f"TEST-{'L' * class_length}-{marker}-{suffix}.xml"
+            path = report_dir / name
+            assert len(str(path.resolve())) <= 245
+            assert len(str((retained_dir / name).resolve())) > 260
+            path.write_bytes(payload)
+            original_names.append(name)
+        stdout_path.write_bytes(b"")
+        stderr_path.write_bytes(b"java tests failed\n")
+        return timestamp, timestamp, 0.0, 1
+
+    monkeypatch.setattr(runner, "ROOT", tmp_path)
+    monkeypatch.setattr(runner.shared, "assert_clean_detached_candidate", lambda *_args: None)
+    monkeypatch.setattr(runner, "_assert_candidate_unchanged", lambda *_args: None)
+    monkeypatch.setattr(
+        runner.shared,
+        "capture_environment",
+        lambda environment_id: {
+            "environment_id": environment_id,
+            "dependency_manifests": [
+                {
+                    "path": dependency.name,
+                    "sha256": runner.shared._sha256(dependency),
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        runner,
+        "authenticate_phase4_handoff",
+        lambda *_args, **_kwargs: HANDOFF,
+    )
+    monkeypatch.setattr(runner.shared, "_run_shell", run_source)
+
+    manifest = runner.execute_checkpoint(
+        candidate_commit=CANDIDATE,
+        run_root=run_root,
+        environment_id="phase5-long-surefire-test",
+        phase4_checkpoint_path=tmp_path / "phase-metrics.json",
+        resume=False,
+        classifications=(),
+    )
+
+    assert manifest["status"] == "REQUIRES_CLASSIFICATION"
+    pending = manifest["pending_failure"]
+    assert pending["id"] == "p5_entry_java"
+    assert pending["exit_code"] == 1
+    assert pending["failure_classification"] == "UNCLASSIFIED"
+    assert pending["accepted"] is False
+    assert [item["original_name"] for item in pending["raw_reports"]] == sorted(
+        original_names
+    )
+    retained_names = [Path(item["path"]).name for item in pending["raw_reports"]]
+    assert retained_names == [
+        f"0001-{hashlib.sha256(payload).hexdigest()[:16]}.xml",
+        f"0002-{hashlib.sha256(payload).hexdigest()[:16]}.xml",
+    ]
+    assert len(set(retained_names)) == 2
+    for item in pending["raw_reports"]:
+        retained = run_root / item["path"]
+        assert len(str(retained.resolve())) < 260
+        assert retained.read_bytes() == payload
+        assert item["sha256"] == runner.shared._sha256(retained)
+
+    persisted = json.loads((run_root / runner.MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert persisted == manifest
+    runner.shared._assert_execution_manifest_seal(persisted)
+    assert runner._load_resume_manifest(run_root, CANDIDATE, HANDOFF) == manifest
+
+    manifest_path = run_root / runner.MANIFEST_NAME
+    baseline = json.loads(json.dumps(manifest))
+    current_suffix = pending["executed_argv"][-2].partition("=")[2]
+    first_retained = run_root / pending["raw_reports"][0]["path"]
+    forged_retained = first_retained.with_name(
+        f"9999-{pending['raw_reports'][0]['sha256'][:16]}.xml"
+    )
+    forged_retained.write_bytes(first_retained.read_bytes())
+
+    def drift_suffix(document: dict) -> None:
+        record = document["pending_failure"]
+        record["executed_argv"][-2] = (
+            f"-Dsurefire.reportNameSuffix=p5-entry-{CANDIDATE[:12]}-ffffffff"
+        )
+        record["executed_command"] = runner.shared.render_command_argv(
+            record["executed_argv"]
+        )
+        record["executed_command_sha256"] = hashlib.sha256(
+            record["executed_command"].encode("utf-8")
+        ).hexdigest()
+
+    def drift_original_name(document: dict) -> None:
+        document["pending_failure"]["raw_reports"][0]["original_name"] = (
+            f"../TEST-forged-{current_suffix}.xml"
+        )
+
+    def drift_short_path(document: dict) -> None:
+        document["pending_failure"]["raw_reports"][0]["path"] = (
+            runner.shared._relative(forged_retained, run_root)
+        )
+
+    def drift_original_order(document: dict) -> None:
+        document["pending_failure"]["raw_reports"].reverse()
+
+    def drift_raw_fields(document: dict) -> None:
+        document["pending_failure"]["raw_reports"][0]["unexpected"] = True
+
+    for mutate, message in (
+        (drift_suffix, "current Surefire report suffix drifted"),
+        (drift_original_name, "original name drifted"),
+        (drift_short_path, "short path drifted"),
+        (drift_original_order, "not unique and sorted"),
+        (drift_raw_fields, "raw JUnit fields drifted"),
+    ):
+        forged = json.loads(json.dumps(baseline))
+        mutate(forged)
+        runner._write_manifest(manifest_path, forged)
+        with pytest.raises(runner.shared.EvidenceError, match=message):
+            runner._load_resume_manifest(run_root, CANDIDATE, HANDOFF)
+
+    forged = json.loads(json.dumps(baseline))
+    forged["commands"][0]["raw_reports"][0]["original_name"] = (
+        f"TEST-forged-{current_suffix}.xml"
+    )
+    runner._write_manifest(manifest_path, forged)
+    with pytest.raises(runner.shared.EvidenceError, match="non-Java raw JUnit"):
+        runner._load_resume_manifest(run_root, CANDIDATE, HANDOFF)
+
+
+@pytest.mark.parametrize(
+    ("failure_mode", "reason"),
+    (
+        ("mkdir", "cannot create retained Surefire directory"),
+        ("write", "cannot retain Surefire report"),
+    ),
+)
+def test_java_retention_io_failure_becomes_classifiable_pending_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    failure_mode: str,
+    reason: str,
+) -> None:
+    run_root = tmp_path / ".codex-run" / f"phase5-entry-java-{failure_mode}-failure"
+    java_root = tmp_path / "java-api-service"
+    java_root.mkdir()
+    original_record_source = runner._record_source
+
+    def run_java(
+        argv: list[str], cwd: Path, stdout_path: Path, stderr_path: Path
+    ) -> tuple[str, str, float, int]:
+        suffix_argument = next(
+            argument
+            for argument in argv
+            if argument.startswith("-Dsurefire.reportNameSuffix=")
+        )
+        suffix = suffix_argument.partition("=")[2]
+        report = cwd / "target" / "surefire-reports" / f"TEST-failed-{suffix}.xml"
+        report.parent.mkdir(parents=True)
+        report.write_bytes(b"<testsuite tests='1' failures='1'/>\n")
+        stdout_path.write_bytes(b"")
+        stderr_path.write_bytes(b"java tests failed\n")
+        timestamp = runner.shared._utc_now()
+        return timestamp, timestamp, 0.0, 1
+
+    def record_source(**arguments: object) -> tuple[dict[str, object], bool]:
+        if arguments["command_id"] != "p5_entry_java":
+            return {"id": str(arguments["command_id"])}, True
+        return original_record_source(**arguments)  # type: ignore[arg-type]
+
+    if failure_mode == "mkdir":
+        original_mkdir = Path.mkdir
+
+        def fail_retained_mkdir(path: Path, *args: object, **kwargs: object) -> None:
+            if path.name == "raw-surefire":
+                raise OSError("simulated retained directory failure")
+            original_mkdir(path, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(Path, "mkdir", fail_retained_mkdir)
+    else:
+        original_open = Path.open
+
+        def fail_retained_write(
+            path: Path, mode: str = "r", *args: object, **kwargs: object
+        ):
+            if path.parent.name == "raw-surefire" and mode == "xb":
+                raise OSError("simulated retained report write failure")
+            return original_open(path, mode, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(Path, "open", fail_retained_write)
+
+    monkeypatch.setattr(runner, "ROOT", tmp_path)
+    monkeypatch.setattr(runner.shared, "assert_clean_detached_candidate", lambda *_args: None)
+    monkeypatch.setattr(runner, "_assert_candidate_unchanged", lambda *_args: None)
+    monkeypatch.setattr(
+        runner.shared,
+        "capture_environment",
+        lambda _environment_id: {"snapshot_sha256": "c" * 64},
+    )
+    monkeypatch.setattr(
+        runner,
+        "authenticate_phase4_handoff",
+        lambda *_args, **_kwargs: HANDOFF,
+    )
+    monkeypatch.setattr(runner.shared, "_run_shell", run_java)
+    monkeypatch.setattr(runner, "_record_source", record_source)
+
+    manifest = runner.execute_checkpoint(
+        candidate_commit=CANDIDATE,
+        run_root=run_root,
+        environment_id=f"phase5-java-{failure_mode}-failure",
+        phase4_checkpoint_path=tmp_path / "phase-metrics.json",
+        resume=False,
+        classifications=(),
+    )
+
+    assert manifest["status"] == "REQUIRES_CLASSIFICATION"
+    pending = manifest["pending_failure"]
+    assert pending["id"] == "p5_entry_java"
+    assert pending["exit_code"] == 2
+    assert pending["failure_classification"] == "UNCLASSIFIED"
+    assert pending["accepted"] is False
+    assert pending["raw_reports"] == []
+    assert reason in pending["failure_reason"]
+    persisted = json.loads((run_root / runner.MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert persisted == manifest
+    runner.shared._assert_execution_manifest_seal(persisted)
+
+
 def test_frontend_dependency_preflight_requires_classified_infra_resume(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
