@@ -18,6 +18,7 @@
   "x-signature": {
     "algorithm": "ES256",
     "covers": "manifest_hash",
+    "input_encoding": "ASCII_LOWERCASE_HEX_TEXT",
     "encoding": "JOSE_P1363_BASE64URL"
   },
   "x-gateway-cross-binding": {
@@ -56,7 +57,7 @@
     },
     {
       "id": "JAVA_SIGNATURE_REQUIRED",
-      "rule": "signature is a Java ES256 signature over manifest_hash; Python has public verification material only and never mints or privately signs a manifest"
+      "rule": "signature is a Java ES256 signature over the ASCII/UTF-8 bytes of the lowercase 64-character manifest_hash hex text and is encoded as JOSE P1363 base64url; Python has public verification material only and never mints or privately signs a manifest"
     },
     {
       "id": "GATEWAY_COMMAND_EXACT_BINDING",

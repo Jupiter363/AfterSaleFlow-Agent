@@ -17,7 +17,9 @@
   },
   "x-signature": {
     "algorithm": "ES256",
-    "covers": "capability_hash"
+    "covers": "capability_hash",
+    "input_encoding": "ASCII_LOWERCASE_HEX_TEXT",
+    "encoding": "JOSE_P1363_BASE64URL"
   },
   "x-semantic-constraints": [
     {
@@ -30,7 +32,7 @@
     },
     {
       "id": "SIGNATURE_SCOPE",
-      "rule": "signature covers capability_hash; capability_hash binds every authorization field except capability_hash and signature"
+      "rule": "signature covers the ASCII/UTF-8 bytes of the lowercase 64-character capability_hash hex text and is encoded as JOSE P1363 base64url; capability_hash binds every authorization field except capability_hash and signature"
     },
     {
       "id": "MANIFEST_ITEM_BODY_LOOKUP",
@@ -264,9 +266,9 @@
     },
     "signature": {
       "type": "string",
-      "minLength": 16,
-      "maxLength": 512,
-      "pattern": "^[A-Za-z0-9_-]+$"
+      "minLength": 86,
+      "maxLength": 86,
+      "pattern": "^[A-Za-z0-9_-]{86}$"
     }
   },
   "allOf": [
