@@ -9,8 +9,10 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.example.dispute.workflow.application.authority.epoch.EpochSelectionHasher;
 import com.example.dispute.workflow.contract.v1.CaseCommandRef;
 import com.example.dispute.workflow.contract.v1.CaseProcessWorkflowProtocol;
+import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRef;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
 import com.example.dispute.workflow.contract.v1.ContractTypes.CommandType;
@@ -22,15 +24,22 @@ import com.example.dispute.workflow.infrastructure.persistence.authority.bridge.
 import com.example.dispute.workflow.infrastructure.persistence.authority.bridge.JdbcIntakeChildBridgeReadPort;
 import com.example.dispute.workflow.temporal.caseprocess.IntakeChildBridgeActivities.ActiveChildBinding;
 import com.example.dispute.workflow.temporal.caseprocess.IntakeChildBridgeActivities.CommandRequest;
+import com.example.dispute.workflow.temporal.caseprocess.IntakeChildBridgeActivities.DomainEventRequest;
 import com.example.dispute.workflow.temporal.caseprocess.IntakeChildBridgeActivities.StartRequest;
+import com.example.dispute.workflow.temporal.caseprocess.CaseDomainEventRef;
+import com.example.dispute.workflow.temporal.room.intake.IntakeOperationKeys;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.lang.reflect.Field;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.time.Instant;
 import java.util.List;
+import java.util.HexFormat;
 import java.util.concurrent.atomic.AtomicInteger;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.BeforeEach;
@@ -189,6 +198,30 @@ class JdbcIntakeChildBridgeReadPortTest {
     }
 
     @Test
+    void startRejectsPersistedSelectionHashDrift() throws Exception {
+        ProvisionRoomEpoch provision = startProvision();
+        PreparedStatement selectionStatement = mock(PreparedStatement.class);
+        PreparedStatement bootstrapStatement = mock(PreparedStatement.class);
+        PreparedStatement partyStatement = mock(PreparedStatement.class);
+        ResultSet selection = mock(ResultSet.class);
+        ResultSet bootstrap = mock(ResultSet.class);
+        ResultSet parties = mock(ResultSet.class);
+        when(connection.prepareStatement(anyString()))
+                .thenReturn(selectionStatement, bootstrapStatement, partyStatement);
+        when(selectionStatement.executeQuery()).thenReturn(selection);
+        when(bootstrapStatement.executeQuery()).thenReturn(bootstrap);
+        when(partyStatement.executeQuery()).thenReturn(parties);
+        stubSelection(selection);
+        when(selection.getString("selection_hash")).thenReturn("f".repeat(64));
+        stubBootstrap(bootstrap, provision, provision.payloadSha256());
+        stubParties(parties, "SHADOW");
+
+        assertThatThrownBy(() -> port.readStart(startRequest(provision)))
+                .isInstanceOf(IntakeAuthorityInvariantException.class)
+                .hasMessage("selection hash mismatch");
+    }
+
+    @Test
     void replayAndEventProofQueriesCannotFallBackToMutableAuthorizationOrJsonOnlyProof()
             throws Exception {
         assertThat(sql("COMMAND_SQL"))
@@ -200,7 +233,12 @@ class JdbcIntakeChildBridgeReadPortTest {
         assertThat(sql("EVENT_SQL"))
                 .doesNotContain("case_access_session")
                 .doesNotContain("agent_conversation_session")
-                .doesNotContain("registration_status");
+                .doesNotContain("registration_status")
+                .contains("from case_timeline_event event")
+                .contains("'case-timeline-event.v1'")
+                .contains("left join case_intake_snapshot_binding source_binding")
+                .contains("SERVER_CANONICAL_BRANCH")
+                .doesNotContain("from case_intake_snapshot_binding b");
         assertThat(sql("BOOTSTRAP_SQL"))
                 .contains("join case_intake_epoch_selection_binding")
                 .contains("room_epoch_bootstrap_outbox")
@@ -216,7 +254,73 @@ class JdbcIntakeChildBridgeReadPortTest {
                 .contains("agent_run_attempt")
                 .contains("agent_execution_manifest")
                 .contains("immutable_payload_snapshot")
-                .contains("agent_run_stream_event");
+                .contains("agent_run_stream_event")
+                .contains("room-graph-result.v1")
+                .contains("intake-turn-proposal.v2")
+                .contains("final_result_ref")
+                .contains("final_result_hash")
+                .doesNotContain("attempt.command_request_hash = ?");
+        assertThat(sql("BRANCH_EVENT_EVIDENCE_SQL"))
+                .contains("operation.result_sha256 = event.event_json ->> 'result_hash'")
+                .contains("ca.case_command_id = operation.case_command_id")
+                .contains("operation.operation_type = case");
+    }
+
+    @Test
+    void committedBranchEventUsesTimelinePayloadAndCommittedRevisions() throws Exception {
+        BranchFixture fixture = branchFixture();
+        PreparedStatement eventStatement = mock(PreparedStatement.class);
+        PreparedStatement evidenceStatement = mock(PreparedStatement.class);
+        ResultSet event = mock(ResultSet.class);
+        ResultSet evidence = mock(ResultSet.class);
+        when(connection.prepareStatement(anyString())).thenReturn(eventStatement, evidenceStatement);
+        when(eventStatement.executeQuery()).thenReturn(event);
+        when(evidenceStatement.executeQuery()).thenReturn(evidence);
+        stubBranchEvent(event, fixture);
+        stubBranchEvidence(evidence, fixture);
+
+        var source = port.readDomainEvent(new DomainEventRequest(
+                "intake-child-domain-event-request.v1",
+                fixture.ref(),
+                activeBinding()));
+
+        assertThat(source.sourcePayloadHash()).isEqualTo(fixture.payloadHash());
+        assertThat(source.eventRef()).isEqualTo("urn:case-timeline-event:EVT_BRANCH");
+        assertThat(source.requestHash()).isEqualTo(fixture.operationRequestHash());
+        assertThat(source.resultHash()).isEqualTo(fixture.resultHash());
+        assertThat(source.processRevision()).isEqualTo(8);
+        assertThat(source.roomRevision()).isEqualTo(3);
+    }
+
+    @Test
+    void committedBranchEventRejectsTimelinePayloadHashDrift() throws Exception {
+        BranchFixture fixture = branchFixture();
+        PreparedStatement eventStatement = mock(PreparedStatement.class);
+        ResultSet event = mock(ResultSet.class);
+        when(connection.prepareStatement(anyString())).thenReturn(eventStatement);
+        when(eventStatement.executeQuery()).thenReturn(event);
+        stubBranchEvent(event, fixture);
+        CaseDomainEventRef drifted = new CaseDomainEventRef(
+                fixture.ref().schemaVersion(),
+                fixture.ref().eventId(),
+                fixture.ref().tenantSurrogate(),
+                fixture.ref().caseId(),
+                fixture.ref().caseEventSequence(),
+                fixture.ref().eventType(),
+                fixture.ref().roomType(),
+                fixture.ref().roomEpoch(),
+                new PayloadRef(
+                        "case-timeline-event.v1",
+                        "urn:case-timeline-event:EVT_BRANCH",
+                        "0".repeat(64),
+                        fixture.ref().payloadRef().sizeBytes()),
+                fixture.ref().occurredAt(),
+                fixture.ref().traceparent());
+
+        assertThatThrownBy(() -> port.readDomainEvent(new DomainEventRequest(
+                "intake-child-domain-event-request.v1", drifted, activeBinding())))
+                .isInstanceOf(IntakeAuthorityInvariantException.class)
+                .hasMessage("event payload hash mismatch");
     }
 
     private static CommandRequest commandRequest() {
@@ -306,6 +410,134 @@ class JdbcIntakeChildBridgeReadPortTest {
                 Instant.parse("2026-07-22T00:00:00Z"));
     }
 
+    private static ActiveChildBinding activeBinding() {
+        return new ActiveChildBinding(
+                "active-intake-child-binding.v1",
+                "tenant-authority",
+                "CASE_AUTHORITY",
+                3,
+                9,
+                "room-epoch-selection.v2",
+                "CaseProcessWorkflow",
+                "case-build.v1",
+                "IntakeRoomWorkflow",
+                "room-build.v1");
+    }
+
+    private static BranchFixture branchFixture() throws Exception {
+        String operationRequestHash = "b".repeat(64);
+        String resultHash = "c".repeat(64);
+        String operationKey = IntakeOperationKeys.cancel("CASE_AUTHORITY", 3, "CMD_BRANCH");
+        ObjectNode event = MAPPER.createObjectNode();
+        event.put("schema_version", "intake-branch-committed-event.v1");
+        event.put("event_id", "EVT_BRANCH");
+        event.put("event_ref", "urn:after-sale-flow:intake-event:EVT_BRANCH");
+        event.put("event_sequence", 11);
+        event.put("event_type", "CANCELLED");
+        event.put("party", "INITIATOR");
+        event.put("command_id", "CMD_BRANCH");
+        event.put("tenant_surrogate", "tenant-authority");
+        event.put("case_id", "CASE_AUTHORITY");
+        event.put("room_epoch", 3);
+        event.put("fencing_token", 9);
+        event.put("actor_scope_hash", "d".repeat(64));
+        event.put("operation_key", operationKey);
+        event.put("request_hash", operationRequestHash);
+        event.put("result_hash", resultHash);
+        event.put("process_revision", 8);
+        event.put("room_revision", 3);
+        event.set("result", MAPPER.createObjectNode().put("status", "CANCELLED"));
+        event.put("event_hash", ContractJson.sha256Hex(event));
+        String eventJson = MAPPER.writeValueAsString(event);
+        String payloadHash = sha256(eventJson);
+        CaseDomainEventRef ref = new CaseDomainEventRef(
+                "case-domain-event-ref.v1",
+                "EVT_BRANCH",
+                "tenant-authority",
+                "CASE_AUTHORITY",
+                11,
+                "CANCELLED",
+                RoomType.INTAKE,
+                3,
+                new PayloadRef(
+                        "case-timeline-event.v1",
+                        "urn:case-timeline-event:EVT_BRANCH",
+                        payloadHash,
+                        eventJson.getBytes(StandardCharsets.UTF_8).length),
+                Instant.parse("2026-07-22T00:01:00Z"),
+                "00-" + "1".repeat(32) + "-" + "2".repeat(16) + "-01");
+        return new BranchFixture(
+                eventJson, payloadHash, operationKey, operationRequestHash, resultHash, ref);
+    }
+
+    private static void stubBranchEvent(ResultSet row, BranchFixture fixture) throws Exception {
+        when(row.next()).thenReturn(true, false);
+        when(row.getString(anyString())).thenAnswer(invocation -> switch ((String) invocation.getArgument(0)) {
+            case "binding_id" -> "case-event:EVT_BRANCH";
+            case "thread_registration_id", "registration_id" -> "REG_INIT";
+            case "tenant_surrogate" -> "tenant-authority";
+            case "case_id" -> "CASE_AUTHORITY";
+            case "room_type" -> "INTAKE";
+            case "thread_id" -> "grt.v1." + "d".repeat(32);
+            case "actor_scope_hash" -> "d".repeat(64);
+            case "agent_session_id" -> "AGENT_INIT";
+            case "actor_audience", "actor_role" -> "USER";
+            case "schema_version" -> "case-timeline-event.v1";
+            case "artifact_id", "event_id", "object_version" -> "EVT_BRANCH";
+            case "object_uri" -> "urn:case-timeline-event:EVT_BRANCH";
+            case "event_type" -> "CANCELLED";
+            case "event_json" -> fixture.eventJson();
+            case "source_refs_json" -> "[\"PAYLOAD_BRANCH\"]";
+            case "party" -> "INITIATOR";
+            case "actor_id" -> "user-authority";
+            case "authority_command_id" -> "CMD_BRANCH";
+            case "case_command_id" -> "CASE_COMMAND_BRANCH";
+            case "authority_request_hash" -> "a".repeat(64);
+            case "case_workflow_type" -> "CaseProcessWorkflow";
+            case "case_workflow_build_id" -> "case-build.v1";
+            case "room_workflow_type" -> "IntakeRoomWorkflow";
+            case "room_workflow_build_id" -> "room-build.v1";
+            case "authority_source_kind" -> "SERVER_CANONICAL_BRANCH";
+            case "authority_payload_schema_version" -> "intake-branch-command.v1";
+            case "authority_payload_uri" -> "urn:intake:branch-command";
+            case "authority_payload_hash" -> "e".repeat(64);
+            default -> null;
+        });
+        when(row.getLong(anyString())).thenAnswer(invocation -> switch ((String) invocation.getArgument(0)) {
+            case "room_epoch" -> 3L;
+            case "fencing_token" -> 9L;
+            case "size_bytes" -> (long) fixture.eventJson().getBytes(StandardCharsets.UTF_8).length;
+            case "event_sequence" -> 11L;
+            case "accepted_room_revision" -> 2L;
+            case "authority_payload_size_bytes" -> 128L;
+            default -> 0L;
+        });
+    }
+
+    private static void stubBranchEvidence(ResultSet row, BranchFixture fixture) throws Exception {
+        when(row.next()).thenReturn(true, false);
+        when(row.getString(anyString())).thenAnswer(invocation -> switch ((String) invocation.getArgument(0)) {
+            case "operation_key" -> fixture.operationKey();
+            case "operation_request_hash" -> fixture.operationRequestHash();
+            case "operation_result_hash" -> fixture.resultHash();
+            default -> null;
+        });
+        when(row.getLong("operation_process_revision")).thenReturn(7L);
+    }
+
+    private static String sha256(String value) throws Exception {
+        return HexFormat.of().formatHex(
+                MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8)));
+    }
+
+    private record BranchFixture(
+            String eventJson,
+            String payloadHash,
+            String operationKey,
+            String operationRequestHash,
+            String resultHash,
+            CaseDomainEventRef ref) {}
+
     private static void stubSelection(ResultSet row) throws Exception {
         when(row.next()).thenReturn(true, false);
         when(row.getString(anyString())).thenAnswer(invocation -> switch ((String) invocation.getArgument(0)) {
@@ -313,7 +545,7 @@ class JdbcIntakeChildBridgeReadPortTest {
             case "tenant_surrogate" -> "tenant-authority";
             case "case_id" -> "CASE_AUTHORITY";
             case "room_type" -> "INTAKE";
-            case "selection_hash" -> "e".repeat(64);
+            case "selection_hash" -> selectionHash();
             case "writer_mode" -> "SHADOW";
             case "case_workflow_type" -> "CaseProcessWorkflow";
             case "case_workflow_build_id" -> "case-build.v1";
@@ -342,6 +574,30 @@ class JdbcIntakeChildBridgeReadPortTest {
             case "fencing_token" -> 9L;
             default -> 0L;
         });
+    }
+
+    private static String selectionHash() {
+        return EpochSelectionHasher.hash(new EpochSelectionHasher.SelectionHashInput(
+                "room-epoch-selection.v2",
+                RoomType.INTAKE,
+                WriterMode.SHADOW,
+                "CaseProcessWorkflow",
+                "case-build.v1",
+                "IntakeRoomWorkflow",
+                "room-build.v1",
+                "case-process.v1",
+                "intake.v2",
+                "graph.v1",
+                "checkpoint.v1",
+                "intake-graph-state.v2",
+                "agent-stream.v2",
+                "prompt.v1",
+                "model.v1",
+                "intake-turn-proposal.v2",
+                "policy.v1",
+                "guardrail.v1",
+                "tools.v1",
+                "cohort.v1"));
     }
 
     private static void stubBootstrap(ResultSet row, ProvisionRoomEpoch provision, String payloadHash)
