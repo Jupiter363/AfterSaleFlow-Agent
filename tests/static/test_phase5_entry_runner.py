@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -699,6 +700,53 @@ def test_frontend_dependency_preflight_requires_classified_infra_resume(
     ) is True
     assert manifest["status"] == "RUNNING"
     assert manifest["quarantined_attempts"][0]["failure_classification"] == "INFRA"
+
+
+def test_frontend_dependency_preflight_allows_candidate_relative_directory_link(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    frontend = runner.load_source_commands()["p5_entry_frontend"]
+    candidate = tmp_path / "candidate"
+    dependencies = tmp_path / "shared-dependencies"
+    vitest = dependencies / "vitest" / "vitest.mjs"
+    vitest.parent.mkdir(parents=True)
+    vitest.write_text("", encoding="utf-8")
+    link = candidate / "frontend" / "node_modules"
+    link.parent.mkdir(parents=True)
+    try:
+        link.symlink_to(dependencies, target_is_directory=True)
+    except OSError:
+        if os.name != "nt":
+            pytest.skip("directory symlinks are unavailable")
+        process = subprocess.run(
+            ["cmd.exe", "/d", "/c", "mklink", "/J", str(link), str(dependencies)],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if process.returncode:
+            pytest.skip(f"directory junctions are unavailable: {process.stderr}")
+
+    monkeypatch.setattr(runner, "ROOT", candidate)
+
+    assert runner._preflight_failure("p5_entry_frontend", frontend) is None
+
+
+@pytest.mark.parametrize(
+    "required_path",
+    ["../outside", "..\\outside", "C:outside", "C:/outside", "\\\\server\\share\\file"],
+)
+def test_frontend_dependency_preflight_rejects_non_relative_paths(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, required_path: str
+) -> None:
+    frontend = dict(runner.load_source_commands()["p5_entry_frontend"])
+    frontend["preflight"] = dict(frontend["preflight"], required_path=required_path)
+    monkeypatch.setattr(runner, "ROOT", tmp_path)
+
+    with pytest.raises(runner.shared.EvidenceError, match="path escapes"):
+        runner._preflight_failure("p5_entry_frontend", frontend)
 
 
 def test_non_infra_failure_blocks_the_candidate() -> None:

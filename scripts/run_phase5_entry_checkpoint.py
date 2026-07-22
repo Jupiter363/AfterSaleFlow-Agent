@@ -7,7 +7,7 @@ import os
 import re
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Sequence
 
 import yaml
@@ -867,12 +867,28 @@ def _preflight_failure(command_id: str, command: dict[str, Any]) -> str | None:
         return None
     if preflight.get("missing_classification") != "INFRA":
         raise shared.EvidenceError(f"{command_id}: preflight must fail as INFRA")
-    path = (ROOT / preflight["required_path"]).resolve()
-    if not path.is_relative_to(ROOT.resolve()):
+    required_value = preflight.get("required_path")
+    if not isinstance(required_value, str) or not required_value:
+        raise shared.EvidenceError(f"{command_id}: preflight path is invalid")
+    required_path = Path(required_value)
+    windows_path = PureWindowsPath(required_value)
+    if (
+        required_path.is_absolute()
+        or required_path.drive
+        or windows_path.is_absolute()
+        or windows_path.drive
+        or not required_path.parts
+        or ".." in required_path.parts
+        or ".." in windows_path.parts
+    ):
         raise shared.EvidenceError(f"{command_id}: preflight path escapes the candidate")
+    # Keep the path lexical here. Windows dependency junctions intentionally resolve
+    # outside the detached worktree, while the authenticated matrix still controls the
+    # candidate-relative location that may be checked.
+    path = ROOT / required_path
     if not path.is_file():
         return (
-            f"missing required path {preflight['required_path']}; classify INFRA, preserve "
+            f"missing required path {required_value}; classify INFRA, preserve "
             "this attempt, restore the exact lockfile dependency tree, then resume the same SHA"
         )
     return None
