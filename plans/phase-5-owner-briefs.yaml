@@ -140,11 +140,40 @@ owners:
         initial_parallel: true
         depends_on: [P5-0]
         input_contracts:
+          - docs/architecture/adr/0013-phase-5-evidence-pre-entry-contract-correction.md
+          - contracts/agent-platform/evidence/v2/compatibility-matrix.yaml
           - contracts/agent-platform/evidence/v2/evidence-batch-manifest.schema.json
+          - contracts/agent-platform/evidence/v2/fixtures/valid/evidence-batch-manifest-synthetic-1-valid.json
           - contracts/agent-platform/evidence/v2/evidence-item-proposal.schema.json
           - contracts/agent-platform/evidence/v2/evidence-terminal-proposal.schema.json
+          - contracts/agent-platform/v1/room-graph-command.schema.json
+          - contracts/agent-platform/v1/fixtures/valid/room-graph-command-evidence-valid.json
+        authority_contract:
+          contract_version: ADR_0013_DIRECT_JAVA_ES256_MANIFEST
+          responsibility: CONSUME_VERIFIED_ADMISSION_BINDING_ONLY
+          manifest_authority: DIRECT_JAVA_ES256_SIGNATURE
+          command_fixture: contracts/agent-platform/v1/fixtures/valid/room-graph-command-evidence-valid.json
+          manifest_fixture: contracts/agent-platform/evidence/v2/fixtures/valid/evidence-batch-manifest-synthetic-1-valid.json
+          validation_order:
+            - VERIFY_ROOM_GRAPH_COMMAND_SCHEMA_AND_REQUEST_HASH
+            - LOAD_EXACT_IMMUTABLE_MANIFEST_URI
+            - VERIFY_FULL_SNAPSHOT_PAYLOAD_SHA256_AND_SIZE
+            - VERIFY_INTERNAL_MANIFEST_RFC8785_SELF_HASH
+            - VERIFY_DIRECT_JAVA_ES256_MANIFEST_SIGNATURE
+            - DERIVE_AND_MATCH_RFC8785_ACTOR_SCOPE_HASH
+            - VERIFY_ASSESSMENT_AND_TERMINAL_OUTPUT_PINS
+            - ENFORCE_DISTINCT_JAVA_ROOM_AND_GRAPH_LEASE_FENCES
+          actor_scope_hash_source: RFC8785_SHA256_OF_VERIFIED_ROOM_GRAPH_COMMAND_ACTOR_SCOPE
+          assessment_output_schema_version: evidence-item-assessment.v1
+          terminal_output_schema_version: evidence-batch-proposal.v1
+          java_room_fence_source: SIGNED_MANIFEST
+          graph_lease_fence_source: CURRENT_GRAPH_LEASE
+          fence_tokens_interchangeable: false
+          authorization_proof_ref: FORBIDDEN
+          implementation_gate: P5_0_ENTRY_EVIDENCE_COMMITTED_FOR_NEW_EXACT_SHA
         output_contracts:
-          - evidence.v2 state validates one immutable manifest and emits proposal-only terminal coverage
+          - evidence.v2 consumes only the verified direct-Java-signed manifest admission binding and emits proposal-only terminal coverage
+          - canonical RoomGraphCommand actor scope and split assessment terminal pins remain immutable through state and terminal output
           - dispatch waves contain at most eight active item assessments for closed synthetic counts 1 8 and 100
         owned_files:
           - python-agent-service/app/graphs/evidence/__init__.py
@@ -163,8 +192,17 @@ owners:
             resource_class: light_pytest
             test_token_required: false
             max_duration_seconds: 180
+          - id: A1_CONTRACT_GATE
+            workdir: .
+            argv: [D:/miniconda/python.exe, -m, pytest, tests/static/test_phase5_entry_contract_plan.py, tests/static/test_phase5_evidence_contracts.py, tests/static/test_agent_platform_schema_contracts.py, -q]
+            resource_class: light_pytest
+            test_token_required: false
+            max_duration_seconds: 180
         commit_definition_of_done:
           - Only P5-A1 owned_files are staged.
+          - Graph state starts only after full snapshot payload SHA size URI then manifest self-hash and direct Java ES256 signature validation.
+          - actor_scope_hash is derived from canonical verified RoomGraphCommand actor_scope and authorization_proof_ref is rejected.
+          - Assessment and terminal pins remain split and Java room fence is never substituted for the Graph lease fence.
           - Counts 1 8 and 100 and max-active 8 have positive and negative tests.
           - State contains no formal merge freeze Hearing-open or trusted business-decision field.
           - T0 passes and C records P0 review closure.
@@ -319,11 +357,40 @@ owners:
         initial_parallel: true
         depends_on: [P5-0]
         input_contracts:
+          - docs/architecture/adr/0013-phase-5-evidence-pre-entry-contract-correction.md
+          - contracts/agent-platform/evidence/v2/compatibility-matrix.yaml
           - contracts/agent-platform/evidence/v2/evidence-batch-manifest.schema.json
+          - contracts/agent-platform/evidence/v2/fixtures/valid/evidence-batch-manifest-synthetic-1-valid.json
           - contracts/agent-platform/evidence/v2/evidence-asset-capability.schema.json
           - contracts/agent-platform/evidence/v2/evidence-finalization-receipt.schema.json
+          - contracts/agent-platform/v1/room-graph-command.schema.json
+          - contracts/agent-platform/v1/fixtures/valid/room-graph-command-evidence-valid.json
+        authority_contract:
+          contract_version: ADR_0013_DIRECT_JAVA_ES256_MANIFEST
+          responsibility: ISSUE_AND_VERIFY_JAVA_MANIFEST_AUTHORITY
+          manifest_authority: DIRECT_JAVA_ES256_SIGNATURE
+          command_fixture: contracts/agent-platform/v1/fixtures/valid/room-graph-command-evidence-valid.json
+          manifest_fixture: contracts/agent-platform/evidence/v2/fixtures/valid/evidence-batch-manifest-synthetic-1-valid.json
+          validation_order:
+            - VERIFY_ROOM_GRAPH_COMMAND_SCHEMA_AND_REQUEST_HASH
+            - LOAD_EXACT_IMMUTABLE_MANIFEST_URI
+            - VERIFY_FULL_SNAPSHOT_PAYLOAD_SHA256_AND_SIZE
+            - VERIFY_INTERNAL_MANIFEST_RFC8785_SELF_HASH
+            - VERIFY_DIRECT_JAVA_ES256_MANIFEST_SIGNATURE
+            - DERIVE_AND_MATCH_RFC8785_ACTOR_SCOPE_HASH
+            - VERIFY_ASSESSMENT_AND_TERMINAL_OUTPUT_PINS
+            - ENFORCE_DISTINCT_JAVA_ROOM_AND_GRAPH_LEASE_FENCES
+          actor_scope_hash_source: RFC8785_SHA256_OF_VERIFIED_ROOM_GRAPH_COMMAND_ACTOR_SCOPE
+          assessment_output_schema_version: evidence-item-assessment.v1
+          terminal_output_schema_version: evidence-batch-proposal.v1
+          java_room_fence_source: SIGNED_MANIFEST
+          graph_lease_fence_source: CURRENT_GRAPH_LEASE
+          fence_tokens_interchangeable: false
+          authorization_proof_ref: FORBIDDEN
+          implementation_gate: P5_0_ENTRY_EVIDENCE_COMMITTED_FOR_NEW_EXACT_SHA
         output_contracts:
-          - Java validates manifest tenant case owner visibility object version MIME size hash expiry nonce epoch and fence
+          - Java validates immutable snapshot URI full payload SHA and size before manifest self-hash and direct ES256 signature
+          - Java derives actor scope hash from verified RoomGraphCommand preserves split pins and keeps room fence distinct from Graph lease fence
           - V043_4 stores additive idempotent binding and receipt identity without activating a writer
         owned_files:
           - java-api-service/src/main/java/com/example/dispute/evidence/application/graph/EvidenceBatchManifest.java
@@ -337,12 +404,21 @@ owners:
         t0_commands:
           - id: C1_MAVEN_TEST
             workdir: java-api-service
-            argv: [./mvnw.cmd, -q, "-Dtest=EvidenceAssetAuthorizationTest,JdbcEvidenceGraphBindingStoreTest", test]
+            argv: [./mvnw.cmd, -q, "-Dtest=EvidenceV2ContractFixtureTest,EvidenceAssetAuthorizationTest,JdbcEvidenceGraphBindingStoreTest", test]
             resource_class: maven_test
             test_token_required: true
             max_duration_seconds: 180
+          - id: C1_CONTRACT_GATE
+            workdir: .
+            argv: [D:/miniconda/python.exe, -m, pytest, tests/static/test_phase5_entry_contract_plan.py, tests/static/test_phase5_evidence_contracts.py, tests/static/test_agent_platform_schema_contracts.py, -q]
+            resource_class: light_pytest
+            test_token_required: false
+            max_duration_seconds: 180
         commit_definition_of_done:
           - Only P5-C1 owned_files are staged and no prior migration changes.
+          - Direct Java ES256 manifest authority rejects unsigned detached authorization_proof_ref and wrong full snapshot payload SHA size or URI.
+          - Internal self-hash and signature are verified only after immutable snapshot bytes and canonical actor scope are bound.
+          - Assessment terminal pins stay split and Java room fence is not reused as Graph lease fence.
           - Signed synthetic capabilities reject wrong owner visibility object version hash epoch fence expiry and nonce.
           - Binding writes are additive and idempotent while formal execution remains disabled.
           - Token-granted T0 passes and A records P0 review closure.
@@ -535,11 +611,40 @@ owners:
         initial_parallel: true
         depends_on: [P5-0]
         input_contracts:
+          - docs/architecture/adr/0013-phase-5-evidence-pre-entry-contract-correction.md
+          - contracts/agent-platform/evidence/v2/compatibility-matrix.yaml
           - contracts/agent-platform/evidence/v2/evidence-batch-manifest.schema.json
+          - contracts/agent-platform/evidence/v2/fixtures/valid/evidence-batch-manifest-synthetic-1-valid.json
           - contracts/agent-platform/evidence/v2/evidence-finalization-receipt.schema.json
+          - contracts/agent-platform/v1/room-graph-command.schema.json
+          - contracts/agent-platform/v1/fixtures/valid/room-graph-command-evidence-valid.json
+        authority_contract:
+          contract_version: ADR_0013_DIRECT_JAVA_ES256_MANIFEST
+          responsibility: PROVE_FAIL_CLOSED_SYNTHETIC_NO_SINK_ASSEMBLY
+          manifest_authority: DIRECT_JAVA_ES256_SIGNATURE
+          command_fixture: contracts/agent-platform/v1/fixtures/valid/room-graph-command-evidence-valid.json
+          manifest_fixture: contracts/agent-platform/evidence/v2/fixtures/valid/evidence-batch-manifest-synthetic-1-valid.json
+          validation_order:
+            - VERIFY_ROOM_GRAPH_COMMAND_SCHEMA_AND_REQUEST_HASH
+            - LOAD_EXACT_IMMUTABLE_MANIFEST_URI
+            - VERIFY_FULL_SNAPSHOT_PAYLOAD_SHA256_AND_SIZE
+            - VERIFY_INTERNAL_MANIFEST_RFC8785_SELF_HASH
+            - VERIFY_DIRECT_JAVA_ES256_MANIFEST_SIGNATURE
+            - DERIVE_AND_MATCH_RFC8785_ACTOR_SCOPE_HASH
+            - VERIFY_ASSESSMENT_AND_TERMINAL_OUTPUT_PINS
+            - ENFORCE_DISTINCT_JAVA_ROOM_AND_GRAPH_LEASE_FENCES
+          actor_scope_hash_source: RFC8785_SHA256_OF_VERIFIED_ROOM_GRAPH_COMMAND_ACTOR_SCOPE
+          assessment_output_schema_version: evidence-item-assessment.v1
+          terminal_output_schema_version: evidence-batch-proposal.v1
+          java_room_fence_source: SIGNED_MANIFEST
+          graph_lease_fence_source: CURRENT_GRAPH_LEASE
+          fence_tokens_interchangeable: false
+          authorization_proof_ref: FORBIDDEN
+          implementation_gate: P5_0_ENTRY_EVIDENCE_COMMITTED_FOR_NEW_EXACT_SHA
         output_contracts:
           - room tenant and global permit policy has bounded queues fairness cancellation and release contracts
-          - static no-sink harness proves disabled and signed-synthetic assembly cannot reach formal writers
+          - static no-sink harness rejects authority validation order pin actor-scope or fence drift before disabled signed-synthetic assembly can run
+          - signed-synthetic assembly consumes no authorization_proof_ref and cannot reach formal writers
         owned_files:
           - java-api-service/src/main/java/com/example/dispute/workflow/shadow/evidence/EvidenceBulkheadPolicy.java
           - java-api-service/src/main/java/com/example/dispute/workflow/shadow/evidence/EvidenceNoFormalSinkGuard.java
@@ -553,6 +658,12 @@ owners:
             resource_class: light_pytest
             test_token_required: false
             max_duration_seconds: 180
+          - id: E0_CONTRACT_GATE
+            workdir: .
+            argv: [D:/miniconda/python.exe, -m, pytest, tests/static/test_phase5_entry_contract_plan.py, tests/static/test_phase5_evidence_contracts.py, tests/static/test_agent_platform_schema_contracts.py, -q]
+            resource_class: light_pytest
+            test_token_required: false
+            max_duration_seconds: 180
           - id: E0_MAVEN_TEST
             workdir: java-api-service
             argv: [./mvnw.cmd, -q, "-Dtest=EvidenceBulkheadPolicyTest,EvidenceNoFormalSinkGuardTest", test]
@@ -561,6 +672,8 @@ owners:
             max_duration_seconds: 180
         commit_definition_of_done:
           - Only P5-E0 owned_files are staged.
+          - No-sink harness fails before assembly on wrong snapshot payload SHA size URI self-hash signature actor scope or split pin.
+          - Java room fence and Graph lease fence are tested as non-interchangeable and authorization_proof_ref remains forbidden.
           - Queue bounds fairness timeout cancellation permit release and bounded metric labels are tested.
           - No-sink proof covers DISABLED and SIGNED_SYNTHETIC_SHADOW and rejects TEMPORAL allocation.
           - T0 passes under token policy and B records P0 review closure.
