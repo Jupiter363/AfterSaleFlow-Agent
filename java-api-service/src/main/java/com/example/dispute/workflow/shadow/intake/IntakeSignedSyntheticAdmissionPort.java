@@ -64,8 +64,12 @@ public interface IntakeSignedSyntheticAdmissionPort {
             long roomEpoch,
             long fencingToken,
             String commandId,
+            long commandSequence,
             IntakeCommandType commandType,
             IntakeParty party,
+            String commandPayloadRef,
+            String commandPayloadHash,
+            String commandOperationKey,
             String actorScopeHash,
             String requestHash,
             String threadId,
@@ -86,6 +90,9 @@ public interface IntakeSignedSyntheticAdmissionPort {
             if (!boundedIdentifier(tenantSurrogate)
                     || !boundedIdentifier(caseId)
                     || !boundedIdentifier(commandId)
+                    || !validReference(commandPayloadRef)
+                    || !sha256(commandPayloadHash)
+                    || !validOperationKey(commandOperationKey, caseId, commandId)
                     || !sha256(actorScopeHash)
                     || !sha256(requestHash)
                     || !validThreadId(threadId)
@@ -93,6 +100,7 @@ public interface IntakeSignedSyntheticAdmissionPort {
                     || !sha256(authorizationHash)
                     || roomEpoch < 0
                     || fencingToken < 1
+                    || commandSequence < 1
                     || deadlineEpochMillis < 1) {
                 throw new IllegalArgumentException("verified synthetic admission is malformed");
             }
@@ -106,8 +114,14 @@ public interface IntakeSignedSyntheticAdmissionPort {
             long roomEpoch,
             long fencingToken,
             String commandId,
+            long commandSequence,
             IntakeCommandType commandType,
             IntakeParty party,
+            String commandPayloadRef,
+            String commandPayloadHash,
+            String commandOperationKey,
+            long processRevision,
+            long roomRevision,
             String actorScopeHash,
             String requestHash,
             String threadId,
@@ -128,6 +142,9 @@ public interface IntakeSignedSyntheticAdmissionPort {
             if (deadlineEpochMillis < 1) {
                 throw new IllegalArgumentException("deadlineEpochMillis must be positive");
             }
+            if (processRevision < 0 || roomRevision < 0) {
+                throw new IllegalArgumentException("process/room revision must be non-negative");
+            }
         }
 
         static ActivityAuthorization from(
@@ -143,8 +160,14 @@ public interface IntakeSignedSyntheticAdmissionPort {
                     envelope.roomEpoch(),
                     envelope.fencingToken(),
                     envelope.commandId(),
+                    envelope.commandSequence(),
                     envelope.commandType(),
                     envelope.party(),
+                    envelope.commandPayloadRef(),
+                    envelope.commandPayloadHash(),
+                    "intake.operation:" + envelope.caseId() + ":" + envelope.commandId(),
+                    envelope.processRevision(),
+                    envelope.roomRevision(),
                     envelope.actorScopeHash(),
                     requestHash,
                     threadId,
@@ -166,6 +189,18 @@ public interface IntakeSignedSyntheticAdmissionPort {
 
     private static boolean validThreadId(String value) {
         return value != null && value.matches("grt\\.v1\\.[0-9a-f]{32}");
+    }
+
+    private static boolean validReference(String value) {
+        return value != null
+                && value.length() <= 1_024
+                && value.matches("(?:s3|minio|urn):.+");
+    }
+
+    private static boolean validOperationKey(String value, String caseId, String commandId) {
+        return value != null
+                && value.equals("intake.operation:" + caseId + ":" + commandId)
+                && value.length() <= 512;
     }
 
     private static String sha256Hex(String value) {

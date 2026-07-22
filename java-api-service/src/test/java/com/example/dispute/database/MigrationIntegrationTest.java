@@ -70,7 +70,7 @@ class MigrationIntegrationTest {
         MigrateResult first = flyway.migrate();
         MigrateResult second = flyway.migrate();
 
-        assertThat(first.migrationsExecuted).isEqualTo(49);
+        assertThat(first.migrationsExecuted).isEqualTo(50);
         assertThat(second.migrationsExecuted).isZero();
 
         try (Connection connection =
@@ -151,6 +151,7 @@ class MigrationIntegrationTest {
                             "case_intake_command_payload_authority",
                             "case_intake_command_authority",
                             "case_intake_shadow_comparison",
+                            "case_intake_synthetic_activity_admission",
                             "domain_operation",
                             "process_reconciliation_issue",
                             "immutable_payload_snapshot",
@@ -236,9 +237,14 @@ class MigrationIntegrationTest {
                             "uq_intake_shadow_comparison_command_authority",
                             "idx_intake_shadow_comparison_epoch",
                             "idx_intake_shadow_comparison_command",
+                            "uq_intake_synthetic_admission_kid_jti",
+                            "idx_intake_synthetic_admission_activity",
+                            "idx_intake_synthetic_admission_authority",
                             "uq_domain_operation_tenant_key",
                             "idx_payload_snapshot_case_visibility",
                             "uq_agent_execution_manifest_logical_run");
+            assertThat(loadIndexDefinitions(connection, "case_intake_command_payload_authority"))
+                    .allSatisfy(definition -> assertThat(definition).doesNotContain("object_uri"));
             assertThat(
                             countRows(
                                     connection,
@@ -263,9 +269,13 @@ class MigrationIntegrationTest {
                             "trg_r15_command_immutable",
                             "trg_r15_existing_private_event_assertion",
                             "trg_r15_command_exact_comparison",
-                            "trg_intake_shadow_comparison_immutable");
+                            "trg_intake_shadow_comparison_immutable",
+                            "trg_intake_synthetic_admission_payload_exact",
+                            "trg_intake_synthetic_admission_immutable");
             assertThat(loadStatementLevelTruncateTriggers(connection))
-                    .contains("trg_intake_shadow_comparison_no_truncate");
+                    .contains(
+                            "trg_intake_shadow_comparison_no_truncate",
+                            "trg_intake_synthetic_admission_no_truncate");
             assertFormalJuryReportUniqueness(connection);
             assertAppendOnlyTablesRejectMutation(connection);
         }
@@ -350,6 +360,27 @@ class MigrationIntegrationTest {
     // 上游调用：「MigrationIntegrationTest.loadIndexes(Connection)」由本测试类中的 「MigrationIntegrationTest.migrationsApplyOnceAndCreateTheCompletePostgresqlSchema」 调用。
     // 下游影响：「MigrationIntegrationTest.loadIndexes(Connection)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
     // 系统意义：「MigrationIntegrationTest.loadIndexes(Connection)」守住「数据库迁移入口」的可执行规格；后续重构若破坏契约会在进入集成环境前失败。
+    private static Set<String> loadIndexDefinitions(Connection connection, String table)
+            throws SQLException {
+        Set<String> definitions = new HashSet<>();
+        try (var statement =
+                connection.prepareStatement(
+                        """
+                        select indexdef
+                        from pg_indexes
+                        where schemaname = 'public'
+                          and tablename = ?
+                        """)) {
+            statement.setString(1, table);
+            try (ResultSet result = statement.executeQuery()) {
+                while (result.next()) {
+                    definitions.add(result.getString(1));
+                }
+            }
+        }
+        return definitions;
+    }
+
     private static Set<String> loadIndexes(Connection connection) throws SQLException {
         Set<String> indexes = new HashSet<>();
         try (Statement statement = connection.createStatement();

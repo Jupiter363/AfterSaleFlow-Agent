@@ -328,8 +328,12 @@ public final class IntakeSyntheticTestFixtures {
                             command.roomEpoch(),
                             command.fencingToken(),
                             command.commandId(),
+                            command.sequence(),
                             command.commandType(),
                             command.party(),
+                            command.payloadRef(),
+                            command.payloadHash(),
+                            command.operationKey(),
                             command.actorScopeHash(),
                             verifiedRequestHashOverride == null
                                     ? command.requestHash()

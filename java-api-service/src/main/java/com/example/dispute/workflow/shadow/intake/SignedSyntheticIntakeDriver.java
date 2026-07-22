@@ -86,8 +86,12 @@ public final class SignedSyntheticIntakeDriver {
                         && verified.roomEpoch() == command.roomEpoch()
                         && verified.fencingToken() == command.fencingToken()
                         && verified.commandId().equals(command.commandId())
+                        && verified.commandSequence() == command.sequence()
                         && verified.commandType() == IntakeCommandType.INTAKE_MESSAGE
                         && verified.party() == command.party()
+                        && verified.commandPayloadRef().equals(command.payloadRef())
+                        && verified.commandPayloadHash().equals(command.payloadHash())
+                        && verified.commandOperationKey().equals(command.operationKey())
                         && verified.actorScopeHash().equals(command.actorScopeHash())
                         && verified.requestHash().equals(command.requestHash())
                         && verified.threadId().equals(attempt.threadId())
