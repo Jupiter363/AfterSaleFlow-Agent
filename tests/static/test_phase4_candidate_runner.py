@@ -186,6 +186,83 @@ def test_resume_rejects_unsealed_and_tampered_manifests(tmp_path: Path) -> None:
         runner._load_resume_manifest(run_root, CANDIDATE)
 
 
+def test_product_blocked_candidate_cannot_resume(tmp_path: Path) -> None:
+    run_root = tmp_path / "phase4-blocked-aaaaaaaa"
+    run_root.mkdir()
+    manifest = runner._initial_manifest(
+        candidate=CANDIDATE,
+        environment_id="blocked-product-test",
+        run_root=run_root,
+    )
+    manifest["status"] = "CANDIDATE_BLOCKED"
+    manifest["verification_finished_at"] = "2026-07-22T00:01:00+00:00"
+    runner._write_manifest(run_root / runner.MANIFEST_NAME, manifest)
+
+    with pytest.raises(runner.EvidenceError, match="blocked this candidate"):
+        runner._load_resume_manifest(run_root, CANDIDATE)
+
+
+def test_new_candidate_refuses_an_existing_run_with_old_source_reports(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    new_candidate = "b" * 40
+    old_run = tmp_path / "phase4-run-aaaaaaaa-existing"
+    old_source = old_run / "source"
+    old_source.mkdir(parents=True)
+    (old_source / "python-phase4-junit.xml").write_text(
+        "old candidate report\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(runner, "assert_clean_detached_candidate", lambda *_: None)
+
+    with pytest.raises(runner.EvidenceError, match="run directory already exists"):
+        runner.execute_checkpoint(
+            candidate_commit=new_candidate,
+            run_root=old_run,
+            environment_id="new-candidate-test",
+            resume=False,
+            classifications=(),
+        )
+
+
+def test_fresh_candidate_run_schedules_all_four_source_suites(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    new_candidate = "b" * 40
+    fresh_run = tmp_path / "phase4-run-bbbbbbbb-fresh"
+    observed: list[str] = []
+    monkeypatch.setattr(runner, "assert_clean_detached_candidate", lambda *_: None)
+    monkeypatch.setattr(runner, "_assert_candidate_unchanged", lambda *_: None)
+    monkeypatch.setattr(
+        runner,
+        "capture_environment",
+        lambda _: {"snapshot_sha256": "c" * 64},
+    )
+
+    def record_source(**arguments: object) -> tuple[dict[str, str], bool]:
+        command_id = str(arguments["command_id"])
+        observed.append(command_id)
+        return {"id": command_id}, True
+
+    monkeypatch.setattr(runner, "_record_source", record_source)
+
+    manifest = runner.execute_checkpoint(
+        candidate_commit=new_candidate,
+        run_root=fresh_run,
+        environment_id="fresh-candidate-test",
+        resume=False,
+        classifications=(),
+    )
+
+    assert observed == list(runner.COMMAND_ORDER)
+    assert [record["id"] for record in manifest["commands"]] == list(
+        runner.COMMAND_ORDER
+    )
+    assert manifest["candidate_commit"] == new_candidate
+    assert manifest["status"] == "PASS"
+
+
 def test_candidate_run_directory_is_confined_inside_the_repository(
     tmp_path: Path,
 ) -> None:
