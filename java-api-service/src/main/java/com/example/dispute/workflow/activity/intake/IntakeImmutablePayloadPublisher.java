@@ -17,7 +17,17 @@ public interface IntakeImmutablePayloadPublisher {
             String schemaVersion,
             String contentSha256,
             byte[] canonicalPayload,
-            int maximumBytes) {
+            int maximumBytes,
+            String putIdempotencyKey) {
+
+        public PublishRequest(
+                String artifactId,
+                String schemaVersion,
+                String contentSha256,
+                byte[] canonicalPayload,
+                int maximumBytes) {
+            this(artifactId, schemaVersion, contentSha256, canonicalPayload, maximumBytes, null);
+        }
 
         public PublishRequest {
             if (artifactId == null
@@ -34,6 +44,12 @@ public interface IntakeImmutablePayloadPublisher {
             Objects.requireNonNull(canonicalPayload, "canonicalPayload");
             if (maximumBytes <= 0) {
                 throw new IllegalArgumentException("maximumBytes must be positive");
+            }
+            if (putIdempotencyKey != null
+                    && (putIdempotencyKey.isBlank()
+                            || putIdempotencyKey.length() > 512
+                            || putIdempotencyKey.chars().anyMatch(Character::isISOControl))) {
+                throw new IllegalArgumentException("putIdempotencyKey is invalid");
             }
             canonicalPayload = Arrays.copyOf(canonicalPayload, canonicalPayload.length);
             if (canonicalPayload.length == 0 || canonicalPayload.length > maximumBytes) {
