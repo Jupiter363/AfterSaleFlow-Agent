@@ -1,7 +1,7 @@
 {
   "schema_version": "evidence-batch-manifest.v1",
   "manifest_id": "MANIFEST_P5_SYNTHETIC_ONE",
-  "manifest_hash": "cae8c13b9ddbb5145fa74cac6c41df0ea0c142768156b00515aba8c858aa9470",
+  "manifest_hash": "6be0faa4fa0b82452103010b21fe67e1d7f894fdd6772860aeed747f33dfa939",
   "execution_scope": "SIGNED_SYNTHETIC_ONLY",
   "writer_mode": "SHADOW",
   "formal_sink_eligible": false,
@@ -38,7 +38,8 @@
     "state_schema_version": "evidence-graph-state.v2",
     "prompt_version": "evidence-prompt.v2",
     "model_profile_id": "evidence-model.synthetic.v1",
-    "output_schema_version": "evidence-batch-proposal.v1",
+    "assessment_output_schema_version": "evidence-item-assessment.v1",
+    "terminal_output_schema_version": "evidence-batch-proposal.v1",
     "policy_version": "evidence-policy.v2",
     "guardrail_version": "evidence-guardrail.v2",
     "tool_policy_version": "evidence-tools.synthetic.v1"
@@ -75,5 +76,9 @@
       "display_order": 0
     }
   ],
-  "open_hearing": true
+  "open_hearing": true,
+  "not_before": "2026-07-22T12:00:00Z",
+  "signature_algorithm": "ES256",
+  "signing_key_id": "KEY_P5_SYNTHETIC_ES256_1",
+  "signature": "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"
 }

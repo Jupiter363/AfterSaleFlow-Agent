@@ -160,7 +160,8 @@
         "state_schema_version",
         "prompt_version",
         "model_profile_id",
-        "output_schema_version",
+        "assessment_output_schema_version",
+        "terminal_output_schema_version",
         "policy_version",
         "guardrail_version",
         "tool_policy_version"
@@ -181,7 +182,10 @@
         "model_profile_id": {
           "$ref": "#/$defs/identifier"
         },
-        "output_schema_version": {
+        "assessment_output_schema_version": {
+          "const": "evidence-item-assessment.v1"
+        },
+        "terminal_output_schema_version": {
           "const": "evidence-batch-proposal.v1"
         },
         "policy_version": {

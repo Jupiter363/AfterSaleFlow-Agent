@@ -1,6 +1,6 @@
 {
   "schema_version": "evidence-item-assessment.v1",
-  "assessment_hash": "8bac118669e8fa53e0b1224cc86450761eb61ceea5120af6e3f22fb4bd536f12",
+  "assessment_hash": "629688355567e0350ac60cccae3da2bc512ce1b303f23781879c23a1dda38929",
   "execution_scope": "SIGNED_SYNTHETIC_ONLY",
   "formal_sink_eligible": false,
   "command_id": "COMMAND_P5_ONE",
@@ -8,7 +8,7 @@
   "attempt_id": "ATTEMPT_P5_ONE_1",
   "thread_id": "grt.v1.018f6b7ec30a7430982fffc520c8195c",
   "manifest_id": "MANIFEST_P5_SYNTHETIC_ONE",
-  "manifest_hash": "cae8c13b9ddbb5145fa74cac6c41df0ea0c142768156b00515aba8c858aa9470",
+  "manifest_hash": "6bc875c51b4b5b20f3bcfa1a378ae373bb051b657e1c633de0c6de1c0180adb1",
   "evidence_id": "EVIDENCE_SYNTH_001",
   "item_hash": "106b3982d3364402961054e9ea3669215ba9b93950d1804c4fe1d051dfe774b9",
   "formal_evidence_revision": 1,
@@ -19,7 +19,8 @@
     "state_schema_version": "evidence-graph-state.v2",
     "prompt_version": "evidence-prompt.v2",
     "model_profile_id": "evidence-model.synthetic.v1",
-    "output_schema_version": "evidence-item-assessment.v1",
+    "assessment_output_schema_version": "evidence-item-assessment.v1",
+    "terminal_output_schema_version": "evidence-batch-proposal.v1",
     "policy_version": "evidence-policy.v2",
     "guardrail_version": "evidence-guardrail.v2",
     "tool_policy_version": "evidence-tools.synthetic.v1"

@@ -1,14 +1,15 @@
 {
   "schema_version": "evidence-batch-manifest.v1",
   "manifest_id": "MANIFEST_P5_SYNTHETIC_ONE",
-  "manifest_hash": "128d6a7f8a82a8fe427c1a0bfba71baed12048f60d7ecd119e100ea6201c905f",
-  "execution_scope": "PUBLIC_CONTRACT_ONLY",
-  "writer_mode": "LEGACY",
+  "manifest_hash": "6bc875c51b4b5b20f3bcfa1a378ae373bb051b657e1c633de0c6de1c0180adb1",
+  "execution_scope": "SIGNED_SYNTHETIC_ONLY",
+  "writer_mode": "SHADOW",
   "formal_sink_eligible": false,
-  "graph_execution_allowed": false,
+  "graph_execution_allowed": true,
+  "synthetic_fixture_id": "FIXTURE_P5_ONE",
   "registration_id": "REGISTRATION_P5_SYNTHETIC_USER",
-  "tenant_surrogate": "TENANT_PUBLIC_1",
-  "case_id": "CASE_PUBLIC_1",
+  "tenant_surrogate": "TENANT_P5_SYNTHETIC_1",
+  "case_id": "CASE_P5_SYNTHETIC_1",
   "room_id": "ROOM_P5_EVIDENCE_1",
   "room_type": "EVIDENCE",
   "room_epoch": 1,
@@ -45,7 +46,7 @@
   },
   "issued_at": "2026-07-22T12:00:00Z",
   "expires_at": "2026-07-22T13:00:00Z",
-  "item_count": 51,
+  "item_count": 1,
   "ordered_item_keys": [
     "EVIDENCE_SYNTH_001"
   ],
@@ -77,6 +78,5 @@
   ],
   "not_before": "2026-07-22T12:00:00Z",
   "signature_algorithm": "ES256",
-  "signing_key_id": "KEY_P5_SYNTHETIC_ES256_1",
-  "signature": "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE"
+  "signing_key_id": "KEY_P5_SYNTHETIC_ES256_1"
 }

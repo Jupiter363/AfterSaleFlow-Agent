@@ -9,7 +9,23 @@
   "x-self-hash": {
     "algorithm": "SHA-256",
     "field": "manifest_hash",
-    "preimage": "omit_top_level_field"
+    "preimage": "omit_top_level_fields",
+    "omit_fields": [
+      "manifest_hash",
+      "signature"
+    ]
+  },
+  "x-signature": {
+    "algorithm": "ES256",
+    "covers": "manifest_hash",
+    "encoding": "JOSE_P1363_BASE64URL"
+  },
+  "x-gateway-cross-binding": {
+    "source_schema_version": "room-graph-command.v1",
+    "manifest_ref_field": "domain_snapshot_ref",
+    "requires_verified_java_envelope": true,
+    "failure": "BEFORE_CHECKPOINT_MUTATION",
+    "room_fence_is_graph_lease_fence": false
   },
   "x-responsibility-mappings": [
     "evidence-thread-registration.v1 -> thread_binding fields",
@@ -20,7 +36,7 @@
   "x-semantic-constraints": [
     {
       "id": "SELF_HASH",
-      "rule": "manifest_hash equals RFC8785 SHA-256 with manifest_hash omitted"
+      "rule": "manifest_hash equals RFC8785 SHA-256 with manifest_hash and signature omitted"
     },
     {
       "id": "ITEM_SELF_HASH",
@@ -32,7 +48,19 @@
     },
     {
       "id": "EXPIRY_ORDER",
-      "rule": "issued_at is before expires_at"
+      "rule": "issued_at is at or before not_before and not_before is before expires_at"
+    },
+    {
+      "id": "JAVA_SIGNATURE_REQUIRED",
+      "rule": "signature is a Java ES256 signature over manifest_hash; Python has public verification material only and never mints or privately signs a manifest"
+    },
+    {
+      "id": "GATEWAY_COMMAND_EXACT_BINDING",
+      "rule": "before Graph or checkpoint mutation, the trusted gateway verifies the Java-signed room-graph-command.v1 envelope and exact domain_snapshot_ref id/schema/URI/hash/size plus command/run/attempt, tenant/case/Evidence room, epoch/room fence, thread/registration, actor role/scope, participant/session, runtime guards, registry/profile pins and deadline; manifest fencing_token is never a Graph lease fence"
+    },
+    {
+      "id": "INITIAL_ADMISSION_AND_RECOVERY",
+      "rule": "initial admission verifies trusted key, signature, issued/not-before/expiry, active registration and command replay identity; an exact already-admitted recovery may use its durable admission identity after expiry, while same manifest_id with another hash fails closed"
     }
   ],
   "required": [
@@ -62,10 +90,14 @@
     "dossier_target_version",
     "profile_versions",
     "issued_at",
+    "not_before",
     "expires_at",
     "item_count",
     "ordered_item_keys",
-    "items"
+    "items",
+    "signature_algorithm",
+    "signing_key_id",
+    "signature"
   ],
   "properties": {
     "schema_version": {
@@ -167,6 +199,10 @@
       "type": "string",
       "format": "date-time"
     },
+    "not_before": {
+      "type": "string",
+      "format": "date-time"
+    },
     "expires_at": {
       "type": "string",
       "format": "date-time"
@@ -192,6 +228,18 @@
       "items": {
         "$ref": "#/$defs/item_manifest"
       }
+    },
+    "signature_algorithm": {
+      "const": "ES256"
+    },
+    "signing_key_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "signature": {
+      "type": "string",
+      "minLength": 86,
+      "maxLength": 86,
+      "pattern": "^[A-Za-z0-9_-]{86}$"
     }
   },
   "allOf": [
@@ -406,7 +454,8 @@
         "state_schema_version",
         "prompt_version",
         "model_profile_id",
-        "output_schema_version",
+        "assessment_output_schema_version",
+        "terminal_output_schema_version",
         "policy_version",
         "guardrail_version",
         "tool_policy_version"
@@ -427,7 +476,10 @@
         "model_profile_id": {
           "$ref": "#/$defs/identifier"
         },
-        "output_schema_version": {
+        "assessment_output_schema_version": {
+          "const": "evidence-item-assessment.v1"
+        },
+        "terminal_output_schema_version": {
           "const": "evidence-batch-proposal.v1"
         },
         "policy_version": {

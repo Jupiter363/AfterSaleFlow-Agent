@@ -1,6 +1,6 @@
 {
   "schema_version": "evidence-process-projection.v1",
-  "projection_hash": "cd4b987de22812499922744724216234d432196fdacfaf6607d3676a9ec2716a",
+  "projection_hash": "0ddba734c062b6b768140ebb5ef83fb199e68e0e5067734d46be8463a5791159",
   "projection_state": "PROCESSING",
   "tenant_surrogate": "TENANT_P5_SYNTHETIC_1",
   "case_id": "CASE_REAL_001",
@@ -46,7 +46,7 @@
     "logical_run_id": "RUN_P5_ONE",
     "attempt_id": "ATTEMPT_P5_ONE_1",
     "manifest_id": "MANIFEST_P5_SYNTHETIC_ONE",
-    "manifest_hash": "cae8c13b9ddbb5145fa74cac6c41df0ea0c142768156b00515aba8c858aa9470",
+    "manifest_hash": "6bc875c51b4b5b20f3bcfa1a378ae373bb051b657e1c633de0c6de1c0180adb1",
     "graph_version": "evidence.v2.0.0",
     "checkpoint_schema_version": "evidence-checkpoint.v2",
     "status": "RUNNING"
@@ -65,7 +65,8 @@
     "state_schema_version": "evidence-graph-state.v2",
     "prompt_version": "evidence-prompt.v2",
     "model_profile_id": "evidence-model.synthetic.v1",
-    "output_schema_version": "evidence-batch-proposal.v1",
+    "assessment_output_schema_version": "evidence-item-assessment.v1",
+    "terminal_output_schema_version": "evidence-batch-proposal.v1",
     "policy_version": "evidence-policy.v2",
     "guardrail_version": "evidence-guardrail.v2",
     "tool_policy_version": "evidence-tools.synthetic.v1"

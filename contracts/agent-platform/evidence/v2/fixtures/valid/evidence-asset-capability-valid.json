@@ -1,14 +1,14 @@
 {
   "schema_version": "evidence-asset-capability.v1",
   "capability_id": "CAPABILITY_P5_SYNTHETIC_001",
-  "capability_hash": "658eac938a6a6228fec88aa351507f13e8cb69ca98398ca066cea88aa99e31f3",
+  "capability_hash": "da72b1e2ef63ef2df4d6e6d4eb7fa3af0696f25d2d5525b2ab90b6a3932c6e27",
   "execution_scope": "SIGNED_SYNTHETIC_ONLY",
   "writer_mode": "SHADOW",
   "real_case_allowed": false,
   "formal_sink_eligible": false,
   "registration_id": "REGISTRATION_P5_SYNTHETIC_USER",
   "manifest_id": "MANIFEST_P5_SYNTHETIC_ONE",
-  "manifest_hash": "cae8c13b9ddbb5145fa74cac6c41df0ea0c142768156b00515aba8c858aa9470",
+  "manifest_hash": "6bc875c51b4b5b20f3bcfa1a378ae373bb051b657e1c633de0c6de1c0180adb1",
   "item_hash": "106b3982d3364402961054e9ea3669215ba9b93950d1804c4fe1d051dfe774b9",
   "tenant_surrogate": "TENANT_P5_SYNTHETIC_1",
   "case_id": "CASE_P5_SYNTHETIC_1",
@@ -30,7 +30,7 @@
   "parse_ref": "urn:synthetic-evidence-parse:fixture-100/item-001",
   "parse_hash": "c6362e1103504f1ae5ed25f2c89a0c1c9de48ad34f10bf33ec19d4c21f594372",
   "parse_status": "AVAILABLE",
-  "profile_versions_hash": "0ce3d6757c91e2760585dc0c9843ec8b34d67632925181480086d064ba758f58",
+  "profile_versions_hash": "fe974bc603715b1c2f67e96f78a92bcf385234bfcd2ed8c5f6de662c7ea16554",
   "permitted_modalities": [
     "TEXT",
     "PDF_METADATA"

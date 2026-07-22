@@ -1,7 +1,7 @@
 {
   "schema_version": "evidence-batch-manifest.v1",
   "manifest_id": "MANIFEST_P5_SYNTHETIC_ONE_HUNDRED",
-  "manifest_hash": "287e777f80f8d8e2ba84f7f2b8053ae22e59c8384285298139fa229c02e010fa",
+  "manifest_hash": "ed73bff340c633379607f72ed4dac3f06baca92275644175eac1373a32725275",
   "execution_scope": "SIGNED_SYNTHETIC_ONLY",
   "writer_mode": "SHADOW",
   "formal_sink_eligible": false,
@@ -38,7 +38,8 @@
     "state_schema_version": "evidence-graph-state.v2",
     "prompt_version": "evidence-prompt.v2",
     "model_profile_id": "evidence-model.synthetic.v1",
-    "output_schema_version": "evidence-batch-proposal.v1",
+    "assessment_output_schema_version": "evidence-item-assessment.v1",
+    "terminal_output_schema_version": "evidence-batch-proposal.v1",
     "policy_version": "evidence-policy.v2",
     "guardrail_version": "evidence-guardrail.v2",
     "tool_policy_version": "evidence-tools.synthetic.v1"
@@ -2549,5 +2550,9 @@
       "formal_evidence_revision": 1,
       "display_order": 99
     }
-  ]
+  ],
+  "not_before": "2026-07-22T12:00:00Z",
+  "signature_algorithm": "ES256",
+  "signing_key_id": "KEY_P5_SYNTHETIC_ES256_1",
+  "signature": "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"
 }

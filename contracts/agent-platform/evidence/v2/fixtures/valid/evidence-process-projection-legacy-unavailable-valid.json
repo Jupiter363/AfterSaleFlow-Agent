@@ -1,6 +1,6 @@
 {
   "schema_version": "evidence-process-projection.v1",
-  "projection_hash": "b1ccabc4f77f2d0a657ce0318d8cb37b4411708ed6c9175875f5fa0e4bcf1d1f",
+  "projection_hash": "73965859c19d9f96c6b662d7d11b628374a0e84dbdb84aaec0de00b3431ab424",
   "projection_state": "UNAVAILABLE",
   "tenant_surrogate": "TENANT_P5_SYNTHETIC_1",
   "case_id": "CASE_P5_SYNTHETIC_LEGACY",
@@ -56,7 +56,8 @@
     "state_schema_version": null,
     "prompt_version": "evidence-prompt.v2",
     "model_profile_id": "evidence-model.synthetic.v1",
-    "output_schema_version": "evidence-batch-proposal.v1",
+    "assessment_output_schema_version": "evidence-item-assessment.v1",
+    "terminal_output_schema_version": "evidence-batch-proposal.v1",
     "policy_version": "evidence-policy.v2",
     "guardrail_version": "evidence-guardrail.v2",
     "tool_policy_version": "evidence-tools.synthetic.v1"
