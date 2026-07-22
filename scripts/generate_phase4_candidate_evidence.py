@@ -69,6 +69,7 @@ DERIVED_REPORTS = {
 }
 EXPECTED_FILES = {
     "phase-metrics.json",
+    "source-execution-manifest.json",
     "baseline-id-coverage.json",
     "check-id-coverage.json",
     "failure-classification.json",
@@ -85,6 +86,9 @@ PROMOTION_STATUSES = {
     "MIG-003": "PENDING_PROMOTION",
     "MIG-004": "PENDING_PROMOTION",
 }
+EXECUTION_MANIFEST_SCHEMA = "phase4-source-execution-manifest.v1"
+EXECUTION_MANIFEST_NAME = "source-execution-manifest.json"
+FAILURE_CLASSIFICATIONS = {"PRODUCT", "FIXTURE", "INFRA", "EXTERNAL_GATE"}
 
 
 def load_matrix(path: Path = MATRIX_PATH) -> dict[str, Any]:
@@ -134,6 +138,266 @@ def focused_commands(matrix: dict[str, Any]) -> dict[str, dict[str, str]]:
         if command_id != "java_phase_4" and not isinstance(item.get("command"), str):
             raise EvidenceError(f"{command_id} has no source command")
     return commands
+
+
+def _json_sha256(value: Any) -> str:
+    encoded = json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _manifest_timestamp(value: Any, field: str) -> datetime:
+    if not isinstance(value, str):
+        raise EvidenceError(f"execution manifest {field} must be an ISO-8601 timestamp")
+    normalized = _assert_timestamp(value, f"execution manifest {field}")
+    return datetime.fromisoformat(normalized.replace("Z", "+00:00"))
+
+
+def _assert_file_digest(path: Path, expected: Any, context: str) -> None:
+    if not path.is_file():
+        raise EvidenceError(f"{context} does not exist: {path}")
+    if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+        raise EvidenceError(f"{context} has no lowercase SHA-256")
+    actual = _sha256(path)
+    if actual != expected:
+        raise EvidenceError(f"{context} SHA-256 drifted: {actual} != {expected}")
+
+
+def _assert_executed_command(command_id: str, matrix_command: str, executed: Any) -> None:
+    if not isinstance(executed, str) or not executed.strip():
+        raise EvidenceError(f"{command_id}: executed command is missing")
+    if command_id in {"python_phase_4", "static_phase_4"}:
+        valid = executed.startswith(matrix_command.rstrip() + " --junitxml=")
+    elif command_id == "frontend_phase_4":
+        valid = executed.startswith(
+            matrix_command.rstrip() + " --reporter=junit --outputFile="
+        )
+    else:
+        prefix = re.sub(r"\btest$", "", matrix_command.rstrip())
+        valid = bool(
+            executed.startswith(prefix)
+            and re.search(
+                r"-Dsurefire\.reportNameSuffix=p4-[0-9a-f]{12}-[0-9a-f]{8} test$",
+                executed,
+            )
+        )
+    if not valid:
+        raise EvidenceError(f"{command_id}: executed command is not the approved JUnit transform")
+
+
+def load_execution_manifest(
+    *,
+    path: Path,
+    candidate_commit: str,
+    matrix: dict[str, Any],
+    source_dir: Path,
+) -> dict[str, Any]:
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exception:
+        raise EvidenceError(f"cannot load execution manifest {path}: {exception}") from exception
+    if not isinstance(manifest, dict):
+        raise EvidenceError("execution manifest must be a JSON object")
+    if manifest.get("schema_version") != EXECUTION_MANIFEST_SCHEMA:
+        raise EvidenceError("unsupported Phase 4 source execution manifest schema")
+    if manifest.get("phase") != 4 or manifest.get("candidate_commit") != candidate_commit:
+        raise EvidenceError("execution manifest is not bound to this Phase 4 candidate")
+    if manifest.get("status") != "PASS":
+        raise EvidenceError("execution manifest did not complete with PASS")
+    if manifest.get("pending_failure") is not None:
+        raise EvidenceError("execution manifest retains a pending failure")
+    if manifest.get("quarantined_attempts_reused") is not False:
+        raise EvidenceError("execution manifest may not reuse quarantined attempts")
+    if manifest.get("promotion_gate") != "PENDING" or any(
+        manifest.get(gate) != status for gate, status in PROMOTION_STATUSES.items()
+    ):
+        raise EvidenceError("execution manifest relaxed a promotion or migration gate")
+
+    expected_source_dir = path.resolve().parent / "source"
+    if source_dir.resolve() != expected_source_dir.resolve():
+        raise EvidenceError("source reports must come from the execution manifest run directory")
+
+    environment = manifest.get("environment")
+    if not isinstance(environment, dict) or not str(environment.get("environment_id", "")).strip():
+        raise EvidenceError("execution manifest lacks an environment identity")
+    captured = _manifest_timestamp(environment.get("captured_at"), "environment.captured_at")
+    snapshot_sha256 = environment.get("snapshot_sha256")
+    snapshot_without_hash = dict(environment)
+    snapshot_without_hash.pop("snapshot_sha256", None)
+    if snapshot_sha256 != _json_sha256(snapshot_without_hash):
+        raise EvidenceError("execution environment snapshot SHA-256 drifted")
+    host = environment.get("host")
+    tools = environment.get("tools")
+    if (
+        not isinstance(host, dict)
+        or not {"system", "release", "machine"} <= set(host)
+        or not isinstance(tools, dict)
+        or not {"python", "git", "java", "node"} <= set(tools)
+    ):
+        raise EvidenceError("execution environment lacks host or tool versions")
+    dependency_manifests = environment.get("dependency_manifests")
+    if not isinstance(dependency_manifests, list) or not dependency_manifests:
+        raise EvidenceError("execution environment lacks dependency manifest hashes")
+    for item in dependency_manifests:
+        if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+            raise EvidenceError("invalid dependency manifest record")
+        dependency = ROOT / item["path"]
+        _assert_file_digest(
+            dependency,
+            item.get("sha256"),
+            f"dependency manifest {item['path']}",
+        )
+    dependency_paths = {item["path"] for item in dependency_manifests}
+    required_dependencies = {
+        "python-agent-service/requirements.lock",
+        "java-api-service/pom.xml",
+        "frontend/pnpm-lock.yaml",
+    }
+    if not required_dependencies <= dependency_paths:
+        raise EvidenceError("execution environment omits a service dependency lock or manifest")
+
+    verification_started = _manifest_timestamp(
+        manifest.get("verification_started_at"), "verification_started_at"
+    )
+    verification_finished = _manifest_timestamp(
+        manifest.get("verification_finished_at"), "verification_finished_at"
+    )
+    if captured > verification_finished or verification_finished < verification_started:
+        raise EvidenceError("execution manifest has an invalid verification timeline")
+
+    commands = focused_commands(matrix)
+    records = manifest.get("commands")
+    if not isinstance(records, list) or len(records) != len(SOURCE_REPORTS):
+        raise EvidenceError("execution manifest must contain four accepted source commands")
+    indexed: dict[str, dict[str, Any]] = {}
+    run_root = path.resolve().parent
+    for record in records:
+        if not isinstance(record, dict) or record.get("id") not in SOURCE_REPORTS:
+            raise EvidenceError("execution manifest contains an unknown source command")
+        command_id = record["id"]
+        if command_id in indexed:
+            raise EvidenceError(f"execution manifest duplicates {command_id}")
+        indexed[command_id] = record
+        matrix_item = commands[command_id]
+        matrix_command = matrix_item["command"]
+        if record.get("candidate_commit") != candidate_commit:
+            raise EvidenceError(f"{command_id}: candidate SHA drifted")
+        if record.get("cwd") != matrix_item["cwd"]:
+            raise EvidenceError(f"{command_id}: cwd drifted from the matrix")
+        if record.get("matrix_command") != matrix_command:
+            raise EvidenceError(f"{command_id}: matrix command text drifted")
+        expected_matrix_hash = hashlib.sha256(matrix_command.encode("utf-8")).hexdigest()
+        if record.get("matrix_command_sha256") != expected_matrix_hash:
+            raise EvidenceError(f"{command_id}: matrix command SHA-256 drifted")
+        executed = record.get("executed_command")
+        _assert_executed_command(command_id, matrix_command, executed)
+        if record.get("executed_command_sha256") != hashlib.sha256(
+            executed.encode("utf-8")
+        ).hexdigest():
+            raise EvidenceError(f"{command_id}: executed command SHA-256 drifted")
+        if record.get("exit_code") != 0 or record.get("accepted") is not True:
+            raise EvidenceError(f"{command_id}: source command was not accepted")
+        if record.get("failure_classification") != "NONE":
+            raise EvidenceError(f"{command_id}: accepted source has a failure classification")
+        if record.get("environment_sha256") != snapshot_sha256:
+            raise EvidenceError(f"{command_id}: environment binding drifted")
+        started = _manifest_timestamp(record.get("started_at"), f"{command_id}.started_at")
+        finished = _manifest_timestamp(record.get("finished_at"), f"{command_id}.finished_at")
+        duration = record.get("duration_seconds")
+        if (
+            finished < started
+            or started < verification_started
+            or finished > verification_finished
+            or not isinstance(duration, (int, float))
+            or isinstance(duration, bool)
+            or duration < 0
+        ):
+            raise EvidenceError(f"{command_id}: invalid command timeline or duration")
+        expected_report = SOURCE_REPORTS[command_id]
+        if record.get("report") != expected_report or record.get("report_path") != (
+            f"source/{expected_report}"
+        ):
+            raise EvidenceError(f"{command_id}: report path drifted")
+        _assert_file_digest(
+            source_dir / expected_report,
+            record.get("report_sha256"),
+            f"{command_id} accepted report",
+        )
+        report_totals = parse_junit(source_dir / expected_report).totals
+        for field in ("tests", "failures", "errors", "skipped"):
+            if record.get(field) != report_totals[field]:
+                raise EvidenceError(f"{command_id}: recorded {field} drifted from JUnit")
+        raw_reports = record.get("raw_reports")
+        if not isinstance(raw_reports, list) or not raw_reports:
+            raise EvidenceError(f"{command_id}: no retained raw JUnit reports")
+        for raw in raw_reports:
+            if not isinstance(raw, dict) or not isinstance(raw.get("path"), str):
+                raise EvidenceError(f"{command_id}: invalid raw JUnit record")
+            raw_path = (run_root / raw["path"]).resolve()
+            if not raw_path.is_relative_to(run_root):
+                raise EvidenceError(f"{command_id}: raw JUnit path escapes the run directory")
+            _assert_file_digest(
+                raw_path,
+                raw.get("sha256"),
+                f"{command_id} raw JUnit",
+            )
+        for stream in ("stdout", "stderr"):
+            relative = record.get(f"{stream}_path")
+            if not isinstance(relative, str):
+                raise EvidenceError(f"{command_id}: missing {stream} path")
+            stream_path = (run_root / relative).resolve()
+            if not stream_path.is_relative_to(run_root):
+                raise EvidenceError(f"{command_id}: {stream} path escapes the run directory")
+            _assert_file_digest(
+                stream_path,
+                record.get(f"{stream}_sha256"),
+                f"{command_id} {stream}",
+            )
+    if set(indexed) != set(SOURCE_REPORTS):
+        raise EvidenceError("execution manifest source command set drifted")
+
+    quarantined = manifest.get("quarantined_attempts")
+    if not isinstance(quarantined, list):
+        raise EvidenceError("execution manifest quarantined attempts must be a list")
+    for attempt in quarantined:
+        if (
+            not isinstance(attempt, dict)
+            or attempt.get("candidate_commit") != candidate_commit
+            or attempt.get("id") not in SOURCE_REPORTS
+            or attempt.get("exit_code") == 0
+            or attempt.get("accepted") is not False
+            or attempt.get("failure_classification") != "INFRA"
+        ):
+            raise EvidenceError("a PASS manifest may retain only classified same-SHA INFRA attempts")
+    return manifest
+
+
+def assert_candidate_chain_policy(matrix: dict[str, Any], policy: dict[str, Any]) -> None:
+    required: set[str] = set()
+    for section_name in (
+        "signed_synthetic_chain_evidence",
+        "runtime_material_chain_evidence",
+    ):
+        section = policy.get(section_name)
+        if not isinstance(section, dict):
+            raise EvidenceError(f"Phase 4 evidence policy lacks {section_name}")
+        if (
+            section.get("claim_ceiling") != "ENGINEERING_ONLY"
+            or section.get("evidence") != "java-phase4-junit.xml"
+            or section.get("promotion_effect") != "NONE"
+        ):
+            raise EvidenceError(f"{section_name} relaxed its engineering-only claim")
+        classes = section.get("required_java_test_classes")
+        if not isinstance(classes, list) or not classes:
+            raise EvidenceError(f"{section_name} has no required Java tests")
+        required.update(classes)
+    batch_classes = set(matrix["batches"]["P4-BATCH-2"]["java_test_classes"])
+    if not required <= batch_classes:
+        raise EvidenceError(
+            "candidate chain policy names Java tests outside P4-BATCH-2: "
+            + ", ".join(sorted(required - batch_classes))
+        )
 
 
 def _path_classname(selector: str, *, frontend: bool = False) -> str:
@@ -428,11 +692,13 @@ def _selector_matches(report_name: str, case: TestCase, selector: str) -> bool:
     class_pattern, separator, name_pattern = selector.partition("#")
     if not separator or not class_pattern or not name_pattern:
         raise EvidenceError(f"invalid evidence selector {selector!r}")
-    if report_name == "frontend-phase4-junit.xml":
+    frontend = report_name == "frontend-phase4-junit.xml"
+    if frontend:
         class_pattern = class_pattern.removeprefix("frontend/")
-    return fnmatch.fnmatch(case.classname, class_pattern) and fnmatch.fnmatch(
-        case.name, name_pattern
-    )
+    name_matches = fnmatch.fnmatch(case.name, name_pattern)
+    if frontend and not name_matches:
+        name_matches = fnmatch.fnmatch(case.name, f"* > {name_pattern}")
+    return fnmatch.fnmatch(case.classname, class_pattern) and name_matches
 
 
 def _resolve_mapping(
@@ -617,7 +883,11 @@ def build_external_gates(
 
 
 def build_failure_classification(
-    *, matrix: dict[str, Any], policy: dict[str, Any], candidate_commit: str
+    *,
+    matrix: dict[str, Any],
+    policy: dict[str, Any],
+    candidate_commit: str,
+    execution_manifest: dict[str, Any],
 ) -> dict[str, Any]:
     matrix_policy = matrix.get("failure_classification", {})
     required = matrix_policy.get("required_values")
@@ -626,12 +896,34 @@ def build_failure_classification(
         raise EvidenceError("Phase 4 failure classification values drifted")
     if not isinstance(classifications, dict) or set(classifications) != set(required):
         raise EvidenceError("Phase 4 evidence policy lacks exact failure classifications")
+    quarantined = []
+    for attempt in execution_manifest["quarantined_attempts"]:
+        quarantined.append(
+            {
+                field: attempt[field]
+                for field in (
+                    "id",
+                    "candidate_commit",
+                    "started_at",
+                    "finished_at",
+                    "duration_seconds",
+                    "exit_code",
+                    "failure_classification",
+                    "stdout_path",
+                    "stdout_sha256",
+                    "stderr_path",
+                    "stderr_sha256",
+                    "raw_reports",
+                )
+            }
+        )
     return {
         "schema_version": "temporal-first-failure-classification.v1",
         "phase": 4,
         "candidate_commit": candidate_commit,
         "classifications": classifications,
         "accepted_source_suite_failures": [],
+        "quarantined_source_attempts": quarantined,
         "open_product_failures": [],
         "quarantined_attempts_reused": False,
         "decision": {
@@ -654,8 +946,13 @@ def build_phase_metrics(
     matrix: dict[str, Any],
     reports: dict[str, JUnitReport],
     derived: dict[str, JUnitReport],
+    execution_manifest: dict[str, Any],
+    execution_manifest_sha256: str,
 ) -> dict[str, Any]:
     commands = focused_commands(matrix)
+    command_records = {
+        record["id"]: record for record in execution_manifest["commands"]
+    }
     source_entries = []
     all_cases: list[TestCase] = []
     counts: dict[str, int] = {}
@@ -665,6 +962,7 @@ def build_phase_metrics(
         all_cases.extend(report.cases)
         counts[command_id] = int(totals["tests"])
         command = commands[command_id]["command"]
+        execution = command_records[command_id]
         source_entries.append(
             {
                 "name": filename,
@@ -675,6 +973,10 @@ def build_phase_metrics(
                     for field in ("tests", "failures", "errors", "skipped")
                 },
                 "sha256": _sha256(report.path),
+                "started_at": execution["started_at"],
+                "finished_at": execution["finished_at"],
+                "duration_seconds": execution["duration_seconds"],
+                "exit_code": execution["exit_code"],
             }
         )
     identities = [case.identity for case in all_cases]
@@ -701,6 +1003,12 @@ def build_phase_metrics(
         )
     started_text = _assert_timestamp(verification_started_at, "verification_started_at")
     finished_text = _assert_timestamp(verification_finished_at, "verification_finished_at")
+    if started_text != execution_manifest["verification_started_at"] or (
+        finished_text != execution_manifest["verification_finished_at"]
+    ):
+        raise EvidenceError(
+            "verification timestamps must exactly match the source execution manifest"
+        )
     started = datetime.fromisoformat(started_text.replace("Z", "+00:00"))
     finished = datetime.fromisoformat(finished_text.replace("Z", "+00:00"))
     if finished < started:
@@ -721,7 +1029,7 @@ def build_phase_metrics(
         "verification_wall_clock_seconds": round((finished - started).total_seconds(), 3),
         "change_summary": _change_summary(base_commit, candidate_commit),
         "candidate_verification": {
-            "source_execution_mode": "PREGENERATED_CANDIDATE_BOUND_JUNIT",
+            "source_execution_mode": "RECORDED_CANDIDATE_BOUND_SOURCE_RUNNER",
             "deduplicated_execution": True,
             "mixed_candidate_results": False,
             "quarantined_attempts_reused": False,
@@ -733,6 +1041,13 @@ def build_phase_metrics(
             "failures": totals["failures"],
             "errors": totals["errors"],
             "skipped": totals["skipped"],
+        },
+        "environment": execution_manifest["environment"],
+        "commands": execution_manifest["commands"],
+        "quarantined_attempts": execution_manifest["quarantined_attempts"],
+        "source_execution_manifest": {
+            "name": EXECUTION_MANIFEST_NAME,
+            "sha256": execution_manifest_sha256,
         },
         "source_reports": source_entries,
         "batch_views": batch_entries,
@@ -757,8 +1072,10 @@ def assemble_evidence(
     engineering_started_at: str,
     verification_started_at: str,
     verification_finished_at: str,
+    execution_manifest: dict[str, Any],
 ) -> dict[str, Any]:
     candidate_commit = _assert_candidate(candidate_commit)
+    assert_candidate_chain_policy(matrix, policy)
     output_dir.mkdir(parents=True, exist_ok=False)
     reports = consume_source_reports(
         source_dir=source_dir,
@@ -791,7 +1108,9 @@ def assemble_evidence(
         matrix=matrix,
         policy=policy,
         candidate_commit=candidate_commit,
+        execution_manifest=execution_manifest,
     )
+    _write_json(output_dir / EXECUTION_MANIFEST_NAME, execution_manifest)
     metrics = build_phase_metrics(
         release_id=release_id,
         base_commit=base_commit,
@@ -802,6 +1121,8 @@ def assemble_evidence(
         matrix=matrix,
         reports=reports,
         derived=derived,
+        execution_manifest=execution_manifest,
+        execution_manifest_sha256=_sha256(output_dir / EXECUTION_MANIFEST_NAME),
     )
     _write_json(output_dir / "phase-metrics.json", metrics)
     _write_json(output_dir / "baseline-id-coverage.json", baseline_coverage)
@@ -839,6 +1160,7 @@ def assert_clean_detached_candidate(
     repository: Path = ROOT,
     *,
     allowed_untracked_root: Path | None = None,
+    allowed_untracked_roots: Sequence[Path] = (),
 ) -> None:
     expected = _assert_candidate(candidate_commit)
     head = _git_result("rev-parse", "HEAD", repository=repository)
@@ -858,13 +1180,15 @@ def assert_clean_detached_candidate(
         raise EvidenceError(f"cannot inspect candidate worktree: {status.stderr.strip()}")
     entries = [entry for entry in status.stdout.split("\0") if entry]
     unexpected: list[str] = []
-    allowed_root = allowed_untracked_root.resolve() if allowed_untracked_root else None
+    allowed_roots = [root.resolve() for root in allowed_untracked_roots]
+    if allowed_untracked_root is not None:
+        allowed_roots.append(allowed_untracked_root.resolve())
     for entry in entries:
-        if not entry.startswith("?? ") or allowed_root is None:
+        if not entry.startswith("?? ") or not allowed_roots:
             unexpected.append(entry)
             continue
         path = (repository / entry[3:]).resolve()
-        if not path.is_relative_to(allowed_root):
+        if not any(path.is_relative_to(root) for root in allowed_roots):
             unexpected.append(entry)
     if unexpected:
         raise EvidenceError(
@@ -918,6 +1242,14 @@ def _parser() -> argparse.ArgumentParser:
         help="Directory containing the four candidate-bound P4-BATCH-3 source reports.",
     )
     parser.add_argument(
+        "--execution-manifest",
+        required=True,
+        type=Path,
+        help=(
+            "PASS source-execution-manifest.json produced by the Phase 4 candidate runner."
+        ),
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         help="Defaults to test-reports/temporal-first/<release-id>/phase-4.",
@@ -936,14 +1268,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         matrix = load_matrix()
         policy = _load_yaml(POLICY_PATH)
-        assert_clean_detached_candidate(candidate_commit)
+        source_dir = arguments.source_dir.resolve()
+        execution_manifest_path = arguments.execution_manifest.resolve()
+        assert_clean_detached_candidate(
+            candidate_commit,
+            allowed_untracked_roots=(execution_manifest_path.parent,),
+        )
         assert_base_ancestor(arguments.base_commit, candidate_commit)
+        execution_manifest = load_execution_manifest(
+            path=execution_manifest_path,
+            candidate_commit=candidate_commit,
+            matrix=matrix,
+            source_dir=source_dir,
+        )
         if output_dir.exists() or staging.exists():
             raise EvidenceError(f"evidence output or staging path already exists: {output_dir}")
         metrics = assemble_evidence(
             matrix=matrix,
             policy=policy,
-            source_dir=arguments.source_dir.resolve(),
+            source_dir=source_dir,
             output_dir=staging,
             release_id=arguments.release_id,
             base_commit=arguments.base_commit,
@@ -951,9 +1294,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             engineering_started_at=arguments.engineering_started_at,
             verification_started_at=arguments.verification_started_at,
             verification_finished_at=arguments.verification_finished_at,
+            execution_manifest=execution_manifest,
         )
         assert_clean_detached_candidate(
-            candidate_commit, allowed_untracked_root=staging
+            candidate_commit,
+            allowed_untracked_roots=(execution_manifest_path.parent, staging),
         )
         staging.rename(output_dir)
     except (EvidenceError, OSError) as exception:

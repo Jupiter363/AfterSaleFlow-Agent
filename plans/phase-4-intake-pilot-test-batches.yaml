@@ -809,6 +809,7 @@ batches:
       - tests/static/test_phase4_r15_authority_binding_contract.py
       - tests/static/test_phase4_engineering_evidence_policy.py
       - tests/static/test_phase4_candidate_evidence.py
+      - tests/static/test_phase4_candidate_runner.py
     python_tests:
       - python-agent-service/tests/graphs/intake
       - python-agent-service/tests/agents/test_intake_turn.py
@@ -819,6 +820,9 @@ batches:
       - python-agent-service/tests/test_streaming_v2.py
       - python-agent-service/tests/graph_runtime/unit/test_compiled_executor.py
       - python-agent-service/tests/graph_runtime/unit/test_registry_identity.py
+      - python-agent-service/tests/graph_runtime/unit/test_production_bindings.py
+      - python-agent-service/tests/graph_runtime/unit/test_intake_graph_recovery.py
+      - python-agent-service/tests/graph_runtime/unit/test_checkpoint_fenced_saver.py
       - python-agent-service/tests/security/test_graph_security_runtime.py
       - python-agent-service/tests/model_runtime/test_runnable_factory.py
     java_test_classes:
@@ -877,6 +881,7 @@ batches:
           tests/static/test_phase4_r15_authority_binding_contract.py
           tests/static/test_phase4_engineering_evidence_policy.py
           tests/static/test_phase4_candidate_evidence.py
+          tests/static/test_phase4_candidate_runner.py
           -q
     execution:
       order:
@@ -935,6 +940,9 @@ batches:
           tests/test_streaming_v2.py
           tests/graph_runtime/unit/test_compiled_executor.py
           tests/graph_runtime/unit/test_registry_identity.py
+          tests/graph_runtime/unit/test_production_bindings.py
+          tests/graph_runtime/unit/test_intake_graph_recovery.py
+          tests/graph_runtime/unit/test_checkpoint_fenced_saver.py
           tests/security/test_graph_security_runtime.py
           tests/model_runtime/test_runnable_factory.py
           -q
@@ -970,6 +978,7 @@ batches:
           tests/static/test_phase4_r15_authority_binding_contract.py
           tests/static/test_phase4_engineering_evidence_policy.py
           tests/static/test_phase4_candidate_evidence.py
+          tests/static/test_phase4_candidate_runner.py
           -q
     execution:
       strategy: deduplicated_source_suites_then_derived_batch_views
@@ -981,6 +990,16 @@ batches:
         - java-phase4-junit.xml
         - frontend-phase4-junit.xml
         - static-phase4-junit.xml
+      execution_manifest: source-execution-manifest.json
+      execution_manifest_required_fields:
+        - candidate_commit
+        - environment
+        - commands
+        - command_timestamps
+        - command_durations
+        - command_exit_codes
+        - command_and_report_sha256
+        - failure_classification
       derived_views:
         - batch-0-junit.xml
         - batch-1-junit.xml
@@ -990,6 +1009,7 @@ batches:
       root: test-reports/temporal-first/<release-id>/phase-4
       required_files:
         - phase-metrics.json
+        - source-execution-manifest.json
         - baseline-id-coverage.json
         - check-id-coverage.json
         - failure-classification.json

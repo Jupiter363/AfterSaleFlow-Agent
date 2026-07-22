@@ -140,6 +140,89 @@ def _fixture_source_reports(
     return source_dir
 
 
+def _fixture_execution_manifest(
+    tmp_path: Path, matrix: dict, source_dir: Path
+) -> dict:
+    commands = evidence.focused_commands(matrix)
+    records = []
+    environment = {
+        "environment_id": "phase4-fixture",
+        "captured_at": "2026-07-22T00:00:00+00:00",
+        "host": {"system": "fixture", "release": "fixture", "machine": "fixture"},
+        "tools": {
+            name: {"available": True, "version": "fixture"}
+            for name in ("python", "git", "java", "node")
+        },
+        "dependency_manifests": [],
+    }
+    environment["snapshot_sha256"] = evidence._json_sha256(environment)
+    for command_id, filename in evidence.SOURCE_REPORTS.items():
+        item = commands[command_id]
+        command = item["command"]
+        raw_path = tmp_path / "attempts" / command_id / "raw-junit.xml"
+        if command_id in {"python_phase_4", "static_phase_4"}:
+            executed = command + f' --junitxml="{raw_path}"'
+        elif command_id == "frontend_phase_4":
+            executed = command + f' --reporter=junit --outputFile="{raw_path}"'
+        else:
+            executed = evidence.re.sub(
+                r"\btest$",
+                "-Dsurefire.reportNameSuffix=p4-aaaaaaaaaaaa-12345678 test",
+                command,
+            )
+        records.append(
+            {
+                "id": command_id,
+                "candidate_commit": CANDIDATE,
+                "cwd": item["cwd"],
+                "matrix_command": command,
+                "matrix_command_sha256": evidence.hashlib.sha256(
+                    command.encode("utf-8")
+                ).hexdigest(),
+                "executed_command": executed,
+                "executed_command_sha256": evidence.hashlib.sha256(
+                    executed.encode("utf-8")
+                ).hexdigest(),
+                "started_at": "2026-07-22T00:00:00+00:00",
+                "finished_at": "2026-07-22T00:01:00+00:00",
+                "duration_seconds": 60.0,
+                "exit_code": 0,
+                "environment_sha256": environment["snapshot_sha256"],
+                "stdout_path": f"logs/{command_id}.stdout.log",
+                "stdout_sha256": "0" * 64,
+                "stderr_path": f"logs/{command_id}.stderr.log",
+                "stderr_sha256": "0" * 64,
+                "raw_reports": [],
+                "failure_classification": "NONE",
+                "accepted": True,
+                "report": filename,
+                "report_path": f"source/{filename}",
+                "report_sha256": evidence._sha256(source_dir / filename),
+                **{
+                    field: evidence.parse_junit(source_dir / filename).totals[field]
+                    for field in ("tests", "failures", "errors", "skipped")
+                },
+            }
+        )
+    return {
+        "schema_version": evidence.EXECUTION_MANIFEST_SCHEMA,
+        "phase": 4,
+        "candidate_commit": CANDIDATE,
+        "attempt_id": tmp_path.name,
+        "status": "PASS",
+        "verification_started_at": "2026-07-22T00:00:00+00:00",
+        "verification_finished_at": "2026-07-22T00:01:00+00:00",
+        "environment": environment,
+        "commands": records,
+        "quarantined_attempts": [],
+        "pending_failure": None,
+        "quarantined_attempts_reused": False,
+        "promotion_gate": "PENDING",
+        "MIG-003": "PENDING_PROMOTION",
+        "MIG-004": "PENDING_PROMOTION",
+    }
+
+
 def test_matrix_expands_java_template_and_declares_exact_artifacts() -> None:
     matrix = evidence.load_matrix()
     commands = evidence.focused_commands(matrix)
@@ -151,6 +234,80 @@ def test_matrix_expands_java_template_and_declares_exact_artifacts() -> None:
     assert set(
         matrix["batches"]["P4-BATCH-3"]["evidence"]["required_files"]
     ) == evidence.EXPECTED_FILES
+
+
+def test_execution_manifest_authenticates_commands_environment_logs_and_reports(
+    tmp_path: Path,
+) -> None:
+    matrix = evidence.load_matrix()
+    policy = evidence._load_yaml(evidence.POLICY_PATH)
+    source_dir = _fixture_source_reports(tmp_path, matrix, policy)
+    manifest = _fixture_execution_manifest(tmp_path, matrix, source_dir)
+    dependency_paths = (
+        "python-agent-service/requirements.lock",
+        "java-api-service/pom.xml",
+        "frontend/pnpm-lock.yaml",
+    )
+    manifest["environment"]["dependency_manifests"] = [
+        {"path": dependency, "sha256": evidence._sha256(evidence.ROOT / dependency)}
+        for dependency in dependency_paths
+    ]
+    manifest["environment"].pop("snapshot_sha256")
+    manifest["environment"]["snapshot_sha256"] = evidence._json_sha256(
+        manifest["environment"]
+    )
+    for record in manifest["commands"]:
+        record["environment_sha256"] = manifest["environment"]["snapshot_sha256"]
+        raw = tmp_path / "attempts" / record["id"] / "raw-junit.xml"
+        raw.parent.mkdir(parents=True, exist_ok=True)
+        raw.write_bytes((source_dir / record["report"]).read_bytes())
+        record["raw_reports"] = [
+            {
+                "path": raw.relative_to(tmp_path).as_posix(),
+                "sha256": evidence._sha256(raw),
+            }
+        ]
+        for stream in ("stdout", "stderr"):
+            path = tmp_path / record[f"{stream}_path"]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"{record['id']} {stream}\n", encoding="utf-8")
+            record[f"{stream}_sha256"] = evidence._sha256(path)
+    manifest_path = tmp_path / evidence.EXECUTION_MANIFEST_NAME
+    evidence._write_json(manifest_path, manifest)
+
+    loaded = evidence.load_execution_manifest(
+        path=manifest_path,
+        candidate_commit=CANDIDATE,
+        matrix=matrix,
+        source_dir=source_dir,
+    )
+    assert loaded["status"] == "PASS"
+    assert {record["id"] for record in loaded["commands"]} == set(
+        evidence.SOURCE_REPORTS
+    )
+
+    manifest["commands"][0]["exit_code"] = 1
+    evidence._write_json(manifest_path, manifest)
+    with pytest.raises(evidence.EvidenceError, match="source command was not accepted"):
+        evidence.load_execution_manifest(
+            path=manifest_path,
+            candidate_commit=CANDIDATE,
+            matrix=matrix,
+            source_dir=source_dir,
+        )
+
+
+def test_frontend_policy_selector_accepts_vitest_suite_prefix() -> None:
+    case = _case(
+        source="frontend-phase4-junit.xml",
+        classname="src/api/agentStream.test.js",
+        name="agent stream protocol > discovers active room runs after refresh with actor isolation headers",
+    )
+    assert evidence._selector_matches(
+        "frontend-phase4-junit.xml",
+        case,
+        "frontend/src/api/agentStream.test.js#discovers active room runs after refresh with actor isolation headers",
+    )
 
 
 def test_source_reports_reject_mixed_candidate_failure_skip_and_command(
@@ -264,6 +421,7 @@ def test_assembles_exact_bundle_and_keeps_both_migrations_pending(
     matrix = evidence.load_matrix()
     policy = evidence._load_yaml(evidence.POLICY_PATH)
     source_dir = _fixture_source_reports(tmp_path, matrix, policy)
+    execution_manifest = _fixture_execution_manifest(tmp_path, matrix, source_dir)
     output_dir = tmp_path / "phase-4"
     monkeypatch.setattr(
         evidence,
@@ -287,6 +445,7 @@ def test_assembles_exact_bundle_and_keeps_both_migrations_pending(
         engineering_started_at="2026-07-21T00:00:00+00:00",
         verification_started_at="2026-07-22T00:00:00+00:00",
         verification_finished_at="2026-07-22T00:01:00+00:00",
+        execution_manifest=execution_manifest,
     )
     second_output = tmp_path / "phase-4-repeat"
     evidence.assemble_evidence(
@@ -300,11 +459,18 @@ def test_assembles_exact_bundle_and_keeps_both_migrations_pending(
         engineering_started_at="2026-07-21T00:00:00+00:00",
         verification_started_at="2026-07-22T00:00:00+00:00",
         verification_finished_at="2026-07-22T00:01:00+00:00",
+        execution_manifest=execution_manifest,
     )
 
     assert {path.name for path in output_dir.iterdir()} == evidence.EXPECTED_FILES
     assert metrics["candidate_commit"] == CANDIDATE
     assert metrics["candidate_verification"]["failures"] == 0
+    assert metrics["source_execution_manifest"] == {
+        "name": evidence.EXECUTION_MANIFEST_NAME,
+        "sha256": evidence._sha256(
+            output_dir / evidence.EXECUTION_MANIFEST_NAME
+        ),
+    }
     assert metrics["status"] == {
         "engineering_checkpoint": "PASS",
         "promotion_gate": "PENDING",

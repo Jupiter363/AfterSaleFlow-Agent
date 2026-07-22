@@ -27,6 +27,16 @@ signed_synthetic_chain_evidence:
     - IntakeSyntheticShadowConfigurationTest
     - TemporalWorkerConfigurationTest
 
+# Runtime material is an independent fail-closed authority boundary within the synthetic chain.
+# Keep it explicit so a candidate cannot prove the ingress/exchange path while omitting the
+# manifest-to-private-object-store material provider.
+runtime_material_chain_evidence:
+  claim_ceiling: ENGINEERING_ONLY
+  evidence: java-phase4-junit.xml
+  promotion_effect: NONE
+  required_java_test_classes:
+    - IntakeSyntheticRuntimeMaterialSourceTest
+
 # Defaults define status and source-report scope. Every Phase 4 Check ID still has an explicit
 # selector mapping below, and the two promotion gates remain independent of engineering results.
 defaults:
