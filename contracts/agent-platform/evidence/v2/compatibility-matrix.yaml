@@ -215,8 +215,9 @@ profile_versioning:
     - evidence-batch-proposal.v1
   capability_profile_versions_hash: canonical_hash_of_split_manifest_profile_versions
   projection_exposes_both_pins: true
-  room_graph_command_output_schema_maps_to: assessment_output_schema_version
-  graph_registry_output_schema_maps_to: assessment_output_schema_version
+  room_graph_command_output_schema_maps_to: terminal_output_schema_version
+  graph_registry_output_schema_maps_to: terminal_output_schema_version
+  internal_item_lcel_parser_output_schema_maps_to: assessment_output_schema_version
   terminal_schema_maps_to: terminal_output_schema_version
 projection_compatibility:
   legacy_unavailable:
