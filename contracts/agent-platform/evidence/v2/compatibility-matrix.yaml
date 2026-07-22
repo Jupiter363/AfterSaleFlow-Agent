@@ -123,10 +123,15 @@ authorization:
       - room_type
       - room_epoch
       - thread_id
-      - actor_scope_hash
       - graph_version
       - checkpoint_schema_version
       - deadline_at
+    derived_command_bindings:
+      actor_scope_hash:
+        source: verified_command.actor_scope
+        canonicalization: RFC_8785
+        digest: SHA_256
+        target: manifest.actor_scope_hash
     thread_bindings:
       - tenant_surrogate
       - case_id
