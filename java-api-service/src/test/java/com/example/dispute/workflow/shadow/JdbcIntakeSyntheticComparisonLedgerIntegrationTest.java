@@ -2,6 +2,7 @@ package com.example.dispute.workflow.shadow;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowable;
 
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.workflow.application.authority.epoch.AgentSessionProfileRegistry;
@@ -12,7 +13,14 @@ import com.example.dispute.workflow.shadow.intake.IntakeSyntheticComparisonLedge
 import com.example.dispute.workflow.shadow.intake.IntakeSyntheticComparisonReceiptFactory;
 import com.example.dispute.workflow.shadow.intake.JdbcIntakeSyntheticComparisonLedger;
 import com.example.dispute.workflow.temporal.room.intake.IntakeDomainEventType;
+import com.example.dispute.workflow.temporal.room.intake.IntakeAgentRunRef;
+import com.example.dispute.workflow.temporal.room.intake.IntakeGraphExecutionRef;
+import com.example.dispute.workflow.temporal.room.intake.IntakeOperationKeys;
 import com.example.dispute.workflow.temporal.room.intake.IntakeParty;
+import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.GraphExecutionReceipt;
+import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.ImmutablePayloadRef;
+import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.OperationReceipt;
+import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.TurnFinalizationRequest;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import java.nio.charset.StandardCharsets;
@@ -25,6 +33,7 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -95,17 +104,22 @@ class JdbcIntakeSyntheticComparisonLedgerIntegrationTest {
     void exactConcurrentCommitCreatesOneRowAndReplaysTheStoredReceipt() throws Exception {
         Fixture fixture = insertFixture("CONCURRENT_" + SEQUENCE.incrementAndGet());
         CommitRequest request = commitRequest(fixture, IntakeDomainEventType.TURN_READY_TO_CONFIRM);
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch start = new CountDownLatch(1);
 
         List<CommitResult> results;
         try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
             List<Future<CommitResult>> futures = List.of(
-                    executor.submit(() -> ledger.commit(request)),
-                    executor.submit(() -> ledger.commit(request)));
+                    executor.submit(() -> commitAfterBarrier(request, ready, start)),
+                    executor.submit(() -> commitAfterBarrier(request, ready, start)));
+            assertThat(ready.await(10, TimeUnit.SECONDS)).isTrue();
+            start.countDown();
             results = List.of(futures.get(0).get(10, TimeUnit.SECONDS),
                     futures.get(1).get(10, TimeUnit.SECONDS));
         }
 
         assertThat(results).extracting(CommitResult::created).containsExactlyInAnyOrder(true, false);
+        assertThat(results.get(0).comparison()).isEqualTo(results.get(1).comparison());
         assertThat(results.get(0).receipt()).isEqualTo(results.get(1).receipt());
         CommitResult replay = ledger.commit(request);
         assertThat(replay.created()).isFalse();
@@ -124,6 +138,61 @@ class JdbcIntakeSyntheticComparisonLedgerIntegrationTest {
                         Integer.class,
                         fixture.finalization().operationKey()))
                 .isZero();
+    }
+
+    @Test
+    void differentOperationCollidingOnComparisonKeyFailsClosedInsteadOfReplaying() {
+        Fixture fixture = insertFixture("KEY_COLLISION_" + SEQUENCE.incrementAndGet());
+        CommitRequest request = commitRequest(fixture, IntakeDomainEventType.TURN_READY_TO_CONFIRM);
+        ledger.commit(request);
+        String originalOperationKey = fixture.finalization().operationKey();
+        String collidingOperationKey = IntakeOperationKeys.turnFinalize(
+                fixture.caseId(),
+                fixture.roomEpoch(),
+                fixture.threadId(),
+                fixture.commandId(),
+                sha256("colliding-operation:" + fixture.caseId()));
+        replaceStoredOperationKey(originalOperationKey, collidingOperationKey);
+
+        Throwable failure = catchThrowable(() -> ledger.commit(request));
+
+        assertThat(failure)
+                .as("a comparison-key collision must never be returned as an exact replay")
+                .isNotNull()
+                .isInstanceOf(RuntimeException.class);
+        assertThat(countComparisons(fixture)).isOne();
+        assertThat(jdbc.queryForObject(
+                        "select operation_key from case_intake_shadow_comparison "
+                                + "where comparison_key_hash = ?",
+                        String.class,
+                        request.comparison().comparisonKeyHash()))
+                .isEqualTo(collidingOperationKey);
+    }
+
+    @Test
+    void sameOperationRejectsRequestAndProposalDriftAndResultCannotReuseTheKey() {
+        Fixture fixture = insertFixture("VALUE_CONFLICT_" + SEQUENCE.incrementAndGet());
+        CommitRequest committed = commitRequest(
+                fixture, IntakeDomainEventType.TURN_READY_TO_CONFIRM);
+        CommitResult original = ledger.commit(committed);
+
+        TurnFinalizationRequest requestDrift = withRequestHash(
+                fixture.finalization(), sha256("request-drift:" + fixture.caseId()));
+        assertReplayConflict(requestDrift);
+
+        TurnFinalizationRequest proposalDrift = withProposalHash(
+                fixture.finalization(), sha256("proposal-drift:" + fixture.caseId()));
+        assertReplayConflict(proposalDrift);
+
+        assertThatThrownBy(() -> withResultHashKeepingOperation(
+                        fixture.finalization(), sha256("result-drift:" + fixture.caseId())))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("operationKey does not match");
+
+        CommitResult replay = ledger.commit(committed);
+        assertThat(replay.created()).isFalse();
+        assertThat(replay.receipt()).isEqualTo(original.receipt());
+        assertThat(countComparisons(fixture)).isOne();
     }
 
     @Test
@@ -285,12 +354,170 @@ class JdbcIntakeSyntheticComparisonLedgerIntegrationTest {
 
     private static CommitRequest commitRequest(
             Fixture fixture, IntakeDomainEventType eventType) {
-        String key = IntakeSyntheticComparisonReceiptFactory.comparisonKey(fixture.finalization());
+        return commitRequest(fixture.finalization(), eventType);
+    }
+
+    private static CommitRequest commitRequest(
+            TurnFinalizationRequest finalization, IntakeDomainEventType eventType) {
+        String key = IntakeSyntheticComparisonReceiptFactory.comparisonKey(finalization);
         IntakeShadowComparison comparison = new IntakeShadowParityService(ignored -> {}).evaluate(
                 key,
                 IntakeSyntheticTestFixtures.paritySnapshot(),
                 IntakeSyntheticTestFixtures.paritySnapshot());
-        return new CommitRequest(fixture.finalization(), comparison, eventType);
+        return new CommitRequest(finalization, comparison, eventType);
+    }
+
+    private static CommitResult commitAfterBarrier(
+            CommitRequest request, CountDownLatch ready, CountDownLatch start)
+            throws InterruptedException {
+        ready.countDown();
+        if (!start.await(10, TimeUnit.SECONDS)) {
+            throw new IllegalStateException("concurrent commit start barrier timed out");
+        }
+        return ledger.commit(request);
+    }
+
+    private static void assertReplayConflict(TurnFinalizationRequest finalization) {
+        assertThatThrownBy(() -> ledger.commit(commitRequest(
+                        finalization, IntakeDomainEventType.TURN_READY_TO_CONFIRM)))
+                .isInstanceOfAny(IllegalStateException.class, IllegalArgumentException.class);
+    }
+
+    private static void replaceStoredOperationKey(String expected, String replacement) {
+        jdbc.execute(
+                "alter table case_intake_shadow_comparison "
+                        + "disable trigger trg_intake_shadow_comparison_immutable");
+        try {
+            assertThat(jdbc.update(
+                            "update case_intake_shadow_comparison set operation_key = ? "
+                                    + "where operation_key = ?",
+                            replacement,
+                            expected))
+                    .isOne();
+        } finally {
+            jdbc.execute(
+                    "alter table case_intake_shadow_comparison "
+                            + "enable trigger trg_intake_shadow_comparison_immutable");
+        }
+    }
+
+    private static TurnFinalizationRequest withRequestHash(
+            TurnFinalizationRequest source, String requestHash) {
+        GraphExecutionReceipt graph = source.graphExecution();
+        OperationReceipt operation = graph.operation();
+        GraphExecutionReceipt reboundGraph = new GraphExecutionReceipt(
+                graph.schemaVersion(),
+                new OperationReceipt(
+                        operation.schemaVersion(),
+                        operation.operationKey(),
+                        requestHash,
+                        operation.resultHash(),
+                        operation.processRevision(),
+                        operation.roomRevision()),
+                graph.agentRunRef(),
+                graph.graphExecutionRef(),
+                graph.resultPointer(),
+                graph.proposalPointer());
+        return new TurnFinalizationRequest(
+                source.schemaVersion(),
+                source.envelope(),
+                source.threadId(),
+                source.agentSessionId(),
+                reboundGraph,
+                source.operationKey(),
+                requestHash);
+    }
+
+    private static TurnFinalizationRequest withProposalHash(
+            TurnFinalizationRequest source, String proposalHash) {
+        GraphExecutionReceipt graph = source.graphExecution();
+        IntakeGraphExecutionRef graphRef = graph.graphExecutionRef();
+        String proposalRef = graphRef.proposalRef() + ":conflict";
+        IntakeGraphExecutionRef reboundRef = new IntakeGraphExecutionRef(
+                graphRef.schemaVersion(),
+                graphRef.threadId(),
+                graphRef.graphCommandId(),
+                graphRef.graphKey(),
+                graphRef.graphVersion(),
+                graphRef.checkpointId(),
+                graphRef.resultRef(),
+                graphRef.resultHash(),
+                proposalRef,
+                proposalHash);
+        ImmutablePayloadRef proposal = graph.proposalPointer();
+        ImmutablePayloadRef reboundProposal = new ImmutablePayloadRef(
+                proposal.schemaVersion(),
+                proposal.artifactId(),
+                proposal.artifactType(),
+                proposal.artifactSchemaVersion(),
+                proposalRef,
+                "conflicting-proposal.v1",
+                proposalHash,
+                proposal.sizeBytes());
+        return new TurnFinalizationRequest(
+                source.schemaVersion(),
+                source.envelope(),
+                source.threadId(),
+                source.agentSessionId(),
+                new GraphExecutionReceipt(
+                        graph.schemaVersion(),
+                        graph.operation(),
+                        graph.agentRunRef(),
+                        reboundRef,
+                        graph.resultPointer(),
+                        reboundProposal),
+                source.operationKey(),
+                source.requestHash());
+    }
+
+    private static TurnFinalizationRequest withResultHashKeepingOperation(
+            TurnFinalizationRequest source, String resultHash) {
+        GraphExecutionReceipt graph = source.graphExecution();
+        OperationReceipt operation = graph.operation();
+        IntakeAgentRunRef run = graph.agentRunRef();
+        IntakeGraphExecutionRef graphRef = graph.graphExecutionRef();
+        String resultRef = graphRef.resultRef() + ":conflict";
+        ImmutablePayloadRef result = graph.resultPointer();
+        GraphExecutionReceipt reboundGraph = new GraphExecutionReceipt(
+                graph.schemaVersion(),
+                new OperationReceipt(
+                        operation.schemaVersion(),
+                        operation.operationKey(),
+                        operation.requestHash(),
+                        resultHash,
+                        operation.processRevision(),
+                        operation.roomRevision()),
+                new IntakeAgentRunRef(
+                        run.schemaVersion(), run.logicalRunId(), run.attemptId(), resultHash),
+                new IntakeGraphExecutionRef(
+                        graphRef.schemaVersion(),
+                        graphRef.threadId(),
+                        graphRef.graphCommandId(),
+                        graphRef.graphKey(),
+                        graphRef.graphVersion(),
+                        graphRef.checkpointId(),
+                        resultRef,
+                        resultHash,
+                        graphRef.proposalRef(),
+                        graphRef.proposalHash()),
+                new ImmutablePayloadRef(
+                        result.schemaVersion(),
+                        result.artifactId(),
+                        result.artifactType(),
+                        result.artifactSchemaVersion(),
+                        resultRef,
+                        "conflicting-result.v1",
+                        resultHash,
+                        result.sizeBytes()),
+                graph.proposalPointer());
+        return new TurnFinalizationRequest(
+                source.schemaVersion(),
+                source.envelope(),
+                source.threadId(),
+                source.agentSessionId(),
+                reboundGraph,
+                source.operationKey(),
+                source.requestHash());
     }
 
     private static Fixture insertFixture(String suffix) {
