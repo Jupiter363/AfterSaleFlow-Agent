@@ -16,6 +16,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 CONTRACT_ROOT = ROOT / "contracts/agent-platform/evidence/v2"
 V1_CONTRACT_ROOT = ROOT / "contracts/agent-platform/v1"
+PYTHON_AGENT_ROOT = ROOT / "python-agent-service"
 VALID_ROOT = CONTRACT_ROOT / "fixtures/valid"
 INVALID_ROOT = CONTRACT_ROOT / "fixtures/invalid"
 EVIDENCE_COMMAND_FIXTURE = (
@@ -641,9 +642,7 @@ def test_room_graph_command_binds_the_complete_manifest_without_a_hash_cycle() -
     assert command["checkpoint_schema_version"] == profile["checkpoint_schema_version"]
     assert invocation["prompt_profile_id"] == profile["prompt_version"]
     assert invocation["model_profile_id"] == profile["model_profile_id"]
-    assert invocation["output_schema_version"] == profile[
-        "assessment_output_schema_version"
-    ]
+    assert invocation["output_schema_version"] == profile["terminal_output_schema_version"]
     assert invocation["policy_version"] == profile["policy_version"]
     assert invocation["guardrail_version"] == profile["guardrail_version"]
     assert invocation["tool_capabilities"] == command["actor_scope"]["capabilities"]
@@ -664,12 +663,44 @@ def test_room_graph_command_binds_the_complete_manifest_without_a_hash_cycle() -
 
     command_request_hash = _canonical_hash(command, "request_hash")
     assert command_request_hash == command["request_hash"]
+    assert command_request_hash == (
+        "c45ad6be9ad4579d92a7901b85e06041e7d092df81d869fcd5a500536c7d46bc"
+    )
     assert len(
         {command_request_hash, manifest_payload_hash, manifest_internal_hash}
     ) == 3
     assert "fencing_token" not in command_schema["required"]
     assert "fencing_token" not in command_schema["properties"]
     assert "fencing_token" not in command
+
+    matrix = yaml.safe_load(
+        (CONTRACT_ROOT / "compatibility-matrix.yaml").read_text(encoding="utf-8")
+    )
+    versioning = matrix["profile_versioning"]
+    assert versioning["room_graph_command_output_schema_maps_to"] == (
+        "terminal_output_schema_version"
+    )
+    assert versioning["graph_registry_output_schema_maps_to"] == (
+        "terminal_output_schema_version"
+    )
+    assert versioning["internal_item_lcel_parser_output_schema_maps_to"] == (
+        "assessment_output_schema_version"
+    )
+    assert versioning["terminal_schema_maps_to"] == "terminal_output_schema_version"
+    assert _schema("evidence-item-proposal.schema.json")["properties"][
+        "schema_version"
+    ]["const"] == profile["assessment_output_schema_version"]
+
+    compiled_executor = (
+        PYTHON_AGENT_ROOT / "app/graph_runtime/compiled_executor.py"
+    ).read_text(encoding="utf-8")
+    graph_registry = (PYTHON_AGENT_ROOT / "app/graph_runtime/registry.py").read_text(
+        encoding="utf-8"
+    )
+    assert "metadata.schema_version != invocation.output_schema_version" in (
+        compiled_executor
+    )
+    assert "output_schema_version=self.output_schema_version" in graph_registry
 
 
 def test_es256_signs_lowercase_hash_text_and_never_raw_digest_bytes() -> None:
