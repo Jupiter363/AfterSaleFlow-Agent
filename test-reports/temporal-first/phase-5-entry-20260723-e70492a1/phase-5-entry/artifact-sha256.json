@@ -1,0 +1,41 @@
+{
+  "schema_version": "phase5-entry-artifact-index.v1",
+  "candidate_commit": "e70492a11e23307382ea762d0e8e7f57ab58870b",
+  "artifacts": [
+    {
+      "path": "candidate.txt",
+      "sha256": "0db9c8e01f9ab86f58694a2679a112637c09d5f0091cb260243a6d7799142fea",
+      "bytes": 41
+    },
+    {
+      "path": "phase5-entry-execution-manifest.json",
+      "sha256": "190730126f689f271a45597922e91619b287d8399d5c803947f000b13f4e4ceb",
+      "bytes": 21130
+    },
+    {
+      "path": "static-phase5-entry-junit.xml",
+      "sha256": "83930685e97951d3af3f7126b56624d43b288cf62e0ddd7d5615d6dd9f32e7fd",
+      "bytes": 24028
+    },
+    {
+      "path": "python-phase5-entry-junit.xml",
+      "sha256": "01f166838cef4be49e5613d1a76d7a64937559fb56eb138b1890c028319d447d",
+      "bytes": 9596
+    },
+    {
+      "path": "java-phase5-entry-junit.xml",
+      "sha256": "0f572ffb1da44f73cb227f36e0935c69b2b283628f29f21023e3aa400bf886b0",
+      "bytes": 195248
+    },
+    {
+      "path": "frontend-phase5-entry-junit.xml",
+      "sha256": "80bbe814028f947ed069ff5058e624e0cafa72bc827440656a9f3a2579c027b4",
+      "bytes": 20443
+    },
+    {
+      "path": "entry-metrics.json",
+      "sha256": "19979e9d73d2badfff90ad6203eb2b507df502d20a9dd971849584743a9997c5",
+      "bytes": 6784
+    }
+  ]
+}

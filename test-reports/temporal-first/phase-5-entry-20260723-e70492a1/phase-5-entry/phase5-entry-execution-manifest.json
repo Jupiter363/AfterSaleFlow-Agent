@@ -1,0 +1,361 @@
+{
+  "schema_version": "phase5-entry-execution-manifest.v1",
+  "phase": 5,
+  "batch": "P5-BATCH-0",
+  "candidate_commit": "e70492a11e23307382ea762d0e8e7f57ab58870b",
+  "attempt_id": "phase5-entry-20260723-e70492a1-r1",
+  "status": "PASS",
+  "verification_started_at": "2026-07-22T21:11:02.424+00:00",
+  "verification_finished_at": "2026-07-22T21:14:27.430+00:00",
+  "environment": {
+    "environment_id": "phase5-entry-e70492a1-r1",
+    "captured_at": "2026-07-22T21:11:02.045+00:00",
+    "host": {
+      "system": "Windows",
+      "release": "11",
+      "machine": "AMD64"
+    },
+    "tools": {
+      "python": {
+        "available": true,
+        "version": "3.12.3",
+        "implementation": "CPython"
+      },
+      "git": {
+        "available": true,
+        "exit_code": 0,
+        "version": "git version 2.44.0.windows.1"
+      },
+      "java": {
+        "available": true,
+        "exit_code": 0,
+        "version": "java version \"21.0.8\" 2025-07-15 LTS"
+      },
+      "node": {
+        "available": true,
+        "exit_code": 0,
+        "version": "v24.15.0"
+      }
+    },
+    "dependency_manifests": [
+      {
+        "path": "python-agent-service/pyproject.toml",
+        "sha256": "89fa516cf0fce8de32f703a38c1be50dd5c8d51f1076512f1a75c7e136875668"
+      },
+      {
+        "path": "python-agent-service/requirements.lock",
+        "sha256": "ec588b073793e6bb74f1fa5cf8630df830fd34afde9596c8b64e9ccd07ac10e3"
+      },
+      {
+        "path": "java-api-service/pom.xml",
+        "sha256": "1b46df62b207a9f0bd3253bba24d1055a88c83f736313561c1fd9b171ca93c58"
+      },
+      {
+        "path": "java-api-service/.mvn/wrapper/maven-wrapper.properties",
+        "sha256": "fd3f8fa8b791a96b39f10907b71c462bed15ba03f9cfe8d136c137406c3a19a6"
+      },
+      {
+        "path": "frontend/package.json",
+        "sha256": "34970a78a8092e8f11a311e9302ea0baf782b7912e9d4a21242b5afea4432e94"
+      },
+      {
+        "path": "frontend/pnpm-lock.yaml",
+        "sha256": "a7a7ef6a83eccff67d18c19c20ebeb537c6fc9e7cd0603dc54b682b0b06cc1db"
+      },
+      {
+        "path": "docker-compose.yml",
+        "sha256": "014cbf196ed61ee871b3e48de73b65da6d5172ec9addaf0da41fc698ff119766"
+      }
+    ],
+    "upstream_phase4_checkpoint": {
+      "checkpoint_path": "test-reports/temporal-first/phase-4-20260722-1ba6e17f/phase-4/phase-metrics.json",
+      "checkpoint_sha256": "33832d631a6df6c687ddaaff559c2868eb7a48758e9c97f6364d77a76e0ecef3",
+      "candidate_commit_file_sha256": "dfdd655e569356ba7f3d816f2926843f10c4ee6bf81f160a45656dddb65136b5",
+      "source_execution_manifest_git_sha256": "6a482cccfa87b8f6582f784b33e9644bba9a03d70eb4bc3a08739ef09ca8728d",
+      "evidence_commit": "b8697ce7a46f4494d250d21f27a076f0711ae04d",
+      "phase4_candidate_commit": "1ba6e17fa2182156825f42d7e243978cf23ccdb4",
+      "engineering_checkpoint": "PASS",
+      "next_phase_permission": "PHASE_5_ENGINEERING_ONLY",
+      "promotion_gate": "PENDING",
+      "MIG-004": "PENDING_PROMOTION",
+      "source_execution_manifest_sha256": "ff972f8845530bdcfcaecff51ae1ec3996fb647290b1a49131b449dafb543ea2"
+    },
+    "snapshot_sha256": "d4f0e2c3468e3fec91daabe929a736ecc6e1ce423d422f1fccc4664badc7d074"
+  },
+  "upstream_phase4_checkpoint": {
+    "checkpoint_path": "test-reports/temporal-first/phase-4-20260722-1ba6e17f/phase-4/phase-metrics.json",
+    "checkpoint_sha256": "33832d631a6df6c687ddaaff559c2868eb7a48758e9c97f6364d77a76e0ecef3",
+    "candidate_commit_file_sha256": "dfdd655e569356ba7f3d816f2926843f10c4ee6bf81f160a45656dddb65136b5",
+    "source_execution_manifest_git_sha256": "6a482cccfa87b8f6582f784b33e9644bba9a03d70eb4bc3a08739ef09ca8728d",
+    "evidence_commit": "b8697ce7a46f4494d250d21f27a076f0711ae04d",
+    "phase4_candidate_commit": "1ba6e17fa2182156825f42d7e243978cf23ccdb4",
+    "engineering_checkpoint": "PASS",
+    "next_phase_permission": "PHASE_5_ENGINEERING_ONLY",
+    "promotion_gate": "PENDING",
+    "MIG-004": "PENDING_PROMOTION",
+    "source_execution_manifest_sha256": "ff972f8845530bdcfcaecff51ae1ec3996fb647290b1a49131b449dafb543ea2"
+  },
+  "commands": [
+    {
+      "id": "p5_entry_static",
+      "candidate_commit": "e70492a11e23307382ea762d0e8e7f57ab58870b",
+      "cwd": ".",
+      "matrix_command": "D:\\miniconda\\python.exe -m pytest tests/static/test_phase5_evidence_contracts.py tests/static/test_phase5_evidence_pilot_plan.py tests/static/test_phase5_entry_contract_plan.py tests/static/test_phase5_entry_runner.py tests/static/test_phase5_entry_evidence.py tests/static/test_temporal_refactor_traceability.py tests/static/test_graph_import_boundaries.py tests/static/test_agent_platform_schema_contracts.py tests/static/test_phase4_no_formal_sink_assembly.py -q",
+      "matrix_command_sha256": "090d07058e0752664f8337e3cd771493e5b836d93cc06d233ed71c49c0089048",
+      "executed_command": "'D:\\miniconda\\python.exe' -m pytest tests/static/test_phase5_evidence_contracts.py tests/static/test_phase5_evidence_pilot_plan.py tests/static/test_phase5_entry_contract_plan.py tests/static/test_phase5_entry_runner.py tests/static/test_phase5_entry_evidence.py tests/static/test_temporal_refactor_traceability.py tests/static/test_graph_import_boundaries.py tests/static/test_agent_platform_schema_contracts.py tests/static/test_phase4_no_formal_sink_assembly.py -q '--junitxml=D:\\学习\\Project\\AfterSaleFlow-Agent\\.codex-run\\phase5-candidate-e70492a1-r1\\.codex-run\\phase5-entry-20260723-e70492a1-r1\\attempts\\p5_entry_static-01\\raw-junit.xml'",
+      "executed_argv": [
+        "D:\\miniconda\\python.exe",
+        "-m",
+        "pytest",
+        "tests/static/test_phase5_evidence_contracts.py",
+        "tests/static/test_phase5_evidence_pilot_plan.py",
+        "tests/static/test_phase5_entry_contract_plan.py",
+        "tests/static/test_phase5_entry_runner.py",
+        "tests/static/test_phase5_entry_evidence.py",
+        "tests/static/test_temporal_refactor_traceability.py",
+        "tests/static/test_graph_import_boundaries.py",
+        "tests/static/test_agent_platform_schema_contracts.py",
+        "tests/static/test_phase4_no_formal_sink_assembly.py",
+        "-q",
+        "--junitxml=D:\\学习\\Project\\AfterSaleFlow-Agent\\.codex-run\\phase5-candidate-e70492a1-r1\\.codex-run\\phase5-entry-20260723-e70492a1-r1\\attempts\\p5_entry_static-01\\raw-junit.xml"
+      ],
+      "executed_command_sha256": "013d0a3bc5975a2fdabfde4507e78d3b8de0cd805dfb25486b4f56a91811bd63",
+      "started_at": "2026-07-22T21:11:02.730+00:00",
+      "finished_at": "2026-07-22T21:11:58.370+00:00",
+      "duration_seconds": 55.64,
+      "exit_code": 0,
+      "environment_sha256": "d4f0e2c3468e3fec91daabe929a736ecc6e1ce423d422f1fccc4664badc7d074",
+      "stdout_path": "attempts/p5_entry_static-01/stdout.log",
+      "stdout_sha256": "3c7e1b9b541a3ef423f8a556bfb376c98ceb4adbe310acc00420ee579bb80599",
+      "stderr_path": "attempts/p5_entry_static-01/stderr.log",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw_reports": [
+        {
+          "path": "attempts/p5_entry_static-01/raw-junit.xml",
+          "sha256": "f09cc5878c4eb7a4eee4a9154c86414c117a2457b71caabc8cc0ba35a309f114"
+        }
+      ],
+      "failure_classification": "NONE",
+      "accepted": true,
+      "report": "static-phase5-entry-junit.xml",
+      "report_path": "source/static-phase5-entry-junit.xml",
+      "report_sha256": "83930685e97951d3af3f7126b56624d43b288cf62e0ddd7d5615d6dd9f32e7fd",
+      "tests": 145,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "time": 49.642
+    },
+    {
+      "id": "p5_entry_python",
+      "candidate_commit": "e70492a11e23307382ea762d0e8e7f57ab58870b",
+      "cwd": "python-agent-service",
+      "matrix_command": "D:\\miniconda\\python.exe -m pytest tests/agents/test_evidence_clerk_turn.py tests/agents/test_evidence_fact_mapping_policy.py tests/evals/test_evidence_clerk_prompt_catalog.py tests/test_streaming.py tests/test_streaming_v2.py -q",
+      "matrix_command_sha256": "f74f6cde31e0511ac7c4da7463f18de4409f67dae20ff1693e416ef35d9bc3c1",
+      "executed_command": "'D:\\miniconda\\python.exe' -m pytest tests/agents/test_evidence_clerk_turn.py tests/agents/test_evidence_fact_mapping_policy.py tests/evals/test_evidence_clerk_prompt_catalog.py tests/test_streaming.py tests/test_streaming_v2.py -q '--junitxml=D:\\学习\\Project\\AfterSaleFlow-Agent\\.codex-run\\phase5-candidate-e70492a1-r1\\.codex-run\\phase5-entry-20260723-e70492a1-r1\\attempts\\p5_entry_python-01\\raw-junit.xml'",
+      "executed_argv": [
+        "D:\\miniconda\\python.exe",
+        "-m",
+        "pytest",
+        "tests/agents/test_evidence_clerk_turn.py",
+        "tests/agents/test_evidence_fact_mapping_policy.py",
+        "tests/evals/test_evidence_clerk_prompt_catalog.py",
+        "tests/test_streaming.py",
+        "tests/test_streaming_v2.py",
+        "-q",
+        "--junitxml=D:\\学习\\Project\\AfterSaleFlow-Agent\\.codex-run\\phase5-candidate-e70492a1-r1\\.codex-run\\phase5-entry-20260723-e70492a1-r1\\attempts\\p5_entry_python-01\\raw-junit.xml"
+      ],
+      "executed_command_sha256": "084627d8d1abd742f9f35ec32808ff3c7f8b8cc203c619e6eb1ff9e33bf878fa",
+      "started_at": "2026-07-22T21:11:58.720+00:00",
+      "finished_at": "2026-07-22T21:12:11.273+00:00",
+      "duration_seconds": 12.552,
+      "exit_code": 0,
+      "environment_sha256": "d4f0e2c3468e3fec91daabe929a736ecc6e1ce423d422f1fccc4664badc7d074",
+      "stdout_path": "attempts/p5_entry_python-01/stdout.log",
+      "stdout_sha256": "17fd39e8b2c19b7cf72db9cbc4b1ddb897f0eace82c3e8c9daafa91530e6bcad",
+      "stderr_path": "attempts/p5_entry_python-01/stderr.log",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw_reports": [
+        {
+          "path": "attempts/p5_entry_python-01/raw-junit.xml",
+          "sha256": "d04608f53fbd2c7c346942f4d69df4e0480b0ac17801b103224287f0bcf27948"
+        }
+      ],
+      "failure_classification": "NONE",
+      "accepted": true,
+      "report": "python-phase5-entry-junit.xml",
+      "report_path": "source/python-phase5-entry-junit.xml",
+      "report_sha256": "01f166838cef4be49e5613d1a76d7a64937559fb56eb138b1890c028319d447d",
+      "tests": 61,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "time": 0.919
+    },
+    {
+      "id": "p5_entry_java",
+      "candidate_commit": "e70492a11e23307382ea762d0e8e7f57ab58870b",
+      "cwd": "java-api-service",
+      "matrix_command": ".\\mvnw.cmd -DforkCount=1 -Dtest=EvidenceApiIntegrationTest,EvidenceSubmissionServiceTest,EvidenceCompletionServiceTest,EvidenceAgentTurnServiceTest,EvidenceDossierFreezerTest,EvidenceWindowWorkflowTest,EvidenceWindowCoordinatorTest,EvidenceRoomControllerTest,EvidenceRoomIntegrationTest,EvidenceV2ContractFixtureTest,JdbcEpochBootstrapOutboxPublisherTest,TransactionalEpochAuthorityServiceTest,JdbcIntakePayloadAuthorityStoreTest,IntakeFormalSinkAssemblyTest test",
+      "matrix_command_sha256": "217aa9f9bf367685aaa4d1e1819ab28e9d385a416fdc8edf909b91b25828f8a5",
+      "executed_command": "'.\\mvnw.cmd' -DforkCount=1 -Dtest=EvidenceApiIntegrationTest,EvidenceSubmissionServiceTest,EvidenceCompletionServiceTest,EvidenceAgentTurnServiceTest,EvidenceDossierFreezerTest,EvidenceWindowWorkflowTest,EvidenceWindowCoordinatorTest,EvidenceRoomControllerTest,EvidenceRoomIntegrationTest,EvidenceV2ContractFixtureTest,JdbcEpochBootstrapOutboxPublisherTest,TransactionalEpochAuthorityServiceTest,JdbcIntakePayloadAuthorityStoreTest,IntakeFormalSinkAssemblyTest -Dsurefire.reportNameSuffix=p5-entry-e70492a11e23-fc40ff85 test",
+      "executed_argv": [
+        ".\\mvnw.cmd",
+        "-DforkCount=1",
+        "-Dtest=EvidenceApiIntegrationTest,EvidenceSubmissionServiceTest,EvidenceCompletionServiceTest,EvidenceAgentTurnServiceTest,EvidenceDossierFreezerTest,EvidenceWindowWorkflowTest,EvidenceWindowCoordinatorTest,EvidenceRoomControllerTest,EvidenceRoomIntegrationTest,EvidenceV2ContractFixtureTest,JdbcEpochBootstrapOutboxPublisherTest,TransactionalEpochAuthorityServiceTest,JdbcIntakePayloadAuthorityStoreTest,IntakeFormalSinkAssemblyTest",
+        "-Dsurefire.reportNameSuffix=p5-entry-e70492a11e23-fc40ff85",
+        "test"
+      ],
+      "executed_command_sha256": "17f2e874edb86cb63bcfb7b4b9e9ead68a32a6ff97d589af589100b37c708dab",
+      "started_at": "2026-07-22T21:12:11.617+00:00",
+      "finished_at": "2026-07-22T21:14:19.079+00:00",
+      "duration_seconds": 127.463,
+      "exit_code": 0,
+      "environment_sha256": "d4f0e2c3468e3fec91daabe929a736ecc6e1ce423d422f1fccc4664badc7d074",
+      "stdout_path": "attempts/p5_entry_java-01/stdout.log",
+      "stdout_sha256": "5f1f9b269a10a6bfcbddc63d0802e48a0ce53373b98e45a876b559de41f8db7a",
+      "stderr_path": "attempts/p5_entry_java-01/stderr.log",
+      "stderr_sha256": "3762ab30ab7847cf761f31c4962fc8faf5a4e10a85f07c1e7f2372eb384f4a15",
+      "raw_reports": [
+        {
+          "path": "attempts/p5_entry_java-01/raw-surefire/0001-f902526180fab1ce.xml",
+          "sha256": "f902526180fab1ce01ff38cf097b806773646db20f02530f19670434731746da",
+          "original_name": "TEST-com.example.dispute.evidence.EvidenceApiIntegrationTest-p5-entry-e70492a11e23-fc40ff85.xml"
+        },
+        {
+          "path": "attempts/p5_entry_java-01/raw-surefire/0002-cf75635a8509d593.xml",
+          "sha256": "cf75635a8509d5931dd407ed09fc2e8ef2a9a62a46bbfdeb56632c4829a91da4",
+          "original_name": "TEST-com.example.dispute.evidence.EvidenceCompletionServiceTest-p5-entry-e70492a11e23-fc40ff85.xml"
+        },
+        {
+          "path": "attempts/p5_entry_java-01/raw-surefire/0003-2efb16fcea8552ed.xml",
+          "sha256": "2efb16fcea8552ed7a41ff04362cfd52cd04473cf6b0747f2b9e680d6e9f1a97",
+          "original_name": "TEST-com.example.dispute.evidence.EvidenceDossierFreezerTest-p5-entry-e70492a11e23-fc40ff85.xml"
+        },
+        {
+          "path": "attempts/p5_entry_java-01/raw-surefire/0004-a74a890e06b6004e.xml",
+          "sha256": "a74a890e06b6004e42efe6d5417d694546463ff215116ae9f8f62f6c80f0ebb8",
+          "original_name": "TEST-com.example.dispute.evidence.EvidenceRoomControllerTest-p5-entry-e70492a11e23-fc40ff85.xml"
+        },
+        {
+          "path": "attempts/p5_entry_java-01/raw-surefire/0005-971065f92b5055bb.xml",
+          "sha256": "971065f92b5055bb2282884a56fa0d8f67ddc59d12b9491d349c0fb45cb7e5af",
+          "original_name": "TEST-com.example.dispute.evidence.EvidenceRoomIntegrationTest-p5-entry-e70492a11e23-fc40ff85.xml"
+        },
+        {
+          "path": "attempts/p5_entry_java-01/raw-surefire/0006-55c7f0dd36fe1509.xml",
+          "sha256": "55c7f0dd36fe15092236aed34214b91c7f0fa784d41b6187bba4348df1101f45",
+          "original_name": "TEST-com.example.dispute.evidence.EvidenceSubmissionServiceTest-p5-entry-e70492a11e23-fc40ff85.xml"
+        },
+        {
+          "path": "attempts/p5_entry_java-01/raw-surefire/0007-3f0c147c831ca879.xml",
+          "sha256": "3f0c147c831ca879df4c0d5e4252a95b5cdb558f9bfd86d9d35b545e2a278c72",
+          "original_name": "TEST-com.example.dispute.room.EvidenceAgentTurnServiceTest-p5-entry-e70492a11e23-fc40ff85.xml"
+        },
+        {
+          "path": "attempts/p5_entry_java-01/raw-surefire/0008-9832fcf77d797243.xml",
+          "sha256": "9832fcf77d797243fe0a9680f7720d9bddfc7497b86920633def751c11d7f888",
+          "original_name": "TEST-com.example.dispute.workflow.EvidenceWindowCoordinatorTest-p5-entry-e70492a11e23-fc40ff85.xml"
+        },
+        {
+          "path": "attempts/p5_entry_java-01/raw-surefire/0009-f2770d1c636047d5.xml",
+          "sha256": "f2770d1c636047d54c33434916cca1a3ff171534e887deea09df94b005a03d26",
+          "original_name": "TEST-com.example.dispute.workflow.EvidenceWindowWorkflowTest-p5-entry-e70492a11e23-fc40ff85.xml"
+        },
+        {
+          "path": "attempts/p5_entry_java-01/raw-surefire/0010-34e4b0a8fbb3be82.xml",
+          "sha256": "34e4b0a8fbb3be8210336a3071a98a1f8446678534ad13f362948ee796fbb748",
+          "original_name": "TEST-com.example.dispute.workflow.architecture.IntakeFormalSinkAssemblyTest-p5-entry-e70492a11e23-fc40ff85.xml"
+        },
+        {
+          "path": "attempts/p5_entry_java-01/raw-surefire/0011-2cf56476ded903c7.xml",
+          "sha256": "2cf56476ded903c739e461853ffb1b28a880a81d441ca45d5c3e2113894f096b",
+          "original_name": "TEST-com.example.dispute.workflow.authority.epoch.JdbcEpochBootstrapOutboxPublisherTest-p5-entry-e70492a11e23-fc40ff85.xml"
+        },
+        {
+          "path": "attempts/p5_entry_java-01/raw-surefire/0012-84011e9d52801f4d.xml",
+          "sha256": "84011e9d52801f4d8018d69e0f57aeb3153b1ba8e54645f8a7d345717a7dd33a",
+          "original_name": "TEST-com.example.dispute.workflow.authority.epoch.TransactionalEpochAuthorityServiceTest-p5-entry-e70492a11e23-fc40ff85.xml"
+        },
+        {
+          "path": "attempts/p5_entry_java-01/raw-surefire/0013-1e74c801436ebe44.xml",
+          "sha256": "1e74c801436ebe4469de8cde283e6e8b3047c7ed161d8d713b79f705bcf140ae",
+          "original_name": "TEST-com.example.dispute.workflow.authority.payload.JdbcIntakePayloadAuthorityStoreTest-p5-entry-e70492a11e23-fc40ff85.xml"
+        },
+        {
+          "path": "attempts/p5_entry_java-01/raw-surefire/0014-d45434466dddbcfe.xml",
+          "sha256": "d45434466dddbcfeea3dbaf4241f2287aae9f7fac45a0093d97ca4b52c97760c",
+          "original_name": "TEST-com.example.dispute.workflow.contract.v1.EvidenceV2ContractFixtureTest-p5-entry-e70492a11e23-fc40ff85.xml"
+        }
+      ],
+      "failure_classification": "NONE",
+      "accepted": true,
+      "report": "java-phase5-entry-junit.xml",
+      "report_path": "source/java-phase5-entry-junit.xml",
+      "report_sha256": "0f572ffb1da44f73cb227f36e0935c69b2b283628f29f21023e3aa400bf886b0",
+      "tests": 93,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "time": 20.117
+    },
+    {
+      "id": "p5_entry_frontend",
+      "candidate_commit": "e70492a11e23307382ea762d0e8e7f57ab58870b",
+      "cwd": "frontend",
+      "matrix_command": "node node_modules/vitest/vitest.mjs run src/views/disputes/EvidenceRoomView.test.js src/components/room/RoomShell.test.js src/api/evidence.test.js src/api/agentStream.test.js src/stores/agentStream.test.js --minWorkers=1 --maxWorkers=2",
+      "matrix_command_sha256": "8275d86fe9ae22ac096ab51638c53bf7c5e375a7326646ddd1a637d9f3916b73",
+      "executed_command": "node node_modules/vitest/vitest.mjs run src/views/disputes/EvidenceRoomView.test.js src/components/room/RoomShell.test.js src/api/evidence.test.js src/api/agentStream.test.js src/stores/agentStream.test.js --minWorkers=1 --maxWorkers=2 --reporter=junit '--outputFile=D:\\学习\\Project\\AfterSaleFlow-Agent\\.codex-run\\phase5-candidate-e70492a1-r1\\.codex-run\\phase5-entry-20260723-e70492a1-r1\\attempts\\p5_entry_frontend-01\\raw-junit.xml'",
+      "executed_argv": [
+        "node",
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/views/disputes/EvidenceRoomView.test.js",
+        "src/components/room/RoomShell.test.js",
+        "src/api/evidence.test.js",
+        "src/api/agentStream.test.js",
+        "src/stores/agentStream.test.js",
+        "--minWorkers=1",
+        "--maxWorkers=2",
+        "--reporter=junit",
+        "--outputFile=D:\\学习\\Project\\AfterSaleFlow-Agent\\.codex-run\\phase5-candidate-e70492a1-r1\\.codex-run\\phase5-entry-20260723-e70492a1-r1\\attempts\\p5_entry_frontend-01\\raw-junit.xml"
+      ],
+      "executed_command_sha256": "8be11445906cd7bfef179d0c3996794218364be0fbf11b0001def5b10c799c12",
+      "started_at": "2026-07-22T21:14:19.477+00:00",
+      "finished_at": "2026-07-22T21:14:27.102+00:00",
+      "duration_seconds": 7.625,
+      "exit_code": 0,
+      "environment_sha256": "d4f0e2c3468e3fec91daabe929a736ecc6e1ce423d422f1fccc4664badc7d074",
+      "stdout_path": "attempts/p5_entry_frontend-01/stdout.log",
+      "stdout_sha256": "b2c9f6b7a8d2b708b931fcc26d844eab89dc0fcd4c31ed4169e6feadc3c51848",
+      "stderr_path": "attempts/p5_entry_frontend-01/stderr.log",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw_reports": [
+        {
+          "path": "attempts/p5_entry_frontend-01/raw-junit.xml",
+          "sha256": "24eed487b36faedcef93bfdfbf6b96fc6659175bf328cf468a9a8da7ad835504"
+        }
+      ],
+      "failure_classification": "NONE",
+      "accepted": true,
+      "report": "frontend-phase5-entry-junit.xml",
+      "report_path": "source/frontend-phase5-entry-junit.xml",
+      "report_sha256": "80bbe814028f947ed069ff5058e624e0cafa72bc827440656a9f3a2579c027b4",
+      "tests": 97,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "time": 2.975368
+    }
+  ],
+  "quarantined_attempts": [],
+  "pending_failure": null,
+  "quarantined_attempts_reused": false,
+  "batch_0": "PASS",
+  "contract_gate": "P5.0_AWAITING_ENTRY_EVIDENCE_COMMIT",
+  "engineering_execution": "BLOCKED_UNTIL_ENTRY_EVIDENCE_COMMIT",
+  "promotion_gate": "PENDING",
+  "MIG-004": "PENDING_PROMOTION",
+  "MIG-005": "PENDING_PROMOTION",
+  "manifest_sha256": "2a0d1859738e7998ae37a62ebdc4eb5e4b651b9332cfed300e63ecd083ffa6f0"
+}

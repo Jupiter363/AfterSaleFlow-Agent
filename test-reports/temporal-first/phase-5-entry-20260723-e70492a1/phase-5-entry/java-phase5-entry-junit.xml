@@ -1,0 +1,986 @@
+<?xml version='1.0' encoding='utf-8'?>
+<testsuites name="java-phase5-entry-junit" tests="93" failures="0" errors="0" skipped="0" time="20.117" candidate_commit="e70492a11e23307382ea762d0e8e7f57ab58870b" source_command_id="p5_entry_java">
+  <testsuite name="com.example.dispute.evidence.EvidenceApiIntegrationTest(p5-entry-e70492a11e23-fc40ff85)" source_report="java-phase5-entry-junit.xml" tests="1" failures="0" errors="0" skipped="0" time="1.053">
+    <testcase name="uploadsMetadataAndAcceptsTrustedOcrCallbackWhenOcrIsDown" classname="com.example.dispute.evidence.EvidenceApiIntegrationTest" time="1.053">
+      <system-out>05:13:05.365 [main] INFO org.springframework.test.context.support.AnnotationConfigContextLoaderUtils -- Could not detect default configuration classes for test class [com.example.dispute.evidence.EvidenceApiIntegrationTest]: EvidenceApiIntegrationTest does not declare any static, non-private, non-final, nested classes annotated with @Configuration.
+05:13:05.896 [main] INFO org.springframework.boot.test.context.SpringBootTestContextBootstrapper -- Found @SpringBootConfiguration com.example.dispute.DisputeApplication for test class com.example.dispute.evidence.EvidenceApiIntegrationTest
+05:13:06.113 [main] INFO org.testcontainers.images.PullPolicy -- Image pull policy will be performed by: DefaultPullPolicy()
+05:13:06.119 [main] INFO org.testcontainers.utility.ImageNameSubstitutor -- Image name substitution will be performed by: DefaultImageNameSubstitutor (composite of 'ConfigurationFileImageNameSubstitutor' and 'PrefixingImageNameSubstitutor')
+05:13:06.160 [main] INFO org.testcontainers.DockerClientFactory -- Testcontainers version: 2.0.5
+05:13:06.535 [main] INFO org.testcontainers.dockerclient.DockerClientProviderStrategy -- Loaded org.testcontainers.dockerclient.NpipeSocketClientProviderStrategy from ~/.testcontainers.properties, will try it first
+05:13:07.139 [main] INFO org.testcontainers.dockerclient.DockerClientProviderStrategy -- Found Docker environment with local Npipe socket (npipe:////./pipe/docker_engine)
+05:13:07.141 [main] INFO org.testcontainers.DockerClientFactory -- Docker host IP address is localhost
+05:13:07.165 [main] INFO org.testcontainers.DockerClientFactory -- Connected to docker: 
+  Server Version: 29.2.1
+  API Version: 1.53
+  Operating System: Docker Desktop
+  Total Memory: 15926 MB
+  Labels: 
+    com.docker.desktop.address=npipe://\\.\pipe\docker_cli
+05:13:07.168 [main] WARN org.testcontainers.utility.ConfigurationFileImageNameSubstitutor -- Image name testcontainers/ryuk:0.14.0 was substituted by configuration to ghcr.io/testcontainers/ryuk:0.12.0. This approach is deprecated and will be removed in the future
+05:13:07.178 [main] INFO org.testcontainers.utility.ImageNameSubstitutor -- Using ghcr.io/testcontainers/ryuk:0.12.0 as a substitute image for testcontainers/ryuk:0.14.0 (using image substitutor: DefaultImageNameSubstitutor (composite of 'ConfigurationFileImageNameSubstitutor' and 'PrefixingImageNameSubstitutor'))
+05:13:07.438 [main] INFO tc.ghcr.io/testcontainers/ryuk:0.12.0 -- Creating container for image: ghcr.io/testcontainers/ryuk:0.12.0
+05:13:07.778 [main] INFO org.testcontainers.utility.RegistryAuthLocator -- Credential helper/store (docker-credential-desktop) does not have credentials for ghcr.io
+05:13:07.940 [main] INFO tc.ghcr.io/testcontainers/ryuk:0.12.0 -- Container ghcr.io/testcontainers/ryuk:0.12.0 is starting: 8d0ec178ac6b32618219ec6da7591cb0673f5220dbc93dbe2a6e7a03c5f51faf
+05:13:08.407 [main] INFO tc.ghcr.io/testcontainers/ryuk:0.12.0 -- Container ghcr.io/testcontainers/ryuk:0.12.0 started in PT0.9696322S
+05:13:08.415 [main] INFO org.testcontainers.utility.RyukResourceReaper -- Ryuk started - will monitor and terminate Testcontainers containers on JVM exit
+05:13:08.416 [main] INFO org.testcontainers.DockerClientFactory -- Checking the system...
+05:13:08.417 [main] INFO org.testcontainers.DockerClientFactory -- ✔︎ Docker server version should be at least 1.6.0
+05:13:08.417 [main] INFO tc.public.ecr.aws/docker/library/postgres:16-alpine -- Creating container for image: public.ecr.aws/docker/library/postgres:16-alpine
+05:13:08.704 [main] INFO org.testcontainers.utility.RegistryAuthLocator -- Credential helper/store (docker-credential-desktop) does not have credentials for public.ecr.aws
+05:13:08.797 [main] INFO tc.public.ecr.aws/docker/library/postgres:16-alpine -- Container public.ecr.aws/docker/library/postgres:16-alpine is starting: fdcc0f7895ace91868746f6e1632645c9729f8120e92cef45252c106edaf2795
+05:13:11.073 [main] INFO tc.public.ecr.aws/docker/library/postgres:16-alpine -- Container public.ecr.aws/docker/library/postgres:16-alpine started in PT2.6554846S
+
+  .   ____          _            __ _ _
+ /\\ / ___'_ __ _ _(_)_ __  __ _ \ \ \ \
+( ( )\___ | '_ | '_| | '_ \/ _` | \ \ \ \
+ \\/  ___)| |_)| | | | | || (_| |  ) ) ) )
+  '  |____| .__|_| |_|_| |_\__, | / / / /
+ =========|_|==============|___/=/_/_/_/
+
+ :: Spring Boot ::               (v3.5.15)
+
+2026-07-23T05:13:11.584+08:00  INFO 30824 --- [java-api-service] [           main] c.e.d.e.EvidenceApiIntegrationTest       : Starting EvidenceApiIntegrationTest using Java 21.0.8 with PID 30824 (started by Jupiter in D:\学习\Project\AfterSaleFlow-Agent\.codex-run\phase5-candidate-e70492a1-r1\java-api-service)
+2026-07-23T05:13:11.584+08:00  INFO 30824 --- [java-api-service] [           main] c.e.d.e.EvidenceApiIntegrationTest       : The following 1 profile is active: "local"
+2026-07-23T05:13:15.111+08:00  INFO 30824 --- [java-api-service] [           main] .s.d.r.c.RepositoryConfigurationDelegate : Multiple Spring Data modules found, entering strict repository configuration mode
+2026-07-23T05:13:15.114+08:00  INFO 30824 --- [java-api-service] [           main] .s.d.r.c.RepositoryConfigurationDelegate : Bootstrapping Spring Data JPA repositories in DEFAULT mode.
+2026-07-23T05:13:16.176+08:00  INFO 30824 --- [java-api-service] [           main] .s.d.r.c.RepositoryConfigurationDelegate : Finished Spring Data repository scanning in 1051 ms. Found 56 JPA repository interfaces.
+2026-07-23T05:13:21.728+08:00  INFO 30824 --- [java-api-service] [           main] o.s.b.w.embedded.tomcat.TomcatWebServer  : Tomcat initialized with port 0 (http)
+2026-07-23T05:13:21.809+08:00  INFO 30824 --- [java-api-service] [           main] o.apache.catalina.core.StandardService   : Starting service [Tomcat]
+2026-07-23T05:13:21.810+08:00  INFO 30824 --- [java-api-service] [           main] o.apache.catalina.core.StandardEngine    : Starting Servlet engine: [Apache Tomcat/10.1.55]
+2026-07-23T05:13:22.338+08:00  INFO 30824 --- [java-api-service] [           main] o.a.c.c.C.[Tomcat].[localhost].[/]       : Initializing Spring embedded WebApplicationContext
+2026-07-23T05:13:22.338+08:00  INFO 30824 --- [java-api-service] [           main] w.s.c.ServletWebServerApplicationContext : Root WebApplicationContext: initialization completed in 10734 ms
+2026-07-23T05:13:24.295+08:00  INFO 30824 --- [java-api-service] [           main] com.zaxxer.hikari.HikariDataSource       : HikariPool-1 - Starting...
+2026-07-23T05:13:24.703+08:00  INFO 30824 --- [java-api-service] [           main] com.zaxxer.hikari.pool.HikariPool        : HikariPool-1 - Added connection org.postgresql.jdbc.PgConnection@6232cde5
+2026-07-23T05:13:24.705+08:00  INFO 30824 --- [java-api-service] [           main] com.zaxxer.hikari.HikariDataSource       : HikariPool-1 - Start completed.
+2026-07-23T05:13:24.812+08:00  INFO 30824 --- [java-api-service] [           main] org.flywaydb.core.FlywayExecutor         : Database: jdbc:postgresql://localhost:54105/dispute_evidence_api (PostgreSQL 16.14)
+2026-07-23T05:13:25.047+08:00  INFO 30824 --- [java-api-service] [           main] o.f.c.i.s.JdbcTableSchemaHistory         : Schema history table "public"."flyway_schema_history" does not exist yet
+2026-07-23T05:13:25.053+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbValidate     : Successfully validated 50 migrations (execution time 00:00.149s)
+2026-07-23T05:13:25.081+08:00  INFO 30824 --- [java-api-service] [           main] o.f.c.i.s.JdbcTableSchemaHistory         : Creating Schema History table "public"."flyway_schema_history" ...
+2026-07-23T05:13:25.216+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Current version of schema "public": &lt;&lt; Empty Schema &gt;&gt;
+2026-07-23T05:13:25.269+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "001 - init case tables"
+2026-07-23T05:13:25.520+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "002 - init evidence tables"
+2026-07-23T05:13:25.664+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "003 - init hearing tables"
+2026-07-23T05:13:25.752+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "004 - init review executor tables"
+2026-07-23T05:13:25.879+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "005 - init policy audit tables"
+2026-07-23T05:13:25.965+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "006 - init router flow tables"
+2026-07-23T05:13:26.039+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "007 - final dispute core"
+2026-07-23T05:13:26.114+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "008 - final agent hearing governance"
+2026-07-23T05:13:26.339+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "009 - freeze review and execution chain"
+2026-07-23T05:13:26.393+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "010 - case rooms and participants"
+2026-07-23T05:13:26.519+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "011 - evidence verification and hearing settlement"
+2026-07-23T05:13:26.630+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "012 - case events and notification outbox"
+2026-07-23T05:13:26.708+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "013 - append only room stream"
+2026-07-23T05:13:26.732+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "014 - hearing round party submission"
+2026-07-23T05:13:26.777+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "015 - full hearing route and round limits"
+2026-07-23T05:13:26.808+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "016 - room turn memory"
+2026-07-23T05:13:26.850+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "017 - case intake dossier"
+2026-07-23T05:13:26.887+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "018 - case initiator role"
+2026-07-23T05:13:26.891+08:00  WARN 30824 --- [java-api-service] [           main] o.f.c.i.s.DefaultSqlScriptExecutor       : DB: column "initiator_role" of relation "fulfillment_dispute_case" already exists, skipping (SQL State: 42701 - Error Code: 0)
+2026-07-23T05:13:26.911+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "019 - access and agent sessions"
+2026-07-23T05:13:27.017+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "020 - actor audience filters"
+2026-07-23T05:13:27.045+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "021 - session scoped room turn memory uniqueness"
+2026-07-23T05:13:27.075+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "022 - evidence submission batches"
+2026-07-23T05:13:27.110+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "023 - evidence active hash unique index"
+2026-07-23T05:13:27.135+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "024 - agent a2a messages"
+2026-07-23T05:13:27.165+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "025 - jury review report message type"
+2026-07-23T05:13:27.185+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "026 - unique formal jury a2a report"
+2026-07-23T05:13:27.206+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "027 - simulated import template cursor"
+2026-07-23T05:13:27.231+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "028 - reviewer simulated case purge"
+2026-07-23T05:13:27.282+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "029 - dismiss inbox notifications"
+2026-07-23T05:13:27.313+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "030 - agent run streaming"
+2026-07-23T05:13:27.372+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "031 - expand case navigation stages"
+2026-07-23T05:13:27.395+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "032 - case intake party completion"
+2026-07-23T05:13:27.436+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "033 - include intake completion in demo case purge"
+2026-07-23T05:13:27.461+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "034 - allow reviewer purge of intake created cases"
+2026-07-23T05:13:27.496+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "035 - hearing flow v2"
+2026-07-23T05:13:27.677+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "036 - key evidence completion by participant id"
+2026-07-23T05:13:27.699+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "037 - key hearing party actions by participant id"
+2026-07-23T05:13:27.733+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "038 - explicit case party assignment"
+2026-07-23T05:13:27.772+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "039 - temporal command control plane"
+2026-07-23T05:13:27.964+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "040 - immutable snapshot and manifest"
+2026-07-23T05:13:28.055+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "040.1 - shadow command terminal status"
+2026-07-23T05:13:28.078+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "040.2 - room epoch scan claims"
+2026-07-23T05:13:28.115+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "040.3 - room epoch allocator contract"
+2026-07-23T05:13:28.184+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "040.4 - room epoch provisioning"
+2026-07-23T05:13:28.280+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "041 - agent run logical attempt v2"
+2026-07-23T05:13:28.392+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "042 - agent run attempt lineage"
+2026-07-23T05:13:28.435+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "043 - intake graph bindings"
+2026-07-23T05:13:28.552+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "043.1 - intake authority bindings"
+2026-07-23T05:13:28.727+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "043.2 - intake shadow comparisons"
+2026-07-23T05:13:28.795+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "043.3 - intake signed synthetic admission"
+2026-07-23T05:13:28.881+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Successfully applied 50 migrations to schema "public", now at version v043.3 (execution time 00:02.744s)
+2026-07-23T05:13:29.832+08:00  INFO 30824 --- [java-api-service] [           main] o.hibernate.jpa.internal.util.LogHelper  : HHH000204: Processing PersistenceUnitInfo [name: default]
+2026-07-23T05:13:30.032+08:00  INFO 30824 --- [java-api-service] [           main] org.hibernate.Version                    : HHH000412: Hibernate ORM core version 6.6.53.Final
+2026-07-23T05:13:30.100+08:00  INFO 30824 --- [java-api-service] [           main] o.h.c.internal.RegionFactoryInitiator    : HHH000026: Second-level cache disabled
+2026-07-23T05:13:30.337+08:00  INFO 30824 --- [java-api-service] [           main] o.s.o.j.p.SpringPersistenceUnitInfo      : No LoadTimeWeaver setup: ignoring JPA class transformer
+2026-07-23T05:13:30.458+08:00  INFO 30824 --- [java-api-service] [           main] org.hibernate.orm.connections.pooling    : HHH10001005: Database info:
+	Database JDBC URL [Connecting through datasource 'HikariDataSource (HikariPool-1)']
+	Database driver: undefined/unknown
+	Database version: 16.14
+	Autocommit mode: undefined/unknown
+	Isolation level: undefined/unknown
+	Minimum pool size: undefined/unknown
+	Maximum pool size: undefined/unknown
+2026-07-23T05:13:33.116+08:00  INFO 30824 --- [java-api-service] [           main] o.h.e.t.j.p.i.JtaPlatformInitiator       : HHH000489: No JTA platform available (set 'hibernate.transaction.jta.platform' to enable JTA platform integration)
+2026-07-23T05:13:33.215+08:00  INFO 30824 --- [java-api-service] [           main] j.LocalContainerEntityManagerFactoryBean : Initialized JPA EntityManagerFactory for persistence unit 'default'
+2026-07-23T05:13:33.686+08:00  INFO 30824 --- [java-api-service] [           main] o.s.d.j.r.query.QueryEnhancerFactory     : Hibernate is in classpath; If applicable, HQL parser will be used.
+2026-07-23T05:13:37.855+08:00  INFO 30824 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : Created WorkflowServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=1, target=temporal-server:7233}}
+2026-07-23T05:13:40.389+08:00  INFO 30824 --- [java-api-service] [           main] o.s.b.a.e.web.EndpointLinksResolver      : Exposing 2 endpoints beneath base path '/actuator'
+2026-07-23T05:13:41.434+08:00  INFO 30824 --- [java-api-service] [           main] o.s.b.w.embedded.tomcat.TomcatWebServer  : Tomcat started on port 57188 (http) with context path '/'
+2026-07-23T05:13:41.455+08:00  INFO 30824 --- [java-api-service] [           main] c.e.d.e.EvidenceApiIntegrationTest       : Started EvidenceApiIntegrationTest in 30.337 seconds (process running for 44.061)
+2026-07-23T05:13:42.003+08:00  INFO 30824 --- [java-api-service] [o-auto-1-exec-1] o.a.c.c.C.[Tomcat].[localhost].[/]       : Initializing Spring DispatcherServlet 'dispatcherServlet'
+2026-07-23T05:13:42.003+08:00  INFO 30824 --- [java-api-service] [o-auto-1-exec-1] o.s.web.servlet.DispatcherServlet        : Initializing Servlet 'dispatcherServlet'
+2026-07-23T05:13:42.003+08:00  INFO 30824 --- [java-api-service] [o-auto-1-exec-1] o.s.web.servlet.DispatcherServlet        : Completed initialization in 0 ms
+2026-07-23T05:13:42.276+08:00  WARN 30824 --- [java-api-service] [o-auto-1-exec-1] c.e.d.e.a.EvidenceApplicationService     : OCR task creation deferred: evidence_id=EVIDENCE_dfb52dd5d70c43adbdf5a939c730ccb3, error_type=IllegalStateException
+</system-out>
+      <system-err>Mockito is currently self-attaching to enable the inline-mock-maker. This will no longer work in future releases of the JDK. Please add Mockito as an agent to your build as described in Mockito's documentation: https://javadoc.io/doc/org.mockito/mockito-core/latest/org.mockito/org/mockito/Mockito.html#0.3
+WARNING: A Java agent has been loaded dynamically (C:\Users\Jupiter\.m2\repository\net\bytebuddy\byte-buddy-agent\1.17.8\byte-buddy-agent-1.17.8.jar)
+WARNING: If a serviceability tool is in use, please run with -XX:+EnableDynamicAgentLoading to hide this warning
+WARNING: If a serviceability tool is not in use, please run with -Djdk.instrument.traceUsage for more information
+WARNING: Dynamic loading of agents will be disallowed by default in a future release
+</system-err>
+    </testcase>
+  </testsuite>
+  <testsuite name="com.example.dispute.evidence.EvidenceCompletionServiceTest(p5-entry-e70492a11e23-fc40ff85)" source_report="java-phase5-entry-junit.xml" tests="10" failures="0" errors="0" skipped="0" time="1.686">
+    <testcase name="bothPartyCompletionsSealEvidenceEarlyAndOpenTheThreeHourHearing" classname="com.example.dispute.evidence.EvidenceCompletionServiceTest" time="0.009" />
+    <testcase name="deadlineExpiryReplayFromHearingDoesNotTransitionAgain" classname="com.example.dispute.evidence.EvidenceCompletionServiceTest" time="0.008" />
+    <testcase name="deadlineExpiryTransitionsOpenEvidenceExactlyOnce" classname="com.example.dispute.evidence.EvidenceCompletionServiceTest" time="0.046" />
+    <testcase name="deadlineExpiryTransitionsSealedEvidenceExactlyOnce" classname="com.example.dispute.evidence.EvidenceCompletionServiceTest" time="0.015" />
+    <testcase name="deadlineWarningNotifiesBothPartiesWhileTheEvidenceWindowIsOpen" classname="com.example.dispute.evidence.EvidenceCompletionServiceTest" time="0.004" />
+    <testcase name="existingHearingClockRemainsTheAuthoritativeDeadlineDuringTransition" classname="com.example.dispute.evidence.EvidenceCompletionServiceTest" time="0.006" />
+    <testcase name="hearingReplayDoesNotResealRoomsOrTransitionTheEpochAgain" classname="com.example.dispute.evidence.EvidenceCompletionServiceTest" time="1.548" />
+    <testcase name="initiatorCannotCompleteEvidenceWithoutSubmittedEvidence" classname="com.example.dispute.evidence.EvidenceCompletionServiceTest" time="0.017" />
+    <testcase name="repeatedCompletionByTheSameParticipantIdUsesTheExistingPhaseConfirmation" classname="com.example.dispute.evidence.EvidenceCompletionServiceTest" time="0.021" />
+    <testcase name="respondentCanCompleteIndependentlyBeforeInitiatorSubmitsEvidence" classname="com.example.dispute.evidence.EvidenceCompletionServiceTest" time="0.012" />
+  </testsuite>
+  <testsuite name="com.example.dispute.evidence.EvidenceDossierFreezerTest(p5-entry-e70492a11e23-fc40ff85)" source_report="java-phase5-entry-junit.xml" tests="5" failures="0" errors="0" skipped="0" time="0.593">
+    <testcase name="freezeToleratesLegacyEvidenceWithoutParseStatus" classname="com.example.dispute.evidence.EvidenceDossierFreezerTest" time="0.064" />
+    <testcase name="frozenDossierContainsEvidenceItemsPartySummaryAndFactEvidenceMatrix" classname="com.example.dispute.evidence.EvidenceDossierFreezerTest" time="0.088" />
+    <testcase name="frozenDossierUsesPersistedMultimodalScoresInsteadOfStatusDefaults" classname="com.example.dispute.evidence.EvidenceDossierFreezerTest" time="0.398" />
+    <testcase name="lowRelevanceModelFactLinkDoesNotBecomeVerifiedFact" classname="com.example.dispute.evidence.EvidenceDossierFreezerTest" time="0.017" />
+    <testcase name="rejectedEvidenceRemainsInTheAuditStoreButIsExcludedFromTheFrozenVersion" classname="com.example.dispute.evidence.EvidenceDossierFreezerTest" time="0.026" />
+  </testsuite>
+  <testsuite name="com.example.dispute.evidence.EvidenceRoomControllerTest(p5-entry-e70492a11e23-fc40ff85)" source_report="java-phase5-entry-junit.xml" tests="3" failures="0" errors="0" skipped="0" time="0.334">
+    <testcase name="completesEvidenceWithoutAcceptingAClientDossierVersion" classname="com.example.dispute.evidence.EvidenceRoomControllerTest" time="0.019" />
+    <testcase name="exposesTheRoleScopedCatalogOnTheFinalUnversionedApi" classname="com.example.dispute.evidence.EvidenceRoomControllerTest" time="0.038" />
+    <testcase name="returnsTheSharedCompletionProjection" classname="com.example.dispute.evidence.EvidenceRoomControllerTest" time="0.277">
+      <system-out>2026-07-23T05:13:45.443+08:00  INFO 30824 --- [java-api-service] [           main] t.c.s.AnnotationConfigContextLoaderUtils : Could not detect default configuration classes for test class [com.example.dispute.evidence.EvidenceRoomControllerTest]: EvidenceRoomControllerTest does not declare any static, non-private, non-final, nested classes annotated with @Configuration.
+2026-07-23T05:13:45.561+08:00  INFO 30824 --- [java-api-service] [           main] .b.t.c.SpringBootTestContextBootstrapper : Found @SpringBootConfiguration com.example.dispute.DisputeApplication for test class com.example.dispute.evidence.EvidenceRoomControllerTest
+
+  .   ____          _            __ _ _
+ /\\ / ___'_ __ _ _(_)_ __  __ _ \ \ \ \
+( ( )\___ | '_ | '_| | '_ \/ _` | \ \ \ \
+ \\/  ___)| |_)| | | | | || (_| |  ) ) ) )
+  '  |____| .__|_| |_|_| |_\__, | / / / /
+ =========|_|==============|___/=/_/_/_/
+
+ :: Spring Boot ::               (v3.5.15)
+
+2026-07-23T05:13:45.716+08:00  INFO 30824 --- [java-api-service] [           main] c.e.d.e.EvidenceRoomControllerTest       : Starting EvidenceRoomControllerTest using Java 21.0.8 with PID 30824 (started by Jupiter in D:\学习\Project\AfterSaleFlow-Agent\.codex-run\phase5-candidate-e70492a1-r1\java-api-service)
+2026-07-23T05:13:45.716+08:00  INFO 30824 --- [java-api-service] [           main] c.e.d.e.EvidenceRoomControllerTest       : The following 1 profile is active: "local"
+2026-07-23T05:13:48.750+08:00  WARN 30824 --- [java-api-service] [           main] .s.s.UserDetailsServiceAutoConfiguration : 
+
+Using generated security password: 76a8bf49-db28-4bd8-9984-61c065009246
+
+This generated password is for development use only. Your security configuration must be updated before running your application in production.
+
+2026-07-23T05:13:48.779+08:00  INFO 30824 --- [java-api-service] [           main] r$InitializeUserDetailsManagerConfigurer : Global AuthenticationManager configured with UserDetailsService bean with name inMemoryUserDetailsManager
+2026-07-23T05:13:49.414+08:00  INFO 30824 --- [java-api-service] [           main] o.s.b.t.m.w.SpringBootMockServletContext : Initializing Spring TestDispatcherServlet ''
+2026-07-23T05:13:49.414+08:00  INFO 30824 --- [java-api-service] [           main] o.s.t.web.servlet.TestDispatcherServlet  : Initializing Servlet ''
+2026-07-23T05:13:49.414+08:00  INFO 30824 --- [java-api-service] [           main] o.s.t.web.servlet.TestDispatcherServlet  : Completed initialization in 0 ms
+2026-07-23T05:13:49.457+08:00  INFO 30824 --- [java-api-service] [           main] c.e.d.e.EvidenceRoomControllerTest       : Started EvidenceRoomControllerTest in 3.85 seconds (process running for 52.062)
+</system-out>
+    </testcase>
+  </testsuite>
+  <testsuite name="com.example.dispute.evidence.EvidenceRoomIntegrationTest(p5-entry-e70492a11e23-fc40ff85)" source_report="java-phase5-entry-junit.xml" tests="3" failures="0" errors="0" skipped="0" time="0.817">
+    <testcase name="bothPartiesFreezeExactlyOneVersionAndRejectedEvidenceIsExcluded" classname="com.example.dispute.evidence.EvidenceRoomIntegrationTest" time="0.536">
+      <system-out>2026-07-23T05:13:49.819+08:00  INFO 30824 --- [java-api-service] [           main] .b.t.c.SpringBootTestContextBootstrapper : Found @SpringBootConfiguration com.example.dispute.DisputeApplication for test class com.example.dispute.evidence.EvidenceRoomIntegrationTest
+2026-07-23T05:13:49.823+08:00  INFO 30824 --- [java-api-service] [           main] .e.aws/docker/library/postgres:16-alpine : Creating container for image: public.ecr.aws/docker/library/postgres:16-alpine
+2026-07-23T05:13:49.940+08:00  INFO 30824 --- [java-api-service] [           main] .e.aws/docker/library/postgres:16-alpine : Container public.ecr.aws/docker/library/postgres:16-alpine is starting: 237270111efa22376ad707cd9868832040b0f57f93e7ffe7166b252928f71562
+2026-07-23T05:13:52.532+08:00  INFO 30824 --- [java-api-service] [           main] .e.aws/docker/library/postgres:16-alpine : Container public.ecr.aws/docker/library/postgres:16-alpine started in PT2.7089923S
+
+  .   ____          _            __ _ _
+ /\\ / ___'_ __ _ _(_)_ __  __ _ \ \ \ \
+( ( )\___ | '_ | '_| | '_ \/ _` | \ \ \ \
+ \\/  ___)| |_)| | | | | || (_| |  ) ) ) )
+  '  |____| .__|_| |_|_| |_\__, | / / / /
+ =========|_|==============|___/=/_/_/_/
+
+ :: Spring Boot ::               (v3.5.15)
+
+2026-07-23T05:13:52.595+08:00  INFO 30824 --- [java-api-service] [           main] c.e.d.e.EvidenceRoomIntegrationTest      : Starting EvidenceRoomIntegrationTest using Java 21.0.8 with PID 30824 (started by Jupiter in D:\学习\Project\AfterSaleFlow-Agent\.codex-run\phase5-candidate-e70492a1-r1\java-api-service)
+2026-07-23T05:13:52.597+08:00  INFO 30824 --- [java-api-service] [           main] c.e.d.e.EvidenceRoomIntegrationTest      : The following 1 profile is active: "local"
+2026-07-23T05:13:53.914+08:00  INFO 30824 --- [java-api-service] [           main] .s.d.r.c.RepositoryConfigurationDelegate : Multiple Spring Data modules found, entering strict repository configuration mode
+2026-07-23T05:13:53.914+08:00  INFO 30824 --- [java-api-service] [           main] .s.d.r.c.RepositoryConfigurationDelegate : Bootstrapping Spring Data JPA repositories in DEFAULT mode.
+2026-07-23T05:13:54.593+08:00  INFO 30824 --- [java-api-service] [           main] .s.d.r.c.RepositoryConfigurationDelegate : Finished Spring Data repository scanning in 674 ms. Found 56 JPA repository interfaces.
+2026-07-23T05:13:54.836+08:00  INFO 30824 --- [java-api-service] [           main] com.zaxxer.hikari.HikariDataSource       : HikariPool-2 - Starting...
+2026-07-23T05:13:54.871+08:00  INFO 30824 --- [java-api-service] [           main] com.zaxxer.hikari.pool.HikariPool        : HikariPool-2 - Added connection org.postgresql.jdbc.PgConnection@306ed15c
+2026-07-23T05:13:54.871+08:00  INFO 30824 --- [java-api-service] [           main] com.zaxxer.hikari.HikariDataSource       : HikariPool-2 - Start completed.
+2026-07-23T05:13:54.875+08:00  INFO 30824 --- [java-api-service] [           main] org.flywaydb.core.FlywayExecutor         : Database: jdbc:postgresql://localhost:57197/dispute_evidence_room (PostgreSQL 16.14)
+2026-07-23T05:13:54.982+08:00  INFO 30824 --- [java-api-service] [           main] o.f.c.i.s.JdbcTableSchemaHistory         : Schema history table "public"."flyway_schema_history" does not exist yet
+2026-07-23T05:13:54.985+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbValidate     : Successfully validated 50 migrations (execution time 00:00.083s)
+2026-07-23T05:13:55.007+08:00  INFO 30824 --- [java-api-service] [           main] o.f.c.i.s.JdbcTableSchemaHistory         : Creating Schema History table "public"."flyway_schema_history" ...
+2026-07-23T05:13:55.060+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Current version of schema "public": &lt;&lt; Empty Schema &gt;&gt;
+2026-07-23T05:13:55.074+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "001 - init case tables"
+2026-07-23T05:13:55.237+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "002 - init evidence tables"
+2026-07-23T05:13:55.555+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "003 - init hearing tables"
+2026-07-23T05:13:55.701+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "004 - init review executor tables"
+2026-07-23T05:13:55.848+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "005 - init policy audit tables"
+2026-07-23T05:13:55.933+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "006 - init router flow tables"
+2026-07-23T05:13:55.998+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "007 - final dispute core"
+2026-07-23T05:13:56.057+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "008 - final agent hearing governance"
+2026-07-23T05:13:56.275+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "009 - freeze review and execution chain"
+2026-07-23T05:13:56.329+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "010 - case rooms and participants"
+2026-07-23T05:13:56.445+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "011 - evidence verification and hearing settlement"
+2026-07-23T05:13:56.558+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "012 - case events and notification outbox"
+2026-07-23T05:13:56.641+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "013 - append only room stream"
+2026-07-23T05:13:56.668+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "014 - hearing round party submission"
+2026-07-23T05:13:56.713+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "015 - full hearing route and round limits"
+2026-07-23T05:13:56.743+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "016 - room turn memory"
+2026-07-23T05:13:56.789+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "017 - case intake dossier"
+2026-07-23T05:13:56.828+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "018 - case initiator role"
+2026-07-23T05:13:56.830+08:00  WARN 30824 --- [java-api-service] [           main] o.f.c.i.s.DefaultSqlScriptExecutor       : DB: column "initiator_role" of relation "fulfillment_dispute_case" already exists, skipping (SQL State: 42701 - Error Code: 0)
+2026-07-23T05:13:56.849+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "019 - access and agent sessions"
+2026-07-23T05:13:56.947+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "020 - actor audience filters"
+2026-07-23T05:13:56.971+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "021 - session scoped room turn memory uniqueness"
+2026-07-23T05:13:56.996+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "022 - evidence submission batches"
+2026-07-23T05:13:57.032+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "023 - evidence active hash unique index"
+2026-07-23T05:13:57.056+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "024 - agent a2a messages"
+2026-07-23T05:13:57.086+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "025 - jury review report message type"
+2026-07-23T05:13:57.104+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "026 - unique formal jury a2a report"
+2026-07-23T05:13:57.124+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "027 - simulated import template cursor"
+2026-07-23T05:13:57.151+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "028 - reviewer simulated case purge"
+2026-07-23T05:13:57.196+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "029 - dismiss inbox notifications"
+2026-07-23T05:13:57.224+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "030 - agent run streaming"
+2026-07-23T05:13:57.271+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "031 - expand case navigation stages"
+2026-07-23T05:13:57.293+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "032 - case intake party completion"
+2026-07-23T05:13:57.325+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "033 - include intake completion in demo case purge"
+2026-07-23T05:13:57.346+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "034 - allow reviewer purge of intake created cases"
+2026-07-23T05:13:57.382+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "035 - hearing flow v2"
+2026-07-23T05:13:57.577+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "036 - key evidence completion by participant id"
+2026-07-23T05:13:57.609+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "037 - key hearing party actions by participant id"
+2026-07-23T05:13:57.648+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "038 - explicit case party assignment"
+2026-07-23T05:13:57.685+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "039 - temporal command control plane"
+2026-07-23T05:13:57.862+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "040 - immutable snapshot and manifest"
+2026-07-23T05:13:57.948+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "040.1 - shadow command terminal status"
+2026-07-23T05:13:57.970+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "040.2 - room epoch scan claims"
+2026-07-23T05:13:58.006+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "040.3 - room epoch allocator contract"
+2026-07-23T05:13:58.065+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "040.4 - room epoch provisioning"
+2026-07-23T05:13:58.160+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "041 - agent run logical attempt v2"
+2026-07-23T05:13:58.279+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "042 - agent run attempt lineage"
+2026-07-23T05:13:58.323+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "043 - intake graph bindings"
+2026-07-23T05:13:58.441+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "043.1 - intake authority bindings"
+2026-07-23T05:13:58.604+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "043.2 - intake shadow comparisons"
+2026-07-23T05:13:58.666+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Migrating schema "public" to version "043.3 - intake signed synthetic admission"
+2026-07-23T05:13:58.735+08:00  INFO 30824 --- [java-api-service] [           main] o.f.core.internal.command.DbMigrate      : Successfully applied 50 migrations to schema "public", now at version v043.3 (execution time 00:02.805s)
+2026-07-23T05:13:58.995+08:00  INFO 30824 --- [java-api-service] [           main] o.hibernate.jpa.internal.util.LogHelper  : HHH000204: Processing PersistenceUnitInfo [name: default]
+2026-07-23T05:13:58.998+08:00  INFO 30824 --- [java-api-service] [           main] o.h.c.internal.RegionFactoryInitiator    : HHH000026: Second-level cache disabled
+2026-07-23T05:13:59.030+08:00  INFO 30824 --- [java-api-service] [           main] o.s.o.j.p.SpringPersistenceUnitInfo      : No LoadTimeWeaver setup: ignoring JPA class transformer
+2026-07-23T05:13:59.047+08:00  INFO 30824 --- [java-api-service] [           main] org.hibernate.orm.connections.pooling    : HHH10001005: Database info:
+	Database JDBC URL [Connecting through datasource 'HikariDataSource (HikariPool-2)']
+	Database driver: undefined/unknown
+	Database version: 16.14
+	Autocommit mode: undefined/unknown
+	Isolation level: undefined/unknown
+	Minimum pool size: undefined/unknown
+	Maximum pool size: undefined/unknown
+2026-07-23T05:14:00.269+08:00  INFO 30824 --- [java-api-service] [           main] o.h.e.t.j.p.i.JtaPlatformInitiator       : HHH000489: No JTA platform available (set 'hibernate.transaction.jta.platform' to enable JTA platform integration)
+2026-07-23T05:14:00.336+08:00  INFO 30824 --- [java-api-service] [           main] j.LocalContainerEntityManagerFactoryBean : Initialized JPA EntityManagerFactory for persistence unit 'default'
+2026-07-23T05:14:01.004+08:00  INFO 30824 --- [java-api-service] [           main] c.e.d.e.EvidenceRoomIntegrationTest      : Started EvidenceRoomIntegrationTest in 8.469 seconds (process running for 63.61)
+Hibernate: select fce1_0.id,fce1_0.after_sales_id,fce1_0.case_status,fce1_0.case_type,fce1_0.closed_at,fce1_0.created_at,fce1_0.created_by,fce1_0.creation_idempotency_key,fce1_0.current_deadline_at,fce1_0.current_room,fce1_0.current_workflow_id,fce1_0.deleted_at,fce1_0.description,fce1_0.dispute_type,fce1_0.external_case_ref,fce1_0.initiator_id,fce1_0.initiator_role,fce1_0.intake_result_json,fce1_0.logistics_id,fce1_0.merchant_id,fce1_0.metadata_json,fce1_0.order_id,fce1_0.respondent_id,fce1_0.respondent_role,fce1_0.risk_level,fce1_0.hearing_route,fce1_0.source_system,fce1_0.source_type,fce1_0.title,fce1_0.updated_at,fce1_0.updated_by,fce1_0.user_id,fce1_0.version from fulfillment_dispute_case fce1_0 where fce1_0.id=?
+Hibernate: insert into fulfillment_dispute_case (after_sales_id,case_status,case_type,closed_at,created_at,created_by,creation_idempotency_key,current_deadline_at,current_room,current_workflow_id,deleted_at,description,dispute_type,external_case_ref,initiator_id,initiator_role,intake_result_json,logistics_id,merchant_id,metadata_json,order_id,respondent_id,respondent_role,risk_level,hearing_route,source_system,source_type,title,updated_at,updated_by,user_id,version,id) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+Hibernate: select ede1_0.id,ede1_0.built_at,ede1_0.case_id,ede1_0.created_at,ede1_0.created_by,ede1_0.deleted_at,ede1_0.dossier_status,ede1_0.dossier_version,ede1_0.matrix_summary_json,ede1_0.summary_json,ede1_0.timeline_json,ede1_0.updated_at,ede1_0.updated_by from evidence_dossier ede1_0 where ede1_0.id=?
+Hibernate: insert into evidence_dossier (built_at,case_id,created_at,created_by,deleted_at,dossier_status,dossier_version,matrix_summary_json,summary_json,timeline_json,updated_at,updated_by,id) values (?,?,?,?,?,?,?,?,?,?,?,?,?)
+Hibernate: select cre1_0.id,cre1_0.case_id,cre1_0.closed_at,cre1_0.created_at,cre1_0.created_by,cre1_0.metadata_json,cre1_0.opened_at,cre1_0.room_status,cre1_0.room_type,cre1_0.sealed_at,cre1_0.updated_at,cre1_0.updated_by,cre1_0.version from case_room cre1_0 where cre1_0.id=?
+Hibernate: insert into case_room (case_id,closed_at,created_at,created_by,metadata_json,opened_at,room_status,room_type,sealed_at,updated_at,updated_by,version,id) values (?,?,?,?,?,?,?,?,?,?,?,?,?)
+Hibernate: select cpce1_0.id,cpce1_0.case_id,cpce1_0.clock_status,cpce1_0.clock_type,cpce1_0.completed_at,cpce1_0.completion_reason,cpce1_0.created_at,cpce1_0.created_by,cpce1_0.deadline_at,cpce1_0.room_id,cpce1_0.started_at,cpce1_0.temporal_run_id,cpce1_0.temporal_workflow_id,cpce1_0.updated_at,cpce1_0.updated_by,cpce1_0.version from case_phase_clock cpce1_0 where cpce1_0.id=?
+Hibernate: insert into case_phase_clock (case_id,clock_status,clock_type,completed_at,completion_reason,created_at,created_by,deadline_at,room_id,started_at,temporal_run_id,temporal_workflow_id,updated_at,updated_by,version,id) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+Hibernate: select fce1_0.id,fce1_0.after_sales_id,fce1_0.case_status,fce1_0.case_type,fce1_0.closed_at,fce1_0.created_at,fce1_0.created_by,fce1_0.creation_idempotency_key,fce1_0.current_deadline_at,fce1_0.current_room,fce1_0.current_workflow_id,fce1_0.deleted_at,fce1_0.description,fce1_0.dispute_type,fce1_0.external_case_ref,fce1_0.initiator_id,fce1_0.initiator_role,fce1_0.intake_result_json,fce1_0.logistics_id,fce1_0.merchant_id,fce1_0.metadata_json,fce1_0.order_id,fce1_0.respondent_id,fce1_0.respondent_role,fce1_0.risk_level,fce1_0.hearing_route,fce1_0.source_system,fce1_0.source_type,fce1_0.title,fce1_0.updated_at,fce1_0.updated_by,fce1_0.user_id,fce1_0.version from fulfillment_dispute_case fce1_0 where fce1_0.id=? for no key update
+Hibernate: select *
+  from case_room_epoch
+ where case_id = ?
+   and lifecycle_status in ('PREPARING', 'PROVISIONING', 'ACTIVE')
+ for update
+
+Hibernate: select cppe1_0.case_id,cppe1_0.current_room,cppe1_0.fencing_token,cppe1_0.last_case_event_sequence,cppe1_0.last_command_sequence,cppe1_0.macro_phase,cppe1_0.process_revision,cppe1_0.projected_at,cppe1_0.projected_deadline_at,cppe1_0.projection_ref,cppe1_0.projection_sha256,cppe1_0.room_epoch,cppe1_0.room_phase,cppe1_0.temporal_build_id,cppe1_0.temporal_run_id,cppe1_0.temporal_workflow_id,cppe1_0.tenant_surrogate,cppe1_0.updated_at,cppe1_0.version,cppe1_0.writer_activation_status,cppe1_0.writer_mode from case_process_projection cppe1_0 where cppe1_0.case_id=? for no key update
+Hibernate: select max(cree1_0.room_epoch) from case_room_epoch cree1_0 where cree1_0.case_id=? and cree1_0.room_type=?
+Hibernate: select max(cree1_0.fencing_token) from case_room_epoch cree1_0 where cree1_0.case_id=?
+Hibernate: select cree1_0.id,cree1_0.activated_at,cree1_0.case_id,cree1_0.checkpoint_schema_version,cree1_0.created_at,cree1_0.fencing_token,cree1_0.graph_key,cree1_0.graph_version,cree1_0.lifecycle_status,cree1_0.process_contract_version,cree1_0.process_revision,cree1_0.provisioned_at,cree1_0.provisioning_failure_code,cree1_0.provisioning_status,cree1_0.room_epoch,cree1_0.room_id,cree1_0.room_revision,cree1_0.room_temporal_run_id,cree1_0.room_temporal_workflow_id,cree1_0.room_type,cree1_0.room_workflow_build_id,cree1_0.room_workflow_type,cree1_0.selection_schema_version,cree1_0.stream_protocol,cree1_0.temporal_build_id,cree1_0.temporal_run_id,cree1_0.temporal_workflow_id,cree1_0.tenant_surrogate,cree1_0.terminal_at,cree1_0.updated_at,cree1_0.version,cree1_0.workflow_type,cree1_0.writer_mode from case_room_epoch cree1_0 where cree1_0.id=?
+Hibernate: insert into case_room_epoch (activated_at,case_id,checkpoint_schema_version,created_at,fencing_token,graph_key,graph_version,lifecycle_status,process_contract_version,process_revision,provisioned_at,provisioning_failure_code,provisioning_status,room_epoch,room_id,room_revision,room_temporal_run_id,room_temporal_workflow_id,room_type,room_workflow_build_id,room_workflow_type,selection_schema_version,stream_protocol,temporal_build_id,temporal_run_id,temporal_workflow_id,tenant_surrogate,terminal_at,updated_at,version,workflow_type,writer_mode,id) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+Hibernate: select cppe1_0.case_id,cppe1_0.current_room,cppe1_0.fencing_token,cppe1_0.last_case_event_sequence,cppe1_0.last_command_sequence,cppe1_0.macro_phase,cppe1_0.process_revision,cppe1_0.projected_at,cppe1_0.projected_deadline_at,cppe1_0.projection_ref,cppe1_0.projection_sha256,cppe1_0.room_epoch,cppe1_0.room_phase,cppe1_0.temporal_build_id,cppe1_0.temporal_run_id,cppe1_0.temporal_workflow_id,cppe1_0.tenant_surrogate,cppe1_0.updated_at,cppe1_0.version,cppe1_0.writer_activation_status,cppe1_0.writer_mode from case_process_projection cppe1_0 where cppe1_0.case_id=?
+Hibernate: insert into case_process_projection (current_room,fencing_token,last_case_event_sequence,last_command_sequence,macro_phase,process_revision,projected_at,projected_deadline_at,projection_ref,projection_sha256,room_epoch,room_phase,temporal_build_id,temporal_run_id,temporal_workflow_id,tenant_surrogate,updated_at,version,writer_activation_status,writer_mode,case_id) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+Hibernate: select ede1_0.id,ede1_0.built_at,ede1_0.case_id,ede1_0.created_at,ede1_0.created_by,ede1_0.deleted_at,ede1_0.dossier_status,ede1_0.dossier_version,ede1_0.matrix_summary_json,ede1_0.summary_json,ede1_0.timeline_json,ede1_0.updated_at,ede1_0.updated_by from evidence_dossier ede1_0 where ede1_0.case_id=? and ede1_0.dossier_version=?
+Hibernate: select eie1_0.id,eie1_0.case_id,eie1_0.content_type,eie1_0.created_at,eie1_0.created_by,eie1_0.deleted_at,eie1_0.desensitized,eie1_0.dossier_id,eie1_0.evidence_type,eie1_0.extraction_json,eie1_0.file_bucket,eie1_0.file_hash,eie1_0.file_object_key,eie1_0.file_size,eie1_0.metadata_json,eie1_0.occurred_at,eie1_0.original_filename,eie1_0.parse_status,eie1_0.parsed_text,eie1_0.source_type,eie1_0.submission_batch_id,eie1_0.submission_status,eie1_0.submitted_at,eie1_0.submitted_by_id,eie1_0.submitted_by_role,eie1_0.updated_at,eie1_0.updated_by,eie1_0.visibility from evidence_item eie1_0 where eie1_0.id=?
+Hibernate: insert into evidence_item (case_id,content_type,created_at,created_by,deleted_at,desensitized,dossier_id,evidence_type,extraction_json,file_bucket,file_hash,file_object_key,file_size,metadata_json,occurred_at,original_filename,parse_status,parsed_text,source_type,submission_batch_id,submission_status,submitted_at,submitted_by_id,submitted_by_role,updated_at,updated_by,visibility,id) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+Hibernate: select eve1_0.id,eve1_0.agent_findings_json,eve1_0.agent_run_id,eve1_0.case_id,eve1_0.created_at,eve1_0.deterministic_checks_json,eve1_0.evidence_id,eve1_0.reasons_json,eve1_0.requires_human_review,eve1_0.trace_id,eve1_0.verification_status,eve1_0.verification_version,eve1_0.verified_at,eve1_0.verified_by from evidence_verification eve1_0 where eve1_0.id=?
+Hibernate: insert into evidence_verification (agent_findings_json,agent_run_id,case_id,created_at,deterministic_checks_json,evidence_id,reasons_json,requires_human_review,trace_id,verification_status,verification_version,verified_at,verified_by,id) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+Hibernate: select ede1_0.id,ede1_0.built_at,ede1_0.case_id,ede1_0.created_at,ede1_0.created_by,ede1_0.deleted_at,ede1_0.dossier_status,ede1_0.dossier_version,ede1_0.matrix_summary_json,ede1_0.summary_json,ede1_0.timeline_json,ede1_0.updated_at,ede1_0.updated_by from evidence_dossier ede1_0 where ede1_0.case_id=? and ede1_0.dossier_version=?
+Hibernate: select eie1_0.id,eie1_0.case_id,eie1_0.content_type,eie1_0.created_at,eie1_0.created_by,eie1_0.deleted_at,eie1_0.desensitized,eie1_0.dossier_id,eie1_0.evidence_type,eie1_0.extraction_json,eie1_0.file_bucket,eie1_0.file_hash,eie1_0.file_object_key,eie1_0.file_size,eie1_0.metadata_json,eie1_0.occurred_at,eie1_0.original_filename,eie1_0.parse_status,eie1_0.parsed_text,eie1_0.source_type,eie1_0.submission_batch_id,eie1_0.submission_status,eie1_0.submitted_at,eie1_0.submitted_by_id,eie1_0.submitted_by_role,eie1_0.updated_at,eie1_0.updated_by,eie1_0.visibility from evidence_item eie1_0 where eie1_0.id=?
+Hibernate: insert into evidence_item (case_id,content_type,created_at,created_by,deleted_at,desensitized,dossier_id,evidence_type,extraction_json,file_bucket,file_hash,file_object_key,file_size,metadata_json,occurred_at,original_filename,parse_status,parsed_text,source_type,submission_batch_id,submission_status,submitted_at,submitted_by_id,submitted_by_role,updated_at,updated_by,visibility,id) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+Hibernate: select eve1_0.id,eve1_0.agent_findings_json,eve1_0.agent_run_id,eve1_0.case_id,eve1_0.created_at,eve1_0.deterministic_checks_json,eve1_0.evidence_id,eve1_0.reasons_json,eve1_0.requires_human_review,eve1_0.trace_id,eve1_0.verification_status,eve1_0.verification_version,eve1_0.verified_at,eve1_0.verified_by from evidence_verification eve1_0 where eve1_0.id=?
+Hibernate: insert into evidence_verification (agent_findings_json,agent_run_id,case_id,created_at,deterministic_checks_json,evidence_id,reasons_json,requires_human_review,trace_id,verification_status,verification_version,verified_at,verified_by,id) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+Hibernate: select fce1_0.id,fce1_0.after_sales_id,fce1_0.case_status,fce1_0.case_type,fce1_0.closed_at,fce1_0.created_at,fce1_0.created_by,fce1_0.creation_idempotency_key,fce1_0.current_deadline_at,fce1_0.current_room,fce1_0.current_workflow_id,fce1_0.deleted_at,fce1_0.description,fce1_0.dispute_type,fce1_0.external_case_ref,fce1_0.initiator_id,fce1_0.initiator_role,fce1_0.intake_result_json,fce1_0.logistics_id,fce1_0.merchant_id,fce1_0.metadata_json,fce1_0.order_id,fce1_0.respondent_id,fce1_0.respondent_role,fce1_0.risk_level,fce1_0.hearing_route,fce1_0.source_system,fce1_0.source_type,fce1_0.title,fce1_0.updated_at,fce1_0.updated_by,fce1_0.user_id,fce1_0.version from fulfillment_dispute_case fce1_0 where fce1_0.id=? for no key update
+Hibernate: select count(eie1_0.id) from evidence_item eie1_0 where eie1_0.case_id=? and eie1_0.submitted_by_id=? and eie1_0.submission_status=? and eie1_0.deleted_at is null
+Hibernate: select epce1_0.id,epce1_0.case_id,epce1_0.completed_at,epce1_0.completion_status,epce1_0.created_at,epce1_0.created_by,epce1_0.dossier_version,epce1_0.idempotency_key,epce1_0.participant_id,epce1_0.participant_role from evidence_party_completion epce1_0 where epce1_0.case_id=? order by epce1_0.dossier_version desc fetch first ? rows only
+Hibernate: select ede1_0.id,ede1_0.built_at,ede1_0.case_id,ede1_0.created_at,ede1_0.created_by,ede1_0.deleted_at,ede1_0.dossier_status,ede1_0.dossier_version,ede1_0.matrix_summary_json,ede1_0.summary_json,ede1_0.timeline_json,ede1_0.updated_at,ede1_0.updated_by from evidence_dossier ede1_0 where ede1_0.case_id=? order by ede1_0.dossier_version desc fetch first ? rows only
+Hibernate: select epce1_0.id,epce1_0.case_id,epce1_0.completed_at,epce1_0.completion_status,epce1_0.created_at,epce1_0.created_by,epce1_0.dossier_version,epce1_0.idempotency_key,epce1_0.participant_id,epce1_0.participant_role from evidence_party_completion epce1_0 where epce1_0.case_id=? and epce1_0.idempotency_key=?
+Hibernate: select epce1_0.id,epce1_0.case_id,epce1_0.completed_at,epce1_0.completion_status,epce1_0.created_at,epce1_0.created_by,epce1_0.dossier_version,epce1_0.idempotency_key,epce1_0.participant_id,epce1_0.participant_role from evidence_party_completion epce1_0 where epce1_0.case_id=? and epce1_0.dossier_version=? and epce1_0.participant_id=?
+Hibernate: select epce1_0.id,epce1_0.case_id,epce1_0.completed_at,epce1_0.completion_status,epce1_0.created_at,epce1_0.created_by,epce1_0.dossier_version,epce1_0.idempotency_key,epce1_0.participant_id,epce1_0.participant_role from evidence_party_completion epce1_0 where epce1_0.id=?
+Hibernate: insert into evidence_party_completion (case_id,completed_at,completion_status,created_at,created_by,dossier_version,idempotency_key,participant_id,participant_role,id) values (?,?,?,?,?,?,?,?,?,?)
+Hibernate: select epce1_0.id,epce1_0.case_id,epce1_0.completed_at,epce1_0.completion_status,epce1_0.created_at,epce1_0.created_by,epce1_0.dossier_version,epce1_0.idempotency_key,epce1_0.participant_id,epce1_0.participant_role from evidence_party_completion epce1_0 where epce1_0.case_id=? and epce1_0.dossier_version=? and epce1_0.completion_status=?
+Hibernate: select fce1_0.id,fce1_0.after_sales_id,fce1_0.case_status,fce1_0.case_type,fce1_0.closed_at,fce1_0.created_at,fce1_0.created_by,fce1_0.creation_idempotency_key,fce1_0.current_deadline_at,fce1_0.current_room,fce1_0.current_workflow_id,fce1_0.deleted_at,fce1_0.description,fce1_0.dispute_type,fce1_0.external_case_ref,fce1_0.initiator_id,fce1_0.initiator_role,fce1_0.intake_result_json,fce1_0.logistics_id,fce1_0.merchant_id,fce1_0.metadata_json,fce1_0.order_id,fce1_0.respondent_id,fce1_0.respondent_role,fce1_0.risk_level,fce1_0.hearing_route,fce1_0.source_system,fce1_0.source_type,fce1_0.title,fce1_0.updated_at,fce1_0.updated_by,fce1_0.user_id,fce1_0.version from fulfillment_dispute_case fce1_0 where fce1_0.id=? for no key update
+Hibernate: select epce1_0.id,epce1_0.case_id,epce1_0.completed_at,epce1_0.completion_status,epce1_0.created_at,epce1_0.created_by,epce1_0.dossier_version,epce1_0.idempotency_key,epce1_0.participant_id,epce1_0.participant_role from evidence_party_completion epce1_0 where epce1_0.case_id=? order by epce1_0.dossier_version desc fetch first ? rows only
+Hibernate: select epce1_0.id,epce1_0.case_id,epce1_0.completed_at,epce1_0.completion_status,epce1_0.created_at,epce1_0.created_by,epce1_0.dossier_version,epce1_0.idempotency_key,epce1_0.participant_id,epce1_0.participant_role from evidence_party_completion epce1_0 where epce1_0.case_id=? and epce1_0.idempotency_key=?
+Hibernate: select epce1_0.id,epce1_0.case_id,epce1_0.completed_at,epce1_0.completion_status,epce1_0.created_at,epce1_0.created_by,epce1_0.dossier_version,epce1_0.idempotency_key,epce1_0.participant_id,epce1_0.participant_role from evidence_party_completion epce1_0 where epce1_0.case_id=? and epce1_0.dossier_version=? and epce1_0.participant_id=?
+Hibernate: select epce1_0.id,epce1_0.case_id,epce1_0.completed_at,epce1_0.completion_status,epce1_0.created_at,epce1_0.created_by,epce1_0.dossier_version,epce1_0.idempotency_key,epce1_0.participant_id,epce1_0.participant_role from evidence_party_completion epce1_0 where epce1_0.id=?
+Hibernate: insert into evidence_party_completion (case_id,completed_at,completion_status,created_at,created_by,dossier_version,idempotency_key,participant_id,participant_role,id) values (?,?,?,?,?,?,?,?,?,?)
+Hibernate: select epce1_0.id,epce1_0.case_id,epce1_0.completed_at,epce1_0.completion_status,epce1_0.created_at,epce1_0.created_by,epce1_0.dossier_version,epce1_0.idempotency_key,epce1_0.participant_id,epce1_0.participant_role from evidence_party_completion epce1_0 where epce1_0.case_id=? and epce1_0.dossier_version=? and epce1_0.completion_status=?
+Hibernate: select count(eie1_0.id) from evidence_item eie1_0 where eie1_0.case_id=? and eie1_0.submitted_by_id=? and eie1_0.submission_status=? and eie1_0.deleted_at is null
+Hibernate: select ede1_0.id,ede1_0.built_at,ede1_0.case_id,ede1_0.created_at,ede1_0.created_by,ede1_0.deleted_at,ede1_0.dossier_status,ede1_0.dossier_version,ede1_0.matrix_summary_json,ede1_0.summary_json,ede1_0.timeline_json,ede1_0.updated_at,ede1_0.updated_by from evidence_dossier ede1_0 where ede1_0.case_id=? and ede1_0.dossier_version=?
+Hibernate: select eie1_0.id,eie1_0.case_id,eie1_0.content_type,eie1_0.created_at,eie1_0.created_by,eie1_0.deleted_at,eie1_0.desensitized,eie1_0.dossier_id,eie1_0.evidence_type,eie1_0.extraction_json,eie1_0.file_bucket,eie1_0.file_hash,eie1_0.file_object_key,eie1_0.file_size,eie1_0.metadata_json,eie1_0.occurred_at,eie1_0.original_filename,eie1_0.parse_status,eie1_0.parsed_text,eie1_0.source_type,eie1_0.submission_batch_id,eie1_0.submission_status,eie1_0.submitted_at,eie1_0.submitted_by_id,eie1_0.submitted_by_role,eie1_0.updated_at,eie1_0.updated_by,eie1_0.visibility from evidence_item eie1_0 where eie1_0.case_id=? and eie1_0.deleted_at is null order by eie1_0.occurred_at,eie1_0.created_at
+Hibernate: select eve1_0.id,eve1_0.agent_findings_json,eve1_0.agent_run_id,eve1_0.case_id,eve1_0.created_at,eve1_0.deterministic_checks_json,eve1_0.evidence_id,eve1_0.reasons_json,eve1_0.requires_human_review,eve1_0.trace_id,eve1_0.verification_status,eve1_0.verification_version,eve1_0.verified_at,eve1_0.verified_by from evidence_verification eve1_0 where eve1_0.evidence_id=? order by eve1_0.verification_version desc fetch first ? rows only
+Hibernate: select eve1_0.id,eve1_0.agent_findings_json,eve1_0.agent_run_id,eve1_0.case_id,eve1_0.created_at,eve1_0.deterministic_checks_json,eve1_0.evidence_id,eve1_0.reasons_json,eve1_0.requires_human_review,eve1_0.trace_id,eve1_0.verification_status,eve1_0.verification_version,eve1_0.verified_at,eve1_0.verified_by from evidence_verification eve1_0 where eve1_0.evidence_id=? order by eve1_0.verification_version desc fetch first ? rows only
+Hibernate: select ede1_0.id,ede1_0.built_at,ede1_0.case_id,ede1_0.created_at,ede1_0.created_by,ede1_0.deleted_at,ede1_0.dossier_status,ede1_0.dossier_version,ede1_0.matrix_summary_json,ede1_0.summary_json,ede1_0.timeline_json,ede1_0.updated_at,ede1_0.updated_by from evidence_dossier ede1_0 where ede1_0.id=?
+Hibernate: select edie1_0.id,edie1_0.case_id,edie1_0.created_at,edie1_0.created_by,edie1_0.dossier_id,edie1_0.evidence_id,edie1_0.evidence_snapshot_json,edie1_0.sequence_no from evidence_dossier_item edie1_0 where edie1_0.id=?
+Hibernate: select cre1_0.id,cre1_0.case_id,cre1_0.closed_at,cre1_0.created_at,cre1_0.created_by,cre1_0.metadata_json,cre1_0.opened_at,cre1_0.room_status,cre1_0.room_type,cre1_0.sealed_at,cre1_0.updated_at,cre1_0.updated_by,cre1_0.version from case_room cre1_0 where cre1_0.case_id=? and cre1_0.room_type=?
+Hibernate: select cpce1_0.id,cpce1_0.case_id,cpce1_0.clock_status,cpce1_0.clock_type,cpce1_0.completed_at,cpce1_0.completion_reason,cpce1_0.created_at,cpce1_0.created_by,cpce1_0.deadline_at,cpce1_0.room_id,cpce1_0.started_at,cpce1_0.temporal_run_id,cpce1_0.temporal_workflow_id,cpce1_0.updated_at,cpce1_0.updated_by,cpce1_0.version from case_phase_clock cpce1_0 where cpce1_0.case_id=? and cpce1_0.clock_type=?
+Hibernate: insert into evidence_dossier (built_at,case_id,created_at,created_by,deleted_at,dossier_status,dossier_version,matrix_summary_json,summary_json,timeline_json,updated_at,updated_by,id) values (?,?,?,?,?,?,?,?,?,?,?,?,?)
+Hibernate: insert into evidence_dossier_item (case_id,created_at,created_by,dossier_id,evidence_id,evidence_snapshot_json,sequence_no,id) values (?,?,?,?,?,?,?,?)
+Hibernate: update case_room set case_id=?,closed_at=?,metadata_json=?,opened_at=?,room_status=?,room_type=?,sealed_at=?,updated_at=?,updated_by=?,version=? where id=? and version=?
+Hibernate: update case_phase_clock set case_id=?,clock_status=?,clock_type=?,completed_at=?,completion_reason=?,deadline_at=?,room_id=?,started_at=?,temporal_run_id=?,temporal_workflow_id=?,updated_at=?,updated_by=?,version=? where id=? and version=?
+Hibernate: select cre1_0.id,cre1_0.case_id,cre1_0.closed_at,cre1_0.created_at,cre1_0.created_by,cre1_0.metadata_json,cre1_0.opened_at,cre1_0.room_status,cre1_0.room_type,cre1_0.sealed_at,cre1_0.updated_at,cre1_0.updated_by,cre1_0.version from case_room cre1_0 where cre1_0.case_id=? and cre1_0.room_type=?
+Hibernate: select cre1_0.id,cre1_0.case_id,cre1_0.closed_at,cre1_0.created_at,cre1_0.created_by,cre1_0.metadata_json,cre1_0.opened_at,cre1_0.room_status,cre1_0.room_type,cre1_0.sealed_at,cre1_0.updated_at,cre1_0.updated_by,cre1_0.version from case_room cre1_0 where cre1_0.id=?
+Hibernate: select cpce1_0.id,cpce1_0.case_id,cpce1_0.clock_status,cpce1_0.clock_type,cpce1_0.completed_at,cpce1_0.completion_reason,cpce1_0.created_at,cpce1_0.created_by,cpce1_0.deadline_at,cpce1_0.room_id,cpce1_0.started_at,cpce1_0.temporal_run_id,cpce1_0.temporal_workflow_id,cpce1_0.updated_at,cpce1_0.updated_by,cpce1_0.version from case_phase_clock cpce1_0 where cpce1_0.case_id=? and cpce1_0.clock_type=?
+Hibernate: select cpce1_0.id,cpce1_0.case_id,cpce1_0.clock_status,cpce1_0.clock_type,cpce1_0.completed_at,cpce1_0.completion_reason,cpce1_0.created_at,cpce1_0.created_by,cpce1_0.deadline_at,cpce1_0.room_id,cpce1_0.started_at,cpce1_0.temporal_run_id,cpce1_0.temporal_workflow_id,cpce1_0.updated_at,cpce1_0.updated_by,cpce1_0.version from case_phase_clock cpce1_0 where cpce1_0.id=?
+Hibernate: insert into case_room (case_id,closed_at,created_at,created_by,metadata_json,opened_at,room_status,room_type,sealed_at,updated_at,updated_by,version,id) values (?,?,?,?,?,?,?,?,?,?,?,?,?)
+Hibernate: insert into case_phase_clock (case_id,clock_status,clock_type,completed_at,completion_reason,created_at,created_by,deadline_at,room_id,started_at,temporal_run_id,temporal_workflow_id,updated_at,updated_by,version,id) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+Hibernate: update fulfillment_dispute_case set after_sales_id=?,case_status=?,case_type=?,closed_at=?,creation_idempotency_key=?,current_deadline_at=?,current_room=?,current_workflow_id=?,deleted_at=?,description=?,dispute_type=?,external_case_ref=?,initiator_id=?,initiator_role=?,intake_result_json=?,logistics_id=?,merchant_id=?,metadata_json=?,order_id=?,respondent_id=?,respondent_role=?,risk_level=?,hearing_route=?,source_system=?,source_type=?,title=?,updated_at=?,updated_by=?,user_id=?,version=? where id=? and version=?
+Hibernate: select fce1_0.id,fce1_0.after_sales_id,fce1_0.case_status,fce1_0.case_type,fce1_0.closed_at,fce1_0.created_at,fce1_0.created_by,fce1_0.creation_idempotency_key,fce1_0.current_deadline_at,fce1_0.current_room,fce1_0.current_workflow_id,fce1_0.deleted_at,fce1_0.description,fce1_0.dispute_type,fce1_0.external_case_ref,fce1_0.initiator_id,fce1_0.initiator_role,fce1_0.intake_result_json,fce1_0.logistics_id,fce1_0.merchant_id,fce1_0.metadata_json,fce1_0.order_id,fce1_0.respondent_id,fce1_0.respondent_role,fce1_0.risk_level,fce1_0.hearing_route,fce1_0.source_system,fce1_0.source_type,fce1_0.title,fce1_0.updated_at,fce1_0.updated_by,fce1_0.user_id,fce1_0.version from fulfillment_dispute_case fce1_0 where fce1_0.id=? for no key update
+Hibernate: select *
+  from case_room_epoch
+ where case_id = ?
+   and lifecycle_status in ('PREPARING', 'PROVISIONING', 'ACTIVE')
+ for update
+
+Hibernate: select cppe1_0.case_id,cppe1_0.current_room,cppe1_0.fencing_token,cppe1_0.last_case_event_sequence,cppe1_0.last_command_sequence,cppe1_0.macro_phase,cppe1_0.process_revision,cppe1_0.projected_at,cppe1_0.projected_deadline_at,cppe1_0.projection_ref,cppe1_0.projection_sha256,cppe1_0.room_epoch,cppe1_0.room_phase,cppe1_0.temporal_build_id,cppe1_0.temporal_run_id,cppe1_0.temporal_workflow_id,cppe1_0.tenant_surrogate,cppe1_0.updated_at,cppe1_0.version,cppe1_0.writer_activation_status,cppe1_0.writer_mode from case_process_projection cppe1_0 where cppe1_0.case_id=? for no key update
+Hibernate: select max(cree1_0.room_epoch) from case_room_epoch cree1_0 where cree1_0.case_id=? and cree1_0.room_type=?
+Hibernate: select max(cree1_0.fencing_token) from case_room_epoch cree1_0 where cree1_0.case_id=?
+Hibernate: update case_room_epoch set lifecycle_status=?,process_revision=?,provisioned_at=?,provisioning_failure_code=?,provisioning_status=?,room_revision=?,room_temporal_run_id=?,room_temporal_workflow_id=?,temporal_run_id=?,terminal_at=?,updated_at=?,version=? where id=? and version=?
+Hibernate: select cree1_0.id,cree1_0.activated_at,cree1_0.case_id,cree1_0.checkpoint_schema_version,cree1_0.created_at,cree1_0.fencing_token,cree1_0.graph_key,cree1_0.graph_version,cree1_0.lifecycle_status,cree1_0.process_contract_version,cree1_0.process_revision,cree1_0.provisioned_at,cree1_0.provisioning_failure_code,cree1_0.provisioning_status,cree1_0.room_epoch,cree1_0.room_id,cree1_0.room_revision,cree1_0.room_temporal_run_id,cree1_0.room_temporal_workflow_id,cree1_0.room_type,cree1_0.room_workflow_build_id,cree1_0.room_workflow_type,cree1_0.selection_schema_version,cree1_0.stream_protocol,cree1_0.temporal_build_id,cree1_0.temporal_run_id,cree1_0.temporal_workflow_id,cree1_0.tenant_surrogate,cree1_0.terminal_at,cree1_0.updated_at,cree1_0.version,cree1_0.workflow_type,cree1_0.writer_mode from case_room_epoch cree1_0 where cree1_0.id=?
+Hibernate: insert into case_room_epoch (activated_at,case_id,checkpoint_schema_version,created_at,fencing_token,graph_key,graph_version,lifecycle_status,process_contract_version,process_revision,provisioned_at,provisioning_failure_code,provisioning_status,room_epoch,room_id,room_revision,room_temporal_run_id,room_temporal_workflow_id,room_type,room_workflow_build_id,room_workflow_type,selection_schema_version,stream_protocol,temporal_build_id,temporal_run_id,temporal_workflow_id,tenant_surrogate,terminal_at,updated_at,version,workflow_type,writer_mode,id) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+Hibernate: update case_process_projection set current_room=?,fencing_token=?,last_case_event_sequence=?,last_command_sequence=?,macro_phase=?,process_revision=?,projected_at=?,projected_deadline_at=?,projection_ref=?,projection_sha256=?,room_epoch=?,room_phase=?,temporal_build_id=?,temporal_run_id=?,temporal_workflow_id=?,tenant_surrogate=?,updated_at=?,version=?,writer_activation_status=?,writer_mode=? where case_id=? and version=?
+Hibernate: select fce1_0.id,fce1_0.after_sales_id,fce1_0.case_status,fce1_0.case_type,fce1_0.closed_at,fce1_0.created_at,fce1_0.created_by,fce1_0.creation_idempotency_key,fce1_0.current_deadline_at,fce1_0.current_room,fce1_0.current_workflow_id,fce1_0.deleted_at,fce1_0.description,fce1_0.dispute_type,fce1_0.external_case_ref,fce1_0.initiator_id,fce1_0.initiator_role,fce1_0.intake_result_json,fce1_0.logistics_id,fce1_0.merchant_id,fce1_0.metadata_json,fce1_0.order_id,fce1_0.respondent_id,fce1_0.respondent_role,fce1_0.risk_level,fce1_0.hearing_route,fce1_0.source_system,fce1_0.source_type,fce1_0.title,fce1_0.updated_at,fce1_0.updated_by,fce1_0.user_id,fce1_0.version from fulfillment_dispute_case fce1_0 where fce1_0.id=? for no key update
+Hibernate: select ctee1_0.id,ctee1_0.audience_actor_ids_json,ctee1_0.audience_json,ctee1_0.case_id,ctee1_0.created_at,ctee1_0.created_by,ctee1_0.dossier_id,ctee1_0.event_json,ctee1_0.event_key,ctee1_0.event_time,ctee1_0.event_type,ctee1_0.room_id,ctee1_0.sequence_no,ctee1_0.source_refs_json from case_timeline_event ctee1_0 where ctee1_0.case_id=? and ctee1_0.event_key=?
+Hibernate: select coalesce(max(ctee1_0.sequence_no),0) from case_timeline_event ctee1_0 where ctee1_0.case_id=?
+Hibernate: select ctee1_0.id,ctee1_0.audience_actor_ids_json,ctee1_0.audience_json,ctee1_0.case_id,ctee1_0.created_at,ctee1_0.created_by,ctee1_0.dossier_id,ctee1_0.event_json,ctee1_0.event_key,ctee1_0.event_time,ctee1_0.event_type,ctee1_0.room_id,ctee1_0.sequence_no,ctee1_0.source_refs_json from case_timeline_event ctee1_0 where ctee1_0.id=?
+Hibernate: select ne1_0.id,ne1_0.body,ne1_0.business_event_key,ne1_0.case_id,ne1_0.created_at,ne1_0.deep_link,ne1_0.dismissed_at,ne1_0.expires_at,ne1_0.notification_type,ne1_0.payload_json,ne1_0.read_at,ne1_0.recipient_id,ne1_0.recipient_role,ne1_0.title from notification ne1_0 where ne1_0.business_event_key=? and ne1_0.recipient_id=?
+Hibernate: select ne1_0.id,ne1_0.body,ne1_0.business_event_key,ne1_0.case_id,ne1_0.created_at,ne1_0.deep_link,ne1_0.dismissed_at,ne1_0.expires_at,ne1_0.notification_type,ne1_0.payload_json,ne1_0.read_at,ne1_0.recipient_id,ne1_0.recipient_role,ne1_0.title from notification ne1_0 where ne1_0.id=?
+Hibernate: select noe1_0.id from notification_outbox noe1_0 where noe1_0.business_event_key=? fetch first ? rows only
+Hibernate: select noe1_0.id,noe1_0.attempt_count,noe1_0.available_at,noe1_0.business_event_key,noe1_0.case_id,noe1_0.created_at,noe1_0.event_payload_json,noe1_0.event_type,noe1_0.last_error,noe1_0.outbox_status,noe1_0.published_at,noe1_0.updated_at from notification_outbox noe1_0 where noe1_0.id=?
+Hibernate: insert into case_timeline_event (audience_actor_ids_json,audience_json,case_id,created_at,created_by,dossier_id,event_json,event_key,event_time,event_type,room_id,sequence_no,source_refs_json,id) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+Hibernate: insert into notification (body,business_event_key,case_id,created_at,deep_link,dismissed_at,expires_at,notification_type,payload_json,read_at,recipient_id,recipient_role,title,id) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+Hibernate: insert into notification_outbox (attempt_count,available_at,business_event_key,case_id,created_at,event_payload_json,event_type,last_error,outbox_status,published_at,updated_at,id) values (?,?,?,?,?,?,?,?,?,?,?,?)
+Hibernate: select ne1_0.id,ne1_0.body,ne1_0.business_event_key,ne1_0.case_id,ne1_0.created_at,ne1_0.deep_link,ne1_0.dismissed_at,ne1_0.expires_at,ne1_0.notification_type,ne1_0.payload_json,ne1_0.read_at,ne1_0.recipient_id,ne1_0.recipient_role,ne1_0.title from notification ne1_0 where ne1_0.business_event_key=? and ne1_0.recipient_id=?
+Hibernate: select ne1_0.id,ne1_0.body,ne1_0.business_event_key,ne1_0.case_id,ne1_0.created_at,ne1_0.deep_link,ne1_0.dismissed_at,ne1_0.expires_at,ne1_0.notification_type,ne1_0.payload_json,ne1_0.read_at,ne1_0.recipient_id,ne1_0.recipient_role,ne1_0.title from notification ne1_0 where ne1_0.id=?
+Hibernate: select noe1_0.id from notification_outbox noe1_0 where noe1_0.business_event_key=? fetch first ? rows only
+Hibernate: insert into notification (body,business_event_key,case_id,created_at,deep_link,dismissed_at,expires_at,notification_type,payload_json,read_at,recipient_id,recipient_role,title,id) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+Hibernate: select cpce1_0.id,cpce1_0.case_id,cpce1_0.clock_status,cpce1_0.clock_type,cpce1_0.completed_at,cpce1_0.completion_reason,cpce1_0.created_at,cpce1_0.created_by,cpce1_0.deadline_at,cpce1_0.room_id,cpce1_0.started_at,cpce1_0.temporal_run_id,cpce1_0.temporal_workflow_id,cpce1_0.updated_at,cpce1_0.updated_by,cpce1_0.version from case_phase_clock cpce1_0 where cpce1_0.case_id=? and cpce1_0.clock_type=?
+Hibernate: select cpce1_0.id,cpce1_0.case_id,cpce1_0.clock_status,cpce1_0.clock_type,cpce1_0.completed_at,cpce1_0.completion_reason,cpce1_0.created_at,cpce1_0.created_by,cpce1_0.deadline_at,cpce1_0.room_id,cpce1_0.started_at,cpce1_0.temporal_run_id,cpce1_0.temporal_workflow_id,cpce1_0.updated_at,cpce1_0.updated_by,cpce1_0.version from case_phase_clock cpce1_0 where cpce1_0.case_id=? and cpce1_0.clock_type=?
+Hibernate: select cre1_0.id,cre1_0.case_id,cre1_0.closed_at,cre1_0.created_at,cre1_0.created_by,cre1_0.metadata_json,cre1_0.opened_at,cre1_0.room_status,cre1_0.room_type,cre1_0.sealed_at,cre1_0.updated_at,cre1_0.updated_by,cre1_0.version from case_room cre1_0 where cre1_0.case_id=? and cre1_0.room_type=?
+Hibernate: select cre1_0.id,cre1_0.case_id,cre1_0.closed_at,cre1_0.created_at,cre1_0.created_by,cre1_0.metadata_json,cre1_0.opened_at,cre1_0.room_status,cre1_0.room_type,cre1_0.sealed_at,cre1_0.updated_at,cre1_0.updated_by,cre1_0.version from case_room cre1_0 where cre1_0.case_id=? and cre1_0.room_type=?
+Hibernate: select ede1_0.id,ede1_0.built_at,ede1_0.case_id,ede1_0.created_at,ede1_0.created_by,ede1_0.deleted_at,ede1_0.dossier_status,ede1_0.dossier_version,ede1_0.matrix_summary_json,ede1_0.summary_json,ede1_0.timeline_json,ede1_0.updated_at,ede1_0.updated_by from evidence_dossier ede1_0 where ede1_0.case_id=? and ede1_0.dossier_version=?
+Hibernate: select edie1_0.id,edie1_0.case_id,edie1_0.created_at,edie1_0.created_by,edie1_0.dossier_id,edie1_0.evidence_id,edie1_0.evidence_snapshot_json,edie1_0.sequence_no from evidence_dossier_item edie1_0 where edie1_0.dossier_id=? order by edie1_0.sequence_no
+Hibernate: select epce1_0.id,epce1_0.case_id,epce1_0.completed_at,epce1_0.completion_status,epce1_0.created_at,epce1_0.created_by,epce1_0.dossier_version,epce1_0.idempotency_key,epce1_0.participant_id,epce1_0.participant_role from evidence_party_completion epce1_0 where epce1_0.case_id=? and epce1_0.dossier_version=? and epce1_0.completion_status=?
+Hibernate: select ctee1_0.id,ctee1_0.audience_actor_ids_json,ctee1_0.audience_json,ctee1_0.case_id,ctee1_0.created_at,ctee1_0.created_by,ctee1_0.dossier_id,ctee1_0.event_json,ctee1_0.event_key,ctee1_0.event_time,ctee1_0.event_type,ctee1_0.room_id,ctee1_0.sequence_no,ctee1_0.source_refs_json from case_timeline_event ctee1_0 where ctee1_0.case_id=? and ctee1_0.event_key=?
+Hibernate: select ne1_0.id,ne1_0.body,ne1_0.business_event_key,ne1_0.case_id,ne1_0.created_at,ne1_0.deep_link,ne1_0.dismissed_at,ne1_0.expires_at,ne1_0.notification_type,ne1_0.payload_json,ne1_0.read_at,ne1_0.recipient_id,ne1_0.recipient_role,ne1_0.title from notification ne1_0 where ne1_0.recipient_id=? order by ne1_0.created_at desc
+Hibernate: select cree1_0.id,cree1_0.activated_at,cree1_0.case_id,cree1_0.checkpoint_schema_version,cree1_0.created_at,cree1_0.fencing_token,cree1_0.graph_key,cree1_0.graph_version,cree1_0.lifecycle_status,cree1_0.process_contract_version,cree1_0.process_revision,cree1_0.provisioned_at,cree1_0.provisioning_failure_code,cree1_0.provisioning_status,cree1_0.room_epoch,cree1_0.room_id,cree1_0.room_revision,cree1_0.room_temporal_run_id,cree1_0.room_temporal_workflow_id,cree1_0.room_type,cree1_0.room_workflow_build_id,cree1_0.room_workflow_type,cree1_0.selection_schema_version,cree1_0.stream_protocol,cree1_0.temporal_build_id,cree1_0.temporal_run_id,cree1_0.temporal_workflow_id,cree1_0.tenant_surrogate,cree1_0.terminal_at,cree1_0.updated_at,cree1_0.version,cree1_0.workflow_type,cree1_0.writer_mode from case_room_epoch cree1_0 where cree1_0.case_id=? and cree1_0.room_type=? and cree1_0.lifecycle_status=?
+Hibernate: select cree1_0.id,cree1_0.activated_at,cree1_0.case_id,cree1_0.checkpoint_schema_version,cree1_0.created_at,cree1_0.fencing_token,cree1_0.graph_key,cree1_0.graph_version,cree1_0.lifecycle_status,cree1_0.process_contract_version,cree1_0.process_revision,cree1_0.provisioned_at,cree1_0.provisioning_failure_code,cree1_0.provisioning_status,cree1_0.room_epoch,cree1_0.room_id,cree1_0.room_revision,cree1_0.room_temporal_run_id,cree1_0.room_temporal_workflow_id,cree1_0.room_type,cree1_0.room_workflow_build_id,cree1_0.room_workflow_type,cree1_0.selection_schema_version,cree1_0.stream_protocol,cree1_0.temporal_build_id,cree1_0.temporal_run_id,cree1_0.temporal_workflow_id,cree1_0.tenant_surrogate,cree1_0.terminal_at,cree1_0.updated_at,cree1_0.version,cree1_0.workflow_type,cree1_0.writer_mode from case_room_epoch cree1_0 where cree1_0.case_id=? and cree1_0.room_type=? and cree1_0.lifecycle_status=?
+</system-out>
+    </testcase>
+    <testcase name="deadlineExpiryWithOnePartySealsAndOpensHearing" classname="com.example.dispute.evidence.EvidenceRoomIntegrationTest" time="0.23">
+      <system-out>Hibernate: select fce1_0.id,fce1_0.after_sales_id,fce1_0.case_status,fce1_0.case_type,fce1_0.closed_at,fce1_0.created_at,fce1_0.created_by,fce1_0.creation_idempotency_key,fce1_0.current_deadline_at,fce1_0.current_room,fce1_0.current_workflow_id,fce1_0.deleted_at,fce1_0.description,fce1_0.dispute_type,fce1_0.external_case_ref,fce1_0.initiator_id,fce1_0.initiator_role,fce1_0.intake_result_json,fce1_0.logistics_id,fce1_0.merchant_id,fce1_0.metadata_json,fce1_0.order_id,fce1_0.respondent_id,fce1_0.respondent_role,fce1_0.risk_level,fce1_0.hearing_route,fce1_0.source_system,fce1_0.source_type,fce1_0.title,fce1_0.updated_at,fce1_0.updated_by,fce1_0.user_id,fce1_0.version from fulfillment_dispute_case fce1_0 where fce1_0.id=?
+Hibernate: insert into fulfillment_dispute_case (after_sales_id,case_status,case_type,closed_at,created_at,created_by,creation_idempotency_key,current_deadline_at,current_room,current_workflow_id,deleted_at,description,dispute_type,external_case_ref,initiator_id,initiator_role,intake_result_json,logistics_id,merchant_id,metadata_json,order_id,respondent_id,respondent_role,risk_level,hearing_route,source_system,source_type,title,updated_at,updated_by,user_id,version,id) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+Hibernate: select ede1_0.id,ede1_0.built_at,ede1_0.case_id,ede1_0.created_at,ede1_0.created_by,ede1_0.deleted_at,ede1_0.dossier_status,ede1_0.dossier_version,ede1_0.matrix_summary_json,ede1_0.summary_json,ede1_0.timeline_json,ede1_0.updated_at,ede1_0.updated_by from evidence_dossier ede1_0 where ede1_0.id=?
+Hibernate: insert into evidence_dossier (built_at,case_id,created_at,created_by,deleted_at,dossier_status,dossier_version,matrix_summary_json,summary_json,timeline_json,updated_at,updated_by,id) values (?,?,?,?,?,?,?,?,?,?,?,?,?)
+Hibernate: select cre1_0.id,cre1_0.case_id,cre1_0.closed_at,cre1_0.created_at,cre1_0.created_by,cre1_0.metadata_json,cre1_0.opened_at,cre1_0.room_status,cre1_0.room_type,cre1_0.sealed_at,cre1_0.updated_at,cre1_0.updated_by,cre1_0.version from case_room cre1_0 where cre1_0.id=?
+Hibernate: insert into case_room (case_id,closed_at,created_at,created_by,metadata_json,opened_at,room_status,room_type,sealed_at,updated_at,updated_by,version,id) values (?,?,?,?,?,?,?,?,?,?,?,?,?)
+Hibernate: select cpce1_0.id,cpce1_0.case_id,cpce1_0.clock_status,cpce1_0.clock_type,cpce1_0.completed_at,cpce1_0.completion_reason,cpce1_0.created_at,cpce1_0.created_by,cpce1_0.deadline_at,cpce1_0.room_id,cpce1_0.started_at,cpce1_0.temporal_run_id,cpce1_0.temporal_workflow_id,cpce1_0.updated_at,cpce1_0.updated_by,cpce1_0.version from case_phase_clock cpce1_0 where cpce1_0.id=?
+Hibernate: insert into case_phase_clock (case_id,clock_status,clock_type,completed_at,completion_reason,created_at,created_by,deadline_at,room_id,started_at,temporal_run_id,temporal_workflow_id,updated_at,updated_by,version,id) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+Hibernate: select fce1_0.id,fce1_0.after_sales_id,fce1_0.case_status,fce1_0.case_type,fce1_0.closed_at,fce1_0.created_at,fce1_0.created_by,fce1_0.creation_idempotency_key,fce1_0.current_deadline_at,fce1_0.current_room,fce1_0.current_workflow_id,fce1_0.deleted_at,fce1_0.description,fce1_0.dispute_type,fce1_0.external_case_ref,fce1_0.initiator_id,fce1_0.initiator_role,fce1_0.intake_result_json,fce1_0.logistics_id,fce1_0.merchant_id,fce1_0.metadata_json,fce1_0.order_id,fce1_0.respondent_id,fce1_0.respondent_role,fce1_0.risk_level,fce1_0.hearing_route,fce1_0.source_system,fce1_0.source_type,fce1_0.title,fce1_0.updated_at,fce1_0.updated_by,fce1_0.user_id,fce1_0.version from fulfillment_dispute_case fce1_0 where fce1_0.id=? for no key update
+Hibernate: select *
+  from case_room_epoch
+ where case_id = ?
+   and lifecycle_status in ('PREPARING', 'PROVISIONING', 'ACTIVE')
+ for update
+
+Hibernate: select cppe1_0.case_id,cppe1_0.current_room,cppe1_0.fencing_token,cppe1_0.last_case_event_sequence,cppe1_0.last_command_sequence,cppe1_0.macro_phase,cppe1_0.process_revision,cppe1_0.projected_at,cppe1_0.projected_deadline_at,cppe1_0.projection_ref,cppe1_0.projection_sha256,cppe1_0.room_epoch,cppe1_0.room_phase,cppe1_0.temporal_build_id,cppe1_0.temporal_run_id,cppe1_0.temporal_workflow_id,cppe1_0.tenant_surrogate,cppe1_0.updated_at,cppe1_0.version,cppe1_0.writer_activation_status,cppe1_0.writer_mode from case_process_projection cppe1_0 where cppe1_0.case_id=? for no key update
+Hibernate: select max(cree1_0.room_epoch) from case_room_epoch cree1_0 where cree1_0.case_id=? and cree1_0.room_type=?
+Hibernate: select max(cree1_0.fencing_token) from case_room_epoch cree1_0 where cree1_0.case_id=?
+Hibernate: select cree1_0.id,cree1_0.activated_at,cree1_0.case_id,cree1_0.checkpoint_schema_version,cree1_0.created_at,cree1_0.fencing_token,cree1_0.graph_key,cree1_0.graph_version,cree1_0.lifecycle_status,cree1_0.process_contract_version,cree1_0.process_revision,cree1_0.provisioned_at,cree1_0.provisioning_failure_code,cree1_0.provisioning_status,cree1_0.room_epoch,cree1_0.room_id,cree1_0.room_revision,cree1_0.room_temporal_run_id,cree1_0.room_temporal_workflow_id,cree1_0.room_type,cree1_0.room_workflow_build_id,cree1_0.room_workflow_type,cree1_0.selection_schema_version,cree1_0.stream_protocol,cree1_0.temporal_build_id,cree1_0.temporal_run_id,cree1_0.temporal_workflow_id,cree1_0.tenant_surrogate,cree1_0.terminal_at,cree1_0.updated_at,cree1_0.version,cree1_0.workflow_type,cree1_0.writer_mode from case_room_epoch cree1_0 where cree1_0.id=?
+Hibernate: insert into case_room_epoch (activated_at,case_id,checkpoint_schema_version,created_at,fencing_token,graph_key,graph_version,lifecycle_status,process_contract_version,process_revision,provisioned_at,provisioning_failure_code,provisioning_status,room_epoch,room_id,room_revision,room_temporal_run_id,room_temporal_workflow_id,room_type,room_workflow_build_id,room_workflow_type,selection_schema_version,stream_protocol,temporal_build_id,temporal_run_id,temporal_workflow_id,tenant_surrogate,terminal_at,updated_at,version,workflow_type,writer_mode,id) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+Hibernate: select cppe1_0.case_id,cppe1_0.current_room,cppe1_0.fencing_token,cppe1_0.last_case_event_sequence,cppe1_0.last_command_sequence,cppe1_0.macro_phase,cppe1_0.process_revision,cppe1_0.projected_at,cppe1_0.projected_deadline_at,cppe1_0.projection_ref,cppe1_0.projection_sha256,cppe1_0.room_epoch,cppe1_0.room_phase,cppe1_0.temporal_build_id,cppe1_0.temporal_run_id,cppe1_0.temporal_workflow_id,cppe1_0.tenant_surrogate,cppe1_0.updated_at,cppe1_0.version,cppe1_0.writer_activation_status,cppe1_0.writer_mode from case_process_projection cppe1_0 where cppe1_0.case_id=?
+Hibernate: insert into case_process_projection (current_room,fencing_token,last_case_event_sequence,last_command_sequence,macro_phase,process_revision,projected_at,projected_deadline_at,projection_ref,projection_sha256,room_epoch,room_phase,temporal_build_id,temporal_run_id,temporal_workflow_id,tenant_surrogate,updated_at,version,writer_activation_status,writer_mode,case_id) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+Hibernate: select ede1_0.id,ede1_0.built_at,ede1_0.case_id,ede1_0.created_at,ede1_0.created_by,ede1_0.deleted_at,ede1_0.dossier_status,ede1_0.dossier_version,ede1_0.matrix_summary_json,ede1_0.summary_json,ede1_0.timeline_json,ede1_0.updated_at,ede1_0.updated_by from evidence_dossier ede1_0 where ede1_0.case_id=? and ede1_0.dossier_version=?
+Hibernate: select eie1_0.id,eie1_0.case_id,eie1_0.content_type,eie1_0.created_at,eie1_0.created_by,eie1_0.deleted_at,eie1_0.desensitized,eie1_0.dossier_id,eie1_0.evidence_type,eie1_0.extraction_json,eie1_0.file_bucket,eie1_0.file_hash,eie1_0.file_object_key,eie1_0.file_size,eie1_0.metadata_json,eie1_0.occurred_at,eie1_0.original_filename,eie1_0.parse_status,eie1_0.parsed_text,eie1_0.source_type,eie1_0.submission_batch_id,eie1_0.submission_status,eie1_0.submitted_at,eie1_0.submitted_by_id,eie1_0.submitted_by_role,eie1_0.updated_at,eie1_0.updated_by,eie1_0.visibility from evidence_item eie1_0 where eie1_0.id=?
+Hibernate: insert into evidence_item (case_id,content_type,created_at,created_by,deleted_at,desensitized,dossier_id,evidence_type,extraction_json,file_bucket,file_hash,file_object_key,file_size,metadata_json,occurred_at,original_filename,parse_status,parsed_text,source_type,submission_batch_id,submission_status,submitted_at,submitted_by_id,submitted_by_role,updated_at,updated_by,visibility,id) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+Hibernate: select eve1_0.id,eve1_0.agent_findings_json,eve1_0.agent_run_id,eve1_0.case_id,eve1_0.created_at,eve1_0.deterministic_checks_json,eve1_0.evidence_id,eve1_0.reasons_json,eve1_0.requires_human_review,eve1_0.trace_id,eve1_0.verification_status,eve1_0.verification_version,eve1_0.verified_at,eve1_0.verified_by from evidence_verification eve1_0 where eve1_0.id=?
+Hibernate: insert into evidence_verification (agent_findings_json,agent_run_id,case_id,created_at,deterministic_checks_json,evidence_id,reasons_json,requires_human_review,trace_id,verification_status,verification_version,verified_at,verified_by,id) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+Hibernate: select fce1_0.id,fce1_0.after_sales_id,fce1_0.case_status,fce1_0.case_type,fce1_0.closed_at,fce1_0.created_at,fce1_0.created_by,fce1_0.creation_idempotency_key,fce1_0.current_deadline_at,fce1_0.current_room,fce1_0.current_workflow_id,fce1_0.deleted_at,fce1_0.description,fce1_0.dispute_type,fce1_0.external_case_ref,fce1_0.initiator_id,fce1_0.initiator_role,fce1_0.intake_result_json,fce1_0.logistics_id,fce1_0.merchant_id,fce1_0.metadata_json,fce1_0.order_id,fce1_0.respondent_id,fce1_0.respondent_role,fce1_0.risk_level,fce1_0.hearing_route,fce1_0.source_system,fce1_0.source_type,fce1_0.title,fce1_0.updated_at,fce1_0.updated_by,fce1_0.user_id,fce1_0.version from fulfillment_dispute_case fce1_0 where fce1_0.id=? for no key update
+Hibernate: select count(eie1_0.id) from evidence_item eie1_0 where eie1_0.case_id=? and eie1_0.submitted_by_id=? and eie1_0.submission_status=? and eie1_0.deleted_at is null
+Hibernate: select epce1_0.id,epce1_0.case_id,epce1_0.completed_at,epce1_0.completion_status,epce1_0.created_at,epce1_0.created_by,epce1_0.dossier_version,epce1_0.idempotency_key,epce1_0.participant_id,epce1_0.participant_role from evidence_party_completion epce1_0 where epce1_0.case_id=? order by epce1_0.dossier_version desc fetch first ? rows only
+Hibernate: select ede1_0.id,ede1_0.built_at,ede1_0.case_id,ede1_0.created_at,ede1_0.created_by,ede1_0.deleted_at,ede1_0.dossier_status,ede1_0.dossier_version,ede1_0.matrix_summary_json,ede1_0.summary_json,ede1_0.timeline_json,ede1_0.updated_at,ede1_0.updated_by from evidence_dossier ede1_0 where ede1_0.case_id=? order by ede1_0.dossier_version desc fetch first ? rows only
+Hibernate: select epce1_0.id,epce1_0.case_id,epce1_0.completed_at,epce1_0.completion_status,epce1_0.created_at,epce1_0.created_by,epce1_0.dossier_version,epce1_0.idempotency_key,epce1_0.participant_id,epce1_0.participant_role from evidence_party_completion epce1_0 where epce1_0.case_id=? and epce1_0.idempotency_key=?
+Hibernate: select epce1_0.id,epce1_0.case_id,epce1_0.completed_at,epce1_0.completion_status,epce1_0.created_at,epce1_0.created_by,epce1_0.dossier_version,epce1_0.idempotency_key,epce1_0.participant_id,epce1_0.participant_role from evidence_party_completion epce1_0 where epce1_0.case_id=? and epce1_0.dossier_version=? and epce1_0.participant_id=?
+Hibernate: select epce1_0.id,epce1_0.case_id,epce1_0.completed_at,epce1_0.completion_status,epce1_0.created_at,epce1_0.created_by,epce1_0.dossier_version,epce1_0.idempotency_key,epce1_0.participant_id,epce1_0.participant_role from evidence_party_completion epce1_0 where epce1_0.id=?
+Hibernate: insert into evidence_party_completion (case_id,completed_at,completion_status,created_at,created_by,dossier_version,idempotency_key,participant_id,participant_role,id) values (?,?,?,?,?,?,?,?,?,?)
+Hibernate: select epce1_0.id,epce1_0.case_id,epce1_0.completed_at,epce1_0.completion_status,epce1_0.created_at,epce1_0.created_by,epce1_0.dossier_version,epce1_0.idempotency_key,epce1_0.participant_id,epce1_0.participant_role from evidence_party_completion epce1_0 where epce1_0.case_id=? and epce1_0.dossier_version=? and epce1_0.completion_status=?
+Hibernate: select fce1_0.id,fce1_0.after_sales_id,fce1_0.case_status,fce1_0.case_type,fce1_0.closed_at,fce1_0.created_at,fce1_0.created_by,fce1_0.creation_idempotency_key,fce1_0.current_deadline_at,fce1_0.current_room,fce1_0.current_workflow_id,fce1_0.deleted_at,fce1_0.description,fce1_0.dispute_type,fce1_0.external_case_ref,fce1_0.initiator_id,fce1_0.initiator_role,fce1_0.intake_result_json,fce1_0.logistics_id,fce1_0.merchant_id,fce1_0.metadata_json,fce1_0.order_id,fce1_0.respondent_id,fce1_0.respondent_role,fce1_0.risk_level,fce1_0.hearing_route,fce1_0.source_system,fce1_0.source_type,fce1_0.title,fce1_0.updated_at,fce1_0.updated_by,fce1_0.user_id,fce1_0.version from fulfillment_dispute_case fce1_0 where fce1_0.id=? for no key update
+Hibernate: select epce1_0.id,epce1_0.case_id,epce1_0.completed_at,epce1_0.completion_status,epce1_0.created_at,epce1_0.created_by,epce1_0.dossier_version,epce1_0.idempotency_key,epce1_0.participant_id,epce1_0.participant_role from evidence_party_completion epce1_0 where epce1_0.case_id=? order by epce1_0.dossier_version desc fetch first ? rows only
+Hibernate: select count(eie1_0.id) from evidence_item eie1_0 where eie1_0.case_id=? and eie1_0.submitted_by_id=? and eie1_0.submission_status=? and eie1_0.deleted_at is null
+Hibernate: select ede1_0.id,ede1_0.built_at,ede1_0.case_id,ede1_0.created_at,ede1_0.created_by,ede1_0.deleted_at,ede1_0.dossier_status,ede1_0.dossier_version,ede1_0.matrix_summary_json,ede1_0.summary_json,ede1_0.timeline_json,ede1_0.updated_at,ede1_0.updated_by from evidence_dossier ede1_0 where ede1_0.case_id=? and ede1_0.dossier_version=?
+Hibernate: select eie1_0.id,eie1_0.case_id,eie1_0.content_type,eie1_0.created_at,eie1_0.created_by,eie1_0.deleted_at,eie1_0.desensitized,eie1_0.dossier_id,eie1_0.evidence_type,eie1_0.extraction_json,eie1_0.file_bucket,eie1_0.file_hash,eie1_0.file_object_key,eie1_0.file_size,eie1_0.metadata_json,eie1_0.occurred_at,eie1_0.original_filename,eie1_0.parse_status,eie1_0.parsed_text,eie1_0.source_type,eie1_0.submission_batch_id,eie1_0.submission_status,eie1_0.submitted_at,eie1_0.submitted_by_id,eie1_0.submitted_by_role,eie1_0.updated_at,eie1_0.updated_by,eie1_0.visibility from evidence_item eie1_0 where eie1_0.case_id=? and eie1_0.deleted_at is null order by eie1_0.occurred_at,eie1_0.created_at
+Hibernate: select eve1_0.id,eve1_0.agent_findings_json,eve1_0.agent_run_id,eve1_0.case_id,eve1_0.created_at,eve1_0.deterministic_checks_json,eve1_0.evidence_id,eve1_0.reasons_json,eve1_0.requires_human_review,eve1_0.trace_id,eve1_0.verification_status,eve1_0.verification_version,eve1_0.verified_at,eve1_0.verified_by from evidence_verification eve1_0 where eve1_0.evidence_id=? order by eve1_0.verification_version desc fetch first ? rows only
+Hibernate: select ede1_0.id,ede1_0.built_at,ede1_0.case_id,ede1_0.created_at,ede1_0.created_by,ede1_0.deleted_at,ede1_0.dossier_status,ede1_0.dossier_version,ede1_0.matrix_summary_json,ede1_0.summary_json,ede1_0.timeline_json,ede1_0.updated_at,ede1_0.updated_by from evidence_dossier ede1_0 where ede1_0.id=?
+Hibernate: select edie1_0.id,edie1_0.case_id,edie1_0.created_at,edie1_0.created_by,edie1_0.dossier_id,edie1_0.evidence_id,edie1_0.evidence_snapshot_json,edie1_0.sequence_no from evidence_dossier_item edie1_0 where edie1_0.id=?
+Hibernate: select cre1_0.id,cre1_0.case_id,cre1_0.closed_at,cre1_0.created_at,cre1_0.created_by,cre1_0.metadata_json,cre1_0.opened_at,cre1_0.room_status,cre1_0.room_type,cre1_0.sealed_at,cre1_0.updated_at,cre1_0.updated_by,cre1_0.version from case_room cre1_0 where cre1_0.case_id=? and cre1_0.room_type=?
+Hibernate: select cpce1_0.id,cpce1_0.case_id,cpce1_0.clock_status,cpce1_0.clock_type,cpce1_0.completed_at,cpce1_0.completion_reason,cpce1_0.created_at,cpce1_0.created_by,cpce1_0.deadline_at,cpce1_0.room_id,cpce1_0.started_at,cpce1_0.temporal_run_id,cpce1_0.temporal_workflow_id,cpce1_0.updated_at,cpce1_0.updated_by,cpce1_0.version from case_phase_clock cpce1_0 where cpce1_0.case_id=? and cpce1_0.clock_type=?
+Hibernate: insert into evidence_dossier (built_at,case_id,created_at,created_by,deleted_at,dossier_status,dossier_version,matrix_summary_json,summary_json,timeline_json,updated_at,updated_by,id) values (?,?,?,?,?,?,?,?,?,?,?,?,?)
+Hibernate: insert into evidence_dossier_item (case_id,created_at,created_by,dossier_id,evidence_id,evidence_snapshot_json,sequence_no,id) values (?,?,?,?,?,?,?,?)
+Hibernate: update case_room set case_id=?,closed_at=?,metadata_json=?,opened_at=?,room_status=?,room_type=?,sealed_at=?,updated_at=?,updated_by=?,version=? where id=? and version=?
+Hibernate: update case_phase_clock set case_id=?,clock_status=?,clock_type=?,completed_at=?,completion_reason=?,deadline_at=?,room_id=?,started_at=?,temporal_run_id=?,temporal_workflow_id=?,updated_at=?,updated_by=?,version=? where id=? and version=?
+Hibernate: select cre1_0.id,cre1_0.case_id,cre1_0.closed_at,cre1_0.created_at,cre1_0.created_by,cre1_0.metadata_json,cre1_0.opened_at,cre1_0.room_status,cre1_0.room_type,cre1_0.sealed_at,cre1_0.updated_at,cre1_0.updated_by,cre1_0.version from case_room cre1_0 where cre1_0.case_id=? and cre1_0.room_type=?
+Hibernate: select cre1_0.id,cre1_0.case_id,cre1_0.closed_at,cre1_0.created_at,cre1_0.created_by,cre1_0.metadata_json,cre1_0.opened_at,cre1_0.room_status,cre1_0.room_type,cre1_0.sealed_at,cre1_0.updated_at,cre1_0.updated_by,cre1_0.version from case_room cre1_0 where cre1_0.id=?
+Hibernate: select cpce1_0.id,cpce1_0.case_id,cpce1_0.clock_status,cpce1_0.clock_type,cpce1_0.completed_at,cpce1_0.completion_reason,cpce1_0.created_at,cpce1_0.created_by,cpce1_0.deadline_at,cpce1_0.room_id,cpce1_0.started_at,cpce1_0.temporal_run_id,cpce1_0.temporal_workflow_id,cpce1_0.updated_at,cpce1_0.updated_by,cpce1_0.version from case_phase_clock cpce1_0 where cpce1_0.case_id=? and cpce1_0.clock_type=?
+Hibernate: select cpce1_0.id,cpce1_0.case_id,cpce1_0.clock_status,cpce1_0.clock_type,cpce1_0.completed_at,cpce1_0.completion_reason,cpce1_0.created_at,cpce1_0.created_by,cpce1_0.deadline_at,cpce1_0.room_id,cpce1_0.started_at,cpce1_0.temporal_run_id,cpce1_0.temporal_workflow_id,cpce1_0.updated_at,cpce1_0.updated_by,cpce1_0.version from case_phase_clock cpce1_0 where cpce1_0.id=?
+Hibernate: insert into case_room (case_id,closed_at,created_at,created_by,metadata_json,opened_at,room_status,room_type,sealed_at,updated_at,updated_by,version,id) values (?,?,?,?,?,?,?,?,?,?,?,?,?)
+Hibernate: insert into case_phase_clock (case_id,clock_status,clock_type,completed_at,completion_reason,created_at,created_by,deadline_at,room_id,started_at,temporal_run_id,temporal_workflow_id,updated_at,updated_by,version,id) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+Hibernate: update fulfillment_dispute_case set after_sales_id=?,case_status=?,case_type=?,closed_at=?,creation_idempotency_key=?,current_deadline_at=?,current_room=?,current_workflow_id=?,deleted_at=?,description=?,dispute_type=?,external_case_ref=?,initiator_id=?,initiator_role=?,intake_result_json=?,logistics_id=?,merchant_id=?,metadata_json=?,order_id=?,respondent_id=?,respondent_role=?,risk_level=?,hearing_route=?,source_system=?,source_type=?,title=?,updated_at=?,updated_by=?,user_id=?,version=? where id=? and version=?
+Hibernate: select fce1_0.id,fce1_0.after_sales_id,fce1_0.case_status,fce1_0.case_type,fce1_0.closed_at,fce1_0.created_at,fce1_0.created_by,fce1_0.creation_idempotency_key,fce1_0.current_deadline_at,fce1_0.current_room,fce1_0.current_workflow_id,fce1_0.deleted_at,fce1_0.description,fce1_0.dispute_type,fce1_0.external_case_ref,fce1_0.initiator_id,fce1_0.initiator_role,fce1_0.intake_result_json,fce1_0.logistics_id,fce1_0.merchant_id,fce1_0.metadata_json,fce1_0.order_id,fce1_0.respondent_id,fce1_0.respondent_role,fce1_0.risk_level,fce1_0.hearing_route,fce1_0.source_system,fce1_0.source_type,fce1_0.title,fce1_0.updated_at,fce1_0.updated_by,fce1_0.user_id,fce1_0.version from fulfillment_dispute_case fce1_0 where fce1_0.id=? for no key update
+Hibernate: select *
+  from case_room_epoch
+ where case_id = ?
+   and lifecycle_status in ('PREPARING', 'PROVISIONING', 'ACTIVE')
+ for update
+
+Hibernate: select cppe1_0.case_id,cppe1_0.current_room,cppe1_0.fencing_token,cppe1_0.last_case_event_sequence,cppe1_0.last_command_sequence,cppe1_0.macro_phase,cppe1_0.process_revision,cppe1_0.projected_at,cppe1_0.projected_deadline_at,cppe1_0.projection_ref,cppe1_0.projection_sha256,cppe1_0.room_epoch,cppe1_0.room_phase,cppe1_0.temporal_build_id,cppe1_0.temporal_run_id,cppe1_0.temporal_workflow_id,cppe1_0.tenant_surrogate,cppe1_0.updated_at,cppe1_0.version,cppe1_0.writer_activation_status,cppe1_0.writer_mode from case_process_projection cppe1_0 where cppe1_0.case_id=? for no key update
+Hibernate: select max(cree1_0.room_epoch) from case_room_epoch cree1_0 where cree1_0.case_id=? and cree1_0.room_type=?
+Hibernate: select max(cree1_0.fencing_token) from case_room_epoch cree1_0 where cree1_0.case_id=?
+Hibernate: update case_room_epoch set lifecycle_status=?,process_revision=?,provisioned_at=?,provisioning_failure_code=?,provisioning_status=?,room_revision=?,room_temporal_run_id=?,room_temporal_workflow_id=?,temporal_run_id=?,terminal_at=?,updated_at=?,version=? where id=? and version=?
+Hibernate: select cree1_0.id,cree1_0.activated_at,cree1_0.case_id,cree1_0.checkpoint_schema_version,cree1_0.created_at,cree1_0.fencing_token,cree1_0.graph_key,cree1_0.graph_version,cree1_0.lifecycle_status,cree1_0.process_contract_version,cree1_0.process_revision,cree1_0.provisioned_at,cree1_0.provisioning_failure_code,cree1_0.provisioning_status,cree1_0.room_epoch,cree1_0.room_id,cree1_0.room_revision,cree1_0.room_temporal_run_id,cree1_0.room_temporal_workflow_id,cree1_0.room_type,cree1_0.room_workflow_build_id,cree1_0.room_workflow_type,cree1_0.selection_schema_version,cree1_0.stream_protocol,cree1_0.temporal_build_id,cree1_0.temporal_run_id,cree1_0.temporal_workflow_id,cree1_0.tenant_surrogate,cree1_0.terminal_at,cree1_0.updated_at,cree1_0.version,cree1_0.workflow_type,cree1_0.writer_mode from case_room_epoch cree1_0 where cree1_0.id=?
+Hibernate: insert into case_room_epoch (activated_at,case_id,checkpoint_schema_version,created_at,fencing_token,graph_key,graph_version,lifecycle_status,process_contract_version,process_revision,provisioned_at,provisioning_failure_code,provisioning_status,room_epoch,room_id,room_revision,room_temporal_run_id,room_temporal_workflow_id,room_type,room_workflow_build_id,room_workflow_type,selection_schema_version,stream_protocol,temporal_build_id,temporal_run_id,temporal_workflow_id,tenant_surrogate,terminal_at,updated_at,version,workflow_type,writer_mode,id) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+Hibernate: update case_process_projection set current_room=?,fencing_token=?,last_case_event_sequence=?,last_command_sequence=?,macro_phase=?,process_revision=?,projected_at=?,projected_deadline_at=?,projection_ref=?,projection_sha256=?,room_epoch=?,room_phase=?,temporal_build_id=?,temporal_run_id=?,temporal_workflow_id=?,tenant_surrogate=?,updated_at=?,version=?,writer_activation_status=?,writer_mode=? where case_id=? and version=?
+Hibernate: select fce1_0.id,fce1_0.after_sales_id,fce1_0.case_status,fce1_0.case_type,fce1_0.closed_at,fce1_0.created_at,fce1_0.created_by,fce1_0.creation_idempotency_key,fce1_0.current_deadline_at,fce1_0.current_room,fce1_0.current_workflow_id,fce1_0.deleted_at,fce1_0.description,fce1_0.dispute_type,fce1_0.external_case_ref,fce1_0.initiator_id,fce1_0.initiator_role,fce1_0.intake_result_json,fce1_0.logistics_id,fce1_0.merchant_id,fce1_0.metadata_json,fce1_0.order_id,fce1_0.respondent_id,fce1_0.respondent_role,fce1_0.risk_level,fce1_0.hearing_route,fce1_0.source_system,fce1_0.source_type,fce1_0.title,fce1_0.updated_at,fce1_0.updated_by,fce1_0.user_id,fce1_0.version from fulfillment_dispute_case fce1_0 where fce1_0.id=? for no key update
+Hibernate: select ctee1_0.id,ctee1_0.audience_actor_ids_json,ctee1_0.audience_json,ctee1_0.case_id,ctee1_0.created_at,ctee1_0.created_by,ctee1_0.dossier_id,ctee1_0.event_json,ctee1_0.event_key,ctee1_0.event_time,ctee1_0.event_type,ctee1_0.room_id,ctee1_0.sequence_no,ctee1_0.source_refs_json from case_timeline_event ctee1_0 where ctee1_0.case_id=? and ctee1_0.event_key=?
+Hibernate: select coalesce(max(ctee1_0.sequence_no),0) from case_timeline_event ctee1_0 where ctee1_0.case_id=?
+Hibernate: select ctee1_0.id,ctee1_0.audience_actor_ids_json,ctee1_0.audience_json,ctee1_0.case_id,ctee1_0.created_at,ctee1_0.created_by,ctee1_0.dossier_id,ctee1_0.event_json,ctee1_0.event_key,ctee1_0.event_time,ctee1_0.event_type,ctee1_0.room_id,ctee1_0.sequence_no,ctee1_0.source_refs_json from case_timeline_event ctee1_0 where ctee1_0.id=?
+Hibernate: select ne1_0.id,ne1_0.body,ne1_0.business_event_key,ne1_0.case_id,ne1_0.created_at,ne1_0.deep_link,ne1_0.dismissed_at,ne1_0.expires_at,ne1_0.notification_type,ne1_0.payload_json,ne1_0.read_at,ne1_0.recipient_id,ne1_0.recipient_role,ne1_0.title from notification ne1_0 where ne1_0.business_event_key=? and ne1_0.recipient_id=?
+Hibernate: select ne1_0.id,ne1_0.body,ne1_0.business_event_key,ne1_0.case_id,ne1_0.created_at,ne1_0.deep_link,ne1_0.dismissed_at,ne1_0.expires_at,ne1_0.notification_type,ne1_0.payload_json,ne1_0.read_at,ne1_0.recipient_id,ne1_0.recipient_role,ne1_0.title from notification ne1_0 where ne1_0.id=?
+Hibernate: select noe1_0.id from notification_outbox noe1_0 where noe1_0.business_event_key=? fetch first ? rows only
+Hibernate: select noe1_0.id,noe1_0.attempt_count,noe1_0.available_at,noe1_0.business_event_key,noe1_0.case_id,noe1_0.created_at,noe1_0.event_payload_json,noe1_0.event_type,noe1_0.last_error,noe1_0.outbox_status,noe1_0.published_at,noe1_0.updated_at from notification_outbox noe1_0 where noe1_0.id=?
+Hibernate: insert into case_timeline_event (audience_actor_ids_json,audience_json,case_id,created_at,created_by,dossier_id,event_json,event_key,event_time,event_type,room_id,sequence_no,source_refs_json,id) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+Hibernate: insert into notification (body,business_event_key,case_id,created_at,deep_link,dismissed_at,expires_at,notification_type,payload_json,read_at,recipient_id,recipient_role,title,id) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+Hibernate: insert into notification_outbox (attempt_count,available_at,business_event_key,case_id,created_at,event_payload_json,event_type,last_error,outbox_status,published_at,updated_at,id) values (?,?,?,?,?,?,?,?,?,?,?,?)
+Hibernate: select ne1_0.id,ne1_0.body,ne1_0.business_event_key,ne1_0.case_id,ne1_0.created_at,ne1_0.deep_link,ne1_0.dismissed_at,ne1_0.expires_at,ne1_0.notification_type,ne1_0.payload_json,ne1_0.read_at,ne1_0.recipient_id,ne1_0.recipient_role,ne1_0.title from notification ne1_0 where ne1_0.business_event_key=? and ne1_0.recipient_id=?
+Hibernate: select ne1_0.id,ne1_0.body,ne1_0.business_event_key,ne1_0.case_id,ne1_0.created_at,ne1_0.deep_link,ne1_0.dismissed_at,ne1_0.expires_at,ne1_0.notification_type,ne1_0.payload_json,ne1_0.read_at,ne1_0.recipient_id,ne1_0.recipient_role,ne1_0.title from notification ne1_0 where ne1_0.id=?
+Hibernate: select noe1_0.id from notification_outbox noe1_0 where noe1_0.business_event_key=? fetch first ? rows only
+Hibernate: select ede1_0.id,ede1_0.built_at,ede1_0.case_id,ede1_0.created_at,ede1_0.created_by,ede1_0.deleted_at,ede1_0.dossier_status,ede1_0.dossier_version,ede1_0.matrix_summary_json,ede1_0.summary_json,ede1_0.timeline_json,ede1_0.updated_at,ede1_0.updated_by from evidence_dossier ede1_0 where ede1_0.case_id=? order by ede1_0.dossier_version desc fetch first ? rows only
+Hibernate: select epce1_0.id,epce1_0.case_id,epce1_0.completed_at,epce1_0.completion_status,epce1_0.created_at,epce1_0.created_by,epce1_0.dossier_version,epce1_0.idempotency_key,epce1_0.participant_id,epce1_0.participant_role from evidence_party_completion epce1_0 where epce1_0.case_id=? and epce1_0.dossier_version=? and epce1_0.completion_status=?
+Hibernate: insert into notification (body,business_event_key,case_id,created_at,deep_link,dismissed_at,expires_at,notification_type,payload_json,read_at,recipient_id,recipient_role,title,id) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+Hibernate: select cpce1_0.id,cpce1_0.case_id,cpce1_0.clock_status,cpce1_0.clock_type,cpce1_0.completed_at,cpce1_0.completion_reason,cpce1_0.created_at,cpce1_0.created_by,cpce1_0.deadline_at,cpce1_0.room_id,cpce1_0.started_at,cpce1_0.temporal_run_id,cpce1_0.temporal_workflow_id,cpce1_0.updated_at,cpce1_0.updated_by,cpce1_0.version from case_phase_clock cpce1_0 where cpce1_0.case_id=? and cpce1_0.clock_type=?
+Hibernate: select cpce1_0.id,cpce1_0.case_id,cpce1_0.clock_status,cpce1_0.clock_type,cpce1_0.completed_at,cpce1_0.completion_reason,cpce1_0.created_at,cpce1_0.created_by,cpce1_0.deadline_at,cpce1_0.room_id,cpce1_0.started_at,cpce1_0.temporal_run_id,cpce1_0.temporal_workflow_id,cpce1_0.updated_at,cpce1_0.updated_by,cpce1_0.version from case_phase_clock cpce1_0 where cpce1_0.case_id=? and cpce1_0.clock_type=?
+Hibernate: select ede1_0.id,ede1_0.built_at,ede1_0.case_id,ede1_0.created_at,ede1_0.created_by,ede1_0.deleted_at,ede1_0.dossier_status,ede1_0.dossier_version,ede1_0.matrix_summary_json,ede1_0.summary_json,ede1_0.timeline_json,ede1_0.updated_at,ede1_0.updated_by from evidence_dossier ede1_0 where ede1_0.case_id=? and ede1_0.dossier_version=?
+Hibernate: select cree1_0.id,cree1_0.activated_at,cree1_0.case_id,cree1_0.checkpoint_schema_version,cree1_0.created_at,cree1_0.fencing_token,cree1_0.graph_key,cree1_0.graph_version,cree1_0.lifecycle_status,cree1_0.process_contract_version,cree1_0.process_revision,cree1_0.provisioned_at,cree1_0.provisioning_failure_code,cree1_0.provisioning_status,cree1_0.room_epoch,cree1_0.room_id,cree1_0.room_revision,cree1_0.room_temporal_run_id,cree1_0.room_temporal_workflow_id,cree1_0.room_type,cree1_0.room_workflow_build_id,cree1_0.room_workflow_type,cree1_0.selection_schema_version,cree1_0.stream_protocol,cree1_0.temporal_build_id,cree1_0.temporal_run_id,cree1_0.temporal_workflow_id,cree1_0.tenant_surrogate,cree1_0.terminal_at,cree1_0.updated_at,cree1_0.version,cree1_0.workflow_type,cree1_0.writer_mode from case_room_epoch cree1_0 where cree1_0.case_id=? and cree1_0.room_type=? and cree1_0.lifecycle_status=?
+Hibernate: select cree1_0.id,cree1_0.activated_at,cree1_0.case_id,cree1_0.checkpoint_schema_version,cree1_0.created_at,cree1_0.fencing_token,cree1_0.graph_key,cree1_0.graph_version,cree1_0.lifecycle_status,cree1_0.process_contract_version,cree1_0.process_revision,cree1_0.provisioned_at,cree1_0.provisioning_failure_code,cree1_0.provisioning_status,cree1_0.room_epoch,cree1_0.room_id,cree1_0.room_revision,cree1_0.room_temporal_run_id,cree1_0.room_temporal_workflow_id,cree1_0.room_type,cree1_0.room_workflow_build_id,cree1_0.room_workflow_type,cree1_0.selection_schema_version,cree1_0.stream_protocol,cree1_0.temporal_build_id,cree1_0.temporal_run_id,cree1_0.temporal_workflow_id,cree1_0.tenant_surrogate,cree1_0.terminal_at,cree1_0.updated_at,cree1_0.version,cree1_0.workflow_type,cree1_0.writer_mode from case_room_epoch cree1_0 where cree1_0.case_id=? and cree1_0.room_type=? and cree1_0.lifecycle_status=?
+</system-out>
+    </testcase>
+    <testcase name="deadlineExpiryWithoutInitiatorEvidenceDoesNotOpenHearing" classname="com.example.dispute.evidence.EvidenceRoomIntegrationTest" time="0.051">
+      <system-out>Hibernate: select fce1_0.id,fce1_0.after_sales_id,fce1_0.case_status,fce1_0.case_type,fce1_0.closed_at,fce1_0.created_at,fce1_0.created_by,fce1_0.creation_idempotency_key,fce1_0.current_deadline_at,fce1_0.current_room,fce1_0.current_workflow_id,fce1_0.deleted_at,fce1_0.description,fce1_0.dispute_type,fce1_0.external_case_ref,fce1_0.initiator_id,fce1_0.initiator_role,fce1_0.intake_result_json,fce1_0.logistics_id,fce1_0.merchant_id,fce1_0.metadata_json,fce1_0.order_id,fce1_0.respondent_id,fce1_0.respondent_role,fce1_0.risk_level,fce1_0.hearing_route,fce1_0.source_system,fce1_0.source_type,fce1_0.title,fce1_0.updated_at,fce1_0.updated_by,fce1_0.user_id,fce1_0.version from fulfillment_dispute_case fce1_0 where fce1_0.id=?
+Hibernate: insert into fulfillment_dispute_case (after_sales_id,case_status,case_type,closed_at,created_at,created_by,creation_idempotency_key,current_deadline_at,current_room,current_workflow_id,deleted_at,description,dispute_type,external_case_ref,initiator_id,initiator_role,intake_result_json,logistics_id,merchant_id,metadata_json,order_id,respondent_id,respondent_role,risk_level,hearing_route,source_system,source_type,title,updated_at,updated_by,user_id,version,id) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+Hibernate: select ede1_0.id,ede1_0.built_at,ede1_0.case_id,ede1_0.created_at,ede1_0.created_by,ede1_0.deleted_at,ede1_0.dossier_status,ede1_0.dossier_version,ede1_0.matrix_summary_json,ede1_0.summary_json,ede1_0.timeline_json,ede1_0.updated_at,ede1_0.updated_by from evidence_dossier ede1_0 where ede1_0.id=?
+Hibernate: insert into evidence_dossier (built_at,case_id,created_at,created_by,deleted_at,dossier_status,dossier_version,matrix_summary_json,summary_json,timeline_json,updated_at,updated_by,id) values (?,?,?,?,?,?,?,?,?,?,?,?,?)
+Hibernate: select cre1_0.id,cre1_0.case_id,cre1_0.closed_at,cre1_0.created_at,cre1_0.created_by,cre1_0.metadata_json,cre1_0.opened_at,cre1_0.room_status,cre1_0.room_type,cre1_0.sealed_at,cre1_0.updated_at,cre1_0.updated_by,cre1_0.version from case_room cre1_0 where cre1_0.id=?
+Hibernate: insert into case_room (case_id,closed_at,created_at,created_by,metadata_json,opened_at,room_status,room_type,sealed_at,updated_at,updated_by,version,id) values (?,?,?,?,?,?,?,?,?,?,?,?,?)
+Hibernate: select cpce1_0.id,cpce1_0.case_id,cpce1_0.clock_status,cpce1_0.clock_type,cpce1_0.completed_at,cpce1_0.completion_reason,cpce1_0.created_at,cpce1_0.created_by,cpce1_0.deadline_at,cpce1_0.room_id,cpce1_0.started_at,cpce1_0.temporal_run_id,cpce1_0.temporal_workflow_id,cpce1_0.updated_at,cpce1_0.updated_by,cpce1_0.version from case_phase_clock cpce1_0 where cpce1_0.id=?
+Hibernate: insert into case_phase_clock (case_id,clock_status,clock_type,completed_at,completion_reason,created_at,created_by,deadline_at,room_id,started_at,temporal_run_id,temporal_workflow_id,updated_at,updated_by,version,id) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+Hibernate: select fce1_0.id,fce1_0.after_sales_id,fce1_0.case_status,fce1_0.case_type,fce1_0.closed_at,fce1_0.created_at,fce1_0.created_by,fce1_0.creation_idempotency_key,fce1_0.current_deadline_at,fce1_0.current_room,fce1_0.current_workflow_id,fce1_0.deleted_at,fce1_0.description,fce1_0.dispute_type,fce1_0.external_case_ref,fce1_0.initiator_id,fce1_0.initiator_role,fce1_0.intake_result_json,fce1_0.logistics_id,fce1_0.merchant_id,fce1_0.metadata_json,fce1_0.order_id,fce1_0.respondent_id,fce1_0.respondent_role,fce1_0.risk_level,fce1_0.hearing_route,fce1_0.source_system,fce1_0.source_type,fce1_0.title,fce1_0.updated_at,fce1_0.updated_by,fce1_0.user_id,fce1_0.version from fulfillment_dispute_case fce1_0 where fce1_0.id=? for no key update
+Hibernate: select *
+  from case_room_epoch
+ where case_id = ?
+   and lifecycle_status in ('PREPARING', 'PROVISIONING', 'ACTIVE')
+ for update
+
+Hibernate: select cppe1_0.case_id,cppe1_0.current_room,cppe1_0.fencing_token,cppe1_0.last_case_event_sequence,cppe1_0.last_command_sequence,cppe1_0.macro_phase,cppe1_0.process_revision,cppe1_0.projected_at,cppe1_0.projected_deadline_at,cppe1_0.projection_ref,cppe1_0.projection_sha256,cppe1_0.room_epoch,cppe1_0.room_phase,cppe1_0.temporal_build_id,cppe1_0.temporal_run_id,cppe1_0.temporal_workflow_id,cppe1_0.tenant_surrogate,cppe1_0.updated_at,cppe1_0.version,cppe1_0.writer_activation_status,cppe1_0.writer_mode from case_process_projection cppe1_0 where cppe1_0.case_id=? for no key update
+Hibernate: select max(cree1_0.room_epoch) from case_room_epoch cree1_0 where cree1_0.case_id=? and cree1_0.room_type=?
+Hibernate: select max(cree1_0.fencing_token) from case_room_epoch cree1_0 where cree1_0.case_id=?
+Hibernate: select cree1_0.id,cree1_0.activated_at,cree1_0.case_id,cree1_0.checkpoint_schema_version,cree1_0.created_at,cree1_0.fencing_token,cree1_0.graph_key,cree1_0.graph_version,cree1_0.lifecycle_status,cree1_0.process_contract_version,cree1_0.process_revision,cree1_0.provisioned_at,cree1_0.provisioning_failure_code,cree1_0.provisioning_status,cree1_0.room_epoch,cree1_0.room_id,cree1_0.room_revision,cree1_0.room_temporal_run_id,cree1_0.room_temporal_workflow_id,cree1_0.room_type,cree1_0.room_workflow_build_id,cree1_0.room_workflow_type,cree1_0.selection_schema_version,cree1_0.stream_protocol,cree1_0.temporal_build_id,cree1_0.temporal_run_id,cree1_0.temporal_workflow_id,cree1_0.tenant_surrogate,cree1_0.terminal_at,cree1_0.updated_at,cree1_0.version,cree1_0.workflow_type,cree1_0.writer_mode from case_room_epoch cree1_0 where cree1_0.id=?
+Hibernate: insert into case_room_epoch (activated_at,case_id,checkpoint_schema_version,created_at,fencing_token,graph_key,graph_version,lifecycle_status,process_contract_version,process_revision,provisioned_at,provisioning_failure_code,provisioning_status,room_epoch,room_id,room_revision,room_temporal_run_id,room_temporal_workflow_id,room_type,room_workflow_build_id,room_workflow_type,selection_schema_version,stream_protocol,temporal_build_id,temporal_run_id,temporal_workflow_id,tenant_surrogate,terminal_at,updated_at,version,workflow_type,writer_mode,id) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+Hibernate: select cppe1_0.case_id,cppe1_0.current_room,cppe1_0.fencing_token,cppe1_0.last_case_event_sequence,cppe1_0.last_command_sequence,cppe1_0.macro_phase,cppe1_0.process_revision,cppe1_0.projected_at,cppe1_0.projected_deadline_at,cppe1_0.projection_ref,cppe1_0.projection_sha256,cppe1_0.room_epoch,cppe1_0.room_phase,cppe1_0.temporal_build_id,cppe1_0.temporal_run_id,cppe1_0.temporal_workflow_id,cppe1_0.tenant_surrogate,cppe1_0.updated_at,cppe1_0.version,cppe1_0.writer_activation_status,cppe1_0.writer_mode from case_process_projection cppe1_0 where cppe1_0.case_id=?
+Hibernate: insert into case_process_projection (current_room,fencing_token,last_case_event_sequence,last_command_sequence,macro_phase,process_revision,projected_at,projected_deadline_at,projection_ref,projection_sha256,room_epoch,room_phase,temporal_build_id,temporal_run_id,temporal_workflow_id,tenant_surrogate,updated_at,version,writer_activation_status,writer_mode,case_id) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+Hibernate: select fce1_0.id,fce1_0.after_sales_id,fce1_0.case_status,fce1_0.case_type,fce1_0.closed_at,fce1_0.created_at,fce1_0.created_by,fce1_0.creation_idempotency_key,fce1_0.current_deadline_at,fce1_0.current_room,fce1_0.current_workflow_id,fce1_0.deleted_at,fce1_0.description,fce1_0.dispute_type,fce1_0.external_case_ref,fce1_0.initiator_id,fce1_0.initiator_role,fce1_0.intake_result_json,fce1_0.logistics_id,fce1_0.merchant_id,fce1_0.metadata_json,fce1_0.order_id,fce1_0.respondent_id,fce1_0.respondent_role,fce1_0.risk_level,fce1_0.hearing_route,fce1_0.source_system,fce1_0.source_type,fce1_0.title,fce1_0.updated_at,fce1_0.updated_by,fce1_0.user_id,fce1_0.version from fulfillment_dispute_case fce1_0 where fce1_0.id=? for no key update
+Hibernate: select epce1_0.id,epce1_0.case_id,epce1_0.completed_at,epce1_0.completion_status,epce1_0.created_at,epce1_0.created_by,epce1_0.dossier_version,epce1_0.idempotency_key,epce1_0.participant_id,epce1_0.participant_role from evidence_party_completion epce1_0 where epce1_0.case_id=? order by epce1_0.dossier_version desc fetch first ? rows only
+Hibernate: select ede1_0.id,ede1_0.built_at,ede1_0.case_id,ede1_0.created_at,ede1_0.created_by,ede1_0.deleted_at,ede1_0.dossier_status,ede1_0.dossier_version,ede1_0.matrix_summary_json,ede1_0.summary_json,ede1_0.timeline_json,ede1_0.updated_at,ede1_0.updated_by from evidence_dossier ede1_0 where ede1_0.case_id=? order by ede1_0.dossier_version desc fetch first ? rows only
+Hibernate: select count(eie1_0.id) from evidence_item eie1_0 where eie1_0.case_id=? and eie1_0.submitted_by_id=? and eie1_0.submission_status=? and eie1_0.deleted_at is null
+Hibernate: select cre1_0.id,cre1_0.case_id,cre1_0.closed_at,cre1_0.created_at,cre1_0.created_by,cre1_0.metadata_json,cre1_0.opened_at,cre1_0.room_status,cre1_0.room_type,cre1_0.sealed_at,cre1_0.updated_at,cre1_0.updated_by,cre1_0.version from case_room cre1_0 where cre1_0.case_id=? and cre1_0.room_type=?
+</system-out>
+    </testcase>
+  </testsuite>
+  <testsuite name="com.example.dispute.evidence.EvidenceSubmissionServiceTest(p5-entry-e70492a11e23-fc40ff85)" source_report="java-phase5-entry-junit.xml" tests="4" failures="0" errors="0" skipped="0" time="0.288">
+    <testcase name="deletesOnlyPendingEvidenceOwnedByCurrentActor" classname="com.example.dispute.evidence.EvidenceSubmissionServiceTest" time="0.005" />
+    <testcase name="refusesToDeleteSubmittedEvidence" classname="com.example.dispute.evidence.EvidenceSubmissionServiceTest" time="0.26" />
+    <testcase name="submitsHearingSupplementEvidenceToTheHearingRoom" classname="com.example.dispute.evidence.EvidenceSubmissionServiceTest" time="0.016" />
+    <testcase name="submitsPendingEvidenceAsOneBatchAndPostsEvidenceReferenceToClerk" classname="com.example.dispute.evidence.EvidenceSubmissionServiceTest" time="0.007" />
+  </testsuite>
+  <testsuite name="com.example.dispute.room.EvidenceAgentTurnServiceTest(p5-entry-e70492a11e23-fc40ff85)" source_report="java-phase5-entry-junit.xml" tests="19" failures="0" errors="0" skipped="0" time="0.975">
+    <testcase name="agentContractMismatchIsNotSilentlyDegraded" classname="com.example.dispute.room.EvidenceAgentTurnServiceTest" time="0.058">
+      <system-out>2026-07-23T05:14:03.016+08:00  WARN 30824 --- [java-api-service] [           main] c.e.d.r.a.EvidenceAgentTurnService       : Evidence agent turn failed closed after agent call failure: case_id=CASE_EVIDENCE_AGENT, room_type=EVIDENCE, trace_id=TRACE_CONTRACT, request_id=REQ_CONTRACT, failure_type=com.example.dispute.common.exception.AgentExecutionException, failure_message=contract mismatch
+
+com.example.dispute.common.exception.AgentExecutionException: contract mismatch
+	at com.example.dispute.room.application.EvidenceAgentTurnService.safeRun(EvidenceAgentTurnService.java:613) ~[classes/:na]
+	at com.example.dispute.room.application.EvidenceAgentTurnService.continueFromParticipantMessage(EvidenceAgentTurnService.java:251) ~[classes/:na]
+	at com.example.dispute.room.EvidenceAgentTurnServiceTest.lambda$agentContractMismatchIsNotSilentlyDegraded$42(EvidenceAgentTurnServiceTest.java:1809) ~[test-classes/:na]
+	at org.assertj.core.api.ThrowableAssert.catchThrowable(ThrowableAssert.java:66) ~[assertj-core-3.27.7.jar:na]
+	at org.assertj.core.api.AssertionsForClassTypes.catchThrowable(AssertionsForClassTypes.java:908) ~[assertj-core-3.27.7.jar:na]
+	at org.assertj.core.api.Assertions.catchThrowable(Assertions.java:1476) ~[assertj-core-3.27.7.jar:na]
+	at org.assertj.core.api.Assertions.assertThatThrownBy(Assertions.java:1319) ~[assertj-core-3.27.7.jar:na]
+	at com.example.dispute.room.EvidenceAgentTurnServiceTest.agentContractMismatchIsNotSilentlyDegraded(EvidenceAgentTurnServiceTest.java:1807) ~[test-classes/:na]
+	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103) ~[na:na]
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580) ~[na:na]
+	at org.junit.platform.commons.util.ReflectionUtils.invokeMethod(ReflectionUtils.java:775) ~[junit-platform-commons-1.12.2.jar:1.12.2]
+	at org.junit.platform.commons.support.ReflectionSupport.invokeMethod(ReflectionSupport.java:479) ~[junit-platform-commons-1.12.2.jar:1.12.2]
+	at org.junit.jupiter.engine.execution.MethodInvocation.proceed(MethodInvocation.java:60) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.jupiter.engine.execution.InvocationInterceptorChain$ValidatingInvocation.proceed(InvocationInterceptorChain.java:131) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.jupiter.engine.extension.TimeoutExtension.intercept(TimeoutExtension.java:161) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.jupiter.engine.extension.TimeoutExtension.interceptTestableMethod(TimeoutExtension.java:152) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.jupiter.engine.extension.TimeoutExtension.interceptTestMethod(TimeoutExtension.java:91) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.jupiter.engine.execution.InterceptingExecutableInvoker$ReflectiveInterceptorCall.lambda$ofVoidMethod$0(InterceptingExecutableInvoker.java:112) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.jupiter.engine.execution.InterceptingExecutableInvoker.lambda$invoke$0(InterceptingExecutableInvoker.java:94) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.jupiter.engine.execution.InvocationInterceptorChain$InterceptedInvocation.proceed(InvocationInterceptorChain.java:106) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.jupiter.engine.execution.InvocationInterceptorChain.proceed(InvocationInterceptorChain.java:64) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.jupiter.engine.execution.InvocationInterceptorChain.chainAndInvoke(InvocationInterceptorChain.java:45) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.jupiter.engine.execution.InvocationInterceptorChain.invoke(InvocationInterceptorChain.java:37) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.jupiter.engine.execution.InterceptingExecutableInvoker.invoke(InterceptingExecutableInvoker.java:93) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.jupiter.engine.execution.InterceptingExecutableInvoker.invoke(InterceptingExecutableInvoker.java:87) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.jupiter.engine.descriptor.TestMethodTestDescriptor.lambda$invokeTestMethod$7(TestMethodTestDescriptor.java:216) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.platform.engine.support.hierarchical.ThrowableCollector.execute(ThrowableCollector.java:73) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.jupiter.engine.descriptor.TestMethodTestDescriptor.invokeTestMethod(TestMethodTestDescriptor.java:212) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.jupiter.engine.descriptor.TestMethodTestDescriptor.execute(TestMethodTestDescriptor.java:137) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.jupiter.engine.descriptor.TestMethodTestDescriptor.execute(TestMethodTestDescriptor.java:69) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$6(NodeTestTask.java:156) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.ThrowableCollector.execute(ThrowableCollector.java:73) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$8(NodeTestTask.java:146) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.Node.around(Node.java:137) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$9(NodeTestTask.java:144) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.ThrowableCollector.execute(ThrowableCollector.java:73) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.executeRecursively(NodeTestTask.java:143) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.execute(NodeTestTask.java:100) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596) ~[na:na]
+	at org.junit.platform.engine.support.hierarchical.SameThreadHierarchicalTestExecutorService.invokeAll(SameThreadHierarchicalTestExecutorService.java:41) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$6(NodeTestTask.java:160) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.ThrowableCollector.execute(ThrowableCollector.java:73) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$8(NodeTestTask.java:146) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.Node.around(Node.java:137) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$9(NodeTestTask.java:144) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.ThrowableCollector.execute(ThrowableCollector.java:73) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.executeRecursively(NodeTestTask.java:143) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.execute(NodeTestTask.java:100) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596) ~[na:na]
+	at org.junit.platform.engine.support.hierarchical.SameThreadHierarchicalTestExecutorService.invokeAll(SameThreadHierarchicalTestExecutorService.java:41) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$6(NodeTestTask.java:160) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.ThrowableCollector.execute(ThrowableCollector.java:73) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$8(NodeTestTask.java:146) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.Node.around(Node.java:137) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$9(NodeTestTask.java:144) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.ThrowableCollector.execute(ThrowableCollector.java:73) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.executeRecursively(NodeTestTask.java:143) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.execute(NodeTestTask.java:100) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.SameThreadHierarchicalTestExecutorService.submit(SameThreadHierarchicalTestExecutorService.java:35) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.HierarchicalTestExecutor.execute(HierarchicalTestExecutor.java:57) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.HierarchicalTestEngine.execute(HierarchicalTestEngine.java:54) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.launcher.core.EngineExecutionOrchestrator.execute(EngineExecutionOrchestrator.java:201) ~[junit-platform-launcher-1.12.2.jar:1.12.2]
+	at org.junit.platform.launcher.core.EngineExecutionOrchestrator.execute(EngineExecutionOrchestrator.java:170) ~[junit-platform-launcher-1.12.2.jar:1.12.2]
+	at org.junit.platform.launcher.core.EngineExecutionOrchestrator.execute(EngineExecutionOrchestrator.java:94) ~[junit-platform-launcher-1.12.2.jar:1.12.2]
+	at org.junit.platform.launcher.core.EngineExecutionOrchestrator.lambda$execute$0(EngineExecutionOrchestrator.java:59) ~[junit-platform-launcher-1.12.2.jar:1.12.2]
+	at org.junit.platform.launcher.core.EngineExecutionOrchestrator.withInterceptedStreams(EngineExecutionOrchestrator.java:142) ~[junit-platform-launcher-1.12.2.jar:1.12.2]
+	at org.junit.platform.launcher.core.EngineExecutionOrchestrator.execute(EngineExecutionOrchestrator.java:58) ~[junit-platform-launcher-1.12.2.jar:1.12.2]
+	at org.junit.platform.launcher.core.DefaultLauncher.execute(DefaultLauncher.java:103) ~[junit-platform-launcher-1.12.2.jar:1.12.2]
+	at org.junit.platform.launcher.core.DefaultLauncher.execute(DefaultLauncher.java:85) ~[junit-platform-launcher-1.12.2.jar:1.12.2]
+	at org.junit.platform.launcher.core.DelegatingLauncher.execute(DelegatingLauncher.java:47) ~[junit-platform-launcher-1.12.2.jar:1.12.2]
+	at org.junit.platform.launcher.core.InterceptingLauncher.lambda$execute$1(InterceptingLauncher.java:39) ~[junit-platform-launcher-1.12.2.jar:1.12.2]
+	at org.junit.platform.launcher.core.ClasspathAlignmentCheckingLauncherInterceptor.intercept(ClasspathAlignmentCheckingLauncherInterceptor.java:25) ~[junit-platform-launcher-1.12.2.jar:1.12.2]
+	at org.junit.platform.launcher.core.InterceptingLauncher.execute(InterceptingLauncher.java:38) ~[junit-platform-launcher-1.12.2.jar:1.12.2]
+	at org.junit.platform.launcher.core.DelegatingLauncher.execute(DelegatingLauncher.java:47) ~[junit-platform-launcher-1.12.2.jar:1.12.2]
+	at org.apache.maven.surefire.junitplatform.LauncherAdapter.executeWithoutCancellationToken(LauncherAdapter.java:60) ~[surefire-junit-platform-3.5.6.jar:3.5.6]
+	at org.apache.maven.surefire.junitplatform.LauncherAdapter.execute(LauncherAdapter.java:52) ~[surefire-junit-platform-3.5.6.jar:3.5.6]
+	at org.apache.maven.surefire.junitplatform.JUnitPlatformProvider.execute(JUnitPlatformProvider.java:203) ~[surefire-junit-platform-3.5.6.jar:3.5.6]
+	at org.apache.maven.surefire.junitplatform.JUnitPlatformProvider.invokeAllTests(JUnitPlatformProvider.java:168) ~[surefire-junit-platform-3.5.6.jar:3.5.6]
+	at org.apache.maven.surefire.junitplatform.JUnitPlatformProvider.invoke(JUnitPlatformProvider.java:136) ~[surefire-junit-platform-3.5.6.jar:3.5.6]
+	at org.apache.maven.surefire.booter.ForkedBooter.runSuitesInProcess(ForkedBooter.java:385) ~[surefire-booter-3.5.6.jar:3.5.6]
+	at org.apache.maven.surefire.booter.ForkedBooter.execute(ForkedBooter.java:162) ~[surefire-booter-3.5.6.jar:3.5.6]
+	at org.apache.maven.surefire.booter.ForkedBooter.run(ForkedBooter.java:507) ~[surefire-booter-3.5.6.jar:3.5.6]
+	at org.apache.maven.surefire.booter.ForkedBooter.main(ForkedBooter.java:495) ~[surefire-booter-3.5.6.jar:3.5.6]
+
+</system-out>
+    </testcase>
+    <testcase name="attachmentAssessmentCoverageMismatchFailsClosed(String, List)[1]" classname="com.example.dispute.room.EvidenceAgentTurnServiceTest" time="0.041" />
+    <testcase name="attachmentAssessmentCoverageMismatchFailsClosed(String, List)[2]" classname="com.example.dispute.room.EvidenceAgentTurnServiceTest" time="0.027" />
+    <testcase name="attachmentAssessmentCoverageMismatchFailsClosed(String, List)[3]" classname="com.example.dispute.room.EvidenceAgentTurnServiceTest" time="0.013" />
+    <testcase name="attachmentWithOnlyLegacySuggestionFailsClosedWithoutVerificationPersistence" classname="com.example.dispute.room.EvidenceAgentTurnServiceTest" time="0.012" />
+    <testcase name="completeMultimodalAssessmentPersistsCurrentAttachmentAndHumanReviewWinsStatus" classname="com.example.dispute.room.EvidenceAgentTurnServiceTest" time="0.017" />
+    <testcase name="ensureOpeningCreatesOneActorScopedClerkMessageAndReusesIt" classname="com.example.dispute.room.EvidenceAgentTurnServiceTest" time="0.084" />
+    <testcase name="ensureOpeningKeepsIntakeSnapshotNullWhenIntakeDossierIsMissing" classname="com.example.dispute.room.EvidenceAgentTurnServiceTest" time="0.012" />
+    <testcase name="ensureOpeningReusesExistingActorScopedConversationInsteadOfAppendingLateOpening" classname="com.example.dispute.room.EvidenceAgentTurnServiceTest" time="0.399" />
+    <testcase name="ensureOpeningSupersedesOnlyGenericWelcomeOpeningWithDossierSpecificOpening" classname="com.example.dispute.room.EvidenceAgentTurnServiceTest" time="0.012" />
+    <testcase name="ensureOpeningSupersedesOpeningOnlyThreadWithPendingFocusFallback" classname="com.example.dispute.room.EvidenceAgentTurnServiceTest" time="0.017" />
+    <testcase name="evidenceAgentRecentTurnsAreScopedToTheSpeakingParty" classname="com.example.dispute.room.EvidenceAgentTurnServiceTest" time="0.014" />
+    <testcase name="failedEvidenceAgentCallFailsClosedWithoutPersistingSyntheticVerification" classname="com.example.dispute.room.EvidenceAgentTurnServiceTest" time="0.016">
+      <system-out>2026-07-23T05:14:03.438+08:00  WARN 30824 --- [java-api-service] [           main] c.e.d.r.a.EvidenceAgentTurnService       : Evidence agent turn failed closed after agent call failure: case_id=CASE_EVIDENCE_AGENT, room_type=EVIDENCE, trace_id=TRACE_DEGRADED, request_id=REQ_DEGRADED, failure_type=java.lang.IllegalStateException, failure_message=agent endpoint missing
+
+java.lang.IllegalStateException: agent endpoint missing
+	at com.example.dispute.room.application.EvidenceAgentTurnService.safeRun(EvidenceAgentTurnService.java:613) ~[classes/:na]
+	at com.example.dispute.room.application.EvidenceAgentTurnService.continueFromParticipantMessage(EvidenceAgentTurnService.java:251) ~[classes/:na]
+	at com.example.dispute.room.EvidenceAgentTurnServiceTest.lambda$failedEvidenceAgentCallFailsClosedWithoutPersistingSyntheticVerification$39(EvidenceAgentTurnServiceTest.java:1754) ~[test-classes/:na]
+	at org.assertj.core.api.ThrowableAssert.catchThrowable(ThrowableAssert.java:66) ~[assertj-core-3.27.7.jar:na]
+	at org.assertj.core.api.AssertionsForClassTypes.catchThrowable(AssertionsForClassTypes.java:908) ~[assertj-core-3.27.7.jar:na]
+	at org.assertj.core.api.Assertions.catchThrowable(Assertions.java:1476) ~[assertj-core-3.27.7.jar:na]
+	at org.assertj.core.api.Assertions.assertThatThrownBy(Assertions.java:1319) ~[assertj-core-3.27.7.jar:na]
+	at com.example.dispute.room.EvidenceAgentTurnServiceTest.failedEvidenceAgentCallFailsClosedWithoutPersistingSyntheticVerification(EvidenceAgentTurnServiceTest.java:1752) ~[test-classes/:na]
+	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103) ~[na:na]
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580) ~[na:na]
+	at org.junit.platform.commons.util.ReflectionUtils.invokeMethod(ReflectionUtils.java:775) ~[junit-platform-commons-1.12.2.jar:1.12.2]
+	at org.junit.platform.commons.support.ReflectionSupport.invokeMethod(ReflectionSupport.java:479) ~[junit-platform-commons-1.12.2.jar:1.12.2]
+	at org.junit.jupiter.engine.execution.MethodInvocation.proceed(MethodInvocation.java:60) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.jupiter.engine.execution.InvocationInterceptorChain$ValidatingInvocation.proceed(InvocationInterceptorChain.java:131) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.jupiter.engine.extension.TimeoutExtension.intercept(TimeoutExtension.java:161) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.jupiter.engine.extension.TimeoutExtension.interceptTestableMethod(TimeoutExtension.java:152) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.jupiter.engine.extension.TimeoutExtension.interceptTestMethod(TimeoutExtension.java:91) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.jupiter.engine.execution.InterceptingExecutableInvoker$ReflectiveInterceptorCall.lambda$ofVoidMethod$0(InterceptingExecutableInvoker.java:112) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.jupiter.engine.execution.InterceptingExecutableInvoker.lambda$invoke$0(InterceptingExecutableInvoker.java:94) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.jupiter.engine.execution.InvocationInterceptorChain$InterceptedInvocation.proceed(InvocationInterceptorChain.java:106) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.jupiter.engine.execution.InvocationInterceptorChain.proceed(InvocationInterceptorChain.java:64) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.jupiter.engine.execution.InvocationInterceptorChain.chainAndInvoke(InvocationInterceptorChain.java:45) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.jupiter.engine.execution.InvocationInterceptorChain.invoke(InvocationInterceptorChain.java:37) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.jupiter.engine.execution.InterceptingExecutableInvoker.invoke(InterceptingExecutableInvoker.java:93) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.jupiter.engine.execution.InterceptingExecutableInvoker.invoke(InterceptingExecutableInvoker.java:87) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.jupiter.engine.descriptor.TestMethodTestDescriptor.lambda$invokeTestMethod$7(TestMethodTestDescriptor.java:216) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.platform.engine.support.hierarchical.ThrowableCollector.execute(ThrowableCollector.java:73) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.jupiter.engine.descriptor.TestMethodTestDescriptor.invokeTestMethod(TestMethodTestDescriptor.java:212) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.jupiter.engine.descriptor.TestMethodTestDescriptor.execute(TestMethodTestDescriptor.java:137) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.jupiter.engine.descriptor.TestMethodTestDescriptor.execute(TestMethodTestDescriptor.java:69) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$6(NodeTestTask.java:156) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.ThrowableCollector.execute(ThrowableCollector.java:73) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$8(NodeTestTask.java:146) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.Node.around(Node.java:137) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$9(NodeTestTask.java:144) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.ThrowableCollector.execute(ThrowableCollector.java:73) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.executeRecursively(NodeTestTask.java:143) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.execute(NodeTestTask.java:100) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596) ~[na:na]
+	at org.junit.platform.engine.support.hierarchical.SameThreadHierarchicalTestExecutorService.invokeAll(SameThreadHierarchicalTestExecutorService.java:41) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$6(NodeTestTask.java:160) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.ThrowableCollector.execute(ThrowableCollector.java:73) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$8(NodeTestTask.java:146) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.Node.around(Node.java:137) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$9(NodeTestTask.java:144) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.ThrowableCollector.execute(ThrowableCollector.java:73) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.executeRecursively(NodeTestTask.java:143) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.execute(NodeTestTask.java:100) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596) ~[na:na]
+	at org.junit.platform.engine.support.hierarchical.SameThreadHierarchicalTestExecutorService.invokeAll(SameThreadHierarchicalTestExecutorService.java:41) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$6(NodeTestTask.java:160) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.ThrowableCollector.execute(ThrowableCollector.java:73) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$8(NodeTestTask.java:146) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.Node.around(Node.java:137) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$9(NodeTestTask.java:144) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.ThrowableCollector.execute(ThrowableCollector.java:73) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.executeRecursively(NodeTestTask.java:143) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.execute(NodeTestTask.java:100) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.SameThreadHierarchicalTestExecutorService.submit(SameThreadHierarchicalTestExecutorService.java:35) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.HierarchicalTestExecutor.execute(HierarchicalTestExecutor.java:57) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.HierarchicalTestEngine.execute(HierarchicalTestEngine.java:54) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.launcher.core.EngineExecutionOrchestrator.execute(EngineExecutionOrchestrator.java:201) ~[junit-platform-launcher-1.12.2.jar:1.12.2]
+	at org.junit.platform.launcher.core.EngineExecutionOrchestrator.execute(EngineExecutionOrchestrator.java:170) ~[junit-platform-launcher-1.12.2.jar:1.12.2]
+	at org.junit.platform.launcher.core.EngineExecutionOrchestrator.execute(EngineExecutionOrchestrator.java:94) ~[junit-platform-launcher-1.12.2.jar:1.12.2]
+	at org.junit.platform.launcher.core.EngineExecutionOrchestrator.lambda$execute$0(EngineExecutionOrchestrator.java:59) ~[junit-platform-launcher-1.12.2.jar:1.12.2]
+	at org.junit.platform.launcher.core.EngineExecutionOrchestrator.withInterceptedStreams(EngineExecutionOrchestrator.java:142) ~[junit-platform-launcher-1.12.2.jar:1.12.2]
+	at org.junit.platform.launcher.core.EngineExecutionOrchestrator.execute(EngineExecutionOrchestrator.java:58) ~[junit-platform-launcher-1.12.2.jar:1.12.2]
+	at org.junit.platform.launcher.core.DefaultLauncher.execute(DefaultLauncher.java:103) ~[junit-platform-launcher-1.12.2.jar:1.12.2]
+	at org.junit.platform.launcher.core.DefaultLauncher.execute(DefaultLauncher.java:85) ~[junit-platform-launcher-1.12.2.jar:1.12.2]
+	at org.junit.platform.launcher.core.DelegatingLauncher.execute(DelegatingLauncher.java:47) ~[junit-platform-launcher-1.12.2.jar:1.12.2]
+	at org.junit.platform.launcher.core.InterceptingLauncher.lambda$execute$1(InterceptingLauncher.java:39) ~[junit-platform-launcher-1.12.2.jar:1.12.2]
+	at org.junit.platform.launcher.core.ClasspathAlignmentCheckingLauncherInterceptor.intercept(ClasspathAlignmentCheckingLauncherInterceptor.java:25) ~[junit-platform-launcher-1.12.2.jar:1.12.2]
+	at org.junit.platform.launcher.core.InterceptingLauncher.execute(InterceptingLauncher.java:38) ~[junit-platform-launcher-1.12.2.jar:1.12.2]
+	at org.junit.platform.launcher.core.DelegatingLauncher.execute(DelegatingLauncher.java:47) ~[junit-platform-launcher-1.12.2.jar:1.12.2]
+	at org.apache.maven.surefire.junitplatform.LauncherAdapter.executeWithoutCancellationToken(LauncherAdapter.java:60) ~[surefire-junit-platform-3.5.6.jar:3.5.6]
+	at org.apache.maven.surefire.junitplatform.LauncherAdapter.execute(LauncherAdapter.java:52) ~[surefire-junit-platform-3.5.6.jar:3.5.6]
+	at org.apache.maven.surefire.junitplatform.JUnitPlatformProvider.execute(JUnitPlatformProvider.java:203) ~[surefire-junit-platform-3.5.6.jar:3.5.6]
+	at org.apache.maven.surefire.junitplatform.JUnitPlatformProvider.invokeAllTests(JUnitPlatformProvider.java:168) ~[surefire-junit-platform-3.5.6.jar:3.5.6]
+	at org.apache.maven.surefire.junitplatform.JUnitPlatformProvider.invoke(JUnitPlatformProvider.java:136) ~[surefire-junit-platform-3.5.6.jar:3.5.6]
+	at org.apache.maven.surefire.booter.ForkedBooter.runSuitesInProcess(ForkedBooter.java:385) ~[surefire-booter-3.5.6.jar:3.5.6]
+	at org.apache.maven.surefire.booter.ForkedBooter.execute(ForkedBooter.java:162) ~[surefire-booter-3.5.6.jar:3.5.6]
+	at org.apache.maven.surefire.booter.ForkedBooter.run(ForkedBooter.java:507) ~[surefire-booter-3.5.6.jar:3.5.6]
+	at org.apache.maven.surefire.booter.ForkedBooter.main(ForkedBooter.java:495) ~[surefire-booter-3.5.6.jar:3.5.6]
+
+</system-out>
+    </testcase>
+    <testcase name="hearingSupplementBatchUsesHearingContractAndFreezesOneMergedDossier" classname="com.example.dispute.room.EvidenceAgentTurnServiceTest" time="0.038" />
+    <testcase name="legacySuggestionWithoutCurrentAttachmentDoesNotCreateVerification" classname="com.example.dispute.room.EvidenceAgentTurnServiceTest" time="0.012" />
+    <testcase name="merchantEvidenceContextKeepsOnlySharedBilateralIntakeProjection" classname="com.example.dispute.room.EvidenceAgentTurnServiceTest" time="0.044" />
+    <testcase name="partyEvidenceReferenceUsesAttachmentRefsWhenTextIsBlank" classname="com.example.dispute.room.EvidenceAgentTurnServiceTest" time="0.015" />
+    <testcase name="partyTextPersistsEvidenceMemorySendsPartyScopedContextAndAppendsIsolatedClerkReply" classname="com.example.dispute.room.EvidenceAgentTurnServiceTest" time="0.117" />
+    <testcase name="rejectsEvidenceReferenceThatIsNotVisibleToTheCurrentActor" classname="com.example.dispute.room.EvidenceAgentTurnServiceTest" time="0.027" />
+  </testsuite>
+  <testsuite name="com.example.dispute.workflow.EvidenceWindowCoordinatorTest(p5-entry-e70492a11e23-fc40ff85)" source_report="java-phase5-entry-junit.xml" tests="1" failures="0" errors="0" skipped="0" time="0.167">
+    <testcase name="partyCompletedSignalFailuresDoNotPropagateToTheBusinessRequest" classname="com.example.dispute.workflow.EvidenceWindowCoordinatorTest" time="0.167">
+      <system-out>2026-07-23T05:14:08.576+08:00  WARN 30824 --- [java-api-service] [           main] c.e.d.c.t.PostCommitSideEffectExecutor   : Post-commit side effect failed: operation=evidence-window-party-completed context={workflow_id=evidence-window-CASE_1, role=USER, case_id=CASE_1} exception_type=java.lang.IllegalStateException message=temporal unavailable
+
+java.lang.IllegalStateException: temporal unavailable
+	at com.example.dispute.workflow.application.EvidenceWindowCoordinator.lambda$signalPartyCompletedAfterCommit$1(EvidenceWindowCoordinator.java:83) ~[classes/:na]
+	at com.example.dispute.common.transaction.PostCommitSideEffectExecutor.runGuarded(PostCommitSideEffectExecutor.java:105) ~[classes/:na]
+	at com.example.dispute.common.transaction.PostCommitSideEffectExecutor.lambda$dispatch$1(PostCommitSideEffectExecutor.java:83) ~[classes/:na]
+	at com.example.dispute.common.transaction.PostCommitSideEffectExecutor.dispatch(PostCommitSideEffectExecutor.java:83) ~[classes/:na]
+	at com.example.dispute.common.transaction.PostCommitSideEffectExecutor.lambda$execute$0(PostCommitSideEffectExecutor.java:54) ~[classes/:na]
+	at com.example.dispute.common.transaction.PostCommitSideEffectExecutor.execute(PostCommitSideEffectExecutor.java:56) ~[classes/:na]
+	at com.example.dispute.workflow.application.EvidenceWindowCoordinator.signalPartyCompletedAfterCommit(EvidenceWindowCoordinator.java:75) ~[classes/:na]
+	at com.example.dispute.workflow.EvidenceWindowCoordinatorTest.lambda$partyCompletedSignalFailuresDoNotPropagateToTheBusinessRequest$0(EvidenceWindowCoordinatorTest.java:51) ~[test-classes/:na]
+	at org.assertj.core.api.ThrowableAssert.catchThrowable(ThrowableAssert.java:66) ~[assertj-core-3.27.7.jar:na]
+	at org.assertj.core.api.AssertionsForClassTypes.catchThrowable(AssertionsForClassTypes.java:908) ~[assertj-core-3.27.7.jar:na]
+	at org.assertj.core.api.AssertionsForClassTypes.assertThatCode(AssertionsForClassTypes.java:879) ~[assertj-core-3.27.7.jar:na]
+	at org.assertj.core.api.Assertions.assertThatCode(Assertions.java:1396) ~[assertj-core-3.27.7.jar:na]
+	at com.example.dispute.workflow.EvidenceWindowCoordinatorTest.partyCompletedSignalFailuresDoNotPropagateToTheBusinessRequest(EvidenceWindowCoordinatorTest.java:49) ~[test-classes/:na]
+	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103) ~[na:na]
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580) ~[na:na]
+	at org.junit.platform.commons.util.ReflectionUtils.invokeMethod(ReflectionUtils.java:775) ~[junit-platform-commons-1.12.2.jar:1.12.2]
+	at org.junit.platform.commons.support.ReflectionSupport.invokeMethod(ReflectionSupport.java:479) ~[junit-platform-commons-1.12.2.jar:1.12.2]
+	at org.junit.jupiter.engine.execution.MethodInvocation.proceed(MethodInvocation.java:60) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.jupiter.engine.execution.InvocationInterceptorChain$ValidatingInvocation.proceed(InvocationInterceptorChain.java:131) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.jupiter.engine.extension.TimeoutExtension.intercept(TimeoutExtension.java:161) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.jupiter.engine.extension.TimeoutExtension.interceptTestableMethod(TimeoutExtension.java:152) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.jupiter.engine.extension.TimeoutExtension.interceptTestMethod(TimeoutExtension.java:91) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.jupiter.engine.execution.InterceptingExecutableInvoker$ReflectiveInterceptorCall.lambda$ofVoidMethod$0(InterceptingExecutableInvoker.java:112) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.jupiter.engine.execution.InterceptingExecutableInvoker.lambda$invoke$0(InterceptingExecutableInvoker.java:94) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.jupiter.engine.execution.InvocationInterceptorChain$InterceptedInvocation.proceed(InvocationInterceptorChain.java:106) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.jupiter.engine.execution.InvocationInterceptorChain.proceed(InvocationInterceptorChain.java:64) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.jupiter.engine.execution.InvocationInterceptorChain.chainAndInvoke(InvocationInterceptorChain.java:45) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.jupiter.engine.execution.InvocationInterceptorChain.invoke(InvocationInterceptorChain.java:37) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.jupiter.engine.execution.InterceptingExecutableInvoker.invoke(InterceptingExecutableInvoker.java:93) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.jupiter.engine.execution.InterceptingExecutableInvoker.invoke(InterceptingExecutableInvoker.java:87) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.jupiter.engine.descriptor.TestMethodTestDescriptor.lambda$invokeTestMethod$7(TestMethodTestDescriptor.java:216) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.platform.engine.support.hierarchical.ThrowableCollector.execute(ThrowableCollector.java:73) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.jupiter.engine.descriptor.TestMethodTestDescriptor.invokeTestMethod(TestMethodTestDescriptor.java:212) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.jupiter.engine.descriptor.TestMethodTestDescriptor.execute(TestMethodTestDescriptor.java:137) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.jupiter.engine.descriptor.TestMethodTestDescriptor.execute(TestMethodTestDescriptor.java:69) ~[junit-jupiter-engine-5.12.2.jar:5.12.2]
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$6(NodeTestTask.java:156) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.ThrowableCollector.execute(ThrowableCollector.java:73) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$8(NodeTestTask.java:146) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.Node.around(Node.java:137) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$9(NodeTestTask.java:144) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.ThrowableCollector.execute(ThrowableCollector.java:73) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.executeRecursively(NodeTestTask.java:143) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.execute(NodeTestTask.java:100) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596) ~[na:na]
+	at org.junit.platform.engine.support.hierarchical.SameThreadHierarchicalTestExecutorService.invokeAll(SameThreadHierarchicalTestExecutorService.java:41) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$6(NodeTestTask.java:160) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.ThrowableCollector.execute(ThrowableCollector.java:73) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$8(NodeTestTask.java:146) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.Node.around(Node.java:137) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$9(NodeTestTask.java:144) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.ThrowableCollector.execute(ThrowableCollector.java:73) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.executeRecursively(NodeTestTask.java:143) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.execute(NodeTestTask.java:100) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596) ~[na:na]
+	at org.junit.platform.engine.support.hierarchical.SameThreadHierarchicalTestExecutorService.invokeAll(SameThreadHierarchicalTestExecutorService.java:41) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$6(NodeTestTask.java:160) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.ThrowableCollector.execute(ThrowableCollector.java:73) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$8(NodeTestTask.java:146) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.Node.around(Node.java:137) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.lambda$executeRecursively$9(NodeTestTask.java:144) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.ThrowableCollector.execute(ThrowableCollector.java:73) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.executeRecursively(NodeTestTask.java:143) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.NodeTestTask.execute(NodeTestTask.java:100) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.SameThreadHierarchicalTestExecutorService.submit(SameThreadHierarchicalTestExecutorService.java:35) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.HierarchicalTestExecutor.execute(HierarchicalTestExecutor.java:57) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.engine.support.hierarchical.HierarchicalTestEngine.execute(HierarchicalTestEngine.java:54) ~[junit-platform-engine-1.12.2.jar:1.12.2]
+	at org.junit.platform.launcher.core.EngineExecutionOrchestrator.execute(EngineExecutionOrchestrator.java:201) ~[junit-platform-launcher-1.12.2.jar:1.12.2]
+	at org.junit.platform.launcher.core.EngineExecutionOrchestrator.execute(EngineExecutionOrchestrator.java:170) ~[junit-platform-launcher-1.12.2.jar:1.12.2]
+	at org.junit.platform.launcher.core.EngineExecutionOrchestrator.execute(EngineExecutionOrchestrator.java:94) ~[junit-platform-launcher-1.12.2.jar:1.12.2]
+	at org.junit.platform.launcher.core.EngineExecutionOrchestrator.lambda$execute$0(EngineExecutionOrchestrator.java:59) ~[junit-platform-launcher-1.12.2.jar:1.12.2]
+	at org.junit.platform.launcher.core.EngineExecutionOrchestrator.withInterceptedStreams(EngineExecutionOrchestrator.java:142) ~[junit-platform-launcher-1.12.2.jar:1.12.2]
+	at org.junit.platform.launcher.core.EngineExecutionOrchestrator.execute(EngineExecutionOrchestrator.java:58) ~[junit-platform-launcher-1.12.2.jar:1.12.2]
+	at org.junit.platform.launcher.core.DefaultLauncher.execute(DefaultLauncher.java:103) ~[junit-platform-launcher-1.12.2.jar:1.12.2]
+	at org.junit.platform.launcher.core.DefaultLauncher.execute(DefaultLauncher.java:85) ~[junit-platform-launcher-1.12.2.jar:1.12.2]
+	at org.junit.platform.launcher.core.DelegatingLauncher.execute(DelegatingLauncher.java:47) ~[junit-platform-launcher-1.12.2.jar:1.12.2]
+	at org.junit.platform.launcher.core.InterceptingLauncher.lambda$execute$1(InterceptingLauncher.java:39) ~[junit-platform-launcher-1.12.2.jar:1.12.2]
+	at org.junit.platform.launcher.core.ClasspathAlignmentCheckingLauncherInterceptor.intercept(ClasspathAlignmentCheckingLauncherInterceptor.java:25) ~[junit-platform-launcher-1.12.2.jar:1.12.2]
+	at org.junit.platform.launcher.core.InterceptingLauncher.execute(InterceptingLauncher.java:38) ~[junit-platform-launcher-1.12.2.jar:1.12.2]
+	at org.junit.platform.launcher.core.DelegatingLauncher.execute(DelegatingLauncher.java:47) ~[junit-platform-launcher-1.12.2.jar:1.12.2]
+	at org.apache.maven.surefire.junitplatform.LauncherAdapter.executeWithoutCancellationToken(LauncherAdapter.java:60) ~[surefire-junit-platform-3.5.6.jar:3.5.6]
+	at org.apache.maven.surefire.junitplatform.LauncherAdapter.execute(LauncherAdapter.java:52) ~[surefire-junit-platform-3.5.6.jar:3.5.6]
+	at org.apache.maven.surefire.junitplatform.JUnitPlatformProvider.execute(JUnitPlatformProvider.java:203) ~[surefire-junit-platform-3.5.6.jar:3.5.6]
+	at org.apache.maven.surefire.junitplatform.JUnitPlatformProvider.invokeAllTests(JUnitPlatformProvider.java:168) ~[surefire-junit-platform-3.5.6.jar:3.5.6]
+	at org.apache.maven.surefire.junitplatform.JUnitPlatformProvider.invoke(JUnitPlatformProvider.java:136) ~[surefire-junit-platform-3.5.6.jar:3.5.6]
+	at org.apache.maven.surefire.booter.ForkedBooter.runSuitesInProcess(ForkedBooter.java:385) ~[surefire-booter-3.5.6.jar:3.5.6]
+	at org.apache.maven.surefire.booter.ForkedBooter.execute(ForkedBooter.java:162) ~[surefire-booter-3.5.6.jar:3.5.6]
+	at org.apache.maven.surefire.booter.ForkedBooter.run(ForkedBooter.java:507) ~[surefire-booter-3.5.6.jar:3.5.6]
+	at org.apache.maven.surefire.booter.ForkedBooter.main(ForkedBooter.java:495) ~[surefire-booter-3.5.6.jar:3.5.6]
+
+</system-out>
+    </testcase>
+  </testsuite>
+  <testsuite name="com.example.dispute.workflow.EvidenceWindowWorkflowTest(p5-entry-e70492a11e23-fc40ff85)" source_report="java-phase5-entry-junit.xml" tests="3" failures="0" errors="0" skipped="0" time="2.23">
+    <testcase name="bothPartiesCompleteBeforeTheWarningWithoutSchedulingSideEffects" classname="com.example.dispute.workflow.EvidenceWindowWorkflowTest" time="0.268">
+      <system-out>2026-07-23T05:14:10.545+08:00  INFO 30824 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : Created WorkflowServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=14, target=directaddress:///d549e452-a39a-4388-93c5-0f8e9f768bb3}}
+2026-07-23T05:14:10.549+08:00  INFO 30824 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : Created TestServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=14, target=directaddress:///d549e452-a39a-4388-93c5-0f8e9f768bb3}}
+2026-07-23T05:14:10.549+08:00  INFO 30824 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : Created OperatorServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=14, target=directaddress:///d549e452-a39a-4388-93c5-0f8e9f768bb3}}
+2026-07-23T05:14:10.549+08:00  INFO 30824 --- [java-api-service] [           main] i.t.internal.worker.MultiThreadedPoller  : start: MultiThreadedPoller{name=Workflow Poller taskQueue="evidence-window-test", namespace="default", identity=30824@LAPTOP-VJM9RQM6}
+2026-07-23T05:14:10.551+08:00  INFO 30824 --- [java-api-service] [           main] i.t.internal.worker.MultiThreadedPoller  : start: MultiThreadedPoller{name=Activity Poller taskQueue="evidence-window-test", namespace="default", identity=30824@LAPTOP-VJM9RQM6}
+2026-07-23T05:14:10.553+08:00  WARN 30824 --- [java-api-service] [artbeat-default] i.t.internal.worker.HeartbeatManager     : Server does not support worker heartbeats for namespace default, disabling
+2026-07-23T05:14:10.554+08:00  INFO 30824 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : shutdownNow
+2026-07-23T05:14:10.554+08:00  INFO 30824 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : shutdownNow
+2026-07-23T05:14:10.554+08:00  INFO 30824 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : shutdownNow: WorkerFactory{identity=30824@LAPTOP-VJM9RQM6}
+2026-07-23T05:14:10.554+08:00  INFO 30824 --- [java-api-service] [           main] io.temporal.internal.worker.BasePoller   : shutdown: MultiThreadedPoller{name=Workflow Poller taskQueue="evidence-window-test", namespace="default", identity=30824@LAPTOP-VJM9RQM6}
+2026-07-23T05:14:10.554+08:00  INFO 30824 --- [java-api-service] [ce="default": 3] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-23T05:14:10.554+08:00  INFO 30824 --- [java-api-service] [ce="default": 5] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-23T05:14:10.554+08:00  INFO 30824 --- [java-api-service] [ce="default": 1] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-23T05:14:10.554+08:00  INFO 30824 --- [java-api-service] [ce="default": 4] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-23T05:14:10.554+08:00  INFO 30824 --- [java-api-service] [ce="default": 2] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-23T05:14:10.554+08:00  INFO 30824 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination begin: WorkerFactory{identity=30824@LAPTOP-VJM9RQM6}
+2026-07-23T05:14:10.554+08:00  INFO 30824 --- [java-api-service] [tdownManager: 1] io.temporal.internal.worker.BasePoller   : shutdown: MultiThreadedPoller{name=Activity Poller taskQueue="evidence-window-test", namespace="default", identity=30824@LAPTOP-VJM9RQM6}
+2026-07-23T05:14:10.554+08:00  INFO 30824 --- [java-api-service] [ce="default": 5] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: ActivityPollTask
+2026-07-23T05:14:10.554+08:00  INFO 30824 --- [java-api-service] [ce="default": 4] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: ActivityPollTask
+2026-07-23T05:14:10.554+08:00  INFO 30824 --- [java-api-service] [ce="default": 2] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: ActivityPollTask
+2026-07-23T05:14:10.554+08:00  INFO 30824 --- [java-api-service] [ce="default": 1] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: ActivityPollTask
+2026-07-23T05:14:10.554+08:00  INFO 30824 --- [java-api-service] [ce="default": 3] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: ActivityPollTask
+2026-07-23T05:14:10.812+08:00  INFO 30824 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination done: WorkerFactory{identity=30824@LAPTOP-VJM9RQM6}
+2026-07-23T05:14:10.813+08:00  INFO 30824 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : shutdownNow
+2026-07-23T05:14:10.813+08:00  INFO 30824 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down in-process gRPC server
+2026-07-23T05:14:10.813+08:00  INFO 30824 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down gRPC Services
+</system-out>
+    </testcase>
+    <testcase name="oneAbsentPartyCausesExpiryAfterTwoVirtualHours" classname="com.example.dispute.workflow.EvidenceWindowWorkflowTest" time="0.281">
+      <system-out>2026-07-23T05:14:10.264+08:00  INFO 30824 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : Created WorkflowServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=9, target=directaddress:///89969ac3-3916-43df-93bd-60f61a7e5ca4}}
+2026-07-23T05:14:10.264+08:00  INFO 30824 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : Created TestServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=9, target=directaddress:///89969ac3-3916-43df-93bd-60f61a7e5ca4}}
+2026-07-23T05:14:10.264+08:00  INFO 30824 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : Created OperatorServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=9, target=directaddress:///89969ac3-3916-43df-93bd-60f61a7e5ca4}}
+2026-07-23T05:14:10.264+08:00  INFO 30824 --- [java-api-service] [           main] i.t.internal.worker.MultiThreadedPoller  : start: MultiThreadedPoller{name=Workflow Poller taskQueue="evidence-window-test", namespace="default", identity=30824@LAPTOP-VJM9RQM6}
+2026-07-23T05:14:10.264+08:00  INFO 30824 --- [java-api-service] [           main] i.t.internal.worker.MultiThreadedPoller  : start: MultiThreadedPoller{name=Activity Poller taskQueue="evidence-window-test", namespace="default", identity=30824@LAPTOP-VJM9RQM6}
+2026-07-23T05:14:10.273+08:00  WARN 30824 --- [java-api-service] [artbeat-default] i.t.internal.worker.HeartbeatManager     : Server does not support worker heartbeats for namespace default, disabling
+2026-07-23T05:14:10.285+08:00  INFO 30824 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : shutdownNow
+2026-07-23T05:14:10.285+08:00  INFO 30824 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : shutdownNow
+2026-07-23T05:14:10.285+08:00  INFO 30824 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : shutdownNow: WorkerFactory{identity=30824@LAPTOP-VJM9RQM6}
+2026-07-23T05:14:10.285+08:00  INFO 30824 --- [java-api-service] [           main] io.temporal.internal.worker.BasePoller   : shutdown: MultiThreadedPoller{name=Workflow Poller taskQueue="evidence-window-test", namespace="default", identity=30824@LAPTOP-VJM9RQM6}
+2026-07-23T05:14:10.285+08:00  INFO 30824 --- [java-api-service] [ce="default": 2] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-23T05:14:10.285+08:00  INFO 30824 --- [java-api-service] [ce="default": 1] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-23T05:14:10.285+08:00  INFO 30824 --- [java-api-service] [ce="default": 5] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-23T05:14:10.285+08:00  INFO 30824 --- [java-api-service] [ce="default": 4] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-23T05:14:10.285+08:00  INFO 30824 --- [java-api-service] [ce="default": 3] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-23T05:14:10.285+08:00  INFO 30824 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination begin: WorkerFactory{identity=30824@LAPTOP-VJM9RQM6}
+2026-07-23T05:14:10.285+08:00  INFO 30824 --- [java-api-service] [tdownManager: 1] io.temporal.internal.worker.BasePoller   : shutdown: MultiThreadedPoller{name=Activity Poller taskQueue="evidence-window-test", namespace="default", identity=30824@LAPTOP-VJM9RQM6}
+2026-07-23T05:14:10.285+08:00  INFO 30824 --- [java-api-service] [ce="default": 3] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: ActivityPollTask
+2026-07-23T05:14:10.285+08:00  INFO 30824 --- [java-api-service] [ce="default": 1] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: ActivityPollTask
+2026-07-23T05:14:10.285+08:00  INFO 30824 --- [java-api-service] [ce="default": 5] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: ActivityPollTask
+2026-07-23T05:14:10.285+08:00  INFO 30824 --- [java-api-service] [ce="default": 4] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: ActivityPollTask
+2026-07-23T05:14:10.285+08:00  INFO 30824 --- [java-api-service] [ce="default": 2] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: ActivityPollTask
+2026-07-23T05:14:10.544+08:00  INFO 30824 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination done: WorkerFactory{identity=30824@LAPTOP-VJM9RQM6}
+2026-07-23T05:14:10.544+08:00  INFO 30824 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : shutdownNow
+2026-07-23T05:14:10.544+08:00  INFO 30824 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down in-process gRPC server
+2026-07-23T05:14:10.545+08:00  INFO 30824 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down gRPC Services
+</system-out>
+    </testcase>
+    <testcase name="warningFiresAtTheSharedDeadlineAndBothPartiesCanStillComplete" classname="com.example.dispute.workflow.EvidenceWindowWorkflowTest" time="1.681">
+      <system-out>2026-07-23T05:14:08.956+08:00  INFO 30824 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : Created WorkflowServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=4, target=directaddress:///69bce274-4fef-41d1-bb2d-5e20ad9b60f0}}
+2026-07-23T05:14:08.959+08:00  INFO 30824 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : Created TestServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=4, target=directaddress:///69bce274-4fef-41d1-bb2d-5e20ad9b60f0}}
+2026-07-23T05:14:08.970+08:00  INFO 30824 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : Created OperatorServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=4, target=directaddress:///69bce274-4fef-41d1-bb2d-5e20ad9b60f0}}
+2026-07-23T05:14:09.183+08:00  INFO 30824 --- [java-api-service] [           main] i.t.internal.worker.MultiThreadedPoller  : start: MultiThreadedPoller{name=Workflow Poller taskQueue="evidence-window-test", namespace="default", identity=30824@LAPTOP-VJM9RQM6}
+2026-07-23T05:14:09.196+08:00  INFO 30824 --- [java-api-service] [           main] i.t.internal.worker.MultiThreadedPoller  : start: MultiThreadedPoller{name=Activity Poller taskQueue="evidence-window-test", namespace="default", identity=30824@LAPTOP-VJM9RQM6}
+2026-07-23T05:14:09.853+08:00  INFO 30824 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : shutdownNow
+2026-07-23T05:14:09.853+08:00  INFO 30824 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : shutdownNow
+2026-07-23T05:14:09.853+08:00  INFO 30824 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : shutdownNow: WorkerFactory{identity=30824@LAPTOP-VJM9RQM6}
+2026-07-23T05:14:09.853+08:00  INFO 30824 --- [java-api-service] [           main] io.temporal.internal.worker.BasePoller   : shutdown: MultiThreadedPoller{name=Workflow Poller taskQueue="evidence-window-test", namespace="default", identity=30824@LAPTOP-VJM9RQM6}
+2026-07-23T05:14:09.867+08:00  INFO 30824 --- [java-api-service] [ce="default": 1] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-23T05:14:09.867+08:00  INFO 30824 --- [java-api-service] [ce="default": 5] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-23T05:14:09.867+08:00  INFO 30824 --- [java-api-service] [ce="default": 3] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-23T05:14:09.867+08:00  INFO 30824 --- [java-api-service] [ce="default": 2] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-23T05:14:09.867+08:00  INFO 30824 --- [java-api-service] [ce="default": 4] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-23T05:14:09.871+08:00  INFO 30824 --- [java-api-service] [           main] io.temporal.internal.worker.BasePoller   : shutdown: MultiThreadedPoller{name=Activity Poller taskQueue="evidence-window-test", namespace="default", identity=30824@LAPTOP-VJM9RQM6}
+2026-07-23T05:14:09.873+08:00  INFO 30824 --- [java-api-service] [ce="default": 3] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: ActivityPollTask
+2026-07-23T05:14:09.873+08:00  INFO 30824 --- [java-api-service] [ce="default": 4] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: ActivityPollTask
+2026-07-23T05:14:09.873+08:00  INFO 30824 --- [java-api-service] [ce="default": 1] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: ActivityPollTask
+2026-07-23T05:14:09.873+08:00  INFO 30824 --- [java-api-service] [ce="default": 5] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: ActivityPollTask
+2026-07-23T05:14:09.873+08:00  INFO 30824 --- [java-api-service] [ce="default": 2] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: ActivityPollTask
+2026-07-23T05:14:09.873+08:00  INFO 30824 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination begin: WorkerFactory{identity=30824@LAPTOP-VJM9RQM6}
+2026-07-23T05:14:10.259+08:00  WARN 30824 --- [java-api-service] [artbeat-default] i.t.internal.worker.HeartbeatManager     : Server does not support worker heartbeats for namespace default, disabling
+2026-07-23T05:14:10.261+08:00  INFO 30824 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination done: WorkerFactory{identity=30824@LAPTOP-VJM9RQM6}
+2026-07-23T05:14:10.261+08:00  INFO 30824 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : shutdownNow
+2026-07-23T05:14:10.261+08:00  INFO 30824 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down in-process gRPC server
+2026-07-23T05:14:10.264+08:00  INFO 30824 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down gRPC Services
+</system-out>
+    </testcase>
+  </testsuite>
+  <testsuite name="com.example.dispute.workflow.architecture.IntakeFormalSinkAssemblyTest(p5-entry-e70492a11e23-fc40ff85)" source_report="java-phase5-entry-junit.xml" tests="3" failures="0" errors="0" skipped="0" time="10.904">
+    <testcase name="assemblyRootsMustNotReachAFormalIntakeSink" classname="IntakeFormalSinkAssemblyTest" time="7.419" />
+    <testcase name="productionServiceDescriptorsMustResolveEveryOwnedProvider" classname="IntakeFormalSinkAssemblyTest" time="0.0" />
+    <testcase name="compiledFixturesProveBytecodeCoverageAndSafeComparisonAssembly(Path)" classname="com.example.dispute.workflow.architecture.IntakeFormalSinkAssemblyTest" time="3.485">
+      <system-out>2026-07-23T05:14:03.719+08:00  INFO 30824 --- [java-api-service] [           main] com.tngtech.archunit.core.PluginLoader   : Detected Java version 21.0.8
+</system-out>
+    </testcase>
+  </testsuite>
+  <testsuite name="com.example.dispute.workflow.authority.epoch.JdbcEpochBootstrapOutboxPublisherTest(p5-entry-e70492a11e23-fc40ff85)" source_report="java-phase5-entry-junit.xml" tests="3" failures="0" errors="0" skipped="0" time="0.548">
+    <testcase name="exactRetryReturnsTheOriginalOutboxId" classname="com.example.dispute.workflow.authority.epoch.JdbcEpochBootstrapOutboxPublisherTest" time="0.113" />
+    <testcase name="repositorySupportsClassProxyInsideTheCallersTransaction" classname="com.example.dispute.workflow.authority.epoch.JdbcEpochBootstrapOutboxPublisherTest" time="0.429" />
+    <testcase name="sameEpochWithChangedImmutableOutboxTupleConflicts" classname="com.example.dispute.workflow.authority.epoch.JdbcEpochBootstrapOutboxPublisherTest" time="0.006" />
+  </testsuite>
+  <testsuite name="com.example.dispute.workflow.authority.epoch.TransactionalEpochAuthorityServiceTest(p5-entry-e70492a11e23-fc40ff85)" source_report="java-phase5-entry-junit.xml" tests="4" failures="0" errors="0" skipped="0" time="0.254">
+    <testcase name="cardinalityFailurePreventsBootstrapPublication" classname="com.example.dispute.workflow.authority.epoch.TransactionalEpochAuthorityServiceTest" time="0.004" />
+    <testcase name="changedAuthorityTupleWithTheSameIdCannotReplay" classname="com.example.dispute.workflow.authority.epoch.TransactionalEpochAuthorityServiceTest" time="0.002" />
+    <testcase name="classProxyPreservesMandatoryCallerTransaction" classname="com.example.dispute.workflow.authority.epoch.TransactionalEpochAuthorityServiceTest" time="0.244" />
+    <testcase name="publishesBootstrapOnlyAfterExactBilateralAssertion" classname="com.example.dispute.workflow.authority.epoch.TransactionalEpochAuthorityServiceTest" time="0.004" />
+  </testsuite>
+  <testsuite name="com.example.dispute.workflow.authority.payload.JdbcIntakePayloadAuthorityStoreTest(p5-entry-e70492a11e23-fc40ff85)" source_report="java-phase5-entry-junit.xml" tests="3" failures="0" errors="0" skipped="0" time="0.033">
+    <testcase name="bindsTheCompletePayloadReferenceAndWritesTheThreeRowsInOrder" classname="com.example.dispute.workflow.authority.payload.JdbcIntakePayloadAuthorityStoreTest" time="0.002" />
+    <testcase name="caseCommandPayloadMismatchPreventsAuthorityAndOutboxWrites" classname="com.example.dispute.workflow.authority.payload.JdbcIntakePayloadAuthorityStoreTest" time="0.013" />
+    <testcase name="classProxyPreservesMandatoryCallerTransaction" classname="com.example.dispute.workflow.authority.payload.JdbcIntakePayloadAuthorityStoreTest" time="0.018" />
+  </testsuite>
+  <testsuite name="com.example.dispute.workflow.contract.v1.EvidenceV2ContractFixtureTest(p5-entry-e70492a11e23-fc40ff85)" source_report="java-phase5-entry-junit.xml" tests="31" failures="0" errors="0" skipped="0" time="0.235">
+    <testcase name="contractPackContainsExactlySixSchemasAndItsCompatibilityMatrix" classname="com.example.dispute.workflow.contract.v1.EvidenceV2ContractFixtureTest" time="0.032">
+      <system-out>2026-07-23T05:14:08.112+08:00  WARN 30824 --- [java-api-service] [           main] c.n.schema.UnknownKeywordFactory         : Unknown keyword x-max-encoded-bytes - you should define your own Meta Schema. If the keyword is irrelevant for validation, just use a NonValidationKeyword or if it should generate annotations AnnotationKeyword
+2026-07-23T05:14:08.112+08:00  WARN 30824 --- [java-api-service] [           main] c.n.schema.UnknownKeywordFactory         : Unknown keyword x-canonicalization - you should define your own Meta Schema. If the keyword is irrelevant for validation, just use a NonValidationKeyword or if it should generate annotations AnnotationKeyword
+2026-07-23T05:14:08.112+08:00  WARN 30824 --- [java-api-service] [           main] c.n.schema.UnknownKeywordFactory         : Unknown keyword x-self-hash - you should define your own Meta Schema. If the keyword is irrelevant for validation, just use a NonValidationKeyword or if it should generate annotations AnnotationKeyword
+2026-07-23T05:14:08.112+08:00  WARN 30824 --- [java-api-service] [           main] c.n.schema.UnknownKeywordFactory         : Unknown keyword x-signature - you should define your own Meta Schema. If the keyword is irrelevant for validation, just use a NonValidationKeyword or if it should generate annotations AnnotationKeyword
+2026-07-23T05:14:08.112+08:00  WARN 30824 --- [java-api-service] [           main] c.n.schema.UnknownKeywordFactory         : Unknown keyword x-semantic-constraints - you should define your own Meta Schema. If the keyword is irrelevant for validation, just use a NonValidationKeyword or if it should generate annotations AnnotationKeyword
+2026-07-23T05:14:08.131+08:00  WARN 30824 --- [java-api-service] [           main] c.n.schema.UnknownKeywordFactory         : Unknown keyword x-gateway-cross-binding - you should define your own Meta Schema. If the keyword is irrelevant for validation, just use a NonValidationKeyword or if it should generate annotations AnnotationKeyword
+2026-07-23T05:14:08.131+08:00  WARN 30824 --- [java-api-service] [           main] c.n.schema.UnknownKeywordFactory         : Unknown keyword x-responsibility-mappings - you should define your own Meta Schema. If the keyword is irrelevant for validation, just use a NonValidationKeyword or if it should generate annotations AnnotationKeyword
+2026-07-23T05:14:08.142+08:00  WARN 30824 --- [java-api-service] [           main] c.n.schema.UnknownKeywordFactory         : Unknown keyword x-responsibility-mapping - you should define your own Meta Schema. If the keyword is irrelevant for validation, just use a NonValidationKeyword or if it should generate annotations AnnotationKeyword
+</system-out>
+    </testcase>
+    <testcase name="contractPackContainsNoDetachedAuthorizationProofReference" classname="com.example.dispute.workflow.contract.v1.EvidenceV2ContractFixtureTest" time="0.031" />
+    <testcase name="invalidFixtureIsRejectedByDraft202012(Path)[10]" classname="com.example.dispute.workflow.contract.v1.EvidenceV2ContractFixtureTest" time="0.002" />
+    <testcase name="invalidFixtureIsRejectedByDraft202012(Path)[1]" classname="com.example.dispute.workflow.contract.v1.EvidenceV2ContractFixtureTest" time="0.03" />
+    <testcase name="invalidFixtureIsRejectedByDraft202012(Path)[2]" classname="com.example.dispute.workflow.contract.v1.EvidenceV2ContractFixtureTest" time="0.005" />
+    <testcase name="invalidFixtureIsRejectedByDraft202012(Path)[3]" classname="com.example.dispute.workflow.contract.v1.EvidenceV2ContractFixtureTest" time="0.0" />
+    <testcase name="invalidFixtureIsRejectedByDraft202012(Path)[4]" classname="com.example.dispute.workflow.contract.v1.EvidenceV2ContractFixtureTest" time="0.0" />
+    <testcase name="invalidFixtureIsRejectedByDraft202012(Path)[5]" classname="com.example.dispute.workflow.contract.v1.EvidenceV2ContractFixtureTest" time="0.0" />
+    <testcase name="invalidFixtureIsRejectedByDraft202012(Path)[6]" classname="com.example.dispute.workflow.contract.v1.EvidenceV2ContractFixtureTest" time="0.011" />
+    <testcase name="invalidFixtureIsRejectedByDraft202012(Path)[7]" classname="com.example.dispute.workflow.contract.v1.EvidenceV2ContractFixtureTest" time="0.0" />
+    <testcase name="invalidFixtureIsRejectedByDraft202012(Path)[8]" classname="com.example.dispute.workflow.contract.v1.EvidenceV2ContractFixtureTest" time="0.005" />
+    <testcase name="invalidFixtureIsRejectedByDraft202012(Path)[9]" classname="com.example.dispute.workflow.contract.v1.EvidenceV2ContractFixtureTest" time="0.002" />
+    <testcase name="legacySingleOutputSchemaVersionIsRejectedEverywhere" classname="com.example.dispute.workflow.contract.v1.EvidenceV2ContractFixtureTest" time="0.005" />
+    <testcase name="manifestAndCapabilityDeclareUnambiguousJavaEs256SigningInput" classname="com.example.dispute.workflow.contract.v1.EvidenceV2ContractFixtureTest" time="0.0" />
+    <testcase name="signedSyntheticManifestFixturesCoverExactlyOneEightAndOneHundredItems" classname="com.example.dispute.workflow.contract.v1.EvidenceV2ContractFixtureTest" time="0.007" />
+    <testcase name="trustAndVersionConfusionFailuresHaveNamedReasons(SchemaRejectionCase)[1]" classname="com.example.dispute.workflow.contract.v1.EvidenceV2ContractFixtureTest" time="0.01" />
+    <testcase name="trustAndVersionConfusionFailuresHaveNamedReasons(SchemaRejectionCase)[2]" classname="com.example.dispute.workflow.contract.v1.EvidenceV2ContractFixtureTest" time="0.021" />
+    <testcase name="trustAndVersionConfusionFailuresHaveNamedReasons(SchemaRejectionCase)[3]" classname="com.example.dispute.workflow.contract.v1.EvidenceV2ContractFixtureTest" time="0.002" />
+    <testcase name="trustAndVersionConfusionFailuresHaveNamedReasons(SchemaRejectionCase)[4]" classname="com.example.dispute.workflow.contract.v1.EvidenceV2ContractFixtureTest" time="0.001" />
+    <testcase name="trustAndVersionConfusionFailuresHaveNamedReasons(SchemaRejectionCase)[5]" classname="com.example.dispute.workflow.contract.v1.EvidenceV2ContractFixtureTest" time="0.003" />
+    <testcase name="validDocumentsAreExactlyCrossBoundToTheVerifiedRoomGraphCommand" classname="com.example.dispute.workflow.contract.v1.EvidenceV2ContractFixtureTest" time="0.018" />
+    <testcase name="validFixturePassesDraft202012AndItsDeclaredSelfHash(Path)[1]" classname="com.example.dispute.workflow.contract.v1.EvidenceV2ContractFixtureTest" time="0.002" />
+    <testcase name="validFixturePassesDraft202012AndItsDeclaredSelfHash(Path)[2]" classname="com.example.dispute.workflow.contract.v1.EvidenceV2ContractFixtureTest" time="0.002" />
+    <testcase name="validFixturePassesDraft202012AndItsDeclaredSelfHash(Path)[3]" classname="com.example.dispute.workflow.contract.v1.EvidenceV2ContractFixtureTest" time="0.021" />
+    <testcase name="validFixturePassesDraft202012AndItsDeclaredSelfHash(Path)[4]" classname="com.example.dispute.workflow.contract.v1.EvidenceV2ContractFixtureTest" time="0.004" />
+    <testcase name="validFixturePassesDraft202012AndItsDeclaredSelfHash(Path)[5]" classname="com.example.dispute.workflow.contract.v1.EvidenceV2ContractFixtureTest" time="0.0" />
+    <testcase name="validFixturePassesDraft202012AndItsDeclaredSelfHash(Path)[6]" classname="com.example.dispute.workflow.contract.v1.EvidenceV2ContractFixtureTest" time="0.007" />
+    <testcase name="validFixturePassesDraft202012AndItsDeclaredSelfHash(Path)[7]" classname="com.example.dispute.workflow.contract.v1.EvidenceV2ContractFixtureTest" time="0.0" />
+    <testcase name="validFixturePassesDraft202012AndItsDeclaredSelfHash(Path)[8]" classname="com.example.dispute.workflow.contract.v1.EvidenceV2ContractFixtureTest" time="0.005" />
+    <testcase name="validFixturePassesDraft202012AndItsDeclaredSelfHash(Path)[9]" classname="com.example.dispute.workflow.contract.v1.EvidenceV2ContractFixtureTest" time="0.0" />
+    <testcase name="validFixturesHaveDualOutputPinsAndDirectManifestSignatureShape" classname="com.example.dispute.workflow.contract.v1.EvidenceV2ContractFixtureTest" time="0.009" />
+  </testsuite>
+</testsuites>

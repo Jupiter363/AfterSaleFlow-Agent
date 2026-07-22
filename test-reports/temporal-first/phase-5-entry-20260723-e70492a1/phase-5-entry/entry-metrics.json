@@ -1,0 +1,173 @@
+{
+  "schema_version": "phase5-entry-evidence.v1",
+  "release_id": "phase-5-entry-20260723-e70492a1",
+  "gate": "P5.0",
+  "batch": "P5-BATCH-0",
+  "result": "PASS_AWAITING_EVIDENCE_COMMIT",
+  "candidate_commit": "e70492a11e23307382ea762d0e8e7f57ab58870b",
+  "base_commit": "b8697ce7a46f4494d250d21f27a076f0711ae04d",
+  "execution_manifest": {
+    "path": "phase5-entry-execution-manifest.json",
+    "sha256": "190730126f689f271a45597922e91619b287d8399d5c803947f000b13f4e4ceb",
+    "manifest_sha256": "2a0d1859738e7998ae37a62ebdc4eb5e4b651b9332cfed300e63ecd083ffa6f0",
+    "schema_version": "phase5-entry-execution-manifest.v1"
+  },
+  "execution_environment": {
+    "environment_id": "phase5-entry-e70492a1-r1",
+    "snapshot_sha256": "d4f0e2c3468e3fec91daabe929a736ecc6e1ce423d422f1fccc4664badc7d074"
+  },
+  "verification": {
+    "started_at": "2026-07-22T21:11:02.424+00:00",
+    "finished_at": "2026-07-22T21:14:27.430+00:00",
+    "clean_detached_candidate_required": true,
+    "mixed_candidate_results": false,
+    "source_reports_reused_from_other_run": false
+  },
+  "upstream_phase4_checkpoint": {
+    "checkpoint_path": "test-reports/temporal-first/phase-4-20260722-1ba6e17f/phase-4/phase-metrics.json",
+    "checkpoint_sha256": "33832d631a6df6c687ddaaff559c2868eb7a48758e9c97f6364d77a76e0ecef3",
+    "candidate_commit_file_sha256": "dfdd655e569356ba7f3d816f2926843f10c4ee6bf81f160a45656dddb65136b5",
+    "source_execution_manifest_git_sha256": "6a482cccfa87b8f6582f784b33e9644bba9a03d70eb4bc3a08739ef09ca8728d",
+    "evidence_commit": "b8697ce7a46f4494d250d21f27a076f0711ae04d",
+    "phase4_candidate_commit": "1ba6e17fa2182156825f42d7e243978cf23ccdb4",
+    "engineering_checkpoint": "PASS",
+    "next_phase_permission": "PHASE_5_ENGINEERING_ONLY",
+    "promotion_gate": "PENDING",
+    "MIG-004": "PENDING_PROMOTION",
+    "source_execution_manifest_sha256": "ff972f8845530bdcfcaecff51ae1ec3996fb647290b1a49131b449dafb543ea2"
+  },
+  "source_suites": [
+    {
+      "command_id": "p5_entry_static",
+      "candidate_commit": "e70492a11e23307382ea762d0e8e7f57ab58870b",
+      "environment_sha256": "d4f0e2c3468e3fec91daabe929a736ecc6e1ce423d422f1fccc4664badc7d074",
+      "cwd": ".",
+      "matrix_command_sha256": "090d07058e0752664f8337e3cd771493e5b836d93cc06d233ed71c49c0089048",
+      "executed_command_sha256": "013d0a3bc5975a2fdabfde4507e78d3b8de0cd805dfb25486b4f56a91811bd63",
+      "started_at": "2026-07-22T21:11:02.730+00:00",
+      "finished_at": "2026-07-22T21:11:58.370+00:00",
+      "duration_seconds": 55.64,
+      "exit_code": 0,
+      "failure_classification": "NONE",
+      "report": "static-phase5-entry-junit.xml",
+      "report_sha256": "83930685e97951d3af3f7126b56624d43b288cf62e0ddd7d5615d6dd9f32e7fd",
+      "report_bytes": 24028,
+      "junit": {
+        "tests": 145,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "time": 49.642
+      }
+    },
+    {
+      "command_id": "p5_entry_python",
+      "candidate_commit": "e70492a11e23307382ea762d0e8e7f57ab58870b",
+      "environment_sha256": "d4f0e2c3468e3fec91daabe929a736ecc6e1ce423d422f1fccc4664badc7d074",
+      "cwd": "python-agent-service",
+      "matrix_command_sha256": "f74f6cde31e0511ac7c4da7463f18de4409f67dae20ff1693e416ef35d9bc3c1",
+      "executed_command_sha256": "084627d8d1abd742f9f35ec32808ff3c7f8b8cc203c619e6eb1ff9e33bf878fa",
+      "started_at": "2026-07-22T21:11:58.720+00:00",
+      "finished_at": "2026-07-22T21:12:11.273+00:00",
+      "duration_seconds": 12.552,
+      "exit_code": 0,
+      "failure_classification": "NONE",
+      "report": "python-phase5-entry-junit.xml",
+      "report_sha256": "01f166838cef4be49e5613d1a76d7a64937559fb56eb138b1890c028319d447d",
+      "report_bytes": 9596,
+      "junit": {
+        "tests": 61,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "time": 0.919
+      }
+    },
+    {
+      "command_id": "p5_entry_java",
+      "candidate_commit": "e70492a11e23307382ea762d0e8e7f57ab58870b",
+      "environment_sha256": "d4f0e2c3468e3fec91daabe929a736ecc6e1ce423d422f1fccc4664badc7d074",
+      "cwd": "java-api-service",
+      "matrix_command_sha256": "217aa9f9bf367685aaa4d1e1819ab28e9d385a416fdc8edf909b91b25828f8a5",
+      "executed_command_sha256": "17f2e874edb86cb63bcfb7b4b9e9ead68a32a6ff97d589af589100b37c708dab",
+      "started_at": "2026-07-22T21:12:11.617+00:00",
+      "finished_at": "2026-07-22T21:14:19.079+00:00",
+      "duration_seconds": 127.463,
+      "exit_code": 0,
+      "failure_classification": "NONE",
+      "report": "java-phase5-entry-junit.xml",
+      "report_sha256": "0f572ffb1da44f73cb227f36e0935c69b2b283628f29f21023e3aa400bf886b0",
+      "report_bytes": 195248,
+      "junit": {
+        "tests": 93,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "time": 20.117
+      }
+    },
+    {
+      "command_id": "p5_entry_frontend",
+      "candidate_commit": "e70492a11e23307382ea762d0e8e7f57ab58870b",
+      "environment_sha256": "d4f0e2c3468e3fec91daabe929a736ecc6e1ce423d422f1fccc4664badc7d074",
+      "cwd": "frontend",
+      "matrix_command_sha256": "8275d86fe9ae22ac096ab51638c53bf7c5e375a7326646ddd1a637d9f3916b73",
+      "executed_command_sha256": "8be11445906cd7bfef179d0c3996794218364be0fbf11b0001def5b10c799c12",
+      "started_at": "2026-07-22T21:14:19.477+00:00",
+      "finished_at": "2026-07-22T21:14:27.102+00:00",
+      "duration_seconds": 7.625,
+      "exit_code": 0,
+      "failure_classification": "NONE",
+      "report": "frontend-phase5-entry-junit.xml",
+      "report_sha256": "80bbe814028f947ed069ff5058e624e0cafa72bc827440656a9f3a2579c027b4",
+      "report_bytes": 20443,
+      "junit": {
+        "tests": 97,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0,
+        "time": 2.975368
+      }
+    }
+  ],
+  "totals": {
+    "tests": 396,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "time": 73.653368
+  },
+  "recovery": {
+    "quarantined_attempt_count": 0,
+    "classifications": [],
+    "unclassified_attempts": 0,
+    "quarantined_attempts_reused": false
+  },
+  "entry_decision": {
+    "engineering_execution": "BLOCKED_UNTIL_THIS_EVIDENCE_COMMIT",
+    "entry_effect_after_commit": "P5_0_ENGINEERING_ENTRY_PASS",
+    "promotion_gate": "PENDING",
+    "MIG-004": "PENDING_PROMOTION",
+    "MIG-005": "PENDING_PROMOTION",
+    "implementation_allowed_before_commit": false
+  },
+  "runtime_restrictions": {
+    "allowed_modes": [
+      "LEGACY",
+      "DISABLED",
+      "SIGNED_SYNTHETIC_SHADOW"
+    ],
+    "formal_evidence_sink": false,
+    "temporal_evidence_allocation": false,
+    "real_case_shadow": false,
+    "production_traffic": false,
+    "canary": false,
+    "promotion": false,
+    "public_submission_max": 50,
+    "closed_synthetic_manifest_counts": [
+      1,
+      8,
+      100
+    ]
+  }
+}
