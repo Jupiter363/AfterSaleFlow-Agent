@@ -5,11 +5,12 @@ from dataclasses import replace
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, TypedDict, cast
 
 import pytest
 import httpx
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph import END, START, StateGraph
 
 from app.api.graph_lifecycle import GraphExecutorKernel
 from app.config import GraphShadowBindingSettings, Settings
@@ -74,6 +75,10 @@ BASE_SETTINGS = {
     "java_service_secret": "test-java-service-secret",
     "python_agent_service_secret": "test-python-service-secret",
 }
+
+
+class _CheckpointProbeState(TypedDict):
+    marker: str
 
 
 def _command() -> RoomGraphCommand:
@@ -703,6 +708,74 @@ async def test_compiled_intake_executor_persists_one_pointer_without_replacing_s
     assert result_json["artifact_operations"][0]["operation"] == "PROPOSE_PATCH"
     assert durable_state["terminal_draft"] == proposal_before
     assert durable_state["result_json"] == proposal_before
+
+
+@pytest.mark.asyncio
+async def test_intake_continuation_resumes_the_durable_checkpoint_not_a_newer_orphan() -> None:
+    command, _, _ = _intake_command()
+    execution = _intake_execution(command)
+    builder = StateGraph(_CheckpointProbeState)
+    builder.add_node("complete", lambda state: {})
+    builder.add_edge(START, "complete")
+    builder.add_edge("complete", END)
+    graph = builder.compile(checkpointer=InMemorySaver())
+    latest_config = {
+        "configurable": {
+            "thread_id": command.thread_id,
+            "checkpoint_ns": "",
+        }
+    }
+
+    await graph.ainvoke({"marker": "committed"}, latest_config)
+    committed = await graph.aget_state(latest_config)
+    committed_id = committed.config["configurable"]["checkpoint_id"]
+    await graph.aupdate_state(
+        committed.config,
+        {"marker": "newer-uncommitted"},
+        as_node="complete",
+    )
+    assert (await graph.aget_state(latest_config)).values["marker"] == "newer-uncommitted"
+
+    assert execution.thread_record is not None
+    committed_record = replace(
+        execution.thread_record,
+        cognitive_revision=1,
+        last_checkpoint_ns="",
+        last_checkpoint_id=committed_id,
+    )
+    resume_config = CompiledIntakeGraphShadowExecutor._graph_config(
+        replace(execution, thread_record=committed_record)
+    )
+
+    assert resume_config["configurable"]["checkpoint_id"] == committed_id
+    assert (await graph.aget_state(resume_config)).values["marker"] == "committed"
+
+
+@pytest.mark.parametrize(
+    ("checkpoint_ns", "checkpoint_id"),
+    [
+        (None, "cp-committed"),
+        ("", None),
+    ],
+)
+def test_intake_continuation_rejects_a_partial_durable_checkpoint_pointer(
+    checkpoint_ns: str | None,
+    checkpoint_id: str | None,
+) -> None:
+    command, _, _ = _intake_command()
+    execution = _intake_execution(command)
+    assert execution.thread_record is not None
+    inconsistent = replace(
+        execution,
+        thread_record=replace(
+            execution.thread_record,
+            last_checkpoint_ns=checkpoint_ns,
+            last_checkpoint_id=checkpoint_id,
+        ),
+    )
+
+    with pytest.raises(GraphContractError, match="must be present together"):
+        CompiledIntakeGraphShadowExecutor._graph_config(inconsistent)
 
 
 def test_intake_ingress_rejects_private_contaminants_before_graph_mutation() -> None:

@@ -230,10 +230,26 @@ class CompiledIntakeGraphShadowExecutor:
     @staticmethod
     def _graph_config(execution: GatewayExecution) -> RunnableConfig:
         record = execution.thread_record
+        checkpoint_ns = record.last_checkpoint_ns
+        checkpoint_id = record.last_checkpoint_id
+        if (checkpoint_ns is None) != (checkpoint_id is None):
+            raise GraphContractError(
+                "durable Intake checkpoint namespace and ID must be present together"
+            )
+        if checkpoint_ns is not None and (
+            not isinstance(checkpoint_ns, str)
+            or len(checkpoint_ns) > 128
+            or not isinstance(checkpoint_id, str)
+            or not checkpoint_id
+            or len(checkpoint_id) > 128
+        ):
+            raise GraphContractError("durable Intake checkpoint pointer is invalid")
         configurable: dict[str, Any] = {
             "thread_id": execution.fence.thread_id,
-            "checkpoint_ns": record.last_checkpoint_ns or "",
+            "checkpoint_ns": checkpoint_ns or "",
         }
+        if checkpoint_id is not None:
+            configurable["checkpoint_id"] = checkpoint_id
         return bind_fence_context({"configurable": configurable}, execution.fence)
 
     @staticmethod
