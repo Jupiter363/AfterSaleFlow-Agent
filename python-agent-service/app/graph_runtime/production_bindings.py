@@ -1,4 +1,4 @@
-"""Deployment-owned bindings for the Phase 3 signed-synthetic SHADOW runtime."""
+"""Deployment-owned bindings for signed-synthetic SHADOW runtimes."""
 
 from __future__ import annotations
 
@@ -42,6 +42,7 @@ from app.graph_runtime.identity import (
     ThreadIdentity,
     ThreadRecord,
 )
+from app.graph_runtime.intake_binding import require_exact_intake_binding
 from app.graph_runtime.registry import VersionBinding
 from app.graph_runtime.result import ResultBindings, TERMINAL_DRAFT_ADAPTER
 from app.graph_runtime.state import CommonGraphState, validate_graph_state
@@ -237,6 +238,8 @@ def _executor_registration(
     configured: GraphShadowBindingSettings,
     kernel: GraphExecutorKernel,
 ) -> ShadowExecutorRegistration:
+    if configured.graph_key == "intake.v2":
+        return _intake_executor_registration(configured, kernel)
     binding = _version_binding(configured)
     builder = build_shadow_kernel_graph(
         validate_command=_validate_synthetic_state,
@@ -260,6 +263,18 @@ def _executor_registration(
             model="deterministic-synthetic",
             allowed_nodes=frozenset({"execute_graph"}),
         ),
+    )
+
+
+def _intake_executor_registration(
+    configured: GraphShadowBindingSettings,
+    kernel: GraphExecutorKernel,
+) -> ShadowExecutorRegistration:
+    del kernel
+    require_exact_intake_binding(configured)
+    raise ValueError(
+        "intake.v2 production binding is unavailable: the generic terminal checkpoint protocol "
+        "overwrites Intake proposal state, and immutable payload/proposal storage ports are absent"
     )
 
 

@@ -10,8 +10,8 @@ import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 
 from app.api.graph_lifecycle import GraphExecutorKernel
-from app.config import Settings
-from app.contracts.v1.codec import canonical_sha256_omitting
+from app.config import GraphShadowBindingSettings, Settings
+from app.contracts.v1.codec import canonical_sha256_omitting, canonicalize
 from app.contracts.v1.models import RoomGraphCommand
 from app.graph_runtime.compiled_executor import CompiledGraphShadowExecutor
 from app.graph_runtime.errors import (
@@ -20,13 +20,28 @@ from app.graph_runtime.errors import (
     GraphVersionUnavailableError,
 )
 from app.graph_runtime.gateway import GatewayExecution
-from app.graph_runtime.identity import ThreadLifecycle, ThreadRecord
+from app.graph_runtime.identity import (
+    ActorScopeBinding,
+    RoomType,
+    ThreadIdentity,
+    ThreadLifecycle,
+    ThreadRecord,
+)
+from app.graph_runtime.intake_binding import (
+    LoadedIntakePayload,
+    build_governed_intake_runtime,
+    build_intake_execution_state,
+    canonical_intake_proposal,
+    decode_authorized_intake_ingress,
+)
+from app.graph_runtime.persistence_models import GraphFenceContext
 from app.graph_runtime.production_bindings import (
     _advance_revision,
     _initial_state,
     _project_synthetic_result,
     _terminal_plan,
     _validate_synthetic_state,
+    _executor_registration,
     build_graph_runtime_bindings,
 )
 from app.graph_runtime.registry import RegistryRecord, RegistryState, VersionBinding
@@ -37,6 +52,7 @@ from app.security.invocation_envelope import (
     VerifiedReconciliation,
     invocation_binding_claims,
 )
+from app.model_runtime.transports import ModelTransportRequest
 
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -54,9 +70,62 @@ BASE_SETTINGS = {
 
 def _command() -> RoomGraphCommand:
     document = json.loads(COMMAND_FIXTURE.read_text(encoding="utf-8"))["instance"]
+    document["graph_key"] = "phase3.synthetic.v1"
     document["invocation_context"]["tool_capabilities"] = []
     document["request_hash"] = canonical_sha256_omitting(document, "request_hash")
     return RoomGraphCommand.model_validate(document)
+
+
+def _intake_command() -> tuple[RoomGraphCommand, dict[str, Any], bytes]:
+    snapshot = json.loads(
+        (
+            ROOT
+            / "contracts/agent-platform/intake/v2/fixtures/valid/intake-domain-snapshot-valid.json"
+        ).read_text(encoding="utf-8")
+    )
+    payload = canonicalize(snapshot)
+    registration = json.loads(
+        (
+            ROOT
+            / "contracts/agent-platform/intake/v2/fixtures/valid/graph-private-thread-registration-valid.json"
+        ).read_text(encoding="utf-8")
+    )
+    document = json.loads(COMMAND_FIXTURE.read_text(encoding="utf-8"))["instance"]
+    document.update(
+        {
+            "command_id": "COMMAND_P4_USER_1",
+            "logical_run_id": "RUN_P4_USER_1",
+            "attempt_id": "ATTEMPT_P4_USER_1_1",
+            "tenant_surrogate": snapshot["tenant_surrogate"],
+            "case_id": snapshot["case_id"],
+            "room_epoch": snapshot["room_epoch"],
+            "graph_key": registration["graph_key"],
+            "graph_version": registration["graph_version"],
+            "checkpoint_schema_version": registration["checkpoint_schema_version"],
+            "thread_id": snapshot["thread_id"],
+            "actor_scope": registration["actor_scope"],
+            "domain_snapshot_ref": {
+                "artifact_id": snapshot["snapshot_id"],
+                "schema_version": snapshot["schema_version"],
+                "uri": "s3://graph-input/intake/snapshot-p4-user-1.json",
+                "sha256": snapshot["snapshot_hash"],
+                "size_bytes": len(payload),
+            },
+        }
+    )
+    document["invocation_context"].update(
+        {
+            "agent_profile_id": "intake-agent.synthetic.v2",
+            "prompt_profile_id": registration["prompt_version"],
+            "model_profile_id": registration["model_profile_id"],
+            "output_schema_version": registration["output_schema_version"],
+            "policy_version": registration["policy_version"],
+            "guardrail_version": registration["guardrail_version"],
+            "tool_capabilities": [],
+        }
+    )
+    document["request_hash"] = canonical_sha256_omitting(document, "request_hash")
+    return RoomGraphCommand.model_validate(document), snapshot, payload
 
 
 def _binding(command: RoomGraphCommand) -> dict[str, Any]:
@@ -109,6 +178,31 @@ def _thread(command: RoomGraphCommand) -> dict[str, Any]:
             }
         ],
     }
+
+
+def _intake_binding(command: RoomGraphCommand) -> dict[str, Any]:
+    binding = _binding(command)
+    binding.update(
+        {
+            "state_schema_version": "intake-graph-state.v2",
+            "output_schema_version": "intake-turn-proposal.v2",
+            "tool_policy_version": "no-tools.v1",
+            "code_build_id": "phase4.intake.v2",
+            "allowed_room_types": ["INTAKE"],
+        }
+    )
+    return binding
+
+
+def _intake_config(command: RoomGraphCommand) -> GraphShadowBindingSettings:
+    values = _intake_binding(command)
+    return GraphShadowBindingSettings.model_construct(
+        **{
+            **values,
+            "allowed_room_types": tuple(values["allowed_room_types"]),
+            "allowed_stage_codes": tuple(values["allowed_stage_codes"]),
+        }
+    )
 
 
 def _settings(
@@ -198,6 +292,97 @@ def _version(command: RoomGraphCommand) -> VersionBinding:
         binding_hash=configured["binding_hash"],
         code_build_id=configured["code_build_id"],
     )
+
+
+def _intake_version(command: RoomGraphCommand) -> VersionBinding:
+    configured = _intake_binding(command)
+    return VersionBinding(
+        graph_key=configured["graph_key"],
+        graph_version=configured["graph_version"],
+        checkpoint_schema_version=configured["checkpoint_schema_version"],
+        state_schema_version=configured["state_schema_version"],
+        state_schema_hash=configured["state_schema_hash"],
+        command_schema_version=configured["command_schema_version"],
+        result_schema_version=configured["result_schema_version"],
+        prompt_version=configured["prompt_version"],
+        model_profile_id=configured["model_profile_id"],
+        output_schema_version=configured["output_schema_version"],
+        policy_version=configured["policy_version"],
+        guardrail_version=configured["guardrail_version"],
+        tool_policy_version=configured["tool_policy_version"],
+        binding_hash=configured["binding_hash"],
+        code_build_id=configured["code_build_id"],
+    )
+
+
+class _NoCallIntakeTransport:
+    def generate(self, request: ModelTransportRequest):
+        raise AssertionError("snapshot initialization must not call the governed model")
+
+    async def agenerate(self, request: ModelTransportRequest):
+        raise AssertionError("snapshot initialization must not call the governed model")
+
+    def stream(self, request: ModelTransportRequest):
+        raise AssertionError("snapshot initialization must not call the governed model")
+        yield
+
+    async def astream(self, request: ModelTransportRequest):
+        raise AssertionError("snapshot initialization must not call the governed model")
+        yield
+
+
+def _intake_execution(
+    command: RoomGraphCommand,
+) -> GatewayExecution:
+    identity = ThreadIdentity(
+        thread_id=command.thread_id,
+        tenant_surrogate=command.tenant_surrogate,
+        case_id=command.case_id,
+        room_type=RoomType.INTAKE,
+        room_epoch=command.room_epoch,
+        actor_scope=ActorScopeBinding.from_json(
+            command.actor_scope.model_dump(mode="json")
+        ),
+        agent_session_id="AGENT_SESSION_P4_USER_1",
+        shared_session=False,
+        graph_key=command.graph_key,
+        graph_version=command.graph_version,
+        checkpoint_schema_version=command.checkpoint_schema_version,
+    )
+    registry = RegistryRecord(
+        binding=_intake_version(command),
+        state=RegistryState.SHADOW,
+        loadable=True,
+        revision=1,
+    )
+    fence = GraphFenceContext(
+        thread_id=command.thread_id,
+        command_id=command.command_id,
+        owner_id="intake-binding-test",
+        fencing_token=1,
+        request_hash=command.request_hash,
+        room_epoch=command.room_epoch,
+        graph_key=command.graph_key,
+        graph_version=command.graph_version,
+        checkpoint_schema_version=command.checkpoint_schema_version,
+    )
+    execution = GatewayExecution(
+        admission=cast(
+            Any,
+            SimpleNamespace(command=command, registry=registry, thread=identity),
+        ),
+        attempt=cast(Any, object()),
+        lease=cast(Any, object()),
+        fence=fence,
+        thread_record=ThreadRecord(
+            identity=identity,
+            lifecycle=ThreadLifecycle.ACTIVE,
+            cognitive_revision=0,
+            last_checkpoint_ns=None,
+            last_checkpoint_id=None,
+        ),
+    )
+    return execution
 
 
 @pytest.mark.asyncio
@@ -302,6 +487,109 @@ def test_executor_factory_registers_a_real_exact_compiled_executor() -> None:
     drifted = replace(record, binding=replace(record.binding, binding_hash="e" * 64))
     with pytest.raises(GraphVersionUnavailableError):
         registry.resolve_registration(drifted)
+
+
+def test_exact_intake_graph_key_never_falls_back_to_the_phase3_kernel() -> None:
+    command, _, _ = _intake_command()
+
+    with pytest.raises(ValueError, match="terminal checkpoint protocol.*proposal storage"):
+        _executor_registration(
+            _intake_config(command),
+            GraphExecutorKernel(
+                saver=cast(Any, InMemorySaver()), gateway=cast(Any, object())
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_authorized_intake_adapter_builds_the_real_governed_graph_proposal() -> None:
+    command, snapshot, payload = _intake_command()
+    saver = InMemorySaver()
+    execution = _intake_execution(command)
+    context = decode_authorized_intake_ingress(
+        command=command,
+        loaded=LoadedIntakePayload(
+            artifact_id=command.domain_snapshot_ref.artifact_id,
+            schema_version=command.domain_snapshot_ref.schema_version,
+            uri=command.domain_snapshot_ref.uri,
+            sha256=command.domain_snapshot_ref.sha256,
+            size_bytes=len(payload),
+            canonical_payload=payload,
+        ),
+    )
+    bundle = build_governed_intake_runtime(
+        execution=execution,
+        transport=cast(Any, _NoCallIntakeTransport()),
+        provider="synthetic",
+        model="intake-model",
+        checkpointer=saver,
+    )
+    assert bundle.graph.checkpointer is saver
+    assert bundle.model_node.model.profile.profile_id == "intake-model.synthetic.v1"
+
+    state = build_intake_execution_state(execution)
+    result = await bundle.graph.ainvoke(
+        state,
+        {"configurable": {"thread_id": command.thread_id}},
+        context=context,
+    )
+    proposal = bundle.terminal_proposal(result)
+    artifact = canonical_intake_proposal(proposal)
+
+    assert proposal.schema_version == "intake-turn-proposal.v2"
+    assert proposal.command_id == command.command_id
+    assert proposal.thread_id == command.thread_id
+    assert proposal.actor_scope_hash == snapshot["actor_scope_hash"]
+    assert proposal.profile_versions.model_profile_id == "intake-model.synthetic.v1"
+    assert proposal.profile_versions.tool_policy_version == "no-tools.v1"
+    assert artifact.schema_version == "intake-turn-proposal.v2"
+    assert artifact.sha256 == proposal.proposal_hash
+    assert artifact.size_bytes == len(artifact.canonical_payload)
+    assert b"memory_frame" not in artifact.canonical_payload
+    assert b"formal_action" not in artifact.canonical_payload
+
+
+def test_intake_ingress_rejects_private_contaminants_before_graph_mutation() -> None:
+    command, snapshot, _ = _intake_command()
+    contaminated = {**snapshot, "memory_frame": {"other_party": "private"}}
+    contaminated["snapshot_hash"] = canonical_sha256_omitting(
+        contaminated,
+        "snapshot_hash",
+    )
+    payload = canonicalize(contaminated)
+    reference = command.domain_snapshot_ref.model_copy(
+        update={"sha256": contaminated["snapshot_hash"], "size_bytes": len(payload)}
+    )
+    forged_command = command.model_copy(update={"domain_snapshot_ref": reference})
+
+    with pytest.raises(GraphContractError, match="frozen schema"):
+        decode_authorized_intake_ingress(
+            command=forged_command,
+            loaded=LoadedIntakePayload(
+                artifact_id=reference.artifact_id,
+                schema_version=reference.schema_version,
+                uri=reference.uri,
+                sha256=reference.sha256,
+                size_bytes=reference.size_bytes,
+                canonical_payload=payload,
+            ),
+        )
+
+
+def test_intake_dispatch_rejects_version_relabeling_before_registration() -> None:
+    command, _, _ = _intake_command()
+    drifted = _intake_config(command).model_copy(
+        update={"state_schema_version": "phase3.synthetic.state.v1"}
+    )
+
+    with pytest.raises(GraphContractError, match="frozen Intake binding"):
+        _executor_registration(
+            drifted,
+            GraphExecutorKernel(
+                saver=cast(Any, InMemorySaver()),
+                gateway=cast(Any, object()),
+            ),
+        )
 
 
 @pytest.mark.asyncio
