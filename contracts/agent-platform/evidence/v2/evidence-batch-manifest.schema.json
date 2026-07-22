@@ -24,6 +24,27 @@
   "x-gateway-cross-binding": {
     "source_schema_version": "room-graph-command.v1",
     "manifest_ref_field": "domain_snapshot_ref",
+    "manifest_ref_payload_binding": {
+      "canonicalization": "RFC_8785",
+      "encoding": "UTF-8",
+      "sha256_field": "domain_snapshot_ref.sha256",
+      "size_bytes_field": "domain_snapshot_ref.size_bytes",
+      "covers": "FULL_CANONICAL_SIGNED_MANIFEST_PAYLOAD"
+    },
+    "manifest_internal_self_hash": {
+      "field": "manifest_hash",
+      "canonicalization": "RFC_8785",
+      "omit_top_level_fields": [
+        "manifest_hash",
+        "signature"
+      ]
+    },
+    "verification_order": [
+      "VERIFY_REFERENCED_PAYLOAD_HASH_AND_SIZE_BEFORE_PARSE",
+      "PARSE_MANIFEST",
+      "VERIFY_MANIFEST_SELF_HASH",
+      "VERIFY_MANIFEST_SIGNATURE"
+    ],
     "requires_verified_java_envelope": true,
     "command_binds_room_fencing_token": false,
     "room_fencing_token_authority": "JAVA_SIGNED_MANIFEST",
@@ -61,7 +82,7 @@
     },
     {
       "id": "GATEWAY_COMMAND_EXACT_BINDING",
-      "rule": "before Graph or checkpoint mutation, the trusted gateway verifies the Java-signed room-graph-command.v1 envelope and exact domain_snapshot_ref id/schema/URI/hash/size plus its actual command/run/attempt, tenant/case, room type/epoch, thread, actor scope, graph/checkpoint, invocation registry/profile, deadline and request bindings; the signed manifest separately binds Java room fencing_token, registration, participant and session, the gateway independently requires the current Graph lease fence for checkpoint writes, the two fences are distinct, and Java Finalizer revalidates the room fence"
+      "rule": "before parsing or Graph/checkpoint mutation, the trusted gateway verifies domain_snapshot_ref.sha256 against SHA-256 of the full RFC8785 canonical signed manifest payload bytes and domain_snapshot_ref.size_bytes against that full UTF-8 payload byte length; only then does it parse the manifest, verify internal manifest_hash as RFC8785 SHA-256 with manifest_hash and signature omitted, and verify the Java ES256 signature over manifest_hash; the referenced payload hash/size and internal manifest_hash are distinct and must never be substituted for one another; the gateway also verifies the Java-signed room-graph-command.v1 envelope and exact domain_snapshot_ref id/schema/URI plus its actual command/run/attempt, tenant/case, room type/epoch, thread, actor scope, graph/checkpoint, invocation registry/profile, deadline and request bindings; the signed manifest separately binds Java room fencing_token, registration, participant and session, the gateway independently requires the current Graph lease fence for checkpoint writes, the two fences are distinct, and Java Finalizer revalidates the room fence"
     },
     {
       "id": "INITIAL_ADMISSION_AND_RECOVERY",
