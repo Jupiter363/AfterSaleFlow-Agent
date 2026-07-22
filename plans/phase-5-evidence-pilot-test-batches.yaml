@@ -392,6 +392,58 @@ batches:
       - MIG-004
       - EVIDENCE_100_FILE_PRODUCT_API_UI_APPROVAL
       - PRODUCTION_ASSET_AUTHORIZATION
+    source_commands:
+      - id: p5_entry_static
+        cwd: .
+        report: static-phase5-entry-junit.xml
+        resource_class: light_pytest
+        command: >-
+          D:\miniconda\python.exe -m pytest
+          tests/static/test_phase5_evidence_pilot_plan.py
+          tests/static/test_phase5_entry_contract_plan.py
+          tests/static/test_phase5_entry_runner.py
+          tests/static/test_temporal_refactor_traceability.py
+          tests/static/test_graph_import_boundaries.py
+          tests/static/test_agent_platform_schema_contracts.py
+          -q
+      - id: p5_entry_python
+        cwd: python-agent-service
+        report: python-phase5-entry-junit.xml
+        resource_class: light_pytest
+        command: >-
+          D:\miniconda\python.exe -m pytest
+          tests/agents/test_evidence_clerk_turn.py
+          tests/agents/test_evidence_fact_mapping_policy.py
+          tests/evals/test_evidence_clerk_prompt_catalog.py
+          tests/test_streaming.py
+          tests/test_streaming_v2.py
+          -q
+      - id: p5_entry_java
+        cwd: java-api-service
+        report: java-phase5-entry-junit.xml
+        resource_class: maven_test
+        command: >-
+          .\mvnw.cmd -DforkCount=1
+          -Dtest=EvidenceApiIntegrationTest,EvidenceSubmissionServiceTest,EvidenceCompletionServiceTest,EvidenceAgentTurnServiceTest,EvidenceDossierFreezerTest,EvidenceWindowWorkflowTest,EvidenceWindowCoordinatorTest,EvidenceRoomControllerTest,EvidenceRoomIntegrationTest
+          test
+      - id: p5_entry_frontend
+        cwd: frontend
+        report: frontend-phase5-entry-junit.xml
+        resource_class: light_frontend_unit
+        preflight:
+          required_path: frontend/node_modules/vitest/vitest.mjs
+          missing_classification: INFRA
+          action: Preserve the failed attempt, run pnpm install --frozen-lockfile against the exact pnpm-lock.yaml, then resume the same SHA.
+          forbidden_action: Do not remove frontend baseline suites or weaken assertions to bypass a missing dependency tree.
+        command: >-
+          node node_modules/vitest/vitest.mjs run
+          src/views/disputes/EvidenceRoomView.test.js
+          src/components/room/RoomShell.test.js
+          src/api/evidence.test.js
+          src/api/agentStream.test.js
+          src/stores/agentStream.test.js
+          --minWorkers=1
+          --maxWorkers=2
     baseline_suites:
       java:
         - EvidenceApiIntegrationTest
@@ -418,12 +470,27 @@ batches:
     static_tests:
       - tests/static/test_phase5_evidence_pilot_plan.py
       - tests/static/test_phase5_entry_contract_plan.py
+      - tests/static/test_phase5_entry_runner.py
       - tests/static/test_temporal_refactor_traceability.py
       - tests/static/test_graph_import_boundaries.py
       - tests/static/test_agent_platform_schema_contracts.py
     execution:
+      runner: scripts/run_phase5_entry_checkpoint.py
+      command_order: [p5_entry_static, p5_entry_python, p5_entry_java, p5_entry_frontend]
+      source_reports:
+        - static-phase5-entry-junit.xml
+        - python-phase5-entry-junit.xml
+        - java-phase5-entry-junit.xml
+        - frontend-phase5-entry-junit.xml
+      execution_manifest: phase5-entry-execution-manifest.json
+      execution_manifest_schema: phase5-entry-execution-manifest.v1
+      fresh_run_directory_required: true
+      sealed_manifest_required: true
+      exact_candidate_sha_required: true
       candidate_sha_must_be_clean_and_detached: true
       evidence_commit_must_be_later_than_tested_sha: true
+      same_sha_retry_allowed_only_for: INFRA
+      product_fixture_or_external_gate_blocks_candidate: true
       heavy_parallelism: 1
       light_parallelism: 2
       browser_or_playwright: none

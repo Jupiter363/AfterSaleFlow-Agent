@@ -408,3 +408,64 @@ def test_phase5_owner_briefs_reserve_shared_paths_for_primary_integration() -> N
         "java-api-service/src/main/java/com/example/dispute/workflow/config/TemporalWorkerConfiguration.java"
         in primary_paths
     )
+
+
+def test_phase5_batch0_source_commands_execute_every_declared_baseline_suite() -> None:
+    batch = _batches()["batches"]["P5-BATCH-0"]
+    commands = {item["id"]: item for item in batch["source_commands"]}
+
+    assert list(commands) == [
+        "p5_entry_static",
+        "p5_entry_python",
+        "p5_entry_java",
+        "p5_entry_frontend",
+    ]
+    assert [item["report"] for item in commands.values()] == batch["execution"][
+        "source_reports"
+    ]
+    for path in batch["static_tests"]:
+        assert path in commands["p5_entry_static"]["command"]
+    for path in batch["baseline_suites"]["python"]:
+        relative = path.removeprefix("python-agent-service/")
+        assert relative in commands["p5_entry_python"]["command"]
+    for path in batch["baseline_suites"]["frontend"]:
+        relative = path.removeprefix("frontend/")
+        assert relative in commands["p5_entry_frontend"]["command"]
+    for class_name in batch["baseline_suites"]["java"]:
+        assert class_name in commands["p5_entry_java"]["command"]
+
+
+def test_phase5_batch0_java_selectors_are_exact_and_deduplicated() -> None:
+    batch = _batches()["batches"]["P5-BATCH-0"]
+    java = next(item for item in batch["source_commands"] if item["id"] == "p5_entry_java")
+    selector = next(
+        token for token in java["command"].split() if token.startswith("-Dtest=")
+    )
+    classes = selector.removeprefix("-Dtest=").split(",")
+
+    assert len(classes) == len(set(classes))
+    assert set(classes) == set(batch["baseline_suites"]["java"])
+
+
+def test_phase5_batch0_runner_is_candidate_bound_and_frontend_missing_is_infra() -> None:
+    batch = _batches()["batches"]["P5-BATCH-0"]
+    execution = batch["execution"]
+    frontend = next(
+        item for item in batch["source_commands"] if item["id"] == "p5_entry_frontend"
+    )
+
+    assert execution["runner"] == "scripts/run_phase5_entry_checkpoint.py"
+    assert execution["fresh_run_directory_required"] is True
+    assert execution["sealed_manifest_required"] is True
+    assert execution["exact_candidate_sha_required"] is True
+    assert execution["candidate_sha_must_be_clean_and_detached"] is True
+    assert execution["same_sha_retry_allowed_only_for"] == "INFRA"
+    assert execution["heavy_parallelism"] == 1
+    assert execution["light_parallelism"] == 2
+    assert frontend["preflight"]["required_path"] == (
+        "frontend/node_modules/vitest/vitest.mjs"
+    )
+    assert frontend["preflight"]["missing_classification"] == "INFRA"
+    assert "pnpm-lock.yaml" in frontend["preflight"]["action"]
+    assert "pnpm install --frozen-lockfile" in frontend["preflight"]["action"]
+    assert "weaken" in frontend["preflight"]["forbidden_action"]
