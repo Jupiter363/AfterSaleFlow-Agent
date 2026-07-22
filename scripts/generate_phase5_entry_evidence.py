@@ -5,6 +5,7 @@ import hashlib
 import json
 import re
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Sequence
@@ -26,6 +27,16 @@ CANDIDATE_NAME = "candidate.txt"
 HASH_INDEX_NAME = "artifact-sha256.json"
 EVIDENCE_SCHEMA = "phase5-entry-evidence.v1"
 HASH_INDEX_SCHEMA = "phase5-entry-artifact-index.v1"
+
+
+def _json_lf_bytes(document: Any) -> bytes:
+    return (
+        json.dumps(document, ensure_ascii=False, indent=2, sort_keys=False) + "\n"
+    ).encode("utf-8")
+
+
+def _write_json_lf(path: Path, document: Any) -> None:
+    path.write_bytes(_json_lf_bytes(document))
 
 
 def _release_id(value: str) -> str:
@@ -62,6 +73,70 @@ def _archive_snapshot(
         raise shared.EvidenceError(f"{context} changed after PASS authentication")
     destination.write_bytes(payload)
     return payload, digest
+
+
+def _archive_execution_manifest(
+    source: Path, destination: Path, expected_manifest: dict[str, Any]
+) -> str:
+    try:
+        source_payload = source.read_bytes()
+        archived_manifest = json.loads(source_payload.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exception:
+        raise shared.EvidenceError(
+            "Phase 5 entry execution manifest changed after PASS authentication"
+        ) from exception
+    if archived_manifest != expected_manifest:
+        raise shared.EvidenceError(
+            "Phase 5 entry execution manifest changed after PASS authentication"
+        )
+    shared._assert_execution_manifest_seal(archived_manifest)
+    payload = _json_lf_bytes(archived_manifest)
+    destination.write_bytes(payload)
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _git_hash_object(payload: bytes, *, logical_path: str | None = None) -> str:
+    command = ["git", "hash-object"]
+    if logical_path is None:
+        command.append("--no-filters")
+    else:
+        command.append(f"--path={logical_path}")
+    command.append("--stdin")
+    process = subprocess.run(
+        command,
+        cwd=ROOT,
+        input=payload,
+        capture_output=True,
+        check=False,
+    )
+    output = process.stdout.decode("ascii", errors="replace").strip()
+    if process.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40,64}", output):
+        error = process.stderr.decode("utf-8", errors="replace").strip()
+        raise shared.EvidenceError(
+            f"cannot apply Git clean filter for Phase 5 evidence: {error or output}"
+        )
+    return output
+
+
+def _assert_git_clean_filter_stable(path: Path, *, release_id: str) -> None:
+    payload = path.read_bytes()
+    if b"\r" in payload:
+        raise shared.EvidenceError(
+            f"entry evidence artifact {path.name} contains non-LF line endings"
+        )
+    logical_path = (
+        Path("test-reports")
+        / "temporal-first"
+        / release_id
+        / "phase-5-entry"
+        / path.name
+    ).as_posix()
+    if _git_hash_object(payload) != _git_hash_object(
+        payload, logical_path=logical_path
+    ):
+        raise shared.EvidenceError(
+            f"entry evidence artifact {path.name} changes under Git clean filters"
+        )
 
 
 def load_pass_manifest(
@@ -221,7 +296,16 @@ def _validate_staged_bundle(
     metrics: dict[str, Any],
     index: dict[str, Any],
     expected_names: set[str],
+    release_id: str,
 ) -> None:
+    initial_artifacts = list(output_dir.iterdir())
+    if {path.name for path in initial_artifacts} != expected_names or any(
+        path.is_symlink() or not path.is_file() for path in initial_artifacts
+    ):
+        raise shared.EvidenceError("entry evidence output file set drifted")
+    for name in sorted(expected_names):
+        _assert_git_clean_filter_stable(output_dir / name, release_id=release_id)
+
     artifacts = list(output_dir.iterdir())
     if {path.name for path in artifacts} != expected_names or any(
         path.is_symlink() or not path.is_file() for path in artifacts
@@ -262,6 +346,10 @@ def _validate_staged_bundle(
             raise shared.EvidenceError(
                 f"entry evidence artifact {artifact['path']} changed during assembly"
             )
+    if (output_dir / HASH_INDEX_NAME).read_bytes() != _json_lf_bytes(index):
+        raise shared.EvidenceError(
+            "entry evidence artifact index bytes changed during assembly"
+        )
 
 
 def assemble_entry_evidence(
@@ -272,29 +360,18 @@ def assemble_entry_evidence(
     release_id: str,
     base_commit: str,
     candidate_commit: str,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], dict[str, Any]]:
     candidate = shared._assert_candidate(candidate_commit)
     base = shared._assert_candidate(base_commit, "base commit")
     run_root = execution_manifest_path.resolve().parent
     source_dir = run_root / "source"
     output_dir.mkdir(parents=True, exist_ok=False)
     (output_dir / CANDIDATE_NAME).write_bytes((candidate + "\n").encode("ascii"))
-    manifest_payload, execution_manifest_sha256 = _archive_snapshot(
+    execution_manifest_sha256 = _archive_execution_manifest(
         execution_manifest_path,
         output_dir / runner.MANIFEST_NAME,
-        context="Phase 5 entry execution manifest",
+        manifest,
     )
-    try:
-        archived_manifest = json.loads(manifest_payload.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exception:
-        raise shared.EvidenceError(
-            "Phase 5 entry execution manifest changed after PASS authentication"
-        ) from exception
-    if archived_manifest != manifest:
-        raise shared.EvidenceError(
-            "Phase 5 entry execution manifest changed after PASS authentication"
-        )
-    shared._assert_execution_manifest_seal(archived_manifest)
 
     report_digests = {
         record["report"]: record["report_sha256"] for record in manifest["commands"]
@@ -365,7 +442,7 @@ def assemble_entry_evidence(
             "closed_synthetic_manifest_counts": [1, 8, 100],
         },
     }
-    shared._write_json(output_dir / METRICS_NAME, metrics)
+    _write_json_lf(output_dir / METRICS_NAME, metrics)
 
     indexed_names = [
         CANDIDATE_NAME,
@@ -385,7 +462,7 @@ def assemble_entry_evidence(
             for name in indexed_names
         ],
     }
-    shared._write_json(output_dir / HASH_INDEX_NAME, index)
+    _write_json_lf(output_dir / HASH_INDEX_NAME, index)
     expected = {HASH_INDEX_NAME, *indexed_names}
     _validate_staged_bundle(
         output_dir=output_dir,
@@ -395,8 +472,9 @@ def assemble_entry_evidence(
         metrics=metrics,
         index=index,
         expected_names=expected,
+        release_id=release_id,
     )
-    return metrics
+    return metrics, index
 
 
 def generate_entry_evidence(
@@ -421,7 +499,7 @@ def generate_entry_evidence(
         raise shared.EvidenceError(f"entry evidence output or staging path exists: {output}")
     manifest = load_pass_manifest(manifest_path, candidate)
     try:
-        metrics = assemble_entry_evidence(
+        metrics, assembled_index = assemble_entry_evidence(
             manifest=manifest,
             execution_manifest_path=manifest_path,
             output_dir=staging,
@@ -431,6 +509,22 @@ def generate_entry_evidence(
         )
         shared.assert_clean_detached_candidate(
             candidate, allowed_untracked_roots=(run_root, staging)
+        )
+        _validate_staged_bundle(
+            output_dir=staging,
+            candidate=candidate,
+            manifest=manifest,
+            execution_manifest_sha256=metrics["execution_manifest"]["sha256"],
+            metrics=metrics,
+            index=assembled_index,
+            expected_names={
+                HASH_INDEX_NAME,
+                CANDIDATE_NAME,
+                runner.MANIFEST_NAME,
+                *runner.SOURCE_REPORTS.values(),
+                METRICS_NAME,
+            },
+            release_id=release_id,
         )
         staging.rename(output)
         return metrics

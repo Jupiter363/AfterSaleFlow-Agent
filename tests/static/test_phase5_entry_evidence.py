@@ -41,7 +41,7 @@ def _authenticated_phase4_handoff(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _write_junit(path: Path, candidate: str, command_id: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
+    path.write_bytes(
         (
             '<?xml version="1.0" encoding="utf-8"?>\n'
             f'<testsuites tests="1" failures="0" errors="0" skipped="0" '
@@ -53,8 +53,7 @@ def _write_junit(path: Path, candidate: str, command_id: str) -> None:
             'time="0.01" />\n'
             "  </testsuite>\n"
             "</testsuites>\n"
-        ),
-        encoding="utf-8",
+        ).encode("utf-8")
     )
 
 
@@ -224,7 +223,61 @@ def test_generator_atomically_writes_the_exact_candidate_bound_entry_bundle(
         item["sha256"] == generator.shared._sha256(output / item["path"])
         for item in index["artifacts"]
     )
+    assert (output / generator.runner.MANIFEST_NAME).read_bytes() == (
+        manifest_path.read_bytes()
+    )
     assert not output.with_name(".entry-evidence.assembling").exists()
+
+
+def test_generator_canonicalizes_crlf_manifest_and_git_clean_filter_bytes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _allow_fixture_git_checks(monkeypatch)
+    manifest_path = _build_pass_run(tmp_path)
+    manifest_path.write_bytes(manifest_path.read_bytes().replace(b"\n", b"\r\n"))
+    output = tmp_path / "entry-evidence"
+
+    generator.generate_entry_evidence(
+        release_id=RELEASE_ID,
+        candidate_commit=CANDIDATE,
+        base_commit=BASE,
+        execution_manifest_path=manifest_path,
+        output_dir=output,
+    )
+
+    index = json.loads((output / generator.HASH_INDEX_NAME).read_text(encoding="utf-8"))
+    indexed = {item["path"]: item for item in index["artifacts"]}
+    for path in output.iterdir():
+        payload = path.read_bytes()
+        assert b"\r" not in payload
+        logical_path = (
+            Path("test-reports")
+            / "temporal-first"
+            / RELEASE_ID
+            / "phase-5-entry"
+            / path.name
+        ).as_posix()
+        assert generator._git_hash_object(payload) == generator._git_hash_object(
+            payload, logical_path=logical_path
+        )
+        if path.name in indexed:
+            assert indexed[path.name]["sha256"] == generator.shared._sha256(path)
+            assert indexed[path.name]["bytes"] == path.stat().st_size
+    archived_manifest = output / generator.runner.MANIFEST_NAME
+    metrics = json.loads((output / generator.METRICS_NAME).read_text(encoding="utf-8"))
+    assert metrics["execution_manifest"]["sha256"] == generator.shared._sha256(
+        archived_manifest
+    )
+
+
+def test_git_clean_filter_guard_rejects_crlf_evidence(tmp_path: Path) -> None:
+    artifact = tmp_path / generator.METRICS_NAME
+    artifact.write_bytes(b'{"result":"PASS"}\r\n')
+
+    with pytest.raises(generator.shared.EvidenceError, match="non-LF line endings"):
+        generator._assert_git_clean_filter_stable(
+            artifact, release_id=RELEASE_ID
+        )
 
 
 @pytest.mark.parametrize(
@@ -332,8 +385,8 @@ def test_generator_rejects_archived_report_replacement_before_publish(
         manifest: dict, source_dir: Path
     ) -> tuple[list[dict], dict[str, int | float]]:
         rows, totals = original_source_metrics(manifest, source_dir)
-        (source_dir / manifest["commands"][0]["report"]).write_text(
-            "replaced after snapshot\n", encoding="utf-8"
+        (source_dir / manifest["commands"][0]["report"]).write_bytes(
+            b"replaced after snapshot\n"
         )
         return rows, totals
 
@@ -347,6 +400,144 @@ def test_generator_rejects_archived_report_replacement_before_publish(
             execution_manifest_path=manifest_path,
             output_dir=output,
         )
+    assert not output.exists()
+    assert not output.with_name(".entry-evidence.assembling").exists()
+
+
+@pytest.mark.parametrize(
+    ("artifact_name", "replacement", "message"),
+    (
+        (generator.METRICS_NAME, b'{}\n', "metrics changed"),
+        (
+            generator.HASH_INDEX_NAME,
+            json.dumps(
+                {
+                    "schema_version": generator.HASH_INDEX_SCHEMA,
+                    "candidate_commit": CANDIDATE,
+                    "artifacts": [],
+                }
+            ).encode("utf-8")
+            + b"\n",
+            "artifact index changed",
+        ),
+    ),
+)
+def test_generator_revalidates_trusted_bundle_after_final_candidate_check(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    artifact_name: str,
+    replacement: bytes,
+    message: str,
+) -> None:
+    monkeypatch.setattr(generator, "assert_base_ancestor", lambda *_args: None)
+    manifest_path = _build_pass_run(tmp_path)
+    output = tmp_path / "entry-evidence"
+    checks = 0
+
+    def replace_during_final_candidate_check(*_args: object, **_kwargs: object) -> None:
+        nonlocal checks
+        checks += 1
+        if checks == 2:
+            staging = output.with_name(f".{output.name}.assembling")
+            (staging / artifact_name).write_bytes(replacement)
+
+    monkeypatch.setattr(
+        generator.shared,
+        "assert_clean_detached_candidate",
+        replace_during_final_candidate_check,
+    )
+
+    with pytest.raises(generator.shared.EvidenceError, match=message):
+        generator.generate_entry_evidence(
+            release_id=RELEASE_ID,
+            candidate_commit=CANDIDATE,
+            base_commit=BASE,
+            execution_manifest_path=manifest_path,
+            output_dir=output,
+        )
+
+    assert checks == 2
+    assert not output.exists()
+    assert not output.with_name(".entry-evidence.assembling").exists()
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    (
+        ("metrics", "metrics changed"),
+        ("index", "artifact index changed"),
+        ("unexpected", "output file set drifted"),
+        ("file_type", "output file set drifted"),
+    ),
+)
+def test_generator_revalidates_content_after_final_git_filter_callbacks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    mutation: str,
+    message: str,
+) -> None:
+    monkeypatch.setattr(generator, "assert_base_ancestor", lambda *_args: None)
+    manifest_path = _build_pass_run(tmp_path)
+    output = tmp_path / "entry-evidence"
+    original_hash_object = generator._git_hash_object
+    final_validation = False
+    replaced = False
+    checks = 0
+
+    def mark_final_candidate_check(*_args: object, **_kwargs: object) -> None:
+        nonlocal checks, final_validation
+        checks += 1
+        final_validation = checks == 2
+
+    def replace_during_final_filter(
+        payload: bytes, *, logical_path: str | None = None
+    ) -> str:
+        nonlocal replaced
+        staging = output.with_name(f".{output.name}.assembling")
+        if final_validation and not replaced and mutation != "file_type":
+            replaced = True
+            if mutation == "metrics":
+                (staging / generator.METRICS_NAME).write_bytes(b'{}\n')
+            elif mutation == "index":
+                generator._write_json_lf(
+                    staging / generator.HASH_INDEX_NAME,
+                    {
+                        "schema_version": generator.HASH_INDEX_SCHEMA,
+                        "candidate_commit": CANDIDATE,
+                        "artifacts": [],
+                    },
+                )
+            else:
+                (staging / "unexpected.txt").write_bytes(b"unexpected\n")
+        elif (
+            final_validation
+            and not replaced
+            and logical_path is not None
+            and logical_path.endswith(f"/{generator.HASH_INDEX_NAME}")
+        ):
+            replaced = True
+            index_path = staging / generator.HASH_INDEX_NAME
+            index_path.unlink()
+            index_path.mkdir()
+        return original_hash_object(payload, logical_path=logical_path)
+
+    monkeypatch.setattr(
+        generator.shared,
+        "assert_clean_detached_candidate",
+        mark_final_candidate_check,
+    )
+    monkeypatch.setattr(generator, "_git_hash_object", replace_during_final_filter)
+
+    with pytest.raises(generator.shared.EvidenceError, match=message):
+        generator.generate_entry_evidence(
+            release_id=RELEASE_ID,
+            candidate_commit=CANDIDATE,
+            base_commit=BASE,
+            execution_manifest_path=manifest_path,
+            output_dir=output,
+        )
+
+    assert replaced is True
     assert not output.exists()
     assert not output.with_name(".entry-evidence.assembling").exists()
 

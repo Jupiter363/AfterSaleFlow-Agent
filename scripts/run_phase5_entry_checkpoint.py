@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -384,7 +385,16 @@ def _validate_embedded_handoff(value: Any) -> dict[str, Any]:
 
 
 def _write_manifest(path: Path, manifest: dict[str, Any]) -> None:
-    shared._write_manifest(path, manifest)
+    shared.seal_execution_manifest(manifest)
+    payload = (
+        json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=False) + "\n"
+    ).encode("utf-8")
+    temporary = path.with_name(f".{path.name}.tmp")
+    try:
+        temporary.write_bytes(payload)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _assert_candidate_unchanged(candidate: str, run_root: Path) -> None:

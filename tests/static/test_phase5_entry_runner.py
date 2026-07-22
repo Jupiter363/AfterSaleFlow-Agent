@@ -480,6 +480,26 @@ def test_resume_rejects_a_tampered_sealed_manifest(tmp_path: Path) -> None:
         runner._load_resume_manifest(run_root, CANDIDATE, HANDOFF)
 
 
+def test_manifest_writer_uses_lf_bytes_independent_of_shared_writer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def write_crlf(path: Path, document: object) -> None:
+        payload = json.dumps(document, ensure_ascii=False, indent=2) + "\n"
+        path.write_bytes(payload.replace("\n", "\r\n").encode("utf-8"))
+
+    monkeypatch.setattr(runner.shared, "_write_json", write_crlf)
+    manifest = {"schema_version": runner.SCHEMA_VERSION, "status": "RUNNING"}
+    path = tmp_path / runner.MANIFEST_NAME
+
+    runner._write_manifest(path, manifest)
+
+    payload = path.read_bytes()
+    assert payload.endswith(b"\n")
+    assert b"\r\n" not in payload
+    assert json.loads(payload.decode("utf-8")) == manifest
+    runner.shared._assert_execution_manifest_seal(manifest)
+
+
 def test_resume_rejects_a_resealed_forged_accepted_prefix(tmp_path: Path) -> None:
     run_root = tmp_path / "phase5-entry-forged-prefix"
     run_root.mkdir()
