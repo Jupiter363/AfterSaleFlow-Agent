@@ -808,6 +808,7 @@ batches:
       - tests/static/test_phase4_no_formal_sink_assembly.py
       - tests/static/test_phase4_r15_authority_binding_contract.py
       - tests/static/test_phase4_engineering_evidence_policy.py
+      - tests/static/test_phase4_candidate_evidence.py
     python_tests:
       - python-agent-service/tests/graphs/intake
       - python-agent-service/tests/agents/test_intake_turn.py
@@ -864,6 +865,7 @@ batches:
           tests/static/test_phase4_no_formal_sink_assembly.py
           tests/static/test_phase4_r15_authority_binding_contract.py
           tests/static/test_phase4_engineering_evidence_policy.py
+          tests/static/test_phase4_candidate_evidence.py
           -q
     execution:
       order:
@@ -956,6 +958,7 @@ batches:
           tests/static/test_phase4_no_formal_sink_assembly.py
           tests/static/test_phase4_r15_authority_binding_contract.py
           tests/static/test_phase4_engineering_evidence_policy.py
+          tests/static/test_phase4_candidate_evidence.py
           -q
     execution:
       strategy: deduplicated_source_suites_then_derived_batch_views
