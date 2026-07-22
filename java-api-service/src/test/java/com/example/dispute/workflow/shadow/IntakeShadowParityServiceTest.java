@@ -79,8 +79,8 @@ class IntakeShadowParityServiceTest {
     @Test
     void rejectsMalformedHashesAndIncompleteSnapshots() {
         assertThat(ObservedValue.class.getRecordComponents())
-                .extracting(component -> component.getType())
-                .containsExactly(Classification.class, String.class);
+                .extracting(component -> component.getType().getName())
+                .containsExactly(Classification.class.getName(), String.class.getName());
         assertThatThrownBy(() -> new ObservedValue(Classification.READY, "raw-private-text"))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("lowercase SHA-256");
