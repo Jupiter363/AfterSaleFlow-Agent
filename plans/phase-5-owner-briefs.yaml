@@ -161,11 +161,15 @@ owners:
             - VERIFY_INTERNAL_MANIFEST_RFC8785_SELF_HASH
             - VERIFY_DIRECT_JAVA_ES256_MANIFEST_SIGNATURE
             - DERIVE_AND_MATCH_RFC8785_ACTOR_SCOPE_HASH
-            - VERIFY_ASSESSMENT_AND_TERMINAL_OUTPUT_PINS
+            - VERIFY_TRANSPORT_AND_REGISTRY_TERMINAL_OUTPUT_PIN
+            - VERIFY_INTERNAL_ITEM_ASSESSMENT_OUTPUT_PIN
             - ENFORCE_DISTINCT_JAVA_ROOM_AND_GRAPH_LEASE_FENCES
           actor_scope_hash_source: RFC8785_SHA256_OF_VERIFIED_ROOM_GRAPH_COMMAND_ACTOR_SCOPE
           assessment_output_schema_version: evidence-item-assessment.v1
           terminal_output_schema_version: evidence-batch-proposal.v1
+          room_graph_command_output_schema_version: evidence-batch-proposal.v1
+          graph_registry_output_schema_version: evidence-batch-proposal.v1
+          item_lcel_parser_output_schema_version: evidence-item-assessment.v1
           java_room_fence_source: SIGNED_MANIFEST
           graph_lease_fence_source: CURRENT_GRAPH_LEASE
           fence_tokens_interchangeable: false
@@ -173,7 +177,7 @@ owners:
           implementation_gate: P5_0_ENTRY_EVIDENCE_COMMITTED_FOR_NEW_EXACT_SHA
         output_contracts:
           - evidence.v2 consumes only the verified direct-Java-signed manifest admission binding and emits proposal-only terminal coverage
-          - canonical RoomGraphCommand actor scope and split assessment terminal pins remain immutable through state and terminal output
+          - RoomGraphCommand and Graph registry output pin the terminal proposal while item LCEL parser independently pins assessment output
           - dispatch waves contain at most eight active item assessments for closed synthetic counts 1 8 and 100
         owned_files:
           - python-agent-service/app/graphs/evidence/__init__.py
@@ -202,7 +206,7 @@ owners:
           - Only P5-A1 owned_files are staged.
           - Graph state starts only after full snapshot payload SHA size URI then manifest self-hash and direct Java ES256 signature validation.
           - actor_scope_hash is derived from canonical verified RoomGraphCommand actor_scope and authorization_proof_ref is rejected.
-          - Assessment and terminal pins remain split and Java room fence is never substituted for the Graph lease fence.
+          - Transport and registry use the terminal pin item LCEL uses the assessment pin and Java room fence is never substituted for Graph lease fence.
           - Counts 1 8 and 100 and max-active 8 have positive and negative tests.
           - State contains no formal merge freeze Hearing-open or trusted business-decision field.
           - T0 passes and C records P0 review closure.
@@ -378,11 +382,15 @@ owners:
             - VERIFY_INTERNAL_MANIFEST_RFC8785_SELF_HASH
             - VERIFY_DIRECT_JAVA_ES256_MANIFEST_SIGNATURE
             - DERIVE_AND_MATCH_RFC8785_ACTOR_SCOPE_HASH
-            - VERIFY_ASSESSMENT_AND_TERMINAL_OUTPUT_PINS
+            - VERIFY_TRANSPORT_AND_REGISTRY_TERMINAL_OUTPUT_PIN
+            - VERIFY_INTERNAL_ITEM_ASSESSMENT_OUTPUT_PIN
             - ENFORCE_DISTINCT_JAVA_ROOM_AND_GRAPH_LEASE_FENCES
           actor_scope_hash_source: RFC8785_SHA256_OF_VERIFIED_ROOM_GRAPH_COMMAND_ACTOR_SCOPE
           assessment_output_schema_version: evidence-item-assessment.v1
           terminal_output_schema_version: evidence-batch-proposal.v1
+          room_graph_command_output_schema_version: evidence-batch-proposal.v1
+          graph_registry_output_schema_version: evidence-batch-proposal.v1
+          item_lcel_parser_output_schema_version: evidence-item-assessment.v1
           java_room_fence_source: SIGNED_MANIFEST
           graph_lease_fence_source: CURRENT_GRAPH_LEASE
           fence_tokens_interchangeable: false
@@ -390,7 +398,7 @@ owners:
           implementation_gate: P5_0_ENTRY_EVIDENCE_COMMITTED_FOR_NEW_EXACT_SHA
         output_contracts:
           - Java validates immutable snapshot URI full payload SHA and size before manifest self-hash and direct ES256 signature
-          - Java derives actor scope hash from verified RoomGraphCommand preserves split pins and keeps room fence distinct from Graph lease fence
+          - Java derives actor scope hash from verified RoomGraphCommand maps transport and registry output to terminal proposal and keeps item assessment internal
           - V043_4 stores additive idempotent binding and receipt identity without activating a writer
         owned_files:
           - java-api-service/src/main/java/com/example/dispute/evidence/application/graph/EvidenceBatchManifest.java
@@ -418,7 +426,7 @@ owners:
           - Only P5-C1 owned_files are staged and no prior migration changes.
           - Direct Java ES256 manifest authority rejects unsigned detached authorization_proof_ref and wrong full snapshot payload SHA size or URI.
           - Internal self-hash and signature are verified only after immutable snapshot bytes and canonical actor scope are bound.
-          - Assessment terminal pins stay split and Java room fence is not reused as Graph lease fence.
+          - RoomGraphCommand and registry use terminal proposal pin item parser uses assessment pin and Java room fence is not reused as Graph lease fence.
           - Signed synthetic capabilities reject wrong owner visibility object version hash epoch fence expiry and nonce.
           - Binding writes are additive and idempotent while formal execution remains disabled.
           - Token-granted T0 passes and A records P0 review closure.
@@ -631,11 +639,15 @@ owners:
             - VERIFY_INTERNAL_MANIFEST_RFC8785_SELF_HASH
             - VERIFY_DIRECT_JAVA_ES256_MANIFEST_SIGNATURE
             - DERIVE_AND_MATCH_RFC8785_ACTOR_SCOPE_HASH
-            - VERIFY_ASSESSMENT_AND_TERMINAL_OUTPUT_PINS
+            - VERIFY_TRANSPORT_AND_REGISTRY_TERMINAL_OUTPUT_PIN
+            - VERIFY_INTERNAL_ITEM_ASSESSMENT_OUTPUT_PIN
             - ENFORCE_DISTINCT_JAVA_ROOM_AND_GRAPH_LEASE_FENCES
           actor_scope_hash_source: RFC8785_SHA256_OF_VERIFIED_ROOM_GRAPH_COMMAND_ACTOR_SCOPE
           assessment_output_schema_version: evidence-item-assessment.v1
           terminal_output_schema_version: evidence-batch-proposal.v1
+          room_graph_command_output_schema_version: evidence-batch-proposal.v1
+          graph_registry_output_schema_version: evidence-batch-proposal.v1
+          item_lcel_parser_output_schema_version: evidence-item-assessment.v1
           java_room_fence_source: SIGNED_MANIFEST
           graph_lease_fence_source: CURRENT_GRAPH_LEASE
           fence_tokens_interchangeable: false
@@ -643,7 +655,7 @@ owners:
           implementation_gate: P5_0_ENTRY_EVIDENCE_COMMITTED_FOR_NEW_EXACT_SHA
         output_contracts:
           - room tenant and global permit policy has bounded queues fairness cancellation and release contracts
-          - static no-sink harness rejects authority validation order pin actor-scope or fence drift before disabled signed-synthetic assembly can run
+          - static no-sink harness rejects authority validation order terminal transport pin internal assessment pin actor-scope or fence drift before assembly
           - signed-synthetic assembly consumes no authorization_proof_ref and cannot reach formal writers
         owned_files:
           - java-api-service/src/main/java/com/example/dispute/workflow/shadow/evidence/EvidenceBulkheadPolicy.java
@@ -672,7 +684,7 @@ owners:
             max_duration_seconds: 180
         commit_definition_of_done:
           - Only P5-E0 owned_files are staged.
-          - No-sink harness fails before assembly on wrong snapshot payload SHA size URI self-hash signature actor scope or split pin.
+          - No-sink harness fails before assembly when transport or registry stops using terminal pin or item LCEL stops using assessment pin.
           - Java room fence and Graph lease fence are tested as non-interchangeable and authorization_proof_ref remains forbidden.
           - Queue bounds fairness timeout cancellation permit release and bounded metric labels are tested.
           - No-sink proof covers DISABLED and SIGNED_SYNTHETIC_SHADOW and rejects TEMPORAL allocation.

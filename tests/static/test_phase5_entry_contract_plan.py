@@ -181,9 +181,12 @@ def test_phase5_evidence_room_command_binds_full_signed_manifest_payload() -> No
     ]
     assert command["invocation_context"]["output_schema_version"] == manifest[
         "profile_versions"
-    ]["assessment_output_schema_version"]
+    ]["terminal_output_schema_version"]
     assert manifest["profile_versions"]["terminal_output_schema_version"] == (
         "evidence-batch-proposal.v1"
+    )
+    assert manifest["profile_versions"]["assessment_output_schema_version"] == (
+        "evidence-item-assessment.v1"
     )
 
     snapshot = command["domain_snapshot_ref"]
@@ -222,7 +225,8 @@ def test_phase5_wave_a_authority_owners_share_corrected_admission_contract() -> 
         "VERIFY_INTERNAL_MANIFEST_RFC8785_SELF_HASH",
         "VERIFY_DIRECT_JAVA_ES256_MANIFEST_SIGNATURE",
         "DERIVE_AND_MATCH_RFC8785_ACTOR_SCOPE_HASH",
-        "VERIFY_ASSESSMENT_AND_TERMINAL_OUTPUT_PINS",
+        "VERIFY_TRANSPORT_AND_REGISTRY_TERMINAL_OUTPUT_PIN",
+        "VERIFY_INTERNAL_ITEM_ASSESSMENT_OUTPUT_PIN",
         "ENFORCE_DISTINCT_JAVA_ROOM_AND_GRAPH_LEASE_FENCES",
     ]
     responsibilities = {
@@ -248,6 +252,15 @@ def test_phase5_wave_a_authority_owners_share_corrected_admission_contract() -> 
         )
         assert authority["terminal_output_schema_version"] == (
             "evidence-batch-proposal.v1"
+        )
+        assert authority["room_graph_command_output_schema_version"] == (
+            "evidence-batch-proposal.v1"
+        )
+        assert authority["graph_registry_output_schema_version"] == (
+            "evidence-batch-proposal.v1"
+        )
+        assert authority["item_lcel_parser_output_schema_version"] == (
+            "evidence-item-assessment.v1"
         )
         assert authority["java_room_fence_source"] == "SIGNED_MANIFEST"
         assert authority["graph_lease_fence_source"] == "CURRENT_GRAPH_LEASE"
