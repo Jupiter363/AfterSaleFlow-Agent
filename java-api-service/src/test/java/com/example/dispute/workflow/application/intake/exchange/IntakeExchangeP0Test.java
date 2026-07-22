@@ -19,6 +19,7 @@ import com.example.dispute.workflow.application.intake.exchange.IntakeExchangeCo
 import com.example.dispute.workflow.application.intake.exchange.IntakeExchangeContract.PayloadLoadRequest;
 import com.example.dispute.workflow.application.intake.exchange.IntakeExchangeContract.ProposalDocument;
 import com.example.dispute.workflow.application.intake.exchange.IntakeExchangeContract.ProposalPutRequest;
+import com.example.dispute.workflow.config.IntakeSyntheticExchangeConfiguration;
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
 import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
@@ -33,11 +34,87 @@ import java.util.Base64;
 import java.util.List;
 import java.util.Objects;
 import org.junit.jupiter.api.Test;
+import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 
 class IntakeExchangeP0Test {
 
     private static final ObjectMapper MAPPER = JsonMapper.builder().build();
     private static final String OBJECT_VERSION = "VERSION_P4_EXACT_1";
+
+    private static final String SYNTHETIC_ENABLED =
+            "app.orchestration.intake-epoch-selection.signed-synthetic-shadow-enabled=true";
+    private static final String SHADOW_SELECTION =
+            "app.orchestration.intake-epoch-selection.mode=SHADOW";
+    private static final String SHADOW_COHORT =
+            "app.orchestration.intake-epoch-selection.shadow-cohort-basis-points=1";
+    private static final String SHADOW_POLICY =
+            "app.orchestration.intake-epoch-selection.cohort-policy-version=synthetic.v1";
+    private static final String GRAPH_SHADOW = "app.agent-run-v2.graph-client.mode=SHADOW";
+    private static final String GRAPH_ENDPOINT =
+            "app.agent-run-v2.graph-client.base-uri=https://python-agent-service:18000";
+
+    @Test
+    void exchangeAssemblyIsAbsentUnlessSyntheticShadowAndEveryRealPortExist() {
+        exchangeRunnerWithPorts().run(context -> {
+            assertThat(context).hasNotFailed();
+            assertThat(context).doesNotHaveBean(IntakeExchangeService.class);
+        });
+
+        exchangeRunnerWithPorts()
+                .withPropertyValues(
+                        SYNTHETIC_ENABLED,
+                        SHADOW_SELECTION,
+                        SHADOW_COHORT,
+                        SHADOW_POLICY,
+                        GRAPH_SHADOW,
+                        GRAPH_ENDPOINT)
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context).hasSingleBean(IntakeExchangeService.class);
+                });
+
+        exchangeRunnerWithoutPayloadStore()
+                .withPropertyValues(
+                        SYNTHETIC_ENABLED,
+                        SHADOW_SELECTION,
+                        SHADOW_COHORT,
+                        SHADOW_POLICY,
+                        GRAPH_SHADOW,
+                        GRAPH_ENDPOINT)
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context).doesNotHaveBean(IntakeExchangeService.class);
+                });
+    }
+
+    @Test
+    void exchangeAssemblyRejectsFormalOrIncompleteRuntimeModes() {
+        exchangeRunnerWithPorts()
+                .withPropertyValues(SYNTHETIC_ENABLED, GRAPH_SHADOW, GRAPH_ENDPOINT)
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure())
+                            .rootCause()
+                            .hasMessageContaining("complete signed synthetic SHADOW selection");
+                });
+
+        exchangeRunnerWithPorts()
+                .withPropertyValues(
+                        SYNTHETIC_ENABLED,
+                        SHADOW_SELECTION,
+                        SHADOW_COHORT,
+                        SHADOW_POLICY,
+                        GRAPH_SHADOW,
+                        GRAPH_ENDPOINT,
+                        "app.agent-run-v2.enabled=true",
+                        "app.agent-run-v2.scheduler-mode=DETECTOR")
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure())
+                            .rootCause()
+                            .hasMessageContaining("formal AgentRunV2 path is enabled");
+                });
+    }
 
     @Test
     void loadEchoesAuthorityAfterExactGrantAndCanonicalPayloadValidation() throws Exception {
@@ -241,6 +318,24 @@ class IntakeExchangeP0Test {
             IntakeExchangeAuthorityValidationPort authority, IntakeExchangeObjectStore store) {
         return new IntakeExchangeService(
                 authority, store, new IntakeExchangeCanonicalPayloadValidator());
+    }
+
+    private static ApplicationContextRunner exchangeRunnerWithPorts() {
+        return exchangeRunnerWithoutPayloadStore()
+                .withBean(
+                        IntakeExchangePayloadObjectStoreGateway.class,
+                        () -> mock(IntakeExchangePayloadObjectStoreGateway.class));
+    }
+
+    private static ApplicationContextRunner exchangeRunnerWithoutPayloadStore() {
+        return new ApplicationContextRunner()
+                .withUserConfiguration(IntakeSyntheticExchangeConfiguration.class)
+                .withBean(
+                        IntakeExchangeAuthorityValidationPort.class,
+                        () -> mock(IntakeExchangeAuthorityValidationPort.class))
+                .withBean(
+                        IntakeImmutablePayloadPublisher.class,
+                        () -> mock(IntakeImmutablePayloadPublisher.class));
     }
 
     private static PayloadLoadRequest loadRequest(byte[] payload) throws Exception {
