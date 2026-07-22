@@ -402,6 +402,7 @@ batches:
           tests/static/test_phase5_evidence_pilot_plan.py
           tests/static/test_phase5_entry_contract_plan.py
           tests/static/test_phase5_entry_runner.py
+          tests/static/test_phase5_entry_evidence.py
           tests/static/test_temporal_refactor_traceability.py
           tests/static/test_graph_import_boundaries.py
           tests/static/test_agent_platform_schema_contracts.py
@@ -471,6 +472,7 @@ batches:
       - tests/static/test_phase5_evidence_pilot_plan.py
       - tests/static/test_phase5_entry_contract_plan.py
       - tests/static/test_phase5_entry_runner.py
+      - tests/static/test_phase5_entry_evidence.py
       - tests/static/test_temporal_refactor_traceability.py
       - tests/static/test_graph_import_boundaries.py
       - tests/static/test_agent_platform_schema_contracts.py
@@ -484,6 +486,17 @@ batches:
         - frontend-phase5-entry-junit.xml
       execution_manifest: phase5-entry-execution-manifest.json
       execution_manifest_schema: phase5-entry-execution-manifest.v1
+      entry_evidence_generator: scripts/generate_phase5_entry_evidence.py
+      entry_evidence_output: test-reports/temporal-first/<release-id>/phase-5-entry
+      entry_evidence_required_files:
+        - candidate.txt
+        - phase5-entry-execution-manifest.json
+        - static-phase5-entry-junit.xml
+        - python-phase5-entry-junit.xml
+        - java-phase5-entry-junit.xml
+        - frontend-phase5-entry-junit.xml
+        - entry-metrics.json
+        - artifact-sha256.json
       fresh_run_directory_required: true
       sealed_manifest_required: true
       exact_candidate_sha_required: true
