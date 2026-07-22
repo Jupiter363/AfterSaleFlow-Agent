@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import shutil
@@ -43,6 +44,24 @@ def _load_json(path: Path, context: str) -> dict[str, Any]:
     if not isinstance(document, dict):
         raise shared.EvidenceError(f"{context} must be a JSON object")
     return document
+
+
+def _archive_snapshot(
+    source: Path,
+    destination: Path,
+    *,
+    context: str,
+    expected_sha256: str | None = None,
+) -> tuple[bytes, str]:
+    try:
+        payload = source.read_bytes()
+    except OSError as exception:
+        raise shared.EvidenceError(f"cannot snapshot {context} {source}: {exception}") from exception
+    digest = hashlib.sha256(payload).hexdigest()
+    if expected_sha256 is not None and digest != expected_sha256:
+        raise shared.EvidenceError(f"{context} changed after PASS authentication")
+    destination.write_bytes(payload)
+    return payload, digest
 
 
 def load_pass_manifest(
@@ -171,6 +190,8 @@ def _source_metrics(
         rows.append(
             {
                 "command_id": record["id"],
+                "candidate_commit": record["candidate_commit"],
+                "environment_sha256": record["environment_sha256"],
                 "cwd": record["cwd"],
                 "matrix_command_sha256": record["matrix_command_sha256"],
                 "executed_command_sha256": record["executed_command_sha256"],
@@ -191,6 +212,58 @@ def _source_metrics(
     return rows, totals
 
 
+def _validate_staged_bundle(
+    *,
+    output_dir: Path,
+    candidate: str,
+    manifest: dict[str, Any],
+    execution_manifest_sha256: str,
+    metrics: dict[str, Any],
+    index: dict[str, Any],
+    expected_names: set[str],
+) -> None:
+    artifacts = list(output_dir.iterdir())
+    if {path.name for path in artifacts} != expected_names or any(
+        path.is_symlink() or not path.is_file() for path in artifacts
+    ):
+        raise shared.EvidenceError("entry evidence output file set drifted")
+    if (output_dir / CANDIDATE_NAME).read_bytes() != (candidate + "\n").encode():
+        raise shared.EvidenceError("entry evidence candidate binding drifted")
+
+    archived_manifest_path = output_dir / runner.MANIFEST_NAME
+    if shared._sha256(archived_manifest_path) != execution_manifest_sha256:
+        raise shared.EvidenceError(
+            "Phase 5 entry execution manifest changed during evidence assembly"
+        )
+    archived_manifest = _load_json(
+        archived_manifest_path, "archived Phase 5 entry execution manifest"
+    )
+    if archived_manifest != manifest:
+        raise shared.EvidenceError(
+            "Phase 5 entry execution manifest changed during evidence assembly"
+        )
+    shared._assert_execution_manifest_seal(archived_manifest)
+
+    for record in manifest["commands"]:
+        if shared._sha256(output_dir / record["report"]) != record["report_sha256"]:
+            raise shared.EvidenceError(
+                f"accepted source report {record['report']} changed during evidence assembly"
+            )
+    if _load_json(output_dir / METRICS_NAME, "Phase 5 entry metrics") != metrics:
+        raise shared.EvidenceError("entry evidence metrics changed during assembly")
+    if _load_json(output_dir / HASH_INDEX_NAME, "Phase 5 entry artifact index") != index:
+        raise shared.EvidenceError("entry evidence artifact index changed during assembly")
+    for artifact in index["artifacts"]:
+        path = output_dir / artifact["path"]
+        if (
+            shared._sha256(path) != artifact["sha256"]
+            or path.stat().st_size != artifact["bytes"]
+        ):
+            raise shared.EvidenceError(
+                f"entry evidence artifact {artifact['path']} changed during assembly"
+            )
+
+
 def assemble_entry_evidence(
     *,
     manifest: dict[str, Any],
@@ -205,12 +278,36 @@ def assemble_entry_evidence(
     run_root = execution_manifest_path.resolve().parent
     source_dir = run_root / "source"
     output_dir.mkdir(parents=True, exist_ok=False)
-    (output_dir / CANDIDATE_NAME).write_text(candidate + "\n", encoding="utf-8")
-    shutil.copy2(execution_manifest_path, output_dir / runner.MANIFEST_NAME)
-    for filename in runner.SOURCE_REPORTS.values():
-        shutil.copy2(source_dir / filename, output_dir / filename)
+    (output_dir / CANDIDATE_NAME).write_bytes((candidate + "\n").encode("ascii"))
+    manifest_payload, execution_manifest_sha256 = _archive_snapshot(
+        execution_manifest_path,
+        output_dir / runner.MANIFEST_NAME,
+        context="Phase 5 entry execution manifest",
+    )
+    try:
+        archived_manifest = json.loads(manifest_payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exception:
+        raise shared.EvidenceError(
+            "Phase 5 entry execution manifest changed after PASS authentication"
+        ) from exception
+    if archived_manifest != manifest:
+        raise shared.EvidenceError(
+            "Phase 5 entry execution manifest changed after PASS authentication"
+        )
+    shared._assert_execution_manifest_seal(archived_manifest)
 
-    source_suites, totals = _source_metrics(manifest, source_dir)
+    report_digests = {
+        record["report"]: record["report_sha256"] for record in manifest["commands"]
+    }
+    for filename in runner.SOURCE_REPORTS.values():
+        _archive_snapshot(
+            source_dir / filename,
+            output_dir / filename,
+            context=f"accepted source report {filename}",
+            expected_sha256=report_digests[filename],
+        )
+
+    source_suites, totals = _source_metrics(manifest, output_dir)
     metrics = {
         "schema_version": EVIDENCE_SCHEMA,
         "release_id": release_id,
@@ -221,9 +318,13 @@ def assemble_entry_evidence(
         "base_commit": base,
         "execution_manifest": {
             "path": runner.MANIFEST_NAME,
-            "sha256": shared._sha256(execution_manifest_path),
+            "sha256": execution_manifest_sha256,
             "manifest_sha256": manifest["manifest_sha256"],
             "schema_version": manifest["schema_version"],
+        },
+        "execution_environment": {
+            "environment_id": manifest["environment"]["environment_id"],
+            "snapshot_sha256": manifest["environment"]["snapshot_sha256"],
         },
         "verification": {
             "started_at": manifest["verification_started_at"],
@@ -286,8 +387,15 @@ def assemble_entry_evidence(
     }
     shared._write_json(output_dir / HASH_INDEX_NAME, index)
     expected = {HASH_INDEX_NAME, *indexed_names}
-    if {path.name for path in output_dir.iterdir()} != expected:
-        raise shared.EvidenceError("entry evidence output file set drifted")
+    _validate_staged_bundle(
+        output_dir=output_dir,
+        candidate=candidate,
+        manifest=manifest,
+        execution_manifest_sha256=execution_manifest_sha256,
+        metrics=metrics,
+        index=index,
+        expected_names=expected,
+    )
     return metrics
 
 

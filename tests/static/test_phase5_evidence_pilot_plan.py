@@ -83,11 +83,21 @@ def test_phase5_machine_gate_requires_only_engineering_entry_authority() -> None
 
     assert gate["required_entry"] == "PHASE_4_ENGINEERING_CHECKPOINT"
     assert gate["engineering_exception"] == "ADR_0012_ACCEPTED"
-    assert gate["entry_decision"] == "BLOCKED_PENDING_PHASE_4_ENGINEERING_CHECKPOINT"
+    assert gate["entry_decision"] == "READY_FOR_P5_BATCH_0"
+    assert gate["observed_entry_state"]["phase_4_engineering_checkpoint"] == "PASS"
+    assert gate["observed_entry_state"]["next_phase_permission"] == (
+        "PHASE_5_ENGINEERING_ONLY"
+    )
+    assert gate["observed_entry_state"]["evidence_v2_closed_contract_set"] == "FROZEN"
+    assert gate["accepted_phase4_checkpoint"] == (
+        "test-reports/temporal-first/phase-4-20260722-1ba6e17f/phase-4/"
+        "phase-metrics.json"
+    )
     assert set(gate["contract_candidate_allowed_when"]) == {
         "PHASE_4_ENGINEERING_CHECKPOINT_PASS",
         "PHASE_5_ENGINEERING_ONLY_PERMISSION_RECORDED",
         "ADR_0012_ACCEPTED",
+        "EVIDENCE_V2_CLOSED_CONTRACT_SET_VALIDATED",
     }
     assert set(gate["implementation_allowed_when"]) == {
         "PHASE_4_ENGINEERING_CHECKPOINT_PASS",
@@ -302,8 +312,18 @@ def test_phase5_owner_briefs_remain_blocked_until_entry_evidence() -> None:
         "P5_0_ENTRY_EVIDENCE_COMMITTED",
     ]
     assert set(briefs["owners"]) == {"A", "B", "C", "D", "E"}
-    assert briefs["shared_contract_owner"]["owner"] == "R"
-    assert briefs["shared_contract_owner"]["delegated_owners_may_edit"] is False
+    shared = briefs["shared_contract_owner"]
+    assert shared["owner"] == "R"
+    assert shared["delegated_owners_may_edit"] is False
+    assert shared["contract_candidate_draft_owner"] == "A"
+    assert shared["contract_candidate_integration_owner"] == "R"
+    assert shared["contract_candidate_draft_gate"] == "P5_0_CONTRACT_CANDIDATE"
+    assert shared["contract_candidate_draft_paths"] == [
+        "contracts/agent-platform/evidence/v2/",
+        "tests/static/test_phase5_evidence_contracts.py",
+        "java-api-service/src/test/java/com/example/dispute/workflow/contract/v1/"
+        "EvidenceV2ContractFixtureTest.java",
+    ]
 
 
 def test_phase5_owner_briefs_repeat_non_negotiable_scope_guards() -> None:
@@ -392,9 +412,28 @@ def test_phase5_d1_e1_takeovers_require_the_wave_a_integration_barrier() -> None
         assert set(transfer["files"]).issubset(task["owned_files"])
 
 
+def test_phase5_owner_brief_maven_selectors_are_single_argv_tokens() -> None:
+    briefs = _owner_briefs()
+
+    for owner in briefs["owners"].values():
+        for task in owner["tasks"].values():
+            for command in task["t0_commands"]:
+                argv = command["argv"]
+                if argv[0] != "./mvnw.cmd":
+                    continue
+                selectors = [token for token in argv if token.startswith("-Dtest=")]
+                assert len(selectors) == 1
+                assert not [
+                    token
+                    for token in argv
+                    if not token.startswith("-Dtest=") and token.endswith("Test")
+                ]
+
+
 def test_phase5_owner_briefs_reserve_shared_paths_for_primary_integration() -> None:
     briefs = _owner_briefs()
-    primary_paths = set(briefs["primary_integration_only"]["exact_paths"])
+    primary = briefs["primary_integration_only"]
+    primary_paths = set(primary["exact_paths"])
     delegated_paths = {
         path
         for owner in briefs["owners"].values()
@@ -408,6 +447,29 @@ def test_phase5_owner_briefs_reserve_shared_paths_for_primary_integration() -> N
         "java-api-service/src/main/java/com/example/dispute/workflow/config/TemporalWorkerConfiguration.java"
         in primary_paths
     )
+    foundation = primary["prebuilt_foundation_candidates"]
+    assert foundation == [
+        {
+            "commit": "58b8300da23ff8725efc27b9df1b8aec5c8c0552",
+            "purpose": (
+                "Generic hierarchical room tenant and global fanout bulkhead "
+                "primitives for GRAPH-016."
+            ),
+            "integration_gate": "P5_0_ENTRY_EVIDENCE_COMMITTED",
+            "runtime_effect": "NONE_UNTIL_EXPLICIT_EVIDENCE_WIRING",
+            "exact_paths": [
+                "python-agent-service/app/graph_runtime/bulkhead.py",
+                "python-agent-service/app/graph_runtime/errors.py",
+                "python-agent-service/tests/graph_runtime/unit/test_bulkhead.py",
+            ],
+            "required_checks": [
+                "P0_REVIEW_PASS",
+                "GRAPH_RUNTIME_UNIT_PASS",
+                "STATIC_IMPORT_BOUNDARY_PASS",
+            ],
+        }
+    ]
+    assert set(foundation[0]["exact_paths"]).issubset(primary_paths)
 
 
 def test_phase5_batch0_source_commands_execute_every_declared_baseline_suite() -> None:

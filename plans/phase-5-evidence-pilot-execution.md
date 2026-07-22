@@ -3,14 +3,14 @@
 ## Status
 
 ```text
-plan_status: ENGINEERING_EXCEPTION_ACCEPTED
-engineering_execution: BLOCKED_PENDING_PHASE_4_ENGINEERING_CHECKPOINT
+plan_status: P5_0_CONTRACT_CANDIDATE
+engineering_execution: BLOCKED_PENDING_P5_0_ENTRY_EVIDENCE
 contract_gate: P5.0 NOT_RUN
-phase_4_engineering_checkpoint: NOT_RECORDED
+phase_4_engineering_checkpoint: PASS
 promotion_gate: MIG-004 PENDING_PROMOTION
 phase_5_promotion_gate: MIG-005 PENDING_PROMOTION
-contract_candidate_permission: AFTER_PHASE_4_ENGINEERING_PASS
-next_phase_permission: BLOCKED_PENDING_PHASE_4_ENGINEERING_PASS
+contract_candidate_permission: GRANTED
+next_phase_permission: BLOCKED_PENDING_P5_0_ENTRY_EVIDENCE
 team_shape: primary + 5 simultaneously active delegated implementation owners
 java_evidence_ledger_writer: SOLE_FORMAL_WRITER
 graph_runtime_default: DISABLED
@@ -19,12 +19,14 @@ temporal_evidence_allocation: FORBIDDEN
 formal_graph_sink: FORBIDDEN
 ```
 
-This P5.0 entry contract is prepared from repository commit
-`1191e0cc419515b5af835aa3e61e9fc976f8be42`. The repository has not yet recorded the Phase 4
-engineering checkpoint, so it authorizes no Phase 5 implementation at this commit. Once that
-checkpoint grants `PHASE_5_ENGINEERING_ONLY`, the repository may freeze and test a P5.0 candidate
-under the repository-owner-approved
-[ADR 0012](../docs/architecture/adr/0012-phase-5-evidence-engineering-exception.md).
+This P5.0 contract candidate is based on the accepted Phase 4 evidence commit
+`b8697ce7a46f4494d250d21f27a076f0711ae04d`. Its candidate
+`1ba6e17fa2182156825f42d7e243978cf23ccdb4` passed the Phase 4 engineering checkpoint and grants
+`PHASE_5_ENGINEERING_ONLY`. The exact tracked checkpoint is
+`test-reports/temporal-first/phase-4-20260722-1ba6e17f/phase-4/phase-metrics.json`.
+This records permission to run P5.0 Batch 0 under the repository-owner-approved
+[ADR 0012](../docs/architecture/adr/0012-phase-5-evidence-engineering-exception.md), but it does not
+authorize Phase 5 implementation yet.
 
 ADR 0012 separates an **engineering lane** from a **promotion lane**. The engineering lane builds
 and proves fail-closed components with disabled or Java-signed synthetic inputs. `MIG-004`, the
@@ -38,10 +40,9 @@ machine-readable [Phase 5 test batches](./phase-5-evidence-pilot-test-batches.ya
 is `plans/temporal-langgraph-room-refactor.md` section 7.6 plus the platform acceptance checklist,
 machine manifest, and current-room behavior baseline.
 
-Implementation remains blocked until the Phase 4 engineering checkpoint is committed, a later
-P5.0 contract candidate freezes the engineering-only restrictions, Batch 0 runs from that exact
-clean detached candidate SHA, and the resulting entry evidence is committed separately. No result
-from the current pre-checkpoint document may be relabeled as a P5.0 `PASS`.
+Implementation remains blocked until Batch 0 runs from this contract candidate's exact clean
+detached SHA and the resulting entry evidence is committed separately. No green source suite may
+be relabeled as P5.0 `PASS` before that evidence commit.
 
 ## Scope
 
@@ -162,17 +163,18 @@ The primary may record P5.0 `PASS` only after all of the following are immutable
   not represented as an already-passed P5.0 prerequisite.
 - Asset loading is restricted to Java-signed synthetic capabilities and immutable synthetic
   fixtures; real party data and production object references remain unreachable.
-- This execution plan, the test-batch policy, and the P5.0 contract pack are frozen in one contract
-  candidate with no source/test/migration changes.
+- This execution plan, the test-batch policy, the P5.0 contract pack, the closed Evidence v2
+  schemas/fixtures, and their static contract tests are frozen in one contract candidate with no
+  product source, product behavior-test, or migration changes.
 - Batch 0 passes from that exact clean detached contract-candidate SHA and its report hashes,
   commands, durations, exit codes, environment, and protected worktree exceptions are committed in
   a later entry-evidence commit.
 - Each delegated brief names exact owned and forbidden paths, input contracts, T0 checks, deferred
   centralized batch, review partner, and commit-sized definition of done.
 
-Any missing condition leaves `engineering_execution: BLOCKED`. At this commit the Phase 4
-engineering checkpoint is not recorded, so the primary cannot yet freeze the final P5.0 candidate,
-start Batch 0, or delegate implementation.
+The Phase 4 handoff, ADR 0012, public-limit, synthetic-only and owner-brief conditions are now
+frozen. `engineering_execution` remains blocked while this exact candidate awaits Batch 0 and a
+separate entry-evidence commit; delegated implementation cannot start before both exist.
 
 ### Promotion Entry Gate
 

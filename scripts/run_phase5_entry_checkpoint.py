@@ -105,6 +105,9 @@ def candidate_plan(candidate_commit: str) -> dict[str, Any]:
             "next_phase_permission": gate["observed_entry_state"][
                 "next_phase_permission"
             ],
+            "evidence_v2_closed_contract_set": gate["observed_entry_state"][
+                "evidence_v2_closed_contract_set"
+            ],
             "entry_decision": gate["entry_decision"],
             "execute_allowed": _matrix_allows_batch0(matrix),
         },
@@ -121,13 +124,17 @@ def candidate_plan(candidate_commit: str) -> dict[str, Any]:
 def _matrix_allows_batch0(matrix: dict[str, Any]) -> bool:
     gate = matrix.get("gate", {})
     observed = gate.get("observed_entry_state", {})
+    checkpoint = gate.get("accepted_phase4_checkpoint")
     return (
         matrix.get("document_status")
         == "P5_0_CONTRACT_CANDIDATE_AWAITING_BATCH0"
         and observed.get("phase_4_engineering_checkpoint") == "PASS"
         and observed.get("next_phase_permission") == "PHASE_5_ENGINEERING_ONLY"
+        and observed.get("evidence_v2_closed_contract_set") == "FROZEN"
         and gate.get("entry_decision") == "READY_FOR_P5_BATCH_0"
         and gate.get("contract_gate_status") == "NOT_RUN"
+        and isinstance(checkpoint, str)
+        and checkpoint.endswith("/phase-metrics.json")
     )
 
 
@@ -232,11 +239,23 @@ def authenticate_phase4_handoff(
             "Phase 4 checkpoint must be a repository phase-metrics.json"
         )
     relative = checkpoint.relative_to(ROOT.resolve()).as_posix()
+    if relative != matrix["gate"]["accepted_phase4_checkpoint"]:
+        raise shared.EvidenceError(
+            "Phase 4 checkpoint path differs from the frozen P5 contract candidate"
+        )
     try:
         document = json.loads(checkpoint.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exception:
         raise shared.EvidenceError(f"cannot read Phase 4 checkpoint: {exception}") from exception
     authenticated = _validate_phase4_checkpoint_document(document)
+    expected_phase4_candidate = shared._assert_candidate(
+        matrix["gate"].get("accepted_phase4_candidate", ""),
+        "P5 matrix accepted Phase 4 candidate",
+    )
+    if authenticated["phase4_candidate_commit"] != expected_phase4_candidate:
+        raise shared.EvidenceError(
+            "Phase 4 checkpoint candidate differs from the frozen P5 contract candidate"
+        )
     candidate_file = checkpoint.parent / "candidate-commit.txt"
     source_manifest = checkpoint.parent / "source-execution-manifest.json"
     bundle_paths = (checkpoint, candidate_file, source_manifest)
@@ -270,6 +289,14 @@ def authenticate_phase4_handoff(
         .strip()
     )
     evidence_commit = shared._assert_candidate(evidence_commit, "Phase 4 evidence commit")
+    expected_evidence_commit = shared._assert_candidate(
+        matrix["gate"].get("accepted_phase4_evidence_commit", ""),
+        "P5 matrix accepted Phase 4 evidence commit",
+    )
+    if evidence_commit != expected_evidence_commit:
+        raise shared.EvidenceError(
+            "Phase 4 evidence commit differs from the frozen P5 contract candidate"
+        )
     if evidence_commit == authenticated["phase4_candidate_commit"]:
         raise shared.EvidenceError(
             "Phase 4 candidate and evidence commit must be separate commits"
@@ -781,6 +808,12 @@ def _record_source(
     cwd = (ROOT / matrix_item["cwd"]).resolve()
     if not cwd.is_dir() or not cwd.is_relative_to(ROOT.resolve()):
         raise shared.EvidenceError(f"{command_id}: matrix cwd escapes the candidate")
+    if command_id == "p5_entry_java" and _raw_reports(
+        command_id, raw_path, report_suffix, cwd
+    ):
+        raise shared.EvidenceError(
+            "candidate-specific Surefire report suffix is not unique"
+        )
     executed_argv = _command_argv_for_source(
         command_id,
         matrix_item["command"],

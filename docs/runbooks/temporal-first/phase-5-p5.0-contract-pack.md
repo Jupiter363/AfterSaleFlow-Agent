@@ -3,13 +3,13 @@
 ## Entry State And Authorization
 
 ```text
-document_status: ENGINEERING_EXCEPTION_ACCEPTED
+document_status: P5_0_CONTRACT_CANDIDATE
 contract_gate: P5.0 NOT_RUN
-contract_prep_base: 1191e0cc419515b5af835aa3e61e9fc976f8be42
-engineering_execution: BLOCKED_PENDING_PHASE_4_ENGINEERING_CHECKPOINT
-phase_4_engineering_checkpoint: NOT_RECORDED
+contract_prep_base: b8697ce7a46f4494d250d21f27a076f0711ae04d
+engineering_execution: BLOCKED_PENDING_P5_0_ENTRY_EVIDENCE
+phase_4_engineering_checkpoint: PASS
 engineering_exception: ADR_0012_ACCEPTED
-next_phase_permission: BLOCKED_PENDING_PHASE_4_ENGINEERING_PASS
+next_phase_permission: BLOCKED_PENDING_P5_0_ENTRY_EVIDENCE
 MIG-004: PENDING_PROMOTION
 MIG-005: PENDING_PROMOTION
 java_evidence_ledger_writer: SOLE_FORMAL_WRITER
@@ -31,8 +31,8 @@ canary or promotion.
 
 `GRAPH-016` is deliberately completed inside Phase 5 by `P5-E1` and remains mandatory engineering
 exit evidence. Treating it as P5.0 entry evidence would recreate the dependency cycle that ADR 0012
-resolves. At this contract-prep base, the Phase 4 engineering checkpoint is not recorded, so the
-candidate still cannot be frozen or tested.
+resolves. The accepted Phase 4 checkpoint now permits this contract candidate to run Batch 0;
+implementation remains blocked until the separate P5.0 entry-evidence commit.
 
 The companion documents are the
 [Phase 5 Evidence Pilot Execution Plan](../../../plans/phase-5-evidence-pilot-execution.md) and its
@@ -52,21 +52,22 @@ valid, and every ADR 0012 runtime restriction is still fail closed.
 
 | Gap | State at prep base | Required closure |
 | --- | --- | --- |
-| `P5-G0` Phase 4 engineering handoff | No Phase 4 engineering checkpoint or `PHASE_5_ENGINEERING_ONLY` grant exists | One accepted Phase 4 candidate and immutable checkpoint |
+| `P5-G0` Phase 4 engineering handoff | Closed for engineering entry by candidate `1ba6e17f` and evidence commit `b8697ce7` | Keep the tracked checkpoint and `PHASE_5_ENGINEERING_ONLY` grant bound to every P5.0 report |
 | `P5-G1` migration promotion prerequisite | `MIG-004` remains `PENDING_PROMOTION` | External promotion gate; ADR 0012 does not satisfy or bypass it for real traffic |
 | `P5-G2` 100-file product contract | Public `EvidenceSubmissionRequest` still has `@Size(max = 50)`; no approval record found | Keep public maximum 50; engineer 1/8/100 only in closed tests and signed synthetic fixtures until product/API/frontend approval |
 | `P5-G3` fan-out bulkheads | Phase 3 marks `GRAPH-016` `PARTIAL_ENGINEERING`; only the per-room eight-item unit bound is evidenced | `P5-E1` implements tenant/global semaphores, bounded queues, fairness, cancellation and recovery as Phase 5 exit evidence |
 | `P5-G4` production asset boundary | The current loader checks visibility, privacy, MIME, size and hash, but uses the legacy service-secret endpoint and is not bound to an approved P5 immutable manifest/epoch/fence capability | Engineering uses Java-signed synthetic capabilities only; production mTLS/object authorization stays externally gated |
-| `P5-G5` Evidence wire contracts | No `contracts/agent-platform/evidence/v2/**` contract set exists | Closed schemas, canonical hashes, fixtures and Java/Python parity before implementation |
+| `P5-G5` Evidence wire contracts | This candidate freezes six canonical schemas, one compatibility matrix and closed positive/negative fixtures under `contracts/agent-platform/evidence/v2/` | Exact-SHA Batch 0 must prove canonical hashes plus Java/Python fixture parity before implementation |
 | `P5-G6` Evidence bindings | V043 through V043_3 are already assigned to Intake; no Evidence graph/manifest/finalizer binding exists | Freeze and implement additive `V043_4__evidence_graph_bindings.sql`; never edit older migrations |
 | `P5-G7` formal transition authority | `EvidenceCompletionService.complete/expire` currently freeze, transition to Hearing, and start Hearing directly; coordinator delivery is post-commit side effect | Mode-aware Java events/receipts, durable dispatch and a single future Temporal ordering path |
 | `P5-G8` durable Evidence graph | Current Evidence clerk is a one-turn graph that returns `memory_frame`; it has no P5 checkpoint registration, 100-item `Send`, keyed reducer, or immutable batch proposal | Version-pinned `evidence.v2` using the Phase 3 durable kernel |
 | `P5-G9` runtime selector and no-sink proof | Evidence has no admitted typed child selector or formal-sink isolation proof | Fail-closed Evidence-specific selector and static assembly evidence, still synthetic-only |
 
-`P5-G0` blocks final P5.0 candidate freeze at this commit. `P5-G1`, the public activation facet of
+`P5-G0` is closed for this engineering-only candidate. `P5-G1`, the public activation facet of
 `P5-G2`, and the production facet of `P5-G4` block promotion, not signed synthetic engineering.
-`P5-G3` is an engineering exit obligation. `P5-G5..G9` remain implementation-slice obligations;
-describing their target state does not count as implementation evidence.
+`P5-G3` is an engineering exit obligation. `P5-G5` is frozen at the contract layer but remains
+unproven until exact-SHA Batch 0; `P5-G6..G9` remain implementation-slice obligations. Describing
+their target state does not count as implementation evidence.
 
 ## Baseline Behavior To Preserve
 
@@ -118,19 +119,18 @@ timer in place. A future promoted epoch uses only the typed child; it cannot als
 
 ## Contract Set
 
-The later P5.0 candidate must add closed schemas and positive/negative fixtures under
-`contracts/agent-platform/evidence/v2/` for at least:
+The P5.0 candidate freezes six closed schemas, one compatibility matrix, and positive/negative
+fixtures under `contracts/agent-platform/evidence/v2/`. The file-level boundaries cover the eight
+wire responsibilities without competing aliases:
 
-| Contract | Responsibility |
+| Canonical schema file | Covered responsibility |
 | --- | --- |
-| `evidence-thread-registration.v1` | Exact private actor/session, tenant/case, Evidence epoch/fence and version pins |
-| `evidence-batch-manifest.v1` | Java-authorized immutable batch and its 1-100 item membership |
-| `evidence-item-manifest.v1` | One Evidence ID, owner, visibility, object version/ref/hash, metadata and parse refs |
-| `evidence-item-assessment.v1` | Bounded proposal with stable item key, source bindings, modalities, scores/reasons and review need |
-| `evidence-batch-proposal.v1` | Complete deterministic keyed assessment map and proposed matrix/review operations |
-| `evidence-room-command.v1` | Temporal-to-Java/Python reference-only command envelope |
-| `evidence-domain-receipt.v1` | Java committed operation receipt used by Workflow replay |
-| `evidence-process-projection.v1` | Java-authorized UI projection for mode, epoch/fence, timer, pending state and active run |
+| `evidence-batch-manifest.schema.json` | Exact private thread/session binding, Temporal-to-Graph reference-only command identity, Java-authorized immutable batch and its bounded item manifests |
+| `evidence-asset-capability.schema.json` | One signed synthetic Evidence object authorization: owner, visibility, immutable object version/ref/hash, metadata, parse refs, expiry, epoch and fence |
+| `evidence-item-proposal.schema.json` | One bounded assessment proposal with stable item key, source bindings, modalities, scores/reasons and review need |
+| `evidence-terminal-proposal.schema.json` | Complete deterministic keyed assessment coverage and proposed matrix/review operations |
+| `evidence-finalization-receipt.schema.json` | The canonical `evidence-finalization-receipt.v1` Java domain receipt used by Workflow replay |
+| `evidence-process-projection.schema.json` | Java-authorized UI projection for mode, epoch/fence, timer, pending state and active run |
 
 All contracts reject unknown fields, noncanonical hashes, duplicate stable keys, missing version
 pins, unauthorized formal-action fields, and oversized values. Canonical JSON hashing uses the
@@ -466,10 +466,10 @@ that receipt; it never restarts a legacy timer, reopens Evidence, or deletes an 
 
 ## P5.0 Verification Requirements
 
-P5.0 Batch 0 is blocked until `P5-G0` closes and the exact candidate proves ADR 0012 restrictions.
-`P5-G1..G4` retain the entry/exit/promotion classifications above; they are not collectively
-relabeled as already passed. When admitted, Batch 0 must run from the exact contract-candidate SHA
-and prove the legacy baseline plus static gate conditions. Later engineering evidence maps:
+`P5-G0` is closed by the accepted Phase 4 handoff, so Batch 0 may run from this exact candidate to
+prove ADR 0012 restrictions. `P5-G1..G4` retain the entry/exit/promotion classifications above;
+they are not collectively relabeled as already passed. Implementation remains blocked until the
+separate entry-evidence commit. Later engineering evidence maps:
 
 | Checks | Required proof |
 | --- | --- |
@@ -485,8 +485,8 @@ and prove the legacy baseline plus static gate conditions. Later engineering evi
 | `MIG-005` | Engineering aggregate remains `PENDING_PROMOTION` until separate real-shadow/canary evidence |
 
 No regression, browser, Docker, Maven, Pytest or service suite ran during the original contract-prep
-task. Only focused static document cross-reference, gate-contract and YAML parsing checks are
-required while this pack awaits the Phase 4 engineering handoff.
+task. This candidate now delegates the exact legacy baseline source suites to the authenticated
+P5.0 Batch 0 runner; broader regression remains centralized at later checkpoints.
 
 ## Frozen P5.0 Decisions
 
@@ -513,5 +513,5 @@ required while this pack awaits the Phase 4 engineering handoff.
 13. The team is one primary plus five simultaneously active delegated implementation owners.
     Dependency-ordered integration still uses two waves; the primary centralizes expensive tests
     and owns one final candidate checkpoint.
-14. P5.0 remains blocked until the Phase 4 engineering handoff exists and exact-SHA Batch 0 evidence
-    is committed separately. External promotion gates remain pending after P5.0 passes.
+14. The Phase 4 handoff exists; P5.0 remains blocked until exact-SHA Batch 0 evidence is committed
+    separately. External promotion gates remain pending after P5.0 passes.

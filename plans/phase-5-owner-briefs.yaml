@@ -24,6 +24,13 @@ entry_gate:
 shared_contract_owner:
   owner: R
   delegated_owners_may_edit: false
+  contract_candidate_draft_owner: A
+  contract_candidate_integration_owner: R
+  contract_candidate_draft_gate: P5_0_CONTRACT_CANDIDATE
+  contract_candidate_draft_paths:
+    - contracts/agent-platform/evidence/v2/
+    - tests/static/test_phase5_evidence_contracts.py
+    - java-api-service/src/test/java/com/example/dispute/workflow/contract/v1/EvidenceV2ContractFixtureTest.java
   files:
     - contracts/agent-platform/evidence/v2/compatibility-matrix.yaml
     - contracts/agent-platform/evidence/v2/evidence-batch-manifest.schema.json
@@ -240,7 +247,7 @@ owners:
         t0_commands:
           - id: B1_MAVEN_TEST
             workdir: java-api-service
-            argv: [./mvnw.cmd, -q, -Dtest=EvidenceRoomWorkflowTest,EvidenceRoomWorkflowReplayTest, test]
+            argv: [./mvnw.cmd, -q, "-Dtest=EvidenceRoomWorkflowTest,EvidenceRoomWorkflowReplayTest", test]
             resource_class: maven_test
             test_token_required: true
             max_duration_seconds: 180
@@ -269,7 +276,7 @@ owners:
         t0_commands:
           - id: B2_MAVEN_TEST
             workdir: java-api-service
-            argv: [./mvnw.cmd, -q, -Dtest=EvidenceRoomActivityContractTest,EvidenceRoomWorkflowWorkerRecoveryTest, test]
+            argv: [./mvnw.cmd, -q, "-Dtest=EvidenceRoomActivityContractTest,EvidenceRoomWorkflowWorkerRecoveryTest", test]
             resource_class: maven_test
             test_token_required: true
             max_duration_seconds: 180
@@ -330,7 +337,7 @@ owners:
         t0_commands:
           - id: C1_MAVEN_TEST
             workdir: java-api-service
-            argv: [./mvnw.cmd, -q, -Dtest=EvidenceAssetAuthorizationTest,JdbcEvidenceGraphBindingStoreTest, test]
+            argv: [./mvnw.cmd, -q, "-Dtest=EvidenceAssetAuthorizationTest,JdbcEvidenceGraphBindingStoreTest", test]
             resource_class: maven_test
             test_token_required: true
             max_duration_seconds: 180
@@ -361,7 +368,7 @@ owners:
         t0_commands:
           - id: C2_MAVEN_TEST
             workdir: java-api-service
-            argv: [./mvnw.cmd, -q, -Dtest=EvidenceGraphCommandFactoryTest,EvidenceGraphResultFinalizerTest,EvidenceFinalizationReceiptTest, test]
+            argv: [./mvnw.cmd, -q, "-Dtest=EvidenceGraphCommandFactoryTest,EvidenceGraphResultFinalizerTest,EvidenceFinalizationReceiptTest", test]
             resource_class: maven_test
             test_token_required: true
             max_duration_seconds: 180
@@ -548,7 +555,7 @@ owners:
             max_duration_seconds: 180
           - id: E0_MAVEN_TEST
             workdir: java-api-service
-            argv: [./mvnw.cmd, -q, -Dtest=EvidenceBulkheadPolicyTest,EvidenceNoFormalSinkGuardTest, test]
+            argv: [./mvnw.cmd, -q, "-Dtest=EvidenceBulkheadPolicyTest,EvidenceNoFormalSinkGuardTest", test]
             resource_class: maven_test
             test_token_required: true
             max_duration_seconds: 180
@@ -589,7 +596,7 @@ owners:
             max_duration_seconds: 180
           - id: E1_MAVEN_TEST
             workdir: java-api-service
-            argv: [./mvnw.cmd, -q, -Dtest=EvidenceBulkheadIntegrationTest,EvidenceShadowParityServiceTest, test]
+            argv: [./mvnw.cmd, -q, "-Dtest=EvidenceBulkheadIntegrationTest,EvidenceShadowParityServiceTest", test]
             resource_class: maven_test
             test_token_required: true
             max_duration_seconds: 180
@@ -624,7 +631,7 @@ owners:
             max_duration_seconds: 180
           - id: E2_MAVEN_TEST
             workdir: java-api-service
-            argv: [./mvnw.cmd, -q, -Dtest=EvidenceTemporalCutoverIntegrationTest,EvidenceCutoverRollbackTest,EvidenceRoomWorkflowRecoveryTest, test]
+            argv: [./mvnw.cmd, -q, "-Dtest=EvidenceTemporalCutoverIntegrationTest,EvidenceCutoverRollbackTest,EvidenceRoomWorkflowRecoveryTest", test]
             resource_class: maven_test
             test_token_required: true
             max_duration_seconds: 180
@@ -638,15 +645,33 @@ owners:
 
 primary_integration_only:
   owner: R
+  prebuilt_foundation_candidates:
+    - commit: 58b8300da23ff8725efc27b9df1b8aec5c8c0552
+      purpose: Generic hierarchical room tenant and global fanout bulkhead primitives for GRAPH-016.
+      integration_gate: P5_0_ENTRY_EVIDENCE_COMMITTED
+      runtime_effect: NONE_UNTIL_EXPLICIT_EVIDENCE_WIRING
+      exact_paths:
+        - python-agent-service/app/graph_runtime/bulkhead.py
+        - python-agent-service/app/graph_runtime/errors.py
+        - python-agent-service/tests/graph_runtime/unit/test_bulkhead.py
+      required_checks:
+        - P0_REVIEW_PASS
+        - GRAPH_RUNTIME_UNIT_PASS
+        - STATIC_IMPORT_BOUNDARY_PASS
   exact_paths:
     - plans/phase-5-owner-briefs.yaml
     - plans/phase-5-evidence-pilot-execution.md
     - plans/phase-5-evidence-pilot-test-batches.yaml
     - tests/static/test_phase5_evidence_pilot_plan.py
     - tests/static/test_phase5_entry_contract_plan.py
+    - python-agent-service/app/graph_runtime/bulkhead.py
+    - python-agent-service/app/graph_runtime/errors.py
+    - python-agent-service/tests/graph_runtime/unit/test_bulkhead.py
     - java-api-service/src/main/java/com/example/dispute/workflow/config/TemporalWorkerConfiguration.java
     - java-api-service/src/main/java/com/example/dispute/workflow/config/OrchestrationCutoverProperties.java
   rules:
+    - Prebuilt foundation candidates remain integration-forbidden until their recorded integration gate is committed.
+    - Integrating a foundation candidate grants no owner permission to wire Evidence runtime formal sinks or TEMPORAL allocation.
     - Shared contract files and selector assembly are merged only after delegated commits are reviewed.
     - R owns Batch 1 Batch 2 candidate evidence failure classification and exact-SHA checkpoint execution.
     - Integration may wire only DISABLED or Java-signed synthetic SHADOW; formal Evidence allocation remains forbidden.

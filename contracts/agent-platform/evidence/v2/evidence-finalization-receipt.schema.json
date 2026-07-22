@@ -1,0 +1,535 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.after-sale-flow.example/agent-platform/evidence/v2/evidence-finalization-receipt.schema.json",
+  "title": "Evidence Finalization Receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "x-max-encoded-bytes": 65536,
+  "x-canonicalization": "RFC_8785",
+  "x-self-hash": {
+    "algorithm": "SHA-256",
+    "field": "receipt_hash",
+    "preimage": "omit_top_level_field"
+  },
+  "x-responsibility-mapping": "evidence-finalization-receipt.v1",
+  "x-semantic-constraints": [
+    {
+      "id": "SELF_HASH",
+      "rule": "receipt_hash equals RFC8785 SHA-256 with receipt_hash omitted"
+    },
+    {
+      "id": "REQUEST_HASH_IDEMPOTENCY",
+      "rule": "exact operation_key replay requires the same canonical request_hash; another request_hash is a conflict"
+    },
+    {
+      "id": "SEMANTIC_OPERATION_KEY",
+      "rule": "operation_key suffix exactly equals the root case_id/room_epoch and the operation-specific binding fields in the frozen contract order"
+    },
+    {
+      "id": "ENGINEERING_NO_FORMAL_WRITE",
+      "rule": "ISOLATED_SYNTHETIC_LEDGER commits no Domain events outbox merge dossier freeze or Hearing effect"
+    }
+  ],
+  "required": [
+    "schema_version",
+    "receipt_id",
+    "receipt_hash",
+    "operation_type",
+    "operation_key",
+    "request_hash",
+    "result_hash",
+    "commit_scope",
+    "status",
+    "formal_domain_write",
+    "formal_sink_eligible",
+    "tenant_surrogate",
+    "case_id",
+    "room_epoch",
+    "fencing_token",
+    "source_revision",
+    "process_revision",
+    "room_revision",
+    "operation_binding",
+    "merge_count",
+    "domain_event_ids",
+    "outbox_ids",
+    "hearing_opened",
+    "committed_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "evidence-finalization-receipt.v1"
+    },
+    "receipt_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "receipt_hash": {
+      "$ref": "#/$defs/sha256"
+    },
+    "operation_type": {
+      "enum": [
+        "MANIFEST_ISSUE",
+        "GRAPH_REQUEST",
+        "PARTY_COMPLETE",
+        "DEADLINE_WARN",
+        "DEADLINE_EXPIRE",
+        "BATCH_MERGE",
+        "DOSSIER_FREEZE",
+        "HEARING_OPEN"
+      ]
+    },
+    "operation_key": {
+      "$ref": "#/$defs/operation_key"
+    },
+    "request_hash": {
+      "$ref": "#/$defs/sha256"
+    },
+    "result_hash": {
+      "$ref": "#/$defs/sha256"
+    },
+    "commit_scope": {
+      "const": "ISOLATED_SYNTHETIC_LEDGER"
+    },
+    "status": {
+      "const": "COMMITTED"
+    },
+    "formal_domain_write": {
+      "const": false
+    },
+    "formal_sink_eligible": {
+      "const": false
+    },
+    "tenant_surrogate": {
+      "type": "string",
+      "pattern": "^TENANT_P5_SYNTHETIC_[A-Za-z0-9._:-]{1,104}$"
+    },
+    "case_id": {
+      "type": "string",
+      "pattern": "^CASE_P5_SYNTHETIC_[A-Za-z0-9._:-]{1,106}$"
+    },
+    "room_epoch": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "fencing_token": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "source_revision": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "process_revision": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "room_revision": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "operation_binding": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/manifest_issue_binding"
+        },
+        {
+          "$ref": "#/$defs/graph_request_binding"
+        },
+        {
+          "$ref": "#/$defs/party_complete_binding"
+        },
+        {
+          "$ref": "#/$defs/deadline_binding"
+        },
+        {
+          "$ref": "#/$defs/batch_merge_binding"
+        },
+        {
+          "$ref": "#/$defs/dossier_freeze_binding"
+        },
+        {
+          "$ref": "#/$defs/hearing_open_binding"
+        }
+      ]
+    },
+    "merge_count": {
+      "const": 0
+    },
+    "domain_event_ids": {
+      "type": "array",
+      "maxItems": 0
+    },
+    "outbox_ids": {
+      "type": "array",
+      "maxItems": 0
+    },
+    "hearing_opened": {
+      "const": false
+    },
+    "committed_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": [
+          "operation_type"
+        ],
+        "properties": {
+          "operation_type": {
+            "const": "MANIFEST_ISSUE"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "operation_key": {
+            "type": "string",
+            "pattern": "^evidence\\.manifest\\.issue:"
+          },
+          "operation_binding": {
+            "$ref": "#/$defs/manifest_issue_binding"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "operation_type"
+        ],
+        "properties": {
+          "operation_type": {
+            "const": "GRAPH_REQUEST"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "operation_key": {
+            "type": "string",
+            "pattern": "^evidence\\.graph\\.request:"
+          },
+          "operation_binding": {
+            "$ref": "#/$defs/graph_request_binding"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "operation_type"
+        ],
+        "properties": {
+          "operation_type": {
+            "const": "PARTY_COMPLETE"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "operation_key": {
+            "type": "string",
+            "pattern": "^evidence\\.party\\.complete:"
+          },
+          "operation_binding": {
+            "$ref": "#/$defs/party_complete_binding"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "operation_type"
+        ],
+        "properties": {
+          "operation_type": {
+            "const": "DEADLINE_WARN"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "operation_key": {
+            "type": "string",
+            "pattern": "^evidence\\.deadline\\.warn:"
+          },
+          "operation_binding": {
+            "$ref": "#/$defs/deadline_binding"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "operation_type"
+        ],
+        "properties": {
+          "operation_type": {
+            "const": "DEADLINE_EXPIRE"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "operation_key": {
+            "type": "string",
+            "pattern": "^evidence\\.deadline\\.expire:"
+          },
+          "operation_binding": {
+            "$ref": "#/$defs/deadline_binding"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "operation_type"
+        ],
+        "properties": {
+          "operation_type": {
+            "const": "BATCH_MERGE"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "operation_key": {
+            "type": "string",
+            "pattern": "^evidence\\.batch\\.merge:"
+          },
+          "operation_binding": {
+            "$ref": "#/$defs/batch_merge_binding"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "operation_type"
+        ],
+        "properties": {
+          "operation_type": {
+            "const": "DOSSIER_FREEZE"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "operation_key": {
+            "type": "string",
+            "pattern": "^evidence\\.dossier\\.freeze:"
+          },
+          "operation_binding": {
+            "$ref": "#/$defs/dossier_freeze_binding"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "operation_type"
+        ],
+        "properties": {
+          "operation_type": {
+            "const": "HEARING_OPEN"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "operation_key": {
+            "type": "string",
+            "pattern": "^evidence\\.hearing\\.open:"
+          },
+          "operation_binding": {
+            "$ref": "#/$defs/hearing_open_binding"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "thread_id": {
+      "type": "string",
+      "pattern": "^grt\\.v1\\.[0-9a-f]{32}$"
+    },
+    "operation_key": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^evidence\\.(?:manifest\\.issue|graph\\.request|party\\.complete|deadline\\.(?:warn|expire)|batch\\.merge|dossier\\.freeze|hearing\\.open):[A-Za-z0-9._:-]{1,448}$"
+    },
+    "manifest_issue_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "submission_batch_id",
+        "submission_revision",
+        "manifest_id",
+        "manifest_hash"
+      ],
+      "properties": {
+        "submission_batch_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "submission_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "manifest_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "manifest_hash": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "graph_request_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "manifest_hash",
+        "logical_run_id",
+        "command_id",
+        "attempt_id",
+        "thread_id"
+      ],
+      "properties": {
+        "manifest_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "logical_run_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "command_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "attempt_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "thread_id": {
+          "$ref": "#/$defs/thread_id"
+        }
+      }
+    },
+    "party_complete_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "participant_id",
+        "completion_request_id"
+      ],
+      "properties": {
+        "participant_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "completion_request_id": {
+          "$ref": "#/$defs/identifier"
+        }
+      }
+    },
+    "deadline_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deadline_revision"
+      ],
+      "properties": {
+        "deadline_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "batch_merge_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "manifest_hash",
+        "dossier_target_version",
+        "proposal_hash",
+        "logical_run_id",
+        "command_id",
+        "attempt_id",
+        "thread_id"
+      ],
+      "properties": {
+        "manifest_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "dossier_target_version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "proposal_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "logical_run_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "command_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "attempt_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "thread_id": {
+          "$ref": "#/$defs/thread_id"
+        }
+      }
+    },
+    "dossier_freeze_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dossier_target_version"
+      ],
+      "properties": {
+        "dossier_target_version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "hearing_open_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "freeze_receipt_hash"
+      ],
+      "properties": {
+        "freeze_receipt_hash": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    }
+  }
+}

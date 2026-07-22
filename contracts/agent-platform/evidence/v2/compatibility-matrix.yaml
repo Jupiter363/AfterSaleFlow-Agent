@@ -1,0 +1,73 @@
+schema_version: evidence-contract-compatibility.v1
+authority: JSON Schema files in this directory
+contracts:
+  evidence-batch-manifest.v1:
+    file: evidence-batch-manifest.schema.json
+    responsibilities:
+      - evidence-thread-registration.v1
+      - evidence-batch-manifest.v1
+      - evidence-item-manifest.v1
+      - evidence-room-command.v1
+    self_hash: manifest_hash
+    max_serialized_bytes: 262144
+    accepts: [evidence-batch-manifest.v1]
+    rejects_unknown_future: true
+  evidence-asset-capability.v1:
+    file: evidence-asset-capability.schema.json
+    responsibilities: [evidence-asset-capability.v1]
+    self_hash: capability_hash
+    self_hash_omits: [capability_hash, signature]
+    signature_covers: capability_hash
+    max_serialized_bytes: 32768
+    accepts: [evidence-asset-capability.v1]
+    synthetic_only: true
+    rejects_unknown_future: true
+  evidence-item-assessment.v1:
+    file: evidence-item-proposal.schema.json
+    responsibilities: [evidence-item-assessment.v1]
+    self_hash: assessment_hash
+    max_serialized_bytes: 65536
+    accepts: [evidence-item-assessment.v1]
+    rejects_unknown_future: true
+  evidence-batch-proposal.v1:
+    file: evidence-terminal-proposal.schema.json
+    responsibilities: [evidence-batch-proposal.v1]
+    self_hash: proposal_hash
+    max_serialized_bytes: 262144
+    accepts: [evidence-batch-proposal.v1]
+    rejects_unknown_future: true
+  evidence-finalization-receipt.v1:
+    file: evidence-finalization-receipt.schema.json
+    responsibilities: [evidence-finalization-receipt.v1]
+    self_hash: receipt_hash
+    max_serialized_bytes: 65536
+    accepts: [evidence-finalization-receipt.v1]
+    synthetic_ledger_only_before_promotion: true
+    rejects_unknown_future: true
+  evidence-process-projection.v1:
+    file: evidence-process-projection.schema.json
+    responsibilities: [evidence-process-projection.v1]
+    self_hash: projection_hash
+    max_serialized_bytes: 32768
+    accepts: [evidence-process-projection.v1]
+    rejects_unknown_future: true
+runtime_gate:
+  graph_runtime_default: DISABLED
+  allowed_modes: [DISABLED, SIGNED_SYNTHETIC_SHADOW]
+  public_submission_max: 50
+  signed_synthetic_counts: [1, 8, 100]
+  synthetic_100_formal_sink_eligible: false
+  real_case_shadow_allowed: false
+  temporal_evidence_allocation_allowed: false
+  formal_graph_sink_allowed: false
+  promotion_allowed: false
+rules:
+  unknown_fields: reject
+  missing_required_fields: reject
+  self_hash_preimage: omit_contract_declared_top_level_fields
+  default_self_hash_omits: [declared_self_hash_field]
+  contract_specific_self_hash_omits_override: allowed_and_required_when_declared
+  canonicalization: RFC_8785
+  digest: SHA_256
+  additive_optional_fields: require_new_schema_version
+  authority_field_changes: require_new_schema_version_and_ADR

@@ -1,7 +1,7 @@
 schema_version: phase-test-batches.v1
 phase: 5
 name: evidence-pilot-engineering-shadow
-document_status: ENGINEERING_EXCEPTION_ACCEPTED_AWAITING_PHASE4_CHECKPOINT
+document_status: P5_0_CONTRACT_CANDIDATE_AWAITING_BATCH0
 
 documents:
   execution_plan: plans/phase-5-evidence-pilot-execution.md
@@ -17,19 +17,24 @@ gate:
   contract_gate_status: NOT_RUN
   required_entry: PHASE_4_ENGINEERING_CHECKPOINT
   engineering_exception: ADR_0012_ACCEPTED
-  observed_base_sha: 1191e0cc419515b5af835aa3e61e9fc976f8be42
+  observed_base_sha: b8697ce7a46f4494d250d21f27a076f0711ae04d
+  accepted_phase4_candidate: 1ba6e17fa2182156825f42d7e243978cf23ccdb4
+  accepted_phase4_evidence_commit: b8697ce7a46f4494d250d21f27a076f0711ae04d
+  accepted_phase4_checkpoint: test-reports/temporal-first/phase-4-20260722-1ba6e17f/phase-4/phase-metrics.json
   observed_entry_state:
-    phase_4_engineering_checkpoint: NOT_RECORDED
-    next_phase_permission: BLOCKED
+    phase_4_engineering_checkpoint: PASS
+    next_phase_permission: PHASE_5_ENGINEERING_ONLY
+    evidence_v2_closed_contract_set: FROZEN
     MIG-004: PENDING_PROMOTION
     product_100_file_approval: NOT_RECORDED
     fanout_bulkhead_evidence: PARTIAL_ENGINEERING
     authorized_asset_boundary: NOT_APPROVED_FOR_PHASE_5
-  entry_decision: BLOCKED_PENDING_PHASE_4_ENGINEERING_CHECKPOINT
+  entry_decision: READY_FOR_P5_BATCH_0
   contract_candidate_allowed_when:
     - PHASE_4_ENGINEERING_CHECKPOINT_PASS
     - PHASE_5_ENGINEERING_ONLY_PERMISSION_RECORDED
     - ADR_0012_ACCEPTED
+    - EVIDENCE_V2_CLOSED_CONTRACT_SET_VALIDATED
   implementation_allowed_when:
     - PHASE_4_ENGINEERING_CHECKPOINT_PASS
     - PHASE_5_ENGINEERING_ONLY_PERMISSION_RECORDED
@@ -273,7 +278,7 @@ owners:
 task_contracts:
   P5-0:
     owner: R
-    status: BLOCKED_PENDING_PHASE_4_ENGINEERING_CHECKPOINT
+    status: AWAITING_EXACT_SHA_BATCH_0
     depends_on:
       - PHASE_4_ENGINEERING_CHECKPOINT_PASS
       - ADR_0012_ACCEPTED
@@ -374,7 +379,7 @@ waves:
 
 batches:
   P5-BATCH-0:
-    status: BLOCKED_PENDING_PHASE_4_ENGINEERING_CHECKPOINT
+    status: READY
     tier: T1
     trigger: P5_0_contract_candidate_commit
     purpose: Authenticate the Phase 4 engineering handoff and ADR 0012 restrictions, then freeze the exact legacy Evidence baseline before implementation.
@@ -382,6 +387,7 @@ batches:
       - phase_4_engineering_checkpoint_pass
       - PHASE_5_ENGINEERING_ONLY_permission
       - ADR_0012_accepted
+      - evidence_v2_closed_contract_set_validated
       - public_evidence_submission_limit_remains_50
       - synthetic_manifest_counts_restricted_to_1_8_100
       - graph_016_recorded_as_phase_5_exit_evidence
@@ -399,6 +405,7 @@ batches:
         resource_class: light_pytest
         command: >-
           D:\miniconda\python.exe -m pytest
+          tests/static/test_phase5_evidence_contracts.py
           tests/static/test_phase5_evidence_pilot_plan.py
           tests/static/test_phase5_entry_contract_plan.py
           tests/static/test_phase5_entry_runner.py
@@ -425,7 +432,7 @@ batches:
         resource_class: maven_test
         command: >-
           .\mvnw.cmd -DforkCount=1
-          -Dtest=EvidenceApiIntegrationTest,EvidenceSubmissionServiceTest,EvidenceCompletionServiceTest,EvidenceAgentTurnServiceTest,EvidenceDossierFreezerTest,EvidenceWindowWorkflowTest,EvidenceWindowCoordinatorTest,EvidenceRoomControllerTest,EvidenceRoomIntegrationTest
+          -Dtest=EvidenceApiIntegrationTest,EvidenceSubmissionServiceTest,EvidenceCompletionServiceTest,EvidenceAgentTurnServiceTest,EvidenceDossierFreezerTest,EvidenceWindowWorkflowTest,EvidenceWindowCoordinatorTest,EvidenceRoomControllerTest,EvidenceRoomIntegrationTest,EvidenceV2ContractFixtureTest
           test
       - id: p5_entry_frontend
         cwd: frontend
@@ -456,6 +463,7 @@ batches:
         - EvidenceWindowCoordinatorTest
         - EvidenceRoomControllerTest
         - EvidenceRoomIntegrationTest
+        - EvidenceV2ContractFixtureTest
       python:
         - python-agent-service/tests/agents/test_evidence_clerk_turn.py
         - python-agent-service/tests/agents/test_evidence_fact_mapping_policy.py
@@ -469,6 +477,7 @@ batches:
         - frontend/src/api/agentStream.test.js
         - frontend/src/stores/agentStream.test.js
     static_tests:
+      - tests/static/test_phase5_evidence_contracts.py
       - tests/static/test_phase5_evidence_pilot_plan.py
       - tests/static/test_phase5_entry_contract_plan.py
       - tests/static/test_phase5_entry_runner.py
@@ -679,4 +688,4 @@ current_contract_prep:
   regression_suites_run: false
   browser_or_service_execution_run: false
   batch_0_run: false
-  status_must_remain: BLOCKED_PENDING_PHASE_4_ENGINEERING_CHECKPOINT
+  status_must_remain: P5_0_CONTRACT_CANDIDATE_AWAITING_BATCH0

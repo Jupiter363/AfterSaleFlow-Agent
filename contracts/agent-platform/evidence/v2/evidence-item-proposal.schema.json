@@ -1,0 +1,421 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.after-sale-flow.example/agent-platform/evidence/v2/evidence-item-proposal.schema.json",
+  "title": "Evidence Item Assessment v1",
+  "type": "object",
+  "additionalProperties": false,
+  "x-max-encoded-bytes": 65536,
+  "x-canonicalization": "RFC_8785",
+  "x-self-hash": {
+    "algorithm": "SHA-256",
+    "field": "assessment_hash",
+    "preimage": "omit_top_level_field"
+  },
+  "x-responsibility-mapping": "evidence-item-assessment.v1",
+  "x-semantic-constraints": [
+    {
+      "id": "SELF_HASH",
+      "rule": "assessment_hash equals RFC8785 SHA-256 with assessment_hash omitted"
+    },
+    {
+      "id": "LOW_RELEVANCE_NOT_FABRICATION",
+      "rule": "relevance reasons cannot manufacture authenticity reasons"
+    },
+    {
+      "id": "ASSET_RECEIPT_BINDING",
+      "rule": "LOADED requires a matching loader-issued receipt and inspected modalities"
+    }
+  ],
+  "required": [
+    "schema_version",
+    "assessment_hash",
+    "execution_scope",
+    "formal_sink_eligible",
+    "command_id",
+    "logical_run_id",
+    "attempt_id",
+    "thread_id",
+    "manifest_id",
+    "manifest_hash",
+    "evidence_id",
+    "item_hash",
+    "formal_evidence_revision",
+    "actor_scope_hash",
+    "profile_versions",
+    "assessment_status",
+    "authenticity_score",
+    "authenticity_reason_codes",
+    "relevance_score",
+    "relevance_reason_codes",
+    "completeness_score",
+    "confidence",
+    "candidate_fact_links",
+    "source_refs",
+    "inspected_modalities",
+    "asset_load_status",
+    "asset_load_receipt_ref",
+    "asset_load_receipt_hash",
+    "limitations",
+    "review_reasons"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "evidence-item-assessment.v1"
+    },
+    "assessment_hash": {
+      "$ref": "#/$defs/sha256"
+    },
+    "execution_scope": {
+      "const": "SIGNED_SYNTHETIC_ONLY"
+    },
+    "formal_sink_eligible": {
+      "const": false
+    },
+    "command_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "logical_run_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "attempt_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "thread_id": {
+      "$ref": "#/$defs/thread_id"
+    },
+    "manifest_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "manifest_hash": {
+      "$ref": "#/$defs/sha256"
+    },
+    "evidence_id": {
+      "$ref": "#/$defs/evidence_id"
+    },
+    "item_hash": {
+      "$ref": "#/$defs/sha256"
+    },
+    "formal_evidence_revision": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "actor_scope_hash": {
+      "$ref": "#/$defs/sha256"
+    },
+    "profile_versions": {
+      "$ref": "#/$defs/profile_versions"
+    },
+    "assessment_status": {
+      "enum": [
+        "COMPLETED",
+        "NEEDS_REVIEW"
+      ]
+    },
+    "authenticity_score": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "authenticity_reason_codes": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 16,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/identifier"
+      }
+    },
+    "relevance_score": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "relevance_reason_codes": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 16,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/identifier"
+      }
+    },
+    "completeness_score": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "candidate_fact_links": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "$ref": "#/$defs/fact_link"
+      }
+    },
+    "source_refs": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/identifier"
+      }
+    },
+    "inspected_modalities": {
+      "type": "array",
+      "maxItems": 4,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "TEXT",
+          "IMAGE_PIXELS",
+          "PDF_METADATA",
+          "OCR"
+        ]
+      }
+    },
+    "asset_load_status": {
+      "enum": [
+        "NOT_REQUIRED",
+        "LOADED",
+        "METADATA_ONLY",
+        "REJECTED"
+      ]
+    },
+    "asset_load_receipt_ref": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/identifier"
+        }
+      ]
+    },
+    "asset_load_receipt_hash": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/sha256"
+        }
+      ]
+    },
+    "limitations": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 16,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/identifier"
+      }
+    },
+    "review_reasons": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 16,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/identifier"
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": [
+          "assessment_status"
+        ],
+        "properties": {
+          "assessment_status": {
+            "const": "NEEDS_REVIEW"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "review_reasons": {
+            "type": "array",
+            "minItems": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "asset_load_status"
+        ],
+        "properties": {
+          "asset_load_status": {
+            "const": "LOADED"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "asset_load_receipt_ref": {
+            "$ref": "#/$defs/identifier"
+          },
+          "asset_load_receipt_hash": {
+            "$ref": "#/$defs/sha256"
+          },
+          "inspected_modalities": {
+            "type": "array",
+            "minItems": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "asset_load_status"
+        ],
+        "properties": {
+          "asset_load_status": {
+            "enum": [
+              "NOT_REQUIRED",
+              "REJECTED"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "asset_load_receipt_ref": {
+            "type": "null"
+          },
+          "asset_load_receipt_hash": {
+            "type": "null"
+          },
+          "inspected_modalities": {
+            "maxItems": 0
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "asset_load_status"
+        ],
+        "properties": {
+          "asset_load_status": {
+            "const": "METADATA_ONLY"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "asset_load_receipt_ref": {
+            "type": "null"
+          },
+          "asset_load_receipt_hash": {
+            "type": "null"
+          },
+          "inspected_modalities": {
+            "items": {
+              "const": "PDF_METADATA"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "thread_id": {
+      "type": "string",
+      "pattern": "^grt\\.v1\\.[0-9a-f]{32}$"
+    },
+    "evidence_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^EVIDENCE_[A-Za-z0-9][A-Za-z0-9._:-]{0,118}$"
+    },
+    "profile_versions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "graph_version",
+        "checkpoint_schema_version",
+        "state_schema_version",
+        "prompt_version",
+        "model_profile_id",
+        "output_schema_version",
+        "policy_version",
+        "guardrail_version",
+        "tool_policy_version"
+      ],
+      "properties": {
+        "graph_version": {
+          "$ref": "#/$defs/identifier"
+        },
+        "checkpoint_schema_version": {
+          "$ref": "#/$defs/identifier"
+        },
+        "state_schema_version": {
+          "const": "evidence-graph-state.v2"
+        },
+        "prompt_version": {
+          "$ref": "#/$defs/identifier"
+        },
+        "model_profile_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "output_schema_version": {
+          "const": "evidence-item-assessment.v1"
+        },
+        "policy_version": {
+          "$ref": "#/$defs/identifier"
+        },
+        "guardrail_version": {
+          "$ref": "#/$defs/identifier"
+        },
+        "tool_policy_version": {
+          "$ref": "#/$defs/identifier"
+        }
+      }
+    },
+    "fact_link": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fact_id",
+        "source_refs"
+      ],
+      "properties": {
+        "fact_id": {
+          "type": "string",
+          "pattern": "^FACT_[A-Za-z0-9_:-]{1,123}$"
+        },
+        "source_refs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/identifier"
+          }
+        }
+      }
+    }
+  }
+}

@@ -52,11 +52,12 @@ def test_plan_binds_four_entry_sources_to_one_candidate_without_runtime_authorit
     }
     assert set(plan["runtime_restrictions"].values()) == {"forbidden"}
     assert plan["execution_gate"] == {
-        "document_status": "ENGINEERING_EXCEPTION_ACCEPTED_AWAITING_PHASE4_CHECKPOINT",
-        "phase_4_engineering_checkpoint": "NOT_RECORDED",
-        "next_phase_permission": "BLOCKED",
-        "entry_decision": "BLOCKED_PENDING_PHASE_4_ENGINEERING_CHECKPOINT",
-        "execute_allowed": False,
+        "document_status": "P5_0_CONTRACT_CANDIDATE_AWAITING_BATCH0",
+        "phase_4_engineering_checkpoint": "PASS",
+        "next_phase_permission": "PHASE_5_ENGINEERING_ONLY",
+        "evidence_v2_closed_contract_set": "FROZEN",
+        "entry_decision": "READY_FOR_P5_BATCH_0",
+        "execute_allowed": True,
     }
 
 
@@ -285,12 +286,50 @@ def _accepted_matrix() -> dict:
         "gate": {
             "contract_gate_status": "NOT_RUN",
             "entry_decision": "READY_FOR_P5_BATCH_0",
+            "accepted_phase4_candidate": "e" * 40,
+            "accepted_phase4_evidence_commit": "d" * 40,
+            "accepted_phase4_checkpoint": "evidence/phase-metrics.json",
             "observed_entry_state": {
                 "phase_4_engineering_checkpoint": "PASS",
                 "next_phase_permission": "PHASE_5_ENGINEERING_ONLY",
+                "evidence_v2_closed_contract_set": "FROZEN",
             },
         },
     }
+
+
+def test_batch0_rejects_an_unfrozen_evidence_contract_set() -> None:
+    matrix = _accepted_matrix()
+    matrix["gate"]["observed_entry_state"]["evidence_v2_closed_contract_set"] = (
+        "MISSING"
+    )
+
+    assert runner._matrix_allows_batch0(matrix) is False
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    (
+        ("accepted_phase4_candidate", "f" * 40, "checkpoint candidate differs"),
+        ("accepted_phase4_evidence_commit", "c" * 40, "evidence commit differs"),
+    ),
+)
+def test_phase4_handoff_rejects_matrix_sha_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    field: str,
+    value: str,
+    message: str,
+) -> None:
+    checkpoint, _ = _write_phase4_bundle(tmp_path)
+    matrix = _accepted_matrix()
+    matrix["gate"][field] = value
+    monkeypatch.setattr(runner, "ROOT", tmp_path)
+    monkeypatch.setattr(runner, "_git_bytes", _bundle_git_reader(tmp_path))
+    monkeypatch.setattr(runner, "_assert_ancestor", lambda *_args: None)
+
+    with pytest.raises(runner.shared.EvidenceError, match=message):
+        runner.authenticate_phase4_handoff(matrix, checkpoint, CANDIDATE)
 
 
 def test_junit_transforms_preserve_matrix_argv_without_a_shell(tmp_path: Path) -> None:
@@ -323,6 +362,40 @@ def test_junit_transforms_preserve_matrix_argv_without_a_shell(tmp_path: Path) -
         "-Dsurefire.reportNameSuffix=p5-entry-aaaaaaaaaaaa-12345678",
         "test",
     ]
+
+
+def test_java_source_rejects_stale_candidate_specific_surefire_report(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    run_root = tmp_path / ".codex-run" / "phase5-entry-stale-java"
+    attempt_dir = run_root / "attempts" / "p5_entry_java-01"
+    report_suffix = (
+        f"p5-entry-{CANDIDATE[:12]}-"
+        f"{hashlib.sha256(str(attempt_dir).encode('utf-8')).hexdigest()[:8]}"
+    )
+    report_dir = tmp_path / "java-api-service" / "target" / "surefire-reports"
+    report_dir.mkdir(parents=True)
+    (report_dir / f"TEST-stale-{report_suffix}.xml").write_text(
+        "<testsuite tests='1'/>", encoding="utf-8"
+    )
+    monkeypatch.setattr(runner, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        runner.shared,
+        "_run_shell",
+        lambda *_args: pytest.fail("source command must not start with stale reports"),
+    )
+
+    with pytest.raises(runner.shared.EvidenceError, match="suffix is not unique"):
+        runner._record_source(
+            command_id="p5_entry_java",
+            candidate=CANDIDATE,
+            run_root=run_root,
+            matrix_item={
+                "cwd": "java-api-service",
+                "command": ".\\mvnw.cmd -Dtest=EvidenceApiIntegrationTest test",
+            },
+            environment_sha256="b" * 64,
+        )
 
 
 def test_frontend_dependency_preflight_requires_classified_infra_resume(
@@ -436,6 +509,21 @@ def test_blocked_matrix_rejects_before_run_dir_or_source_invocation(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     observed: list[str] = []
+    monkeypatch.setattr(
+        runner,
+        "load_matrix",
+        lambda: {
+            "document_status": "ENGINEERING_EXCEPTION_ACCEPTED_AWAITING_PHASE4_CHECKPOINT",
+            "gate": {
+                "contract_gate_status": "NOT_RUN",
+                "entry_decision": "BLOCKED_PENDING_PHASE_4_ENGINEERING_CHECKPOINT",
+                "observed_entry_state": {
+                    "phase_4_engineering_checkpoint": "NOT_RECORDED",
+                    "next_phase_permission": "BLOCKED",
+                },
+            },
+        },
+    )
     monkeypatch.setattr(
         runner,
         "_record_source",

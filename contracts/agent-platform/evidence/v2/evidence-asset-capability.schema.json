@@ -1,0 +1,343 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.after-sale-flow.example/agent-platform/evidence/v2/evidence-asset-capability.schema.json",
+  "title": "Evidence Asset Capability v1",
+  "type": "object",
+  "additionalProperties": false,
+  "x-max-encoded-bytes": 32768,
+  "x-canonicalization": "RFC_8785",
+  "x-self-hash": {
+    "algorithm": "SHA-256",
+    "field": "capability_hash",
+    "preimage": "omit_top_level_fields",
+    "omit_fields": [
+      "capability_hash",
+      "signature"
+    ]
+  },
+  "x-signature": {
+    "algorithm": "ES256",
+    "covers": "capability_hash"
+  },
+  "x-semantic-constraints": [
+    {
+      "id": "SELF_HASH",
+      "rule": "capability_hash equals RFC8785 SHA-256 with both capability_hash and signature omitted"
+    },
+    {
+      "id": "EXPIRY_ORDER",
+      "rule": "issued_at is before expires_at"
+    },
+    {
+      "id": "SIGNATURE_SCOPE",
+      "rule": "signature covers capability_hash; capability_hash binds every authorization field except capability_hash and signature"
+    },
+    {
+      "id": "MANIFEST_ITEM_BODY_LOOKUP",
+      "rule": "verifier must load the exact immutable manifest_id/manifest_hash and evidence_id/item_hash bodies and compare every duplicated authorization field before loading bytes"
+    },
+    {
+      "id": "CURRENT_TIME_EXPIRY",
+      "rule": "verification rejects when current trusted time is before issued_at or at/after expires_at"
+    },
+    {
+      "id": "SINGLE_USE_NONCE",
+      "rule": "nonce is consumed atomically once per capability_id and replay is rejected"
+    }
+  ],
+  "required": [
+    "schema_version",
+    "capability_id",
+    "capability_hash",
+    "execution_scope",
+    "writer_mode",
+    "real_case_allowed",
+    "formal_sink_eligible",
+    "registration_id",
+    "manifest_id",
+    "manifest_hash",
+    "item_hash",
+    "tenant_surrogate",
+    "case_id",
+    "room_epoch",
+    "fencing_token",
+    "thread_id",
+    "actor_scope_hash",
+    "agent_session_id",
+    "evidence_id",
+    "owner_participant_id",
+    "owner_role",
+    "visibility",
+    "object_ref",
+    "immutable_object_version",
+    "object_sha256",
+    "content_type",
+    "byte_size",
+    "privacy_basis",
+    "parse_ref",
+    "parse_hash",
+    "parse_status",
+    "profile_versions_hash",
+    "permitted_modalities",
+    "synthetic_fixture_id",
+    "nonce",
+    "issued_at",
+    "expires_at",
+    "signature_algorithm",
+    "signing_key_id",
+    "signature"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "evidence-asset-capability.v1"
+    },
+    "capability_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "capability_hash": {
+      "$ref": "#/$defs/sha256"
+    },
+    "execution_scope": {
+      "const": "SIGNED_SYNTHETIC_ONLY"
+    },
+    "writer_mode": {
+      "const": "SHADOW"
+    },
+    "real_case_allowed": {
+      "const": false
+    },
+    "formal_sink_eligible": {
+      "const": false
+    },
+    "registration_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "manifest_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "manifest_hash": {
+      "$ref": "#/$defs/sha256"
+    },
+    "item_hash": {
+      "$ref": "#/$defs/sha256"
+    },
+    "tenant_surrogate": {
+      "type": "string",
+      "pattern": "^TENANT_P5_SYNTHETIC_[A-Za-z0-9._:-]{1,104}$"
+    },
+    "case_id": {
+      "type": "string",
+      "pattern": "^CASE_P5_SYNTHETIC_[A-Za-z0-9._:-]{1,106}$"
+    },
+    "room_epoch": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "fencing_token": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "thread_id": {
+      "$ref": "#/$defs/thread_id"
+    },
+    "actor_scope_hash": {
+      "$ref": "#/$defs/sha256"
+    },
+    "agent_session_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "evidence_id": {
+      "$ref": "#/$defs/evidence_id"
+    },
+    "owner_participant_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "owner_role": {
+      "enum": [
+        "USER",
+        "MERCHANT"
+      ]
+    },
+    "visibility": {
+      "enum": [
+        "PRIVATE",
+        "PARTIES",
+        "PLATFORM_REVIEWER"
+      ]
+    },
+    "object_ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^urn:synthetic-evidence:[A-Za-z0-9._:/-]{1,480}$"
+    },
+    "immutable_object_version": {
+      "$ref": "#/$defs/identifier"
+    },
+    "object_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "content_type": {
+      "enum": [
+        "application/pdf",
+        "image/jpeg",
+        "image/png",
+        "text/plain"
+      ]
+    },
+    "byte_size": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 10485760
+    },
+    "privacy_basis": {
+      "const": "SIGNED_SYNTHETIC_FIXTURE"
+    },
+    "parse_ref": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^urn:synthetic-evidence-parse:[A-Za-z0-9._:/-]{1,470}$"
+        }
+      ]
+    },
+    "parse_hash": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/sha256"
+        }
+      ]
+    },
+    "parse_status": {
+      "enum": [
+        "NOT_REQUESTED",
+        "AVAILABLE",
+        "FAILED"
+      ]
+    },
+    "profile_versions_hash": {
+      "$ref": "#/$defs/sha256"
+    },
+    "permitted_modalities": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 4,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "TEXT",
+          "IMAGE_PIXELS",
+          "PDF_METADATA",
+          "OCR"
+        ]
+      }
+    },
+    "synthetic_fixture_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "nonce": {
+      "$ref": "#/$defs/identifier"
+    },
+    "issued_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "signature_algorithm": {
+      "const": "ES256"
+    },
+    "signing_key_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "signature": {
+      "type": "string",
+      "minLength": 16,
+      "maxLength": 512,
+      "pattern": "^[A-Za-z0-9_-]+$"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": [
+          "parse_status"
+        ],
+        "properties": {
+          "parse_status": {
+            "const": "AVAILABLE"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "parse_ref": {
+            "type": "string"
+          },
+          "parse_hash": {
+            "$ref": "#/$defs/sha256"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "parse_status"
+        ],
+        "properties": {
+          "parse_status": {
+            "enum": [
+              "NOT_REQUESTED",
+              "FAILED"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "parse_ref": {
+            "type": "null"
+          },
+          "parse_hash": {
+            "type": "null"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "thread_id": {
+      "type": "string",
+      "pattern": "^grt\\.v1\\.[0-9a-f]{32}$"
+    },
+    "evidence_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^EVIDENCE_[A-Za-z0-9][A-Za-z0-9._:-]{0,118}$"
+    }
+  }
+}

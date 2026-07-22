@@ -202,11 +202,151 @@ def test_generator_atomically_writes_the_exact_candidate_bound_entry_bundle(
         "implementation_allowed_before_commit": False,
     }
     assert metrics["upstream_phase4_checkpoint"] == HANDOFF
+    assert metrics["execution_environment"] == {
+        "environment_id": "phase5-entry-fixture",
+        "snapshot_sha256": json.loads(
+            manifest_path.read_text(encoding="utf-8")
+        )["environment"]["snapshot_sha256"],
+    }
+    assert all(
+        suite["candidate_commit"] == CANDIDATE
+        and suite["environment_sha256"]
+        == metrics["execution_environment"]["snapshot_sha256"]
+        for suite in metrics["source_suites"]
+    )
     index = json.loads((output / "artifact-sha256.json").read_text(encoding="utf-8"))
     assert index["candidate_commit"] == CANDIDATE
     assert {item["path"] for item in index["artifacts"]} == {
         path.name for path in output.iterdir() if path.name != "artifact-sha256.json"
     }
+    assert all(
+        item["sha256"] == generator.shared._sha256(output / item["path"])
+        for item in index["artifacts"]
+    )
+    assert not output.with_name(".entry-evidence.assembling").exists()
+
+
+@pytest.mark.parametrize(
+    ("updates", "message"),
+    [
+        ({"status": "FAIL", "batch_0": "FAIL"}, "not a PASS"),
+        ({"promotion_gate": "PASS"}, "gate or recovery state drifted"),
+        ({"MIG-004": "PASS"}, "gate or recovery state drifted"),
+        ({"MIG-005": "PASS"}, "gate or recovery state drifted"),
+    ],
+)
+def test_generator_rejects_failed_or_forged_gate_manifest_even_after_reseal(
+    updates: dict[str, str], message: str, tmp_path: Path
+) -> None:
+    manifest_path = _build_pass_run(tmp_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.update(updates)
+    generator.runner._write_manifest(manifest_path, manifest)
+
+    with pytest.raises(generator.shared.EvidenceError, match=message):
+        generator.load_pass_manifest(manifest_path, CANDIDATE)
+
+
+def test_generator_rejects_missing_source_report(tmp_path: Path) -> None:
+    manifest_path = _build_pass_run(tmp_path)
+    missing = manifest_path.parent / "source" / next(
+        iter(generator.runner.SOURCE_REPORTS.values())
+    )
+    missing.unlink()
+
+    with pytest.raises(generator.shared.EvidenceError, match="missing or escapes"):
+        generator.load_pass_manifest(manifest_path, CANDIDATE)
+
+
+def test_generator_rejects_raw_report_path_escape_even_after_reseal(
+    tmp_path: Path,
+) -> None:
+    manifest_path = _build_pass_run(tmp_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    outside = tmp_path / "outside.xml"
+    record = manifest["commands"][0]
+    _write_junit(outside, CANDIDATE, record["id"])
+    record["raw_reports"] = [
+        {
+            "path": "../outside.xml",
+            "sha256": generator.shared._sha256(outside),
+        }
+    ]
+    generator.runner._write_manifest(manifest_path, manifest)
+
+    with pytest.raises(generator.shared.EvidenceError, match="missing or escapes"):
+        generator.load_pass_manifest(manifest_path, CANDIDATE)
+
+
+def test_generator_rejects_source_replacement_during_atomic_assembly(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _allow_fixture_git_checks(monkeypatch)
+    manifest_path = _build_pass_run(tmp_path)
+    output = tmp_path / "entry-evidence"
+    original_snapshot = generator._archive_snapshot
+    replaced = False
+
+    def replace_before_snapshot(
+        source: Path,
+        destination: Path,
+        *,
+        context: str,
+        expected_sha256: str | None = None,
+    ) -> tuple[bytes, str]:
+        nonlocal replaced
+        if expected_sha256 is not None and not replaced:
+            replaced = True
+            source.write_text("replaced after authentication\n", encoding="utf-8")
+        return original_snapshot(
+            source,
+            destination,
+            context=context,
+            expected_sha256=expected_sha256,
+        )
+
+    monkeypatch.setattr(generator, "_archive_snapshot", replace_before_snapshot)
+
+    with pytest.raises(generator.shared.EvidenceError, match="changed after PASS"):
+        generator.generate_entry_evidence(
+            release_id=RELEASE_ID,
+            candidate_commit=CANDIDATE,
+            base_commit=BASE,
+            execution_manifest_path=manifest_path,
+            output_dir=output,
+        )
+    assert not output.exists()
+    assert not output.with_name(".entry-evidence.assembling").exists()
+
+
+def test_generator_rejects_archived_report_replacement_before_publish(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _allow_fixture_git_checks(monkeypatch)
+    manifest_path = _build_pass_run(tmp_path)
+    output = tmp_path / "entry-evidence"
+    original_source_metrics = generator._source_metrics
+
+    def replace_after_metrics(
+        manifest: dict, source_dir: Path
+    ) -> tuple[list[dict], dict[str, int | float]]:
+        rows, totals = original_source_metrics(manifest, source_dir)
+        (source_dir / manifest["commands"][0]["report"]).write_text(
+            "replaced after snapshot\n", encoding="utf-8"
+        )
+        return rows, totals
+
+    monkeypatch.setattr(generator, "_source_metrics", replace_after_metrics)
+
+    with pytest.raises(generator.shared.EvidenceError, match="changed during evidence"):
+        generator.generate_entry_evidence(
+            release_id=RELEASE_ID,
+            candidate_commit=CANDIDATE,
+            base_commit=BASE,
+            execution_manifest_path=manifest_path,
+            output_dir=output,
+        )
+    assert not output.exists()
     assert not output.with_name(".entry-evidence.assembling").exists()
 
 

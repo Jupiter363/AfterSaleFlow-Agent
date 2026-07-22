@@ -1,0 +1,643 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.after-sale-flow.example/agent-platform/evidence/v2/evidence-batch-manifest.schema.json",
+  "title": "Evidence Batch Manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "x-max-encoded-bytes": 262144,
+  "x-canonicalization": "RFC_8785",
+  "x-self-hash": {
+    "algorithm": "SHA-256",
+    "field": "manifest_hash",
+    "preimage": "omit_top_level_field"
+  },
+  "x-responsibility-mappings": [
+    "evidence-thread-registration.v1 -> thread_binding fields",
+    "evidence-item-manifest.v1 -> items entries",
+    "evidence-room-command.v1 -> command_binding",
+    "evidence-batch-manifest.v1 -> root"
+  ],
+  "x-semantic-constraints": [
+    {
+      "id": "SELF_HASH",
+      "rule": "manifest_hash equals RFC8785 SHA-256 with manifest_hash omitted"
+    },
+    {
+      "id": "ITEM_SELF_HASH",
+      "rule": "each item_hash equals RFC8785 SHA-256 with item_hash omitted"
+    },
+    {
+      "id": "EXACT_MEMBERSHIP",
+      "rule": "item_count equals items length and ordered_item_keys equals sorted unique items[*].evidence_id"
+    },
+    {
+      "id": "EXPIRY_ORDER",
+      "rule": "issued_at is before expires_at"
+    }
+  ],
+  "required": [
+    "schema_version",
+    "manifest_id",
+    "manifest_hash",
+    "execution_scope",
+    "writer_mode",
+    "formal_sink_eligible",
+    "graph_execution_allowed",
+    "registration_id",
+    "tenant_surrogate",
+    "case_id",
+    "room_id",
+    "room_type",
+    "room_epoch",
+    "fencing_token",
+    "thread_id",
+    "actor_id",
+    "actor_role",
+    "participant_id",
+    "actor_scope_hash",
+    "agent_session_id",
+    "command_binding",
+    "submission_batch_id",
+    "submission_revision",
+    "dossier_target_version",
+    "profile_versions",
+    "issued_at",
+    "expires_at",
+    "item_count",
+    "ordered_item_keys",
+    "items"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "evidence-batch-manifest.v1"
+    },
+    "manifest_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "manifest_hash": {
+      "$ref": "#/$defs/sha256"
+    },
+    "execution_scope": {
+      "enum": [
+        "PUBLIC_CONTRACT_ONLY",
+        "SIGNED_SYNTHETIC_ONLY"
+      ]
+    },
+    "writer_mode": {
+      "enum": [
+        "LEGACY",
+        "SHADOW"
+      ]
+    },
+    "formal_sink_eligible": {
+      "const": false
+    },
+    "graph_execution_allowed": {
+      "type": "boolean"
+    },
+    "synthetic_fixture_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "registration_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "tenant_surrogate": {
+      "$ref": "#/$defs/identifier"
+    },
+    "case_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "room_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "room_type": {
+      "const": "EVIDENCE"
+    },
+    "room_epoch": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "fencing_token": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "thread_id": {
+      "$ref": "#/$defs/thread_id"
+    },
+    "actor_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "actor_role": {
+      "enum": [
+        "USER",
+        "MERCHANT"
+      ]
+    },
+    "participant_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "actor_scope_hash": {
+      "$ref": "#/$defs/sha256"
+    },
+    "agent_session_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "command_binding": {
+      "$ref": "#/$defs/command_binding"
+    },
+    "submission_batch_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "submission_revision": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "dossier_target_version": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "profile_versions": {
+      "$ref": "#/$defs/profile_versions"
+    },
+    "issued_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "item_count": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100
+    },
+    "ordered_item_keys": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/evidence_id"
+      }
+    },
+    "items": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "items": {
+        "$ref": "#/$defs/item_manifest"
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": [
+          "execution_scope"
+        ],
+        "properties": {
+          "execution_scope": {
+            "const": "PUBLIC_CONTRACT_ONLY"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "writer_mode": {
+            "const": "LEGACY"
+          },
+          "graph_execution_allowed": {
+            "const": false
+          },
+          "item_count": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50
+          },
+          "ordered_item_keys": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 50
+          },
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 50,
+            "items": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/item_manifest"
+                },
+                {
+                  "properties": {
+                    "object_ref": {
+                      "type": "string",
+                      "pattern": "^urn:evidence-object:"
+                    },
+                    "parse_ref": {
+                      "oneOf": [
+                        {"type": "null"},
+                        {"type": "string", "pattern": "^urn:evidence-parse:"}
+                      ]
+                    },
+                    "privacy_basis": {
+                      "const": "OWNER_CONSENT"
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          "case_id": {
+            "type": "string",
+            "pattern": "^(?!CASE_P5_SYNTHETIC_)[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+          }
+        },
+        "not": {
+          "required": [
+            "synthetic_fixture_id"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "execution_scope"
+        ],
+        "properties": {
+          "execution_scope": {
+            "const": "SIGNED_SYNTHETIC_ONLY"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "synthetic_fixture_id"
+        ],
+        "properties": {
+          "writer_mode": {
+            "const": "SHADOW"
+          },
+          "graph_execution_allowed": {
+            "const": true
+          },
+          "item_count": {
+            "enum": [
+              1,
+              8,
+              100
+            ]
+          },
+          "tenant_surrogate": {
+            "type": "string",
+            "pattern": "^TENANT_P5_SYNTHETIC_[A-Za-z0-9._:-]{1,104}$"
+          },
+          "case_id": {
+            "type": "string",
+            "pattern": "^CASE_P5_SYNTHETIC_[A-Za-z0-9._:-]{1,106}$"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/item_manifest"
+                },
+                {
+                  "properties": {
+                    "object_ref": {
+                      "type": "string",
+                      "pattern": "^urn:synthetic-evidence:"
+                    },
+            "privacy_basis": {
+              "const": "SIGNED_SYNTHETIC_FIXTURE"
+            },
+            "parse_ref": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "string",
+                  "pattern": "^urn:synthetic-evidence-parse:"
+                }
+              ]
+            }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "thread_id": {
+      "type": "string",
+      "pattern": "^grt\\.v1\\.[0-9a-f]{32}$"
+    },
+    "evidence_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^EVIDENCE_[A-Za-z0-9][A-Za-z0-9._:-]{0,118}$"
+    },
+    "command_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "command_id",
+        "logical_run_id",
+        "attempt_id",
+        "command_type",
+        "submitted_at",
+        "deadline_at"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "evidence-room-command.v1"
+        },
+        "command_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "logical_run_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "attempt_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "command_type": {
+          "const": "EVIDENCE_ASSESS_BATCH"
+        },
+        "submitted_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "deadline_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "profile_versions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "graph_version",
+        "checkpoint_schema_version",
+        "state_schema_version",
+        "prompt_version",
+        "model_profile_id",
+        "output_schema_version",
+        "policy_version",
+        "guardrail_version",
+        "tool_policy_version"
+      ],
+      "properties": {
+        "graph_version": {
+          "$ref": "#/$defs/identifier"
+        },
+        "checkpoint_schema_version": {
+          "$ref": "#/$defs/identifier"
+        },
+        "state_schema_version": {
+          "const": "evidence-graph-state.v2"
+        },
+        "prompt_version": {
+          "$ref": "#/$defs/identifier"
+        },
+        "model_profile_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "output_schema_version": {
+          "const": "evidence-batch-proposal.v1"
+        },
+        "policy_version": {
+          "$ref": "#/$defs/identifier"
+        },
+        "guardrail_version": {
+          "$ref": "#/$defs/identifier"
+        },
+        "tool_policy_version": {
+          "$ref": "#/$defs/identifier"
+        }
+      }
+    },
+    "item_manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "evidence_id",
+        "item_hash",
+        "owner_participant_id",
+        "owner_role",
+        "visibility",
+        "object_ref",
+        "immutable_object_version",
+        "object_sha256",
+        "content_type",
+        "byte_size",
+        "original_filename",
+        "parse_ref",
+        "parse_hash",
+        "parse_status",
+        "privacy_basis",
+        "permitted_modalities",
+        "formal_evidence_revision",
+        "display_order"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "evidence-item-manifest.v1"
+        },
+        "evidence_id": {
+          "$ref": "#/$defs/evidence_id"
+        },
+        "item_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "owner_participant_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "owner_role": {
+          "enum": [
+            "USER",
+            "MERCHANT"
+          ]
+        },
+        "visibility": {
+          "enum": [
+            "PRIVATE",
+            "PARTIES",
+            "PLATFORM_REVIEWER"
+          ]
+        },
+        "object_ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^urn:(?:evidence-object|synthetic-evidence):[A-Za-z0-9._:/-]{1,480}$"
+        },
+        "immutable_object_version": {
+          "$ref": "#/$defs/identifier"
+        },
+        "object_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "content_type": {
+          "enum": [
+            "application/pdf",
+            "image/jpeg",
+            "image/png",
+            "text/plain"
+          ]
+        },
+        "byte_size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10485760
+        },
+        "original_filename": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\\\/\\u0000-\\u001f]+$"
+        },
+        "parse_ref": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "pattern": "^urn:(?:evidence-parse|synthetic-evidence-parse):[A-Za-z0-9._:/-]{1,470}$"
+            }
+          ]
+        },
+        "parse_hash": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/sha256"
+            }
+          ]
+        },
+        "parse_status": {
+          "enum": [
+            "NOT_REQUESTED",
+            "AVAILABLE",
+            "FAILED"
+          ]
+        },
+        "privacy_basis": {
+          "enum": [
+            "OWNER_CONSENT",
+            "SIGNED_SYNTHETIC_FIXTURE"
+          ]
+        },
+        "permitted_modalities": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "TEXT",
+            "IMAGE_PIXELS",
+              "PDF_METADATA",
+              "OCR"
+            ]
+          }
+        },
+        "formal_evidence_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "display_order": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "parse_status"
+            ],
+            "properties": {
+              "parse_status": {
+                "const": "AVAILABLE"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "parse_ref": {
+                "type": "string"
+              },
+              "parse_hash": {
+                "$ref": "#/$defs/sha256"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "parse_status"
+            ],
+            "properties": {
+              "parse_status": {
+                "enum": [
+                  "NOT_REQUESTED",
+                  "FAILED"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "parse_ref": {
+                "type": "null"
+              },
+              "parse_hash": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ],
+      "x-canonicalization": "RFC_8785",
+      "x-self-hash": {
+        "algorithm": "SHA-256",
+        "field": "item_hash",
+        "preimage": "omit_top_level_field"
+      }
+    }
+  }
+}

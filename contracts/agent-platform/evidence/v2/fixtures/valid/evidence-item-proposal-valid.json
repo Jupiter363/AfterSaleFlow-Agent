@@ -1,0 +1,60 @@
+{
+  "schema_version": "evidence-item-assessment.v1",
+  "assessment_hash": "8bac118669e8fa53e0b1224cc86450761eb61ceea5120af6e3f22fb4bd536f12",
+  "execution_scope": "SIGNED_SYNTHETIC_ONLY",
+  "formal_sink_eligible": false,
+  "command_id": "COMMAND_P5_ONE",
+  "logical_run_id": "RUN_P5_ONE",
+  "attempt_id": "ATTEMPT_P5_ONE_1",
+  "thread_id": "grt.v1.018f6b7ec30a7430982fffc520c8195c",
+  "manifest_id": "MANIFEST_P5_SYNTHETIC_ONE",
+  "manifest_hash": "cae8c13b9ddbb5145fa74cac6c41df0ea0c142768156b00515aba8c858aa9470",
+  "evidence_id": "EVIDENCE_SYNTH_001",
+  "item_hash": "106b3982d3364402961054e9ea3669215ba9b93950d1804c4fe1d051dfe774b9",
+  "formal_evidence_revision": 1,
+  "actor_scope_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+  "profile_versions": {
+    "graph_version": "evidence.v2.0.0",
+    "checkpoint_schema_version": "evidence-checkpoint.v2",
+    "state_schema_version": "evidence-graph-state.v2",
+    "prompt_version": "evidence-prompt.v2",
+    "model_profile_id": "evidence-model.synthetic.v1",
+    "output_schema_version": "evidence-item-assessment.v1",
+    "policy_version": "evidence-policy.v2",
+    "guardrail_version": "evidence-guardrail.v2",
+    "tool_policy_version": "evidence-tools.synthetic.v1"
+  },
+  "assessment_status": "COMPLETED",
+  "authenticity_score": 0.91,
+  "authenticity_reason_codes": [
+    "SOURCE_HASH_MATCHED"
+  ],
+  "relevance_score": 0.86,
+  "relevance_reason_codes": [
+    "FACT_LINK_MATCHED"
+  ],
+  "completeness_score": 0.8,
+  "confidence": 0.84,
+  "candidate_fact_links": [
+    {
+      "fact_id": "FACT_ORDER_DAMAGE",
+      "source_refs": [
+        "SOURCE_SYNTHETIC_001"
+      ]
+    }
+  ],
+  "source_refs": [
+    "SOURCE_SYNTHETIC_001"
+  ],
+  "inspected_modalities": [
+    "TEXT",
+    "PDF_METADATA"
+  ],
+  "asset_load_status": "LOADED",
+  "asset_load_receipt_ref": "ASSET_RECEIPT_P5_001",
+  "asset_load_receipt_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+  "limitations": [
+    "SYNTHETIC_FIXTURE_ONLY"
+  ],
+  "review_reasons": []
+}

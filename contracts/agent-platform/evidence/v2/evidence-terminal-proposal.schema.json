@@ -1,0 +1,289 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.after-sale-flow.example/agent-platform/evidence/v2/evidence-terminal-proposal.schema.json",
+  "title": "Evidence Batch Proposal v1",
+  "type": "object",
+  "additionalProperties": false,
+  "x-max-encoded-bytes": 262144,
+  "x-canonicalization": "RFC_8785",
+  "x-self-hash": {
+    "algorithm": "SHA-256",
+    "field": "proposal_hash",
+    "preimage": "omit_top_level_field"
+  },
+  "x-responsibility-mapping": "evidence-batch-proposal.v1",
+  "x-semantic-constraints": [
+    {
+      "id": "SELF_HASH",
+      "rule": "proposal_hash equals RFC8785 SHA-256 with proposal_hash omitted"
+    },
+    {
+      "id": "EXACT_COVERAGE",
+      "rule": "assessment_refs contains exactly one sorted entry for every ordered_item_key"
+    },
+    {
+      "id": "PROPOSAL_ONLY",
+      "rule": "document cannot request merge freeze completion transition or Hearing opening"
+    }
+  ],
+  "required": [
+    "schema_version",
+    "proposal_hash",
+    "execution_scope",
+    "writer_mode",
+    "formal_sink_eligible",
+    "command_id",
+    "logical_run_id",
+    "attempt_id",
+    "thread_id",
+    "manifest_id",
+    "manifest_hash",
+    "item_count",
+    "ordered_item_keys",
+    "assessment_refs",
+    "coverage_status",
+    "proposed_fact_links",
+    "proposed_review_items",
+    "profile_versions",
+    "completed_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "evidence-batch-proposal.v1"
+    },
+    "proposal_hash": {
+      "$ref": "#/$defs/sha256"
+    },
+    "execution_scope": {
+      "const": "SIGNED_SYNTHETIC_ONLY"
+    },
+    "writer_mode": {
+      "const": "PROPOSAL_ONLY"
+    },
+    "formal_sink_eligible": {
+      "const": false
+    },
+    "command_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "logical_run_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "attempt_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "thread_id": {
+      "$ref": "#/$defs/thread_id"
+    },
+    "manifest_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "manifest_hash": {
+      "$ref": "#/$defs/sha256"
+    },
+    "item_count": {
+      "enum": [
+        1,
+        8,
+        100
+      ]
+    },
+    "ordered_item_keys": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/evidence_id"
+      }
+    },
+    "assessment_refs": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "items": {
+        "$ref": "#/$defs/assessment_ref"
+      }
+    },
+    "coverage_status": {
+      "const": "COMPLETE"
+    },
+    "proposed_fact_links": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "$ref": "#/$defs/fact_link"
+      }
+    },
+    "proposed_review_items": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "$ref": "#/$defs/review_item"
+      }
+    },
+    "profile_versions": {
+      "$ref": "#/$defs/profile_versions"
+    },
+    "completed_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "thread_id": {
+      "type": "string",
+      "pattern": "^grt\\.v1\\.[0-9a-f]{32}$"
+    },
+    "evidence_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^EVIDENCE_[A-Za-z0-9][A-Za-z0-9._:-]{0,118}$"
+    },
+    "profile_versions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "graph_version",
+        "checkpoint_schema_version",
+        "state_schema_version",
+        "prompt_version",
+        "model_profile_id",
+        "output_schema_version",
+        "policy_version",
+        "guardrail_version",
+        "tool_policy_version"
+      ],
+      "properties": {
+        "graph_version": {
+          "$ref": "#/$defs/identifier"
+        },
+        "checkpoint_schema_version": {
+          "$ref": "#/$defs/identifier"
+        },
+        "state_schema_version": {
+          "const": "evidence-graph-state.v2"
+        },
+        "prompt_version": {
+          "$ref": "#/$defs/identifier"
+        },
+        "model_profile_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "output_schema_version": {
+          "const": "evidence-batch-proposal.v1"
+        },
+        "policy_version": {
+          "$ref": "#/$defs/identifier"
+        },
+        "guardrail_version": {
+          "$ref": "#/$defs/identifier"
+        },
+        "tool_policy_version": {
+          "$ref": "#/$defs/identifier"
+        }
+      }
+    },
+    "assessment_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidence_id",
+        "assessment_status",
+        "assessment_hash"
+      ],
+      "properties": {
+        "evidence_id": {
+          "$ref": "#/$defs/evidence_id"
+        },
+        "assessment_status": {
+          "enum": [
+            "COMPLETED",
+            "NEEDS_REVIEW"
+          ]
+        },
+        "assessment_hash": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "fact_link": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fact_id",
+        "evidence_ids",
+        "source_refs"
+      ],
+      "properties": {
+        "fact_id": {
+          "type": "string",
+          "pattern": "^FACT_[A-Za-z0-9_:-]{1,123}$"
+        },
+        "evidence_ids": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 100,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/evidence_id"
+          }
+        },
+        "source_refs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/identifier"
+          }
+        }
+      }
+    },
+    "review_item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "review_key",
+        "evidence_id",
+        "reason_codes",
+        "priority"
+      ],
+      "properties": {
+        "review_key": {
+          "$ref": "#/$defs/identifier"
+        },
+        "evidence_id": {
+          "$ref": "#/$defs/evidence_id"
+        },
+        "reason_codes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/identifier"
+          }
+        },
+        "priority": {
+          "enum": [
+            "LOW",
+            "MEDIUM",
+            "HIGH"
+          ]
+        }
+      }
+    }
+  }
+}

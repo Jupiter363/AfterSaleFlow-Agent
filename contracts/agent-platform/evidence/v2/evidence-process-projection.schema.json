@@ -1,0 +1,878 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.after-sale-flow.example/agent-platform/evidence/v2/evidence-process-projection.schema.json",
+  "title": "Evidence Process Projection v1",
+  "type": "object",
+  "additionalProperties": false,
+  "x-max-encoded-bytes": 32768,
+  "x-canonicalization": "RFC_8785",
+  "x-self-hash": {
+    "algorithm": "SHA-256",
+    "field": "projection_hash",
+    "preimage": "omit_top_level_field"
+  },
+  "x-semantic-constraints": [
+    {
+      "id": "SELF_HASH",
+      "rule": "projection_hash equals RFC8785 SHA-256 with projection_hash omitted"
+    },
+    {
+      "id": "PHASE_TERMINAL_REASON",
+      "rule": "COMPLETED requires one terminal_reason; all nonterminal phases require null"
+    },
+    {
+      "id": "SHADOW_SYNTHETIC_ONLY",
+      "rule": "SIGNED_SYNTHETIC_SHADOW binds only synthetic case identity and never allocates Temporal or a formal sink"
+    },
+    {
+      "id": "DISABLED_NO_RUN",
+      "rule": "DISABLED has no active Graph run"
+    },
+    {
+      "id": "WARNING_TIME",
+      "rule": "warning_sent is true exactly when warning_sent_at is non-null"
+    },
+    {
+      "id": "ASSESSMENT_COUNTS",
+      "rule": "completed plus needs_review plus failed plus pending equals manifest_item_count"
+    },
+    {
+      "id": "ACTIVE_GRAPH_OPERATION_BINDING",
+      "rule": "AGENT_RUNNING requires pending_operation_key exactly evidence.graph.request:{case_id}:{room_epoch}:{active_graph_run.manifest_hash}:{active_graph_run.logical_run_id}"
+    },
+    {
+      "id": "READY_REQUIRES_COMPLETE_COVERAGE",
+      "rule": "READY_TO_FREEZE requires terminal_proposal, pending_count zero, and completed_count plus needs_review_count equal manifest_item_count"
+    },
+    {
+      "id": "HISTORY_READ_ONLY",
+      "rule": "history_mode has no active Graph run or pending operation and reports pending_state NONE"
+    },
+    {
+      "id": "FAILED_REQUIRES_FAILED_RECOVERY",
+      "rule": "FAILED projection_state or pending_state requires recovery.state FAILED and no active Graph run or pending operation"
+    }
+  ],
+  "required": [
+    "schema_version",
+    "projection_hash",
+    "projection_state",
+    "tenant_surrogate",
+    "case_id",
+    "room_id",
+    "room_epoch",
+    "fencing_token",
+    "writer_mode",
+    "graph_runtime_mode",
+    "formal_sink_allowed",
+    "temporal_evidence_allocation_allowed",
+    "real_case_shadow_allowed",
+    "viewer_actor_id",
+    "viewer_actor_role",
+    "viewer_scope_hash",
+    "audience",
+    "room_phase",
+    "terminal_reason",
+    "pending_state",
+    "pending_operation_key",
+    "original_deadline_at",
+    "warning_sent",
+    "warning_sent_at",
+    "party_completion",
+    "assessment_counts",
+    "dossier_version",
+    "history_mode",
+    "last_event_sequence",
+    "active_graph_run",
+    "terminal_proposal",
+    "recovery",
+    "version_pins",
+    "process_revision",
+    "room_revision",
+    "projected_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "evidence-process-projection.v1"
+    },
+    "projection_hash": {
+      "$ref": "#/$defs/sha256"
+    },
+    "projection_state": {
+      "enum": ["AVAILABLE", "PROCESSING", "UNAVAILABLE", "FAILED"]
+    },
+    "tenant_surrogate": {
+      "$ref": "#/$defs/identifier"
+    },
+    "case_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "room_id": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/identifier"}
+      ]
+    },
+    "room_epoch": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "fencing_token": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "writer_mode": {
+      "enum": [
+        "LEGACY",
+        "SHADOW"
+      ]
+    },
+    "graph_runtime_mode": {
+      "enum": [
+        "DISABLED",
+        "SIGNED_SYNTHETIC_SHADOW"
+      ]
+    },
+    "formal_sink_allowed": {
+      "const": false
+    },
+    "temporal_evidence_allocation_allowed": {
+      "const": false
+    },
+    "real_case_shadow_allowed": {
+      "const": false
+    },
+    "viewer_actor_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "viewer_actor_role": {
+      "enum": ["USER", "MERCHANT", "PLATFORM_REVIEWER"]
+    },
+    "viewer_scope_hash": {
+      "$ref": "#/$defs/sha256"
+    },
+    "audience": {
+      "enum": ["USER", "MERCHANT", "PLATFORM_REVIEWER"]
+    },
+    "room_phase": {
+      "enum": [
+        "OPEN",
+        "WAITING_PARTIES",
+        "ASSESSING",
+        "READY_TO_FREEZE",
+        "COMPLETED"
+      ]
+    },
+    "terminal_reason": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "enum": [
+            "BOTH_PARTIES_COMPLETED",
+            "DEADLINE_EXPIRED",
+            "ADMISSION_FAILED",
+            "CANCELLED"
+          ]
+        }
+      ]
+    },
+    "pending_state": {
+      "enum": [
+        "NONE",
+        "WAITING_PARTY",
+        "WAITING_TIMER",
+        "AGENT_RUNNING",
+        "REVIEW_PENDING",
+        "FAILED"
+      ]
+    },
+    "pending_operation_key": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/operation_key"
+        }
+      ]
+    },
+    "original_deadline_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "warning_sent": {
+      "type": "boolean"
+    },
+    "warning_sent_at": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "format": "date-time"
+        }
+      ]
+    },
+    "party_completion": {
+      "$ref": "#/$defs/party_completion"
+    },
+    "assessment_counts": {
+      "$ref": "#/$defs/assessment_counts"
+    },
+    "dossier_version": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "integer", "minimum": 1, "maximum": 9007199254740991}
+      ]
+    },
+    "history_mode": {
+      "type": "boolean"
+    },
+    "last_event_sequence": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "active_graph_run": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/graph_run"
+        }
+      ]
+    },
+    "terminal_proposal": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/terminal_proposal"}
+      ]
+    },
+    "recovery": {
+      "$ref": "#/$defs/recovery"
+    },
+    "version_pins": {
+      "$ref": "#/$defs/version_pins"
+    },
+    "process_revision": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "room_revision": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "projected_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": [
+          "graph_runtime_mode"
+        ],
+        "properties": {
+          "graph_runtime_mode": {
+            "const": "DISABLED"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "active_graph_run": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "graph_runtime_mode"
+        ],
+        "properties": {
+          "graph_runtime_mode": {
+            "const": "SIGNED_SYNTHETIC_SHADOW"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "writer_mode": {
+            "const": "SHADOW"
+          },
+          "tenant_surrogate": {
+            "type": "string",
+            "pattern": "^TENANT_P5_SYNTHETIC_[A-Za-z0-9._:-]{1,104}$"
+          },
+          "case_id": {
+            "type": "string",
+            "pattern": "^CASE_P5_SYNTHETIC_[A-Za-z0-9._:-]{1,106}$"
+          },
+          "room_id": {
+            "$ref": "#/$defs/identifier"
+          },
+          "fencing_token": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "version_pins": {
+            "properties": {
+              "workflow_build_id": {"$ref": "#/$defs/identifier"},
+              "graph_version": {"$ref": "#/$defs/identifier"},
+              "checkpoint_schema_version": {"$ref": "#/$defs/identifier"},
+              "state_schema_version": {"const": "evidence-graph-state.v2"}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["writer_mode", "projection_state"],
+        "properties": {
+          "writer_mode": {"const": "LEGACY"},
+          "projection_state": {"const": "UNAVAILABLE"}
+        }
+      },
+      "then": {
+        "properties": {
+          "graph_runtime_mode": {"const": "DISABLED"},
+          "room_id": {"type": "null"},
+          "room_epoch": {"const": 0},
+          "fencing_token": {"const": 0},
+          "version_pins": {
+            "properties": {
+              "workflow_build_id": {"type": "null"},
+              "graph_version": {"type": "null"},
+              "checkpoint_schema_version": {"type": "null"},
+              "state_schema_version": {"type": "null"}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "pending_state"
+        ],
+        "properties": {
+          "pending_state": {
+            "const": "AGENT_RUNNING"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "active_graph_run": {
+            "$ref": "#/$defs/graph_run"
+          },
+          "pending_operation_key": {
+            "type": "string",
+            "pattern": "^evidence\\.graph\\.request:"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "room_phase"
+        ],
+        "properties": {
+          "room_phase": {
+            "const": "COMPLETED"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "terminal_reason": {
+            "enum": [
+              "BOTH_PARTIES_COMPLETED",
+              "DEADLINE_EXPIRED",
+              "ADMISSION_FAILED",
+              "CANCELLED"
+            ]
+          },
+          "pending_state": {
+            "const": "NONE"
+          },
+          "pending_operation_key": {
+            "type": "null"
+          },
+          "active_graph_run": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "room_phase"
+        ],
+        "properties": {
+          "room_phase": {
+            "enum": [
+              "OPEN",
+              "WAITING_PARTIES",
+              "ASSESSING",
+              "READY_TO_FREEZE"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "terminal_reason": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "warning_sent"
+        ],
+        "properties": {
+          "warning_sent": {
+            "const": false
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "warning_sent_at": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["room_phase"],
+        "properties": {"room_phase": {"const": "READY_TO_FREEZE"}}
+      },
+      "then": {
+        "properties": {
+          "terminal_proposal": {"$ref": "#/$defs/terminal_proposal"},
+          "assessment_counts": {
+            "properties": {
+              "pending_count": {"const": 0},
+              "failed_count": {"const": 0}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["room_phase"],
+        "properties": {
+          "room_phase": {"enum": ["OPEN", "WAITING_PARTIES", "ASSESSING"]}
+        }
+      },
+      "then": {
+        "properties": {"terminal_proposal": {"type": "null"}}
+      }
+    },
+    {
+      "if": {
+        "required": ["terminal_proposal"],
+        "properties": {
+          "terminal_proposal": {"$ref": "#/$defs/terminal_proposal"}
+        }
+      },
+      "then": {
+        "properties": {
+          "room_phase": {"enum": ["READY_TO_FREEZE", "COMPLETED"]}
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "warning_sent"
+        ],
+        "properties": {
+          "warning_sent": {
+            "const": true
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "warning_sent_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["history_mode"],
+        "properties": {"history_mode": {"const": true}}
+      },
+      "then": {
+        "properties": {
+          "pending_state": {"const": "NONE"},
+          "pending_operation_key": {"type": "null"},
+          "active_graph_run": {"type": "null"}
+        }
+      }
+    },
+    {
+      "if": {
+        "anyOf": [
+          {
+            "required": ["projection_state"],
+            "properties": {"projection_state": {"const": "FAILED"}}
+          },
+          {
+            "required": ["pending_state"],
+            "properties": {"pending_state": {"const": "FAILED"}}
+          }
+        ]
+      },
+      "then": {
+        "properties": {
+          "pending_operation_key": {"type": "null"},
+          "active_graph_run": {"type": "null"},
+          "recovery": {
+            "properties": {"state": {"const": "FAILED"}}
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["viewer_actor_role"],
+        "properties": {"viewer_actor_role": {"const": "USER"}}
+      },
+      "then": {
+        "properties": {"audience": {"const": "USER"}}
+      }
+    },
+    {
+      "if": {
+        "required": ["viewer_actor_role"],
+        "properties": {"viewer_actor_role": {"const": "MERCHANT"}}
+      },
+      "then": {
+        "properties": {"audience": {"const": "MERCHANT"}}
+      }
+    },
+    {
+      "if": {
+        "required": ["viewer_actor_role"],
+        "properties": {"viewer_actor_role": {"const": "PLATFORM_REVIEWER"}}
+      },
+      "then": {
+        "properties": {"audience": {"const": "PLATFORM_REVIEWER"}}
+      }
+    }
+  ],
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "operation_key": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^evidence\\.(?:manifest\\.issue|graph\\.request|party\\.complete|deadline\\.(?:warn|expire)|batch\\.merge|dossier\\.freeze|hearing\\.open):[A-Za-z0-9._:-]{1,448}$"
+    },
+    "party_completion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "initiator_completed",
+        "respondent_completed",
+        "initiator_receipt_ref",
+        "initiator_receipt_hash",
+        "respondent_receipt_ref",
+        "respondent_receipt_hash"
+      ],
+      "properties": {
+        "initiator_completed": {
+          "type": "boolean"
+        },
+        "respondent_completed": {
+          "type": "boolean"
+        },
+        "initiator_receipt_ref": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/identifier"
+            }
+          ]
+        },
+        "initiator_receipt_hash": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/sha256"
+            }
+          ]
+        },
+        "respondent_receipt_ref": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/identifier"
+            }
+          ]
+        },
+        "respondent_receipt_hash": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/sha256"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": ["initiator_completed"],
+            "properties": {"initiator_completed": {"const": true}}
+          },
+          "then": {
+            "properties": {
+              "initiator_receipt_ref": {"$ref": "#/$defs/identifier"},
+              "initiator_receipt_hash": {"$ref": "#/$defs/sha256"}
+            }
+          },
+          "else": {
+            "properties": {
+              "initiator_receipt_ref": {"type": "null"},
+              "initiator_receipt_hash": {"type": "null"}
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["respondent_completed"],
+            "properties": {"respondent_completed": {"const": true}}
+          },
+          "then": {
+            "properties": {
+              "respondent_receipt_ref": {"$ref": "#/$defs/identifier"},
+              "respondent_receipt_hash": {"$ref": "#/$defs/sha256"}
+            }
+          },
+          "else": {
+            "properties": {
+              "respondent_receipt_ref": {"type": "null"},
+              "respondent_receipt_hash": {"type": "null"}
+            }
+          }
+        }
+      ]
+    },
+    "assessment_counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "manifest_item_count",
+        "completed_count",
+        "needs_review_count",
+        "failed_count",
+        "pending_count"
+      ],
+      "properties": {
+        "manifest_item_count": {"type": "integer", "minimum": 0, "maximum": 100},
+        "completed_count": {"type": "integer", "minimum": 0, "maximum": 100},
+        "needs_review_count": {"type": "integer", "minimum": 0, "maximum": 100},
+        "failed_count": {"type": "integer", "minimum": 0, "maximum": 100},
+        "pending_count": {"type": "integer", "minimum": 0, "maximum": 100}
+      }
+    },
+    "terminal_proposal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["proposal_ref", "proposal_hash"],
+      "properties": {
+        "proposal_ref": {"$ref": "#/$defs/identifier"},
+        "proposal_hash": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "recovery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "retryable", "checkpoint_ref", "checkpoint_hash"],
+      "properties": {
+        "state": {"enum": ["NONE", "RESUMABLE", "RECONCILING", "FAILED"]},
+        "retryable": {"type": "boolean"},
+        "checkpoint_ref": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/identifier"}
+          ]
+        },
+        "checkpoint_hash": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/sha256"}
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": ["state"],
+            "properties": {"state": {"const": "NONE"}}
+          },
+          "then": {
+            "properties": {
+              "retryable": {"const": false},
+              "checkpoint_ref": {"type": "null"},
+              "checkpoint_hash": {"type": "null"}
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["state"],
+            "properties": {"state": {"enum": ["RESUMABLE", "RECONCILING"]}}
+          },
+          "then": {
+            "properties": {
+              "retryable": {"const": true},
+              "checkpoint_ref": {"$ref": "#/$defs/identifier"},
+              "checkpoint_hash": {"$ref": "#/$defs/sha256"}
+            }
+          }
+        }
+      ]
+    },
+    "graph_run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "command_id",
+        "logical_run_id",
+        "attempt_id",
+        "manifest_id",
+        "manifest_hash",
+        "graph_version",
+        "checkpoint_schema_version",
+        "status"
+      ],
+      "properties": {
+        "command_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "logical_run_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "attempt_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "manifest_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "manifest_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "graph_version": {
+          "$ref": "#/$defs/identifier"
+        },
+        "checkpoint_schema_version": {
+          "$ref": "#/$defs/identifier"
+        },
+        "status": {
+          "enum": [
+            "QUEUED",
+            "RUNNING",
+            "COMPLETED",
+            "FAILED"
+          ]
+        }
+      }
+    },
+    "version_pins": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workflow_build_id",
+        "graph_version",
+        "checkpoint_schema_version",
+        "state_schema_version",
+        "prompt_version",
+        "model_profile_id",
+        "output_schema_version",
+        "policy_version",
+        "guardrail_version",
+        "tool_policy_version"
+      ],
+      "properties": {
+        "workflow_build_id": {
+          "oneOf": [{"type": "null"}, {"$ref": "#/$defs/identifier"}]
+        },
+        "graph_version": {
+          "oneOf": [{"type": "null"}, {"$ref": "#/$defs/identifier"}]
+        },
+        "checkpoint_schema_version": {
+          "oneOf": [{"type": "null"}, {"$ref": "#/$defs/identifier"}]
+        },
+        "state_schema_version": {
+          "oneOf": [
+            {"type": "null"},
+            {"const": "evidence-graph-state.v2"}
+          ]
+        },
+        "prompt_version": {
+          "$ref": "#/$defs/identifier"
+        },
+        "model_profile_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "output_schema_version": {
+          "const": "evidence-batch-proposal.v1"
+        },
+        "policy_version": {
+          "$ref": "#/$defs/identifier"
+        },
+        "guardrail_version": {
+          "$ref": "#/$defs/identifier"
+        },
+        "tool_policy_version": {
+          "$ref": "#/$defs/identifier"
+        }
+      }
+    }
+  }
+}
