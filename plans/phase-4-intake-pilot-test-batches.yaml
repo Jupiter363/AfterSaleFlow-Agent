@@ -807,6 +807,7 @@ batches:
     static_tests:
       - tests/static/test_phase4_no_formal_sink_assembly.py
       - tests/static/test_phase4_r15_authority_binding_contract.py
+      - tests/static/test_phase4_engineering_evidence_policy.py
     python_tests:
       - python-agent-service/tests/graphs/intake
       - python-agent-service/tests/agents/test_intake_turn.py
@@ -823,8 +824,14 @@ batches:
       - IntakeFormalSinkAssemblyTest
       - IntakeRoomWorkflowTest
       - IntakeRoomWorkflowReplayTest
-      - IntakeRoomWorkflowRecoveryTest
+      - IntakeRoomWorkflowWorkerRecoveryTest
       - IntakeTemporalCutoverIntegrationTest
+      - IntakeSyntheticComparisonActivitiesTest
+      - SignedSyntheticIntakeDriverTest
+      - JdbcIntakeSyntheticComparisonLedgerIntegrationTest
+      - MigrationIntegrationTest
+      - IntakeSyntheticShadowConfigurationTest
+      - TemporalWorkerConfigurationTest
       - IntakeGraphCommandFactoryTest
       - IntakeGraphResultFinalizerTest
       - IntakeProcessProjectionAdapterTest
@@ -856,6 +863,7 @@ batches:
           D:\miniconda\python.exe -m pytest
           tests/static/test_phase4_no_formal_sink_assembly.py
           tests/static/test_phase4_r15_authority_binding_contract.py
+          tests/static/test_phase4_engineering_evidence_policy.py
           -q
     execution:
       order:
@@ -947,6 +955,7 @@ batches:
           tests/static/test_phase4_matrix_authority_erratum.py
           tests/static/test_phase4_no_formal_sink_assembly.py
           tests/static/test_phase4_r15_authority_binding_contract.py
+          tests/static/test_phase4_engineering_evidence_policy.py
           -q
     execution:
       strategy: deduplicated_source_suites_then_derived_batch_views
