@@ -6,15 +6,19 @@
 review_status: CLOSED_WITH_BLOCKERS_CLASSIFIED
 review_basis_commit: d6f66d6d8634aac20b77b9b66a22cbb77370c4fe
 contract_gate: P5.0 NOT_RUN
-engineering_execution: BLOCKED_PENDING_PHASE_4_ENGINEERING_CHECKPOINT
+historical_engineering_execution_at_review_basis: BLOCKED_PENDING_PHASE_4_ENGINEERING_CHECKPOINT
+current_phase_4_engineering_checkpoint: PASS
+engineering_execution: BLOCKED_PENDING_P5_0_ENTRY_EVIDENCE
+candidate_scope_integrity: REPAIRS_CLASSIFIED_REQUIRES_FRESH_EXACT_SHA_BATCH_0
 promotion_gate: PENDING
 MIG-004: PENDING_PROMOTION
 MIG-005: PENDING_PROMOTION
 ```
 
 This closes the independent document and repository-fact review requested before the final P5.0
-candidate. It does not close `P5-G0`, authorize implementation, or turn an engineering exception
-into a promotion exception. The reviewed fact set is
+candidate. The later accepted Phase 4 evidence closes the historical `P5-G0`, but this closure does
+not authorize implementation or turn an engineering exception into a promotion exception. The
+reviewed fact set is
 [`phase-5-p5.0-baseline-inventory.md`](./phase-5-p5.0-baseline-inventory.md).
 
 ## Reviewed Inputs
@@ -39,12 +43,12 @@ representing pending external gates as passed. `P5-G1`, public activation in `P5
 activation in `P5-G4` stay outside repository-only engineering. `P5-G3` moves to the Phase 5 exit
 where E1 can actually implement and prove it.
 
-### R1: P5-G0 Still Blocks Candidate Freeze
+### R1: P5-G0 Is Closed By Accepted Phase 4 Evidence
 
-**Disposition: BLOCK UNTIL UPSTREAM EVIDENCE.** At the review basis commit, there is no accepted
-Phase 4 engineering checkpoint granting `PHASE_5_ENGINEERING_ONLY`. R may prepare facts and review
-closure, but may not freeze the final P5.0 candidate, run Batch 0 or delegate implementation until
-that immutable handoff exists.
+**Disposition: ACCEPTED HANDOFF, HISTORICAL FINDING RETAINED.** At the review basis commit there was
+no accepted Phase 4 engineering checkpoint. Candidate `1ba6e17f` and evidence commit `b8697ce7`
+subsequently grant `PHASE_5_ENGINEERING_ONLY`. This closes only the handoff dependency: final P5.0
+candidate integrity, exact-SHA Batch 0 and separate entry evidence remain mandatory.
 
 ### R2: 50/100 Product Boundary Is Explicit
 
@@ -105,11 +109,28 @@ All five delegated owners must receive concrete implementation work and edit per
 owners do not satisfy the plan. R owns shared contracts, selector assembly, candidate evidence and
 the single heavy-test token.
 
+### R8: Post-Contract Repairs Require A New Candidate
+
+**Disposition: ACCEPT AS ENTRY REPAIRS WITH EXACT-SHA REVALIDATION.** Commits `99cdd435`,
+`d76fde17`, `24a705dc`, `a3be6744`, `c9e6c7ba`, `e97e1341`, and `fb69bd4c` are limited to evidence
+authentication/publication, runner retention, test-fixture isolation, and existing Spring bean
+proxyability. The proxy repairs remove only class-level `final`; they do not change transaction
+annotations, locks, SQL, idempotency, formal writers, runtime modes or Evidence behavior.
+
+The Evidence upload diagnostic is a fixture defect: its case is only `INTAKE_COMPLETED`, while
+production access correctly requires an Evidence-open case. The final candidate may update only
+`EvidenceApiIntegrationTest` to reach `EVIDENCE_OPEN` through the domain admission transition
+before upload. Weakening
+`SecurityConfiguration`, controller/service authorization, or production state checks is forbidden.
+
+No diagnostic run from an earlier SHA is accepted. `P5-G10` remains blocked until the repair set is
+integrated, the final diff is reviewed, and Batch 0 passes from one fresh clean detached SHA.
+
 ## P5-G Closure Acceptance
 
 | Gate | Review result | May engineering proceed after P5.0? | May promotion proceed? |
 | --- | --- | --- | --- |
-| `P5-G0` | OPEN, upstream | No, until exact checkpoint/permission | No |
+| `P5-G0` | CLOSED by `1ba6e17f` / `b8697ce7` | Yes, subject to P5.0 and `P5-G10` | No |
 | `P5-G1` | Classified external | Yes under ADR 0012 | No |
 | `P5-G2` | Split: public open, synthetic contracted | Yes for closed 1/8/100 only | No public 100 until approval |
 | `P5-G3` | Assigned to E0/E1 exit | Yes, implementation required | No until engineering and production gates |
@@ -119,17 +140,20 @@ the single heavy-test token.
 | `P5-G7` | Assigned to B/C, activation closed | Kernel/receipt engineering only | No |
 | `P5-G8` | Assigned to A | Disabled/synthetic engineering only | No |
 | `P5-G9` | Assigned to E, formal sink closed | Disabled/synthetic engineering only | No |
+| `P5-G10` | Classified entry repairs; exact candidate unproved | No, until fresh exact-SHA Batch 0 and evidence commit | No |
 
 ## Required Entry Sequence
 
-1. Commit one accepted Phase 4 engineering checkpoint with
+1. Preserve accepted Phase 4 candidate `1ba6e17f` and evidence commit `b8697ce7` with
    `next_phase_permission: PHASE_5_ENGINEERING_ONLY`.
-2. Freeze a new P5.0 contract candidate containing ADR 0012 restrictions, this factual baseline,
-   the machine schedule and exact owner briefs. Do not include implementation.
-3. Run P5-BATCH-0 once from the exact clean detached candidate SHA.
-4. Commit entry evidence separately with commands, timestamps, durations, exit codes, JUnit/report
+2. Integrate and independently review only the classified candidate-scope repairs, including the
+   Evidence-open test fixture correction; no Phase 5 feature implementation is allowed.
+3. Freeze a new P5.0 contract candidate containing ADR 0012 restrictions, this factual baseline,
+   the machine schedule, exact owner briefs and the closed repair ledger.
+4. Run P5-BATCH-0 once from the exact clean detached candidate SHA.
+5. Commit entry evidence separately with commands, timestamps, durations, exit codes, JUnit/report
    hashes, environment and the protected unrelated-worktree exception.
-5. Only then start A-E. Runtime remains `LEGACY`/`DISABLED` or Java-signed synthetic `SHADOW`.
+6. Only then start A-E. Runtime remains `LEGACY`/`DISABLED` or Java-signed synthetic `SHADOW`.
 
 ## Required Focused Review Tests
 
@@ -153,4 +177,5 @@ external checkpoints. A local static PASS cannot be relabelled as those results.
 The P5.0 contract direction is reviewable and internally consistent after ADR 0012. The repository
 facts, gaps, owner routes and resolution path are now explicit. Review closure is therefore
 `CLOSED_WITH_BLOCKERS_CLASSIFIED`, while P5.0 remains `NOT_RUN`, engineering remains blocked on
-`P5-G0`, promotion remains pending, and Java remains the only formal Evidence writer.
+fresh exact-SHA proof of `P5-G10`, promotion remains pending, and Java remains the only formal
+Evidence writer.

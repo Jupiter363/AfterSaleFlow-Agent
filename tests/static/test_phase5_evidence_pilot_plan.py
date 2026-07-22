@@ -277,14 +277,49 @@ def test_phase5_baseline_maps_every_entry_gap_without_claiming_entry() -> None:
     inventory = BASELINE_INVENTORY.read_text(encoding="utf-8")
     closure = REVIEW_CLOSURE.read_text(encoding="utf-8")
 
-    for index in range(10):
+    for index in range(11):
         gate = f"P5-G{index}"
         assert gate in inventory
         assert gate in closure
     assert "contract_gate: P5.0 NOT_RUN" in inventory
     assert "contract_gate: P5.0 NOT_RUN" in closure
     assert "review_status: CLOSED_WITH_BLOCKERS_CLASSIFIED" in closure
-    assert "engineering_execution: BLOCKED_PENDING_PHASE_4_ENGINEERING_CHECKPOINT" in closure
+    assert "current_phase_4_engineering_checkpoint: PASS" in closure
+    assert "engineering_execution: BLOCKED_PENDING_P5_0_ENTRY_EVIDENCE" in closure
+
+
+def test_phase5_candidate_repairs_are_ledgered_without_inheriting_a_pass() -> None:
+    execution = EXECUTION_PLAN.read_text(encoding="utf-8")
+    contract = CONTRACT_PACK.read_text(encoding="utf-8")
+    inventory = BASELINE_INVENTORY.read_text(encoding="utf-8")
+    closure = REVIEW_CLOSURE.read_text(encoding="utf-8")
+    documents = (execution, contract, inventory, closure)
+
+    for document in documents:
+        assert (
+            "candidate_scope_integrity: "
+            "REPAIRS_CLASSIFIED_REQUIRES_FRESH_EXACT_SHA_BATCH_0"
+        ) in document
+        assert "P5.0 NOT_RUN" in document
+        assert "EvidenceApiIntegrationTest" in document
+        assert "EVIDENCE_OPEN" in document
+
+    for commit in (
+        "99cdd435",
+        "d76fde17",
+        "24a705dc",
+        "a3be6744",
+        "c9e6c7ba",
+        "e97e1341",
+        "fb69bd4c",
+    ):
+        assert commit in execution
+        assert commit in closure
+
+    assert "SecurityConfiguration" in execution
+    assert "SecurityConfiguration" in closure
+    assert "do not inherit any result" in execution
+    assert "No diagnostic run from an earlier SHA is accepted" in closure
 
 
 def test_phase5_review_keeps_d0_and_e0_independent_with_exact_path_closure() -> None:

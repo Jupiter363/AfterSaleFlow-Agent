@@ -7,6 +7,7 @@ document_status: P5_0_CONTRACT_CANDIDATE
 contract_gate: P5.0 NOT_RUN
 contract_prep_base: b8697ce7a46f4494d250d21f27a076f0711ae04d
 engineering_execution: BLOCKED_PENDING_P5_0_ENTRY_EVIDENCE
+candidate_scope_integrity: REPAIRS_CLASSIFIED_REQUIRES_FRESH_EXACT_SHA_BATCH_0
 phase_4_engineering_checkpoint: PASS
 engineering_exception: ADR_0012_ACCEPTED
 next_phase_permission: BLOCKED_PENDING_P5_0_ENTRY_EVIDENCE
@@ -48,6 +49,15 @@ records the tested SHA, commands, durations, exit codes, report paths and hashes
 starts only after that evidence commit says P5.0 `PASS`, the Phase 4 engineering handoff remains
 valid, and every ADR 0012 runtime restriction is still fail closed.
 
+The post-contract changes through `fb69bd4c0d944eccfd6c7f78dfd1faadbbe05ffe` are not Phase 5
+implementation and do not constitute a passed candidate. They are the line-ending authentication,
+LF publication, architecture-fixture isolation, Surefire retention, and three semantics-preserving
+Spring proxyability repairs classified in the execution plan's candidate-scope ledger. The final
+candidate must also correct `EvidenceApiIntegrationTest` to admit its completed Intake case to
+`EVIDENCE_OPEN` before upload; production authentication and authorization remain unchanged. All
+earlier Batch 0 attempts are diagnostic only, and the complete suite must run afresh on the final
+exact SHA.
+
 ## Open P0 Contract Gaps
 
 | Gap | State at prep base | Required closure |
@@ -62,12 +72,14 @@ valid, and every ADR 0012 runtime restriction is still fail closed.
 | `P5-G7` formal transition authority | `EvidenceCompletionService.complete/expire` currently freeze, transition to Hearing, and start Hearing directly; coordinator delivery is post-commit side effect | Mode-aware Java events/receipts, durable dispatch and a single future Temporal ordering path |
 | `P5-G8` durable Evidence graph | Current Evidence clerk is a one-turn graph that returns `memory_frame`; it has no P5 checkpoint registration, 100-item `Send`, keyed reducer, or immutable batch proposal | Version-pinned `evidence.v2` using the Phase 3 durable kernel |
 | `P5-G9` runtime selector and no-sink proof | Evidence has no admitted typed child selector or formal-sink isolation proof | Fail-closed Evidence-specific selector and static assembly evidence, still synthetic-only |
+| `P5-G10` candidate-scope integrity | Post-contract diagnostics required bounded entry tooling, test-fixture and existing Spring baseline repairs | Include only the classified repair ledger, review the final diff, and run a fresh exact-SHA Batch 0; no prior diagnostic result is reusable |
 
 `P5-G0` is closed for this engineering-only candidate. `P5-G1`, the public activation facet of
 `P5-G2`, and the production facet of `P5-G4` block promotion, not signed synthetic engineering.
 `P5-G3` is an engineering exit obligation. `P5-G5` is frozen at the contract layer but remains
-unproven until exact-SHA Batch 0; `P5-G6..G9` remain implementation-slice obligations. Describing
-their target state does not count as implementation evidence.
+unproven until exact-SHA Batch 0; `P5-G6..G9` remain implementation-slice obligations. `P5-G10`
+remains an entry blocker until the final repair-complete SHA passes Batch 0. Describing their target
+state does not count as implementation evidence.
 
 ## Baseline Behavior To Preserve
 

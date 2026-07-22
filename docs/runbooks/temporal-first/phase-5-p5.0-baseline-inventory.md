@@ -6,7 +6,10 @@
 inventory_status: FROZEN_AT_ENTRY_EXCEPTION_BASE
 observed_commit: d6f66d6d8634aac20b77b9b66a22cbb77370c4fe
 contract_gate: P5.0 NOT_RUN
-engineering_execution: BLOCKED_PENDING_PHASE_4_ENGINEERING_CHECKPOINT
+engineering_execution_at_observed_commit: BLOCKED_PENDING_PHASE_4_ENGINEERING_CHECKPOINT
+current_phase_4_engineering_checkpoint: PASS
+current_engineering_execution: BLOCKED_PENDING_P5_0_ENTRY_EVIDENCE
+candidate_scope_integrity: REPAIRS_CLASSIFIED_REQUIRES_FRESH_EXACT_SHA_BATCH_0
 promotion_gate: PENDING
 MIG-004: PENDING_PROMOTION
 MIG-005: PENDING_PROMOTION
@@ -16,7 +19,9 @@ formal_evidence_writer: JAVA_DOMAIN_POSTGRESQL_ONLY
 
 This inventory records facts at the ADR 0012 engineering-exception commit. It is not an entry
 evidence bundle, an implementation authorization, a production-capacity result, or a promotion
-approval. The authoritative constraints remain:
+approval. The historical observation predates the accepted Phase 4 checkpoint; current gate state
+is recorded separately above so the old `P5-G0` fact cannot be mistaken for a current blocker. The
+authoritative constraints remain:
 
 - [`phase-5-evidence-pilot-execution.md`](../../../plans/phase-5-evidence-pilot-execution.md)
 - [`phase-5-evidence-pilot-test-batches.yaml`](../../../plans/phase-5-evidence-pilot-test-batches.yaml)
@@ -161,11 +166,31 @@ disabled/synthetic rendering evidence until approval.
 | Generic reducer | `test_reducers.py` | Evidence-specific membership and proposal hash |
 | UI/API | `EvidenceRoomView.test.js`, `evidence.test.js`, `evidence-room.layout.spec.js` | Public 100 approval or backend 100 submission acceptance |
 
-## P5-G0 Through P5-G9 Resolution Map
+## Post-Baseline Candidate Repairs
+
+The accepted Phase 4 candidate `1ba6e17fa2182156825f42d7e243978cf23ccdb4` and evidence commit
+`b8697ce7a46f4494d250d21f27a076f0711ae04d` close the historical handoff gap. Contract preparation
+then exposed only entry-path baseline defects, not permission to implement Evidence v2:
+
+- `99cdd435` and `d76fde17` make handoff authentication and generated evidence stable across
+  checkout line endings.
+- `24a705dc` isolates adversarial architecture fixtures from Spring component scanning.
+- `a3be6744`, `e97e1341`, and `fb69bd4c` remove class-level `final` from three existing Spring
+  beans while retaining transaction propagation, persistence order, idempotency and Java authority.
+- `c9e6c7ba` preserves long Surefire report identity through deterministic short retained paths.
+- The final candidate must make `EvidenceApiIntegrationTest` transition its fixture from completed
+  Intake to `EVIDENCE_OPEN` before upload. This is a `FIXTURE` correction; production security and
+  Evidence access checks must remain unchanged.
+
+These changes are admissible only as the bounded candidate-scope repair set documented in the
+execution plan. They do not update this inventory's historical product observations, do not grant
+engineering execution, and require a fresh exact-SHA Batch 0 after the complete set is integrated.
+
+## P5-G0 Through P5-G10 Resolution Map
 
 | Gate | Classification after ADR 0012 | Resolution owner/task | Required closure |
 | --- | --- | --- | --- |
-| `P5-G0` Phase 4 handoff | Hard P5.0 entry blocker | R / `P5-0` | Accepted Phase 4 checkpoint grants `PHASE_5_ENGINEERING_ONLY`, then exact-SHA Batch 0 and separate evidence commit |
+| `P5-G0` Phase 4 handoff | Closed for engineering entry | R / `P5-0` | Candidate `1ba6e17f` and evidence `b8697ce7` grant `PHASE_5_ENGINEERING_ONLY`; keep the authenticated artifact immutable |
 | `P5-G1` MIG-004 promotion | Promotion blocker, not synthetic engineering entry | External promotion authority | Keep `MIG-004=PENDING_PROMOTION`; no local substitution |
 | `P5-G2` 100-file public contract | Public activation blocker | D0 preserves 50; A/C/D use closed synthetic fixtures; product/API/frontend approval is external | Public remains 1-50; synthetic 1/8/100 is visibly non-public and no-sink |
 | `P5-G3` bulkheads | Phase 5 engineering exit obligation | E0 harness, E1 implementation; A supplies graph integration | `GRAPH-016` room/tenant/global permits, bounded queues, fairness, cancellation/recovery evidence |
@@ -175,6 +200,7 @@ disabled/synthetic rendering evidence until approval.
 | `P5-G7` transition authority | Engineering implementation, activation forbidden | B1/B2 timer kernel; C2 receipts/Finalizer | Deterministic ordering and committed Java receipts; legacy stays active |
 | `P5-G8` durable graph | Engineering implementation | A1/A2 | Versioned `evidence.v2`, 1/8/100 waves, recovery and keyed terminal proposal |
 | `P5-G9` selector/no-sink | Engineering implementation, promotion separately blocked | E0 static harness; E1/E2 selector/parity/recovery | Fail-closed Evidence selector, signed synthetic SHADOW only, formal sink unreachable |
+| `P5-G10` candidate-scope integrity | P5.0 entry blocker | R / final candidate freeze | Integrate only the classified repair set, review the final diff, and pass Batch 0 on one fresh exact clean detached SHA |
 
 ## Ownership And Parallelism Review
 
@@ -200,4 +226,5 @@ not suggestions.
 
 This inventory does not claim P5.0 entry, `GRAPH-016` closure, public 100-file compatibility,
 production asset authorization, a formal Finalizer, `TEMPORAL` Evidence allocation, real shadow,
-load/soak/failover/DR, canary, `MIG-004=PASS`, `MIG-005=PASS` or production readiness.
+load/soak/failover/DR, canary, `MIG-004=PASS`, `MIG-005=PASS` or production readiness. It also does
+not treat any pre-final-candidate diagnostic run as P5.0 PASS.

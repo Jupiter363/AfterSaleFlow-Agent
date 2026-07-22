@@ -6,6 +6,7 @@
 plan_status: P5_0_CONTRACT_CANDIDATE
 engineering_execution: BLOCKED_PENDING_P5_0_ENTRY_EVIDENCE
 contract_gate: P5.0 NOT_RUN
+candidate_scope_integrity: REPAIRS_CLASSIFIED_REQUIRES_FRESH_EXACT_SHA_BATCH_0
 phase_4_engineering_checkpoint: PASS
 promotion_gate: MIG-004 PENDING_PROMOTION
 phase_5_promotion_gate: MIG-005 PENDING_PROMOTION
@@ -44,6 +45,28 @@ Implementation remains blocked until Batch 0 runs from this contract candidate's
 detached SHA and the resulting entry evidence is committed separately. No green source suite may
 be relabeled as P5.0 `PASS` before that evidence commit.
 
+### Candidate-Scope Repair Ledger
+
+The contract material frozen by `6e23c580dc4ac53f2c3b8e8ca2894388fd9c3500` was not a successful
+P5.0 candidate. Diagnostic Batch 0 attempts exposed baseline and evidence-capture defects. The
+following repairs are permitted before the primary selects a new exact candidate because the
+contract gate is still `NOT_RUN`, engineering implementation remains blocked, and none of them
+adds Phase 5 Evidence behavior:
+
+| Repair | Classification | Candidate-scope constraint |
+| --- | --- | --- |
+| `99cdd435`, `d76fde17` | Entry evidence authentication/serialization | Authenticate the accepted Phase 4 bundle across checkout line endings and publish LF-stable evidence bytes; never rewrite or relabel Phase 4 evidence |
+| `24a705dc` | Test-fixture isolation | Keep formal-sink architecture fixtures outside Spring component discovery; production assembly is unchanged |
+| `a3be6744`, `e97e1341`, `fb69bd4c` | Existing Spring baseline proxyability | Remove only class-level `final` and prove class proxies preserve caller transaction, `MANDATORY` propagation, SQL/lock order, idempotency and Java authority |
+| `c9e6c7ba` | Entry runner report retention | Retain long Surefire reports under deterministic short artifact names without changing selected suites or acceptance rules |
+| `EvidenceApiIntegrationTest` Evidence-open setup | `FIXTURE` correction required in the final candidate | After `completeIntake`, call the domain admission transition so upload is tested from `EVIDENCE_OPEN`; do not change `SecurityConfiguration`, `EvidenceController` authorization, or production access rules |
+
+These repairs do not inherit any result from `6e23c580`, `d76fde17`, or another diagnostic SHA.
+The primary must review the final diff, include the Evidence fixture correction above, run the
+focused repair checks, and then execute all of Batch 0 from one fresh clean detached SHA. Any
+additional product source, migration, runtime, public-contract, or authorization change reopens
+candidate-scope review and cannot be classified as an entry repair by assertion alone.
+
 ## Scope
 
 ### Goals
@@ -70,8 +93,9 @@ be relabeled as P5.0 `PASS` before that evidence commit.
 
 ### Non-Goals
 
-- No Phase 5 source, test, migration, schema, fixture, runtime, or UI implementation is authorized
-  before exact-SHA P5.0 entry evidence is committed.
+- No Phase 5 feature source, behavior expansion, migration, runtime, public contract, or UI
+  implementation is authorized before exact-SHA P5.0 entry evidence is committed. Only the
+  bounded, semantics-preserving entry repairs in the candidate-scope ledger above are permitted.
 - No real-case shadow, `TEMPORAL` Evidence allocation, canary, production traffic, formal Graph
   Finalizer, or claim that `MIG-004` or `MIG-005` passed.
 - No Graph write to an Evidence table, verification row, dossier, matrix, completion record, room
@@ -164,8 +188,9 @@ The primary may record P5.0 `PASS` only after all of the following are immutable
 - Asset loading is restricted to Java-signed synthetic capabilities and immutable synthetic
   fixtures; real party data and production object references remain unreachable.
 - This execution plan, the test-batch policy, the P5.0 contract pack, the closed Evidence v2
-  schemas/fixtures, and their static contract tests are frozen in one contract candidate with no
-  product source, product behavior-test, or migration changes.
+  schemas/fixtures, their static contract tests, and the closed candidate-scope repair ledger are
+  frozen in one contract candidate. No Phase 5 feature source, migration, public-contract, runtime,
+  or authorization change is present; every pre-entry baseline repair is listed and reviewed.
 - Batch 0 passes from that exact clean detached contract-candidate SHA and its report hashes,
   commands, durations, exit codes, environment, and protected worktree exceptions are committed in
   a later entry-evidence commit.
