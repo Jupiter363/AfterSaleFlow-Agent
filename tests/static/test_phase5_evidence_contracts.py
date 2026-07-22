@@ -158,7 +158,7 @@ def _fixture_schema(path: Path) -> tuple[str, str]:
 def _canonical_hash(value: dict[str, Any], *omitted: str) -> str:
     preimage = copy.deepcopy(value)
     for field in omitted:
-        preimage.pop(field)
+        preimage.pop(field, None)
     return hashlib.sha256(rfc8785.dumps(preimage)).hexdigest()
 
 
@@ -533,7 +533,10 @@ def test_manifest_uses_direct_java_signature_before_graph_or_checkpoint_mutation
         "manifest_ref_field": "domain_snapshot_ref",
         "requires_verified_java_envelope": True,
         "failure": "BEFORE_CHECKPOINT_MUTATION",
-        "room_fence_is_graph_lease_fence": False,
+        "command_binds_room_fencing_token": False,
+        "room_fencing_token_authority": "JAVA_SIGNED_MANIFEST",
+        "checkpoint_lease_fence_authority": "GRAPH_RUNTIME",
+        "java_finalizer_revalidates_room_fencing_token": True,
     }
     binding_rule = _semantic_rule(schema, "GATEWAY_COMMAND_EXACT_BINDING").lower()
     for required_text in (
@@ -545,6 +548,29 @@ def test_manifest_uses_direct_java_signature_before_graph_or_checkpoint_mutation
         "room fence",
     ):
         assert required_text in binding_rule
+
+
+def test_room_and_graph_fences_have_distinct_authorities() -> None:
+    command_schema = _load_json(
+        CONTRACT_ROOT.parents[1] / "v1" / "room-graph-command.schema.json"
+    )
+    manifest_schema = _schema("evidence-batch-manifest.schema.json")
+    gateway = manifest_schema["x-gateway-cross-binding"]
+
+    assert "fencing_token" not in command_schema["required"]
+    assert "fencing_token" not in command_schema["properties"]
+    assert gateway["command_binds_room_fencing_token"] is False
+    assert gateway["room_fencing_token_authority"] == "JAVA_SIGNED_MANIFEST"
+    assert gateway["checkpoint_lease_fence_authority"] == "GRAPH_RUNTIME"
+    assert gateway["java_finalizer_revalidates_room_fencing_token"] is True
+
+    binding_rule = _semantic_rule(
+        manifest_schema, "GATEWAY_COMMAND_EXACT_BINDING"
+    ).lower()
+    assert "command fencing_token" not in binding_rule
+    assert "manifest fencing_token" in binding_rule
+    assert "graph lease" in binding_rule
+    assert "java finalizer" in binding_rule
 
 
 def test_detached_authorization_proof_refs_are_forbidden_from_closed_contracts() -> None:
