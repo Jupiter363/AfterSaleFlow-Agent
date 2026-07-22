@@ -4,23 +4,20 @@ import static com.example.dispute.workflow.contract.v1.TemporalTaskQueues.CASE_C
 import static com.example.dispute.workflow.contract.v1.TemporalTaskQueues.ROOM_CONTROL;
 
 import com.example.dispute.workflow.activity.domain.IntakeChildBridgeActivitiesAdapter;
+import com.example.dispute.workflow.activity.domain.IntakeChildBridgeActivitiesV2Adapter;
 import com.example.dispute.workflow.activity.domain.IntakeChildBridgeReadPort;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessWorkflow;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessWorkflowImpl;
 import com.example.dispute.workflow.temporal.caseprocess.IntakeChildBridgeActivities;
+import com.example.dispute.workflow.temporal.caseprocess.IntakeChildBridgeActivitiesV2;
 import com.example.dispute.workflow.temporal.room.common.RoomControlWorkflow;
 import com.example.dispute.workflow.temporal.room.common.RoomControlWorkflowImpl;
 import com.example.dispute.workflow.temporal.room.intake.IntakeRoomWorkflow;
 import com.example.dispute.workflow.temporal.room.intake.IntakeRoomWorkflowImpl;
-import io.temporal.activity.ActivityInterface;
-import io.temporal.activity.ActivityMethod;
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Objects;
-import java.util.stream.Stream;
 import org.springframework.beans.factory.ObjectProvider;
 
 /**
@@ -134,20 +131,12 @@ public final class IntakeAuthorityWorkerRegistration {
      * Validates a primary-owned v2 facade that delegates to this registration's read-only bridge.
      */
     public V2BridgeActivityRegistration authorityBackedV2Activity(
-            Object v2ActivityImplementation, Class<?> v2ActivityContract) {
+            IntakeChildBridgeActivitiesV2Adapter v2ActivityImplementation,
+            Class<IntakeChildBridgeActivitiesV2> v2ActivityContract) {
         if (v2ActivityImplementation == null || v2ActivityContract == null) {
             throw new IllegalStateException("CASE_CONTROL requires an authority-backed v2 bridge facade");
         }
-        if (v2ActivityImplementation instanceof IntakeChildBridgeActivities
-                || IntakeChildBridgeActivities.class.isAssignableFrom(v2ActivityContract)) {
-            throw new IllegalStateException(
-                    "CASE_CONTROL must not register legacy IntakeChildBridgeActivities on the v2 path");
-        }
         requireV2ActivityContract(v2ActivityContract);
-        if (!v2ActivityContract.isInstance(v2ActivityImplementation)) {
-            throw new IllegalStateException(
-                    "v2 bridge facade must implement its declared v2 Activity contract");
-        }
         requireDelegate(v2ActivityImplementation, bridgeActivities);
         return new V2BridgeActivityRegistration(
                 v2ActivityImplementation, v2ActivityContract, bridgeActivities);
@@ -276,89 +265,28 @@ public final class IntakeAuthorityWorkerRegistration {
     private void requireV2BridgeRegistration(V2BridgeActivityRegistration registration) {
         if (registration == null
                 || registration.backingAdapter() != bridgeActivities
-                || !hasV2BridgeActivityContract(registration.activityImplementation())) {
+                || registration.activityContract() != IntakeChildBridgeActivitiesV2.class
+                || registration.activityImplementation().delegate() != bridgeActivities) {
             throw new IllegalStateException("CASE_CONTROL requires an authority-backed v2 bridge facade");
         }
     }
 
-    private static void requireV2ActivityContract(Class<?> activityContract) {
-        if (!activityContract.isAnnotationPresent(ActivityInterface.class)
-                || !hasV2ActivityMethods(activityContract)) {
+    private static void requireV2ActivityContract(
+            Class<IntakeChildBridgeActivitiesV2> activityContract) {
+        if (activityContract != IntakeChildBridgeActivitiesV2.class) {
             throw new IllegalStateException(
                     "v2 bridge facade must declare exactly the authority-backed v2 Activity names");
         }
     }
 
     private boolean hasV2BridgeActivityContract(Object activityImplementation) {
-        return activityImplementation != null
-                && hasV2BridgeActivityContract(activityImplementation.getClass());
-    }
-
-    private static boolean hasV2BridgeActivityContract(Class<?> activityType) {
-        if (activityType == null || activityType == Object.class) {
-            return false;
-        }
-        for (Class<?> interfaceType : activityType.getInterfaces()) {
-            if (interfaceType.isAnnotationPresent(ActivityInterface.class)
-                    && hasV2ActivityMethods(interfaceType)) {
-                return true;
-            }
-            if (hasV2BridgeActivityContract(interfaceType)) {
-                return true;
-            }
-        }
-        return hasV2BridgeActivityContract(activityType.getSuperclass());
-    }
-
-    private static boolean hasV2ActivityMethods(Class<?> activityContract) {
-        List<Method> activityMethods =
-                Stream.of(activityContract.getMethods())
-                        .filter(method -> method.isAnnotationPresent(ActivityMethod.class))
-                        .toList();
-        return activityMethods.size() == 3
-                && hasActivityMethod(
-                        activityContract,
-                        "bindStart",
-                        IntakeChildBridgeActivities.StartRequest.class,
-                        "BindIntakeChildStartV2")
-                && hasActivityMethod(
-                        activityContract,
-                        "bindCommand",
-                        IntakeChildBridgeActivities.CommandRequest.class,
-                        "BindIntakeChildCommandV2")
-                && hasActivityMethod(
-                        activityContract,
-                        "bindDomainEvent",
-                        IntakeChildBridgeActivities.DomainEventRequest.class,
-                        "BindIntakeChildDomainEventV2");
-    }
-
-    private static boolean hasActivityMethod(
-            Class<?> activityContract,
-            String methodName,
-            Class<?> requestType,
-            String expectedActivityName) {
-        try {
-            ActivityMethod activityMethod =
-                    activityContract.getMethod(methodName, requestType).getAnnotation(ActivityMethod.class);
-            return activityMethod != null && expectedActivityName.equals(activityMethod.name());
-        } catch (NoSuchMethodException exception) {
-            return false;
-        }
+        return activityImplementation instanceof IntakeChildBridgeActivitiesV2;
     }
 
     private static void requireDelegate(
-            Object v2ActivityImplementation, IntakeChildBridgeActivitiesAdapter expectedDelegate) {
-        try {
-            Method delegateMethod = v2ActivityImplementation.getClass().getMethod("delegate");
-            if (!IntakeChildBridgeActivitiesAdapter.class.isAssignableFrom(
-                    delegateMethod.getReturnType())) {
-                throw invalidV2Delegate();
-            }
-            if (delegateMethod.invoke(v2ActivityImplementation) != expectedDelegate) {
-                throw invalidV2Delegate();
-            }
-        } catch (NoSuchMethodException | IllegalAccessException | InvocationTargetException exception) {
+            IntakeChildBridgeActivitiesV2Adapter v2ActivityImplementation,
+            IntakeChildBridgeActivitiesAdapter expectedDelegate) {
+        if (v2ActivityImplementation.delegate() != expectedDelegate) {
             throw invalidV2Delegate();
         }
     }
@@ -444,24 +372,24 @@ public final class IntakeAuthorityWorkerRegistration {
      */
     public static final class V2BridgeActivityRegistration {
 
-        private final Object activityImplementation;
-        private final Class<?> activityContract;
+        private final IntakeChildBridgeActivitiesV2Adapter activityImplementation;
+        private final Class<IntakeChildBridgeActivitiesV2> activityContract;
         private final IntakeChildBridgeActivitiesAdapter backingAdapter;
 
         private V2BridgeActivityRegistration(
-                Object activityImplementation,
-                Class<?> activityContract,
+                IntakeChildBridgeActivitiesV2Adapter activityImplementation,
+                Class<IntakeChildBridgeActivitiesV2> activityContract,
                 IntakeChildBridgeActivitiesAdapter backingAdapter) {
             this.activityImplementation = activityImplementation;
             this.activityContract = activityContract;
             this.backingAdapter = backingAdapter;
         }
 
-        public Object activityImplementation() {
+        public IntakeChildBridgeActivitiesV2Adapter activityImplementation() {
             return activityImplementation;
         }
 
-        public Class<?> activityContract() {
+        public Class<IntakeChildBridgeActivitiesV2> activityContract() {
             return activityContract;
         }
 

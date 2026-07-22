@@ -5,12 +5,13 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.dispute.workflow.activity.domain.IntakeChildBridgeActivitiesAdapter;
+import com.example.dispute.workflow.activity.domain.IntakeChildBridgeActivitiesV2Adapter;
 import com.example.dispute.workflow.activity.domain.IntakeChildBridgeReadPort;
-import com.example.dispute.workflow.temporal.caseprocess.IntakeChildBridgeActivities;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessWorkflowImpl;
+import com.example.dispute.workflow.temporal.caseprocess.IntakeChildBridgeActivities;
+import com.example.dispute.workflow.temporal.caseprocess.IntakeChildBridgeActivitiesV2;
 import com.example.dispute.workflow.temporal.room.common.RoomControlWorkflowImpl;
 import com.example.dispute.workflow.temporal.room.intake.IntakeRoomWorkflowImpl;
-import io.temporal.activity.ActivityInterface;
 import io.temporal.activity.ActivityMethod;
 import java.util.List;
 import org.junit.jupiter.api.Test;
@@ -107,13 +108,15 @@ class IntakeAuthorityWorkerRegistrationTest {
                                         v2Bridge, registration.bridgeActivities()))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("exactly one authority-backed");
-        assertThat(TestV2BridgeActivities.class.isAssignableFrom(IntakeChildBridgeActivities.class))
+        assertThat(
+                        IntakeChildBridgeActivitiesV2.class.isAssignableFrom(
+                                IntakeChildBridgeActivities.class))
                 .isFalse();
     }
 
     @Test
     void v2FacadeUsesOnlyTheAuthorityBridgeActivityNames() throws NoSuchMethodException {
-        Class<TestV2BridgeActivities> v2Contract = TestV2BridgeActivities.class;
+        Class<IntakeChildBridgeActivitiesV2> v2Contract = IntakeChildBridgeActivitiesV2.class;
 
         assertThat(
                         v2Contract
@@ -139,6 +142,23 @@ class IntakeAuthorityWorkerRegistrationTest {
                                 .getAnnotation(ActivityMethod.class)
                                 .name())
                 .isEqualTo("BindIntakeChildDomainEventV2");
+    }
+
+    @Test
+    void rejectsAV2FacadeBackedByAnotherAuthorityAdapter() {
+        IntakeAuthorityWorkerRegistration registration =
+                IntakeAuthorityWorkerRegistration.fromReadPorts(List.of(new StubReadPort()));
+        IntakeAuthorityWorkerRegistration otherRegistration =
+                IntakeAuthorityWorkerRegistration.fromReadPorts(List.of(new StubReadPort()));
+
+        assertThatThrownBy(
+                        () ->
+                                registration.authorityBackedV2Activity(
+                                        new IntakeChildBridgeActivitiesV2Adapter(
+                                                otherRegistration.bridgeActivities()),
+                                        IntakeChildBridgeActivitiesV2.class))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("exact authority-backed");
     }
 
     @Test
@@ -223,54 +243,7 @@ class IntakeAuthorityWorkerRegistrationTest {
     private static IntakeAuthorityWorkerRegistration.V2BridgeActivityRegistration v2Bridge(
             IntakeAuthorityWorkerRegistration registration) {
         return registration.authorityBackedV2Activity(
-                new TestV2BridgeActivitiesAdapter(registration.bridgeActivities()),
-                TestV2BridgeActivities.class);
-    }
-
-    @ActivityInterface
-    private interface TestV2BridgeActivities {
-
-        @ActivityMethod(name = "BindIntakeChildStartV2")
-        IntakeChildBridgeActivities.StartBinding bindStart(
-                IntakeChildBridgeActivities.StartRequest request);
-
-        @ActivityMethod(name = "BindIntakeChildCommandV2")
-        IntakeChildBridgeActivities.CommandBinding bindCommand(
-                IntakeChildBridgeActivities.CommandRequest request);
-
-        @ActivityMethod(name = "BindIntakeChildDomainEventV2")
-        IntakeChildBridgeActivities.DomainEventBinding bindDomainEvent(
-                IntakeChildBridgeActivities.DomainEventRequest request);
-    }
-
-    static final class TestV2BridgeActivitiesAdapter implements TestV2BridgeActivities {
-
-        private final IntakeChildBridgeActivitiesAdapter delegate;
-
-        private TestV2BridgeActivitiesAdapter(IntakeChildBridgeActivitiesAdapter delegate) {
-            this.delegate = delegate;
-        }
-
-        public IntakeChildBridgeActivitiesAdapter delegate() {
-            return delegate;
-        }
-
-        @Override
-        public IntakeChildBridgeActivities.StartBinding bindStart(
-                IntakeChildBridgeActivities.StartRequest request) {
-            return delegate.bindStart(request);
-        }
-
-        @Override
-        public IntakeChildBridgeActivities.CommandBinding bindCommand(
-                IntakeChildBridgeActivities.CommandRequest request) {
-            return delegate.bindCommand(request);
-        }
-
-        @Override
-        public IntakeChildBridgeActivities.DomainEventBinding bindDomainEvent(
-                IntakeChildBridgeActivities.DomainEventRequest request) {
-            return delegate.bindDomainEvent(request);
-        }
+                new IntakeChildBridgeActivitiesV2Adapter(registration.bridgeActivities()),
+                IntakeChildBridgeActivitiesV2.class);
     }
 }
