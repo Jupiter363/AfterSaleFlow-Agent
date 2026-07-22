@@ -108,14 +108,18 @@ class IntakeChildBridgeActivitiesTest {
     }
 
     @Test
-    void keepsCaseAndRoomWorkflowBindingsSeparateAndAllowsFutureTemporalMode() {
-        var binding = adapter.bindStart(startRequest(WriterMode.TEMPORAL));
+    void keepsCaseAndRoomWorkflowBindingsSeparateAndRejectsTemporalMode() {
+        var binding = adapter.bindStart(startRequest(WriterMode.SHADOW));
         assertThat(binding.activeBinding().caseWorkflowType())
                 .isEqualTo(CaseProcessWorkflowProtocol.CASE_WORKFLOW_TYPE);
         assertThat(binding.activeBinding().caseWorkflowBuildId())
                 .isEqualTo("case-workflow-build.v1");
         assertThat(binding.activeBinding().roomWorkflowType()).isEqualTo("IntakeRoomWorkflow");
         assertThat(binding.start().workflowBuildId()).isEqualTo("intake-room-build.v1");
+
+        assertInvariant(
+                () -> adapter.bindStart(startRequest(WriterMode.TEMPORAL)),
+                "current typed Intake bridge gate requires SHADOW");
     }
 
     @Test
