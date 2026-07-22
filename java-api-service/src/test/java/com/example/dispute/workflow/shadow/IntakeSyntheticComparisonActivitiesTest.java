@@ -58,8 +58,8 @@ class IntakeSyntheticComparisonActivitiesTest {
                                 registration.activityImplementation()
                                         .getClass()
                                         .getDeclaredFields())
-                        .map(field -> field.getType()))
-                .contains(IntakeSignedSyntheticGraphExecutionPort.class);
+                        .map(field -> field.getType().getName()))
+                .contains(IntakeSignedSyntheticGraphExecutionPort.class.getName());
     }
 
     @Test
