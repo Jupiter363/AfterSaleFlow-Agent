@@ -1,0 +1,103 @@
+{
+  "MIG-004": "PENDING_PROMOTION",
+  "MIG-005": "PENDING_PROMOTION",
+  "MIG-006": "PENDING_PROMOTION",
+  "candidate_commit": "ea046eae2792cd5afb9929bca40da8fb8c77a9bd",
+  "engineering_checkpoint": "PASS",
+  "invariants": {
+    "BOUNDED_LANGGRAPH_LCEL_AND_RECOVERY": {
+      "sources": [
+        "python"
+      ],
+      "status": "PASS_ENGINEERING"
+    },
+    "FIFTEEN_STAGE_AND_FOURTEEN_EDGE_PROTOCOL": {
+      "sources": [
+        "java",
+        "python"
+      ],
+      "status": "PASS_ENGINEERING"
+    },
+    "JAVA_FINALIZER_HASH_FENCE_AUTHORITY": {
+      "sources": [
+        "java",
+        "static"
+      ],
+      "status": "PASS_ENGINEERING"
+    },
+    "QUERY_PRIVACY_AND_UI_COMPATIBILITY": {
+      "sources": [
+        "java",
+        "frontend"
+      ],
+      "status": "PASS_ENGINEERING"
+    },
+    "REAL_SHADOW_CANARY_AND_PROMOTION": {
+      "sources": [],
+      "status": "PENDING_PROMOTION"
+    },
+    "SIGNED_SYNTHETIC_NO_FORMAL_SINK": {
+      "sources": [
+        "java",
+        "static"
+      ],
+      "status": "PASS_ENGINEERING_ONLY"
+    },
+    "TEMPORAL_REPLAY_TIMER_AND_RECEIPT_RECOVERY": {
+      "sources": [
+        "java"
+      ],
+      "status": "PASS_ENGINEERING"
+    }
+  },
+  "next_phase_permission": "PHASE_7_ENGINEERING_ONLY",
+  "promotion_gate": "PENDING",
+  "runtime_restrictions": {
+    "allowed_modes": [
+      "LEGACY",
+      "DISABLED",
+      "SIGNED_SYNTHETIC_SHADOW"
+    ],
+    "canary": "forbidden",
+    "formal_graph_sink": "forbidden",
+    "promotion": "forbidden",
+    "real_case_shadow": "forbidden",
+    "temporal_hearing_allocation": "forbidden"
+  },
+  "schema_version": "phase6-engineering-verification-summary.v1",
+  "sources": {
+    "frontend": {
+      "errors": 0,
+      "failures": 0,
+      "path": "frontend-phase6-junit.xml",
+      "sha256": "fb5c39c0fd5bb912c9bcdaac95be37dc22f102ec9499aa7c298a677927c97e92",
+      "skipped": 0,
+      "tests": 74
+    },
+    "java": {
+      "errors": 0,
+      "failures": 0,
+      "path": "java-phase6-junit.xml",
+      "sha256": "f72fd911a7a8f912aaea300915af02bf2dbce60c3175591ea3be50462ebd5079",
+      "skipped": 0,
+      "tests": 143
+    },
+    "python": {
+      "errors": 0,
+      "failures": 0,
+      "path": "python-phase6-junit.xml",
+      "sha256": "90c23a995daa9ed5641c9827fca72190b6e9adc3ba316a438d698213784e0b38",
+      "skipped": 0,
+      "tests": 60
+    },
+    "static": {
+      "errors": 0,
+      "failures": 0,
+      "path": "static-phase6-junit.xml",
+      "sha256": "baea876bd16ca8b64c4784f3e4cab61fb1a9ffa196a458be575cacf6cf60b753",
+      "skipped": 0,
+      "tests": 46
+    }
+  },
+  "total_tests": 323
+}

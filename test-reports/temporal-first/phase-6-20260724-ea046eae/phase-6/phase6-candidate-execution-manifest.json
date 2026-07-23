@@ -1,0 +1,175 @@
+{
+  "MIG-004": "PENDING_PROMOTION",
+  "MIG-005": "PENDING_PROMOTION",
+  "MIG-006": "PENDING_PROMOTION",
+  "batch": "P6.9_ENGINEERING_CANDIDATE",
+  "candidate_commit": "ea046eae2792cd5afb9929bca40da8fb8c77a9bd",
+  "commands": [
+    {
+      "argv": [
+        "D:\\学习\\Project\\AfterSaleFlow-Agent\\.worktrees\\p6-hearing-entry\\java-api-service\\mvnw.cmd",
+        "-q",
+        "-DforkCount=1",
+        "-Dtest=AdmissibilityHearingRouterTest,DisputeImportServiceIntegrationTest,DisputeImportServiceTest,EvidenceCompletionServiceTest,HearingDomainReceiptAdapterTest,HearingEngineeringRollbackTest,HearingEpochSelectionPropertiesTest,HearingEpochSelectorTest,HearingFlowControllerTest,HearingFlowPersistenceContractTest,HearingFlowRuntimeServiceTest,HearingFormalFinalizerContractTest,HearingFormalReceiptServiceTest,HearingNoFormalSinkGuardTest,HearingPartyStatementRequestTest,HearingProjectionAdapterTest,HearingProjectionContractTest,HearingProjectionQueryServiceTest,HearingRecoveryReconcilerTest,HearingReliabilityHarnessTest,HearingReliabilityMetricsTest,HearingReviewHandoffServiceTest,HearingRoomWorkflowReplayTest,HearingRoomWorkflowTest,HearingRoomWorkflowTimerTest,HearingSchedulerModeTest,HearingShadowParityServiceTest,HearingSignedSyntheticAdmissionServiceTest,HearingSyntheticShadowConfigurationTest,HearingTemporalLedgerIntegrationTest,HearingTrialDossierServiceTest,JdbcHearingSchedulerDetectorTest,SimulatedExternalImportTemplateCycleTest",
+        "-Dsurefire.reportNameSuffix=phase6-candidate",
+        "test"
+      ],
+      "cwd": "java-api-service",
+      "duration_seconds": 105.032,
+      "exit_code": 0,
+      "failure_classification": "NONE",
+      "finished_at": "2026-07-23T21:53:45.274866+00:00",
+      "id": "java",
+      "report": {
+        "errors": 0,
+        "failures": 0,
+        "path": "java-phase6-junit.xml",
+        "sha256": "f72fd911a7a8f912aaea300915af02bf2dbce60c3175591ea3be50462ebd5079",
+        "skipped": 0,
+        "tests": 143
+      },
+      "started_at": "2026-07-23T21:52:00.256758+00:00",
+      "stderr": {
+        "path": "commands/java/stderr.log",
+        "sha256": "3762ab30ab7847cf761f31c4962fc8faf5a4e10a85f07c1e7f2372eb384f4a15"
+      },
+      "stdout": {
+        "path": "commands/java/stdout.log",
+        "sha256": "9d639777293b9643ef3e464cf3c99bef0f4ec9a736f6792b092d69663b132813"
+      }
+    },
+    {
+      "argv": [
+        "D:/miniconda/python.exe",
+        "-m",
+        "pytest",
+        "tests/graphs/hearing",
+        "tests/agents/test_hearing_flow_v2.py",
+        "-q",
+        "--junitxml=D:\\学习\\Project\\AfterSaleFlow-Agent\\.worktrees\\p6-hearing-entry\\.codex-run\\phase6-candidate-20260724-ea046eae\\commands\\python\\raw-junit.xml"
+      ],
+      "cwd": "python-agent-service",
+      "duration_seconds": 15.86,
+      "exit_code": 0,
+      "failure_classification": "NONE",
+      "finished_at": "2026-07-23T21:52:16.104538+00:00",
+      "id": "python",
+      "report": {
+        "errors": 0,
+        "failures": 0,
+        "path": "python-phase6-junit.xml",
+        "sha256": "90c23a995daa9ed5641c9827fca72190b6e9adc3ba316a438d698213784e0b38",
+        "skipped": 0,
+        "tests": 60
+      },
+      "started_at": "2026-07-23T21:52:00.255247+00:00",
+      "stderr": {
+        "path": "commands/python/stderr.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stdout": {
+        "path": "commands/python/stdout.log",
+        "sha256": "c79e6236c507e55db807a5cf21c04b3b3e250c8bac56212792e352343e35974c"
+      }
+    },
+    {
+      "argv": [
+        "node",
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/views/disputes/HearingCourtView.test.js",
+        "src/utils/hearingFlow.test.js",
+        "src/api/hearing.test.js",
+        "src/stores/hearing.test.js",
+        "--minWorkers=1",
+        "--maxWorkers=2",
+        "--reporter=default",
+        "--reporter=junit",
+        "--outputFile.junit=D:\\学习\\Project\\AfterSaleFlow-Agent\\.worktrees\\p6-hearing-entry\\.codex-run\\phase6-candidate-20260724-ea046eae\\commands\\frontend\\raw-junit.xml"
+      ],
+      "cwd": "frontend",
+      "duration_seconds": 8.579,
+      "exit_code": 0,
+      "failure_classification": "NONE",
+      "finished_at": "2026-07-23T21:52:08.820795+00:00",
+      "id": "frontend",
+      "report": {
+        "errors": 0,
+        "failures": 0,
+        "path": "frontend-phase6-junit.xml",
+        "sha256": "fb5c39c0fd5bb912c9bcdaac95be37dc22f102ec9499aa7c298a677927c97e92",
+        "skipped": 0,
+        "tests": 74
+      },
+      "started_at": "2026-07-23T21:52:00.255247+00:00",
+      "stderr": {
+        "path": "commands/frontend/stderr.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stdout": {
+        "path": "commands/frontend/stdout.log",
+        "sha256": "6b3fd2b5d8903840849a5eaea2e64400ea733d409bee8bf7a80ec3da84fd26a7"
+      }
+    },
+    {
+      "argv": [
+        "D:/miniconda/python.exe",
+        "-m",
+        "pytest",
+        "tests/static/test_phase6_hearing_contracts.py",
+        "tests/static/test_phase6_hearing_pilot_plan.py",
+        "tests/static/test_phase6_entry_checkpoint.py",
+        "tests/static/test_phase6_entry_evidence.py",
+        "tests/static/test_phase6_p6_0_entry_checkpoint.py",
+        "tests/static/test_phase6_candidate_runner.py",
+        "tests/static/test_temporal_refactor_traceability.py",
+        "-q",
+        "--junitxml=D:\\学习\\Project\\AfterSaleFlow-Agent\\.worktrees\\p6-hearing-entry\\.codex-run\\phase6-candidate-20260724-ea046eae\\commands\\static\\raw-junit.xml"
+      ],
+      "cwd": ".",
+      "duration_seconds": 22.656,
+      "exit_code": 0,
+      "failure_classification": "NONE",
+      "finished_at": "2026-07-23T21:54:07.942402+00:00",
+      "id": "static",
+      "report": {
+        "errors": 0,
+        "failures": 0,
+        "path": "static-phase6-junit.xml",
+        "sha256": "baea876bd16ca8b64c4784f3e4cab61fb1a9ffa196a458be575cacf6cf60b753",
+        "skipped": 0,
+        "tests": 46
+      },
+      "started_at": "2026-07-23T21:53:45.277874+00:00",
+      "stderr": {
+        "path": "commands/static/stderr.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stdout": {
+        "path": "commands/static/stdout.log",
+        "sha256": "01ccc4b097f0258200062a3829ca734f0f2d5b4adbbd2d5601c12c2d3b9339e5"
+      }
+    }
+  ],
+  "engineering_checkpoint": "PASS",
+  "execution_topology": "ONE_MAVEN_PLUS_TWO_LIGHT_THEN_STATIC",
+  "finished_at": "2026-07-23T21:54:08.348188+00:00",
+  "next_phase_permission": "PHASE_7_ENGINEERING_ONLY",
+  "phase": 6,
+  "promotion_gate": "PENDING",
+  "runtime_restrictions": {
+    "allowed_modes": [
+      "LEGACY",
+      "DISABLED",
+      "SIGNED_SYNTHETIC_SHADOW"
+    ],
+    "canary": "forbidden",
+    "formal_graph_sink": "forbidden",
+    "promotion": "forbidden",
+    "real_case_shadow": "forbidden",
+    "temporal_hearing_allocation": "forbidden"
+  },
+  "schema_version": "phase6-candidate-execution-manifest.v1",
+  "started_at": "2026-07-23T21:52:00.160226+00:00",
+  "status": "PASS"
+}
