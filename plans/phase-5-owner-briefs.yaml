@@ -81,7 +81,12 @@ wave_a_parallel_launch:
 
 integration_barriers:
   P5-WAVE-A-INTEGRATED:
-    status: BLOCKED
+    status: OPEN
+    accepted_bindings:
+      tested_candidate_commit: edfd54952dcc5a07d87a90fdb094c01b1a7df79b
+      evidence_commit: 0292321fdb376c3392c86daf6cf98365bfee7c4a
+      acceptance_tooling_candidate_commit: ffc1409709046f8859deafc8917481f99f94659a
+      acceptance_evidence_commit: c6f9d7dbdd8d9322b219cef866a812a12004f539
     owner: R
     prerequisites:
       - P5-A2_COMMITTED_AND_REVIEWED
@@ -894,7 +899,7 @@ primary_integration_only:
   owner: R
   post_wave_a_migration_contract_gate:
     task_id: P5-R2
-    status: BLOCKED_ON_WAVE_A_ACCEPTANCE
+    status: READY
     depends_on: [P5-R1, P5-WAVE-A-INTEGRATED]
     current_plan_paths:
       - plans/phase-5-owner-briefs.yaml

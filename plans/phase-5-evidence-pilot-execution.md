@@ -549,3 +549,12 @@ MIG-005: PENDING_PROMOTION
 `MIG-005=PASS` additionally requires authorized real shadow, promotion evidence, canary observation,
 and Java's formal Evidence ledger remaining the only writer. Until then, no report may claim
 promotion or permit Hearing supplementation work under Phase 5.
+
+### Wave A Acceptance State Transition Record
+
+- Tested candidate: `edfd54952dcc5a07d87a90fdb094c01b1a7df79b`.
+- Evidence commit: `0292321fdb376c3392c86daf6cf98365bfee7c4a`.
+- Acceptance tooling commit: `ffc1409709046f8859deafc8917481f99f94659a`.
+- Acceptance evidence commit: `c6f9d7dbdd8d9322b219cef866a812a12004f539`.
+- Decision: `P5-WAVE-A-INTEGRATED=OPEN`, `Wave B=READY`, `P5-R2=READY`.
+- Guard state: candidate wave remains blocked; runtime, traffic, canary, promotion, `MIG-004`, and `MIG-005` remain unchanged.

@@ -419,13 +419,13 @@ waves:
     tasks: [P5-0]
     test_batch: P5-BATCH-0
   wave_a:
-    status: READY
+    status: INTEGRATED
     active_roles: [R, A, B, C, D, E]
     delegated_tasks: [P5-A1, P5-A2, P5-B1, P5-B2, P5-C1, P5-C2, P5-D0, P5-E0]
     integration_task: P5-R1
     test_batch: P5-BATCH-1
   wave_b:
-    status: BLOCKED_ON_WAVE_A_INTEGRATION
+    status: READY
     active_roles: [R, A, B, C, D, E]
     delegated_tasks: [P5-B3, P5-C3, P5-D1, P5-D2, P5-E1, P5-E2]
     primary_migration_contract_gate: P5-R2
@@ -707,7 +707,12 @@ batches:
       real_provider: forbidden
       formal_finalizer_runtime_wiring: forbidden
     acceptance:
-      status: READY_FOR_SEPARATE_ACCEPTANCE_RUN
+      status: ACCEPTED_BY_STATE_TRANSITION
+      accepted_bindings:
+        tested_candidate_commit: edfd54952dcc5a07d87a90fdb094c01b1a7df79b
+        evidence_commit: 0292321fdb376c3392c86daf6cf98365bfee7c4a
+        acceptance_tooling_candidate_commit: ffc1409709046f8859deafc8917481f99f94659a
+        acceptance_evidence_commit: c6f9d7dbdd8d9322b219cef866a812a12004f539
       tested_candidate_commit: edfd54952dcc5a07d87a90fdb094c01b1a7df79b
       evidence_commit: 0292321fdb376c3392c86daf6cf98365bfee7c4a
       evidence_path: test-reports/temporal-first/phase-5-wave-a-20260723-edfd5495/phase-5-wave-a
