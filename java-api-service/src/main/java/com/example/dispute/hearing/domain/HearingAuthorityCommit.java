@@ -19,6 +19,7 @@ public record HearingAuthorityCommit(
 
     private static final Pattern OPERATION_KEY =
             Pattern.compile("hearing[.](?:stage|party|agent|finalize|handoff|close)[A-Za-z0-9._:-]{1,480}");
+    private static final String KEY_COMPONENT = "[A-Za-z0-9][A-Za-z0-9._-]{0,127}";
     private static final Pattern SHA256 = Pattern.compile("[0-9a-f]{64}");
     private static final long MAX_SAFE_INTEGER = 9_007_199_254_740_991L;
 
@@ -62,6 +63,26 @@ public record HearingAuthorityCommit(
                     || operationKey.length() == stagePrefix.length()) {
                 throw new IllegalArgumentException(
                         "operationKey does not bind the expected stage sequence");
+            }
+            String suffix = operationKey.substring(stagePrefix.length());
+            boolean validSuffix = switch (operationType) {
+                case PARTY_TERMINAL -> suffix.matches(KEY_COMPONENT + ':' + KEY_COMPONENT);
+                case AGENT_RESULT -> suffix.matches(KEY_COMPONENT + ":[0-9a-f]{64}");
+                case FINALIZE -> suffix.matches(KEY_COMPONENT + ':' + requestHash);
+                default -> throw new IllegalStateException("unreachable Hearing operation type");
+            };
+            if (!validSuffix) {
+                throw new IllegalArgumentException("operationKey has an invalid operation suffix");
+            }
+        } else {
+            String suffix = operationKey.substring(authorityPrefix.length());
+            boolean validSuffix = switch (operationType) {
+                case HANDOFF -> suffix.matches(KEY_COMPONENT + ":[0-9a-f]{64}");
+                case CLOSE -> suffix.matches("[0-9a-f]{64}");
+                default -> throw new IllegalStateException("unreachable Hearing operation type");
+            };
+            if (!validSuffix) {
+                throw new IllegalArgumentException("operationKey has an invalid operation suffix");
             }
         }
         if (requestHash == null || !SHA256.matcher(requestHash).matches()) {
