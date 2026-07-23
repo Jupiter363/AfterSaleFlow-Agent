@@ -591,7 +591,8 @@ batches:
       mixed_candidate_reports_forbidden: true
     required_result: ALL_PASS_THEN_SEPARATE_ENTRY_EVIDENCE_COMMIT
   batch_1_foundation:
-    status: BLOCKED_UNTIL_P6_0_PASS_AND_A_B_C_INTEGRATED
+    status: PASS
+    accepted_integrated_sha: 245cb500b7f0cf83a31f348c34b486207152c783
     owner: R
     java_test_classes:
       - HearingRoomWorkflowTest
@@ -617,7 +618,9 @@ batches:
       - JAVA_FINALIZER_AND_FENCE_AUTHORITY
       - NO_FORMAL_GRAPH_SINK
   batch_2_integration:
-    status: BLOCKED_UNTIL_D_E_AND_FOUNDATIONS_INTEGRATED
+    status: PASS
+    accepted_integrated_sha: 39145806528e38ef9319643b520c77196efc36e3
+    source_test_counts: {java: 93, python: 60, frontend: 74, total: 227}
     owner: R
     java_test_classes:
       - HearingRoomWorkflowWorkerRecoveryTest
@@ -641,8 +644,10 @@ batches:
       - SIDE_EFFECT_FREE_GET_AND_COMPLETE
       - UI_BASELINE_UNCHANGED
   batch_3_candidate:
-    status: BLOCKED_UNTIL_ALL_FIVE_SLICES_PASS
+    status: READY_FOR_EXACT_SHA_RUN
     owner: R
+    runner: scripts/run_phase6_candidate_checkpoint.py
+    execution_topology: ONE_MAVEN_PLUS_TWO_LIGHT_THEN_STATIC
     exact_clean_detached_sha_required: true
     fresh_run_directory_required: true
     report_hashes_required: true
@@ -658,6 +663,14 @@ batches:
       - MIXED_RETRY_REPORTS_WITHOUT_CLASSIFICATION
       - UNIT_TEST_AS_REAL_SHADOW_EVIDENCE
       - SYNTHETIC_RESULT_AS_MIG_006_PASS
+    required_reports:
+      - java-phase6-junit.xml
+      - python-phase6-junit.xml
+      - frontend-phase6-junit.xml
+      - static-phase6-junit.xml
+      - phase6-candidate-execution-manifest.json
+      - phase6-verification-summary.json
+      - artifact-sha256.json
   batch_4_promotion:
     status: EXTERNAL_AND_NOT_AUTHORIZED
     owner: R
