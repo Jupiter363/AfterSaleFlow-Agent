@@ -269,11 +269,13 @@ and the new epoch persists the full selection. Current formal Evidence traffic r
     may complete with zero. Hearing can open only from a committed Java admission/freeze receipt.
 12. Legacy `evidence-window-{caseId}` remains pinned to `LEGACY`. A new Evidence child and the legacy
     workflow cannot own timers for the same case/epoch.
-13. Additive Evidence binding DDL uses
+13. Wave A additive Evidence binding DDL uses
     `V043_4__evidence_graph_bindings.sql`, after the existing Intake migrations
     `V043_2__intake_shadow_comparisons.sql` and
     `V043_3__intake_signed_synthetic_admission.sql`. The candidate must freeze its exact schema
-    before implementation. V044 and V045 remain reserved by existing plans.
+    before implementation. Wave B may not edit `V043_4`; C owns the separate additive migration
+    identity `V043_5__evidence_finalization_receipt_ledger.sql` for the durable receipt ledger and
+    validated terminal-summary sidecar. V044 and V045 remain reserved by existing plans.
 14. Runtime before promotion is only `DISABLED` or Java-signed synthetic `SHADOW`. Real party data,
     a formal sink, `TEMPORAL` allocation, canary, and promotion remain unreachable.
 15. Phase 5 does not alter Hearing supplementation contracts or behavior.
@@ -339,9 +341,9 @@ cannot mark any of those gates `PASS`.
 | --- | --- | --- | --- |
 | A | `evidence.v2`, bounded scheduler, state, reducers, recovery properties | `python-agent-service/app/graphs/evidence/**`, narrow graph tests | Java, frontend, Domain DB, formal merge |
 | B | Evidence child Workflow, command loop, timers, Activity contracts | `java-api-service/**/workflow/temporal/room/evidence/**` | Domain fact implementation, Python, UI, Hearing behavior |
-| C | Java manifest/asset authority, mode guards, Finalizer, V043 sub-version | Evidence application/persistence adapters and exact tests | Workflow decisions, Graph DB, frontend, Hearing supplement |
-| D | Java projection/API compatibility and Evidence Vue/store behavior | Evidence projection/controller/view/API/store and focused tests | selectors, Temporal/Python runtime, formal rules |
-| E | bulkheads, synthetic parity, selector, observability, crash/rollback harness | narrow Evidence config/shadow/recovery paths | formal activation, secrets, deployment, other rooms |
+| C | Java manifest/asset authority, mode guards, Finalizer, durable receipt/recovery projections | Evidence application/persistence adapters, `V043_5` and exact tests | Workflow decisions, Graph DB, frontend, Hearing supplement |
+| D | Java projection/API compatibility and Evidence Vue/store behavior | EvidenceProcessProjectionQuery, EvidenceController process-projection route, view/API/store and focused tests | selectors, Temporal/Python runtime, InternalEvidenceController, formal rules |
+| E | production Graph permit queue, local Java bulkhead parity, selector, observability, crash/rollback harness | Graph `G004`, permit repository/lifecycle/readiness/restore/bindings and narrow Java shadow paths | formal activation, secrets, deployment, other rooms |
 | R | contracts, shared fixtures, exact briefs, integration, reviews, test tokens, candidate evidence | shared contract/plan/report/config paths explicitly granted | duplicating delegated slice implementation |
 
 Path families are not blanket permissions. Before delegation, the primary records exact owned and
@@ -416,8 +418,33 @@ D:\miniconda\python.exe scripts/generate_phase5_wave_a_evidence.py `
 
 ### Wave B: Experience And Hardening
 
-- D completes `P5-S4` projections and compatible frontend behavior.
-- E completes `P5-S5` bulkhead, synthetic parity, recovery, selector, and release controls.
+- C and B first complete the two post-Wave-A prerequisites. `P5-C3` creates the durable Java finalization
+  receipt ledger and validated terminal-summary sidecar through additive
+  `V043_5__evidence_finalization_receipt_ledger.sql`, without editing `V043_4`. C2 remains port-only;
+  C3 atomically validates and locks a trusted current-authority snapshot (tenant/case/epoch, Java
+  room fence, process/room/source revisions, and current fact/source allowlists), immutable
+  actual-load receipt ref/hash, receipt binding, proposal hash, and current applicable fences before
+  receipt insert or exact replay returns a sidecar. `P5-B3` adds a Java-readable fenced operational recovery
+  projection and reconciles production `EvidenceRoomActivities` only from durable receipt refs and
+  current Graph lease validation. Neither task may fabricate terminal or recovery state from
+  Temporal memory, create a formal sink, or allocate `TEMPORAL` Evidence.
+- D starts `P5-D1` only after `P5-C2`, `P5-C3`, `P5-B3`, and the still-blocked
+  `P5-WAVE-A-INTEGRATED` barrier are satisfied. It adds `EvidenceProcessProjectionQuery` and the
+  authenticated `GET /api/disputes/{caseId}/evidence/process-projection` route on
+  `EvidenceController`, with a controller test and a Java adapter Maven T0 selector. The query is
+  under `workflow/projection/evidence`, not the formal Evidence application package. The response
+  is private and `no-store`; the API, store, and view must test stale role changes and history
+  behavior. `InternalEvidenceController` is explicitly untouched.
+- E completes `P5-S5` with production Graph PostgreSQL `G004` durable permit admission, not a
+  process-local Java bulkhead. The database owns a fair queue and atomically grants room, tenant,
+  and global permits; leases have fence tokens, cancellation, expiry/takeover, and crash recovery.
+  Evidence async item admission and takeover validate the current Graph lease. Permit, Graph lease,
+  and Java finalization fences are distinct and non-interchangeable. Lifecycle, readiness, restore,
+  production bindings, unit tests, and integration tests are in scope; labels are bounded and no
+  fallback is permitted. Java bulkheads remain signed-synthetic local parity/no-formal-sink checks
+  only.
+- Runtime remains `DISABLED` or Java-signed synthetic `SHADOW`; real-case shadow, a formal sink,
+  `TEMPORAL` allocation, public 100 submissions, canary, and promotion remain forbidden.
 - A-C remain active for dependency fixes and bounded cross-review.
 - R integrates, closes findings, freezes one candidate, and alone runs the final checkpoint.
 

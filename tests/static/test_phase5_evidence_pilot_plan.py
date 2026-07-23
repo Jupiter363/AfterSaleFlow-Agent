@@ -590,6 +590,15 @@ def test_phase5_every_delegated_task_is_executable_and_path_bounded() -> None:
     briefs = _owner_briefs()
     token_classes = set(briefs["test_token_policy"]["required_resource_classes"])
     path_owners: dict[str, str] = {}
+    e1_takeover_paths = set(
+        next(
+            item
+            for item in briefs["integration_barriers"]["P5-WAVE-A-INTEGRATED"][
+                "path_takeovers"
+            ]
+            if item["owner"] == "E"
+        )["files"]
+    )
 
     for owner_id, owner in briefs["owners"].items():
         assert owner["review_partner"] != owner_id
@@ -607,7 +616,12 @@ def test_phase5_every_delegated_task_is_executable_and_path_bounded() -> None:
             for path in task["owned_files"]:
                 assert not any(token in path for token in ("*", "?", "[", "]"))
                 previous_owner = path_owners.setdefault(path, owner_id)
-                assert previous_owner == owner_id, (
+                assert previous_owner == owner_id or (
+                    previous_owner == "A"
+                    and owner_id == "E"
+                    and task_id == "P5-E1"
+                    and path in e1_takeover_paths
+                ), (
                     f"{path} crosses delegated owners {previous_owner} and {owner_id}"
                 )
             for command in task["t0_commands"]:
@@ -633,6 +647,12 @@ def test_phase5_d1_e1_takeovers_require_the_wave_a_integration_barrier() -> None
         assert "P5-WAVE-A-INTEGRATED" in task["depends_on"]
         assert transfer["to_task"] == next_task
         assert set(transfer["files"]).issubset(task["owned_files"])
+    assert transfers["E"]["from_tasks"] == ["P5-A1", "P5-A2", "P5-E0"]
+    assert {
+        "python-agent-service/app/graphs/evidence/runtime.py",
+        "python-agent-service/app/graphs/evidence/nodes.py",
+        "python-agent-service/app/graphs/evidence/graph.py",
+    }.issubset(transfers["E"]["files"])
 
 
 def test_phase5_owner_brief_maven_selectors_are_single_argv_tokens() -> None:
@@ -651,6 +671,142 @@ def test_phase5_owner_brief_maven_selectors_are_single_argv_tokens() -> None:
                     for token in argv
                     if not token.startswith("-Dtest=") and token.endswith("Test")
                 ]
+
+
+def test_phase5_wave_b_requires_durable_java_receipts_before_projection() -> None:
+    briefs = _owner_briefs()
+    batches = _batches()
+    c3 = briefs["owners"]["C"]["tasks"]["P5-C3"]
+    b3 = briefs["owners"]["B"]["tasks"]["P5-B3"]
+    d1 = briefs["owners"]["D"]["tasks"]["P5-D1"]
+
+    assert c3["depends_on"] == ["P5-C2", "P5-WAVE-A-INTEGRATED"]
+    assert b3["depends_on"] == ["P5-B2", "P5-C3", "P5-WAVE-A-INTEGRATED"]
+    assert {
+        "java-api-service/src/main/resources/db/migration/"
+        "V043_5__evidence_finalization_receipt_ledger.sql",
+        "java-api-service/src/main/java/com/example/dispute/evidence/application/graph/"
+        "EvidenceFinalizationReceiptLookup.java",
+        "java-api-service/src/main/java/com/example/dispute/workflow/temporal/room/evidence/"
+        "EvidenceRoomActivities.java",
+    }.issubset(c3["owned_files"] + b3["owned_files"])
+    assert (
+        "java-api-service/src/main/resources/db/migration/"
+        "V043_4__evidence_graph_bindings.sql"
+        in briefs["owners"]["C"]["forbidden_files"]
+    )
+    assert {"P5-C2", "P5-C3", "P5-B3", "P5-WAVE-A-INTEGRATED"}.issubset(
+        d1["depends_on"]
+    )
+    c3_text = " ".join(c3["output_contracts"] + c3["commit_definition_of_done"])
+    assert "trusted current-authority snapshot/lock" in c3_text
+    assert "immutable actual-load receipts" in c3_text
+    assert "atomically" in c3_text
+    assert "stale/takeover races" in c3_text
+    assert "same operationKey with a different requestHash conflict" in c3_text
+    assert "Temporal History" in c3_text
+    assert "Temporal memory" in " ".join(b3["commit_definition_of_done"])
+    assert batches["waves"]["wave_a"]["delegated_tasks"] == [
+        "P5-A1",
+        "P5-A2",
+        "P5-B1",
+        "P5-B2",
+        "P5-C1",
+        "P5-C2",
+        "P5-D0",
+        "P5-E0",
+    ]
+
+
+def test_phase5_d1_projection_route_is_private_and_controller_bound() -> None:
+    briefs = _owner_briefs()
+    d1 = briefs["owners"]["D"]["tasks"]["P5-D1"]
+    text = " ".join(d1["output_contracts"] + d1["commit_definition_of_done"])
+    selector = next(
+        command["argv"]
+        for command in d1["t0_commands"]
+        if command["id"] == "D1_MAVEN_TEST"
+    )
+
+    assert (
+        "java-api-service/src/main/java/com/example/dispute/workflow/projection/evidence/"
+        "EvidenceProcessProjectionQuery.java" in d1["owned_files"]
+    )
+    assert "java-api-service/src/main/java/com/example/dispute/evidence/api/EvidenceController.java" in d1[
+        "owned_files"
+    ]
+    assert "EvidenceRoomControllerTest" in selector[2]
+    assert "authenticated" in text and "private" in text and "no-store" in text
+    assert (
+        "java-api-service/src/main/java/com/example/dispute/evidence/api/"
+        "InternalEvidenceController.java"
+        in briefs["owners"]["D"]["forbidden_files"]
+    )
+
+
+def test_phase5_e1_is_durable_graph_permit_work_not_java_bulkhead_authority() -> None:
+    briefs = _owner_briefs()
+    batches = _batches()
+    e1 = briefs["owners"]["E"]["tasks"]["P5-E1"]
+    paths = set(e1["owned_files"])
+    text = " ".join(e1["output_contracts"] + e1["commit_definition_of_done"])
+    maven = next(
+        command["argv"]
+        for command in e1["t0_commands"]
+        if command["id"] == "E1_MAVEN_TEST"
+    )
+
+    assert {
+        "python-agent-service/migrations/graph/G004_graph_fanout_bulkhead.sql",
+        "python-agent-service/app/graph_runtime/postgres_bulkhead.py",
+        "python-agent-service/app/graph_runtime/bulkhead.py",
+        "python-agent-service/app/graph_runtime/errors.py",
+        "python-agent-service/app/graph_runtime/migrations.py",
+        "python-agent-service/app/graph_runtime/readiness.py",
+        "python-agent-service/app/graph_runtime/restore_validation.py",
+        "python-agent-service/app/graph_runtime/graph_lifecycle.py",
+        "python-agent-service/app/graph_runtime/production_bindings.py",
+        "python-agent-service/app/graphs/evidence/runtime.py",
+        "python-agent-service/app/graphs/evidence/nodes.py",
+        "python-agent-service/app/graphs/evidence/graph.py",
+    }.issubset(paths)
+    assert "database-owned fair queue" in text
+    assert "room tenant and global atomic permits" in text
+    assert "current Graph lease" in text
+    assert "no fallback" in text
+    assert "bounded labels" in text
+    assert "local signed-synthetic parity" in text
+    assert all(
+        name in maven[2]
+        for name in (
+            "EvidenceBulkheadPolicyTest",
+            "EvidenceNoFormalSinkGuardTest",
+            "EvidenceBulkheadIntegrationTest",
+            "EvidenceShadowParityServiceTest",
+        )
+    )
+    batch_2 = batches["batches"]["P5-BATCH-2"]
+    assert batch_2["requires_tasks"] == [
+        "P5-B3",
+        "P5-C3",
+        "P5-D1",
+        "P5-D2",
+        "P5-E1",
+        "P5-E2",
+    ]
+    assert "python-agent-service/tests/graphs/evidence/test_recovery.py" in batch_2[
+        "planned_python_tests"
+    ]
+    assert "frontend/src/stores/evidence.test.js" in batch_2["frontend_tests"]
+    assert "tests/static/test_phase5_evidence_selector.py" in batch_2[
+        "planned_static_tests"
+    ]
+    assert {
+        "EvidenceProcessProjectionAdapterTest",
+        "EvidenceRoomControllerTest",
+        "EvidenceBulkheadPolicyTest",
+        "EvidenceNoFormalSinkGuardTest",
+    }.issubset(batch_2["planned_java_test_classes"])
 
 
 def test_phase5_owner_briefs_reserve_shared_paths_for_primary_integration() -> None:
@@ -700,7 +856,8 @@ def test_phase5_owner_briefs_reserve_shared_paths_for_primary_integration() -> N
             ],
         }
     ]
-    assert set(foundation[0]["exact_paths"]).issubset(primary_paths)
+    e1_paths = set(briefs["owners"]["E"]["tasks"]["P5-E1"]["owned_files"])
+    assert set(foundation[0]["exact_paths"]).issubset(e1_paths)
     assert _batches()["waves"]["wave_a"]["status"] == "READY"
     assert _batches()["waves"]["wave_b"]["status"] == (
         "BLOCKED_ON_WAVE_A_INTEGRATION"

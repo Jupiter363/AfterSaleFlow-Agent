@@ -105,9 +105,13 @@ integration_barriers:
           - frontend/src/api/evidence.test.js
           - frontend/src/views/disputes/EvidenceRoomView.test.js
       - owner: E
-        from_task: P5-E0
+        from_tasks: [P5-A1, P5-A2, P5-E0]
         to_task: P5-E1
         files:
+          - python-agent-service/app/graphs/evidence/runtime.py
+          - python-agent-service/app/graphs/evidence/nodes.py
+          - python-agent-service/app/graphs/evidence/graph.py
+          - python-agent-service/tests/graphs/evidence/test_graph.py
           - java-api-service/src/main/java/com/example/dispute/workflow/shadow/evidence/EvidenceBulkheadPolicy.java
           - java-api-service/src/main/java/com/example/dispute/workflow/shadow/evidence/EvidenceNoFormalSinkGuard.java
           - java-api-service/src/test/java/com/example/dispute/workflow/shadow/evidence/EvidenceBulkheadPolicyTest.java
@@ -334,6 +338,35 @@ owners:
           - Lost response and cancellation recovery are covered without formal sink activation.
           - Token-granted T0 passes and E records P0 review closure.
           - Commit SHA and test-token release are returned to R.
+      P5-B3:
+        initial_parallel: false
+        depends_on: [P5-B2, P5-C3, P5-WAVE-A-INTEGRATED]
+        input_contracts:
+          - contracts/agent-platform/evidence/v2/evidence-process-projection.schema.json
+          - contracts/agent-platform/evidence/v2/evidence-finalization-receipt.schema.json
+        output_contracts:
+          - Java-readable fenced operational recovery projection reconciles production EvidenceRoomActivities from validated receipt refs and current Graph lease state
+          - reconciliation is recovery-only and cannot become a formal Evidence Finalizer sink or Temporal allocation path
+        owned_files:
+          - java-api-service/src/main/java/com/example/dispute/workflow/temporal/room/evidence/EvidenceRoomActivities.java
+          - java-api-service/src/main/java/com/example/dispute/workflow/temporal/room/evidence/EvidenceOperationalRecoveryProjection.java
+          - java-api-service/src/main/java/com/example/dispute/workflow/temporal/room/evidence/EvidenceOperationalRecoveryReconciler.java
+          - java-api-service/src/test/java/com/example/dispute/workflow/room/evidence/EvidenceRoomActivitiesReconciliationTest.java
+          - java-api-service/src/test/java/com/example/dispute/workflow/room/evidence/EvidenceOperationalRecoveryReconcilerTest.java
+        t0_commands:
+          - id: B3_MAVEN_TEST
+            workdir: java-api-service
+            argv: [./mvnw.cmd, -q, "-Dtest=EvidenceRoomActivitiesReconciliationTest,EvidenceOperationalRecoveryReconcilerTest", test]
+            resource_class: maven_test
+            test_token_required: true
+            max_duration_seconds: 180
+        commit_definition_of_done:
+          - P5-WAVE-A-INTEGRATED is OPEN before the first edit.
+          - Only P5-B3 owned_files are staged.
+          - Reconciliation consumes only durable Java receipt refs and a current Graph lease validation; it never manufactures terminal or recovery state from Temporal memory.
+          - Java room Graph lease and Java finalization fences are separately validated, and no fallback to local memory or a formal sink exists.
+          - Token-granted T0 passes and E records P0 review closure.
+          - Commit SHA and test-token release are returned to R.
 
   C:
     role: Java manifest asset authority ledger and Finalizer
@@ -362,6 +395,7 @@ owners:
       - java-api-service/src/main/resources/db/migration/V043__intake_graph_bindings.sql
       - java-api-service/src/main/resources/db/migration/V043_2__intake_shadow_comparisons.sql
       - java-api-service/src/main/resources/db/migration/V043_3__intake_signed_synthetic_admission.sql
+      - java-api-service/src/main/resources/db/migration/V043_4__evidence_graph_bindings.sql
     tasks:
       P5-C1:
         initial_parallel: true
@@ -469,7 +503,41 @@ owners:
           - Formal sink assembly remains unreachable in DISABLED and SIGNED_SYNTHETIC_SHADOW.
           - Token-granted T0 passes and A records P0 review closure.
           - Commit SHA and test-token release are returned to R.
-
+      P5-C3:
+        initial_parallel: false
+        depends_on: [P5-C2, P5-WAVE-A-INTEGRATED]
+        input_contracts:
+          - contracts/agent-platform/evidence/v2/evidence-finalization-receipt.schema.json
+          - contracts/agent-platform/evidence/v2/evidence-terminal-proposal.schema.json
+        output_contracts:
+          - durable Java finalization receipt ledger is the sole source of a validated terminal-summary sidecar; P5-C2 is port-only and makes no durability claim
+          - receipt-ref lookup is idempotent and validates a trusted current-authority snapshot/lock for tenant case epoch Java room fence process room and source revisions plus current fact/source allowlists
+          - immutable actual-load receipts are looked up by ref and hash and validated atomically with receipt insert or replay; receipt-ref lookup also validates Graph lease fence and proposal hash before returning a summary
+          - terminal or recovery state is never fabricated from Temporal memory
+        owned_files:
+          - java-api-service/src/main/java/com/example/dispute/evidence/application/graph/EvidenceFinalizationReceiptLookup.java
+          - java-api-service/src/main/java/com/example/dispute/evidence/application/graph/EvidenceCurrentAuthoritySnapshot.java
+          - java-api-service/src/main/java/com/example/dispute/evidence/application/graph/EvidenceTerminalSummary.java
+          - java-api-service/src/main/java/com/example/dispute/evidence/infrastructure/persistence/JdbcEvidenceFinalizationReceiptLedger.java
+          - java-api-service/src/main/resources/db/migration/V043_5__evidence_finalization_receipt_ledger.sql
+          - java-api-service/src/test/java/com/example/dispute/evidence/EvidenceFinalizationReceiptLookupTest.java
+          - java-api-service/src/test/java/com/example/dispute/evidence/infrastructure/persistence/JdbcEvidenceFinalizationReceiptLedgerTest.java
+        t0_commands:
+          - id: C3_MAVEN_TEST
+            workdir: java-api-service
+            argv: [./mvnw.cmd, -q, "-Dtest=EvidenceFinalizationReceiptLookupTest,JdbcEvidenceFinalizationReceiptLedgerTest", test]
+            resource_class: maven_test
+            test_token_required: true
+            max_duration_seconds: 180
+        commit_definition_of_done:
+          - P5-WAVE-A-INTEGRATED is OPEN before the first edit.
+          - Only P5-C3 owned_files are staged; V043_4 is not edited and V043_5 is additive-only.
+          - Receipt-ref lookup rejects missing foreign stale or conflicting receipt refs and never reads Temporal History as a terminal or recovery authority.
+          - The trusted current-authority snapshot/lock and immutable actual-load receipt ref/hash validations commit atomically with receipt insert/replay.
+          - The validated terminal-summary sidecar retains the distinct Java room Graph lease and Java finalization fences.
+          - Tests cover stale/takeover races forged self-hashed actual-load receipts foreign caller allowlists same operationKey with a different requestHash conflict and exact commit-response replay.
+          - Token-granted T0 passes and A records P0 review closure.
+          - Commit SHA migration checksum and test-token release are returned to R.
   D:
     role: Evidence projection API and compatible frontend experience
     status: READY_FOR_WAVE_A_DISPATCH
@@ -497,6 +565,7 @@ owners:
       - java-api-service/src/main/java/com/example/dispute/evidence/application/EvidenceCompletionService.java
       - java-api-service/src/main/java/com/example/dispute/evidence/application/EvidenceDossierFreezer.java
       - java-api-service/src/main/java/com/example/dispute/workflow/config/TemporalWorkerConfiguration.java
+      - java-api-service/src/main/java/com/example/dispute/evidence/api/InternalEvidenceController.java
     tasks:
       P5-D0:
         initial_parallel: true
@@ -534,17 +603,21 @@ owners:
           - Commit SHA and exact T0 results are returned to R.
       P5-D1:
         initial_parallel: false
-        depends_on: [P5-D0, P5-A2, P5-B2, P5-C2, P5-WAVE-A-INTEGRATED]
+        depends_on: [P5-D0, P5-A2, P5-B2, P5-C2, P5-C3, P5-B3, P5-WAVE-A-INTEGRATED]
         input_contracts:
           - contracts/agent-platform/evidence/v2/evidence-process-projection.schema.json
           - contracts/agent-platform/evidence/v2/evidence-finalization-receipt.schema.json
         output_contracts:
-          - versioned projection exposes pending active terminal and recovery state without hidden authority
-          - API and store preserve stale-response role-switch and history locks
+          - EvidenceProcessProjectionQuery reads only the durable Java finalization receipt ledger validated terminal-summary sidecar and current fenced operational recovery projection
+          - authenticated GET /api/disputes/{caseId}/evidence/process-projection is private and no-store and exposes pending active terminal and recovery state without hidden authority
+          - API store and view preserve stale-response role-switch and history locks without accessing InternalEvidenceController or Temporal memory
         owned_files:
+          - java-api-service/src/main/java/com/example/dispute/evidence/api/EvidenceController.java
+          - java-api-service/src/main/java/com/example/dispute/workflow/projection/evidence/EvidenceProcessProjectionQuery.java
           - java-api-service/src/main/java/com/example/dispute/workflow/projection/evidence/EvidenceProcessProjectionAdapter.java
           - java-api-service/src/main/java/com/example/dispute/workflow/projection/evidence/EvidenceProcessProjectionView.java
           - java-api-service/src/test/java/com/example/dispute/workflow/projection/EvidenceProcessProjectionAdapterTest.java
+          - java-api-service/src/test/java/com/example/dispute/evidence/EvidenceRoomControllerTest.java
           - frontend/src/api/evidence.js
           - frontend/src/api/evidence.test.js
           - frontend/src/stores/evidence.js
@@ -552,6 +625,12 @@ owners:
           - frontend/src/views/disputes/EvidenceRoomView.vue
           - frontend/src/views/disputes/EvidenceRoomView.test.js
         t0_commands:
+          - id: D1_MAVEN_TEST
+            workdir: java-api-service
+            argv: [./mvnw.cmd, -q, "-Dtest=EvidenceProcessProjectionAdapterTest,EvidenceRoomControllerTest", test]
+            resource_class: maven_test
+            test_token_required: true
+            max_duration_seconds: 180
           - id: D1_VITEST
             workdir: frontend
             argv: [node, node_modules/vitest/vitest.mjs, run, src/api/evidence.test.js, src/stores/evidence.test.js, src/views/disputes/EvidenceRoomView.test.js, --maxWorkers=2, --minWorkers=1]
@@ -561,7 +640,8 @@ owners:
         commit_definition_of_done:
           - P5-WAVE-A-INTEGRATED is OPEN before the first edit.
           - Only P5-D1 owned_files are staged.
-          - Projection privacy pending active-run recovery role-switch and history tests pass.
+          - EvidenceController only serves the authenticated private no-store process-projection route; InternalEvidenceController remains untouched.
+          - Projection privacy pending active-run validated terminal-summary recovery stale role-switch and history tests pass.
           - No UI or API enables TEMPORAL allocation formal sink or public 100 submission.
           - R records P0 review closure and receives the commit SHA.
       P5-D2:
@@ -704,8 +784,9 @@ owners:
           - contracts/agent-platform/evidence/v2/evidence-terminal-proposal.schema.json
           - contracts/agent-platform/evidence/v2/evidence-finalization-receipt.schema.json
         output_contracts:
-          - signed-synthetic parity uses room tenant and global bulkheads with deterministic hashes
-          - Graph recovery cannot bypass no-sink or asset authority
+          - production Graph PostgreSQL owns fair durable room tenant and global permit queues leases fences cancellation crash recovery and admission ordering for Evidence async items
+          - Graph recovery validates the current Graph lease and keeps permit Graph and Java finalization fences distinct; there is no fallback to process-local permits or Temporal memory
+          - Java bulkhead remains local signed-synthetic parity and no-formal-sink defense only, never the production permit authority
         owned_files:
           - java-api-service/src/main/java/com/example/dispute/workflow/shadow/evidence/EvidenceBulkheadPolicy.java
           - java-api-service/src/main/java/com/example/dispute/workflow/shadow/evidence/EvidenceNoFormalSinkGuard.java
@@ -716,25 +797,44 @@ owners:
           - java-api-service/src/test/java/com/example/dispute/workflow/shadow/evidence/EvidenceNoFormalSinkGuardTest.java
           - java-api-service/src/test/java/com/example/dispute/workflow/shadow/evidence/EvidenceBulkheadIntegrationTest.java
           - java-api-service/src/test/java/com/example/dispute/workflow/shadow/evidence/EvidenceShadowParityServiceTest.java
-          - python-agent-service/tests/graphs/evidence/test_bulkhead_recovery.py
+          - python-agent-service/migrations/graph/G004_graph_fanout_bulkhead.sql
+          - python-agent-service/app/graph_runtime/postgres_bulkhead.py
+          - python-agent-service/app/graph_runtime/bulkhead.py
+          - python-agent-service/app/graph_runtime/errors.py
+          - python-agent-service/app/graph_runtime/migrations.py
+          - python-agent-service/app/graph_runtime/production_bindings.py
+          - python-agent-service/app/graph_runtime/readiness.py
+          - python-agent-service/app/graph_runtime/restore_validation.py
+          - python-agent-service/app/graph_runtime/graph_lifecycle.py
+          - python-agent-service/app/graphs/evidence/runtime.py
+          - python-agent-service/app/graphs/evidence/nodes.py
+          - python-agent-service/app/graphs/evidence/graph.py
+          - python-agent-service/tests/graph_runtime/unit/test_bulkhead.py
+          - python-agent-service/tests/graph_runtime/unit/test_graph_persistence_readiness.py
+          - python-agent-service/tests/graph_runtime/integration/test_graph_postgres_runtime.py
+          - python-agent-service/tests/api/test_graph_lifecycle.py
+          - python-agent-service/tests/graphs/evidence/test_graph.py
           - tests/static/test_phase5_evidence_no_sink_bulkhead.py
         t0_commands:
           - id: E1_PYTEST
             workdir: python-agent-service
-            argv: [D:/miniconda/python.exe, -m, pytest, tests/graphs/evidence/test_bulkhead_recovery.py, -q]
+            argv: [D:/miniconda/python.exe, -m, pytest, tests/graph_runtime/unit/test_bulkhead.py, tests/graph_runtime/unit/test_graph_persistence_readiness.py, tests/api/test_graph_lifecycle.py, tests/graphs/evidence/test_graph.py, -q]
             resource_class: light_pytest
             test_token_required: false
             max_duration_seconds: 180
           - id: E1_MAVEN_TEST
             workdir: java-api-service
-            argv: [./mvnw.cmd, -q, "-Dtest=EvidenceBulkheadIntegrationTest,EvidenceShadowParityServiceTest", test]
+            argv: [./mvnw.cmd, -q, "-Dtest=EvidenceBulkheadPolicyTest,EvidenceNoFormalSinkGuardTest,EvidenceBulkheadIntegrationTest,EvidenceShadowParityServiceTest", test]
             resource_class: maven_test
             test_token_required: true
             max_duration_seconds: 180
         commit_definition_of_done:
           - P5-WAVE-A-INTEGRATED is OPEN before the first edit.
           - Only P5-E1 owned_files are staged.
-          - GRAPH-016 room tenant global bounds fairness cancellation recovery and release evidence passes.
+          - G004 is additive Graph migration ownership only; V043_4 and all Java formal-ledger migrations remain untouched.
+          - GRAPH-016 proves G004 database-owned fair queue admission, room tenant and global atomic permits, lease expiry takeover cancellation and crash recovery with bounded labels.
+          - Evidence graph runtime nodes and graph wrap every async Send with durable permit acquisition and release; direct local admission is forbidden.
+          - Each production Graph async item validates its current Graph lease and separately preserves permit Graph and Java finalization fences; no fallback exists.
           - Synthetic parity never uses party data production objects formal sink or TEMPORAL allocation.
           - T0 passes under token policy and B records P0 review closure.
           - Commit SHA and exact T0 results are returned to R.
@@ -805,9 +905,6 @@ primary_integration_only:
     - tests/static/test_phase5_wave_a_runner.py
     - tests/static/test_phase5_wave_a_evidence.py
     - tests/static/test_phase5_wave_a_checkpoint.py
-    - python-agent-service/app/graph_runtime/bulkhead.py
-    - python-agent-service/app/graph_runtime/errors.py
-    - python-agent-service/tests/graph_runtime/unit/test_bulkhead.py
     - java-api-service/src/main/java/com/example/dispute/workflow/config/TemporalWorkerConfiguration.java
     - java-api-service/src/main/java/com/example/dispute/workflow/config/OrchestrationCutoverProperties.java
   rules:
