@@ -46,3 +46,32 @@ def test_r2_gate_authenticates_current_candidate(monkeypatch) -> None:
     assert manifest["authorized_migration_path"] == gate.AUTHORIZED_MIGRATION
     assert manifest["forbidden_migration_sha256"] == gate.FORBIDDEN_MIGRATION_SHA256
     json.dumps(manifest, sort_keys=True)
+
+
+def test_r2_execute_manifest_records_frozen_source_command(monkeypatch, tmp_path) -> None:
+    candidate = "a" * 40
+    monkeypatch.setattr(gate, "_assert_clean", lambda value: None)
+    monkeypatch.setattr(
+        gate,
+        "authenticate",
+        lambda value: {
+            "schema_version": gate.SCHEMA_VERSION,
+            "status": "PASS",
+            "candidate_commit": value,
+            "authorized_migration_path": gate.AUTHORIZED_MIGRATION,
+        },
+    )
+
+    class Completed:
+        returncode = 0
+        stdout = b"33 passed\n"
+        stderr = b""
+
+    monkeypatch.setattr(gate.subprocess, "run", lambda *args, **kwargs: Completed())
+
+    manifest = gate.execute(candidate, tmp_path / "run")
+
+    assert manifest["source_command"]["id"] == "p5_r2_static_migration_contract_gate"
+    assert manifest["source_command"]["argv"] == gate.SOURCE_COMMAND["argv"]
+    assert manifest["source_command"]["exit_code"] == 0
+    assert manifest["source_command"]["status"] == "PASS"

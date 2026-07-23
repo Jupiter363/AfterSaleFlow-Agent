@@ -837,7 +837,13 @@ def test_phase5_r2_is_the_only_pre_c3_migration_authorization_gate() -> None:
         "c2c6e51c3f099ecbe867679b75a44a5b6ffb736e"
     )
     assert "P5-R2" in c3["depends_on"]
-    assert R2_AUTHORIZED_MIGRATION in c3["owned_files"]
+    c3_migration_paths = {
+        path
+        for path in c3["owned_files"]
+        if path.startswith("java-api-service/src/main/resources/db/migration/")
+    }
+    assert c3_migration_paths == {R2_AUTHORIZED_MIGRATION}
+    assert c3["authorized_migration_path"] == R2_AUTHORIZED_MIGRATION
     assert (
         "java-api-service/src/main/resources/db/migration/"
         "V043_4__evidence_graph_bindings.sql"

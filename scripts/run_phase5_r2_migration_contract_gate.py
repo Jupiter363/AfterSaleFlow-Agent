@@ -3,8 +3,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -14,6 +16,18 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_VERSION = "phase5-r2-migration-contract-gate.v1"
 MANIFEST_NAME = "phase5-r2-migration-contract-gate.json"
+SOURCE_COMMAND = {
+    "id": "p5_r2_static_migration_contract_gate",
+    "workdir": ".",
+    "argv": [
+        "D:/miniconda/python.exe",
+        "-m",
+        "pytest",
+        "tests/static/test_phase5_r2_migration_contract_gate.py",
+        "tests/static/test_phase5_evidence_pilot_plan.py",
+        "-q",
+    ],
+}
 AUTHORIZED_MIGRATION = (
     "java-api-service/src/main/resources/db/migration/"
     "V043_5__evidence_finalization_and_operational_recovery.sql"
@@ -112,7 +126,37 @@ def authenticate(candidate: str) -> dict[str, Any]:
 def execute(candidate: str, run_dir: Path) -> dict[str, Any]:
     if run_dir.exists():
         raise GateError("run directory already exists")
+    _assert_clean(candidate)
+    started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    environment = os.environ.copy()
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    result = subprocess.run(
+        SOURCE_COMMAND["argv"],
+        cwd=ROOT,
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=environment,
+    )
+    ended = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    command_result = {
+        "id": SOURCE_COMMAND["id"],
+        "workdir": SOURCE_COMMAND["workdir"],
+        "argv": SOURCE_COMMAND["argv"],
+        "started_at": started,
+        "ended_at": ended,
+        "exit_code": result.returncode,
+        "status": "PASS" if result.returncode == 0 else "FAIL",
+        "stdout_sha256": _sha256(result.stdout),
+        "stderr_sha256": _sha256(result.stderr),
+    }
+    if result.returncode:
+        raise GateError(
+            "source command failed: "
+            + result.stderr.decode("utf-8", errors="replace").strip()
+        )
     manifest = authenticate(candidate)
+    manifest["source_command"] = command_result
     run_dir.mkdir(parents=True)
     manifest_path = run_dir / MANIFEST_NAME
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
