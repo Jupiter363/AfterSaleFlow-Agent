@@ -1,0 +1,264 @@
+{
+  "schema_version": "phase6-entry-execution-manifest.v1",
+  "phase": 6,
+  "candidate_commit": "f338eb5df0c37d40a7b7293a1ae999dc8ea18b0c",
+  "attempt_id": "phase6-entry-20260724-f338eb5d",
+  "status": "SOURCE_SUITES_GREEN_AWAITING_SEPARATE_ENTRY_EVIDENCE",
+  "contract_gate": "P6.0_NOT_RUN",
+  "implementation_authorized": false,
+  "MIG-004": "PENDING_PROMOTION",
+  "MIG-005": "PENDING_PROMOTION",
+  "MIG-006": "PENDING_PROMOTION",
+  "verification_started_at": "2026-07-23T19:15:16.202+00:00",
+  "verification_finished_at": "2026-07-23T19:17:07.376+00:00",
+  "environment": {
+    "environment_id": "local-phase6-entry-20260724-r2",
+    "captured_at": "2026-07-23T19:15:16.207+00:00",
+    "host": {
+      "system": "Windows",
+      "release": "11",
+      "machine": "AMD64"
+    },
+    "tools": {
+      "python": {
+        "available": true,
+        "version": "3.12.3",
+        "implementation": "CPython"
+      },
+      "git": {
+        "available": true,
+        "exit_code": 0,
+        "version": "git version 2.44.0.windows.1"
+      },
+      "java": {
+        "available": true,
+        "exit_code": 0,
+        "version": "java version \"21.0.8\" 2025-07-15 LTS"
+      },
+      "node": {
+        "available": true,
+        "exit_code": 0,
+        "version": "v24.15.0"
+      }
+    },
+    "dependency_manifests": [
+      {
+        "path": "python-agent-service/pyproject.toml",
+        "sha256": "89fa516cf0fce8de32f703a38c1be50dd5c8d51f1076512f1a75c7e136875668"
+      },
+      {
+        "path": "python-agent-service/requirements.lock",
+        "sha256": "ec588b073793e6bb74f1fa5cf8630df830fd34afde9596c8b64e9ccd07ac10e3"
+      },
+      {
+        "path": "java-api-service/pom.xml",
+        "sha256": "1b46df62b207a9f0bd3253bba24d1055a88c83f736313561c1fd9b171ca93c58"
+      },
+      {
+        "path": "java-api-service/.mvn/wrapper/maven-wrapper.properties",
+        "sha256": "fd3f8fa8b791a96b39f10907b71c462bed15ba03f9cfe8d136c137406c3a19a6"
+      },
+      {
+        "path": "frontend/package.json",
+        "sha256": "34970a78a8092e8f11a311e9302ea0baf782b7912e9d4a21242b5afea4432e94"
+      },
+      {
+        "path": "frontend/pnpm-lock.yaml",
+        "sha256": "a7a7ef6a83eccff67d18c19c20ebeb537c6fc9e7cd0603dc54b682b0b06cc1db"
+      },
+      {
+        "path": "docker-compose.yml",
+        "sha256": "014cbf196ed61ee871b3e48de73b65da6d5172ec9addaf0da41fc698ff119766"
+      }
+    ],
+    "snapshot_sha256": "afadd57dca9f1407fbbfd6b9ee0f69341cb282a32daec5e32d92fd489c2342cf"
+  },
+  "commands": [
+    {
+      "id": "static_phase6_entry",
+      "candidate_commit": "f338eb5df0c37d40a7b7293a1ae999dc8ea18b0c",
+      "cwd": ".",
+      "matrix_command": "D:\\miniconda\\python.exe -m pytest -q tests/static/test_phase6_hearing_contracts.py tests/static/test_phase6_hearing_pilot_plan.py tests/static/test_phase6_entry_checkpoint.py tests/static/test_phase6_entry_evidence.py tests/static/test_temporal_refactor_traceability.py --junitxml={raw_report}",
+      "matrix_command_sha256": "4e700503fe7ca2308859fd93bfcc50a398598c8eb73fef5c96f7fc539f6d621b",
+      "executed_command": "'D:\\miniconda\\python.exe' -m pytest -q tests/static/test_phase6_hearing_contracts.py tests/static/test_phase6_hearing_pilot_plan.py tests/static/test_phase6_entry_checkpoint.py tests/static/test_phase6_entry_evidence.py tests/static/test_temporal_refactor_traceability.py '--junitxml=D:\\学习\\Project\\AfterSaleFlow-Agent\\.codex-run\\p6-entry-f338eb5d\\.codex-run\\phase6-entry-20260724-f338eb5d\\attempts\\static_phase6_entry-01\\raw-junit.xml'",
+      "executed_argv": [
+        "D:\\miniconda\\python.exe",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/static/test_phase6_hearing_contracts.py",
+        "tests/static/test_phase6_hearing_pilot_plan.py",
+        "tests/static/test_phase6_entry_checkpoint.py",
+        "tests/static/test_phase6_entry_evidence.py",
+        "tests/static/test_temporal_refactor_traceability.py",
+        "--junitxml=D:\\学习\\Project\\AfterSaleFlow-Agent\\.codex-run\\p6-entry-f338eb5d\\.codex-run\\phase6-entry-20260724-f338eb5d\\attempts\\static_phase6_entry-01\\raw-junit.xml"
+      ],
+      "executed_command_sha256": "a6461641ee4458705c2a55ed6c54f3dc8166e6bc624c2f1a08f55c60b686e11c",
+      "started_at": "2026-07-23T19:15:17.229+00:00",
+      "finished_at": "2026-07-23T19:15:37.787+00:00",
+      "duration_seconds": 20.557,
+      "exit_code": 0,
+      "environment_sha256": "afadd57dca9f1407fbbfd6b9ee0f69341cb282a32daec5e32d92fd489c2342cf",
+      "stdout_path": "attempts/static_phase6_entry-01/stdout.log",
+      "stdout_sha256": "159f3c3daecf5c6de1cbe5bcaba0976f67d376f4445ab69b05bb4d2e0ef8a422",
+      "stderr_path": "attempts/static_phase6_entry-01/stderr.log",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw_reports": [
+        {
+          "path": "attempts/static_phase6_entry-01/raw-junit.xml",
+          "sha256": "d08a5dde99b317cff65f7d32a85d917e0eee9e02ecfa4d866a84229b88dbdcef"
+        }
+      ],
+      "failure_classification": "NONE",
+      "accepted": true,
+      "report": "static-phase6-entry.xml",
+      "report_path": "source/static-phase6-entry.xml",
+      "report_sha256": "2546db75d6e0b3cd2cda51afc5e3b6ac96208957ae6806f55122417a27674233",
+      "tests": 37,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "id": "python_phase6_entry",
+      "candidate_commit": "f338eb5df0c37d40a7b7293a1ae999dc8ea18b0c",
+      "cwd": "python-agent-service",
+      "matrix_command": "D:\\miniconda\\python.exe -m pytest -q tests/agents/test_hearing_flow_v2.py --junitxml={raw_report}",
+      "matrix_command_sha256": "f1fda0244ac26ac9a4225cc07412d464092b8a29c055098a91889e19c6596cc8",
+      "executed_command": "'D:\\miniconda\\python.exe' -m pytest -q tests/agents/test_hearing_flow_v2.py '--junitxml=D:\\学习\\Project\\AfterSaleFlow-Agent\\.codex-run\\p6-entry-f338eb5d\\.codex-run\\phase6-entry-20260724-f338eb5d\\attempts\\python_phase6_entry-01\\raw-junit.xml'",
+      "executed_argv": [
+        "D:\\miniconda\\python.exe",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agents/test_hearing_flow_v2.py",
+        "--junitxml=D:\\学习\\Project\\AfterSaleFlow-Agent\\.codex-run\\p6-entry-f338eb5d\\.codex-run\\phase6-entry-20260724-f338eb5d\\attempts\\python_phase6_entry-01\\raw-junit.xml"
+      ],
+      "executed_command_sha256": "1a413bd7aba58e45694711b07bba59e0c6b7b70333d1877ea898fca91fa1c280",
+      "started_at": "2026-07-23T19:15:38.344+00:00",
+      "finished_at": "2026-07-23T19:15:51.182+00:00",
+      "duration_seconds": 12.837,
+      "exit_code": 0,
+      "environment_sha256": "afadd57dca9f1407fbbfd6b9ee0f69341cb282a32daec5e32d92fd489c2342cf",
+      "stdout_path": "attempts/python_phase6_entry-01/stdout.log",
+      "stdout_sha256": "c168839bd302a0b11542881b7cd21b680bd3abee06fd3fc8a4e634c73f731ac0",
+      "stderr_path": "attempts/python_phase6_entry-01/stderr.log",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw_reports": [
+        {
+          "path": "attempts/python_phase6_entry-01/raw-junit.xml",
+          "sha256": "eb5e31dff5e52ac34904606c0c62a9ded1eed5cab63e82fb0705d1bd27c04c34"
+        }
+      ],
+      "failure_classification": "NONE",
+      "accepted": true,
+      "report": "python-phase6-entry.xml",
+      "report_path": "source/python-phase6-entry.xml",
+      "report_sha256": "0f9e2a8bcaec4b7a1db3cbbcd609eba40c0d0581db6a25f015d290b25c253217",
+      "tests": 23,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "id": "java_phase6_entry",
+      "candidate_commit": "f338eb5df0c37d40a7b7293a1ae999dc8ea18b0c",
+      "cwd": "java-api-service",
+      "matrix_command": ".\\mvnw.cmd -DforkCount=1 -Dtest=HearingFlowRuntimeServiceTest,HearingFlowPersistenceContractTest,HearingTrialDossierServiceTest,HearingReviewHandoffServiceTest -Dsurefire.reportNameSuffix={report_suffix} test",
+      "matrix_command_sha256": "3179e75a2854e65962245f6299bbd0748462adffc474e0e0c26bde0af1394339",
+      "executed_command": "'.\\mvnw.cmd' -DforkCount=1 -Dtest=HearingFlowRuntimeServiceTest,HearingFlowPersistenceContractTest,HearingTrialDossierServiceTest,HearingReviewHandoffServiceTest -Dsurefire.reportNameSuffix=p6-f338eb5df0c3-c72b32d8 test",
+      "executed_argv": [
+        ".\\mvnw.cmd",
+        "-DforkCount=1",
+        "-Dtest=HearingFlowRuntimeServiceTest,HearingFlowPersistenceContractTest,HearingTrialDossierServiceTest,HearingReviewHandoffServiceTest",
+        "-Dsurefire.reportNameSuffix=p6-f338eb5df0c3-c72b32d8",
+        "test"
+      ],
+      "executed_command_sha256": "20c7f524780f019f4f4265b1d9078e0da17511f2f607f80e767ac34ab6f9bf43",
+      "started_at": "2026-07-23T19:15:51.636+00:00",
+      "finished_at": "2026-07-23T19:17:00.079+00:00",
+      "duration_seconds": 68.443,
+      "exit_code": 0,
+      "environment_sha256": "afadd57dca9f1407fbbfd6b9ee0f69341cb282a32daec5e32d92fd489c2342cf",
+      "stdout_path": "attempts/java_phase6_entry-01/stdout.log",
+      "stdout_sha256": "869d96c39c11db4e922d530be9e76f006f459c78f82927fb44c48558182e8944",
+      "stderr_path": "attempts/java_phase6_entry-01/stderr.log",
+      "stderr_sha256": "3762ab30ab7847cf761f31c4962fc8faf5a4e10a85f07c1e7f2372eb384f4a15",
+      "raw_reports": [
+        {
+          "path": "attempts/java_phase6_entry-01/raw-surefire/TEST-com.example.dispute.hearing.HearingFlowPersistenceContractTest-p6-f338eb5df0c3-c72b32d8.xml",
+          "sha256": "4725d35caa0c24810f7f9a77288806c06a09689deb9f2a8d5b6e0a75b01a7d34"
+        },
+        {
+          "path": "attempts/java_phase6_entry-01/raw-surefire/TEST-com.example.dispute.hearing.HearingFlowRuntimeServiceTest-p6-f338eb5df0c3-c72b32d8.xml",
+          "sha256": "f50eef55b7b45886d1f5b406e2cf40fffe57924d36c1661e362434625b24bf3b"
+        },
+        {
+          "path": "attempts/java_phase6_entry-01/raw-surefire/TEST-com.example.dispute.hearing.HearingReviewHandoffServiceTest-p6-f338eb5df0c3-c72b32d8.xml",
+          "sha256": "913cfca6fe4198915b830bae9b14f1744083508e487b749c620fa7ca12d3f827"
+        },
+        {
+          "path": "attempts/java_phase6_entry-01/raw-surefire/TEST-com.example.dispute.hearing.HearingTrialDossierServiceTest-p6-f338eb5df0c3-c72b32d8.xml",
+          "sha256": "911ce8bac41efa2fb4f94633ae691563cd222b9990e099797839b54366f4a040"
+        }
+      ],
+      "failure_classification": "NONE",
+      "accepted": true,
+      "report": "java-phase6-entry.xml",
+      "report_path": "source/java-phase6-entry.xml",
+      "report_sha256": "ec154f7e0a8b49750b9357e4ddccae5cfc3b895e6aaa08ad3b3d0d0ead3d6560",
+      "tests": 18,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "id": "frontend_phase6_entry",
+      "candidate_commit": "f338eb5df0c37d40a7b7293a1ae999dc8ea18b0c",
+      "cwd": "frontend",
+      "matrix_command": "node node_modules/vitest/vitest.mjs run src/views/disputes/HearingCourtView.test.js src/utils/hearingFlow.test.js src/api/hearing.test.js --reporter=default --reporter=junit --outputFile.junit={raw_report}",
+      "matrix_command_sha256": "3c6bed965a1b6ef3671460fb838b53dbb2c22dc573a45c569e3cf0d868c72f5f",
+      "executed_command": "node node_modules/vitest/vitest.mjs run src/views/disputes/HearingCourtView.test.js src/utils/hearingFlow.test.js src/api/hearing.test.js --reporter=default --reporter=junit '--outputFile.junit=D:\\学习\\Project\\AfterSaleFlow-Agent\\.codex-run\\p6-entry-f338eb5d\\.codex-run\\phase6-entry-20260724-f338eb5d\\attempts\\frontend_phase6_entry-01\\raw-junit.xml'",
+      "executed_argv": [
+        "node",
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/views/disputes/HearingCourtView.test.js",
+        "src/utils/hearingFlow.test.js",
+        "src/api/hearing.test.js",
+        "--reporter=default",
+        "--reporter=junit",
+        "--outputFile.junit=D:\\学习\\Project\\AfterSaleFlow-Agent\\.codex-run\\p6-entry-f338eb5d\\.codex-run\\phase6-entry-20260724-f338eb5d\\attempts\\frontend_phase6_entry-01\\raw-junit.xml"
+      ],
+      "executed_command_sha256": "d5782b2f985175f8576aacaa941a1e0c1a72df711821b5fcd214b39f8109efe3",
+      "started_at": "2026-07-23T19:17:00.486+00:00",
+      "finished_at": "2026-07-23T19:17:07.021+00:00",
+      "duration_seconds": 6.535,
+      "exit_code": 0,
+      "environment_sha256": "afadd57dca9f1407fbbfd6b9ee0f69341cb282a32daec5e32d92fd489c2342cf",
+      "stdout_path": "attempts/frontend_phase6_entry-01/stdout.log",
+      "stdout_sha256": "1903732ae92509e773a7cc0a7e95ad2f3769e7920f32efdbcfb21d3c6411a10d",
+      "stderr_path": "attempts/frontend_phase6_entry-01/stderr.log",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw_reports": [
+        {
+          "path": "attempts/frontend_phase6_entry-01/raw-junit.xml",
+          "sha256": "56a0db5208e6f0eaad568f46d8cd14205fab44dc81f3e680c8f7d1fbec1e0536"
+        }
+      ],
+      "failure_classification": "NONE",
+      "accepted": true,
+      "report": "frontend-phase6-entry.xml",
+      "report_path": "source/frontend-phase6-entry.xml",
+      "report_sha256": "b332d2ed1d42c1621debd9964071528f24eab12f8fe189c86819940d79f98d9f",
+      "tests": 70,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    }
+  ],
+  "quarantined_attempts": [],
+  "pending_failure": null,
+  "quarantined_attempts_reused": false,
+  "manifest_sha256": "dfbe29d331bf2e9d2511e2561047efe9630eec386643969afc845a093d766675"
+}

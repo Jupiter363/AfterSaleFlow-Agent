@@ -1,0 +1,149 @@
+<?xml version='1.0' encoding='utf-8'?>
+<testsuites name="frontend-phase6-entry" tests="70" failures="0" errors="0" skipped="0" time="1.708788" candidate_commit="f338eb5df0c37d40a7b7293a1ae999dc8ea18b0c" source_command_id="frontend_phase6_entry">
+  <testsuite name="src/api/hearing.test.js" source_report="frontend-phase6-entry.xml" tests="3" failures="0" errors="0" skipped="0" time="0.006009">
+    <testcase classname="src/api/hearing.test.js" name="hearing API &gt; keeps the legacy answer endpoint available for compatible callers" time="0.0007369">
+        </testcase>
+    <testcase classname="src/api/hearing.test.js" name="hearing API &gt; submits one evidence batch after parallel file uploads finish" time="0.0006374">
+        </testcase>
+    <testcase classname="src/api/hearing.test.js" name="hearing API &gt; submits one natural-language statement for the authenticated party" time="0.0046345">
+        </testcase>
+  </testsuite>
+  <testsuite name="src/utils/hearingFlow.test.js" source_report="frontend-phase6-entry.xml" tests="4" failures="0" errors="0" skipped="0" time="0.004718">
+    <testcase classname="src/utils/hearingFlow.test.js" name="hearing flow v2 &gt; builds stable macro progress from the explicit state order" time="0.0013171">
+        </testcase>
+    <testcase classname="src/utils/hearingFlow.test.js" name="hearing flow v2 &gt; limits party input and judge calls to their declared stages" time="0.000486">
+        </testcase>
+    <testcase classname="src/utils/hearingFlow.test.js" name="hearing flow v2 &gt; reads the authoritative stage without inspecting messages" time="0.0024893">
+        </testcase>
+    <testcase classname="src/utils/hearingFlow.test.js" name="hearing flow v2 &gt; uses the preparing state for absent or unknown server values" time="0.0004257">
+        </testcase>
+  </testsuite>
+  <testsuite name="src/views/disputes/HearingCourtView.test.js" source_report="frontend-phase6-entry.xml" tests="63" failures="0" errors="0" skipped="0" time="1.698061">
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; adds dossier, V1, jury, V2 and reviewer handoff events to the hearing ledger" time="0.0167745">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; adds evidence supplements, matrix revisions and jury reports without round labels" time="0.0184864">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; allows a statement when the shared issue set has no prompt for the current party" time="0.0227172">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; clears an open evidence drawer without restoring focus when the courtroom grows past the drawer breakpoint" time="0.0296739">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; clips translated inactive evidence drawers at the narrow canvas boundary" time="0.0004138">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; closes the stacked court ledger before the evidence drawer on consecutive Escape presses" time="0.0526148">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; contains a 200-character unbroken hearing error inside the fixed canvas" time="0.025166">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; declares the 1220px evidence-drawer breakpoint and fixed rail rows" time="0.0004776">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; does not allow a party to resubmit after its stage terminal state" time="0.0212929">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; does not expose party stage submission to platform reviewers" time="0.0133292">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; does not invent a party deadline when the server omitted it" time="0.0235023">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; does not poll or open the draft while V2 is still being generated" time="0.0145925">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; extracts persisted matrix JSON into readable courtroom summaries" time="0.0183938">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; hands a platform reviewer to the same read-only draft room" time="0.0197122">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; hands the parties to human review only after the persisted V2 is ready" time="0.0163091">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; keeps a ready draft behind an explicit courtroom entry click" time="0.0341478">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; keeps all six hearing flow groups horizontally scrollable at the narrow breakpoint" time="0.0214431">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; keeps fifty naturally-sized messages inside the one transcript scroll rail" time="0.0652966">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; keeps hearing-level actions below the right evidence card instead of inside it" time="0.0141374">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; keeps ledger and settlement dialog close controls at least 44px square" time="0.000445">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; keeps one hundred evidence records in the two dedicated evidence scroll rails" time="0.0514344">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; keeps settlement proposal and confirmation out of the normal hearing mainline" time="0.0266428">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; keeps the audit aide out of the hearing page even for a platform reviewer" time="0.0138584">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; keeps the total hearing countdown anchored to the case deadline after refresh" time="0.0682491">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; keeps user, merchant, and reviewer role shells semantically stable" time="0.0541108">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; lets courtroom authority cards grow vertically with long transcript text" time="0.0012547">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; maps internal evidence ids and normalizes mixed sentence punctuation in judge copy" time="0.0183598">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; moves focus into the court ledger, traps Tab, and restores the opener for explicit closes" time="0.0495777">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; offers a status refresh while the human-review handoff projection is incomplete" time="0.015479">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; opens only one accessible evidence drawer and restores launcher focus on Escape" time="0.0548062">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; opens the outcome only after a durable case-closed event" time="0.0187145">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; prefers participant identity statuses over conflicting legacy role statuses" time="0.0229616">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; presents hearing intake streams as intake-officer actions" time="0.000447">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; puts the current party evidence rail on the left and keeps the counterparty read-only on the right" time="0.0160429">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; rechecks a delayed final projection after the review task event" time="0.0360641">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; refreshes the hearing snapshot when the backend emits a flow-stage event" time="0.0236613">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; removes the shared courtroom keydown listener when the view unmounts" time="0.0166437">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; renders bootstrap room messages with courtroom role labels instead of backend sender roles" time="0.0220643">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; renders party evidence rails from the backend evidence catalog instead of mock files" time="0.0154916">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; renders system notices as centered time-and-text rows before digital-human cards" time="0.0223655">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; renders the explicit hearing flow with agents and a shared party deadline" time="0.0416609">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; shows a friendly empty ledger before flow events are persisted" time="0.0151903">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; shows a sealed historical courtroom and blocks all mutation controls" time="0.0997093">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; shows an empty evidence rail state when the backend catalog has no visible evidence" time="0.0150692">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; shows an empty transcript state instead of fabricated courtroom messages when no backend messages exist" time="0.0212485">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; shows formal jury review reports as cards without exposing raw A2A internals" time="0.0160371">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; shows intake synthesis without invoking or naming the judge" time="0.0147064">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; shows loading placeholders instead of false empty states while the hearing snapshot is still loading" time="0.031682">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; shows stage progress instead of a fake round countdown while V1 is generated" time="0.0171802">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; streams the draft and jury report inside their final courtroom cards" time="0.0626328">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; submits one natural-language party statement and then locks the party input" time="0.0281191">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; switches to abnormal-report mode at exactly 1500 Unicode characters" time="0.0307947">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; updates the optimistic submission state by participant identity" time="0.0393176">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; uploads and submits merchant supplementary evidence with the backend actor-specific source type" time="0.0367537">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; uploads every supplementary evidence file in parallel and submits one shared batch" time="0.034925">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; uses a cleaned-up window resize fallback when ResizeObserver is unavailable" time="0.027156">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; uses each courtroom digital human's clothing color on their transcript cards" time="0.0025256">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; uses explicit fixed rows and returns the input dock space to reviewers" time="0.0405357">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; uses the AI-native courtroom layout with party evidence rails and no party role cards" time="0.0637242">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; uses the formal statement endpoint when no submit action is injected" time="0.0228726">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; uses the role-keyed party prompt emitted by the hearing agent" time="0.0158615">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; waits for system synthesis after both party statements reach terminal state" time="0.0157432">
+        </testcase>
+    <testcase classname="src/views/disputes/HearingCourtView.test.js" name="HearingCourtView &gt; withholds the counterparty raw statement until both parties are terminal" time="0.0274603">
+        </testcase>
+  </testsuite>
+</testsuites>
