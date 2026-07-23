@@ -558,3 +558,11 @@ promotion or permit Hearing supplementation work under Phase 5.
 - Acceptance evidence commit: `c6f9d7dbdd8d9322b219cef866a812a12004f539`.
 - Decision: `P5-WAVE-A-INTEGRATED=OPEN`, `Wave B=READY`, `P5-R2=READY`.
 - Guard state: candidate wave remains blocked; runtime, traffic, canary, promotion, `MIG-004`, and `MIG-005` remain unchanged.
+
+### P5.R2 Migration Contract Gate Record
+
+- Candidate: `c2c6e51c3f099ecbe867679b75a44a5b6ffb736e`.
+- Evidence: `test-reports/temporal-first/phase-5-r2-20260723-c2c6e51c/phase-5-r2-migration-contract/phase5-r2-migration-contract-gate.json`.
+- Authorized migration: `java-api-service/src/main/resources/db/migration/V043_5__evidence_finalization_and_operational_recovery.sql`.
+- V043_4 SHA-256: `f2872430c63db6b8f561ef982ea4b3329d04bd7ecde744aaa625880c02399cb0`.
+- Runtime guard: formal sink, `TEMPORAL` allocation, real-case shadow, canary, promotion, and production traffic remain forbidden.

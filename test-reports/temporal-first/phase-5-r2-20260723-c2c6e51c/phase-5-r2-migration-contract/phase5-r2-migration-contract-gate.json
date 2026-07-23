@@ -1,0 +1,18 @@
+{
+  "adr_sha256": "1fc08d558491677caf3d561cdc13b232a4305c58605dbad180a6971bafbd68d0",
+  "authorized_migration_path": "java-api-service/src/main/resources/db/migration/V043_5__evidence_finalization_and_operational_recovery.sql",
+  "candidate_commit": "c2c6e51c3f099ecbe867679b75a44a5b6ffb736e",
+  "contract_sha256": "3f00c9be579dde9cd5cbfda098dba50afd29a2aec54faa1d08acffecb7ae5965",
+  "forbidden_migration_path": "java-api-service/src/main/resources/db/migration/V043_4__evidence_graph_bindings.sql",
+  "forbidden_migration_sha256": "f2872430c63db6b8f561ef982ea4b3329d04bd7ecde744aaa625880c02399cb0",
+  "runtime_restrictions": {
+    "canary_allowed": false,
+    "formal_evidence_sink_allowed": false,
+    "production_traffic_allowed": false,
+    "promotion_allowed": false,
+    "real_case_shadow_allowed": false,
+    "temporal_evidence_allocation_allowed": false
+  },
+  "schema_version": "phase5-r2-migration-contract-gate.v1",
+  "status": "PASS"
+}

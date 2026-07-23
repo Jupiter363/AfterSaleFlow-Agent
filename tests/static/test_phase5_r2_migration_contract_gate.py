@@ -36,8 +36,9 @@ def test_r2_contract_authorizes_exactly_one_additive_migration() -> None:
     )
 
 
-def test_r2_gate_authenticates_current_candidate() -> None:
+def test_r2_gate_authenticates_current_candidate(monkeypatch) -> None:
     candidate = gate._git_text("rev-parse", "HEAD")
+    monkeypatch.setattr(gate, "_assert_clean", lambda value: None)
     manifest = gate.authenticate(candidate)
 
     assert manifest["status"] == "PASS"

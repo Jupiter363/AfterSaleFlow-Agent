@@ -6,6 +6,10 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[2]
+R2_AUTHORIZED_MIGRATION = (
+    "java-api-service/src/main/resources/db/migration/"
+    "V043_5__evidence_finalization_and_operational_recovery.sql"
+)
 EXECUTION_PLAN = ROOT / "plans/phase-5-evidence-pilot-execution.md"
 TEST_BATCHES = ROOT / "plans/phase-5-evidence-pilot-test-batches.yaml"
 OWNER_BRIEFS = ROOT / "plans/phase-5-owner-briefs.yaml"
@@ -824,13 +828,16 @@ def test_phase5_r2_is_the_only_pre_c3_migration_authorization_gate() -> None:
     c3 = briefs["owners"]["C"]["tasks"]["P5-C3"]
 
     assert r2["depends_on"] == ["P5-R1", "P5-WAVE-A-INTEGRATED"]
-    assert r2["authorized_migration_path"] == "P5-R2_AUTHORIZED_MIGRATION"
+    assert r2["authorized_migration_path"] == R2_AUTHORIZED_MIGRATION
     assert r3["depends_on"] == ["P5-D2", "P5-E2"]
     assert batches["waves"]["candidate_wave"]["tasks"] == ["P5-R3"]
-    assert gate["status"] == "READY"
-    assert gate["authorized_migration_path"] == "P5-R2_AUTHORIZED_MIGRATION"
+    assert gate["status"] == "ACCEPTED"
+    assert gate["authorized_migration_path"] == R2_AUTHORIZED_MIGRATION
+    assert gate["accepted_candidate_commit"] == (
+        "c2c6e51c3f099ecbe867679b75a44a5b6ffb736e"
+    )
     assert "P5-R2" in c3["depends_on"]
-    assert not any("V043_5" in path for path in c3["owned_files"])
+    assert R2_AUTHORIZED_MIGRATION in c3["owned_files"]
     assert (
         "java-api-service/src/main/resources/db/migration/"
         "V043_4__evidence_graph_bindings.sql"
