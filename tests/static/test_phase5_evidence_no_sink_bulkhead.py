@@ -114,10 +114,10 @@ def test_no_sink_guard_pins_direct_java_authority_and_exact_validation_order() -
         assert required in source
 
 
-def test_no_sink_guard_rejects_unsafe_contracts_before_factory_invocation() -> None:
+def test_no_sink_guard_rejects_unsafe_contracts_before_closed_assembly_creation() -> None:
     source = NO_SINK.read_text(encoding="utf-8")
     test_source = NO_SINK_TEST.read_text(encoding="utf-8")
-    factory_call = source.index("factory.get()")
+    assembly_creation = source.index("SignedSyntheticAssembly.fromVerified(contract)")
 
     for required in (
         "authorizationProofRefPresent()",
@@ -126,15 +126,16 @@ def test_no_sink_guard_rejects_unsafe_contracts_before_factory_invocation() -> N
         "Violation.FORMAL_WRITER_REACHABLE",
     ):
         assert required in source
-        assert source.index(required) < factory_call
+        assert source.index(required) < assembly_creation
 
     for required in (
-        "disabledModeDoesNotInvokeAssemblyFactory",
+        "disabledModeProducesNoAssembly",
         "rejectsTemporalOrActiveAllocationBeforeAssembly",
         "rejectsFormalWriterReachabilityAndAuthorizationProofReferenceBeforeAssembly",
         "rejectsAuthorityOrderManifestAuthorityAndActorScopeDrift",
         "rejectsTerminalTransportRegistryOrItemAssessmentPinDrift",
         "rejectsInterchangeableOrSourceDriftedFences",
+        "closedAssemblyCannotReachApplicationServiceWriterOrExecutableCallback",
     ):
         assert required in test_source
 
@@ -143,3 +144,28 @@ def test_no_sink_guard_rejects_unsafe_contracts_before_factory_invocation() -> N
     assert "case DISABLED -> verifyDisabled(contract)" in source
     assert "case SHADOW -> verifySignedSyntheticShadow(contract)" in source
     assert "case ACTIVE -> throw rejected(Violation.ACTIVE_RUNTIME)" in source
+
+
+def test_closed_assembly_has_no_caller_executable_or_application_dependency_slot() -> None:
+    source = NO_SINK.read_text(encoding="utf-8")
+    test_source = NO_SINK_TEST.read_text(encoding="utf-8")
+    assembly_start = source.index("public static final class SignedSyntheticAssembly")
+    assembly_end = source.index("public record ActorScopeHashPin", assembly_start)
+    assembly = source[assembly_start:assembly_end]
+
+    for forbidden in (
+        "java.util.function",
+        "Supplier<",
+        "Runnable",
+        "Callable",
+        "Class.forName",
+        "ServiceLoader",
+        "BeanFactory",
+    ):
+        assert forbidden not in source
+    assert "Object " not in assembly
+    assert "ReachableCapability" not in assembly.split("fromVerified", 1)[0]
+    assert "Set<SyntheticCapability> capabilities" in assembly
+    assert "private SignedSyntheticAssembly(" in assembly
+    assert "method.getParameterTypes()" in test_source
+    assert "getDirectDependenciesFromSelf()" in test_source

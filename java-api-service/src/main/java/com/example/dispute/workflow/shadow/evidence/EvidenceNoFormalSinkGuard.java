@@ -4,7 +4,6 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
-import java.util.function.Supplier;
 
 /** Fail-closed assembly guard for disabled or Java-signed synthetic Evidence execution only. */
 public final class EvidenceNoFormalSinkGuard {
@@ -34,18 +33,13 @@ public final class EvidenceNoFormalSinkGuard {
         };
     }
 
-    /**
-     * Verifies the complete contract before invoking the synthetic assembly factory. Disabled mode
-     * returns empty and never calls the factory.
-     */
-    public <T> Optional<T> assembleIfSafe(AssemblyContract contract, Supplier<T> factory) {
-        Objects.requireNonNull(factory, "factory must not be null");
+    /** Returns a closed value description; this API cannot execute or carry caller code. */
+    public Optional<SignedSyntheticAssembly> assembleIfSafe(AssemblyContract contract) {
         Decision decision = verify(contract);
         if (decision.disposition() == RuntimeDisposition.NO_EXECUTION) {
             return Optional.empty();
         }
-        return Optional.of(Objects.requireNonNull(
-                factory.get(), "synthetic assembly factory must not return null"));
+        return Optional.of(SignedSyntheticAssembly.fromVerified(contract));
     }
 
     private Decision verifyDisabled(AssemblyContract contract) {
@@ -256,6 +250,108 @@ public final class EvidenceNoFormalSinkGuard {
         }
     }
 
+    /**
+     * A non-executable assembly descriptor with a closed dependency surface. It cannot contain an
+     * application service, writer, callback, or arbitrary object supplied by a caller.
+     */
+    public static final class SignedSyntheticAssembly {
+
+        private final ManifestAuthority manifestAuthority;
+        private final ActorScopeHashPin actorScopeHashPin;
+        private final TerminalOutputPin terminalOutputPin;
+        private final ItemAssessmentOutputPin itemAssessmentOutputPin;
+        private final JavaRoomFence javaRoomFence;
+        private final GraphLeaseFence graphLeaseFence;
+        private final Set<SyntheticCapability> capabilities;
+
+        private SignedSyntheticAssembly(
+                ManifestAuthority manifestAuthority,
+                ActorScopeHashPin actorScopeHashPin,
+                TerminalOutputPin terminalOutputPin,
+                ItemAssessmentOutputPin itemAssessmentOutputPin,
+                JavaRoomFence javaRoomFence,
+                GraphLeaseFence graphLeaseFence,
+                Set<SyntheticCapability> capabilities) {
+            this.manifestAuthority = manifestAuthority;
+            this.actorScopeHashPin = actorScopeHashPin;
+            this.terminalOutputPin = terminalOutputPin;
+            this.itemAssessmentOutputPin = itemAssessmentOutputPin;
+            this.javaRoomFence = javaRoomFence;
+            this.graphLeaseFence = graphLeaseFence;
+            this.capabilities = Set.copyOf(capabilities);
+        }
+
+        private static SignedSyntheticAssembly fromVerified(AssemblyContract contract) {
+            Set<SyntheticCapability> safeCapabilities = contract.reachableCapabilities().stream()
+                    .filter(capability -> !capability.formalWriter())
+                    .map(SyntheticCapability::fromVerified)
+                    .collect(java.util.stream.Collectors.toUnmodifiableSet());
+            return new SignedSyntheticAssembly(
+                    ManifestAuthority.DIRECT_JAVA_ES256_SIGNATURE,
+                    new ActorScopeHashPin(ACTOR_SCOPE_HASH_SOURCE),
+                    new TerminalOutputPin(TERMINAL_OUTPUT_SCHEMA_VERSION),
+                    new ItemAssessmentOutputPin(ITEM_ASSESSMENT_OUTPUT_SCHEMA_VERSION),
+                    contract.fenceBinding().javaRoomFence(),
+                    contract.fenceBinding().graphLeaseFence(),
+                    safeCapabilities);
+        }
+
+        public ManifestAuthority manifestAuthority() {
+            return manifestAuthority;
+        }
+
+        public ActorScopeHashPin actorScopeHashPin() {
+            return actorScopeHashPin;
+        }
+
+        public TerminalOutputPin terminalOutputPin() {
+            return terminalOutputPin;
+        }
+
+        public ItemAssessmentOutputPin itemAssessmentOutputPin() {
+            return itemAssessmentOutputPin;
+        }
+
+        public JavaRoomFence javaRoomFence() {
+            return javaRoomFence;
+        }
+
+        public GraphLeaseFence graphLeaseFence() {
+            return graphLeaseFence;
+        }
+
+        public Set<SyntheticCapability> capabilities() {
+            return capabilities;
+        }
+    }
+
+    public record ActorScopeHashPin(String source) {
+
+        public ActorScopeHashPin {
+            if (!ACTOR_SCOPE_HASH_SOURCE.equals(source)) {
+                throw new IllegalArgumentException("actor scope hash source is not pinned");
+            }
+        }
+    }
+
+    public record TerminalOutputPin(String schemaVersion) {
+
+        public TerminalOutputPin {
+            if (!TERMINAL_OUTPUT_SCHEMA_VERSION.equals(schemaVersion)) {
+                throw new IllegalArgumentException("terminal output schema is not pinned");
+            }
+        }
+    }
+
+    public record ItemAssessmentOutputPin(String schemaVersion) {
+
+        public ItemAssessmentOutputPin {
+            if (!ITEM_ASSESSMENT_OUTPUT_SCHEMA_VERSION.equals(schemaVersion)) {
+                throw new IllegalArgumentException("item assessment output schema is not pinned");
+            }
+        }
+    }
+
     public enum RuntimeMode {
         DISABLED,
         SHADOW,
@@ -293,6 +389,22 @@ public final class EvidenceNoFormalSinkGuard {
 
         public boolean formalWriter() {
             return formalWriter;
+        }
+    }
+
+    /** Only these inert synthetic capabilities can be represented by a verified assembly. */
+    public enum SyntheticCapability {
+        SYNTHETIC_COMPARISON_LEDGER,
+        BOUNDED_TELEMETRY;
+
+        private static SyntheticCapability fromVerified(ReachableCapability capability) {
+            return switch (capability) {
+                case SYNTHETIC_COMPARISON_LEDGER -> SYNTHETIC_COMPARISON_LEDGER;
+                case BOUNDED_TELEMETRY -> BOUNDED_TELEMETRY;
+                case FORMAL_EVIDENCE_WRITER, FORMAL_EVIDENCE_FINALIZATION_WRITER ->
+                        throw new IllegalStateException(
+                                "formal capability reached closed synthetic assembly");
+            };
         }
     }
 

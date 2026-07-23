@@ -3,6 +3,9 @@ package com.example.dispute.workflow.shadow.evidence;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.tngtech.archunit.core.domain.Dependency;
+import com.tngtech.archunit.core.importer.ClassFileImporter;
+import com.tngtech.archunit.core.importer.ImportOption;
 import com.example.dispute.workflow.shadow.evidence.EvidenceNoFormalSinkGuard.AssemblyContract;
 import com.example.dispute.workflow.shadow.evidence.EvidenceNoFormalSinkGuard.AuthorityValidationStep;
 import com.example.dispute.workflow.shadow.evidence.EvidenceNoFormalSinkGuard.ExecutionAllocation;
@@ -15,12 +18,13 @@ import com.example.dispute.workflow.shadow.evidence.EvidenceNoFormalSinkGuard.Ma
 import com.example.dispute.workflow.shadow.evidence.EvidenceNoFormalSinkGuard.ReachableCapability;
 import com.example.dispute.workflow.shadow.evidence.EvidenceNoFormalSinkGuard.RuntimeDisposition;
 import com.example.dispute.workflow.shadow.evidence.EvidenceNoFormalSinkGuard.RuntimeMode;
+import com.example.dispute.workflow.shadow.evidence.EvidenceNoFormalSinkGuard.SignedSyntheticAssembly;
+import com.example.dispute.workflow.shadow.evidence.EvidenceNoFormalSinkGuard.SyntheticCapability;
 import com.example.dispute.workflow.shadow.evidence.EvidenceNoFormalSinkGuard.Violation;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Set;
-import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.Test;
 
 class EvidenceNoFormalSinkGuardTest {
@@ -28,30 +32,29 @@ class EvidenceNoFormalSinkGuardTest {
     private final EvidenceNoFormalSinkGuard guard = new EvidenceNoFormalSinkGuard();
 
     @Test
-    void disabledModeDoesNotInvokeAssemblyFactory() {
-        AtomicBoolean invoked = new AtomicBoolean();
-
+    void disabledModeProducesNoAssembly() {
         assertThat(guard.verify(AssemblyContract.disabled()).disposition())
                 .isEqualTo(RuntimeDisposition.NO_EXECUTION);
-        assertThat(guard.assembleIfSafe(AssemblyContract.disabled(), () -> {
-                    invoked.set(true);
-                    return "should-not-exist";
-                }))
-                .isEmpty();
-        assertThat(invoked).isFalse();
+        assertThat(guard.assembleIfSafe(AssemblyContract.disabled())).isEmpty();
     }
 
     @Test
     void javaSignedSyntheticShadowUsesExactAuthorityAndIndependentOutputPins() {
         AssemblyContract contract = AssemblyContract.javaSignedSyntheticShadow(41, 91);
-        AtomicBoolean invoked = new AtomicBoolean();
+        SignedSyntheticAssembly assembly = guard.assembleIfSafe(contract).orElseThrow();
 
-        assertThat(guard.assembleIfSafe(contract, () -> {
-                    invoked.set(true);
-                    return "synthetic-comparison";
-                }))
-                .contains("synthetic-comparison");
-        assertThat(invoked).isTrue();
+        assertThat(assembly.manifestAuthority())
+                .isEqualTo(ManifestAuthority.DIRECT_JAVA_ES256_SIGNATURE);
+        assertThat(assembly.capabilities())
+                .containsExactlyInAnyOrder(
+                        SyntheticCapability.SYNTHETIC_COMPARISON_LEDGER,
+                        SyntheticCapability.BOUNDED_TELEMETRY);
+        assertThat(assembly.terminalOutputPin().schemaVersion())
+                .isEqualTo("evidence-batch-proposal.v1");
+        assertThat(assembly.itemAssessmentOutputPin().schemaVersion())
+                .isEqualTo("evidence-item-assessment.v1");
+        assertThat(assembly.javaRoomFence().token()).isEqualTo(41);
+        assertThat(assembly.graphLeaseFence().token()).isEqualTo(91);
         assertThat(contract.terminalTransportOutputSchemaVersion())
                 .isEqualTo("evidence-batch-proposal.v1");
         assertThat(contract.graphRegistryOutputSchemaVersion())
@@ -166,16 +169,40 @@ class EvidenceNoFormalSinkGuardTest {
                 Violation.DISABLED_REACHABILITY);
     }
 
+    @Test
+    void closedAssemblyCannotReachApplicationServiceWriterOrExecutableCallback() {
+        var production = new ClassFileImporter()
+                .withImportOption(new ImportOption.DoNotIncludeTests())
+                .importClasses(EvidenceNoFormalSinkGuard.class);
+        var guardClass = production.get(EvidenceNoFormalSinkGuard.class);
+
+        assertThat(guardClass.getDirectDependenciesFromSelf().stream()
+                        .map(Dependency::getTargetClass)
+                        .map(target -> target.getName())
+                        .filter(name -> name.startsWith("com.example.dispute"))
+                        .filter(name -> !name.startsWith(EvidenceNoFormalSinkGuard.class.getName())))
+                .as("guard and closed assembly must not reference an application service or writer")
+                .isEmpty();
+        assertThat(EvidenceNoFormalSinkGuard.class.getDeclaredMethods())
+                .filteredOn(method -> method.getName().equals("assembleIfSafe"))
+                .singleElement()
+                .satisfies(method -> {
+                    assertThat(method.getParameterTypes())
+                            .containsExactly(AssemblyContract.class);
+                    assertThat(method.getGenericParameterTypes())
+                            .noneMatch(type -> type.getTypeName().startsWith("java.util.function."));
+                });
+        assertThat(SignedSyntheticAssembly.class.getDeclaredFields())
+                .noneMatch(field -> field.getType() == Object.class)
+                .noneMatch(field -> field.getType().getName().startsWith("java.util.function."))
+                .noneMatch(field -> field.getType().getSimpleName().matches(".*(?:Service|Writer).*$"));
+    }
+
     private void assertRejected(AssemblyContract contract, Violation violation) {
-        AtomicBoolean invoked = new AtomicBoolean();
-        assertThatThrownBy(() -> guard.assembleIfSafe(contract, () -> {
-                    invoked.set(true);
-                    return "unsafe";
-                }))
+        assertThatThrownBy(() -> guard.assembleIfSafe(contract))
                 .isInstanceOfSatisfying(
                         GuardRejectedException.class,
                         rejected -> assertThat(rejected.violation()).isEqualTo(violation));
-        assertThat(invoked).isFalse();
     }
 
     private static final class Builder {
