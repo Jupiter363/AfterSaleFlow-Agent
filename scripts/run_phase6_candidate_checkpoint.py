@@ -156,7 +156,11 @@ def command_specs() -> dict[str, CommandSpec]:
         "PHASE6_PYTHON",
         "D:/miniconda/python.exe" if os.name == "nt" else sys.executable,
     )
-    maven = r".\mvnw.cmd" if os.name == "nt" else "./mvnw"
+    maven = str(
+        ROOT
+        / "java-api-service"
+        / ("mvnw.cmd" if os.name == "nt" else "mvnw")
+    )
     suffix = "phase6-candidate"
     java_classes = ",".join(discover_java_tests())
     return {

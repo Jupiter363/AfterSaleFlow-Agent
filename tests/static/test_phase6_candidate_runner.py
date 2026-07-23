@@ -44,6 +44,8 @@ def test_candidate_runner_respects_the_test_process_budget() -> None:
     commands = runner.command_specs()
 
     assert tuple(commands) == runner.COMMAND_ORDER
+    assert Path(commands["java"].argv[0]).is_absolute()
+    assert Path(commands["java"].argv[0]).is_file()
     assert commands["java"].argv.count("-DforkCount=1") == 1
     assert "--minWorkers=1" in commands["frontend"].argv
     assert "--maxWorkers=2" in commands["frontend"].argv
