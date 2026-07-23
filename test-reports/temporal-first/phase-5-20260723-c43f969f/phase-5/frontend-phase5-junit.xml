@@ -1,0 +1,247 @@
+<?xml version='1.0' encoding='utf-8'?>
+<testsuites name="frontend-phase5-junit" tests="116" failures="0" errors="0" skipped="0" time="4.079154" candidate_commit="c43f969f08755fd6eb90c0845809cda1785d11bf" source_command_id="frontend_phase_5_deduplicated">
+  <testsuite name="src/api/agentStream.test.js" source_report="frontend-phase5-junit.xml" tests="27" failures="0" errors="0" skipped="0" time="0.018987">
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; accepts both Java camelCase and public snake_case run descriptors" time="0.0011159">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; discovers active room runs after refresh with actor isolation headers" time="0.0058545">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; fails closed on conflicting SSE and payload event types" time="0.000079">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; fails closed on conflicting attempt aliases" time="0.0001667">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; fails closed on conflicting cursor sources" time="0.0001563">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; fails closed on conflicting protocol aliases" time="0.0001678">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; fails closed on conflicting run aliases" time="0.0000874">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; fails closed on conflicting sequence aliases" time="0.0001368">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; normalizes attempt-scoped V2 reset cursors without collapsing them to numbers" time="0.0002492">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; normalizes the persisted Java SSE event view" time="0.0008282">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; passes the consuming actor role into V2 audience validation" time="0.0050564">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; rejects a missing V2 attempt id" time="0.0001654">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; rejects a missing sequence instead of coercing it" time="0.0002807">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; rejects a negative sequence instead of coercing it" time="0.0001198">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; rejects a non-string V2 attempt id" time="0.0001502">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; rejects a noninteger sequence instead of coercing it" time="0.0001546">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; rejects a string sequence instead of coercing it" time="0.0001729">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; rejects a unsafe sequence instead of coercing it" time="0.000214">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; rejects missing V1 cursor" time="0.0003475">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; rejects missing V2 cursor" time="0.0001434">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; rejects noncanonical V1 cursor" time="0.0001837">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; rejects noncanonical V2 sequence" time="0.0000975">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; rejects wrong V1 sequence" time="0.0001341">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; rejects wrong V2 attempt" time="0.0001144">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; requires a declared run id instead of filling it from the descriptor" time="0.0001854">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; requires a valid V2 audience and enforces it for non-admin actors" time="0.0005441">
+        </testcase>
+    <testcase classname="src/api/agentStream.test.js" name="agent stream protocol &gt; uses authenticated fetch, resumes at Last-Event-ID and stops at final" time="0.0020807">
+        </testcase>
+  </testsuite>
+  <testsuite name="src/api/evidence.test.js" source_report="frontend-phase5-junit.xml" tests="5" failures="0" errors="0" skipped="0" time="0.00962">
+    <testcase classname="src/api/evidence.test.js" name="evidenceApi &gt; deletes only a pending evidence item through the evidence endpoint" time="0.0005728">
+        </testcase>
+    <testcase classname="src/api/evidence.test.js" name="evidenceApi &gt; loads the actor-scoped process projection in explicit history mode" time="0.0004728">
+        </testcase>
+    <testcase classname="src/api/evidence.test.js" name="evidenceApi &gt; preserves the public 50-item limit by surfacing a 51-item rejection" time="0.00181">
+        </testcase>
+    <testcase classname="src/api/evidence.test.js" name="evidenceApi &gt; sends explicit per-evidence multimodal processing authorization" time="0.002632">
+        </testcase>
+    <testcase classname="src/api/evidence.test.js" name="evidenceApi &gt; submits a pending evidence batch with an idempotency key" time="0.004132">
+        </testcase>
+  </testsuite>
+  <testsuite name="src/components/room/RoomShell.test.js" source_report="frontend-phase5-junit.xml" tests="3" failures="0" errors="0" skipped="0" time="0.062726">
+    <testcase classname="src/components/room/RoomShell.test.js" name="RoomShell &gt; exposes the workspace as an inline-size container for room layouts" time="0.0008337">
+        </testcase>
+    <testcase classname="src/components/room/RoomShell.test.js" name="RoomShell &gt; keeps room context, server status and human-final boundary visible" time="0.0480296">
+        </testcase>
+    <testcase classname="src/components/room/RoomShell.test.js" name="RoomShell &gt; shortens long case identifiers in the header while preserving the full title" time="0.0138622">
+        </testcase>
+  </testsuite>
+  <testsuite name="src/stores/agentStream.test.js" source_report="frontend-phase5-junit.xml" tests="6" failures="0" errors="0" skipped="0" time="0.831172">
+    <testcase classname="src/stores/agentStream.test.js" name="agentStreamStore &gt; clears the aborted attempt before revealing replacement attempt text" time="0.1097468">
+        </testcase>
+    <testcase classname="src/stores/agentStream.test.js" name="agentStreamStore &gt; collects approved deltas and keeps the temporary message until final refresh completes" time="0.2487353">
+        </testcase>
+    <testcase classname="src/stores/agentStream.test.js" name="agentStreamStore &gt; commits a visible delta before an observer failure reconnects and replays it" time="0.1695948">
+        </testcase>
+    <testcase classname="src/stores/agentStream.test.js" name="agentStreamStore &gt; commits an attempt reset before observer failure replay" time="0.1384499">
+        </testcase>
+    <testcase classname="src/stores/agentStream.test.js" name="agentStreamStore &gt; does not render internal reasoning fields even if a malformed relay emits one" time="0.0259389">
+        </testcase>
+    <testcase classname="src/stores/agentStream.test.js" name="agentStreamStore &gt; replays an overflowed delta without duplicating received or durable fallback text" time="0.1387066">
+        </testcase>
+  </testsuite>
+  <testsuite name="src/stores/evidence.test.js" source_report="frontend-phase5-junit.xml" tests="4" failures="0" errors="0" skipped="0" time="0.006505">
+    <testcase classname="src/stores/evidence.test.js" name="evidenceStore &gt; clears the private projection and ignores a late response after a case switch" time="0.0013557">
+        </testcase>
+    <testcase classname="src/stores/evidence.test.js" name="evidenceStore &gt; ignores a late error after a role-only projection scope switch" time="0.0005913">
+        </testcase>
+    <testcase classname="src/stores/evidence.test.js" name="evidenceStore &gt; ignores a late response after an actor-only projection scope switch" time="0.0004659">
+        </testcase>
+    <testcase classname="src/stores/evidence.test.js" name="evidenceStore &gt; loads the process projection as a separate read-only resource" time="0.0040924">
+        </testcase>
+  </testsuite>
+  <testsuite name="src/views/disputes/EvidenceRoomView.test.js" source_report="frontend-phase5-junit.xml" tests="71" failures="0" errors="0" skipped="0" time="3.150144">
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; accepts camelCase assessment fields and requiresHumanReview independently of status" time="0.0200246">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; allows a non-initiating party to complete without submitted evidence" time="0.0132274">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; clears private intake facts on scope changes and blocks locked messages" time="0.000511">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; clears the previous party thread immediately when the viewer role changes" time="0.0282658">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; clears the selected file when the upload declaration is cancelled" time="0.0219193">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; continues refreshing after send until the evidence clerk reply appears" time="0.0227786">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; deletes only pending evidence from the staging card" time="0.021169">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; derives the declaration consequence from initiatorRole instead of a fixed user role" time="0.0206642">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; distinguishes suspected forgery from low relevance in the human review queue" time="0.0217856">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; does not append another opening when the private thread already has a current clerk turn" time="0.0120448">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; does not open evidence detail when keyboard activation comes from nested actions" time="0.0134182">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; does not write a late user batch result into the merchant private thread" time="0.0284198">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; does not write a late user message response into the merchant private thread" time="0.0241825">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; encodes a fixed four-card board with horizontal evidence rails" time="0.0009975">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; ensures the evidence clerk opens the first actor-scoped turn only for an empty thread" time="0.0147432">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; exposes the hearing entrance when the resumed event stream announces it" time="0.0125558">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; fails closed for recovery and history projections without rendering private authority references" time="0.02426">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; finishes the merchant clerk stream before refreshing the evidence board" time="1.6397739">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; ignores stale evidence refresh results from the previous actor" time="0.0184612">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; keeps MERCHANT evidence actor-scoped in active/history=false mode" time="0.0145598">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; keeps MERCHANT evidence actor-scoped in active/history=true mode" time="0.0148818">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; keeps PLATFORM_REVIEWER evidence actor-scoped in active/history=false mode" time="0.0174686">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; keeps PLATFORM_REVIEWER evidence actor-scoped in active/history=true mode" time="0.01669">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; keeps USER evidence actor-scoped in active/history=false mode" time="0.0216586">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; keeps USER evidence actor-scoped in active/history=true mode" time="0.0171781">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; keeps a 200-character filename inspectable without rendering feedback inside the compact card" time="0.0273826">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; keeps compact footer controls horizontal and overlays errors outside the board tracks" time="0.0005575">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; keeps disabled graph execution visibly non-public and never renders a synthetic count" time="0.0172337">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; keeps historical evidence readable while locking every write control" time="0.0682979">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; keeps platform-only evidence out of the party evidence room" time="0.0122693">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; keeps the board fixed with horizontal evidence rails and a vertical human-review queue" time="0.0008516">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; keeps the evidence conversation composer enabled while evidence is not uploading or completing" time="0.0120397">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; keeps the narrow room header, countdown, AI notice, and conversation chain wrap-safe" time="0.0010979">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; maps second-round fact and coverage fields in durable clerk messages" time="0.0133003">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; moves focus into the evidence gate, traps Tab, closes on Escape, and restores the completion trigger" time="0.0440389">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; opens a submitted evidence detail modal from a card" time="0.0283044">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; opens an independent first evidence turn for the merchant actor" time="0.0119309">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; opens compact evidence cards directly into a focus-restoring detail modal" time="0.0260293">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; records evidence explanations through the immutable clerk conversation" time="0.0160173">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; refreshes a delayed merchant-initiated catalog before allowing the user to complete" time="0.0169152">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; refreshes evidence messages after sending an explanation and shows the clerk reply" time="0.0294781">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; rejects a claimed fact shorter than the backend minimum before upload" time="0.0340386">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; reloads actor-scoped evidence data when the viewer role changes" time="0.0205229">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; removes the modal keyboard listener when the view unmounts" time="0.0206421">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; renders a closed signed-synthetic 1-card projection without expanding public submission" time="0.0223974">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; renders a closed signed-synthetic 100-card projection without expanding public submission" time="0.080706">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; renders a closed signed-synthetic 8-card projection without expanding public submission" time="0.0125388">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; renders a closed synthetic MERCHANT catalog with 8 items without granting public submission" time="0.0141236">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; renders a closed synthetic USER catalog with 1 items without granting public submission" time="0.0128412">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; renders a closed synthetic USER catalog with 100 items without granting public submission" time="0.0947674">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; renders an intake-like fixed two-panel evidence room" time="0.01806">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; renders multimodal assessment confidence and a read-only human review card" time="0.0444726">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; repairs a party-only private thread by requesting the missing clerk opening" time="0.0264427">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; requests a dossier-specific opening upgrade for a stale generic clerk welcome" time="0.0113139">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; requests an opening upgrade when earlier fallback openings still have no case focus" time="0.0115661">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; reserves a real 44px touch target for uploader, footer, and modal actions" time="0.0003628">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; retries the catalog after a role switch instead of restoring a roleless snapshot" time="0.0175946">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; separates pending evidence from submitted originals and removes the shared wall" time="0.0148418">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; shows a dismissible modal when the dispute initiator has no submitted evidence" time="0.0187641">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; shows a durable waiting state after the current party completes evidence" time="0.0233732">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; shows confidence feedback and keeps completion available for low confidence evidence" time="0.0249726">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; shows every party human-review item to the platform reviewer" time="0.0130319">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; shows the merchant completion variant without exposing a user-only original" time="0.0097114">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; shows the party statement immediately while the evidence clerk turn is running" time="0.0249397">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; still opens the evidence clerk conversation when the evidence catalog is not created yet" time="0.0175259">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; submits pending evidence as a batch and then waits for the clerk feedback" time="0.0351617">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; uploads into the pending batch card without interrupting the evidence clerk" time="0.0350819">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; uploads user evidence with the backend actor-specific source type" time="0.049351">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; uses reusable document image and video icons for evidence files" time="0.0194083">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; uses the evidence completion deadline returned by the server" time="0.0185831">
+        </testcase>
+    <testcase classname="src/views/disputes/EvidenceRoomView.test.js" name="EvidenceRoomView &gt; waits for the server completion result before exposing the hearing entrance" time="0.0156231">
+        </testcase>
+  </testsuite>
+</testsuites>

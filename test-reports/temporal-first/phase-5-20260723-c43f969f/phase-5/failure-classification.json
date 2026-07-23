@@ -1,0 +1,36 @@
+{
+  "schema_version": "temporal-first-failure-classification.v1",
+  "phase": 5,
+  "candidate_commit": "c43f969f08755fd6eb90c0845809cda1785d11bf",
+  "classifications": {
+    "PRODUCT": {
+      "action": "return_to_owner_and_block_dependent_batch",
+      "candidate_checkpoint_action": "block_candidate"
+    },
+    "FIXTURE": {
+      "action": "prove_contract_correct_repair_fixture_and_rerun_affected_scope_before_candidate_freeze",
+      "candidate_checkpoint_action": "block_candidate"
+    },
+    "INFRA": {
+      "action": "preserve_trace_restore_environment_and_rerun_same_sha_failed_scope",
+      "candidate_checkpoint_action": "resume_same_sha_subject_to_candidate_checkpoint_limit"
+    },
+    "EXTERNAL_GATE": {
+      "action": "record_owner_and_due_condition_without_claiming_pass",
+      "candidate_checkpoint_action": "block_candidate"
+    }
+  },
+  "classify_before_rerun": true,
+  "bounded_same_sha_infra_reruns_per_source": 1,
+  "accepted_source_suite_failures": [],
+  "quarantined_source_attempts": [],
+  "open_product_failures": [],
+  "quarantined_attempts_reused": false,
+  "decision": {
+    "engineering_checkpoint": "PASS",
+    "promotion_gate": "PENDING",
+    "next_phase_permission": "PHASE_6_ENGINEERING_ONLY",
+    "MIG-004": "PENDING_PROMOTION",
+    "MIG-005": "PENDING_PROMOTION"
+  }
+}

@@ -1,0 +1,561 @@
+{
+  "schema_version": "temporal-first-phase-metrics.v1",
+  "release_id": "phase-5-20260723-c43f969f",
+  "phase": 5,
+  "name": "evidence-pilot-engineering-shadow",
+  "scope": "SIGNED_SYNTHETIC_ENGINEERING_ONLY",
+  "base_commit": "d33adcdb35b7b014473bf6bffc8d0292b8846428",
+  "candidate_commit": "c43f969f08755fd6eb90c0845809cda1785d11bf",
+  "engineering_started_at": "2026-07-23T18:37:58+08:00",
+  "verification_started_at": "2026-07-23T16:10:13.138+00:00",
+  "verification_finished_at": "2026-07-23T16:14:51.756+00:00",
+  "verification_wall_clock_seconds": 278.618,
+  "change_summary": {
+    "commits": 22,
+    "files_changed": 79,
+    "insertions": 15368,
+    "deletions": 124
+  },
+  "candidate_verification": {
+    "source_execution_mode": "RECORDED_CANDIDATE_BOUND_SOURCE_RUNNER",
+    "deduplicated_execution": true,
+    "runner_execution": "sequential",
+    "mixed_candidate_results": false,
+    "quarantined_attempts_reused": false,
+    "unconditional_rerun": false,
+    "same_sha_infra_reruns_per_source": 1,
+    "distinct_tests": 890,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "environment": {
+    "environment_id": "local-windows-docker-phase5",
+    "captured_at": "2026-07-23T16:10:13.144+00:00",
+    "host": {
+      "system": "Windows",
+      "release": "11",
+      "machine": "AMD64"
+    },
+    "tools": {
+      "python": {
+        "available": true,
+        "version": "3.12.3",
+        "implementation": "CPython"
+      },
+      "git": {
+        "available": true,
+        "exit_code": 0,
+        "version": "git version 2.44.0.windows.1"
+      },
+      "java": {
+        "available": true,
+        "exit_code": 0,
+        "version": "java version \"21.0.8\" 2025-07-15 LTS"
+      },
+      "node": {
+        "available": true,
+        "exit_code": 0,
+        "version": "v24.15.0"
+      }
+    },
+    "dependency_manifests": [
+      {
+        "path": "python-agent-service/pyproject.toml",
+        "sha256": "89fa516cf0fce8de32f703a38c1be50dd5c8d51f1076512f1a75c7e136875668"
+      },
+      {
+        "path": "python-agent-service/requirements.lock",
+        "sha256": "ec588b073793e6bb74f1fa5cf8630df830fd34afde9596c8b64e9ccd07ac10e3"
+      },
+      {
+        "path": "java-api-service/pom.xml",
+        "sha256": "1b46df62b207a9f0bd3253bba24d1055a88c83f736313561c1fd9b171ca93c58"
+      },
+      {
+        "path": "java-api-service/.mvn/wrapper/maven-wrapper.properties",
+        "sha256": "fd3f8fa8b791a96b39f10907b71c462bed15ba03f9cfe8d136c137406c3a19a6"
+      },
+      {
+        "path": "frontend/package.json",
+        "sha256": "34970a78a8092e8f11a311e9302ea0baf782b7912e9d4a21242b5afea4432e94"
+      },
+      {
+        "path": "frontend/pnpm-lock.yaml",
+        "sha256": "a7a7ef6a83eccff67d18c19c20ebeb537c6fc9e7cd0603dc54b682b0b06cc1db"
+      },
+      {
+        "path": "docker-compose.yml",
+        "sha256": "014cbf196ed61ee871b3e48de73b65da6d5172ec9addaf0da41fc698ff119766"
+      }
+    ],
+    "snapshot_sha256": "74afa0b46888feb5c72a2d7d19cbe11e014e70bd6a0e4d37f24ee7d673a9b10e"
+  },
+  "commands": [
+    {
+      "id": "python_phase_5_deduplicated",
+      "candidate_commit": "c43f969f08755fd6eb90c0845809cda1785d11bf",
+      "cwd": "python-agent-service",
+      "matrix_command": "D:/miniconda/python.exe -m pytest tests/agents/test_evidence_clerk_turn.py tests/agents/test_evidence_fact_mapping_policy.py tests/evals/test_evidence_clerk_prompt_catalog.py tests/test_streaming.py tests/test_streaming_v2.py tests/graphs/evidence tests/graph_runtime/unit/test_bulkhead.py tests/graph_runtime/unit/test_graph_persistence_readiness.py tests/graph_runtime/unit/test_checkpoint_migrations.py tests/graph_runtime/unit/test_gateway_recovery.py tests/graph_runtime/unit/test_production_bindings.py tests/api/test_graph_lifecycle.py tests/security tests/graph_runtime/integration/test_graph_postgres_runtime.py -q",
+      "matrix_command_sha256": "0445d168b79956238492594bbf495ce44c2c44ded15ce71b6a12d2e307a82f2c",
+      "executed_command": "D:/miniconda/python.exe -m pytest tests/agents/test_evidence_clerk_turn.py tests/agents/test_evidence_fact_mapping_policy.py tests/evals/test_evidence_clerk_prompt_catalog.py tests/test_streaming.py tests/test_streaming_v2.py tests/graphs/evidence tests/graph_runtime/unit/test_bulkhead.py tests/graph_runtime/unit/test_graph_persistence_readiness.py tests/graph_runtime/unit/test_checkpoint_migrations.py tests/graph_runtime/unit/test_gateway_recovery.py tests/graph_runtime/unit/test_production_bindings.py tests/api/test_graph_lifecycle.py tests/security tests/graph_runtime/integration/test_graph_postgres_runtime.py -q '--junitxml=D:\\学习\\Project\\AfterSaleFlow-Agent\\.codex-run\\p5-final-c43f969f\\.codex-run\\phase5-candidate-c43f969f\\attempts\\python_phase_5_deduplicated-01\\raw-junit.xml'",
+      "executed_argv": [
+        "D:/miniconda/python.exe",
+        "-m",
+        "pytest",
+        "tests/agents/test_evidence_clerk_turn.py",
+        "tests/agents/test_evidence_fact_mapping_policy.py",
+        "tests/evals/test_evidence_clerk_prompt_catalog.py",
+        "tests/test_streaming.py",
+        "tests/test_streaming_v2.py",
+        "tests/graphs/evidence",
+        "tests/graph_runtime/unit/test_bulkhead.py",
+        "tests/graph_runtime/unit/test_graph_persistence_readiness.py",
+        "tests/graph_runtime/unit/test_checkpoint_migrations.py",
+        "tests/graph_runtime/unit/test_gateway_recovery.py",
+        "tests/graph_runtime/unit/test_production_bindings.py",
+        "tests/api/test_graph_lifecycle.py",
+        "tests/security",
+        "tests/graph_runtime/integration/test_graph_postgres_runtime.py",
+        "-q",
+        "--junitxml=D:\\学习\\Project\\AfterSaleFlow-Agent\\.codex-run\\p5-final-c43f969f\\.codex-run\\phase5-candidate-c43f969f\\attempts\\python_phase_5_deduplicated-01\\raw-junit.xml"
+      ],
+      "executed_command_sha256": "6f7aa350f6e15a0eed7ed2c84f03b874308544fbbe7a1594a64edf6544dc4d7a",
+      "started_at": "2026-07-23T16:10:14.051+00:00",
+      "finished_at": "2026-07-23T16:11:10.522+00:00",
+      "duration_seconds": 56.469,
+      "exit_code": 0,
+      "environment_sha256": "74afa0b46888feb5c72a2d7d19cbe11e014e70bd6a0e4d37f24ee7d673a9b10e",
+      "stdout_path": "attempts/python_phase_5_deduplicated-01/stdout.log",
+      "stdout_sha256": "f7a4bff80966cd009f00c0ac81c72bccb459d9b77c6b2886120836abdf33f396",
+      "stderr_path": "attempts/python_phase_5_deduplicated-01/stderr.log",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw_reports": [
+        {
+          "path": "attempts/python_phase_5_deduplicated-01/raw-junit.xml",
+          "sha256": "420eecab0ba5744e5458397329819fbafbb7c054fec5848a1525f876c703b65d"
+        }
+      ],
+      "accepted": true,
+      "failure_classification": "NONE",
+      "report": "python-phase5-junit.xml",
+      "report_path": "source/python-phase5-junit.xml",
+      "report_sha256": "8b35e5c4469ef02c39b175376458a21e1fba59c293316c82d33b94607c445207",
+      "tests": 362,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "id": "java_phase_5_deduplicated",
+      "candidate_commit": "c43f969f08755fd6eb90c0845809cda1785d11bf",
+      "cwd": "java-api-service",
+      "matrix_command": "'.\\mvnw.cmd' -q -DforkCount=1 -Dtest=EvidenceApiIntegrationTest,EvidenceSubmissionServiceTest,EvidenceCompletionServiceTest,EvidenceAgentTurnServiceTest,EvidenceDossierFreezerTest,EvidenceWindowWorkflowTest,EvidenceWindowCoordinatorTest,EvidenceRoomControllerTest,EvidenceRoomIntegrationTest,EvidenceV2ContractFixtureTest,JdbcEpochBootstrapOutboxPublisherTest,TransactionalEpochAuthorityServiceTest,JdbcIntakePayloadAuthorityStoreTest,IntakeFormalSinkAssemblyTest,EvidenceRoomWorkflowTest,EvidenceRoomWorkflowReplayTest,EvidenceRoomActivityContractTest,EvidenceRoomWorkflowWorkerRecoveryTest,EvidenceAssetAuthorizationTest,JdbcEvidenceGraphBindingStoreTest,EvidenceGraphCommandFactoryTest,EvidenceGraphResultFinalizerTest,EvidenceFinalizationReceiptTest,EvidenceProcessProjectionAdapterTest,EvidenceBulkheadPolicyTest,EvidenceNoFormalSinkGuardTest,EvidenceFinalizationReceiptLookupTest,JdbcEvidenceFinalizationReceiptLedgerTest,EvidenceRoomActivitiesReconciliationTest,EvidenceOperationalRecoveryReconcilerTest,JdbcEvidenceOperationalRecoveryStoreTest,EvidenceRoomWorkflowRecoveryTest,EvidenceTemporalCutoverIntegrationTest,EvidenceShadowParityServiceTest,EvidenceCutoverRollbackTest,EvidenceBulkheadIntegrationTest test",
+      "matrix_command_sha256": "0b92165128650bef9fff42f738697e9223126f2c35ca3e90a4f423d9efbe34cb",
+      "executed_command": "'.\\mvnw.cmd' -q -DforkCount=1 -Dtest=EvidenceApiIntegrationTest,EvidenceSubmissionServiceTest,EvidenceCompletionServiceTest,EvidenceAgentTurnServiceTest,EvidenceDossierFreezerTest,EvidenceWindowWorkflowTest,EvidenceWindowCoordinatorTest,EvidenceRoomControllerTest,EvidenceRoomIntegrationTest,EvidenceV2ContractFixtureTest,JdbcEpochBootstrapOutboxPublisherTest,TransactionalEpochAuthorityServiceTest,JdbcIntakePayloadAuthorityStoreTest,IntakeFormalSinkAssemblyTest,EvidenceRoomWorkflowTest,EvidenceRoomWorkflowReplayTest,EvidenceRoomActivityContractTest,EvidenceRoomWorkflowWorkerRecoveryTest,EvidenceAssetAuthorizationTest,JdbcEvidenceGraphBindingStoreTest,EvidenceGraphCommandFactoryTest,EvidenceGraphResultFinalizerTest,EvidenceFinalizationReceiptTest,EvidenceProcessProjectionAdapterTest,EvidenceBulkheadPolicyTest,EvidenceNoFormalSinkGuardTest,EvidenceFinalizationReceiptLookupTest,JdbcEvidenceFinalizationReceiptLedgerTest,EvidenceRoomActivitiesReconciliationTest,EvidenceOperationalRecoveryReconcilerTest,JdbcEvidenceOperationalRecoveryStoreTest,EvidenceRoomWorkflowRecoveryTest,EvidenceTemporalCutoverIntegrationTest,EvidenceShadowParityServiceTest,EvidenceCutoverRollbackTest,EvidenceBulkheadIntegrationTest -Dsurefire.reportNameSuffix=p5-c43f969f0875-4f22631b test",
+      "executed_argv": [
+        ".\\mvnw.cmd",
+        "-q",
+        "-DforkCount=1",
+        "-Dtest=EvidenceApiIntegrationTest,EvidenceSubmissionServiceTest,EvidenceCompletionServiceTest,EvidenceAgentTurnServiceTest,EvidenceDossierFreezerTest,EvidenceWindowWorkflowTest,EvidenceWindowCoordinatorTest,EvidenceRoomControllerTest,EvidenceRoomIntegrationTest,EvidenceV2ContractFixtureTest,JdbcEpochBootstrapOutboxPublisherTest,TransactionalEpochAuthorityServiceTest,JdbcIntakePayloadAuthorityStoreTest,IntakeFormalSinkAssemblyTest,EvidenceRoomWorkflowTest,EvidenceRoomWorkflowReplayTest,EvidenceRoomActivityContractTest,EvidenceRoomWorkflowWorkerRecoveryTest,EvidenceAssetAuthorizationTest,JdbcEvidenceGraphBindingStoreTest,EvidenceGraphCommandFactoryTest,EvidenceGraphResultFinalizerTest,EvidenceFinalizationReceiptTest,EvidenceProcessProjectionAdapterTest,EvidenceBulkheadPolicyTest,EvidenceNoFormalSinkGuardTest,EvidenceFinalizationReceiptLookupTest,JdbcEvidenceFinalizationReceiptLedgerTest,EvidenceRoomActivitiesReconciliationTest,EvidenceOperationalRecoveryReconcilerTest,JdbcEvidenceOperationalRecoveryStoreTest,EvidenceRoomWorkflowRecoveryTest,EvidenceTemporalCutoverIntegrationTest,EvidenceShadowParityServiceTest,EvidenceCutoverRollbackTest,EvidenceBulkheadIntegrationTest",
+        "-Dsurefire.reportNameSuffix=p5-c43f969f0875-4f22631b",
+        "test"
+      ],
+      "executed_command_sha256": "095c9d26dccbb536985cfd47df0545da08cf823a13239babd608b904b2722b1a",
+      "started_at": "2026-07-23T16:11:10.913+00:00",
+      "finished_at": "2026-07-23T16:13:31.137+00:00",
+      "duration_seconds": 140.224,
+      "exit_code": 0,
+      "environment_sha256": "74afa0b46888feb5c72a2d7d19cbe11e014e70bd6a0e4d37f24ee7d673a9b10e",
+      "stdout_path": "attempts/java_phase_5_deduplicated-01/stdout.log",
+      "stdout_sha256": "81b7de41919198cca03039733259925ce5c11da70943c5c04adbb7b015385680",
+      "stderr_path": "attempts/java_phase_5_deduplicated-01/stderr.log",
+      "stderr_sha256": "3762ab30ab7847cf761f31c4962fc8faf5a4e10a85f07c1e7f2372eb384f4a15",
+      "raw_reports": [
+        {
+          "path": "attempts/java_phase_5_deduplicated-01/raw-surefire/TEST-001-p5-c43f969f0875-4f22631b.xml",
+          "sha256": "752423938d4dc59ebbb7e857364e03a4b7f88b8c20a505f235487f4a47627f82"
+        },
+        {
+          "path": "attempts/java_phase_5_deduplicated-01/raw-surefire/TEST-002-p5-c43f969f0875-4f22631b.xml",
+          "sha256": "40e2dd6c77f14b7c0959b3a24c8be2857ae13039928e8edba15f515bbbb82b9b"
+        },
+        {
+          "path": "attempts/java_phase_5_deduplicated-01/raw-surefire/TEST-003-p5-c43f969f0875-4f22631b.xml",
+          "sha256": "77d3d1a1b2d9c57c3838f73418cfd42c19b5ef4a0fab9c65c74a05e35a2e8459"
+        },
+        {
+          "path": "attempts/java_phase_5_deduplicated-01/raw-surefire/TEST-004-p5-c43f969f0875-4f22631b.xml",
+          "sha256": "046a798221bc0e1f1e21d96394eec659d77b4054aa0f5c036b07c21d6737b550"
+        },
+        {
+          "path": "attempts/java_phase_5_deduplicated-01/raw-surefire/TEST-005-p5-c43f969f0875-4f22631b.xml",
+          "sha256": "0f016cc49d0e5f1683169353d8d9fc545bd41f8b32b23764750a9281d4343ddc"
+        },
+        {
+          "path": "attempts/java_phase_5_deduplicated-01/raw-surefire/TEST-006-p5-c43f969f0875-4f22631b.xml",
+          "sha256": "33103e872f1fa6158d81106871c127dda025fd4e8d7449700ccc4bf5b7415037"
+        },
+        {
+          "path": "attempts/java_phase_5_deduplicated-01/raw-surefire/TEST-007-p5-c43f969f0875-4f22631b.xml",
+          "sha256": "b8ee6eae11e98f457b47a95f50d604f6dc0d481bb80e1b83337e6c09dcd88dc7"
+        },
+        {
+          "path": "attempts/java_phase_5_deduplicated-01/raw-surefire/TEST-008-p5-c43f969f0875-4f22631b.xml",
+          "sha256": "67bea935f106d2eff17eacac4ca48f0d6146eb682bfbfd70adceaf19fa9273e2"
+        },
+        {
+          "path": "attempts/java_phase_5_deduplicated-01/raw-surefire/TEST-009-p5-c43f969f0875-4f22631b.xml",
+          "sha256": "02a71587e074e2046d9b53e2024be9b554e61af13811e94a332c79f736bd9f4f"
+        },
+        {
+          "path": "attempts/java_phase_5_deduplicated-01/raw-surefire/TEST-010-p5-c43f969f0875-4f22631b.xml",
+          "sha256": "c33813ea5067c40ce3b674e8ed8f5386dc600f645b5dff401fbfd447c8375e75"
+        },
+        {
+          "path": "attempts/java_phase_5_deduplicated-01/raw-surefire/TEST-011-p5-c43f969f0875-4f22631b.xml",
+          "sha256": "c200ffc05ba81069d2220d1d4b9fe7c41300ebcd17653aed789b76622b9b26bc"
+        },
+        {
+          "path": "attempts/java_phase_5_deduplicated-01/raw-surefire/TEST-012-p5-c43f969f0875-4f22631b.xml",
+          "sha256": "fa881b48cc317e021e4d2b423183d782136121ae44803d23e96d1e3e508b4f0a"
+        },
+        {
+          "path": "attempts/java_phase_5_deduplicated-01/raw-surefire/TEST-013-p5-c43f969f0875-4f22631b.xml",
+          "sha256": "9a1cb973119b4f5294ac806bd44994d261c47d502b8ebd48b59d0355b5f714ff"
+        },
+        {
+          "path": "attempts/java_phase_5_deduplicated-01/raw-surefire/TEST-014-p5-c43f969f0875-4f22631b.xml",
+          "sha256": "c113381e7ffc96c501167f13993d920c89406906052dc19af8f269eedb8b1506"
+        },
+        {
+          "path": "attempts/java_phase_5_deduplicated-01/raw-surefire/TEST-015-p5-c43f969f0875-4f22631b.xml",
+          "sha256": "c02137e3c0f883c8ddc4834cb8321f64840b63e0067d830ddd9fc7b3d0926495"
+        },
+        {
+          "path": "attempts/java_phase_5_deduplicated-01/raw-surefire/TEST-016-p5-c43f969f0875-4f22631b.xml",
+          "sha256": "8adb0e686ecfacc170b18b046533fb529c4ed9e4ac7e2dc6ba7ffbafe09229e8"
+        },
+        {
+          "path": "attempts/java_phase_5_deduplicated-01/raw-surefire/TEST-017-p5-c43f969f0875-4f22631b.xml",
+          "sha256": "344134caeb00971e20f5217ad6cfaccc6953057a40f01d1f374f3c4bd799f549"
+        },
+        {
+          "path": "attempts/java_phase_5_deduplicated-01/raw-surefire/TEST-018-p5-c43f969f0875-4f22631b.xml",
+          "sha256": "953e803b6b65381a5e0f8dfd7618651c0fd19fe92fc4dbfcdba5590978b6ce0e"
+        },
+        {
+          "path": "attempts/java_phase_5_deduplicated-01/raw-surefire/TEST-019-p5-c43f969f0875-4f22631b.xml",
+          "sha256": "09ec82d82069184fc1aa3dd286598c3d55acd207edd5a52cdbd03424ca3c06a8"
+        },
+        {
+          "path": "attempts/java_phase_5_deduplicated-01/raw-surefire/TEST-020-p5-c43f969f0875-4f22631b.xml",
+          "sha256": "63806a0ec0d033b91343245fbe92932183dab7393873161879b3d6c71dcc09af"
+        },
+        {
+          "path": "attempts/java_phase_5_deduplicated-01/raw-surefire/TEST-021-p5-c43f969f0875-4f22631b.xml",
+          "sha256": "426fae4742ce1627c9cc06bfa0c3d8cd64cd5704dfc0455addc992b82535a66d"
+        },
+        {
+          "path": "attempts/java_phase_5_deduplicated-01/raw-surefire/TEST-022-p5-c43f969f0875-4f22631b.xml",
+          "sha256": "733574d41ed6ff80c312035a9da1997e1c9ca52c7a4a4cdb271a638feeeb050f"
+        },
+        {
+          "path": "attempts/java_phase_5_deduplicated-01/raw-surefire/TEST-023-p5-c43f969f0875-4f22631b.xml",
+          "sha256": "843cd1d23e40684d30d2418f13d9474a5ca193a25cfdb47e88f46ee1d0c54b8f"
+        },
+        {
+          "path": "attempts/java_phase_5_deduplicated-01/raw-surefire/TEST-024-p5-c43f969f0875-4f22631b.xml",
+          "sha256": "d7d6d42989aac1585e086cbf248e4dd513c943504b853ffa5cc1386584f1944b"
+        },
+        {
+          "path": "attempts/java_phase_5_deduplicated-01/raw-surefire/TEST-025-p5-c43f969f0875-4f22631b.xml",
+          "sha256": "caea7c89f42492257b47439b29f1df03967e0936c11099bf4055907d73895314"
+        },
+        {
+          "path": "attempts/java_phase_5_deduplicated-01/raw-surefire/TEST-026-p5-c43f969f0875-4f22631b.xml",
+          "sha256": "54760ad4396b6e40df81a98081d848a90f47b60a5bc52672a1248e562d2f554f"
+        },
+        {
+          "path": "attempts/java_phase_5_deduplicated-01/raw-surefire/TEST-027-p5-c43f969f0875-4f22631b.xml",
+          "sha256": "cfbe427fb169d4a2be18a625226124a7d3546bcd0dd60b0ddc21ab43220a6771"
+        },
+        {
+          "path": "attempts/java_phase_5_deduplicated-01/raw-surefire/TEST-028-p5-c43f969f0875-4f22631b.xml",
+          "sha256": "fabb13237b622fc2b02071a74843bcad836623b89d37e11e410ca2c146a74d80"
+        },
+        {
+          "path": "attempts/java_phase_5_deduplicated-01/raw-surefire/TEST-029-p5-c43f969f0875-4f22631b.xml",
+          "sha256": "ac4407c97feb525e48bd98533785445841b5e83297fe3899ce0c1cbbbff2c99b"
+        },
+        {
+          "path": "attempts/java_phase_5_deduplicated-01/raw-surefire/TEST-030-p5-c43f969f0875-4f22631b.xml",
+          "sha256": "22412337739bfe5bca518aa5ee00cea6eac3573edf425a157119403fbe0be26a"
+        },
+        {
+          "path": "attempts/java_phase_5_deduplicated-01/raw-surefire/TEST-031-p5-c43f969f0875-4f22631b.xml",
+          "sha256": "319e5d15f6761e40b9378e1760b034788b4f1c72934366852084246e3621cd51"
+        },
+        {
+          "path": "attempts/java_phase_5_deduplicated-01/raw-surefire/TEST-032-p5-c43f969f0875-4f22631b.xml",
+          "sha256": "5536faaaeb45802f3674c9aac056a82de8e479faa189364dc632843f55290f5f"
+        },
+        {
+          "path": "attempts/java_phase_5_deduplicated-01/raw-surefire/TEST-033-p5-c43f969f0875-4f22631b.xml",
+          "sha256": "90ad100519dd80d8b42f11fc6982dc19ab78d2a682493005275392f8da792315"
+        },
+        {
+          "path": "attempts/java_phase_5_deduplicated-01/raw-surefire/TEST-034-p5-c43f969f0875-4f22631b.xml",
+          "sha256": "d25f6cbaa152e48eaffbfd8b699fc8e0b58da43872f91d3396ce68d68080d424"
+        },
+        {
+          "path": "attempts/java_phase_5_deduplicated-01/raw-surefire/TEST-035-p5-c43f969f0875-4f22631b.xml",
+          "sha256": "bdaf2c40cb4d98c5fd4706c2e12cbb3e12f92603fbfd79ef33cf6c629943ab84"
+        },
+        {
+          "path": "attempts/java_phase_5_deduplicated-01/raw-surefire/TEST-036-p5-c43f969f0875-4f22631b.xml",
+          "sha256": "4b6ed78294a6e8b966bd4bc5ad0ecb65751bbee440d4f85a0c53f8a6ca89bfdf"
+        }
+      ],
+      "accepted": true,
+      "failure_classification": "NONE",
+      "report": "java-phase5-junit.xml",
+      "report_path": "source/java-phase5-junit.xml",
+      "report_sha256": "018eae70fe7056c3e8f683e790814a727a40f70605aca66cdada688d30be8a3d",
+      "tests": 212,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "id": "frontend_phase_5_deduplicated",
+      "candidate_commit": "c43f969f08755fd6eb90c0845809cda1785d11bf",
+      "cwd": "frontend",
+      "matrix_command": "node node_modules/vitest/vitest.mjs run src/views/disputes/EvidenceRoomView.test.js src/components/room/RoomShell.test.js src/api/evidence.test.js src/api/agentStream.test.js src/stores/agentStream.test.js src/stores/evidence.test.js --minWorkers=1 --maxWorkers=2",
+      "matrix_command_sha256": "c5778dd0707a9ba6eac1fdbee8244a8850271551707a6f38ca79751756655b91",
+      "executed_command": "node node_modules/vitest/vitest.mjs run src/views/disputes/EvidenceRoomView.test.js src/components/room/RoomShell.test.js src/api/evidence.test.js src/api/agentStream.test.js src/stores/agentStream.test.js src/stores/evidence.test.js --minWorkers=1 --maxWorkers=2 --reporter=junit '--outputFile=D:\\学习\\Project\\AfterSaleFlow-Agent\\.codex-run\\p5-final-c43f969f\\.codex-run\\phase5-candidate-c43f969f\\attempts\\frontend_phase_5_deduplicated-01\\raw-junit.xml'",
+      "executed_argv": [
+        "node",
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "src/views/disputes/EvidenceRoomView.test.js",
+        "src/components/room/RoomShell.test.js",
+        "src/api/evidence.test.js",
+        "src/api/agentStream.test.js",
+        "src/stores/agentStream.test.js",
+        "src/stores/evidence.test.js",
+        "--minWorkers=1",
+        "--maxWorkers=2",
+        "--reporter=junit",
+        "--outputFile=D:\\学习\\Project\\AfterSaleFlow-Agent\\.codex-run\\p5-final-c43f969f\\.codex-run\\phase5-candidate-c43f969f\\attempts\\frontend_phase_5_deduplicated-01\\raw-junit.xml"
+      ],
+      "executed_command_sha256": "17539746be9f5fea8310aa9b51f745c1c52f730fe178fdd793f9977c96850dae",
+      "started_at": "2026-07-23T16:13:31.664+00:00",
+      "finished_at": "2026-07-23T16:13:41.898+00:00",
+      "duration_seconds": 10.234,
+      "exit_code": 0,
+      "environment_sha256": "74afa0b46888feb5c72a2d7d19cbe11e014e70bd6a0e4d37f24ee7d673a9b10e",
+      "stdout_path": "attempts/frontend_phase_5_deduplicated-01/stdout.log",
+      "stdout_sha256": "9a1337c0cc5939a0477f0268f932bb4ad0527bdd92465e5cfbf0dfb8b6fb837c",
+      "stderr_path": "attempts/frontend_phase_5_deduplicated-01/stderr.log",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw_reports": [
+        {
+          "path": "attempts/frontend_phase_5_deduplicated-01/raw-junit.xml",
+          "sha256": "2b3db8cc578f2bb83a25cdf2f3aa9c7cc854c41d2b4d2d0d2eedfdebbc56925e"
+        }
+      ],
+      "accepted": true,
+      "failure_classification": "NONE",
+      "report": "frontend-phase5-junit.xml",
+      "report_path": "source/frontend-phase5-junit.xml",
+      "report_sha256": "85243751b4be73dc420a0ae28eb7c143ac145906d29d28279cf2dc4ab5453a98",
+      "tests": 116,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "id": "static_phase_5_deduplicated",
+      "candidate_commit": "c43f969f08755fd6eb90c0845809cda1785d11bf",
+      "cwd": ".",
+      "matrix_command": "D:/miniconda/python.exe -m pytest tests/static/test_phase5_evidence_contracts.py tests/static/test_phase5_evidence_pilot_plan.py tests/static/test_phase5_entry_contract_plan.py tests/static/test_phase5_entry_runner.py tests/static/test_phase5_entry_evidence.py tests/static/test_temporal_refactor_traceability.py tests/static/test_graph_import_boundaries.py tests/static/test_agent_platform_schema_contracts.py tests/static/test_phase4_no_formal_sink_assembly.py tests/static/test_phase5_evidence_no_sink_bulkhead.py tests/static/test_phase5_wave_a_runner.py tests/static/test_phase5_wave_a_evidence.py tests/static/test_phase5_wave_a_checkpoint.py tests/static/test_phase5_evidence_selector.py tests/static/test_phase5_candidate_runner.py tests/static/test_phase5_candidate_evidence.py -q",
+      "matrix_command_sha256": "70df59a56adb5b202cf6daaf80023d4a85f3023633fb924d4c3bac9e96e43d35",
+      "executed_command": "D:/miniconda/python.exe -m pytest tests/static/test_phase5_evidence_contracts.py tests/static/test_phase5_evidence_pilot_plan.py tests/static/test_phase5_entry_contract_plan.py tests/static/test_phase5_entry_runner.py tests/static/test_phase5_entry_evidence.py tests/static/test_temporal_refactor_traceability.py tests/static/test_graph_import_boundaries.py tests/static/test_agent_platform_schema_contracts.py tests/static/test_phase4_no_formal_sink_assembly.py tests/static/test_phase5_evidence_no_sink_bulkhead.py tests/static/test_phase5_wave_a_runner.py tests/static/test_phase5_wave_a_evidence.py tests/static/test_phase5_wave_a_checkpoint.py tests/static/test_phase5_evidence_selector.py tests/static/test_phase5_candidate_runner.py tests/static/test_phase5_candidate_evidence.py -q '--junitxml=D:\\学习\\Project\\AfterSaleFlow-Agent\\.codex-run\\p5-final-c43f969f\\.codex-run\\phase5-candidate-c43f969f\\attempts\\static_phase_5_deduplicated-01\\raw-junit.xml'",
+      "executed_argv": [
+        "D:/miniconda/python.exe",
+        "-m",
+        "pytest",
+        "tests/static/test_phase5_evidence_contracts.py",
+        "tests/static/test_phase5_evidence_pilot_plan.py",
+        "tests/static/test_phase5_entry_contract_plan.py",
+        "tests/static/test_phase5_entry_runner.py",
+        "tests/static/test_phase5_entry_evidence.py",
+        "tests/static/test_temporal_refactor_traceability.py",
+        "tests/static/test_graph_import_boundaries.py",
+        "tests/static/test_agent_platform_schema_contracts.py",
+        "tests/static/test_phase4_no_formal_sink_assembly.py",
+        "tests/static/test_phase5_evidence_no_sink_bulkhead.py",
+        "tests/static/test_phase5_wave_a_runner.py",
+        "tests/static/test_phase5_wave_a_evidence.py",
+        "tests/static/test_phase5_wave_a_checkpoint.py",
+        "tests/static/test_phase5_evidence_selector.py",
+        "tests/static/test_phase5_candidate_runner.py",
+        "tests/static/test_phase5_candidate_evidence.py",
+        "-q",
+        "--junitxml=D:\\学习\\Project\\AfterSaleFlow-Agent\\.codex-run\\p5-final-c43f969f\\.codex-run\\phase5-candidate-c43f969f\\attempts\\static_phase_5_deduplicated-01\\raw-junit.xml"
+      ],
+      "executed_command_sha256": "c8e905efe4f11245ab948de63c904985997177b0c3ac9ba43dbc27c1b9616374",
+      "started_at": "2026-07-23T16:13:42.293+00:00",
+      "finished_at": "2026-07-23T16:14:51.413+00:00",
+      "duration_seconds": 69.121,
+      "exit_code": 0,
+      "environment_sha256": "74afa0b46888feb5c72a2d7d19cbe11e014e70bd6a0e4d37f24ee7d673a9b10e",
+      "stdout_path": "attempts/static_phase_5_deduplicated-01/stdout.log",
+      "stdout_sha256": "62ba00c8ff2adbd1760a660f6b2fb156a3a6a4bc42c5271d1d94ee74a5163cf5",
+      "stderr_path": "attempts/static_phase_5_deduplicated-01/stderr.log",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw_reports": [
+        {
+          "path": "attempts/static_phase_5_deduplicated-01/raw-junit.xml",
+          "sha256": "1895f922d2b9c44f3b657c72bed75a0bf591ae484d857fe54536456737c671db"
+        }
+      ],
+      "accepted": true,
+      "failure_classification": "NONE",
+      "report": "static-phase5-junit.xml",
+      "report_path": "source/static-phase5-junit.xml",
+      "report_sha256": "cdc7da524c1a4dc1591266803c4581ab089be4a5df9c9a9ff14cace1c96b9379",
+      "tests": 200,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    }
+  ],
+  "quarantined_attempts": [],
+  "source_execution_manifest": {
+    "name": "phase5-candidate-execution-manifest.json",
+    "sha256": "b6c97ef533a7f3a45e493ebabf134ccb7908d438dca9e149e0e44e6726f8f836",
+    "manifest_sha256": "9ac24385d0ef442a23d0df45aa70ceb96b14c5d4d348a92ec9585c33d78b1e0b"
+  },
+  "source_reports": [
+    {
+      "name": "python-phase5-junit.xml",
+      "command_id": "python_phase_5_deduplicated",
+      "matrix_command_sha256": "0445d168b79956238492594bbf495ce44c2c44ded15ce71b6a12d2e307a82f2c",
+      "tests": 362,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "sha256": "8b35e5c4469ef02c39b175376458a21e1fba59c293316c82d33b94607c445207",
+      "execution_source_sha256": "8b35e5c4469ef02c39b175376458a21e1fba59c293316c82d33b94607c445207",
+      "started_at": "2026-07-23T16:10:14.051+00:00",
+      "finished_at": "2026-07-23T16:11:10.522+00:00",
+      "duration_seconds": 56.469,
+      "exit_code": 0
+    },
+    {
+      "name": "java-phase5-junit.xml",
+      "command_id": "java_phase_5_deduplicated",
+      "matrix_command_sha256": "0b92165128650bef9fff42f738697e9223126f2c35ca3e90a4f423d9efbe34cb",
+      "tests": 212,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "sha256": "4788c3e043d6eb08e01782825520791dcc3708c88c4e67b19ef606956503b84d",
+      "execution_source_sha256": "018eae70fe7056c3e8f683e790814a727a40f70605aca66cdada688d30be8a3d",
+      "started_at": "2026-07-23T16:11:10.913+00:00",
+      "finished_at": "2026-07-23T16:13:31.137+00:00",
+      "duration_seconds": 140.224,
+      "exit_code": 0
+    },
+    {
+      "name": "frontend-phase5-junit.xml",
+      "command_id": "frontend_phase_5_deduplicated",
+      "matrix_command_sha256": "c5778dd0707a9ba6eac1fdbee8244a8850271551707a6f38ca79751756655b91",
+      "tests": 116,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "sha256": "85243751b4be73dc420a0ae28eb7c143ac145906d29d28279cf2dc4ab5453a98",
+      "execution_source_sha256": "85243751b4be73dc420a0ae28eb7c143ac145906d29d28279cf2dc4ab5453a98",
+      "started_at": "2026-07-23T16:13:31.664+00:00",
+      "finished_at": "2026-07-23T16:13:41.898+00:00",
+      "duration_seconds": 10.234,
+      "exit_code": 0
+    },
+    {
+      "name": "static-phase5-junit.xml",
+      "command_id": "static_phase_5_deduplicated",
+      "matrix_command_sha256": "70df59a56adb5b202cf6daaf80023d4a85f3023633fb924d4c3bac9e96e43d35",
+      "tests": 200,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "sha256": "cdc7da524c1a4dc1591266803c4581ab089be4a5df9c9a9ff14cace1c96b9379",
+      "execution_source_sha256": "cdc7da524c1a4dc1591266803c4581ab089be4a5df9c9a9ff14cace1c96b9379",
+      "started_at": "2026-07-23T16:13:42.293+00:00",
+      "finished_at": "2026-07-23T16:14:51.413+00:00",
+      "duration_seconds": 69.121,
+      "exit_code": 0
+    }
+  ],
+  "batch_views": [
+    {
+      "id": "P5-BATCH-0",
+      "report": "batch-0-junit.xml",
+      "sha256": "0dc66381dfc376e78a8fb6ce8ffdc5b7fad8494fa39b1a225a4f005fe8b25e7a",
+      "tests": 418,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "id": "P5-BATCH-1",
+      "report": "batch-1-junit.xml",
+      "sha256": "d3edcd60681ad11aace38e37e3539833942fa17d41db8f452ff92347a0a62d94",
+      "tests": 386,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "id": "P5-BATCH-2",
+      "report": "batch-2-junit.xml",
+      "sha256": "c590bcbb10ea9338426f5898b2f97d4762f5609ba1acee8f75360cb4282a7870",
+      "tests": 556,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "id": "P5-BATCH-3",
+      "report": "batch-3-junit.xml",
+      "sha256": "2a39d7f94884f5b21be2608d36f3a70a0089cb1938e83ef9546f0b1d0a9fc680",
+      "tests": 890,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    }
+  ],
+  "runtime_restrictions": {
+    "allowed_modes": [
+      "LEGACY",
+      "DISABLED",
+      "SIGNED_SYNTHETIC_SHADOW"
+    ],
+    "formal_evidence_graph_sink": "forbidden",
+    "temporal_evidence_allocation": "forbidden",
+    "real_case_shadow": "forbidden",
+    "canary": "forbidden",
+    "promotion": "forbidden",
+    "t3_unified_checkpoint": "not_executed"
+  },
+  "status": {
+    "engineering_checkpoint": "PASS",
+    "promotion_gate": "PENDING",
+    "next_phase_permission": "PHASE_6_ENGINEERING_ONLY",
+    "MIG-004": "PENDING_PROMOTION",
+    "MIG-005": "PENDING_PROMOTION"
+  }
+}

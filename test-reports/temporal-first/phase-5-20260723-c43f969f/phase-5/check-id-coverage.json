@@ -1,0 +1,421 @@
+{
+  "schema_version": "temporal-first-check-id-coverage.v1",
+  "phase": 5,
+  "candidate_commit": "c43f969f08755fd6eb90c0845809cda1785d11bf",
+  "scope": "SIGNED_SYNTHETIC_ENGINEERING_ONLY",
+  "all_required_ids_mapped": true,
+  "summary": {
+    "PASS_ENGINEERING": 17,
+    "PASS_ENGINEERING_CAPACITY_ONLY": 1,
+    "PENDING_PROMOTION": 1,
+    "total": 19
+  },
+  "checks": [
+    {
+      "id": "ENV-014",
+      "owners": [
+        "E",
+        "R"
+      ],
+      "status": "PASS_ENGINEERING_CAPACITY_ONLY",
+      "bindings": [
+        {
+          "selector": "tests.graphs.evidence.test_graph#test_graph_never_has_more_than_eight_active_item_assessments*",
+          "report": "python-phase5-junit.xml",
+          "report_sha256": "8b35e5c4469ef02c39b175376458a21e1fba59c293316c82d33b94607c445207",
+          "testcases": [
+            "tests.graphs.evidence.test_graph#test_graph_never_has_more_than_eight_active_item_assessments"
+          ]
+        },
+        {
+          "selector": "tests.graphs.evidence.test_graph#test_manifest_scheduler_rejects_count_above_one_hundred*",
+          "report": "python-phase5-junit.xml",
+          "report_sha256": "8b35e5c4469ef02c39b175376458a21e1fba59c293316c82d33b94607c445207",
+          "testcases": [
+            "tests.graphs.evidence.test_graph#test_manifest_scheduler_rejects_count_above_one_hundred"
+          ]
+        }
+      ],
+      "note": "Synthetic 100-item capacity evidence does not approve the public 100-file contract."
+    },
+    {
+      "id": "GRAPH-009",
+      "owners": [
+        "C"
+      ],
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "*EvidenceGraphResultFinalizerTest#actualLoadReceiptHashOrVersionCannotBeSubstituted",
+          "report": "java-phase5-junit.xml",
+          "report_sha256": "4788c3e043d6eb08e01782825520791dcc3708c88c4e67b19ef606956503b84d",
+          "testcases": [
+            "com.example.dispute.evidence.application.graph.EvidenceGraphResultFinalizerTest#actualLoadReceiptHashOrVersionCannotBeSubstituted"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "GRAPH-016",
+      "owners": [
+        "A",
+        "E"
+      ],
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "tests.graph_runtime.integration.test_graph_postgres_runtime#test_real_durable_fanout_permit_scope_renew_release_and_retry",
+          "report": "python-phase5-junit.xml",
+          "report_sha256": "8b35e5c4469ef02c39b175376458a21e1fba59c293316c82d33b94607c445207",
+          "testcases": [
+            "tests.graph_runtime.integration.test_graph_postgres_runtime#test_real_durable_fanout_permit_scope_renew_release_and_retry"
+          ]
+        },
+        {
+          "selector": "tests.graph_runtime.unit.test_bulkhead#test_room_tenant_and_global_limits_are_granted_atomically",
+          "report": "python-phase5-junit.xml",
+          "report_sha256": "8b35e5c4469ef02c39b175376458a21e1fba59c293316c82d33b94607c445207",
+          "testcases": [
+            "tests.graph_runtime.unit.test_bulkhead#test_room_tenant_and_global_limits_are_granted_atomically"
+          ]
+        },
+        {
+          "selector": "tests.graph_runtime.unit.test_bulkhead#test_bounded_queues_reject_without_starting_untracked_work",
+          "report": "python-phase5-junit.xml",
+          "report_sha256": "8b35e5c4469ef02c39b175376458a21e1fba59c293316c82d33b94607c445207",
+          "testcases": [
+            "tests.graph_runtime.unit.test_bulkhead#test_bounded_queues_reject_without_starting_untracked_work"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "GRAPH-017",
+      "owners": [
+        "A"
+      ],
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "tests.graphs.evidence.test_reducers#test_conflicting_value_hash_or_key_fails_closed*",
+          "report": "python-phase5-junit.xml",
+          "report_sha256": "8b35e5c4469ef02c39b175376458a21e1fba59c293316c82d33b94607c445207",
+          "testcases": [
+            "tests.graphs.evidence.test_reducers#test_conflicting_value_hash_or_key_fails_closed[hash-EVIDENCE_ASSESSMENT_HASH_MISMATCH]",
+            "tests.graphs.evidence.test_reducers#test_conflicting_value_hash_or_key_fails_closed[key-EVIDENCE_ASSESSMENT_REDUCER_KEY_INVALID]",
+            "tests.graphs.evidence.test_reducers#test_conflicting_value_hash_or_key_fails_closed[value-EVIDENCE_ASSESSMENT_REDUCER_CONFLICT]"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "GRAPH-018",
+      "owners": [
+        "A"
+      ],
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "tests.graphs.evidence.test_recovery#test_random_completion_order_produces_one_stable_terminal_hash*",
+          "report": "python-phase5-junit.xml",
+          "report_sha256": "8b35e5c4469ef02c39b175376458a21e1fba59c293316c82d33b94607c445207",
+          "testcases": [
+            "tests.graphs.evidence.test_recovery#test_random_completion_order_produces_one_stable_terminal_hash"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "GRAPH-019",
+      "owners": [
+        "A"
+      ],
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "tests.graphs.evidence.test_recovery#test_recovery_rejects_another_graph_lease_fence_on_the_same_java_manifest*",
+          "report": "python-phase5-junit.xml",
+          "report_sha256": "8b35e5c4469ef02c39b175376458a21e1fba59c293316c82d33b94607c445207",
+          "testcases": [
+            "tests.graphs.evidence.test_recovery#test_recovery_rejects_another_graph_lease_fence_on_the_same_java_manifest"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "LCEL-009",
+      "owners": [
+        "C"
+      ],
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "tests.agents.test_evidence_clerk_turn#test_evidence_asset_loader_fetches_authorized_image_and_builds_data_url",
+          "report": "python-phase5-junit.xml",
+          "report_sha256": "8b35e5c4469ef02c39b175376458a21e1fba59c293316c82d33b94607c445207",
+          "testcases": [
+            "tests.agents.test_evidence_clerk_turn#test_evidence_asset_loader_fetches_authorized_image_and_builds_data_url"
+          ]
+        },
+        {
+          "selector": "*EvidenceAssetAuthorizationTest#verifiesDirectManifestSignatureAndBindsAnActualImmutableLoadReceipt",
+          "report": "java-phase5-junit.xml",
+          "report_sha256": "4788c3e043d6eb08e01782825520791dcc3708c88c4e67b19ef606956503b84d",
+          "testcases": [
+            "com.example.dispute.evidence.application.graph.EvidenceAssetAuthorizationTest#verifiesDirectManifestSignatureAndBindsAnActualImmutableLoadReceipt"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "MIG-005",
+      "owners": [
+        "E"
+      ],
+      "status": "PENDING_PROMOTION",
+      "bindings": [
+        {
+          "selector": "*EvidenceNoFormalSinkGuardTest#closedAssemblyCannotReachApplicationServiceWriterOrExecutableCallback",
+          "report": "java-phase5-junit.xml",
+          "report_sha256": "4788c3e043d6eb08e01782825520791dcc3708c88c4e67b19ef606956503b84d",
+          "testcases": [
+            "com.example.dispute.workflow.shadow.evidence.EvidenceNoFormalSinkGuardTest#closedAssemblyCannotReachApplicationServiceWriterOrExecutableCallback"
+          ]
+        },
+        {
+          "selector": "tests.static.test_phase5_evidence_no_sink_bulkhead#test_closed_assembly_has_no_caller_executable_or_application_dependency_slot",
+          "report": "static-phase5-junit.xml",
+          "report_sha256": "cdc7da524c1a4dc1591266803c4581ab089be4a5df9c9a9ff14cace1c96b9379",
+          "testcases": [
+            "tests.static.test_phase5_evidence_no_sink_bulkhead#test_closed_assembly_has_no_caller_executable_or_application_dependency_slot"
+          ]
+        }
+      ],
+      "note": "Real shadow, formal-writer cutover, canary, and production approval remain external."
+    },
+    {
+      "id": "ROOM-EVIDENCE-001",
+      "owners": [
+        "C",
+        "D"
+      ],
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "tests.agents.test_evidence_clerk_turn#test_existing_evidence_links_are_filtered_by_fact_and_visibility",
+          "report": "python-phase5-junit.xml",
+          "report_sha256": "8b35e5c4469ef02c39b175376458a21e1fba59c293316c82d33b94607c445207",
+          "testcases": [
+            "tests.agents.test_evidence_clerk_turn#test_existing_evidence_links_are_filtered_by_fact_and_visibility"
+          ]
+        },
+        {
+          "selector": "*EvidenceRoomControllerTest#exposesOnlyTheActorScopedProcessProjectionWithPrivateNoStoreHeaders",
+          "report": "java-phase5-junit.xml",
+          "report_sha256": "4788c3e043d6eb08e01782825520791dcc3708c88c4e67b19ef606956503b84d",
+          "testcases": [
+            "com.example.dispute.evidence.EvidenceRoomControllerTest#exposesOnlyTheActorScopedProcessProjectionWithPrivateNoStoreHeaders"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ROOM-EVIDENCE-002",
+      "owners": [
+        "A"
+      ],
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "tests.graphs.evidence.test_graph#test_graph_processes_closed_synthetic_counts_in_deterministic_waves*",
+          "report": "python-phase5-junit.xml",
+          "report_sha256": "8b35e5c4469ef02c39b175376458a21e1fba59c293316c82d33b94607c445207",
+          "testcases": [
+            "tests.graphs.evidence.test_graph#test_graph_processes_closed_synthetic_counts_in_deterministic_waves[100]",
+            "tests.graphs.evidence.test_graph#test_graph_processes_closed_synthetic_counts_in_deterministic_waves[1]",
+            "tests.graphs.evidence.test_graph#test_graph_processes_closed_synthetic_counts_in_deterministic_waves[8]"
+          ]
+        },
+        {
+          "selector": "*EvidenceGraphResultFinalizerTest#validatesCompleteCoverageAndCommitsOnlyAZeroWriteSyntheticReceipt",
+          "report": "java-phase5-junit.xml",
+          "report_sha256": "4788c3e043d6eb08e01782825520791dcc3708c88c4e67b19ef606956503b84d",
+          "testcases": [
+            "com.example.dispute.evidence.application.graph.EvidenceGraphResultFinalizerTest#validatesCompleteCoverageAndCommitsOnlyAZeroWriteSyntheticReceipt"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ROOM-EVIDENCE-003",
+      "owners": [
+        "A"
+      ],
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "tests.graphs.evidence.test_reducers#test_keyed_reduction_is_associative_order_independent_and_replay_idempotent*",
+          "report": "python-phase5-junit.xml",
+          "report_sha256": "8b35e5c4469ef02c39b175376458a21e1fba59c293316c82d33b94607c445207",
+          "testcases": [
+            "tests.graphs.evidence.test_reducers#test_keyed_reduction_is_associative_order_independent_and_replay_idempotent"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ROOM-EVIDENCE-004",
+      "owners": [
+        "C",
+        "D"
+      ],
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "tests.agents.test_evidence_clerk_turn#test_evidence_asset_loader_fetches_authorized_image_and_builds_data_url",
+          "report": "python-phase5-junit.xml",
+          "report_sha256": "8b35e5c4469ef02c39b175376458a21e1fba59c293316c82d33b94607c445207",
+          "testcases": [
+            "tests.agents.test_evidence_clerk_turn#test_evidence_asset_loader_fetches_authorized_image_and_builds_data_url"
+          ]
+        },
+        {
+          "selector": "*EvidenceAssetAuthorizationTest#verifiesDirectManifestSignatureAndBindsAnActualImmutableLoadReceipt",
+          "report": "java-phase5-junit.xml",
+          "report_sha256": "4788c3e043d6eb08e01782825520791dcc3708c88c4e67b19ef606956503b84d",
+          "testcases": [
+            "com.example.dispute.evidence.application.graph.EvidenceAssetAuthorizationTest#verifiesDirectManifestSignatureAndBindsAnActualImmutableLoadReceipt"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ROOM-EVIDENCE-005",
+      "owners": [
+        "B"
+      ],
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "*EvidenceRoomWorkflowTest#warningFiresExactlyThirtyMinutesBeforeTheImmutableDeadline",
+          "report": "java-phase5-junit.xml",
+          "report_sha256": "4788c3e043d6eb08e01782825520791dcc3708c88c4e67b19ef606956503b84d",
+          "testcases": [
+            "com.example.dispute.workflow.room.evidence.EvidenceRoomWorkflowTest#warningFiresExactlyThirtyMinutesBeforeTheImmutableDeadline"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ROOM-EVIDENCE-006",
+      "owners": [
+        "B",
+        "C"
+      ],
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "*EvidenceGraphResultFinalizerTest#validatesCompleteCoverageAndCommitsOnlyAZeroWriteSyntheticReceipt",
+          "report": "java-phase5-junit.xml",
+          "report_sha256": "4788c3e043d6eb08e01782825520791dcc3708c88c4e67b19ef606956503b84d",
+          "testcases": [
+            "com.example.dispute.evidence.application.graph.EvidenceGraphResultFinalizerTest#validatesCompleteCoverageAndCommitsOnlyAZeroWriteSyntheticReceipt"
+          ]
+        },
+        {
+          "selector": "*EvidenceDossierFreezerTest#frozenDossierContainsEvidenceItemsPartySummaryAndFactEvidenceMatrix",
+          "report": "java-phase5-junit.xml",
+          "report_sha256": "4788c3e043d6eb08e01782825520791dcc3708c88c4e67b19ef606956503b84d",
+          "testcases": [
+            "com.example.dispute.evidence.EvidenceDossierFreezerTest#frozenDossierContainsEvidenceItemsPartySummaryAndFactEvidenceMatrix"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "TEMP-020",
+      "owners": [
+        "B"
+      ],
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "*EvidenceRoomWorkflowTest#warningFiresExactlyThirtyMinutesBeforeTheImmutableDeadline",
+          "report": "java-phase5-junit.xml",
+          "report_sha256": "4788c3e043d6eb08e01782825520791dcc3708c88c4e67b19ef606956503b84d",
+          "testcases": [
+            "com.example.dispute.workflow.room.evidence.EvidenceRoomWorkflowTest#warningFiresExactlyThirtyMinutesBeforeTheImmutableDeadline"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "TEMP-021",
+      "owners": [
+        "B"
+      ],
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "*EvidenceRoomWorkflowTest#firstPartyCompletionDoesNotResetWarningOrExpiry",
+          "report": "java-phase5-junit.xml",
+          "report_sha256": "4788c3e043d6eb08e01782825520791dcc3708c88c4e67b19ef606956503b84d",
+          "testcases": [
+            "com.example.dispute.workflow.room.evidence.EvidenceRoomWorkflowTest#firstPartyCompletionDoesNotResetWarningOrExpiry"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "TEMP-022",
+      "owners": [
+        "B"
+      ],
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "*EvidenceRoomWorkflowReplayTest#warningDuplicateAndCompletionHistoryReplaysDeterministically",
+          "report": "java-phase5-junit.xml",
+          "report_sha256": "4788c3e043d6eb08e01782825520791dcc3708c88c4e67b19ef606956503b84d",
+          "testcases": [
+            "com.example.dispute.workflow.room.evidence.EvidenceRoomWorkflowReplayTest#warningDuplicateAndCompletionHistoryReplaysDeterministically"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "TEMP-023",
+      "owners": [
+        "B"
+      ],
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "*EvidenceRoomWorkflowTest#completionAcceptedBeforeDeadlineWinsWithoutAnExpiryCommand",
+          "report": "java-phase5-junit.xml",
+          "report_sha256": "4788c3e043d6eb08e01782825520791dcc3708c88c4e67b19ef606956503b84d",
+          "testcases": [
+            "com.example.dispute.workflow.room.evidence.EvidenceRoomWorkflowTest#completionAcceptedBeforeDeadlineWinsWithoutAnExpiryCommand"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "TEMP-024",
+      "owners": [
+        "B"
+      ],
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "*EvidenceRoomWorkflowWorkerRecoveryTest#lostActivityResponseRecoversOnlyFromAnExplicitCommittedReceipt",
+          "report": "java-phase5-junit.xml",
+          "report_sha256": "4788c3e043d6eb08e01782825520791dcc3708c88c4e67b19ef606956503b84d",
+          "testcases": [
+            "com.example.dispute.workflow.room.evidence.EvidenceRoomWorkflowWorkerRecoveryTest#lostActivityResponseRecoversOnlyFromAnExplicitCommittedReceipt"
+          ]
+        }
+      ]
+    }
+  ]
+}

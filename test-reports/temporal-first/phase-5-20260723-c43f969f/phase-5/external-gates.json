@@ -1,0 +1,44 @@
+{
+  "schema_version": "temporal-first-external-gates.v1",
+  "phase": 5,
+  "candidate_commit": "c43f969f08755fd6eb90c0845809cda1785d11bf",
+  "promotion_gate": "PENDING",
+  "promotion_gates": {
+    "MIG-004": "PENDING_PROMOTION",
+    "MIG-005": "PENDING_PROMOTION"
+  },
+  "external_gates": {
+    "MIG-004": "PENDING_PROMOTION",
+    "evidence_100_file_product_api_ui_approval": "PENDING_EXTERNAL_APPROVAL",
+    "production_asset_authorization": "PENDING_EXTERNAL_APPROVAL",
+    "real_shadow_and_canary": "FORBIDDEN"
+  },
+  "runtime_restrictions": {
+    "allowed_modes": [
+      "LEGACY",
+      "DISABLED",
+      "SIGNED_SYNTHETIC_SHADOW"
+    ],
+    "formal_evidence_graph_sink": "forbidden",
+    "temporal_evidence_allocation": "forbidden",
+    "real_case_shadow": "forbidden",
+    "canary": "forbidden",
+    "promotion": "forbidden",
+    "t3_unified_checkpoint": "not_executed"
+  },
+  "traffic_constraints": {
+    "formal_evidence_graph_sink_allowed": false,
+    "temporal_evidence_allocation_allowed": false,
+    "real_case_shadow_allowed": false,
+    "production_traffic_allowed": false,
+    "canary_allowed": false,
+    "promotion_allowed": false,
+    "synthetic_fixtures_only": true
+  },
+  "unified_checkpoint": {
+    "tier": "T3",
+    "automatic": false,
+    "executed": false,
+    "classification": "EXTERNAL_GATE"
+  }
+}

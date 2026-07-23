@@ -1,0 +1,533 @@
+{
+  "schema_version": "temporal-first-baseline-id-coverage.v1",
+  "phase": 5,
+  "candidate_commit": "c43f969f08755fd6eb90c0845809cda1785d11bf",
+  "scope": "PHASE_5_PRESERVED_ROOM_BEHAVIOR",
+  "all_required_ids_mapped": true,
+  "summary": {
+    "PASS_ENGINEERING": 35,
+    "total": 35
+  },
+  "baselines": [
+    {
+      "id": "CORE-001",
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "tests.test_streaming#test_invalid_streamed_schema_fails_closed_without_second_model_call",
+          "report": "python-phase5-junit.xml",
+          "report_sha256": "8b35e5c4469ef02c39b175376458a21e1fba59c293316c82d33b94607c445207",
+          "testcases": [
+            "tests.test_streaming#test_invalid_streamed_schema_fails_closed_without_second_model_call"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "CORE-002",
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "tests.test_streaming#test_observer_reorders_events_constructed_by_parallel_model_threads",
+          "report": "python-phase5-junit.xml",
+          "report_sha256": "8b35e5c4469ef02c39b175376458a21e1fba59c293316c82d33b94607c445207",
+          "testcases": [
+            "tests.test_streaming#test_observer_reorders_events_constructed_by_parallel_model_threads"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "CORE-003",
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "src/api/agentStream.test.js#*uses authenticated fetch, resumes at Last-Event-ID and stops at final",
+          "report": "frontend-phase5-junit.xml",
+          "report_sha256": "85243751b4be73dc420a0ae28eb7c143ac145906d29d28279cf2dc4ab5453a98",
+          "testcases": [
+            "src/api/agentStream.test.js#agent stream protocol > uses authenticated fetch, resumes at Last-Event-ID and stops at final"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "CORE-004",
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "src/api/agentStream.test.js#*discovers active room runs after refresh with actor isolation headers",
+          "report": "frontend-phase5-junit.xml",
+          "report_sha256": "85243751b4be73dc420a0ae28eb7c143ac145906d29d28279cf2dc4ab5453a98",
+          "testcases": [
+            "src/api/agentStream.test.js#agent stream protocol > discovers active room runs after refresh with actor isolation headers"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "CORE-005",
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "src/views/disputes/EvidenceRoomView.test.js#*does not write a late user message response into the merchant private thread",
+          "report": "frontend-phase5-junit.xml",
+          "report_sha256": "85243751b4be73dc420a0ae28eb7c143ac145906d29d28279cf2dc4ab5453a98",
+          "testcases": [
+            "src/views/disputes/EvidenceRoomView.test.js#EvidenceRoomView > does not write a late user message response into the merchant private thread"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "CORE-006",
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "tests.test_streaming_v2#test_v2_model_rejects_unknown_payload_and_unbound_final",
+          "report": "python-phase5-junit.xml",
+          "report_sha256": "8b35e5c4469ef02c39b175376458a21e1fba59c293316c82d33b94607c445207",
+          "testcases": [
+            "tests.test_streaming_v2#test_v2_model_rejects_unknown_payload_and_unbound_final"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "CORE-007",
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "tests.test_streaming#test_real_provider_stream_projects_answer_and_ignores_reasoning_channel",
+          "report": "python-phase5-junit.xml",
+          "report_sha256": "8b35e5c4469ef02c39b175376458a21e1fba59c293316c82d33b94607c445207",
+          "testcases": [
+            "tests.test_streaming#test_real_provider_stream_projects_answer_and_ignores_reasoning_channel"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "CORE-008",
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "tests.test_streaming_v2#test_v1_adapter_preserves_identity_and_drops_raw_final_response",
+          "report": "python-phase5-junit.xml",
+          "report_sha256": "8b35e5c4469ef02c39b175376458a21e1fba59c293316c82d33b94607c445207",
+          "testcases": [
+            "tests.test_streaming_v2#test_v1_adapter_preserves_identity_and_drops_raw_final_response"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "CORE-009",
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "src/stores/agentStream.test.js#*clears the aborted attempt before revealing replacement attempt text",
+          "report": "frontend-phase5-junit.xml",
+          "report_sha256": "85243751b4be73dc420a0ae28eb7c143ac145906d29d28279cf2dc4ab5453a98",
+          "testcases": [
+            "src/stores/agentStream.test.js#agentStreamStore > clears the aborted attempt before revealing replacement attempt text"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "CORE-010",
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "src/views/disputes/EvidenceRoomView.test.js#*history*",
+          "report": "frontend-phase5-junit.xml",
+          "report_sha256": "85243751b4be73dc420a0ae28eb7c143ac145906d29d28279cf2dc4ab5453a98",
+          "testcases": [
+            "src/views/disputes/EvidenceRoomView.test.js#EvidenceRoomView > fails closed for recovery and history projections without rendering private authority references",
+            "src/views/disputes/EvidenceRoomView.test.js#EvidenceRoomView > keeps MERCHANT evidence actor-scoped in active/history=false mode",
+            "src/views/disputes/EvidenceRoomView.test.js#EvidenceRoomView > keeps MERCHANT evidence actor-scoped in active/history=true mode",
+            "src/views/disputes/EvidenceRoomView.test.js#EvidenceRoomView > keeps PLATFORM_REVIEWER evidence actor-scoped in active/history=false mode",
+            "src/views/disputes/EvidenceRoomView.test.js#EvidenceRoomView > keeps PLATFORM_REVIEWER evidence actor-scoped in active/history=true mode",
+            "src/views/disputes/EvidenceRoomView.test.js#EvidenceRoomView > keeps USER evidence actor-scoped in active/history=false mode",
+            "src/views/disputes/EvidenceRoomView.test.js#EvidenceRoomView > keeps USER evidence actor-scoped in active/history=true mode"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "EVD-001",
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "*EvidenceAgentTurnServiceTest#rejectsEvidenceReferenceThatIsNotVisibleToTheCurrentActor",
+          "report": "java-phase5-junit.xml",
+          "report_sha256": "4788c3e043d6eb08e01782825520791dcc3708c88c4e67b19ef606956503b84d",
+          "testcases": [
+            "com.example.dispute.room.EvidenceAgentTurnServiceTest#rejectsEvidenceReferenceThatIsNotVisibleToTheCurrentActor"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "EVD-002",
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "*EvidenceSubmissionServiceTest#submitsHearingSupplementEvidenceToTheHearingRoom",
+          "report": "java-phase5-junit.xml",
+          "report_sha256": "4788c3e043d6eb08e01782825520791dcc3708c88c4e67b19ef606956503b84d",
+          "testcases": [
+            "com.example.dispute.evidence.EvidenceSubmissionServiceTest#submitsHearingSupplementEvidenceToTheHearingRoom"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "EVD-003",
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "*EvidenceSubmissionServiceTest#deletesOnlyPendingEvidenceOwnedByCurrentActor",
+          "report": "java-phase5-junit.xml",
+          "report_sha256": "4788c3e043d6eb08e01782825520791dcc3708c88c4e67b19ef606956503b84d",
+          "testcases": [
+            "com.example.dispute.evidence.EvidenceSubmissionServiceTest#deletesOnlyPendingEvidenceOwnedByCurrentActor"
+          ]
+        },
+        {
+          "selector": "*EvidenceSubmissionServiceTest#refusesToDeleteSubmittedEvidence",
+          "report": "java-phase5-junit.xml",
+          "report_sha256": "4788c3e043d6eb08e01782825520791dcc3708c88c4e67b19ef606956503b84d",
+          "testcases": [
+            "com.example.dispute.evidence.EvidenceSubmissionServiceTest#refusesToDeleteSubmittedEvidence"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "EVD-004",
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "*EvidenceSubmissionServiceTest#submitsPendingEvidenceAsOneBatchAndPostsEvidenceReferenceToClerk",
+          "report": "java-phase5-junit.xml",
+          "report_sha256": "4788c3e043d6eb08e01782825520791dcc3708c88c4e67b19ef606956503b84d",
+          "testcases": [
+            "com.example.dispute.evidence.EvidenceSubmissionServiceTest#submitsPendingEvidenceAsOneBatchAndPostsEvidenceReferenceToClerk"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "EVD-005",
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "*EvidenceAgentTurnServiceTest#partyTextPersistsEvidenceMemorySendsPartyScopedContextAndAppendsIsolatedClerkReply",
+          "report": "java-phase5-junit.xml",
+          "report_sha256": "4788c3e043d6eb08e01782825520791dcc3708c88c4e67b19ef606956503b84d",
+          "testcases": [
+            "com.example.dispute.room.EvidenceAgentTurnServiceTest#partyTextPersistsEvidenceMemorySendsPartyScopedContextAndAppendsIsolatedClerkReply"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "EVD-006",
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "*EvidenceApiIntegrationTest#uploadsMetadataAndAcceptsTrustedOcrCallbackWhenOcrIsDown",
+          "report": "java-phase5-junit.xml",
+          "report_sha256": "4788c3e043d6eb08e01782825520791dcc3708c88c4e67b19ef606956503b84d",
+          "testcases": [
+            "com.example.dispute.evidence.EvidenceApiIntegrationTest#uploadsMetadataAndAcceptsTrustedOcrCallbackWhenOcrIsDown"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "EVD-007",
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "*EvidenceGraphResultFinalizerTest#lowRelevanceDoesNotBecomeSuspectedForgery",
+          "report": "java-phase5-junit.xml",
+          "report_sha256": "4788c3e043d6eb08e01782825520791dcc3708c88c4e67b19ef606956503b84d",
+          "testcases": [
+            "com.example.dispute.evidence.application.graph.EvidenceGraphResultFinalizerTest#lowRelevanceDoesNotBecomeSuspectedForgery"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "EVD-008",
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "src/views/disputes/EvidenceRoomView.test.js#*keeps completion available for low confidence evidence",
+          "report": "frontend-phase5-junit.xml",
+          "report_sha256": "85243751b4be73dc420a0ae28eb7c143ac145906d29d28279cf2dc4ab5453a98",
+          "testcases": [
+            "src/views/disputes/EvidenceRoomView.test.js#EvidenceRoomView > shows confidence feedback and keeps completion available for low confidence evidence"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "EVD-009",
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "src/views/disputes/EvidenceRoomView.test.js#*shows every party human-review item to the platform reviewer",
+          "report": "frontend-phase5-junit.xml",
+          "report_sha256": "85243751b4be73dc420a0ae28eb7c143ac145906d29d28279cf2dc4ab5453a98",
+          "testcases": [
+            "src/views/disputes/EvidenceRoomView.test.js#EvidenceRoomView > shows every party human-review item to the platform reviewer"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "EVD-010",
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "*EvidenceCompletionServiceTest#repeatedCompletionByTheSameParticipantIdUsesTheExistingPhaseConfirmation",
+          "report": "java-phase5-junit.xml",
+          "report_sha256": "4788c3e043d6eb08e01782825520791dcc3708c88c4e67b19ef606956503b84d",
+          "testcases": [
+            "com.example.dispute.evidence.EvidenceCompletionServiceTest#repeatedCompletionByTheSameParticipantIdUsesTheExistingPhaseConfirmation"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "EVD-011",
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "*EvidenceCompletionServiceTest#respondentCanCompleteIndependentlyBeforeInitiatorSubmitsEvidence",
+          "report": "java-phase5-junit.xml",
+          "report_sha256": "4788c3e043d6eb08e01782825520791dcc3708c88c4e67b19ef606956503b84d",
+          "testcases": [
+            "com.example.dispute.evidence.EvidenceCompletionServiceTest#respondentCanCompleteIndependentlyBeforeInitiatorSubmitsEvidence"
+          ]
+        },
+        {
+          "selector": "*EvidenceCompletionServiceTest#initiatorCannotCompleteEvidenceWithoutSubmittedEvidence",
+          "report": "java-phase5-junit.xml",
+          "report_sha256": "4788c3e043d6eb08e01782825520791dcc3708c88c4e67b19ef606956503b84d",
+          "testcases": [
+            "com.example.dispute.evidence.EvidenceCompletionServiceTest#initiatorCannotCompleteEvidenceWithoutSubmittedEvidence"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "EVD-012",
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "*EvidenceRoomIntegrationTest#bothPartiesFreezeExactlyOneVersionAndRejectedEvidenceIsExcluded",
+          "report": "java-phase5-junit.xml",
+          "report_sha256": "4788c3e043d6eb08e01782825520791dcc3708c88c4e67b19ef606956503b84d",
+          "testcases": [
+            "com.example.dispute.evidence.EvidenceRoomIntegrationTest#bothPartiesFreezeExactlyOneVersionAndRejectedEvidenceIsExcluded"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "EVD-013",
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "*EvidenceWindowWorkflowTest#bothPartiesCompleteBeforeTheWarningWithoutSchedulingSideEffects",
+          "report": "java-phase5-junit.xml",
+          "report_sha256": "4788c3e043d6eb08e01782825520791dcc3708c88c4e67b19ef606956503b84d",
+          "testcases": [
+            "com.example.dispute.workflow.EvidenceWindowWorkflowTest#bothPartiesCompleteBeforeTheWarningWithoutSchedulingSideEffects"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "EVD-014",
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "*EvidenceRoomIntegrationTest#deadlineExpiryWithOnePartySealsAndOpensHearing",
+          "report": "java-phase5-junit.xml",
+          "report_sha256": "4788c3e043d6eb08e01782825520791dcc3708c88c4e67b19ef606956503b84d",
+          "testcases": [
+            "com.example.dispute.evidence.EvidenceRoomIntegrationTest#deadlineExpiryWithOnePartySealsAndOpensHearing"
+          ]
+        },
+        {
+          "selector": "*EvidenceRoomIntegrationTest#deadlineExpiryWithoutInitiatorEvidenceDoesNotOpenHearing",
+          "report": "java-phase5-junit.xml",
+          "report_sha256": "4788c3e043d6eb08e01782825520791dcc3708c88c4e67b19ef606956503b84d",
+          "testcases": [
+            "com.example.dispute.evidence.EvidenceRoomIntegrationTest#deadlineExpiryWithoutInitiatorEvidenceDoesNotOpenHearing"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "EVD-015",
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "*EvidenceWindowWorkflowTest#warningFiresAtTheSharedDeadlineAndBothPartiesCanStillComplete",
+          "report": "java-phase5-junit.xml",
+          "report_sha256": "4788c3e043d6eb08e01782825520791dcc3708c88c4e67b19ef606956503b84d",
+          "testcases": [
+            "com.example.dispute.workflow.EvidenceWindowWorkflowTest#warningFiresAtTheSharedDeadlineAndBothPartiesCanStillComplete"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SEC-001",
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "*EvidenceRoomControllerTest#exposesOnlyTheActorScopedProcessProjectionWithPrivateNoStoreHeaders",
+          "report": "java-phase5-junit.xml",
+          "report_sha256": "4788c3e043d6eb08e01782825520791dcc3708c88c4e67b19ef606956503b84d",
+          "testcases": [
+            "com.example.dispute.evidence.EvidenceRoomControllerTest#exposesOnlyTheActorScopedProcessProjectionWithPrivateNoStoreHeaders"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SEC-002",
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "tests.agents.test_evidence_clerk_turn#test_evidence_envelope_rejects_cross_actor_private_history",
+          "report": "python-phase5-junit.xml",
+          "report_sha256": "8b35e5c4469ef02c39b175376458a21e1fba59c293316c82d33b94607c445207",
+          "testcases": [
+            "tests.agents.test_evidence_clerk_turn#test_evidence_envelope_rejects_cross_actor_private_history"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SEC-003",
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "*EvidenceRoomControllerTest#completesEvidenceWithoutAcceptingAClientDossierVersion",
+          "report": "java-phase5-junit.xml",
+          "report_sha256": "4788c3e043d6eb08e01782825520791dcc3708c88c4e67b19ef606956503b84d",
+          "testcases": [
+            "com.example.dispute.evidence.EvidenceRoomControllerTest#completesEvidenceWithoutAcceptingAClientDossierVersion"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SEC-004",
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "tests.agents.test_evidence_clerk_turn#test_evidence_turn_api_requires_service_secret_and_fails_without_model",
+          "report": "python-phase5-junit.xml",
+          "report_sha256": "8b35e5c4469ef02c39b175376458a21e1fba59c293316c82d33b94607c445207",
+          "testcases": [
+            "tests.agents.test_evidence_clerk_turn#test_evidence_turn_api_requires_service_secret_and_fails_without_model"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SEC-005",
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "tests.agents.test_evidence_clerk_turn#test_assessment_policy_blocks_fact_ids_outside_intake_dossier_allowlist",
+          "report": "python-phase5-junit.xml",
+          "report_sha256": "8b35e5c4469ef02c39b175376458a21e1fba59c293316c82d33b94607c445207",
+          "testcases": [
+            "tests.agents.test_evidence_clerk_turn#test_assessment_policy_blocks_fact_ids_outside_intake_dossier_allowlist"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "SEC-006",
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "*EvidenceNoFormalSinkGuardTest#closedAssemblyCannotReachApplicationServiceWriterOrExecutableCallback",
+          "report": "java-phase5-junit.xml",
+          "report_sha256": "4788c3e043d6eb08e01782825520791dcc3708c88c4e67b19ef606956503b84d",
+          "testcases": [
+            "com.example.dispute.workflow.shadow.evidence.EvidenceNoFormalSinkGuardTest#closedAssemblyCannotReachApplicationServiceWriterOrExecutableCallback"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "UI-001",
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "src/views/disputes/EvidenceRoomView.test.js#*renders an intake-like fixed two-panel evidence room",
+          "report": "frontend-phase5-junit.xml",
+          "report_sha256": "85243751b4be73dc420a0ae28eb7c143ac145906d29d28279cf2dc4ab5453a98",
+          "testcases": [
+            "src/views/disputes/EvidenceRoomView.test.js#EvidenceRoomView > renders an intake-like fixed two-panel evidence room"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "UI-003",
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "src/views/disputes/EvidenceRoomView.test.js#*moves focus into the evidence gate, traps Tab, closes on Escape, and restores the completion trigger",
+          "report": "frontend-phase5-junit.xml",
+          "report_sha256": "85243751b4be73dc420a0ae28eb7c143ac145906d29d28279cf2dc4ab5453a98",
+          "testcases": [
+            "src/views/disputes/EvidenceRoomView.test.js#EvidenceRoomView > moves focus into the evidence gate, traps Tab, closes on Escape, and restores the completion trigger"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "UI-004",
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "src/views/disputes/EvidenceRoomView.test.js#*keeps a 200-character filename inspectable without rendering feedback inside the compact card",
+          "report": "frontend-phase5-junit.xml",
+          "report_sha256": "85243751b4be73dc420a0ae28eb7c143ac145906d29d28279cf2dc4ab5453a98",
+          "testcases": [
+            "src/views/disputes/EvidenceRoomView.test.js#EvidenceRoomView > keeps a 200-character filename inspectable without rendering feedback inside the compact card"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "UI-005",
+      "status": "PASS_ENGINEERING",
+      "bindings": [
+        {
+          "selector": "src/views/disputes/EvidenceRoomView.test.js#*keeps the board fixed with horizontal evidence rails and a vertical human-review queue",
+          "report": "frontend-phase5-junit.xml",
+          "report_sha256": "85243751b4be73dc420a0ae28eb7c143ac145906d29d28279cf2dc4ab5453a98",
+          "testcases": [
+            "src/views/disputes/EvidenceRoomView.test.js#EvidenceRoomView > keeps the board fixed with horizontal evidence rails and a vertical human-review queue"
+          ]
+        }
+      ]
+    }
+  ]
+}
