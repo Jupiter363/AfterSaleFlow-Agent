@@ -53,7 +53,7 @@ class EvidenceV2ContractFixtureTest {
                             "room-graph-command.schema.json")
                     .normalize();
     private static final ObjectMapper MAPPER = JsonMapper.builder().findAndAddModules().build();
-    private static final Set<String> CONTRACT_FILES =
+    private static final Set<String> PRODUCT_CONTRACT_FILES =
             Set.of(
                     "compatibility-matrix.yaml",
                     "evidence-asset-capability.schema.json",
@@ -62,6 +62,10 @@ class EvidenceV2ContractFixtureTest {
                     "evidence-item-proposal.schema.json",
                     "evidence-process-projection.schema.json",
                     "evidence-terminal-proposal.schema.json");
+    private static final Map<String, String> GOVERNANCE_SCHEMA_VERSIONS =
+            Map.of(
+                    "phase5-wave-a-acceptance.schema.json",
+                    "phase5-wave-a-acceptance.v1");
     private static final Map<String, String> INVALID_FIXTURE_REASONS =
             Map.of(
                     "evidence-asset-capability-credential.json",
@@ -194,8 +198,24 @@ class EvidenceV2ContractFixtureTest {
                             .map(path -> path.getFileName().toString())
                             .collect(java.util.stream.Collectors.toCollection(TreeSet::new));
         }
-        assertThat(authoritativeFiles).containsExactlyElementsOf(new TreeSet<>(CONTRACT_FILES));
+        TreeSet<String> expectedFiles = new TreeSet<>(PRODUCT_CONTRACT_FILES);
+        expectedFiles.addAll(GOVERNANCE_SCHEMA_VERSIONS.keySet());
+        assertThat(authoritativeFiles).containsExactlyElementsOf(expectedFiles);
         assertThat(schemasByVersion).hasSize(6);
+        for (Map.Entry<String, String> governanceSchema :
+                GOVERNANCE_SCHEMA_VERSIONS.entrySet()) {
+            JsonNode document =
+                    MAPPER.readTree(CONTRACT_ROOT.resolve(governanceSchema.getKey()).toFile());
+            assertThat(document.required("$schema").asText())
+                    .as("governance schema dialect for %s", governanceSchema.getKey())
+                    .isEqualTo("https://json-schema.org/draft/2020-12/schema");
+            assertThat(document.required("properties")
+                            .required("schema_version")
+                            .required("const")
+                            .asText())
+                    .as("governance schema version for %s", governanceSchema.getKey())
+                    .isEqualTo(governanceSchema.getValue());
+        }
         TreeSet<String> validFixtureFiles =
                 fixtureFiles("valid").stream()
                         .map(path -> path.getFileName().toString())
@@ -220,7 +240,7 @@ class EvidenceV2ContractFixtureTest {
                 .forEachRemaining(contract -> matrixSchemaFiles.add(contract.required("file").asText()));
         assertThat(matrixSchemaFiles)
                 .containsExactlyElementsOf(
-                        CONTRACT_FILES.stream()
+                        PRODUCT_CONTRACT_FILES.stream()
                                 .filter(file -> file.endsWith(".schema.json"))
                                 .collect(java.util.stream.Collectors.toCollection(TreeSet::new)));
         for (String signedContract :
@@ -853,6 +873,10 @@ class EvidenceV2ContractFixtureTest {
     private static List<Path> schemaFiles() throws IOException {
         try (Stream<Path> paths = Files.list(CONTRACT_ROOT)) {
             return paths.filter(Files::isRegularFile)
+                    .filter(
+                            path ->
+                                    PRODUCT_CONTRACT_FILES.contains(
+                                            path.getFileName().toString()))
                     .filter(path -> path.getFileName().toString().endsWith(".schema.json"))
                     .sorted()
                     .toList();
