@@ -32,17 +32,37 @@ public record HearingAuthorityCommit(
             throw new IllegalArgumentException("operationKey is not a bounded Hearing operation key");
         }
         String requiredPrefix = switch (operationType) {
-            case STAGE -> "hearing.stage";
-            case PARTY_TERMINAL -> "hearing.party";
-            case AGENT_RESULT -> "hearing.agent";
-            case FINALIZE -> "hearing.finalize";
-            case HANDOFF -> "hearing.handoff";
-            case CLOSE -> "hearing.close";
+            case STAGE -> "hearing.stage:";
+            case PARTY_TERMINAL -> "hearing.party:";
+            case AGENT_RESULT -> "hearing.agent:";
+            case FINALIZE -> "hearing.finalize:";
+            case HANDOFF -> "hearing.handoff:";
+            case CLOSE -> "hearing.close:";
         };
-        if (!operationKey.startsWith(requiredPrefix)
-                || operationKey.length() == requiredPrefix.length()
-                || ".:".indexOf(operationKey.charAt(requiredPrefix.length())) < 0) {
-            throw new IllegalArgumentException("operationKey does not match operationType");
+        String authorityPrefix = requiredPrefix
+                + operationComponent(authority.tenantSurrogate(), "tenantSurrogate") + ':'
+                + operationComponent(authority.caseId(), "caseId") + ':'
+                + authority.roomEpoch() + ':';
+        if (!operationKey.startsWith(authorityPrefix)) {
+            throw new IllegalArgumentException(
+                    "operationKey does not bind the expected tenant, case, and epoch");
+        }
+        if (operationType == OperationType.STAGE) {
+            String expected = authorityPrefix
+                    + authority.stageSequence() + ':' + authority.stage().name();
+            if (!operationKey.equals(expected)) {
+                throw new IllegalArgumentException(
+                        "stage operationKey does not bind the expected stage");
+            }
+        } else if (operationType == OperationType.PARTY_TERMINAL
+                || operationType == OperationType.AGENT_RESULT
+                || operationType == OperationType.FINALIZE) {
+            String stagePrefix = authorityPrefix + authority.stageSequence() + ':';
+            if (!operationKey.startsWith(stagePrefix)
+                    || operationKey.length() == stagePrefix.length()) {
+                throw new IllegalArgumentException(
+                        "operationKey does not bind the expected stage sequence");
+            }
         }
         if (requestHash == null || !SHA256.matcher(requestHash).matches()) {
             throw new IllegalArgumentException("requestHash must be lowercase SHA-256");
@@ -53,6 +73,13 @@ public record HearingAuthorityCommit(
         }
         committedAt = Objects.requireNonNull(committedAt, "committedAt")
                 .truncatedTo(ChronoUnit.MICROS);
+    }
+
+    private static String operationComponent(String value, String field) {
+        if (value.indexOf(':') >= 0) {
+            throw new IllegalArgumentException(field + " cannot contain ':' in an operationKey");
+        }
+        return value;
     }
 
     public enum OperationType {

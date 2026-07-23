@@ -154,10 +154,13 @@ class HearingFlowPersistenceContractTest {
                 .contains("create table hearing_domain_receipt")
                 .contains("references case_room_epoch")
                 .contains("writer_mode = 'LEGACY'")
+                .contains("'legacy-java.v1'")
                 .contains("old Java Hearing advance is fenced for a TEMPORAL epoch")
                 .doesNotContain("drop table hearing_flow_")
                 .doesNotContain("truncate hearing_flow_")
                 .doesNotContain("alter column participant_id");
+        assertThat(v044.lines().filter(line -> line.contains("'legacy-java.v1'")).count())
+                .isEqualTo(3);
         assertThat(sha256(migrationDirectory.resolve("V035__hearing_flow_v2.sql")))
                 .isEqualTo("1fd05055e7a0104466fa0be5d784e4b78e488356f95085e9735abffd909e6649");
         assertThat(sha256(
@@ -221,6 +224,17 @@ class HearingFlowPersistenceContractTest {
                 .isInstanceOf(HearingAuthorityRejectedException.class)
                 .extracting(failure -> ((HearingAuthorityRejectedException) failure).code())
                 .isEqualTo("HEARING_IDEMPOTENCY_CONFLICT");
+
+        assertThatThrownBy(() -> new HearingAuthorityCommit(
+                        HearingAuthorityCommit.SCHEMA_VERSION,
+                        authority,
+                        HearingAuthorityCommit.OperationType.STAGE,
+                        "hearing.stage:other-tenant:CASE_1:0:1:COURT_PREPARING",
+                        HASH_A,
+                        null,
+                        NOW))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("tenant, case, and epoch");
     }
 
     private static String sha256(Path path) throws IOException {

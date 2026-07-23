@@ -77,14 +77,18 @@ class HearingTemporalLedgerIntegrationTest {
         AtomicInteger mutations = new AtomicInteger();
 
         HearingDomainReceipt first = ledger.commitOrReplay(
-                fixture.command("hearing.stage:" + fixture.caseId() + ":0:1:COURT_PREPARING", HASH_A),
+                fixture.command(
+                        stageOperationKey(fixture.caseId(), 1, HearingFlowStage.COURT_PREPARING),
+                        HASH_A),
                 () -> {
                     mutations.incrementAndGet();
                     advanceFormalCursor(fixture, HearingFlowStage.CASE_INTRODUCTION, 2);
                     return result(HearingFlowStage.CASE_INTRODUCTION, 2, HASH_B, 1);
                 });
         HearingDomainReceipt replay = ledger.commitOrReplay(
-                fixture.command("hearing.stage:" + fixture.caseId() + ":0:1:COURT_PREPARING", HASH_A),
+                fixture.command(
+                        stageOperationKey(fixture.caseId(), 1, HearingFlowStage.COURT_PREPARING),
+                        HASH_A),
                 () -> {
                     throw new AssertionError("replay must not execute the formal mutation");
                 });
@@ -99,8 +103,25 @@ class HearingTemporalLedgerIntegrationTest {
         assertThat(number("select process_revision from case_room_epoch where id = ?", fixture.epochId()))
                 .isEqualTo(1);
 
-        HearingAuthorityCommit stale = fixture.command(
-                "hearing.stage:" + fixture.caseId() + ":0:2:CASE_INTRODUCTION", HASH_C);
+        HearingAuthorityCommit stale = new HearingAuthorityCommit(
+                HearingAuthorityCommit.SCHEMA_VERSION,
+                new HearingAuthorityExpectation(
+                        TENANT,
+                        fixture.caseId(),
+                        fixture.flowId(),
+                        fixture.epochId(),
+                        0,
+                        HearingWriterMode.LEGACY,
+                        HearingFlowStage.CASE_INTRODUCTION,
+                        2,
+                        0,
+                        0,
+                        0),
+                HearingAuthorityCommit.OperationType.STAGE,
+                stageOperationKey(fixture.caseId(), 2, HearingFlowStage.CASE_INTRODUCTION),
+                HASH_C,
+                null,
+                NOW);
         assertThatThrownBy(() -> ledger.commitOrReplay(
                         stale,
                         () -> result(HearingFlowStage.EVIDENCE_INTRODUCTION, 3, HASH_C, 2)))
@@ -112,7 +133,8 @@ class HearingTemporalLedgerIntegrationTest {
     @Test
     void conflictingRequestHashIsRejectedBeforeAnyMutation() {
         Fixture fixture = insertFixture("CONFLICT");
-        String operationKey = "hearing.stage:" + fixture.caseId() + ":0:1:COURT_PREPARING";
+        String operationKey =
+                stageOperationKey(fixture.caseId(), 1, HearingFlowStage.COURT_PREPARING);
         ledger.commitOrReplay(fixture.command(operationKey, HASH_A), () -> {
             advanceFormalCursor(fixture, HearingFlowStage.CASE_INTRODUCTION, 2);
             return result(HearingFlowStage.CASE_INTRODUCTION, 2, HASH_B, 1);
@@ -136,7 +158,8 @@ class HearingTemporalLedgerIntegrationTest {
 
         assertThatThrownBy(() -> ledger.commitOrReplay(
                         fixture.command(
-                                "hearing.stage:" + fixture.caseId() + ":0:1:COURT_PREPARING",
+                                stageOperationKey(
+                                        fixture.caseId(), 1, HearingFlowStage.COURT_PREPARING),
                                 HASH_A),
                         () -> {
                             advanceFormalCursor(fixture, HearingFlowStage.CASE_INTRODUCTION, 2);
@@ -157,9 +180,26 @@ class HearingTemporalLedgerIntegrationTest {
     }
 
     @Test
+    void missingDerivedProjectionCannotFailOpenTheDatabaseWriterGuard() {
+        Fixture fixture = insertFixture("MISSING_PROJECTION");
+        assertThat(jdbc.update(
+                        "delete from hearing_temporal_projection where flow_instance_id = ?",
+                        fixture.flowId()))
+                .isEqualTo(1);
+
+        assertThatThrownBy(() -> advanceFormalCursor(
+                        fixture, HearingFlowStage.CASE_INTRODUCTION, 2))
+                .isInstanceOf(RuntimeException.class)
+                .hasMessageContaining("no exact database authority projection");
+        assertThat(value("select current_stage from hearing_flow_instance where id = ?", fixture.flowId()))
+                .isEqualTo("COURT_PREPARING");
+    }
+
+    @Test
     void reviewerAuthorizedDemoPurgeRemovesTheAdditiveHearingAuthorityRows() {
         Fixture fixture = insertFixture("PURGE");
-        String operationKey = "hearing.stage:" + fixture.caseId() + ":0:1:COURT_PREPARING";
+        String operationKey =
+                stageOperationKey(fixture.caseId(), 1, HearingFlowStage.COURT_PREPARING);
         ledger.commitOrReplay(fixture.command(operationKey, HASH_A), () -> {
             advanceFormalCursor(fixture, HearingFlowStage.CASE_INTRODUCTION, 2);
             return result(HearingFlowStage.CASE_INTRODUCTION, 2, HASH_B, 1);
@@ -320,6 +360,11 @@ class HearingTemporalLedgerIntegrationTest {
                 "urn:hearing:stage:" + stage.name().toLowerCase(),
                 hash,
                 eventSequence);
+    }
+
+    private static String stageOperationKey(
+            String caseId, int sequence, HearingFlowStage stage) {
+        return "hearing.stage:" + TENANT + ':' + caseId + ":0:" + sequence + ':' + stage.name();
     }
 
     private static String value(String sql, Object... arguments) {

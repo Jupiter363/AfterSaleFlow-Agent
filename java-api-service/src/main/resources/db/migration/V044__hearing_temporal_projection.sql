@@ -170,7 +170,11 @@ select
     null,
     null,
     null,
-    coalesce(epoch.room_workflow_build_id, epoch.temporal_build_id),
+    coalesce(
+        epoch.room_workflow_build_id,
+        epoch.temporal_build_id,
+        'legacy-java.v1'
+    ),
     flow.created_at,
     greatest(flow.updated_at, flow.created_at)
 from hearing_flow_instance flow
@@ -344,7 +348,9 @@ begin
     authority_run_id := coalesce(
         authority.room_temporal_run_id, authority.temporal_run_id);
     authority_build_id := coalesce(
-        authority.room_workflow_build_id, authority.temporal_build_id);
+        authority.room_workflow_build_id,
+        authority.temporal_build_id,
+        'legacy-java.v1');
 
     if new.writer_mode <> authority.writer_mode
        or new.process_revision <> authority.process_revision
@@ -462,7 +468,11 @@ begin
         case when authority.writer_mode = 'LEGACY' then null else 'default' end,
         coalesce(authority.room_temporal_workflow_id, authority.temporal_workflow_id),
         coalesce(authority.room_temporal_run_id, authority.temporal_run_id),
-        coalesce(authority.room_workflow_build_id, authority.temporal_build_id),
+        coalesce(
+            authority.room_workflow_build_id,
+            authority.temporal_build_id,
+            'legacy-java.v1'
+        ),
         new.created_at, greatest(new.updated_at, new.created_at)
     );
     return new;
@@ -486,11 +496,24 @@ begin
        and new.shared_deadline_at is not distinct from old.shared_deadline_at then
         return new;
     end if;
-    select projection.writer_mode
+    select epoch.writer_mode
       into selected_writer
       from hearing_temporal_projection projection
+      join case_room_epoch epoch
+        on epoch.id = projection.epoch_id
+       and epoch.tenant_surrogate = projection.tenant_surrogate
+       and epoch.case_id = projection.case_id
+       and epoch.room_type = 'HEARING'
+       and epoch.room_epoch = projection.hearing_epoch
+       and epoch.fencing_token = projection.fencing_token
+       and epoch.writer_mode = projection.writer_mode
      where projection.flow_instance_id = old.id
-       and projection.case_id = old.case_id;
+       and projection.case_id = old.case_id
+     for key share of projection, epoch;
+    if not found then
+        raise exception using errcode = '23514',
+            message = 'Hearing cursor update has no exact database authority projection';
+    end if;
     if selected_writer = 'SHADOW' then
         raise exception using errcode = '23514',
             message = 'SHADOW Hearing epoch cannot mutate the formal V035 cursor';
