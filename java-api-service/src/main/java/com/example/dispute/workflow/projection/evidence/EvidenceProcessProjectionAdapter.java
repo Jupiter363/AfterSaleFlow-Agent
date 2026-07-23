@@ -19,7 +19,6 @@ import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
-import java.util.function.Function;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcOperations;
 import org.springframework.stereotype.Component;
@@ -179,14 +178,18 @@ public class EvidenceProcessProjectionAdapter {
 
     public Optional<EvidenceProcessProjectionView> read(
             String caseId, AuthenticatedActor actor, boolean historyMode) {
-        return read(caseId, actor, historyMode, ProjectionRow::evidenceState);
+        return read(
+                caseId,
+                actor,
+                historyMode,
+                row -> StateResolution.incomplete(row.evidenceState()));
     }
 
     public Optional<EvidenceProcessProjectionView> read(
             String caseId,
             AuthenticatedActor actor,
             boolean historyMode,
-            Function<ProjectionRow, ProjectionEvidenceState> stateResolver) {
+            StateResolver stateResolver) {
         if (caseId == null || caseId.isBlank()) {
             throw new IllegalArgumentException("caseId must not be blank");
         }
@@ -199,16 +202,20 @@ public class EvidenceProcessProjectionAdapter {
                         .addValue("actorRole", actor.role().name())
                         .addValue("requiredViewerScopes", "[\"CASE_READ\",\"EVIDENCE_READ\"]")
                         .addValue("historyMode", historyMode),
-                (resultSet, rowNumber) -> {
-                    ProjectionRow row = row(resultSet, rowNumber);
-                    ProjectionEvidenceState resolved = stateResolver.apply(row);
-                    return row.withEvidenceState(
-                            Objects.requireNonNull(resolved, "resolved Evidence projection state"));
-                });
+                EvidenceProcessProjectionAdapter::row);
         if (rows.size() > 1) {
             return Optional.of(processing(rows.getFirst(), requireViewerBinding(rows.getFirst(), actor)));
         }
-        return rows.stream().findFirst().map(row -> adapt(row, actor));
+        if (rows.isEmpty()) {
+            return Optional.empty();
+        }
+        ProjectionRow row = rows.getFirst();
+        StateResolution resolution = Objects.requireNonNull(
+                stateResolver.resolve(row), "resolved Evidence projection state");
+        return Optional.of(adapt(
+                row.withEvidenceState(resolution.state()),
+                actor,
+                resolution.authoritativelyComplete()));
     }
 
     public Optional<EvidenceProcessProjectionView> read(
@@ -217,6 +224,11 @@ public class EvidenceProcessProjectionAdapter {
     }
 
     public EvidenceProcessProjectionView adapt(ProjectionRow row, AuthenticatedActor actor) {
+        return adapt(row, actor, true);
+    }
+
+    private EvidenceProcessProjectionView adapt(
+            ProjectionRow row, AuthenticatedActor actor, boolean authoritativelyHydrated) {
         Objects.requireNonNull(row, "row");
         requireAllowedViewer(actor);
         ViewerBinding viewer = requireViewerBinding(row, actor);
@@ -230,7 +242,8 @@ public class EvidenceProcessProjectionAdapter {
         requireSyntheticShadow(row);
         if (!tupleIsCurrent(row)
                 || !phaseIsKnown(row.roomPhase())
-                || !activeRunTupleIsCurrent(row)) {
+                || !activeRunTupleIsCurrent(row)
+                || !authoritativelyHydrated) {
             return processing(row, viewer);
         }
         return projection(row, viewer, EvidenceProcessProjectionView.AVAILABLE, true);
@@ -613,6 +626,23 @@ public class EvidenceProcessProjectionAdapter {
                     null,
                     Recovery.none());
         }
+    }
+
+    public record StateResolution(
+            ProjectionEvidenceState state, boolean authoritativelyComplete) {
+
+        public StateResolution {
+            Objects.requireNonNull(state, "state");
+        }
+
+        public static StateResolution incomplete(ProjectionEvidenceState state) {
+            return new StateResolution(state, false);
+        }
+    }
+
+    @FunctionalInterface
+    public interface StateResolver {
+        StateResolution resolve(ProjectionRow row);
     }
 
     public record ProjectionRow(

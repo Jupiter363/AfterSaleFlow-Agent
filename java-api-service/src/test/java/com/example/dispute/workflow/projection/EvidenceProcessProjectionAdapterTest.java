@@ -16,6 +16,7 @@ import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.projection.evidence.EvidenceProcessProjectionAdapter;
 import com.example.dispute.workflow.projection.evidence.EvidenceProcessProjectionAdapter.ProjectionEvidenceState;
 import com.example.dispute.workflow.projection.evidence.EvidenceProcessProjectionAdapter.ProjectionRow;
+import com.example.dispute.workflow.projection.evidence.EvidenceProcessProjectionQuery;
 import com.example.dispute.workflow.projection.evidence.EvidenceProcessProjectionView;
 import com.example.dispute.workflow.projection.evidence.EvidenceProcessProjectionView.ActiveGraphRun;
 import com.example.dispute.workflow.projection.evidence.EvidenceProcessProjectionView.AssessmentCounts;
@@ -40,6 +41,7 @@ import java.time.OffsetDateTime;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.IntStream;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -142,6 +144,68 @@ class EvidenceProcessProjectionAdapterTest {
                         "viewer.permission_level = case",
                         "viewer.permission_scopes_json",
                         "participant.case_id = projection.case_id");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void missingDurableEnrichmentKeepsThePendingPlaceholderProcessing() {
+        NamedParameterJdbcOperations jdbc = mock(NamedParameterJdbcOperations.class);
+        AuthenticatedActor actor = actor(ActorRole.USER);
+        ProjectionRow pending =
+                shadowRow(actor, false, false, "OPEN", "ACTIVE", pendingState());
+        when(jdbc.query(anyString(), any(SqlParameterSource.class), any(RowMapper.class)))
+                .thenReturn(List.of(pending));
+        EvidenceProcessProjectionQuery query = new EvidenceProcessProjectionQuery(
+                new EvidenceProcessProjectionAdapter(jdbc), List.of());
+
+        EvidenceProcessProjectionView view =
+                query.read(pending.caseId(), actor, false).orElseThrow();
+
+        assertThat(view.projectionState()).isEqualTo("PROCESSING");
+        assertThat(view.dossierVersion()).isNull();
+        assertThat(view.terminalProposal()).isNull();
+        assertThat(view.recovery()).isEqualTo(Recovery.none());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void partialDurableEnrichmentRunsAfterTheBaseQueryAndCannotAuthorizeAvailability() {
+        NamedParameterJdbcOperations jdbc = mock(NamedParameterJdbcOperations.class);
+        AuthenticatedActor actor = actor(ActorRole.USER);
+        ProjectionRow pending = shadowRow(
+                actor, false, false, "READY_TO_FREEZE", "ACTIVE", pendingState());
+        AtomicBoolean baseQueryReturned = new AtomicBoolean();
+        when(jdbc.query(anyString(), any(SqlParameterSource.class), any(RowMapper.class)))
+                .thenAnswer(ignored -> {
+                    baseQueryReturned.set(true);
+                    return List.of(pending);
+                });
+        EvidenceProcessProjectionQuery.StateEnricher partial = (row, viewer, current) -> {
+            assertThat(baseQueryReturned.get()).isTrue();
+            return new ProjectionEvidenceState(
+                    current.originalDeadlineAt(),
+                    current.warningSent(),
+                    current.warningSentAt(),
+                    current.partyCompletion(),
+                    current.assessmentCounts(),
+                    3L,
+                    current.lastEventSequence(),
+                    current.terminalReason(),
+                    new TerminalProposal("RECEIPT_P5_TERMINAL", "b".repeat(64)),
+                    current.recovery());
+        };
+        EvidenceProcessProjectionQuery query = new EvidenceProcessProjectionQuery(
+                new EvidenceProcessProjectionAdapter(jdbc), List.of(partial));
+
+        EvidenceProcessProjectionView view =
+                query.read(pending.caseId(), actor, false).orElseThrow();
+
+        assertThat(view.projectionState()).isEqualTo("PROCESSING");
+        assertThat(view.dossierVersion()).isEqualTo(3L);
+        assertThat(view.terminalProposal())
+                .isEqualTo(new TerminalProposal("RECEIPT_P5_TERMINAL", "b".repeat(64)));
+        assertThat(view.assessmentCounts()).isEqualTo(AssessmentCounts.empty());
+        assertThat(view.lastEventSequence()).isZero();
     }
 
     @Test
