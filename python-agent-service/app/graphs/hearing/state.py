@@ -2,18 +2,52 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
+from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel
 from typing_extensions import NotRequired, TypedDict
 
 from app.graphs.hearing.contracts import HearingGraphIdentity, HearingOperation
 from app.graphs.hearing.errors import HearingGraphContractError
+from app.graphs.hearing.reducers import merge_keyed_hearing_results
 
 
 MAX_HEARING_PROPOSAL_BYTES = 2_000_000
+MAX_HEARING_WORK_RESULT_BYTES = 128_000
+MAX_HEARING_EVIDENCE_ITEMS = 100
+MAX_HEARING_EVIDENCE_SENDS = 8
+
+
+class HearingCommandBindingV1(TypedDict):
+    schema_version: Literal["hearing-command-binding.v1"]
+    command_id: str
+    operation_key: str
+    command_request_hash: str
+    thread_id: str
+    tenant_surrogate: str
+    room_epoch: int
+    process_revision: int
+    java_room_fencing_token: int
+    graph_lease_owner_id: str
+    graph_lease_fencing_token: int
+
+
+class HearingArtifactRefV1(TypedDict):
+    artifact_id: str
+    schema_version: str
+    uri: str
+    sha256: str
+
+
+class HearingScopeBindingV1(TypedDict):
+    schema_version: Literal["hearing-scope-binding.v1"]
+    state_scope: Literal["ACTOR_PRIVATE", "SHARED"]
+    actor_scope_hash: str
+    authorized_artifact_refs: list[HearingArtifactRefV1]
+    shared_barrier_receipt_hash: str | None
 
 
 class HearingGraphStateV1(TypedDict):
@@ -27,7 +61,17 @@ class HearingGraphStateV1(TypedDict):
     request_schema_version: str
     request_hash: str
     status: Literal["PENDING", "PROPOSED"]
+    cognitive_revision: NotRequired[int]
+    command_binding: NotRequired[HearingCommandBindingV1]
+    scope_binding: NotRequired[HearingScopeBindingV1]
     route: NotRequired[str]
+    ordered_work_item_keys: NotRequired[list[str]]
+    next_dispatch_index: NotRequired[int]
+    current_wave_keys: NotRequired[list[str]]
+    in_flight_keys: NotRequired[list[str]]
+    work_results: NotRequired[
+        Annotated[dict[str, dict[str, Any]], merge_keyed_hearing_results]
+    ]
     proposal_schema_version: NotRequired[str]
     proposal: NotRequired[dict[str, Any]]
 
@@ -51,15 +95,24 @@ class HearingGraphInvocation:
 
     request: BaseModel
     execute: Callable[[BaseModel], BaseModel]
+    plan_work_items: Callable[[BaseModel], Sequence[str]] | None = None
+    execute_work_item: Callable[[BaseModel, str], BaseModel] | None = None
+    execute_with_work_results: (
+        Callable[[BaseModel, Mapping[str, Mapping[str, Any]]], BaseModel] | None
+    ) = None
 
 
 def request_hash(request: BaseModel) -> str:
-    encoded = json.dumps(
-        request.model_dump(mode="json"),
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
+    try:
+        encoded = json.dumps(
+            request.model_dump(mode="json"),
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    except (TypeError, ValueError) as error:
+        raise HearingGraphContractError("HEARING_REQUEST_NOT_SERIALIZABLE") from error
     return hashlib.sha256(encoded).hexdigest()
 
 
@@ -68,6 +121,8 @@ def new_hearing_graph_state(
     identity: HearingGraphIdentity,
     operation: HearingOperation,
     request: BaseModel,
+    command_binding: HearingCommandBindingV1 | None = None,
+    scope_binding: HearingScopeBindingV1 | None = None,
 ) -> HearingGraphStateV1:
     if operation not in identity.operations:
         raise HearingGraphContractError("HEARING_OPERATION_GRAPH_MISMATCH")
@@ -84,7 +139,7 @@ def new_hearing_graph_state(
         or flow_schema_version != "hearing_flow.v2"
     ):
         raise HearingGraphContractError("HEARING_REQUEST_BINDING_INVALID")
-    return {
+    state: HearingGraphStateV1 = {
         "schema_version": "hearing.graph-state.v1",
         "graph_identity": identity.identity,
         "version_pins": version_pins(identity),
@@ -96,6 +151,13 @@ def new_hearing_graph_state(
         "request_hash": request_hash(request),
         "status": "PENDING",
     }
+    if (command_binding is None) != (scope_binding is None):
+        raise HearingGraphContractError("HEARING_RUNTIME_BINDINGS_INCOMPLETE")
+    if command_binding is not None and scope_binding is not None:
+        state["command_binding"] = deepcopy(command_binding)
+        state["scope_binding"] = deepcopy(scope_binding)
+        state["cognitive_revision"] = 1
+    return state
 
 
 def version_pins(identity: HearingGraphIdentity) -> HearingGraphVersionPins:

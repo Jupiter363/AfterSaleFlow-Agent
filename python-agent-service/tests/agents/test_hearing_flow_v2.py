@@ -408,10 +408,16 @@ class ParallelEvidenceRunner(QueueRunner):
     def __init__(self, outputs: dict[str, object], expected_files: int) -> None:
         super().__init__(outputs)
         self.assessment_barrier = threading.Barrier(expected_files)
+        self._assessment_lock = threading.Lock()
+        self._assessment_started = 0
 
     def invoke_structured(self, **kwargs):
         if kwargs["node_name"] == "hearing_evidence_file_assessment":
-            self.assessment_barrier.wait(timeout=2)
+            with self._assessment_lock:
+                self._assessment_started += 1
+                join_first_wave = self._assessment_started <= self.assessment_barrier.parties
+            if join_first_wave:
+                self.assessment_barrier.wait(timeout=2)
         return super().invoke_structured(**kwargs)
 
 
@@ -1204,7 +1210,7 @@ def test_evidence_synthesis_assesses_the_present_file_when_other_party_times_out
     assert result.evidence_gaps
 
 
-def test_evidence_synthesis_starts_every_file_assessment_in_parallel() -> None:
+def test_evidence_synthesis_runs_bounded_parallel_send_waves() -> None:
     file_count = 9
     stream_context: ContextVar[str | None] = ContextVar(
         "test_hearing_file_stream_context",
@@ -1228,7 +1234,7 @@ def test_evidence_synthesis_starts_every_file_assessment_in_parallel() -> None:
                 "public_message": "已完成全部文件的并行核验与一次性合并。",
             },
         },
-        expected_files=file_count,
+        expected_files=8,
     )
     files = [
         {

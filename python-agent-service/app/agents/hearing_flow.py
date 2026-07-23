@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-from concurrent.futures import ThreadPoolExecutor
-from contextvars import copy_context
 from typing import Any, Iterable
 
 from app.llm import AgentOutputSchemaError, AgentServiceUnavailable
@@ -267,6 +265,13 @@ class HearingFlowWorkflows:
             node_name="hearing_evidence_synthesis",
         )
         assessments = self._assess_evidence_files(request)
+        return self._evidence_synthesis_from_assessments(request, assessments)
+
+    def _evidence_synthesis_from_assessments(
+        self,
+        request: HearingEvidenceSynthesisRequest,
+        assessments: list[HearingBatchEvidenceAssessment],
+    ) -> HearingEvidenceSynthesisResult:
         matrix = _merge_evidence_batch(request, assessments)
         output = self._invoke_payload(
             "hearing_evidence_synthesis",
@@ -290,55 +295,69 @@ class HearingFlowWorkflows:
     def _assess_evidence_files(
         self, request: HearingEvidenceSynthesisRequest
     ) -> list[HearingBatchEvidenceAssessment]:
-        pending = [
-            (batch, evidence) for batch in request.party_batches for evidence in batch.evidence
+        return [
+            self._assess_evidence_file(request, evidence.evidence_id)
+            for batch in request.party_batches
+            for evidence in batch.evidence
         ]
-        if not pending:
-            return []
 
-        def assess(item: tuple[Any, Any]) -> HearingBatchEvidenceAssessment:
-            batch, evidence = item
-            output = self._invoke_payload(
+    def _evidence_work_item_keys(
+        self, request: HearingEvidenceSynthesisRequest
+    ) -> list[str]:
+        return [
+            evidence.evidence_id
+            for batch in request.party_batches
+            for evidence in batch.evidence
+        ]
+
+    def _assess_evidence_file(
+        self,
+        request: HearingEvidenceSynthesisRequest,
+        evidence_id: str,
+    ) -> HearingBatchEvidenceAssessment:
+        matches = [
+            (batch, evidence)
+            for batch in request.party_batches
+            for evidence in batch.evidence
+            if evidence.evidence_id == evidence_id
+        ]
+        if len(matches) != 1:
+            raise AgentOutputSchemaError(
                 "hearing_evidence_file_assessment",
-                {
-                    "flow": {
-                        "flow_schema_version": request.flow_schema_version,
-                        "case_id": request.case_id,
-                        "workflow_id": request.workflow_id,
-                        "stage_code": request.stage_code,
-                        "stage_sequence": request.stage_sequence,
-                        "stage_deadline_at": request.stage_deadline_at,
-                        "source_refs": request.source_refs,
-                    },
-                    "participant_role": batch.participant_role,
-                    "batch_id": batch.batch_id,
-                    "evidence_file": evidence.model_dump(mode="json"),
-                    "requests": [value.model_dump(mode="json") for value in request.requests],
-                    "case_fact_matrix": request.case_fact_matrix.model_dump(mode="json"),
-                    "prior_fact_evidence_matrix": (
-                        request.prior_fact_evidence_matrix.model_dump(mode="json")
-                        if request.prior_fact_evidence_matrix is not None
-                        else None
-                    ),
+                f"invalid stable evidence key: {evidence_id}",
+            )
+        batch, evidence = matches[0]
+        output = self._invoke_payload(
+            "hearing_evidence_file_assessment",
+            {
+                "flow": {
+                    "flow_schema_version": request.flow_schema_version,
+                    "case_id": request.case_id,
+                    "workflow_id": request.workflow_id,
+                    "stage_code": request.stage_code,
+                    "stage_sequence": request.stage_sequence,
+                    "stage_deadline_at": request.stage_deadline_at,
+                    "source_refs": request.source_refs,
                 },
-                HearingEvidenceFileAssessmentLlmOutput,
-            )
-            return HearingBatchEvidenceAssessment(
-                evidence_id=evidence.evidence_id,
-                fact_links=output.fact_links,
-                summary=output.summary,
-                requires_human_review=output.requires_human_review,
-            )
-
-        # The request schema bounds the batch at 100 files. One worker per file
-        # preserves the V2 contract that all terminal-batch files are assessed
-        # independently and in parallel before the single deterministic merge.
-        with ThreadPoolExecutor(
-            max_workers=len(pending),
-            thread_name_prefix="hearing-evidence",
-        ) as executor:
-            futures = [executor.submit(copy_context().run, assess, item) for item in pending]
-            return [future.result() for future in futures]
+                "participant_role": batch.participant_role,
+                "batch_id": batch.batch_id,
+                "evidence_file": evidence.model_dump(mode="json"),
+                "requests": [value.model_dump(mode="json") for value in request.requests],
+                "case_fact_matrix": request.case_fact_matrix.model_dump(mode="json"),
+                "prior_fact_evidence_matrix": (
+                    request.prior_fact_evidence_matrix.model_dump(mode="json")
+                    if request.prior_fact_evidence_matrix is not None
+                    else None
+                ),
+            },
+            HearingEvidenceFileAssessmentLlmOutput,
+        )
+        return HearingBatchEvidenceAssessment(
+            evidence_id=evidence.evidence_id,
+            fact_links=output.fact_links,
+            summary=output.summary,
+            requires_human_review=output.requires_human_review,
+        )
 
     def judge_v1(self, request: HearingJudgeV1Request) -> HearingJudgeV1Result:
         return self._run_operation(
@@ -516,9 +535,27 @@ class HearingFlowWorkflows:
             operation=operation,
             request=request,
         )
+        invocation = HearingGraphInvocation(request=request, execute=execute)
+        if operation is HearingOperation.EVIDENCE_SYNTHESIS:
+            invocation = HearingGraphInvocation(
+                request=request,
+                execute=execute,
+                plan_work_items=self._evidence_work_item_keys,
+                execute_work_item=self._assess_evidence_file,
+                execute_with_work_results=lambda value, results: (
+                    self._evidence_synthesis_from_assessments(
+                        value,
+                        [
+                            HearingBatchEvidenceAssessment.model_validate(results[key])
+                            for key in sorted(results)
+                        ],
+                    )
+                ),
+            )
         result = self._hearing_graphs[identity.identity].invoke(
             state,
-            context=HearingGraphInvocation(request=request, execute=execute),
+            context=invocation,
+            config={"max_concurrency": 8, "recursion_limit": 64},
         )
         return result_type.model_validate(result["proposal"])
 

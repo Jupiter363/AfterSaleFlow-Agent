@@ -17,15 +17,31 @@ from app.graphs.hearing.graph import (
     build_hearing_jury_v1_graph,
     compile_hearing_graph_candidates,
 )
+from app.graphs.hearing.privacy import (
+    build_actor_private_state_lens,
+    build_shared_state_lens,
+)
+from app.graphs.hearing.reducers import merge_keyed_hearing_results
+from app.graphs.hearing.runtime import (
+    HearingRuntimeAuthority,
+    build_hearing_runtime_bundle,
+    validate_hearing_recovery_state,
+)
 
 __all__ = [
     "HEARING_GRAPH_IDENTITIES",
     "HEARING_OPERATION_IDENTITIES",
     "HearingGraphIdentity",
     "HearingOperation",
+    "HearingRuntimeAuthority",
     "build_hearing_evidence_v1_graph",
     "build_hearing_intake_v1_graph",
     "build_hearing_judge_v1_graph",
     "build_hearing_jury_v1_graph",
     "compile_hearing_graph_candidates",
+    "build_actor_private_state_lens",
+    "build_hearing_runtime_bundle",
+    "build_shared_state_lens",
+    "merge_keyed_hearing_results",
+    "validate_hearing_recovery_state",
 ]
