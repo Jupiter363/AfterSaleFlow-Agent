@@ -503,8 +503,11 @@ Baseline evidence maps every `EVD-001..015`, `UI-001`, `UI-003..005`, `CORE-001.
 separate 100-file product approval.
 
 Every accepted command record includes candidate SHA, environment manifest, timestamps, duration,
-exit code, report path, and SHA-256. Failures are classified `PRODUCT`, `FIXTURE`, `INFRA`, or
-`EXTERNAL_GATE` before a bounded rerun. Results from different candidate commits are never mixed.
+exit code, report path, and SHA-256. Every failure is classified `PRODUCT`, `FIXTURE`, `INFRA`, or
+`EXTERNAL_GATE` before any retry or repair. In `P5-BATCH-3`, only `INFRA` may resume the failed
+source on the same SHA, at most once. `PRODUCT`, `FIXTURE`, and `EXTERNAL_GATE` block that candidate.
+Any repair creates a new SHA and requires a complete `P5-BATCH-3` run from a fresh clean detached
+candidate; no result from the blocked candidate may be reused or mixed into the new run.
 
 `P5-BATCH-3` is executed only through `scripts/run_phase5_candidate_checkpoint.py` on one clean,
 detached candidate SHA. The runner derives the four deduplicated source commands from the

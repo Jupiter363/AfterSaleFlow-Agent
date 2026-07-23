@@ -335,3 +335,26 @@ def test_product_fixture_and_external_gate_block_the_candidate() -> None:
             manifest, {runner.COMMAND_ORDER[0]: classification}
         )
         assert manifest["status"] == "CANDIDATE_BLOCKED"
+
+
+def test_matrix_failure_policy_matches_runner_candidate_semantics() -> None:
+    matrix = runner.load_matrix()
+    failure_policy = matrix["failure_classification"]
+    checkpoint = failure_policy["candidate_checkpoint"]
+
+    assert set(failure_policy["required_values"]) == runner.FAILURE_CLASSIFICATIONS
+    assert checkpoint == {
+        "batch": runner.BATCH_ID,
+        "same_sha_resume_allowed_only_for": "INFRA",
+        "maximum_same_sha_resumes_per_source": runner.MAX_INFRA_RERUNS_PER_SOURCE,
+        "candidate_blocking_values": ["PRODUCT", "FIXTURE", "EXTERNAL_GATE"],
+        "repair_requires_new_candidate_sha": True,
+        "new_candidate_execution": "full_batch_from_fresh_clean_detached_worktree",
+        "prior_candidate_results_reusable": False,
+    }
+    assert set(checkpoint["candidate_blocking_values"]) == (
+        runner.FAILURE_CLASSIFICATIONS
+        - {checkpoint["same_sha_resume_allowed_only_for"]}
+    )
+    assert failure_policy["FIXTURE"]["candidate_checkpoint_action"] == "block_candidate"
+    assert "rerun_exact_failed_scope" not in failure_policy["FIXTURE"]["action"]
