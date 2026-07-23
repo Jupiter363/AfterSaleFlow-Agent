@@ -96,10 +96,23 @@ def _transition_bindings() -> dict[str, str]:
 
 
 def _transition_preimages() -> dict[str, bytes]:
-    return {
-        path: (ROOT / path).read_bytes()
-        for path in runner.STATE_TRANSITION_FILES
-    }
+    current_matrix = yaml.safe_load(MATRIX.read_text(encoding="utf-8"))
+    acceptance = current_matrix["batches"]["P5-BATCH-1"]["acceptance"]
+    if acceptance.get("status") == "ACCEPTED_BY_STATE_TRANSITION":
+        commit = acceptance["accepted_bindings"]["acceptance_evidence_commit"]
+        return {path: runner._git_blob(commit, path) for path in runner.STATE_TRANSITION_FILES}
+    return {path: (ROOT / path).read_bytes() for path in runner.STATE_TRANSITION_FILES}
+
+
+def _tooling_contract_documents() -> tuple[dict, dict]:
+    current_matrix = yaml.safe_load(MATRIX.read_text(encoding="utf-8"))
+    acceptance = current_matrix["batches"]["P5-BATCH-1"]["acceptance"]
+    if acceptance.get("status") == "ACCEPTED_BY_STATE_TRANSITION":
+        commit = acceptance["accepted_bindings"]["acceptance_tooling_candidate_commit"]
+        matrix = yaml.safe_load(runner._git_blob(commit, runner.TEST_MATRIX_PATH))
+        briefs = yaml.safe_load(runner._git_blob(commit, runner.OWNER_BRIEFS_PATH))
+        return matrix, briefs
+    return current_matrix, yaml.safe_load(BRIEFS.read_text(encoding="utf-8"))
 
 
 def test_fixed_evidence_commit_is_direct_child_with_exact_eight_added_blobs() -> None:
@@ -221,8 +234,7 @@ def test_junit_recount_rejects_declared_total_drift() -> None:
 
 
 def test_tooling_contract_stays_blocked_until_separate_state_transition() -> None:
-    matrix = yaml.safe_load(MATRIX.read_text(encoding="utf-8"))
-    briefs = yaml.safe_load(BRIEFS.read_text(encoding="utf-8"))
+    matrix, briefs = _tooling_contract_documents()
     acceptance = matrix["batches"]["P5-BATCH-1"]["acceptance"]
     transition = acceptance["state_transition"]
 
