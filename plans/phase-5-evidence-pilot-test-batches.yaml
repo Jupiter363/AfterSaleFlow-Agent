@@ -902,7 +902,7 @@ batches:
         - <candidate-sha>
         - --execute
         - --run-dir
-        - test-reports/temporal-first/<release-id>/phase-5-candidate-run
+        - .codex-run/phase5-candidate-<candidate-prefix>
         - --environment-id
         - <environment-id>
       evidence_argv:
@@ -917,7 +917,7 @@ batches:
         - --engineering-started-at
         - <rfc3339-timestamp>
         - --execution-manifest
-        - test-reports/temporal-first/<release-id>/phase-5-candidate-run/phase5-candidate-execution-manifest.json
+        - .codex-run/phase5-candidate-<candidate-prefix>/phase5-candidate-execution-manifest.json
     execution:
       strategy: deduplicated_source_suites_then_derived_batch_views
       heavy_parallelism: 1
