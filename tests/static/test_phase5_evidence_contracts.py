@@ -74,6 +74,7 @@ OPERATION_KEY_FIELDS = {
 }
 EXPECTED_ROOT_FILES = {
     "compatibility-matrix.yaml",
+    "phase5-wave-a-acceptance.schema.json",
     *(binding[0] for binding in SCHEMA_BY_PREFIX.values()),
 }
 EXPECTED_VALID_FIXTURES = {
