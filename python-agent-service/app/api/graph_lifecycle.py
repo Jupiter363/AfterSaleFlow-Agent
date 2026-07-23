@@ -45,7 +45,10 @@ from app.graph_runtime.persistence_models import (
     GraphReadinessConfig,
 )
 from app.graph_runtime.readiness import GraphPersistenceReadinessProbe
-from app.security.graph_runtime import GraphSecurityRuntime
+from app.security.graph_runtime import (
+    GraphSecurityRuntime,
+    _open_for_lifecycle as _open_graph_security_runtime_for_lifecycle,
+)
 from app.security.invocation_envelope import (
     InvocationEnvelopeError,
     InvocationEnvelopeVerifier,
@@ -210,7 +213,7 @@ class GraphApplicationRuntime:
                 input_authorizer=bindings.input_authorizer,
                 acquire_timeout_seconds=settings.graph_pool_acquire_timeout_seconds,
             )
-            security_runtime = await GraphSecurityRuntime.open(
+            security_runtime = await _open_graph_security_runtime_for_lifecycle(
                 jwks_url=str(settings.graph_jwks_url),
                 timeout_seconds=settings.graph_jwks_timeout_seconds,
                 refresh_interval_seconds=settings.graph_jwks_refresh_seconds,
@@ -491,9 +494,7 @@ class _RuntimeExecutionVerifier:
             transport_identity=transport_identity,
         )
         if not isinstance(verified, VerifiedInvocation):
-            raise InvocationEnvelopeError(
-                "INVOCATION_EXECUTION_CREDENTIAL_TYPE_REJECTED"
-            )
+            raise InvocationEnvelopeError("INVOCATION_EXECUTION_CREDENTIAL_TYPE_REJECTED")
         return verified
 
 
@@ -514,9 +515,7 @@ class _RuntimeReconciliationVerifier:
             transport_identity=transport_identity,
         )
         if not isinstance(verified, VerifiedReconciliation):
-            raise InvocationEnvelopeError(
-                "INVOCATION_RECONCILIATION_CREDENTIAL_TYPE_REJECTED"
-            )
+            raise InvocationEnvelopeError("INVOCATION_RECONCILIATION_CREDENTIAL_TYPE_REJECTED")
         return verified
 
 

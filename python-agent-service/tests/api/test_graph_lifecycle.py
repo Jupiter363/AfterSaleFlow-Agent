@@ -209,11 +209,6 @@ def _install_open_dependencies(
     class SecurityRuntime:
         resolver = object()
 
-        @classmethod
-        async def open(cls, **kwargs: Any) -> SecurityRuntime:
-            events.append("security_open")
-            return cls()
-
         def readiness(self) -> Any:
             return SimpleNamespace(ready=True, code="GRAPH_JWKS_READY")
 
@@ -221,6 +216,11 @@ def _install_open_dependencies(
             events.append("security_close")
             if security_close_error is not None:
                 raise security_close_error
+
+    async def open_security_runtime(**kwargs: Any) -> SecurityRuntime:
+        del kwargs
+        events.append("security_open")
+        return SecurityRuntime()
 
     class AdmissionGate:
         accepting = False
@@ -239,7 +239,11 @@ def _install_open_dependencies(
     monkeypatch.setattr(graph_lifecycle, "GraphCheckpointRuntime", CheckpointRuntime)
     monkeypatch.setattr(graph_lifecycle, "GraphPersistenceReadinessProbe", PersistenceProbe)
     monkeypatch.setattr(graph_lifecycle, "GraphCommandGateway", Gateway)
-    monkeypatch.setattr(graph_lifecycle, "GraphSecurityRuntime", SecurityRuntime)
+    monkeypatch.setattr(
+        graph_lifecycle,
+        "_open_graph_security_runtime_for_lifecycle",
+        open_security_runtime,
+    )
     monkeypatch.setattr(graph_lifecycle, "GraphStreamAdmissionGate", AdmissionGate)
     return saver, gateways
 
@@ -441,26 +445,38 @@ async def test_runtime_handle_exposes_distinct_typed_verifier_and_service_proxie
     )
 
     async with handle.lifespan(None):
-        assert execution_dependencies.envelope_verifier.verify(
-            token="execution-token",
-            command=command,
-            transport_identity=transport,
-        ) is execution
-        assert reconciliation_dependencies.envelope_verifier.verify(
-            token="reconciliation-token",
-            command=command,
-            transport_identity=transport,
-        ) is reconciliation
-        assert await execution_dependencies.stream_service.open_stream(
-            command=command,
-            verified_invocation=execution,
-            expected_thread=thread,
-        ) is stream
-        assert await reconciliation_dependencies.reconciliation_service.reconcile(
-            command=command,
-            verified_reconciliation=reconciliation,
-            expected_thread=thread,
-        ) is reconciliation_response
+        assert (
+            execution_dependencies.envelope_verifier.verify(
+                token="execution-token",
+                command=command,
+                transport_identity=transport,
+            )
+            is execution
+        )
+        assert (
+            reconciliation_dependencies.envelope_verifier.verify(
+                token="reconciliation-token",
+                command=command,
+                transport_identity=transport,
+            )
+            is reconciliation
+        )
+        assert (
+            await execution_dependencies.stream_service.open_stream(
+                command=command,
+                verified_invocation=execution,
+                expected_thread=thread,
+            )
+            is stream
+        )
+        assert (
+            await reconciliation_dependencies.reconciliation_service.reconcile(
+                command=command,
+                verified_reconciliation=reconciliation,
+                expected_thread=thread,
+            )
+            is reconciliation_response
+        )
 
         runtime.execution_verifier = cast(Any, StaticVerifier(reconciliation))
         runtime.reconciliation_verifier = cast(Any, StaticVerifier(execution))

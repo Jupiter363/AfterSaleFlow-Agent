@@ -1,15 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import base64
-import hashlib
 import json
 from copy import deepcopy
 from pathlib import Path
 
+import httpx
 import jwt
 import pytest
 from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 from langchain_core.runnables import RunnableLambda
@@ -20,12 +20,13 @@ from app.graphs.evidence.contracts import (
     EvidenceAdmissionRequest,
     EvidenceAdmissionVerifier,
     EvidenceGraphContext,
-    EvidenceJavaSigningKeyPin,
-    EvidenceJavaSigningTrustConfig,
     JsonObject,
     VerifiedEvidenceAdmission,
 )
-from app.security.jwks import JwksVerificationKeyResolver
+from app.security.graph_runtime import (
+    GraphSecurityRuntime,
+    _open_for_lifecycle,
+)
 
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -38,50 +39,61 @@ SIGNING_KEY_ID = "KEY_P5_SYNTHETIC_ES256_1"
 PRIVATE_KEY = ec.generate_private_key(ec.SECP256R1())
 
 
-def service_jwks_resolver(
-    *,
-    private_key: ec.EllipticCurvePrivateKey = PRIVATE_KEY,
-    signing_key_id: str = SIGNING_KEY_ID,
-) -> JwksVerificationKeyResolver:
-    public_jwk = jwt.algorithms.ECAlgorithm.to_jwk(
-        private_key.public_key(),
-        as_dict=True,
-    )
-    resolver = JwksVerificationKeyResolver()
-    resolver.install(
-        {
-            "keys": [
-                {
-                    **public_jwk,
-                    "kid": signing_key_id,
-                    "use": "sig",
-                    "alg": "ES256",
-                }
-            ]
-        }
-    )
-    return resolver
+def _jwks_document(
+    keys: dict[str, ec.EllipticCurvePrivateKey],
+) -> dict[str, object]:
+    return {
+        "keys": [
+            {
+                **jwt.algorithms.ECAlgorithm.to_jwk(key.public_key(), as_dict=True),
+                "kid": key_id,
+                "use": "sig",
+                "alg": "ES256",
+            }
+            for key_id, key in sorted(keys.items())
+        ]
+    }
 
 
-def service_trust_config(
-    *,
-    private_key: ec.EllipticCurvePrivateKey = PRIVATE_KEY,
-    signing_key_id: str = SIGNING_KEY_ID,
-    version: str = "evidence-java-keys.synthetic.v1",
-) -> EvidenceJavaSigningTrustConfig:
-    public_der = private_key.public_key().public_bytes(
-        serialization.Encoding.DER,
-        serialization.PublicFormat.SubjectPublicKeyInfo,
-    )
-    return EvidenceJavaSigningTrustConfig(
-        version=version,
-        keys=(
-            EvidenceJavaSigningKeyPin(
-                signing_key_id=signing_key_id,
-                public_key_sha256=hashlib.sha256(public_der).hexdigest(),
-            ),
-        ),
-    )
+async def _no_referenced_keys() -> tuple[str, ...]:
+    return ()
+
+
+class GraphSecurityRuntimeHarness:
+    def __init__(self, keys: dict[str, ec.EllipticCurvePrivateKey]) -> None:
+        self._keys = dict(keys)
+        self._document = _jwks_document(self._keys)
+        self._runner = asyncio.Runner()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            del request
+            return httpx.Response(
+                200,
+                json=self._document,
+                headers={"content-type": "application/jwk-set+json"},
+            )
+
+        self.runtime = self._runner.run(
+            _open_for_lifecycle(
+                jwks_url="https://java-api-service.internal/.well-known/graph-jwks.json",
+                timeout_seconds=1,
+                refresh_interval_seconds=3600,
+                referenced_key_ids=_no_referenced_keys,
+                transport=httpx.MockTransport(handler),
+            )
+        )
+
+    def publish(self, keys: dict[str, ec.EllipticCurvePrivateKey]) -> None:
+        self._keys = dict(keys)
+        self._document = _jwks_document(self._keys)
+        self._runner.run(self.runtime.refresh_now())
+
+    def add_key(self, key_id: str, key: ec.EllipticCurvePrivateKey) -> None:
+        self.publish({**self._keys, key_id: key})
+
+    def close(self) -> None:
+        self._runner.run(self.runtime.close())
+        self._runner.close()
 
 
 def load_manifest(count: int) -> JsonObject:
@@ -126,11 +138,11 @@ def make_request(count: int = 1) -> EvidenceAdmissionRequest:
     )
 
 
-def make_admission(count: int = 1) -> VerifiedEvidenceAdmission:
-    return EvidenceAdmissionVerifier.from_service_jwks(
-        service_jwks_resolver(),
-        service_trust_config(),
-    ).verify(make_request(count))
+def make_admission(
+    runtime: GraphSecurityRuntime,
+    count: int = 1,
+) -> VerifiedEvidenceAdmission:
+    return EvidenceAdmissionVerifier.from_security_runtime(runtime).verify(make_request(count))
 
 
 def refresh_request(
@@ -228,9 +240,36 @@ def assessment_for_work_item(work_item: JsonObject) -> JsonObject:
     return assessment
 
 
+@pytest.fixture(scope="session")
+def service_security_runtime() -> GraphSecurityRuntime:
+    harness = GraphSecurityRuntimeHarness({SIGNING_KEY_ID: PRIVATE_KEY})
+    try:
+        yield harness.runtime
+    finally:
+        harness.close()
+
+
 @pytest.fixture
-def admission() -> VerifiedEvidenceAdmission:
-    return make_admission(1)
+def security_runtime_factory():
+    harnesses: list[GraphSecurityRuntimeHarness] = []
+
+    def factory(
+        keys: dict[str, ec.EllipticCurvePrivateKey] | None = None,
+    ) -> GraphSecurityRuntimeHarness:
+        harness = GraphSecurityRuntimeHarness(keys or {SIGNING_KEY_ID: PRIVATE_KEY})
+        harnesses.append(harness)
+        return harness
+
+    try:
+        yield factory
+    finally:
+        for harness in reversed(harnesses):
+            harness.close()
+
+
+@pytest.fixture
+def admission(service_security_runtime: GraphSecurityRuntime) -> VerifiedEvidenceAdmission:
+    return make_admission(service_security_runtime, 1)
 
 
 @pytest.fixture
@@ -244,8 +283,11 @@ def assessor() -> RunnableLambda:
 
 
 @pytest.fixture
-def admission_factory():
-    return make_admission
+def admission_factory(service_security_runtime: GraphSecurityRuntime):
+    def factory(count: int = 1) -> VerifiedEvidenceAdmission:
+        return make_admission(service_security_runtime, count)
+
+    return factory
 
 
 @pytest.fixture
@@ -259,24 +301,13 @@ def admission_request_factory():
 
 
 @pytest.fixture
-def admission_verifier_factory():
-    def factory(resolver=None, trust_config=None):
-        return EvidenceAdmissionVerifier.from_service_jwks(
-            resolver or service_jwks_resolver(),
-            trust_config or service_trust_config(),
+def admission_verifier_factory(service_security_runtime: GraphSecurityRuntime):
+    def factory(runtime: GraphSecurityRuntime | None = None):
+        return EvidenceAdmissionVerifier.from_security_runtime(
+            runtime if runtime is not None else service_security_runtime
         )
 
     return factory
-
-
-@pytest.fixture
-def service_jwks_factory():
-    return service_jwks_resolver
-
-
-@pytest.fixture
-def service_trust_config_factory():
-    return service_trust_config
 
 
 @pytest.fixture

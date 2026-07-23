@@ -11,8 +11,6 @@ from app.graphs.evidence.contracts import (
     EvidenceAdmissionVerifier,
     EvidenceGraphContext,
     EvidenceGraphContractError,
-    EvidenceJavaSigningKeyPin,
-    EvidenceJavaSigningTrustConfig,
     VerifiedEvidenceAdmission,
     validate_verified_admission,
 )
@@ -37,8 +35,6 @@ __all__ = [
     "EvidenceGraphContext",
     "EvidenceGraphContractError",
     "EvidenceGraphStateV2",
-    "EvidenceJavaSigningKeyPin",
-    "EvidenceJavaSigningTrustConfig",
     "VerifiedEvidenceAdmission",
     "build_evidence_v2_graph",
     "compile_evidence_v2_graph",

@@ -6,24 +6,21 @@ import pickle
 from copy import deepcopy
 from dataclasses import replace
 
-import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import ec
 
 from app.contracts.v1.codec import canonical_sha256
+import app.graphs.evidence as evidence_exports
 from app.graphs.evidence import (
     ASSESSMENT_OUTPUT_SCHEMA_VERSION,
     TERMINAL_OUTPUT_SCHEMA_VERSION,
     EvidenceAdmissionVerifier,
     EvidenceGraphContractError,
-    EvidenceJavaSigningTrustConfig,
     VerifiedEvidenceAdmission,
     merge_evidence_assessments,
     new_evidence_graph_state,
     validate_verified_admission,
 )
-from app.security.invocation_envelope import InvocationEnvelopeError
-from app.security.jwks import JwksVerificationKeyResolver
 
 
 def _rehash_command(command: dict) -> None:
@@ -180,117 +177,91 @@ def test_unknown_signing_key_id_fails_closed(
         admission_verifier_factory().verify(broken)
 
 
-def test_duplicate_service_jwks_key_ids_fail_before_verifier_bootstrap(
-    service_trust_config_factory,
-) -> None:
-    key = ec.generate_private_key(ec.SECP256R1())
-    public = jwt.algorithms.ECAlgorithm.to_jwk(key.public_key(), as_dict=True)
-    candidate = {**public, "kid": "KEY_DUPLICATE", "use": "sig", "alg": "ES256"}
-    resolver = JwksVerificationKeyResolver()
-
-    with pytest.raises(InvocationEnvelopeError, match="INVOCATION_JWKS_DUPLICATE_KEY"):
-        resolver.install({"keys": [candidate, dict(candidate)]})
-    with pytest.raises(
-        EvidenceGraphContractError,
-        match="EVIDENCE_SERVICE_JWKS_NOT_READY",
-    ):
-        EvidenceAdmissionVerifier.from_service_jwks(
-            resolver,
-            service_trust_config_factory(),
-        )
-    valid_config = service_trust_config_factory()
-    with pytest.raises(
-        EvidenceGraphContractError,
-        match="EVIDENCE_TRUST_CONFIG_DUPLICATE_KEY",
-    ):
-        EvidenceJavaSigningTrustConfig(
-            version="evidence-java-keys.synthetic.duplicate",
-            keys=valid_config.keys + valid_config.keys,
-        )
-
-
-def test_verifier_constructor_resolver_substitution_and_replacement_are_blocked(
-    admission_verifier_factory,
-    service_jwks_factory,
-    service_trust_config_factory,
-) -> None:
+def test_caller_controlled_resolver_and_config_bootstrap_are_not_public() -> None:
     class AttackerResolver:
-        def resolve(self, signing_key_id):
-            del signing_key_id
-            return None
+        pass
+
+    class AttackerConfig:
+        pass
+
+    assert not hasattr(EvidenceAdmissionVerifier, "from_service_jwks")
+    assert not hasattr(evidence_exports, "EvidenceJavaSigningKeyPin")
+    assert not hasattr(evidence_exports, "EvidenceJavaSigningTrustConfig")
 
     with pytest.raises(
         EvidenceGraphContractError,
         match="EVIDENCE_VERIFIER_BOOTSTRAP_REQUIRED",
     ):
-        EvidenceAdmissionVerifier(AttackerResolver())
-    with pytest.raises(
-        EvidenceGraphContractError,
-        match="EVIDENCE_SERVICE_JWKS_REQUIRED",
-    ):
-        EvidenceAdmissionVerifier.from_service_jwks(
+        EvidenceAdmissionVerifier(
             AttackerResolver(),
-            service_trust_config_factory(),
+            trust_snapshot=AttackerConfig(),
         )
-
-    attacker_key = ec.generate_private_key(ec.SECP256R1())
-    substituted_resolver = service_jwks_factory(private_key=attacker_key)
     with pytest.raises(
         EvidenceGraphContractError,
-        match="EVIDENCE_TRUST_CONFIG_KEY_MISMATCH",
+        match="EVIDENCE_SECURITY_RUNTIME_REQUIRED",
     ):
-        EvidenceAdmissionVerifier.from_service_jwks(
-            substituted_resolver,
-            service_trust_config_factory(),
-        )
+        EvidenceAdmissionVerifier.from_security_runtime(AttackerResolver())
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["jwks_url", "key_resolver", "trust_config", "signing_public_key"],
+)
+def test_room_command_cannot_select_trust_material(
+    admission_request_factory,
+    admission_verifier_factory,
+    field: str,
+) -> None:
+    request = admission_request_factory()
+    command = deepcopy(dict(request.room_graph_command))
+    command[field] = "attacker-controlled"
+    _rehash_command(command)
+
+    with pytest.raises(
+        EvidenceGraphContractError,
+        match="EVIDENCE_COMMAND_FIELDS_INVALID",
+    ):
+        admission_verifier_factory().verify(replace(request, room_graph_command=command))
+
+
+def test_low_level_verifier_trust_substitution_fails_before_attacker_resolution(
+    admission_request_factory,
+    admission_verifier_factory,
+) -> None:
+    class AttackerResolver:
+        calls = 0
+
+        def resolve(self, signing_key_id):
+            del signing_key_id
+            self.calls += 1
+            return None
 
     verifier = admission_verifier_factory()
     with pytest.raises(EvidenceGraphContractError, match="EVIDENCE_VERIFIER_IMMUTABLE"):
-        verifier._trust_store = AttackerResolver()
+        verifier._trust_snapshot = AttackerResolver()
+
+    attacker = AttackerResolver()
+    object.__setattr__(verifier, "_trust_snapshot", attacker)
+    with pytest.raises(
+        EvidenceGraphContractError,
+        match="EVIDENCE_VERIFIER_TRUST_INVALID",
+    ):
+        verifier.verify(admission_request_factory())
+    assert attacker.calls == 0
 
 
 def test_key_rotation_publishes_a_new_immutable_trust_snapshot(
     admission_request_factory,
     admission_refresher,
-    service_jwks_factory,
-    service_trust_config_factory,
+    security_runtime_factory,
 ) -> None:
-    resolver = service_jwks_factory()
-    original_config = service_trust_config_factory()
-    original_verifier = EvidenceAdmissionVerifier.from_service_jwks(
-        resolver,
-        original_config,
-    )
+    harness = security_runtime_factory()
+    original_verifier = EvidenceAdmissionVerifier.from_security_runtime(harness.runtime)
     original_request = admission_request_factory()
 
     rotated_key = ec.generate_private_key(ec.SECP256R1())
-    public = jwt.algorithms.ECAlgorithm.to_jwk(rotated_key.public_key(), as_dict=True)
-    resolver.install(
-        {
-            "keys": [
-                {
-                    **public,
-                    "kid": "KEY_P5_ROTATED_ES256_2",
-                    "use": "sig",
-                    "alg": "ES256",
-                }
-            ]
-        },
-        retain_key_ids={"KEY_P5_SYNTHETIC_ES256_1"},
-    )
-    rotated_pin = service_trust_config_factory(
-        private_key=rotated_key,
-        signing_key_id="KEY_P5_ROTATED_ES256_2",
-        version="evidence-java-keys.synthetic.v2",
-    )
-    rotated_config = EvidenceJavaSigningTrustConfig(
-        version="evidence-java-keys.synthetic.v2",
-        keys=original_config.keys + rotated_pin.keys,
-    )
-    rotated_verifier = EvidenceAdmissionVerifier.from_service_jwks(
-        resolver,
-        rotated_config,
-    )
+    harness.add_key("KEY_P5_ROTATED_ES256_2", rotated_key)
+    rotated_verifier = EvidenceAdmissionVerifier.from_security_runtime(harness.runtime)
     rotated_manifest = json.loads(original_request.signed_manifest_payload)
     rotated_manifest["signing_key_id"] = "KEY_P5_ROTATED_ES256_2"
     rotated_request = admission_refresher(
@@ -309,6 +280,43 @@ def test_key_rotation_publishes_a_new_immutable_trust_snapshot(
         original_verifier.verify(rotated_request)
     assert rotated_verifier.verify(original_request).manifest
     assert rotated_verifier.verify(rotated_request).manifest
+
+
+def test_registered_verifier_rejects_full_slot_transplant(
+    admission_request_factory,
+    security_runtime_factory,
+) -> None:
+    source_runtime = security_runtime_factory().runtime
+    target_runtime = security_runtime_factory().runtime
+    source = EvidenceAdmissionVerifier.from_security_runtime(source_runtime)
+    target = EvidenceAdmissionVerifier.from_security_runtime(target_runtime)
+
+    for slot in EvidenceAdmissionVerifier.__slots__:
+        if slot != "__weakref__":
+            object.__setattr__(target, slot, getattr(source, slot))
+
+    with pytest.raises(EvidenceGraphContractError, match="EVIDENCE_VERIFIER_INVALID"):
+        target.verify(admission_request_factory())
+
+
+def test_registered_trust_snapshot_rejects_full_slot_transplant(
+    admission_request_factory,
+    security_runtime_factory,
+) -> None:
+    source = EvidenceAdmissionVerifier.from_security_runtime(security_runtime_factory().runtime)
+    target = EvidenceAdmissionVerifier.from_security_runtime(security_runtime_factory().runtime)
+    source_snapshot = source._trust_snapshot
+    target_snapshot = target._trust_snapshot
+
+    for slot in type(source_snapshot).__slots__:
+        if slot != "__weakref__":
+            object.__setattr__(target_snapshot, slot, getattr(source_snapshot, slot))
+
+    with pytest.raises(
+        EvidenceGraphContractError,
+        match="EVIDENCE_VERIFIER_TRUST_INVALID",
+    ):
+        target.verify(admission_request_factory())
 
 
 def test_rehashed_command_with_an_unknown_field_fails_closed(
@@ -450,6 +458,21 @@ def test_consume_revalidates_seal_after_low_level_slot_tamper(admission_factory)
         match="EVIDENCE_VERIFIED_ADMISSION_SEAL_INVALID",
     ):
         validate_verified_admission(admission)
+
+
+def test_registered_admission_rejects_full_slot_transplant(admission_factory) -> None:
+    source = admission_factory()
+    target = admission_factory()
+
+    for slot in VerifiedEvidenceAdmission.__slots__:
+        if slot != "__weakref__":
+            object.__setattr__(target, slot, getattr(source, slot))
+
+    with pytest.raises(
+        EvidenceGraphContractError,
+        match="EVIDENCE_VERIFIED_ADMISSION_SEAL_INVALID",
+    ):
+        validate_verified_admission(target)
 
 
 @pytest.mark.parametrize(

@@ -10,18 +10,23 @@ from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
+from threading import RLock
 from typing import Any, Literal, TypeAlias, cast
-from weakref import WeakSet
+from weakref import WeakKeyDictionary
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
 
 from app.contracts.v1.codec import canonical_sha256, canonicalize
+from app.security.graph_runtime import (
+    GraphSecurityRuntime,
+    GraphSecurityRuntimeError,
+    _resolve_graph_verification_key,
+    _validate_graph_verification_snapshot,
+)
 from app.security.invocation_envelope import ResolvedVerificationKey
-from app.security.jwks import JwksVerificationKeyResolver
 
 
 JsonScalar: TypeAlias = str | int | float | bool | None
@@ -226,86 +231,11 @@ class EvidenceAdmissionRequest:
         object.__setattr__(self, "signed_manifest_payload", bytes(self.signed_manifest_payload))
 
 
-@dataclass(frozen=True, slots=True)
-class EvidenceJavaSigningKeyPin:
-    signing_key_id: str
-    public_key_sha256: str
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.signing_key_id, str) or not _KEY_ID.fullmatch(self.signing_key_id):
-            raise EvidenceGraphContractError("EVIDENCE_TRUST_CONFIG_KEY_ID_INVALID")
-        if not isinstance(self.public_key_sha256, str) or not _SHA256.fullmatch(
-            self.public_key_sha256
-        ):
-            raise EvidenceGraphContractError("EVIDENCE_TRUST_CONFIG_FINGERPRINT_INVALID")
-
-
-@dataclass(frozen=True, slots=True)
-class EvidenceJavaSigningTrustConfig:
-    version: str
-    keys: tuple[EvidenceJavaSigningKeyPin, ...]
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.version, str) or not _KEY_ID.fullmatch(self.version):
-            raise EvidenceGraphContractError("EVIDENCE_TRUST_CONFIG_VERSION_INVALID")
-        object.__setattr__(self, "keys", tuple(self.keys))
-        if not all(type(pin) is EvidenceJavaSigningKeyPin for pin in self.keys):
-            raise EvidenceGraphContractError("EVIDENCE_TRUST_CONFIG_KEY_INVALID")
-        key_ids = tuple(pin.signing_key_id for pin in self.keys)
-        if not key_ids:
-            raise EvidenceGraphContractError("EVIDENCE_TRUST_CONFIG_EMPTY")
-        if len(key_ids) != len(set(key_ids)):
-            raise EvidenceGraphContractError("EVIDENCE_TRUST_CONFIG_DUPLICATE_KEY")
-
-
 _VERIFIED_ADMISSION_TOKEN = object()
+_EVIDENCE_VERIFIER_TOKEN = object()
 _ADMISSION_SEAL_KEY = secrets.token_bytes(32)
-_TRUST_STORE_TOKEN = object()
-_TRUST_STORE_SEAL_KEY = secrets.token_bytes(32)
-
-
-class _EvidenceJavaSigningTrustStore:
-    """Immutable generation captured from the service-owned validated JWKS resolver."""
-
-    __slots__ = (
-        "_generation",
-        "_config_version",
-        "_keys",
-        "_seal",
-        "_token",
-        "__weakref__",
-    )
-
-    def __init__(
-        self,
-        *,
-        generation: int,
-        config_version: str,
-        keys: tuple[ResolvedVerificationKey, ...],
-        _token: object,
-    ) -> None:
-        if _token is not _TRUST_STORE_TOKEN:
-            raise EvidenceGraphContractError("EVIDENCE_TRUST_STORE_BOOTSTRAP_REQUIRED")
-        seal = _trust_store_seal(generation, config_version, keys)
-        object.__setattr__(self, "_generation", generation)
-        object.__setattr__(self, "_config_version", config_version)
-        object.__setattr__(self, "_keys", keys)
-        object.__setattr__(self, "_seal", seal)
-        object.__setattr__(self, "_token", _token)
-
-    def __setattr__(self, name: str, value: object) -> None:
-        del name, value
-        raise EvidenceGraphContractError("EVIDENCE_TRUST_STORE_IMMUTABLE")
-
-    def resolve(self, signing_key_id: str) -> ResolvedVerificationKey:
-        _validate_trust_store(self)
-        matches = tuple(key for key in self._keys if key.kid == signing_key_id)
-        if len(matches) != 1:
-            raise EvidenceGraphContractError("EVIDENCE_SIGNING_KEY_UNAVAILABLE")
-        return matches[0]
-
-
-_TRUST_STORES: WeakSet[_EvidenceJavaSigningTrustStore] = WeakSet()
+_EVIDENCE_VERIFIER_SEAL_KEY = secrets.token_bytes(32)
+_EVIDENCE_REGISTRY_LOCK = RLock()
 
 
 class VerifiedEvidenceAdmission:
@@ -338,14 +268,6 @@ class VerifiedEvidenceAdmission:
             raise EvidenceGraphContractError("EVIDENCE_VERIFIED_ADMISSION_REQUIRED")
         command_payload = canonicalize(room_graph_command)
         manifest_payload = canonicalize(manifest)
-        seal = _admission_seal(
-            runtime_mode=runtime_mode,
-            room_graph_command_payload=command_payload,
-            manifest_payload=manifest_payload,
-            registry_output_schema_version=registry_output_schema_version,
-            graph_lease_fencing_token=graph_lease_fencing_token,
-            snapshot_payload_sha256=snapshot_payload_sha256,
-        )
         object.__setattr__(self, "_runtime_mode", runtime_mode)
         object.__setattr__(self, "_room_graph_command_payload", command_payload)
         object.__setattr__(self, "_manifest_payload", manifest_payload)
@@ -360,8 +282,11 @@ class VerifiedEvidenceAdmission:
             graph_lease_fencing_token,
         )
         object.__setattr__(self, "_snapshot_payload_sha256", snapshot_payload_sha256)
-        object.__setattr__(self, "_seal", seal)
         object.__setattr__(self, "_token", _token)
+        nonce = secrets.token_bytes(32)
+        object.__setattr__(self, "_seal", _admission_seal(self, nonce))
+        with _EVIDENCE_REGISTRY_LOCK:
+            _VERIFIED_ADMISSIONS[self] = nonce
 
     def __setattr__(self, name: str, value: object) -> None:
         del name, value
@@ -409,41 +334,71 @@ class VerifiedEvidenceAdmission:
         return self._snapshot_payload_sha256
 
 
-_VERIFIED_ADMISSIONS: WeakSet[VerifiedEvidenceAdmission] = WeakSet()
+_VERIFIED_ADMISSIONS: WeakKeyDictionary[VerifiedEvidenceAdmission, bytes] = WeakKeyDictionary()
 
 
 class EvidenceAdmissionVerifier:
-    __slots__ = ("_trust_store", "_token")
+    __slots__ = (
+        "_security_runtime",
+        "_trust_snapshot",
+        "_seal",
+        "_token",
+        "__weakref__",
+    )
 
     def __init__(
         self,
-        trust_store: object = None,
+        security_runtime: object = None,
         *,
+        trust_snapshot: object = None,
         _token: object = None,
     ) -> None:
-        if (
-            _token is not _TRUST_STORE_TOKEN
-            or type(trust_store) is not _EvidenceJavaSigningTrustStore
-            or trust_store not in _TRUST_STORES
-        ):
+        if _token is not _EVIDENCE_VERIFIER_TOKEN:
             raise EvidenceGraphContractError("EVIDENCE_VERIFIER_BOOTSTRAP_REQUIRED")
-        object.__setattr__(self, "_trust_store", trust_store)
+        try:
+            trust_binding = _validate_graph_verification_snapshot(
+                security_runtime,
+                trust_snapshot,
+            )
+        except GraphSecurityRuntimeError as error:
+            raise EvidenceGraphContractError("EVIDENCE_VERIFIER_TRUST_INVALID") from error
+        object.__setattr__(self, "_security_runtime", security_runtime)
+        object.__setattr__(self, "_trust_snapshot", trust_snapshot)
         object.__setattr__(self, "_token", _token)
+        nonce = secrets.token_bytes(32)
+        object.__setattr__(
+            self,
+            "_seal",
+            _evidence_verifier_seal(self, nonce, trust_binding),
+        )
+        with _EVIDENCE_REGISTRY_LOCK:
+            _EVIDENCE_VERIFIERS[self] = nonce
 
     def __setattr__(self, name: str, value: object) -> None:
         del name, value
         raise EvidenceGraphContractError("EVIDENCE_VERIFIER_IMMUTABLE")
 
     @classmethod
-    def from_service_jwks(
+    def from_security_runtime(
         cls,
-        resolver: JwksVerificationKeyResolver,
-        trust_config: EvidenceJavaSigningTrustConfig,
+        runtime: GraphSecurityRuntime,
     ) -> EvidenceAdmissionVerifier:
-        trust_store = _capture_service_jwks_snapshot(resolver, trust_config)
-        return cls(trust_store, _token=_TRUST_STORE_TOKEN)
+        if cls is not EvidenceAdmissionVerifier:
+            raise EvidenceGraphContractError("EVIDENCE_VERIFIER_TYPE_INVALID")
+        if type(runtime) is not GraphSecurityRuntime:
+            raise EvidenceGraphContractError("EVIDENCE_SECURITY_RUNTIME_REQUIRED")
+        try:
+            snapshot = runtime.capture_verification_snapshot()
+        except GraphSecurityRuntimeError as error:
+            raise EvidenceGraphContractError("EVIDENCE_SECURITY_RUNTIME_REQUIRED") from error
+        return EvidenceAdmissionVerifier(
+            runtime,
+            trust_snapshot=snapshot,
+            _token=_EVIDENCE_VERIFIER_TOKEN,
+        )
 
     def verify(self, request: EvidenceAdmissionRequest) -> VerifiedEvidenceAdmission:
+        security_runtime, trust_snapshot = _validate_evidence_verifier(self)
         if type(request) is not EvidenceAdmissionRequest:
             raise EvidenceGraphContractError("EVIDENCE_ADMISSION_REQUEST_REQUIRED")
         if request.runtime_mode != "SHADOW":
@@ -461,7 +416,11 @@ class EvidenceAdmissionVerifier:
             raise EvidenceGraphContractError("EVIDENCE_FORMAL_AUTHORITY_FORBIDDEN")
         _verify_manifest_schema_shape(manifest)
         _verify_internal_manifest_hash(manifest)
-        _verify_direct_java_signature(manifest, self._trust_store)
+        _verify_direct_java_signature(
+            manifest,
+            security_runtime,
+            trust_snapshot,
+        )
         actor_scope_hash = _verify_actor_scope(command, manifest)
         _verify_output_pins(
             request.registry_output_schema_version,
@@ -484,8 +443,10 @@ class EvidenceAdmissionVerifier:
             snapshot_payload_sha256=payload_hash,
             _token=_VERIFIED_ADMISSION_TOKEN,
         )
-        _VERIFIED_ADMISSIONS.add(admission)
         return admission
+
+
+_EVIDENCE_VERIFIERS: WeakKeyDictionary[EvidenceAdmissionVerifier, bytes] = WeakKeyDictionary()
 
 
 @dataclass(frozen=True, slots=True)
@@ -499,20 +460,13 @@ def validate_verified_admission(
 ) -> tuple[JsonObject, JsonObject]:
     """Consume only an opaque result minted by ``EvidenceAdmissionVerifier``."""
 
-    if (
-        type(admission) is not VerifiedEvidenceAdmission
-        or admission not in _VERIFIED_ADMISSIONS
-        or admission._token is not _VERIFIED_ADMISSION_TOKEN
-    ):
+    if type(admission) is not VerifiedEvidenceAdmission:
         raise EvidenceGraphContractError("EVIDENCE_VERIFIED_ADMISSION_REQUIRED")
-    expected_seal = _admission_seal(
-        runtime_mode=admission._runtime_mode,
-        room_graph_command_payload=admission._room_graph_command_payload,
-        manifest_payload=admission._manifest_payload,
-        registry_output_schema_version=admission._registry_output_schema_version,
-        graph_lease_fencing_token=admission._graph_lease_fencing_token,
-        snapshot_payload_sha256=admission._snapshot_payload_sha256,
-    )
+    with _EVIDENCE_REGISTRY_LOCK:
+        nonce = _VERIFIED_ADMISSIONS.get(admission)
+    if nonce is None or admission._token is not _VERIFIED_ADMISSION_TOKEN:
+        raise EvidenceGraphContractError("EVIDENCE_VERIFIED_ADMISSION_REQUIRED")
+    expected_seal = _admission_seal(admission, nonce)
     if not hmac.compare_digest(admission._seal, expected_seal):
         raise EvidenceGraphContractError("EVIDENCE_VERIFIED_ADMISSION_SEAL_INVALID")
     if hashlib.sha256(admission._manifest_payload).hexdigest() != (
@@ -794,7 +748,8 @@ def _verify_internal_manifest_hash(manifest: JsonObject) -> None:
 
 def _verify_direct_java_signature(
     manifest: JsonObject,
-    trust_store: _EvidenceJavaSigningTrustStore,
+    security_runtime: GraphSecurityRuntime,
+    trust_snapshot: object,
 ) -> None:
     signature = manifest.get("signature")
     if (
@@ -812,10 +767,12 @@ def _verify_direct_java_signature(
     ):
         raise EvidenceGraphContractError("EVIDENCE_DIRECT_JAVA_SIGNATURE_UNVERIFIED")
     try:
-        resolved = trust_store.resolve(signing_key_id)
-    except EvidenceGraphContractError:
-        raise
-    except Exception as error:
+        resolved = _resolve_graph_verification_key(
+            security_runtime,
+            trust_snapshot,
+            signing_key_id,
+        )
+    except GraphSecurityRuntimeError as error:
         raise EvidenceGraphContractError("EVIDENCE_SIGNING_KEY_UNAVAILABLE") from error
     if (
         type(resolved) is not ResolvedVerificationKey
@@ -1148,137 +1105,60 @@ def _decode_admission_payload(payload: bytes, code: str) -> JsonObject:
     return _json_object(value, code)
 
 
-def _capture_service_jwks_snapshot(
-    resolver: JwksVerificationKeyResolver,
-    trust_config: EvidenceJavaSigningTrustConfig,
-) -> _EvidenceJavaSigningTrustStore:
-    if type(resolver) is not JwksVerificationKeyResolver:
-        raise EvidenceGraphContractError("EVIDENCE_SERVICE_JWKS_REQUIRED")
-    if type(trust_config) is not EvidenceJavaSigningTrustConfig:
-        raise EvidenceGraphContractError("EVIDENCE_TRUST_CONFIG_REQUIRED")
-    before = resolver.snapshot()
-    if (
-        before.generation < 1
-        or not before.key_ids
-        or len(before.key_ids) != len(set(before.key_ids))
-    ):
-        raise EvidenceGraphContractError("EVIDENCE_SERVICE_JWKS_NOT_READY")
-    keys: list[ResolvedVerificationKey] = []
-    configured = {pin.signing_key_id: pin for pin in trust_config.keys}
+def _validate_evidence_verifier(
+    verifier: object,
+) -> tuple[GraphSecurityRuntime, object]:
+    if type(verifier) is not EvidenceAdmissionVerifier:
+        raise EvidenceGraphContractError("EVIDENCE_VERIFIER_INVALID")
+    with _EVIDENCE_REGISTRY_LOCK:
+        nonce = _EVIDENCE_VERIFIERS.get(verifier)
+    if nonce is None or verifier._token is not _EVIDENCE_VERIFIER_TOKEN:
+        raise EvidenceGraphContractError("EVIDENCE_VERIFIER_INVALID")
     try:
-        for signing_key_id in sorted(configured):
-            key = resolver.resolve(signing_key_id)
-            _validate_resolved_evidence_key(key, signing_key_id)
-            actual_fingerprint = _public_key_sha256(key.public_key)
-            if not hmac.compare_digest(
-                actual_fingerprint,
-                configured[signing_key_id].public_key_sha256,
-            ):
-                raise EvidenceGraphContractError("EVIDENCE_TRUST_CONFIG_KEY_MISMATCH")
-            keys.append(key)
-    except EvidenceGraphContractError:
-        raise
-    except Exception as error:
-        raise EvidenceGraphContractError("EVIDENCE_SERVICE_JWKS_INVALID") from error
-    after = resolver.snapshot()
-    if before != after:
-        raise EvidenceGraphContractError("EVIDENCE_SERVICE_JWKS_ROTATED_DURING_BOOTSTRAP")
-    trust_store = _EvidenceJavaSigningTrustStore(
-        generation=before.generation,
-        config_version=trust_config.version,
-        keys=tuple(keys),
-        _token=_TRUST_STORE_TOKEN,
-    )
-    _TRUST_STORES.add(trust_store)
-    return trust_store
-
-
-def _validate_resolved_evidence_key(
-    key: ResolvedVerificationKey,
-    expected_key_id: str,
-) -> None:
-    if (
-        type(key) is not ResolvedVerificationKey
-        or key.kid != expected_key_id
-        or key.algorithm != "ES256"
-        or key.curve != "P-256"
-        or key.use != "sig"
-        or not isinstance(key.public_key, ec.EllipticCurvePublicKey)
-        or not isinstance(key.public_key.curve, ec.SECP256R1)
-    ):
-        raise EvidenceGraphContractError("EVIDENCE_SERVICE_JWKS_KEY_INVALID")
-
-
-def _trust_store_seal(
-    generation: int,
-    config_version: str,
-    keys: tuple[ResolvedVerificationKey, ...],
-) -> str:
-    descriptors = []
-    for key in keys:
-        _validate_resolved_evidence_key(key, key.kid)
-        descriptors.append(
-            {
-                "kid": key.kid,
-                "public_key_sha256": _public_key_sha256(key.public_key),
-                "algorithm": key.algorithm,
-                "curve": key.curve,
-                "use": key.use,
-            }
+        trust_binding = _validate_graph_verification_snapshot(
+            verifier._security_runtime,
+            verifier._trust_snapshot,
         )
+    except GraphSecurityRuntimeError as error:
+        raise EvidenceGraphContractError("EVIDENCE_VERIFIER_TRUST_INVALID") from error
+    expected = _evidence_verifier_seal(verifier, nonce, trust_binding)
+    if not hmac.compare_digest(verifier._seal, expected):
+        raise EvidenceGraphContractError("EVIDENCE_VERIFIER_INVALID")
+    return verifier._security_runtime, verifier._trust_snapshot
+
+
+def _evidence_verifier_seal(
+    verifier: EvidenceAdmissionVerifier,
+    nonce: bytes,
+    trust_binding: str,
+) -> str:
     preimage = canonicalize(
         {
-            "schema_version": "evidence-java-signing-trust-store.v1",
-            "generation": generation,
-            "config_version": config_version,
-            "keys": descriptors,
+            "schema_version": "evidence-admission-verifier-seal.v1",
+            "registry_nonce": nonce.hex(),
+            "verifier_identity": id(verifier),
+            "security_runtime_identity": id(verifier._security_runtime),
+            "trust_snapshot_identity": id(verifier._trust_snapshot),
+            "trust_binding": trust_binding,
         }
     )
-    return hmac.new(_TRUST_STORE_SEAL_KEY, preimage, hashlib.sha256).hexdigest()
+    return hmac.new(_EVIDENCE_VERIFIER_SEAL_KEY, preimage, hashlib.sha256).hexdigest()
 
 
-def _validate_trust_store(trust_store: _EvidenceJavaSigningTrustStore) -> None:
-    if (
-        type(trust_store) is not _EvidenceJavaSigningTrustStore
-        or trust_store not in _TRUST_STORES
-        or trust_store._token is not _TRUST_STORE_TOKEN
-    ):
-        raise EvidenceGraphContractError("EVIDENCE_TRUST_STORE_INVALID")
-    expected = _trust_store_seal(
-        trust_store._generation,
-        trust_store._config_version,
-        trust_store._keys,
-    )
-    if not hmac.compare_digest(trust_store._seal, expected):
-        raise EvidenceGraphContractError("EVIDENCE_TRUST_STORE_INVALID")
-
-
-def _public_key_sha256(public_key: ec.EllipticCurvePublicKey) -> str:
-    public_der = public_key.public_bytes(
-        serialization.Encoding.DER,
-        serialization.PublicFormat.SubjectPublicKeyInfo,
-    )
-    return hashlib.sha256(public_der).hexdigest()
-
-
-def _admission_seal(
-    *,
-    runtime_mode: str,
-    room_graph_command_payload: bytes,
-    manifest_payload: bytes,
-    registry_output_schema_version: str,
-    graph_lease_fencing_token: int,
-    snapshot_payload_sha256: str,
-) -> str:
+def _admission_seal(admission: VerifiedEvidenceAdmission, nonce: bytes) -> str:
     preimage = canonicalize(
         {
             "schema_version": "evidence-verified-admission-seal.v1",
-            "runtime_mode": runtime_mode,
-            "room_graph_command_sha256": hashlib.sha256(room_graph_command_payload).hexdigest(),
-            "manifest_payload_sha256": hashlib.sha256(manifest_payload).hexdigest(),
-            "registry_output_schema_version": registry_output_schema_version,
-            "graph_lease_fencing_token": graph_lease_fencing_token,
-            "snapshot_payload_sha256": snapshot_payload_sha256,
+            "registry_nonce": nonce.hex(),
+            "admission_identity": id(admission),
+            "runtime_mode": admission._runtime_mode,
+            "room_graph_command_sha256": hashlib.sha256(
+                admission._room_graph_command_payload
+            ).hexdigest(),
+            "manifest_payload_sha256": hashlib.sha256(admission._manifest_payload).hexdigest(),
+            "registry_output_schema_version": admission._registry_output_schema_version,
+            "graph_lease_fencing_token": admission._graph_lease_fencing_token,
+            "snapshot_payload_sha256": admission._snapshot_payload_sha256,
         }
     )
     return hmac.new(_ADMISSION_SEAL_KEY, preimage, hashlib.sha256).hexdigest()
