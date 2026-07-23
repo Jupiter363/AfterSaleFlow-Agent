@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import re
+import subprocess
 from fnmatch import fnmatchcase
 from pathlib import Path
 
@@ -35,6 +36,7 @@ PYTHON_HEARING = ROOT / "python-agent-service/app/agents/hearing_flow.py"
 MIGRATIONS = ROOT / "java-api-service/src/main/resources/db/migration"
 V044 = "V044__hearing_temporal_projection.sql"
 BASE_SHA = "d3ea271188be57adac49592879aaf3417e90c5c0"
+ENTRY_CANDIDATE_SHA = "f338eb5df0c37d40a7b7293a1ae999dc8ea18b0c"
 
 STAGES = [
     "COURT_PREPARING",
@@ -99,6 +101,32 @@ def _contract_stage_order() -> list[str]:
 
 def _range(prefix: str, first: int, last: int) -> list[str]:
     return [f"{prefix}-{number:03d}" for number in range(first, last + 1)]
+
+
+def _git(*args: str) -> str:
+    return subprocess.run(
+        ["git", *args],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    ).stdout
+
+
+def _entry_files(prefix: str) -> list[Path]:
+    return [
+        Path(value)
+        for value in _git(
+            "ls-tree", "-r", "--name-only", ENTRY_CANDIDATE_SHA, "--", prefix
+        ).splitlines()
+        if value
+    ]
+
+
+def _entry_text(path: str | Path) -> str:
+    normalized = Path(path).as_posix()
+    return _git("show", f"{ENTRY_CANDIDATE_SHA}:{normalized}")
 
 
 def test_phase6_accepted_entry_is_linked_and_remains_fail_closed() -> None:
@@ -298,10 +326,14 @@ def test_phase6_preserves_java_truth_and_reserves_v044_without_implementation() 
     assert reservation["historical_flow_backfill_mode"] == "LEGACY"
     assert reservation["additive_only"] is True
     assert reservation["preserve_v035_append_only"] is True
-    assert not (MIGRATIONS / V044).exists()
-    assert (MIGRATIONS / "V035__hearing_flow_v2.sql").is_file()
-    assert (MIGRATIONS / "V043_2__intake_shadow_comparisons.sql").is_file()
-    assert (MIGRATIONS / "V043_3__intake_signed_synthetic_admission.sql").is_file()
+    entry_migrations = {
+        path.name
+        for path in _entry_files("java-api-service/src/main/resources/db/migration")
+    }
+    assert V044 not in entry_migrations
+    assert "V035__hearing_flow_v2.sql" in entry_migrations
+    assert "V043_2__intake_shadow_comparisons.sql" in entry_migrations
+    assert "V043_3__intake_signed_synthetic_admission.sql" in entry_migrations
 
     assert modes["LEGACY"]["formal_writer"] == "JAVA_DOMAIN_POSTGRESQL"
     assert modes["SHADOW"]["graph_sink"] == "ISOLATED_COMPARISON_LEDGER_ONLY"
@@ -715,44 +747,65 @@ def test_phase6_baseline_inventory_is_factual_blocked_and_complete() -> None:
 
 
 def test_phase6_baseline_inventory_counts_match_checked_in_sources() -> None:
-    java_root = ROOT / "java-api-service/src/main/java/com/example/dispute/hearing"
-    java_test_root = ROOT / "java-api-service/src/test/java/com/example/dispute/hearing"
-    controller = java_root / "api/HearingFlowController.java"
-    v035 = MIGRATIONS / "V035__hearing_flow_v2.sql"
-    python_main = ROOT / "python-agent-service/app/main.py"
-    prompt_root = ROOT / "python-agent-service/app/agents/prompts"
-    python_test = ROOT / "python-agent-service/tests/agents/test_hearing_flow_v2.py"
-    frontend_flow = ROOT / "frontend/src/utils/hearingFlow.js"
-
-    java_main_files = list(java_root.rglob("*.java"))
-    java_test_files = list(java_test_root.glob("*.java"))
+    java_root = "java-api-service/src/main/java/com/example/dispute/hearing"
+    java_test_root = "java-api-service/src/test/java/com/example/dispute/hearing"
+    controller = f"{java_root}/api/HearingFlowController.java"
+    java_main_files = [path for path in _entry_files(java_root) if path.suffix == ".java"]
+    java_test_files = [
+        path
+        for path in _entry_files(java_test_root)
+        if path.suffix == ".java" and path.parent.as_posix() == java_test_root
+    ]
     assert len(java_main_files) == 39
-    assert len(list((java_root / "infrastructure/persistence/entity").glob("*.java"))) == 7
-    assert len(list((java_root / "infrastructure/persistence/repository").glob("*.java"))) == 7
+    assert len(
+        [
+            path
+            for path in java_main_files
+            if path.parent.as_posix() == f"{java_root}/infrastructure/persistence/entity"
+        ]
+    ) == 7
+    assert len(
+        [
+            path
+            for path in java_main_files
+            if path.parent.as_posix() == f"{java_root}/infrastructure/persistence/repository"
+        ]
+    ) == 7
     assert len(java_test_files) == 5
     assert sum(
-        len(re.findall(r"^\s*@Test\b", path.read_text(encoding="utf-8"), re.MULTILINE))
+        len(re.findall(r"^\s*@Test\b", _entry_text(path), re.MULTILINE))
         for path in java_test_files
     ) == 21
     assert len(
         re.findall(
             r"^\s*@(Get|Post|Put|Delete)Mapping\b",
-            controller.read_text(encoding="utf-8"),
+            _entry_text(controller),
             re.MULTILINE,
         )
     ) == 8
-    assert not (
-        ROOT
-        / "java-api-service/src/main/java/com/example/dispute/workflow/temporal/room/hearing"
-    ).exists()
+    assert not _entry_files(
+        "java-api-service/src/main/java/com/example/dispute/workflow/temporal/room/hearing"
+    )
 
-    v035_text = v035.read_text(encoding="utf-8")
+    v035_text = _entry_text(
+        "java-api-service/src/main/resources/db/migration/V035__hearing_flow_v2.sql"
+    )
     assert len(re.findall(r"^create table ", v035_text, re.MULTILINE)) == 5
     assert len(re.findall(r"^create trigger ", v035_text, re.MULTILINE)) == 7
-    assert not (MIGRATIONS / V044).exists()
+    assert V044 not in {
+        path.name
+        for path in _entry_files("java-api-service/src/main/resources/db/migration")
+    }
 
-    assert len(list(prompt_root.rglob("hearing_*.md"))) == 8
-    python_main_text = python_main.read_text(encoding="utf-8")
+    prompt_files = _entry_files("python-agent-service/app/agents/prompts")
+    assert len(
+        [
+            path
+            for path in prompt_files
+            if path.suffix == ".md" and path.name.startswith("hearing_")
+        ]
+    ) == 8
+    python_main_text = _entry_text("python-agent-service/app/main.py")
     hearing_routes = re.findall(
         r'@app\.post\(\s*"(/internal/agents/hearing-flow/[^\"]+)"',
         python_main_text,
@@ -760,9 +813,15 @@ def test_phase6_baseline_inventory_counts_match_checked_in_sources() -> None:
     )
     assert len(hearing_routes) == 14
     assert len(hearing_routes) == len(set(hearing_routes))
-    assert len(re.findall(r"^def test_", python_test.read_text(encoding="utf-8"), re.MULTILINE)) == 23
+    assert len(
+        re.findall(
+            r"^def test_",
+            _entry_text("python-agent-service/tests/agents/test_hearing_flow_v2.py"),
+            re.MULTILINE,
+        )
+    ) == 23
 
-    frontend_text = frontend_flow.read_text(encoding="utf-8")
+    frontend_text = _entry_text("frontend/src/utils/hearingFlow.js")
     frontend_stage_body = frontend_text.split(
         "export const HEARING_FLOW_STAGES = Object.freeze([", 1
     )[1].split("]);", 1)[0]
@@ -773,14 +832,19 @@ def test_phase6_baseline_inventory_counts_match_checked_in_sources() -> None:
     assert len(re.findall(r'^\s*"[^\"]+",?\s*$', group_body, re.MULTILINE)) == 6
 
     javascript_test_counts = {
-        ROOT / "frontend/src/views/disputes/HearingCourtView.test.js": 63,
-        ROOT / "frontend/src/utils/hearingFlow.test.js": 4,
-        ROOT / "frontend/src/api/hearing.test.js": 3,
+        "frontend/src/views/disputes/HearingCourtView.test.js": 63,
+        "frontend/src/utils/hearingFlow.test.js": 4,
+        "frontend/src/api/hearing.test.js": 3,
     }
     for path, expected in javascript_test_counts.items():
-        assert len(re.findall(r"^\s*it\(", path.read_text(encoding="utf-8"), re.MULTILINE)) == expected
-    live_e2e = ROOT / "tests/e2e/test_hearing_flow_v2_live.py"
-    assert len(re.findall(r"^def test_", live_e2e.read_text(encoding="utf-8"), re.MULTILINE)) == 1
+        assert len(re.findall(r"^\s*it\(", _entry_text(path), re.MULTILINE)) == expected
+    assert len(
+        re.findall(
+            r"^def test_",
+            _entry_text("tests/e2e/test_hearing_flow_v2_live.py"),
+            re.MULTILINE,
+        )
+    ) == 1
 
 
 def test_phase6_baseline_inventory_records_current_side_effect_and_test_gaps() -> None:
