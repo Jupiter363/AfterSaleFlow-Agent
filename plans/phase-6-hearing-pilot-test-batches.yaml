@@ -1,0 +1,686 @@
+schema_version: phase-test-batches.v1
+phase: 6
+name: hearing-pilot-engineering-shadow
+document_status: P6_0_CONTRACT_CANDIDATE_ASSEMBLY
+
+documents:
+  execution_plan: plans/phase-6-hearing-pilot-execution.md
+  contract_pack: docs/runbooks/temporal-first/phase-6-p6.0-contract-pack.md
+  baseline_inventory: docs/runbooks/temporal-first/phase-6-p6.0-baseline-inventory.md
+  owner_briefs: plans/phase-6-owner-briefs.yaml
+  engineering_exception: docs/architecture/adr/0015-phase-6-hearing-engineering-exception.md
+  compatibility_matrix: contracts/agent-platform/hearing/v2/compatibility-matrix.yaml
+  source_plan: plans/temporal-langgraph-room-refactor.md
+  hearing_contract: docs/contracts/hearing-flow-v2.md
+  acceptance_checklist: docs/acceptance/temporal-first-agent-platform-verification-checklist.md
+  acceptance_manifest: tests/acceptance/temporal-first-check-manifest.yaml
+  room_behavior_baseline: docs/acceptance/current-room-function-baseline.md
+  baseline_manifest: tests/baseline/current-room-baseline.yaml
+  static_gate: tests/static/test_phase6_hearing_pilot_plan.py
+  entry_runner: scripts/run_phase6_entry_checkpoint.py
+
+gate:
+  contract_gate: P6.0
+  contract_gate_status: NOT_RUN
+  accepted_phase_5_checkpoint_sha: d3ea271188be57adac49592879aaf3417e90c5c0
+  phase_5_candidate_sha: c43f969f08755fd6eb90c0845809cda1785d11bf
+  phase_5_evidence_sha: 8770d84aac4f653e8953d469246295b6e8c3b8fa
+  required_entry: PHASE_5_ENGINEERING_CHECKPOINT_AND_ADR_0015
+  observed_entry_state:
+    phase_5_engineering_checkpoint: PASS
+    phase_6_engineering_exception: ADR_0015_ACCEPTED_FOR_ENGINEERING_ONLY
+    next_phase_permission: PHASE_6_ENGINEERING_ONLY
+    MIG-004: PENDING_PROMOTION
+    MIG-005: PENDING_PROMOTION
+    P6.0: NOT_RUN
+    MIG-006: PENDING_ENGINEERING_AND_PROMOTION
+  entry_decision: CONTRACT_CANDIDATE_ASSEMBLY
+  product_implementation: BLOCKED_PENDING_EXACT_SHA_BATCH_0_AND_ENTRY_EVIDENCE
+  implementation_allowed_when:
+    - PHASE_5_ENGINEERING_CHECKPOINT_PASS
+    - ADR_0015_ACCEPTED_FOR_ENGINEERING_ONLY
+    - PHASE_6_ENGINEERING_ONLY_PERMISSION_RECORDED
+    - P6_0_CONTRACT_CANDIDATE_COMMITTED
+    - P6_0_BATCH_0_PASSED_ON_EXACT_CONTRACT_CANDIDATE_SHA
+    - P6_0_ENTRY_EVIDENCE_COMMITTED
+  exception_constraints:
+    - ADR_0015_CANNOT_MARK_MIG_004_MIG_005_OR_MIG_006_PASS
+    - AN_EXCEPTION_ALLOWS_ONLY_DISABLED_OR_JAVA_SIGNED_SYNTHETIC_SHADOW
+    - AN_EXCEPTION_CANNOT_AUTHORIZE_REAL_DATA_FORMAL_SINK_OR_TEMPORAL_ALLOCATION
+  two_commit_gate:
+    commit_1: P6_0_CONTRACT_CANDIDATE
+    exact_sha_batch: BATCH_0_ALL_FOUR_SUITES
+    commit_2: P6_0_ENTRY_EVIDENCE
+    implementation_after: COMMIT_2_RECORDS_P6_0_PASS
+    mixed_product_implementation_in_commit_1: false
+    reuse_reports_from_another_sha: false
+  runtime_modes_allowed_now: [LEGACY, DISABLED, SIGNED_SYNTHETIC_SHADOW]
+  runtime_modes_forbidden_now: [REAL_CASE_SHADOW, TEMPORAL]
+  traffic_constraints:
+    formal_hearing_graph_sink_allowed: false
+    temporal_hearing_allocation_allowed: false
+    real_case_shadow_allowed: false
+    active_v035_in_place_migration_allowed: false
+    production_traffic_change_allowed: false
+    canary_allowed: false
+    promotion_allowed: false
+    synthetic_fixtures_only_for_new_runtime: true
+    hearing_ui_behavior_change_allowed: false
+  invariants:
+    - Java Hearing action artifact dossier decision and handoff ledgers remain the sole formal writers.
+    - Temporal may own stage ordering timers retry and failure only for a future admitted TEMPORAL epoch.
+    - Graph output remains a proposal and cannot advance stage open review handoff or close Hearing.
+    - Party waits remain in Temporal and never use a long-lived LangGraph interrupt.
+    - Shared Hearing Graph accepts only Java-authorized formal Artifact references.
+    - V035 action and artifact append-only constraints remain intact.
+    - V044__hearing_temporal_projection.sql is reserved and absent before accepted P6.0 entry evidence.
+    - Existing Hearing API and UI baseline is preserved.
+    - MIG-006 cannot pass from synthetic engineering evidence.
+  gate_change_policy:
+    - An upstream checkpoint or exception does not implicitly pass P6.0.
+    - Every changed gate requires an amended contract candidate and a new exact-SHA Batch 0.
+    - No implementation owner starts before the separate P6.0 entry-evidence commit.
+
+mode_contract:
+  DISABLED:
+    process_owner: NONE_FOR_NEW_PHASE_6_RUNTIME
+    formal_writer: EXISTING_JAVA_PATH_AS_CONFIGURED
+    graph_sink: NONE
+    allocation_status: ALLOWED_SAFE_DEFAULT
+  LEGACY:
+    process_owner: HEARING_FLOW_RUNTIME_SERVICE_AND_LEGACY_SCHEDULERS
+    formal_writer: JAVA_DOMAIN_POSTGRESQL
+    graph_sink: CURRENT_GOVERNED_OPERATION_PATH
+    allocation_status: CURRENT_BEHAVIOR
+  SHADOW:
+    process_owner: JAVA_LEGACY_HEARING_V2
+    formal_writer: JAVA_LEGACY_PATH
+    graph_sink: ISOLATED_COMPARISON_LEDGER_ONLY
+    allocation_status: JAVA_SIGNED_SYNTHETIC_FIXTURES_ONLY
+  TEMPORAL:
+    process_owner: HEARING_ROOM_WORKFLOW
+    formal_writer: JAVA_ACTIVITIES_AND_FINALIZERS
+    graph_sink: VERSION_PINNED_PROPOSAL_THEN_JAVA_FINALIZER
+    allocation_status: FORBIDDEN_UNTIL_SEPARATE_MIG_006_PROMOTION
+
+stage_contract:
+  - sequence: 1
+    code: COURT_PREPARING
+    owner: SYSTEM
+    party_wait: false
+    graph_operation: null
+    completion_receipt: HEARING_ADMISSION_AND_SOURCE_MATRIX_BINDING
+  - sequence: 2
+    code: CASE_INTRODUCTION
+    owner: INTAKE_OFFICER_TEMPLATE
+    party_wait: false
+    graph_operation: null
+    completion_receipt: ROLE_TEMPLATE_MESSAGE
+  - sequence: 3
+    code: EVIDENCE_INTRODUCTION
+    owner: EVIDENCE_CLERK_TEMPLATE
+    party_wait: false
+    graph_operation: null
+    completion_receipt: ROLE_TEMPLATE_MESSAGE
+  - sequence: 4
+    code: INTAKE_QUESTIONS_GENERATING
+    owner: INTAKE_OFFICER_LLM
+    party_wait: false
+    graph_operation: HEARING_INTAKE_QUESTIONS
+    completion_receipt: HEARING_QUESTION_SET_V1
+  - sequence: 5
+    code: PARTY_ANSWERS_OPEN
+    owner: PARTIES
+    party_wait: true
+    graph_operation: null
+    completion_receipt: TWO_PARTY_TERMINAL_ACTIONS
+  - sequence: 6
+    code: INTAKE_SYNTHESIZING
+    owner: INTAKE_OFFICER_LLM
+    party_wait: false
+    graph_operation: HEARING_INTAKE_SYNTHESIS
+    completion_receipt: ATOMIC_CASE_MATRIX_AND_PUBLIC_SYNTHESIS
+  - sequence: 7
+    code: EVIDENCE_REQUESTS_GENERATING
+    owner: EVIDENCE_CLERK_LLM
+    party_wait: false
+    graph_operation: HEARING_EVIDENCE_REQUESTS
+    completion_receipt: HEARING_EVIDENCE_REQUEST_SET_V1
+  - sequence: 8
+    code: PARTY_EVIDENCE_OPEN
+    owner: PARTIES
+    party_wait: true
+    graph_operation: null
+    completion_receipt: TWO_PARTY_TERMINAL_BATCHES
+  - sequence: 9
+    code: EVIDENCE_SYNTHESIZING
+    owner: EVIDENCE_CLERK_LLM
+    party_wait: false
+    graph_operation: HEARING_EVIDENCE_SYNTHESIS
+    completion_receipt: ALL_ITEMS_TERMINAL_ONE_MATRIX_AND_SYNTHESIS
+  - sequence: 10
+    code: DOSSIER_FREEZING
+    owner: SYSTEM
+    party_wait: false
+    graph_operation: null
+    completion_receipt: TRIAL_DOSSIER_V1
+  - sequence: 11
+    code: JUDGE_V1_GENERATING
+    owner: PRESIDING_JUDGE_LLM
+    party_wait: false
+    graph_operation: HEARING_JUDGE_V1
+    completion_receipt: JUDGE_PROPOSAL_V1
+  - sequence: 12
+    code: JURY_REVIEWING
+    owner: JURY_PANEL_LLM
+    party_wait: false
+    graph_operation: HEARING_JURY_REVIEW
+    completion_receipt: JURY_REVIEW_REPORT_V1
+  - sequence: 13
+    code: JUDGE_V2_GENERATING
+    owner: PRESIDING_JUDGE_LLM
+    party_wait: false
+    graph_operation: HEARING_JUDGE_V2
+    completion_receipt: ADJUDICATION_DRAFT_V2
+  - sequence: 14
+    code: HUMAN_REVIEW_OPEN
+    owner: SYSTEM
+    party_wait: false
+    graph_operation: null
+    completion_receipt: IDEMPOTENT_REVIEW_HANDOFF
+  - sequence: 15
+    code: CLOSED
+    owner: SYSTEM
+    party_wait: false
+    graph_operation: null
+    completion_receipt: APPEND_ONLY_CLOSURE_EVENT
+
+graph_families:
+  hearing.intake.v1:
+    operations: [HEARING_INTAKE_QUESTIONS, HEARING_INTAKE_SYNTHESIS]
+    input_scope: JAVA_AUTHORIZED_CASE_MATRIX_AND_POST_BARRIER_STATEMENT_ARTIFACTS
+    formal_effect: NONE_PROPOSAL_ONLY
+  hearing.evidence.v1:
+    operations: [HEARING_EVIDENCE_REQUESTS, HEARING_EVIDENCE_SYNTHESIS]
+    internal_nodes: [HEARING_EVIDENCE_FILE_ASSESSMENT]
+    input_scope: FORMAL_VISIBLE_EVIDENCE_AND_AUTHORIZED_SUPPLEMENT_MANIFEST
+    formal_effect: NONE_PROPOSAL_ONLY
+  hearing.judge.v1:
+    operations: [HEARING_JUDGE_V1, HEARING_JUDGE_V2]
+    input_scope: IMMUTABLE_DOSSIER_AND_EXACT_DECISION_PARENT_REFS
+    formal_effect: NONE_PROPOSAL_ONLY
+  hearing.jury.v1:
+    operations: [HEARING_JURY_REVIEW]
+    input_scope: IMMUTABLE_DOSSIER_AND_EXACT_V1_ID_HASH
+    formal_effect: NONE_PROPOSAL_ONLY
+  shared_requirements:
+    topology: EXPLICIT_STATE_GRAPH
+    object_flow: PROMPT_PIPE_GOVERNED_MODEL_PIPE_PARSER
+    checkpoint: POSTGRESQL
+    command_ledger: REQUIRED
+    lease_fencing: REQUIRED
+    state_lens: REQUIRED
+    unknown_router: FAIL_CLOSED
+    party_wait_interrupt: FORBIDDEN
+    raw_private_transcript: FORBIDDEN
+    domain_credentials: FORBIDDEN
+    version_pins:
+      - graph_version
+      - prompt_version
+      - model_profile_id
+      - output_schema_version
+      - policy_version
+      - guardrail_version
+      - tool_policy_version
+
+persistence_reservation:
+  migration: V044__hearing_temporal_projection.sql
+  file_must_exist_in_draft: false
+  historical_flow_backfill_mode: LEGACY
+  additive_only: true
+  preserve_v035_append_only: true
+  fields_to_freeze_at_contract_candidate:
+    - hearing_epoch
+    - writer_mode
+    - process_revision
+    - fencing_token
+    - temporal_namespace
+    - temporal_workflow_id
+    - temporal_run_id
+    - temporal_build_or_deployment
+    - last_acknowledged_receipt
+    - last_acknowledged_history_event
+  temporal_history_payload_policy: STAGE_REF_HASH_REVISION_ONLY
+
+resources:
+  active_primary_agents: 1
+  logical_child_owners: 5
+  logical_p0_review_lanes: 3
+  logical_verification_lanes: 2
+  logical_lookahead_lanes: 1
+  max_active_child_agents: 11
+  max_active_agents_total: 12
+  simultaneous_implementation_owners: [A, B, C, D, E]
+  activation_policy: DEPENDENCY_AWARE_NOT_ALL_ROLES_MUST_REMAIN_ACTIVE
+  heavy_test_slots: 1
+  light_test_slots: 2
+  pytest_db_workers: 1
+  maven_fork_count: 1
+  frontend_max_workers: 1
+  docker_compose_owner: R
+  temporal_test_environment_owner: R
+  postgresql_testcontainer_owner: R
+  frontend_build_browser_owner: R
+  candidate_checkpoint_owner: R
+  heavy_resources:
+    - maven_test_or_spring_context
+    - temporal_test_server
+    - postgresql_or_testcontainers
+    - docker_compose
+    - frontend_production_build
+    - browser_or_playwright
+    - repository_full_regression
+    - load_soak_chaos_or_dr
+  child_forbidden_commands:
+    - java_full_suite
+    - python_full_suite
+    - docker_compose_up_or_build
+    - frontend_production_build
+    - browser_or_playwright_suite
+    - repository_full_regression
+    - load_soak_chaos_or_dr
+
+test_token:
+  grantor: R
+  max_heavy_tokens: 1
+  required_for:
+    - maven_test_or_spring_context
+    - temporal_test_server
+    - postgresql_or_testcontainers
+    - docker_compose
+    - frontend_build_or_browser
+    - full_regression_load_soak_chaos_or_dr
+  request_fields: [task_id, exact_command, expected_duration, resource_class]
+
+owners:
+  A:
+    role: Hearing graph and governed LCEL
+    tasks: [P6-A1, P6-A2]
+    owned_routes:
+      - python-agent-service/app/graphs/hearing/**
+      - python-agent-service/tests/graphs/hearing/**
+      - python-agent-service/tests/agents/test_hearing_flow_v2.py
+    compatibility_route:
+      - python-agent-service/app/agents/hearing_flow.py
+    forbidden_routes: [java-api-service/**, frontend/**, Domain_DB, stage_cursor]
+    focused_checks:
+      - python -m pytest -q tests/graphs/hearing tests/agents/test_hearing_flow_v2.py
+  B:
+    role: Temporal Hearing process
+    tasks: [P6-B1, P6-B2]
+    owned_routes:
+      - java-api-service/src/main/java/com/example/dispute/workflow/temporal/room/hearing/**
+      - java-api-service/src/test/java/com/example/dispute/workflow/temporal/room/hearing/**
+    forbidden_routes: [hearing_domain_implementation, python-agent-service/**, frontend/**, migration_DDL]
+    focused_checks:
+      - HearingRoomWorkflowTest
+      - HearingRoomWorkflowReplayTest
+  C:
+    role: Java Hearing business truth and V044
+    tasks: [P6-C1, P6-C2]
+    owned_routes:
+      - java-api-service/src/main/java/com/example/dispute/hearing/domain/**
+      - java-api-service/src/main/java/com/example/dispute/hearing/infrastructure/persistence/**
+      - java-api-service/src/main/java/com/example/dispute/hearing/application/HearingFlowRuntimeService.java
+      - java-api-service/src/main/java/com/example/dispute/hearing/application/HearingTrialDossierService.java
+      - java-api-service/src/main/java/com/example/dispute/hearing/application/HearingReviewHandoffService.java
+      - java-api-service/src/main/resources/db/migration/V044__hearing_temporal_projection.sql
+      - java-api-service/src/test/java/com/example/dispute/hearing/HearingFlowRuntimeServiceTest.java
+      - java-api-service/src/test/java/com/example/dispute/hearing/HearingFlowPersistenceContractTest.java
+      - java-api-service/src/test/java/com/example/dispute/hearing/HearingTrialDossierServiceTest.java
+      - java-api-service/src/test/java/com/example/dispute/hearing/HearingReviewHandoffServiceTest.java
+      - java-api-service/src/test/java/com/example/dispute/hearing/HearingTemporalLedgerIntegrationTest.java
+    forbidden_routes: [Temporal_workflow_decisions, python-agent-service/**, frontend/**, Graph_DB]
+    focused_checks:
+      - HearingFlowRuntimeServiceTest
+      - HearingFlowPersistenceContractTest
+      - HearingTrialDossierServiceTest
+      - HearingReviewHandoffServiceTest
+      - HearingTemporalLedgerIntegrationTest
+  D:
+    role: Compatible Hearing API projection and UI
+    tasks: [P6-D1, P6-D2]
+    owned_routes:
+      - java-api-service/src/main/java/com/example/dispute/hearing/api/**
+      - java-api-service/src/main/java/com/example/dispute/hearing/application/**Query**
+      - frontend/src/views/disputes/HearingCourtView.vue
+      - frontend/src/views/disputes/HearingCourtView.test.js
+      - frontend/src/utils/hearingFlow.js
+      - frontend/src/utils/hearingFlow.test.js
+      - frontend/src/api/hearing.js
+      - frontend/src/api/hearing.test.js
+    forbidden_routes: [writer_mode_selector, Temporal_runtime, Python_graph, business_rule_change, UI_redesign]
+    focused_checks:
+      - HearingCourtView.test.js
+      - hearingFlow.test.js
+      - hearing.test.js
+  E:
+    role: Signed synthetic parity recovery and release controls
+    tasks: [P6-E1, P6-E2]
+    owned_routes:
+      - java-api-service/src/main/java/com/example/dispute/workflow/config/**Hearing**
+      - java-api-service/src/main/java/com/example/dispute/hearing/application/*Scheduler.java
+      - java-api-service/src/test/java/com/example/dispute/hearing/**Reliability**
+      - tests/e2e/test_hearing_flow_v2_live.py
+    forbidden_routes: [formal_activation, secrets, real_case_data, production_deployment, other_rooms]
+    focused_checks:
+      - HearingSignedSyntheticAssemblyTest
+      - HearingReliabilityHarnessTest
+      - HearingSchedulerModeTest
+  R:
+    role: Primary integration gate and evidence owner
+    tasks: [P6-R0, P6-R1, P6-R2, P6-R3]
+    owned_routes:
+      - plans/phase-6-hearing-pilot-execution.md
+      - plans/phase-6-hearing-pilot-test-batches.yaml
+      - docs/runbooks/temporal-first/phase-6-p6.0-contract-pack.md
+      - tests/static/test_phase6_hearing_pilot_plan.py
+      - future exact P6 schemas fixtures evidence and briefs when explicitly granted
+    forbidden_routes: [duplicating_owner_implementation, unrelated_worktree_changes, secrets, production_actions]
+    focused_checks:
+      - python -m pytest -q tests/static/test_phase6_hearing_pilot_plan.py tests/static/test_temporal_refactor_traceability.py
+
+task_dag:
+  P6-R0:
+    description: Freeze approved contract candidate after upstream authorization.
+    requires: [UPSTREAM_AUTHORIZATION]
+    result: CONTRACT_CANDIDATE_COMMIT
+  P6-R1:
+    description: Run all Batch 0 source suites from exact clean detached candidate SHA.
+    requires: [P6-R0]
+    result: IMMUTABLE_BATCH_0_REPORTS
+  P6-R2:
+    description: Commit entry evidence and P6.0 decision separately.
+    requires: [P6-R1]
+    result: P6_0_PASS_OR_BLOCKED
+  P6-A1:
+    description: Implement four explicit Hearing graph families and registry identities.
+    requires: [P6-R2_PASS]
+  P6-B1:
+    description: Implement deterministic 15-stage Hearing child Workflow contract.
+    requires: [P6-R2_PASS]
+  P6-C1:
+    description: Implement additive V044 and Java mode/fence/receipt foundation.
+    requires: [P6-R2_PASS]
+  P6-D1:
+    description: Split side-effect-free query projection and preserve API/UI baseline.
+    requires: [P6-R2_PASS]
+  P6-E1:
+    description: Implement signed synthetic comparison and scheduler detector controls.
+    requires: [P6-R2_PASS]
+  P6-A2:
+    description: Add bounded evidence Send/reducer and checkpoint recovery.
+    requires: [P6-A1, P6-C1]
+  P6-B2:
+    description: Add two waits deadlines signals receipts and AgentRun ordering.
+    requires: [P6-B1, P6-C1]
+  P6-C2:
+    description: Split action ledger Finalizers projection and decision-chain receipts.
+    requires: [P6-C1]
+  P6-D2:
+    description: Verify privacy history route and unchanged six-group presentation.
+    requires: [P6-D1, P6-C2]
+  P6-E2:
+    description: Add kill replay parity metrics reconciliation and rollback harness.
+    requires: [P6-E1, P6-A2, P6-B2, P6-C2]
+  P6-R3:
+    description: Freeze and run one Phase 6 engineering candidate checkpoint.
+    requires: [P6-A2, P6-B2, P6-C2, P6-D2, P6-E2]
+
+tiers:
+  T0:
+    owner: delegated_owner
+    services: none
+    max_duration_seconds: 180
+    purpose: syntax static schema pure graph reducer workflow and UI unit checks
+  T1:
+    owner: R
+    trigger: A_B_C_FOUNDATIONS_INTEGRATED
+    purpose: deduplicated Java Python Temporal contract and baseline checks
+  T2:
+    owner: R
+    trigger: D_E_EXPERIENCE_RECOVERY_INTEGRATED
+    purpose: PostgreSQL Temporal replay privacy API projection frontend and reliability integration
+  T3:
+    owner: R
+    trigger: PHASE_6_ENGINEERING_CANDIDATE_FROZEN
+    purpose: one immutable Phase 6 candidate checkpoint
+  T4:
+    owner: R
+    trigger: EXPLICIT_UNIFIED_OR_PROMOTION_CHECKPOINT_ONLY
+    automatic: false
+    purpose: full repository browser Docker load soak chaos DR real shadow canary and promotion
+
+checks:
+  primary:
+    room_hearing: [ROOM-HEARING-001, ROOM-HEARING-002, ROOM-HEARING-003, ROOM-HEARING-004, ROOM-HEARING-005, ROOM-HEARING-006, ROOM-HEARING-007]
+    temporal: [TEMP-013, TEMP-014, TEMP-015, TEMP-016, TEMP-017, TEMP-018, TEMP-020, TEMP-021, TEMP-022, TEMP-023, TEMP-024, TEMP-025, TEMP-026, TEMP-027, TEMP-028, TEMP-029]
+    agent_run: [RUN-001, RUN-002, RUN-003, RUN-004, RUN-005, RUN-006, RUN-007, RUN-008, RUN-009]
+    graph: [GRAPH-009, GRAPH-011, GRAPH-012, GRAPH-013, GRAPH-014, GRAPH-015, GRAPH-016, GRAPH-017, GRAPH-018, GRAPH-019, GRAPH-020]
+    lcel: [LCEL-001, LCEL-002, LCEL-003, LCEL-004, LCEL-005, LCEL-006, LCEL-007, LCEL-008, LCEL-009, LCEL-010, LCEL-011, LCEL-012, LCEL-013, LCEL-014]
+    java: [JAVA-004, JAVA-005, JAVA-006, JAVA-007, JAVA-008, JAVA-009, JAVA-010]
+    e2e: [E2E-008, E2E-009]
+    migration: [MIG-006]
+  baseline:
+    hearing: [HRG-001, HRG-002, HRG-003, HRG-004, HRG-005, HRG-006, HRG-007, HRG-008, HRG-009, HRG-010, HRG-011, HRG-012, HRG-013, HRG-014, HRG-015, HRG-016, HRG-017, HRG-018, HRG-019]
+    draft: [DRF-001, DRF-002, DRF-003, DRF-004]
+    ui: [UI-002, UI-003, UI-004, UI-005]
+    core: [CORE-001, CORE-002, CORE-003, CORE-004, CORE-005, CORE-006, CORE-007, CORE-008, CORE-009, CORE-010]
+    security: [SEC-001, SEC-002, SEC-003, SEC-004, SEC-005, SEC-006]
+    upstream_interface: [EVD-002, EVD-012]
+  claim_policy:
+    engineering_candidate: PASS_OR_FAIL_FROM_ONE_EXACT_SHA
+    MIG-006: PENDING_PROMOTION_UNTIL_SEPARATE_REAL_SHADOW_CANARY
+    synthetic_can_substitute_for_promotion: false
+
+batches:
+  draft_validation:
+    status: RUNNABLE_DURING_CONTRACT_CANDIDATE_ASSEMBLY
+    purpose: Validate document consistency only; does not pass P6.0 or authorize implementation.
+    commands:
+      - id: static_phase6_draft
+        cwd: .
+        resource_class: light
+        command: >-
+          python -m pytest -q
+          tests/static/test_phase6_hearing_contracts.py
+          tests/static/test_phase6_hearing_pilot_plan.py
+          tests/static/test_phase6_entry_checkpoint.py
+          tests/static/test_temporal_refactor_traceability.py
+  batch_0_entry:
+    status: READY_AFTER_CONTRACT_CANDIDATE_COMMIT_AND_P0_REVIEW
+    owner: R
+    exact_clean_detached_sha_required: true
+    fresh_run_directory_required: true
+    sealed_execution_manifest_required: true
+    all_four_suites_required: true
+    execution_gate:
+      required_batch_status: READY_FOR_EXACT_SHA_BATCH_0
+      required_entry_decision: CONTRACT_CANDIDATE_READY
+      phase_5_authority:
+        checkpoint: PASS
+        accepted_checkpoint_commit: d3ea271188be57adac49592879aaf3417e90c5c0
+        phase_6_exception: ADR_0015_ACCEPTED_FOR_ENGINEERING_ONLY
+      required_next_phase_permission: PHASE_6_ENGINEERING_ONLY
+      reject_before_source_execution: true
+    source_reports:
+      static_phase6_entry: static-phase6-entry.xml
+      python_phase6_entry: python-phase6-entry.xml
+      java_phase6_entry: java-phase6-entry.xml
+      frontend_phase6_entry: frontend-phase6-entry.xml
+    source_commands:
+      - id: static_phase6_entry
+        cwd: .
+        resource_class: light
+        report: static-phase6-entry.xml
+        report_kind: PYTEST_JUNIT
+        command: >-
+          D:\miniconda\python.exe -m pytest -q
+          tests/static/test_phase6_hearing_contracts.py
+          tests/static/test_phase6_hearing_pilot_plan.py
+          tests/static/test_phase6_entry_checkpoint.py
+          tests/static/test_temporal_refactor_traceability.py
+          --junitxml={raw_report}
+      - id: python_phase6_entry
+        cwd: python-agent-service
+        resource_class: light
+        report: python-phase6-entry.xml
+        report_kind: PYTEST_JUNIT
+        command: >-
+          D:\miniconda\python.exe -m pytest -q tests/agents/test_hearing_flow_v2.py
+          --junitxml={raw_report}
+      - id: java_phase6_entry
+        cwd: java-api-service
+        resource_class: heavy
+        report: java-phase6-entry.xml
+        report_kind: SUREFIRE_GLOB
+        raw_report_glob: target/surefire-reports/TEST-*-{report_suffix}.xml
+        command: >-
+          .\mvnw.cmd -DforkCount=1
+          -Dtest=HearingFlowRuntimeServiceTest,HearingFlowPersistenceContractTest,HearingTrialDossierServiceTest,HearingReviewHandoffServiceTest
+          -Dsurefire.reportNameSuffix={report_suffix} test
+      - id: frontend_phase6_entry
+        cwd: frontend
+        resource_class: light
+        report: frontend-phase6-entry.xml
+        report_kind: VITEST_JUNIT
+        command: >-
+          node node_modules/vitest/vitest.mjs run
+          src/views/disputes/HearingCourtView.test.js
+          src/utils/hearingFlow.test.js
+          src/api/hearing.test.js
+          --reporter=default --reporter=junit
+          --outputFile.junit={raw_report}
+    execution_manifest:
+      filename: phase6-entry-execution-manifest.json
+      schema_version: phase6-entry-execution-manifest.v1
+      seal: SHA256_CANONICAL_JSON_EXCLUDING_MANIFEST_SHA256
+      ordered_source_prefix_required_on_resume: true
+      source_report_hashes_required: true
+      stdout_stderr_hashes_required: true
+      candidate_unchanged_before_and_after_every_source: true
+      terminal_green_status: SOURCE_SUITES_GREEN_AWAITING_SEPARATE_ENTRY_EVIDENCE
+      forbidden_statuses: [P6_0_PASS, IMPLEMENTATION_AUTHORIZED, MIG_006_PASS]
+    retry_policy:
+      classify_before_resume: true
+      classifications: [PRODUCT, FIXTURE, INFRA, EXTERNAL_GATE]
+      same_sha_retry_allowed_only_for: INFRA
+      quarantined_attempts_reused: false
+      product_fixture_external_gate_block_candidate: true
+      mixed_candidate_reports_forbidden: true
+    required_result: ALL_PASS_THEN_SEPARATE_ENTRY_EVIDENCE_COMMIT
+  batch_1_foundation:
+    status: BLOCKED_UNTIL_P6_0_PASS_AND_A_B_C_INTEGRATED
+    owner: R
+    java_test_classes:
+      - HearingRoomWorkflowTest
+      - HearingRoomWorkflowReplayTest
+      - HearingFlowRuntimeServiceTest
+      - HearingFlowPersistenceContractTest
+      - HearingTrialDossierServiceTest
+      - HearingTemporalLedgerIntegrationTest
+    python_test_paths:
+      - python-agent-service/tests/graphs/hearing/**
+      - python-agent-service/tests/agents/test_hearing_flow_v2.py
+      - python-agent-service/tests/graph_runtime/**/test_*hearing*.py
+    static_test_paths:
+      - tests/static/test_phase6_hearing_contracts.py
+      - tests/static/test_phase6_hearing_pilot_plan.py
+      - tests/static/test_phase6_entry_checkpoint.py
+      - tests/static/test_temporal_refactor_traceability.py
+    assertions:
+      - EXACT_15_STAGE_ORDER_AND_14_ADJACENT_EDGES
+      - ALL_ILLEGAL_EDGES_REJECTED
+      - FOUR_GRAPH_FAMILIES_SEVEN_OPERATIONS
+      - JAVA_FINALIZER_AND_FENCE_AUTHORITY
+      - NO_FORMAL_GRAPH_SINK
+  batch_2_integration:
+    status: BLOCKED_UNTIL_D_E_AND_FOUNDATIONS_INTEGRATED
+    owner: R
+    java_test_classes:
+      - HearingRoomWorkflowWorkerRecoveryTest
+      - HearingTemporalLedgerIntegrationTest
+      - HearingReviewHandoffServiceTest
+      - HearingSignedSyntheticAssemblyTest
+      - HearingSchedulerModeTest
+      - HearingReliabilityHarnessTest
+    python_test_paths:
+      - python-agent-service/tests/graphs/hearing/**
+      - python-agent-service/tests/security/test_*hearing*.py
+    frontend_test_paths:
+      - frontend/src/views/disputes/HearingCourtView.test.js
+      - frontend/src/utils/hearingFlow.test.js
+      - frontend/src/api/hearing.test.js
+    assertions:
+      - TWO_SHARED_DEADLINES_AND_SIGNAL_TIMEOUT_RACES
+      - PRIVATE_BEFORE_BARRIER_SHARED_FORMAL_ARTIFACT_AFTER_BARRIER
+      - DOSSIER_V1_JURY_V2_HASH_CHAIN
+      - IDEMPOTENT_HANDOFF_AND_CLOSED_PROJECTION
+      - SIDE_EFFECT_FREE_GET_AND_COMPLETE
+      - UI_BASELINE_UNCHANGED
+  batch_3_candidate:
+    status: BLOCKED_UNTIL_ALL_FIVE_SLICES_PASS
+    owner: R
+    exact_clean_detached_sha_required: true
+    fresh_run_directory_required: true
+    report_hashes_required: true
+    source_suites: [static, python, java, frontend]
+    candidate_content:
+      - ALL_BATCH_1_AND_BATCH_2_TESTS
+      - ALL_CURRENT_HEARING_BASELINE_TESTS
+      - CAPTURED_TEMPORAL_HISTORY_REPLAY
+      - POSTGRESQL_FENCE_IDEMPOTENCY_AND_LOST_RESPONSE_TESTS
+      - SIGNED_SYNTHETIC_15_STAGE_PARITY_AND_NO_FORMAL_SINK
+    forbidden_substitutions:
+      - REPORT_FROM_ANOTHER_SHA
+      - MIXED_RETRY_REPORTS_WITHOUT_CLASSIFICATION
+      - UNIT_TEST_AS_REAL_SHADOW_EVIDENCE
+      - SYNTHETIC_RESULT_AS_MIG_006_PASS
+  batch_4_promotion:
+    status: EXTERNAL_AND_NOT_AUTHORIZED
+    owner: R
+    trigger: EXPLICIT_PROMOTION_AUTHORIZATION
+    required_but_not_runnable_from_this_plan:
+      - AUTHORIZED_ACTIVE_CASE_SHADOW_PARITY
+      - DEADLINE_AND_SIGNAL_DRILL
+      - CAPTURED_HISTORY_REPLAY_ON_DEPLOYMENT_IMAGE
+      - NEW_EPOCH_TEMPORAL_COHORT_AND_CANARY
+      - LEGACY_ADVANCE_AND_SCHEDULER_REJECTION
+      - LOAD_SOAK_CHAOS_SECURITY_AND_DR_GATES
+
+failure_policy:
+  classifications: [PRODUCT, FIXTURE, INFRA, EXTERNAL_GATE]
+  product_or_fixture_candidate_failure: NEW_SHA_AND_COMPLETE_CANDIDATE_RERUN
+  infra_retry: SAME_SHA_ONLY_WITH_CLASSIFIED_IMMUTABLE_FAILURE_EVIDENCE
+  external_gate: KEEP_ENGINEERING_RESULT_SEPARATE_AND_PROMOTION_BLOCKED
+  p0_blocks_integration: true
+  p1_or_lower: RECORD_FOR_RELIABILITY_BACKLOG_UNDER_CURRENT_DELIVERY_POLICY
+
+rollback:
+  engineering:
+    - Keep formal Hearing allocation LEGACY and new Phase 6 runtime DISABLED.
+    - Stop signed synthetic commands and fence nonterminal Graph leases.
+    - Preserve V035 facts and any additive V044 or comparison rows.
+    - Re-run mode no-formal-sink privacy stage-order and side-effect-free query gates.
+  future_temporal:
+    - Set new Hearing cohort allocation to zero without changing active epoch mode.
+    - Keep active TEMPORAL Hearings pinned to compatible workers until terminal.
+    - Never return an active flow to Java or regenerate dossier V1 Jury V2 or handoff.
+    - Reconcile History revision and Java receipts before resuming.
+
+exit_report_shape:
+  engineering_checkpoint: PASS_OR_FAIL
+  contract_gate: P6_0_PASS
+  promotion_gate: MIG_006_PENDING_OR_FAIL
+  next_phase_permission: PHASE_7_ENGINEERING_ONLY_OR_BLOCKED
+  MIG-006: PENDING_PROMOTION
