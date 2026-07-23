@@ -49,7 +49,8 @@ def _task_bindings(candidate: str = CANDIDATE) -> dict:
     }
 
 
-def test_wave_a_plan_is_three_source_t1_and_still_blocked_after_pass() -> None:
+def test_wave_a_plan_is_closed_after_integration_without_opening_candidate() -> None:
+    matrix = runner.load_matrix()
     plan = runner.candidate_plan(CANDIDATE)
 
     assert plan["batch"] == "P5-BATCH-1"
@@ -66,10 +67,16 @@ def test_wave_a_plan_is_three_source_t1_and_still_blocked_after_pass() -> None:
     }
     assert plan["execution_gate"] == {
         "accepted_wave_a_base_commit": "496d0d459b97000f62742fe064d8ef70956ea419",
-        "wave_a": "READY",
-        "wave_b": "BLOCKED_ON_WAVE_A_INTEGRATION",
-        "execute_allowed": True,
+        "wave_a": "INTEGRATED",
+        "wave_b": "READY",
+        "execute_allowed": False,
     }
+    assert matrix["waves"]["candidate_wave"]["status"] == (
+        "BLOCKED_ON_WAVE_B_AND_ENGINEERING_EVIDENCE"
+    )
+    assert matrix["gate"]["accepted_entry_state"]["promotion_gate"] == "PENDING"
+    assert matrix["gate"]["traffic_constraints"]["promotion_allowed"] is False
+    assert plan["runtime_restrictions"]["promotion"] == "forbidden"
     assert set(plan["runtime_restrictions"].values()) <= {
         "none",
         "forbidden",
@@ -201,6 +208,75 @@ def test_source_record_normalizes_junit_with_candidate_and_command_binding(
     assert record["report_sha256"] == runner.shared._sha256(report.path)
 
 
+@pytest.mark.parametrize(
+    ("failures", "errors", "skipped"),
+    ((1, 0, 0), (0, 1, 0), (0, 0, 1)),
+)
+def test_source_record_rejects_mixed_or_skipped_junit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    failures: int,
+    errors: int,
+    skipped: int,
+) -> None:
+    repository = tmp_path / "repo"
+    (repository / "python-agent-service").mkdir(parents=True)
+    run_root = repository / ".codex-run" / "wave-a"
+    run_root.mkdir(parents=True)
+    monkeypatch.setattr(runner, "ROOT", repository)
+    monkeypatch.setattr(runner, "_assert_candidate_unchanged", lambda *_args: None)
+
+    def fake_run(
+        argv: list[str], _cwd: Path, stdout: Path, stderr: Path
+    ) -> tuple[str, str, float, int]:
+        outcome = (
+            '<failure message="fixture failure" />'
+            if failures
+            else '<error message="fixture error" />'
+            if errors
+            else '<skipped message="fixture skip" />'
+        )
+        junit = Path(
+            next(item for item in argv if item.startswith("--junitxml=")).split(
+                "=", 1
+            )[1]
+        )
+        junit.write_text(
+            f'<testsuite name="fixture" tests="2" failures="{failures}" '
+            f'errors="{errors}" skipped="{skipped}" time="0.01">'
+            '<testcase classname="fixture.python" name="passes" time="0.01" />'
+            f'<testcase classname="fixture.python" name="mixed" time="0">{outcome}'
+            "</testcase>"
+            "</testsuite>\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        stdout.write_text("mixed result\n", encoding="utf-8", newline="\n")
+        stderr.write_text("", encoding="utf-8", newline="\n")
+        return (
+            "2026-07-23T00:00:00+00:00",
+            "2026-07-23T00:00:01+00:00",
+            1.0,
+            0,
+        )
+
+    monkeypatch.setattr(runner.shared, "_run_shell", fake_run)
+
+    record, passed = runner._record_source(
+        command_id="p5_wave_a_python",
+        candidate=CANDIDATE,
+        run_root=run_root,
+        matrix_item=runner.load_source_commands()["p5_wave_a_python"],
+        environment_sha256="e" * 64,
+    )
+
+    assert not passed
+    assert record["accepted"] is False
+    assert record["failure_classification"] == "UNCLASSIFIED"
+    assert "not all-pass zero-skip" in record["failure_reason"]
+    assert not (run_root / "source" / runner.SOURCE_REPORTS["p5_wave_a_python"]).exists()
+
+
 def test_only_infra_classification_can_resume_same_sha() -> None:
     pending = {
         "id": "p5_wave_a_java",
@@ -231,7 +307,44 @@ def test_only_infra_classification_can_resume_same_sha() -> None:
     assert blocked["status"] == "CANDIDATE_BLOCKED"
 
 
-def test_cli_help_does_not_execute_sources(capsys: pytest.CaptureFixture[str]) -> None:
+def test_cli_plan_reports_closed_wave_a_execution_gate(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     assert runner.main(["--candidate-commit", CANDIDATE]) == 0
     plan = json.loads(capsys.readouterr().out)
-    assert plan["execution_gate"]["execute_allowed"] is True
+    assert plan["execution_gate"] == {
+        "accepted_wave_a_base_commit": "496d0d459b97000f62742fe064d8ef70956ea419",
+        "wave_a": "INTEGRATED",
+        "wave_b": "READY",
+        "execute_allowed": False,
+    }
+
+
+def test_cli_rejects_repeat_wave_a_execution_before_source_launch(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "repeat-wave-a"
+    bindings = tmp_path / "bindings.json"
+
+    def reject_source_launch(**_kwargs: object) -> tuple[dict, bool]:
+        pytest.fail("post-integration Wave A attempted to launch a source command")
+
+    monkeypatch.setattr(runner, "_record_source", reject_source_launch)
+
+    assert runner.main(
+        [
+            "--candidate-commit",
+            CANDIDATE,
+            "--execute",
+            "--run-dir",
+            str(run_root),
+            "--task-bindings",
+            str(bindings),
+        ]
+    ) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "P5-BATCH-1 matrix state is not execution-ready" in captured.err
+    assert not run_root.exists()
