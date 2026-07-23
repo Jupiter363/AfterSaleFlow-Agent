@@ -1,5 +1,6 @@
 package com.example.dispute.workflow.temporal.room.hearing;
 
+import com.example.dispute.hearing.domain.HearingWriterMode;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -10,6 +11,9 @@ public record HearingRoomSnapshot(
     String tenantSurrogate,
     String caseId,
     String roomId,
+    String flowInstanceId,
+    String epochId,
+    HearingWriterMode writerMode,
     long roomEpoch,
     long fencingToken,
     HearingWorkflowStage stage,
@@ -26,7 +30,14 @@ public record HearingRoomSnapshot(
     long lastCommittedEventSequence,
     long duplicateSignalCount,
     long rejectedSignalCount,
-    String protocolErrorCode) {
+    String protocolErrorCode,
+    List<Long> pendingReceiptRevisions,
+    int acceptedReceiptCount,
+    String lastReceiptId,
+    String lastReceiptHash,
+    String agentResultReceiptId,
+    String handoffReceiptId,
+    String handoffReceiptHash) {
 
   public HearingRoomSnapshot {
     partyTerminals = partyTerminals == null ? Map.of() : Map.copyOf(partyTerminals);
@@ -36,5 +47,7 @@ public record HearingRoomSnapshot(
             : List.copyOf(timeoutRequiredParticipantIds);
     orderedOperationKeys =
         orderedOperationKeys == null ? List.of() : List.copyOf(orderedOperationKeys);
+    pendingReceiptRevisions =
+        pendingReceiptRevisions == null ? List.of() : List.copyOf(pendingReceiptRevisions);
   }
 }

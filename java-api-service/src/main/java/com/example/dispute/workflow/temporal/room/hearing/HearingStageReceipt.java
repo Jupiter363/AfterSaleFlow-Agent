@@ -1,35 +1,23 @@
 package com.example.dispute.workflow.temporal.room.hearing;
 
+import com.example.dispute.hearing.domain.HearingAuthorityCommit;
 import java.util.Objects;
 
-/** Java-committed completion receipt for a non-party stage. */
+/** Java-committed receipt for a non-party Hearing operation. */
 public record HearingStageReceipt(
     String schemaVersion,
-    String receiptId,
-    HearingWorkflowStage stage,
-    int stageSequence,
-    String operationKey,
-    String requestHash,
-    String resultHash,
-    long processRevision,
-    long roomRevision,
-    long committedEventSequence) {
+    HearingCommittedReceipt committed) {
+
+  public static final String SCHEMA_VERSION = "hearing-stage-receipt.v1";
 
   public HearingStageReceipt {
-    if (!"hearing-stage-receipt.v1".equals(schemaVersion)) {
-      throw new IllegalArgumentException("schemaVersion must be hearing-stage-receipt.v1");
+    if (!SCHEMA_VERSION.equals(schemaVersion)) {
+      throw new IllegalArgumentException("schemaVersion must be " + SCHEMA_VERSION);
     }
-    requireText(receiptId, "receiptId");
-    Objects.requireNonNull(stage, "stage must not be null");
-    if (stageSequence != stage.sequence() || stage.isPartyWait() || stage == HearingWorkflowStage.CLOSED) {
-      throw new IllegalArgumentException("receipt stage/sequence is not a completable system stage");
+    Objects.requireNonNull(committed, "committed must not be null");
+    if (committed.operationType() == HearingAuthorityCommit.OperationType.PARTY_TERMINAL) {
+      throw new IllegalArgumentException("party receipt cannot use the stage Signal");
     }
-    requireText(operationKey, "operationKey");
-    requireHash(requestHash, "requestHash");
-    requireHash(resultHash, "resultHash");
-    requirePositive(processRevision, "processRevision");
-    requirePositive(roomRevision, "roomRevision");
-    requirePositive(committedEventSequence, "committedEventSequence");
   }
 
   static void requireText(String value, String field) {

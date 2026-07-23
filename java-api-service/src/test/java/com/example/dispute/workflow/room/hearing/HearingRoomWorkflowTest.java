@@ -21,7 +21,6 @@ import io.temporal.worker.Worker;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Arrays;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Predicate;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -30,14 +29,9 @@ import org.junit.jupiter.api.Test;
 class HearingRoomWorkflowTest {
 
   private static final String TASK_QUEUE = "phase6-hearing-room-workflow-test";
-  private static final String CASE_ID = "CASE_P6_SYNTHETIC_HEARING";
-  private static final long EPOCH = 6;
-  private static final String INITIATOR = "PARTICIPANT_P6_INITIATOR";
-  private static final String RESPONDENT = "PARTICIPANT_P6_RESPONDENT";
 
   private TestWorkflowEnvironment environment;
   private WorkflowClient client;
-  private AtomicLong revision;
 
   @BeforeEach
   void setUp() {
@@ -46,7 +40,6 @@ class HearingRoomWorkflowTest {
     worker.registerWorkflowImplementationTypes(HearingRoomWorkflowImpl.class);
     environment.start();
     client = environment.getWorkflowClient();
-    revision = new AtomicLong();
   }
 
   @AfterEach
@@ -55,7 +48,7 @@ class HearingRoomWorkflowTest {
   }
 
   @Test
-  void stageContractContainsExactlyFifteenStagesAndFourteenAdjacentEdges() {
+  void stageContractContainsExactlyFifteenStagesAndSevenAgentOperations() {
     assertThat(HearingWorkflowStage.values())
         .extracting(Enum::name)
         .containsExactly(
@@ -81,6 +74,19 @@ class HearingRoomWorkflowTest {
         .containsExactly(
             HearingWorkflowStage.PARTY_ANSWERS_OPEN,
             HearingWorkflowStage.PARTY_EVIDENCE_OPEN);
+    assertThat(
+            Arrays.stream(HearingWorkflowStage.values())
+                .filter(HearingWorkflowStage::requiresAgentRun)
+                .map(HearingWorkflowStage::agentOperation)
+                .toList())
+        .containsExactly(
+            "intake_questions",
+            "intake_synthesis",
+            "evidence_requests",
+            "evidence_synthesis",
+            "judge_v1",
+            "jury_review",
+            "judge_v2");
     for (int sequence = 1; sequence < 15; sequence++) {
       assertThat(HearingWorkflowStage.atSequence(sequence).next())
           .isEqualTo(HearingWorkflowStage.atSequence(sequence + 1));
@@ -96,201 +102,210 @@ class HearingRoomWorkflowTest {
   void fullReceiptDrivenFlowPreservesDeadlineAndWaitsForJavaTimeoutReceipt()
       throws Exception {
     Started started = start("full", Duration.ofSeconds(3));
-    advanceSystemStages(started.workflow(), HearingWorkflowStage.PARTY_ANSWERS_OPEN);
+    advanceTo(started, HearingWorkflowStage.PARTY_ANSWERS_OPEN);
 
     HearingRoomSnapshot answerWait =
         awaitState(started.workflow(), state -> state.stageDeadlineAt() != null);
     Instant answerDeadline = answerWait.stageDeadlineAt();
-    started.workflow().partyTerminal(partyReceipt(answerWait, INITIATOR, "ANSWER_I", false));
-    HearingRoomSnapshot afterFirstAnswer =
-        awaitState(started.workflow(), state -> state.partyTerminals().size() == 1);
+    started.workflow().partyTerminal(
+        started.receipts().party(
+            answerWait,
+            HearingReceiptTestFactory.INITIATOR,
+            "ANSWER_I",
+            HearingPartyTerminalReceipt.TerminalStatus.SUBMITTED,
+            false));
+    HearingRoomSnapshot afterFirstAnswer = awaitState(
+        started.workflow(), state -> state.partyTerminals().size() == 1);
     assertThat(afterFirstAnswer.stageDeadlineAt()).isEqualTo(answerDeadline);
-    started.workflow().partyTerminal(partyReceipt(afterFirstAnswer, RESPONDENT, "ANSWER_R", false));
+    started.workflow().partyTerminal(
+        started.receipts().party(
+            afterFirstAnswer,
+            HearingReceiptTestFactory.RESPONDENT,
+            "ANSWER_R",
+            HearingPartyTerminalReceipt.TerminalStatus.SUBMITTED,
+            true));
     awaitStage(started.workflow(), HearingWorkflowStage.INTAKE_SYNTHESIZING);
 
-    advanceSystemStages(started.workflow(), HearingWorkflowStage.PARTY_EVIDENCE_OPEN);
+    advanceTo(started, HearingWorkflowStage.PARTY_EVIDENCE_OPEN);
     HearingRoomSnapshot evidenceWait =
         awaitState(started.workflow(), state -> state.stageDeadlineAt() != null);
     started.workflow().partyTerminal(
-        partyReceipt(evidenceWait, INITIATOR, "EVIDENCE_I", false));
+        started.receipts().party(
+            evidenceWait,
+            HearingReceiptTestFactory.INITIATOR,
+            "EVIDENCE_I",
+            HearingPartyTerminalReceipt.TerminalStatus.SUBMITTED,
+            false));
     environment.sleep(Duration.ofSeconds(4));
     HearingRoomSnapshot expired =
         awaitState(started.workflow(), HearingRoomSnapshot::deadlineReached);
     assertThat(expired.stage()).isEqualTo(HearingWorkflowStage.PARTY_EVIDENCE_OPEN);
-    assertThat(expired.timeoutRequiredParticipantIds()).containsExactly(RESPONDENT);
+    assertThat(expired.timeoutRequiredParticipantIds())
+        .containsExactly(HearingReceiptTestFactory.RESPONDENT);
     assertThat(expired.orderedOperationKeys())
         .contains(
             HearingOperationKeys.partyDeadline(
-                CASE_ID,
-                EPOCH,
+                HearingReceiptTestFactory.TENANT,
+                HearingReceiptTestFactory.CASE_ID,
+                HearingReceiptTestFactory.ROOM_EPOCH,
                 HearingWorkflowStage.PARTY_EVIDENCE_OPEN,
                 HearingWorkflowStage.PARTY_EVIDENCE_OPEN.sequence()));
     started.workflow().partyTerminal(
-        partyReceipt(expired, RESPONDENT, "EVIDENCE_R_TIMEOUT", true));
+        started.receipts().party(
+            expired,
+            HearingReceiptTestFactory.RESPONDENT,
+            "EVIDENCE_R_TIMEOUT",
+            HearingPartyTerminalReceipt.TerminalStatus.AUTO_TIMEOUT,
+            true));
     awaitStage(started.workflow(), HearingWorkflowStage.EVIDENCE_SYNTHESIZING);
 
-    advanceSystemStages(started.workflow(), HearingWorkflowStage.CLOSED);
+    completeRemaining(started);
     HearingRoomSnapshot result =
         WorkflowStub.fromTyped(started.workflow()).getResult(HearingRoomSnapshot.class);
     assertThat(result.status()).isEqualTo("CLOSED");
     assertThat(result.stage()).isEqualTo(HearingWorkflowStage.CLOSED);
     assertThat(result.stageSequence()).isEqualTo(15);
     assertThat(result.rejectedSignalCount()).isZero();
-    assertThat(result.processRevision()).isEqualTo(revision.get());
-    assertThat(result.roomRevision()).isEqualTo(revision.get());
+    assertThat(result.processRevision()).isEqualTo(result.acceptedReceiptCount());
+    assertThat(result.roomRevision()).isEqualTo(result.acceptedReceiptCount());
+    assertThat(result.pendingReceiptRevisions()).isEmpty();
+    assertThat(result.lastReceiptId()).isNotBlank();
+    assertThat(result.handoffReceiptId()).isNotBlank();
 
     WorkflowExecutionHistory history = client.fetchHistory(started.workflowId());
     WorkflowReplayer.replayWorkflowExecution(history, HearingRoomWorkflowImpl.class);
   }
 
   @Test
-  void duplicateReceiptIsIdempotentAndConflictingOperationDoesNotAdvance() {
-    Started started = start("dedupe", Duration.ofMinutes(20));
-    HearingRoomSnapshot initial = awaitStage(started.workflow(), HearingWorkflowStage.COURT_PREPARING);
-    HearingStageReceipt first = stageReceipt(initial);
-    started.workflow().stageCompleted(first);
-    started.workflow().stageCompleted(first);
-    HearingRoomSnapshot introduction =
-        awaitStage(started.workflow(), HearingWorkflowStage.CASE_INTRODUCTION);
-    assertThat(awaitState(started.workflow(), state -> state.duplicateSignalCount() == 1)
-            .duplicateSignalCount())
-        .isEqualTo(1);
+  void finalizerCannotBypassRequiredAgentResult() {
+    Started started = start("agent-order", Duration.ofMinutes(20));
+    advanceTo(started, HearingWorkflowStage.INTAKE_QUESTIONS_GENERATING);
+    HearingRoomSnapshot agentStage = started.workflow().state();
+    Instant deadline = nextPartyDeadline(started.start());
 
-    long next = revision.incrementAndGet();
-    HearingStageReceipt wrong =
-        new HearingStageReceipt(
-            "hearing-stage-receipt.v1",
-            "RECEIPT_WRONG_KEY",
-            introduction.stage(),
-            introduction.stageSequence(),
-            HearingOperationKeys.stageCompletion(
-                CASE_ID,
-                EPOCH,
-                HearingWorkflowStage.EVIDENCE_INTRODUCTION,
-                HearingWorkflowStage.EVIDENCE_INTRODUCTION.sequence()),
-            hash('a'),
-            hash('b'),
-            next,
-            next,
-            next);
-    started.workflow().stageCompleted(wrong);
-    HearingRoomSnapshot rejected =
-        awaitState(started.workflow(), state -> state.rejectedSignalCount() == 1);
-    assertThat(rejected.stage()).isEqualTo(HearingWorkflowStage.CASE_INTRODUCTION);
-    assertThat(rejected.protocolErrorCode())
-        .isEqualTo("HEARING_STAGE_RECEIPT_OPERATION_KEY_MISMATCH");
+    started.workflow().stageCompleted(
+        started.receipts().finalizer(
+            agentStage,
+            HearingWorkflowStage.PARTY_ANSWERS_OPEN,
+            deadline,
+            "hearing_question_set.v1"));
 
-    completeRemaining(started.workflow());
-    assertThat(WorkflowStub.fromTyped(started.workflow()).getResult(HearingRoomSnapshot.class).status())
-        .isEqualTo("CLOSED");
+    HearingRoomSnapshot rejected = awaitState(
+        started.workflow(), state -> state.rejectedSignalCount() == 1);
+    assertThat(rejected.stage()).isEqualTo(HearingWorkflowStage.INTAKE_QUESTIONS_GENERATING);
+    assertThat(rejected.status()).isEqualTo("FAILED");
+    assertThat(rejected.protocolErrorCode()).isEqualTo("HEARING_STAGE_RECEIPT_OPERATION_INVALID");
+    assertThat(rejected.pendingReceiptRevisions())
+        .containsExactly(agentStage.processRevision() + 1);
   }
 
   private Started start(String suffix, Duration partyWindow) {
     Instant openedAt = Instant.ofEpochMilli(environment.currentTimeMillis());
-    HearingRoomStart start =
-        new HearingRoomStart(
-            "hearing-room-start.v1",
-            "TENANT_P6_SYNTHETIC_HEARING",
-            CASE_ID,
-            "ROOM_P6_HEARING",
-            EPOCH,
-            19,
-            INITIATOR,
-            RESPONDENT,
-            openedAt,
-            openedAt.plus(Duration.ofHours(3)),
-            partyWindow.toSeconds(),
-            0,
-            0,
-            "hearing-workflow.synthetic.v1");
-    String workflowId = "hearing-room:" + CASE_ID + ":" + EPOCH + ":" + suffix;
-    HearingRoomWorkflow workflow =
-        client.newWorkflowStub(
-            HearingRoomWorkflow.class,
-            WorkflowOptions.newBuilder()
-                .setWorkflowId(workflowId)
-                .setTaskQueue(TASK_QUEUE)
-                .build());
+    HearingRoomStart start = HearingReceiptTestFactory.start(openedAt, partyWindow);
+    HearingReceiptTestFactory receipts = new HearingReceiptTestFactory(start);
+    String workflowId = "hearing-room:" + HearingReceiptTestFactory.CASE_ID + ':'
+        + HearingReceiptTestFactory.ROOM_EPOCH + ':' + suffix;
+    HearingRoomWorkflow workflow = client.newWorkflowStub(
+        HearingRoomWorkflow.class,
+        WorkflowOptions.newBuilder()
+            .setWorkflowId(workflowId)
+            .setTaskQueue(TASK_QUEUE)
+            .build());
     WorkflowClient.start(workflow::run, start);
-    return new Started(workflow, workflowId);
+    awaitStage(workflow, HearingWorkflowStage.COURT_PREPARING);
+    return new Started(workflow, workflowId, start, receipts);
   }
 
-  private void advanceSystemStages(
-      HearingRoomWorkflow workflow, HearingWorkflowStage target) {
-    while (true) {
-      HearingRoomSnapshot current = workflow.state();
-      if (current.stage() == target) {
-        return;
-      }
-      assertThat(current.stage()).isNotNull();
-      assertThat(current.stage().isPartyWait()).isFalse();
-      workflow.stageCompleted(stageReceipt(current));
-      awaitState(workflow, state -> state.stageSequence() > current.stageSequence());
-    }
-  }
-
-  private void completeRemaining(HearingRoomWorkflow workflow) {
-    while (workflow.state().stage() != HearingWorkflowStage.CLOSED) {
-      HearingRoomSnapshot state = workflow.state();
-      if (state.stage().isPartyWait()) {
-        workflow.partyTerminal(partyReceipt(state, INITIATOR, "AUTO_I_" + state.stageSequence(), false));
-        HearingRoomSnapshot one = awaitState(workflow, item -> item.partyTerminals().size() == 1);
-        workflow.partyTerminal(partyReceipt(one, RESPONDENT, "AUTO_R_" + state.stageSequence(), false));
-        awaitState(workflow, item -> item.stageSequence() > state.stageSequence());
+  private void advanceTo(Started started, HearingWorkflowStage target) {
+    while (started.workflow().state().stage() != target) {
+      HearingRoomSnapshot current = started.workflow().state();
+      if (current.stage().isPartyWait()) {
+        started.workflow().partyTerminal(
+            started.receipts().party(
+                current,
+                HearingReceiptTestFactory.INITIATOR,
+                "AUTO_I_" + current.stageSequence(),
+                HearingPartyTerminalReceipt.TerminalStatus.SUBMITTED,
+                false));
+        HearingRoomSnapshot one = awaitState(
+            started.workflow(), state -> state.partyTerminals().size() == 1);
+        started.workflow().partyTerminal(
+            started.receipts().party(
+                one,
+                HearingReceiptTestFactory.RESPONDENT,
+                "AUTO_R_" + current.stageSequence(),
+                HearingPartyTerminalReceipt.TerminalStatus.SUBMITTED,
+                true));
+        awaitState(
+            started.workflow(), state -> state.stageSequence() > current.stageSequence());
       } else {
-        workflow.stageCompleted(stageReceipt(state));
-        awaitState(workflow, item -> item.stageSequence() > state.stageSequence());
+        completeNonWaitStage(started, current);
       }
     }
   }
 
-  private HearingStageReceipt stageReceipt(HearingRoomSnapshot state) {
-    long next = revision.incrementAndGet();
-    return new HearingStageReceipt(
-        "hearing-stage-receipt.v1",
-        "RECEIPT_" + state.stage().name() + "_" + next,
-        state.stage(),
-        state.stageSequence(),
-        HearingOperationKeys.stageCompletion(
-            CASE_ID, EPOCH, state.stage(), state.stageSequence()),
-        hash('c'),
-        hash('d'),
-        next,
-        next,
-        next);
+  private void completeRemaining(Started started) {
+    advanceTo(started, HearingWorkflowStage.HUMAN_REVIEW_OPEN);
+    HearingRoomSnapshot review = started.workflow().state();
+    started.workflow().stageCompleted(
+        started.receipts().handoff(
+            review,
+            "JUDGE_V2_SYNTHETIC",
+            HearingReceiptTestFactory.hash("judge-v2")));
+    HearingRoomSnapshot handedOff = awaitState(
+        started.workflow(), state -> state.handoffReceiptId() != null);
+    started.workflow().stageCompleted(started.receipts().close(handedOff));
   }
 
-  private HearingPartyTerminalReceipt partyReceipt(
-      HearingRoomSnapshot state, String participantId, String requestId, boolean timeout) {
-    long next = revision.incrementAndGet();
-    return new HearingPartyTerminalReceipt(
-        "hearing-party-terminal-receipt.v1",
-        requestId,
-        participantId,
-        state.stage(),
-        state.stageSequence(),
-        timeout
-            ? HearingPartyTerminalReceipt.TerminalStatus.AUTO_TIMEOUT
-            : HearingPartyTerminalReceipt.TerminalStatus.SUBMITTED,
-        HearingOperationKeys.partyTerminal(
-            CASE_ID,
-            EPOCH,
-            state.stage(),
-            state.stageSequence(),
-            participantId,
-            requestId),
-        hash('e'),
-        next,
-        next,
-        next);
+  private void completeNonWaitStage(Started started, HearingRoomSnapshot current) {
+    HearingWorkflowStage next = current.stage().next();
+    if (current.stage().requiresAgentRun()) {
+      started.workflow().stageCompleted(started.receipts().agentResult(current));
+      HearingRoomSnapshot agentResult = awaitState(
+          started.workflow(),
+          state -> state.processRevision() == current.processRevision() + 1);
+      started.workflow().stageCompleted(
+          started.receipts().finalizer(
+              agentResult,
+              next,
+              next.isPartyWait() ? nextPartyDeadline(started.start()) : null,
+              artifactType(current.stage())));
+    } else if (current.stage() == HearingWorkflowStage.DOSSIER_FREEZING) {
+      started.workflow().stageCompleted(
+          started.receipts().finalizer(
+              current, next, null, "trial_dossier.v1"));
+    } else {
+      started.workflow().stageCompleted(
+          started.receipts().stageCompletion(current, next, null));
+    }
+    awaitState(started.workflow(), state -> state.stageSequence() > current.stageSequence());
   }
 
-  private static HearingRoomSnapshot awaitStage(
+  private Instant nextPartyDeadline(HearingRoomStart start) {
+    Instant window = Instant.ofEpochMilli(environment.currentTimeMillis())
+        .plusSeconds(start.partyStageWindowSeconds());
+    return window.isBefore(start.hearingDeadlineAt()) ? window : start.hearingDeadlineAt();
+  }
+
+  private static String artifactType(HearingWorkflowStage stage) {
+    return switch (stage) {
+      case INTAKE_QUESTIONS_GENERATING -> "hearing_question_set.v1";
+      case INTAKE_SYNTHESIZING -> "hearing_intake_matrix.v1";
+      case EVIDENCE_REQUESTS_GENERATING -> "hearing_evidence_request_set.v1";
+      case EVIDENCE_SYNTHESIZING -> "hearing_evidence_matrix.v1";
+      case JUDGE_V1_GENERATING -> "hearing_judge_v1.v1";
+      case JURY_REVIEWING -> "hearing_jury_review.v1";
+      case JUDGE_V2_GENERATING -> "hearing_judge_v2.v1";
+      default -> throw new IllegalArgumentException("stage has no Agent finalizer artifact");
+    };
+  }
+
+  static HearingRoomSnapshot awaitStage(
       HearingRoomWorkflow workflow, HearingWorkflowStage expected) {
     return awaitState(workflow, state -> state.stage() == expected);
   }
 
-  private static HearingRoomSnapshot awaitState(
+  static HearingRoomSnapshot awaitState(
       HearingRoomWorkflow workflow, Predicate<HearingRoomSnapshot> predicate) {
     long deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
     HearingRoomSnapshot last = null;
@@ -309,9 +324,9 @@ class HearingRoomWorkflowTest {
     throw new AssertionError("workflow state did not reach expected condition: " + last);
   }
 
-  private static String hash(char value) {
-    return String.valueOf(value).repeat(64);
-  }
-
-  private record Started(HearingRoomWorkflow workflow, String workflowId) {}
+  private record Started(
+      HearingRoomWorkflow workflow,
+      String workflowId,
+      HearingRoomStart start,
+      HearingReceiptTestFactory receipts) {}
 }
