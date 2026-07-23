@@ -291,7 +291,6 @@ public final class HearingRoomWorkflowImpl implements HearingRoomWorkflow {
                   handoffReceiptHash)
               .equals(committed.operationKey());
       boolean agentFinalizer = stage.requiresAgentRun()
-          && agentResultReceiptId != null
           && committed.operationType() == HearingAuthorityCommit.OperationType.FINALIZE;
       boolean dossierFinalizer = stage == HearingWorkflowStage.DOSSIER_FREEZING
           && committed.operationType() == HearingAuthorityCommit.OperationType.FINALIZE;

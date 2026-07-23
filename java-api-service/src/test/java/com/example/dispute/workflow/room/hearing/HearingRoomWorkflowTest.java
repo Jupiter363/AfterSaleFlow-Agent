@@ -123,7 +123,12 @@ class HearingRoomWorkflowTest {
             HearingReceiptTestFactory.RESPONDENT,
             "ANSWER_R",
             HearingPartyTerminalReceipt.TerminalStatus.SUBMITTED,
-            true));
+            false));
+    HearingRoomSnapshot bothAnswers = awaitState(
+        started.workflow(), state -> state.partyTerminals().size() == 2);
+    started.workflow().stageCompleted(
+        started.receipts().stageCompletion(
+            bothAnswers, HearingWorkflowStage.INTAKE_SYNTHESIZING, null));
     awaitStage(started.workflow(), HearingWorkflowStage.INTAKE_SYNTHESIZING);
 
     advanceTo(started, HearingWorkflowStage.PARTY_EVIDENCE_OPEN);
@@ -156,7 +161,12 @@ class HearingRoomWorkflowTest {
             HearingReceiptTestFactory.RESPONDENT,
             "EVIDENCE_R_TIMEOUT",
             HearingPartyTerminalReceipt.TerminalStatus.AUTO_TIMEOUT,
-            true));
+            false));
+    HearingRoomSnapshot bothEvidence = awaitState(
+        started.workflow(), state -> state.partyTerminals().size() == 2);
+    started.workflow().stageCompleted(
+        started.receipts().stageCompletion(
+            bothEvidence, HearingWorkflowStage.EVIDENCE_SYNTHESIZING, null));
     awaitStage(started.workflow(), HearingWorkflowStage.EVIDENCE_SYNTHESIZING);
 
     completeRemaining(started);
@@ -177,26 +187,23 @@ class HearingRoomWorkflowTest {
   }
 
   @Test
-  void finalizerCannotBypassRequiredAgentResult() {
+  void agentResultCannotAdvanceWithoutJavaFinalizerReceipt() {
     Started started = start("agent-order", Duration.ofMinutes(20));
     advanceTo(started, HearingWorkflowStage.INTAKE_QUESTIONS_GENERATING);
     HearingRoomSnapshot agentStage = started.workflow().state();
-    Instant deadline = nextPartyDeadline(started.start());
+    started.workflow().stageCompleted(started.receipts().agentResult(agentStage));
+    HearingRoomSnapshot observed = awaitState(
+        started.workflow(), state -> state.agentResultReceiptId() != null);
+    assertThat(observed.stage()).isEqualTo(HearingWorkflowStage.INTAKE_QUESTIONS_GENERATING);
 
     started.workflow().stageCompleted(
         started.receipts().finalizer(
-            agentStage,
+            observed,
             HearingWorkflowStage.PARTY_ANSWERS_OPEN,
-            deadline,
+            nextPartyDeadline(started.start()),
             "hearing_question_set.v1"));
-
-    HearingRoomSnapshot rejected = awaitState(
-        started.workflow(), state -> state.rejectedSignalCount() == 1);
-    assertThat(rejected.stage()).isEqualTo(HearingWorkflowStage.INTAKE_QUESTIONS_GENERATING);
-    assertThat(rejected.status()).isEqualTo("FAILED");
-    assertThat(rejected.protocolErrorCode()).isEqualTo("HEARING_STAGE_RECEIPT_OPERATION_INVALID");
-    assertThat(rejected.pendingReceiptRevisions())
-        .containsExactly(agentStage.processRevision() + 1);
+    assertThat(awaitStage(started.workflow(), HearingWorkflowStage.PARTY_ANSWERS_OPEN).status())
+        .isEqualTo("RUNNING");
   }
 
   private Started start(String suffix, Duration partyWindow) {
@@ -235,7 +242,11 @@ class HearingRoomWorkflowTest {
                 HearingReceiptTestFactory.RESPONDENT,
                 "AUTO_R_" + current.stageSequence(),
                 HearingPartyTerminalReceipt.TerminalStatus.SUBMITTED,
-                true));
+                false));
+        HearingRoomSnapshot both = awaitState(
+            started.workflow(), state -> state.partyTerminals().size() == 2);
+        started.workflow().stageCompleted(
+            started.receipts().stageCompletion(both, current.stage().next(), null));
         awaitState(
             started.workflow(), state -> state.stageSequence() > current.stageSequence());
       } else {
@@ -260,13 +271,9 @@ class HearingRoomWorkflowTest {
   private void completeNonWaitStage(Started started, HearingRoomSnapshot current) {
     HearingWorkflowStage next = current.stage().next();
     if (current.stage().requiresAgentRun()) {
-      started.workflow().stageCompleted(started.receipts().agentResult(current));
-      HearingRoomSnapshot agentResult = awaitState(
-          started.workflow(),
-          state -> state.processRevision() == current.processRevision() + 1);
       started.workflow().stageCompleted(
           started.receipts().finalizer(
-              agentResult,
+              current,
               next,
               next.isPartyWait() ? nextPartyDeadline(started.start()) : null,
               artifactType(current.stage())));

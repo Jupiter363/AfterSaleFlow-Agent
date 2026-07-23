@@ -103,7 +103,12 @@ class HearingRoomWorkflowTimerTest {
             HearingReceiptTestFactory.RESPONDENT,
             "ANSWER_R",
             HearingPartyTerminalReceipt.TerminalStatus.SUBMITTED,
-            true));
+            false));
+    HearingRoomSnapshot both = HearingRoomWorkflowTest.awaitState(
+        started.workflow(), state -> state.partyTerminals().size() == 2);
+    started.workflow().stageCompleted(
+        started.receipts().stageCompletion(
+            both, HearingWorkflowStage.INTAKE_SYNTHESIZING, null));
     HearingRoomSnapshot advanced = HearingRoomWorkflowTest.awaitStage(
         started.workflow(), HearingWorkflowStage.INTAKE_SYNTHESIZING);
 
@@ -173,15 +178,11 @@ class HearingRoomWorkflowTimerTest {
       state = HearingRoomWorkflowTest.awaitState(
           workflow, current -> current.stageSequence() == expectedSequence);
     }
-    workflow.stageCompleted(receipts.agentResult(state));
-    long sourceRevision = state.processRevision();
-    HearingRoomSnapshot agentResult = HearingRoomWorkflowTest.awaitState(
-        workflow, current -> current.processRevision() == sourceRevision + 1);
     Instant deadline = Instant.ofEpochMilli(environment.currentTimeMillis())
         .plusSeconds(partyWindow.toSeconds());
     workflow.stageCompleted(
         receipts.finalizer(
-            agentResult,
+            state,
             HearingWorkflowStage.PARTY_ANSWERS_OPEN,
             deadline,
             "hearing_question_set.v1"));
