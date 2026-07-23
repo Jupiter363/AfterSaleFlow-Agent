@@ -172,10 +172,12 @@ def _install_open_dependencies(
     *,
     gate_start_error: Exception | None = None,
     security_close_error: Exception | None = None,
-) -> tuple[Any, list[Any]]:
+    bulkhead_ready: bool = True,
+) -> tuple[Any, list[Any], list[Any]]:
     pool = object()
     saver = object()
     gateways: list[Any] = []
+    durable_bulkheads: list[Any] = []
 
     class CheckpointRuntime:
         def __init__(self) -> None:
@@ -205,6 +207,36 @@ def _install_open_dependencies(
 
         async def referenced_verification_key_ids(self) -> frozenset[str]:
             return frozenset()
+
+    class DurableBulkhead:
+        def __init__(self, actual_pool: Any, config: Any) -> None:
+            assert actual_pool is pool
+            assert config.global_limit == 32
+            assert config.tenant_limit == 16
+            assert config.room_limit == 8
+            assert config.global_queue_limit == 256
+            assert config.tenant_queue_limit == 128
+            assert config.room_queue_limit == 100
+            assert config.permit_lease_seconds == 20
+            durable_bulkheads.append(self)
+            self.ready = bulkhead_ready
+
+        async def open(self) -> None:
+            events.append("bulkhead_open")
+
+        async def check_readiness(self) -> Any:
+            events.append("bulkhead_readiness")
+            return SimpleNamespace(
+                ready=self.ready,
+                code="GRAPH_BULKHEAD_READY" if self.ready else "GRAPH_BULKHEAD_UNAVAILABLE",
+            )
+
+        async def drain(self) -> bool:
+            events.append("bulkhead_drain")
+            return True
+
+        async def close(self) -> None:
+            events.append("bulkhead_close")
 
     class SecurityRuntime:
         resolver = object()
@@ -239,13 +271,14 @@ def _install_open_dependencies(
     monkeypatch.setattr(graph_lifecycle, "GraphCheckpointRuntime", CheckpointRuntime)
     monkeypatch.setattr(graph_lifecycle, "GraphPersistenceReadinessProbe", PersistenceProbe)
     monkeypatch.setattr(graph_lifecycle, "GraphCommandGateway", Gateway)
+    monkeypatch.setattr(graph_lifecycle, "PostgresGraphFanoutBulkhead", DurableBulkhead)
     monkeypatch.setattr(
         graph_lifecycle,
         "_open_graph_security_runtime_for_lifecycle",
         open_security_runtime,
     )
     monkeypatch.setattr(graph_lifecycle, "GraphStreamAdmissionGate", AdmissionGate)
-    return saver, gateways
+    return saver, gateways, durable_bulkheads
 
 
 @pytest.mark.asyncio
@@ -300,6 +333,7 @@ def test_disabled_readiness_route_is_dependency_free_and_noncacheable() -> None:
         "accepting": False,
         "persistence_code": "GRAPH_DISABLED",
         "security_code": "GRAPH_DISABLED",
+        "bulkhead_code": "GRAPH_DISABLED",
     }
     assert response.headers["cache-control"] == "no-store, no-transform"
     assert response.headers["pragma"] == "no-cache"
@@ -581,7 +615,7 @@ async def test_shadow_services_share_the_runtime_kernel_owner_and_shutdown_gate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[str] = []
-    saver, gateways = _install_open_dependencies(monkeypatch, events)
+    saver, gateways, durable_bulkheads = _install_open_dependencies(monkeypatch, events)
     owner_calls = 0
 
     def process_owner_id() -> str:
@@ -595,6 +629,7 @@ async def test_shadow_services_share_the_runtime_kernel_owner_and_shutdown_gate(
         events.append("executor_factory")
         assert kernel.saver is saver
         assert kernel.gateway is gateways[0]
+        assert kernel.durable_bulkhead is durable_bulkheads[0]
         return _registered_executors()
 
     runtime = await GraphApplicationRuntime.open(
@@ -602,6 +637,7 @@ async def test_shadow_services_share_the_runtime_kernel_owner_and_shutdown_gate(
         _bindings(executor_registry_factory=executor_factory),
     )
     assert len(gateways) == 1
+    assert len(durable_bulkheads) == 1
     assert owner_calls == 1
     assert runtime.stream_service._owner_id == "graph-replica:test-owner"
     assert runtime.reconciliation_service._owner_id == "graph-replica:test-owner"
@@ -611,10 +647,14 @@ async def test_shadow_services_share_the_runtime_kernel_owner_and_shutdown_gate(
     assert events == [
         "checkpoint_open",
         "persistence_check",
+        "bulkhead_open",
+        "bulkhead_readiness",
         "security_open",
         "executor_factory",
         "gate_start",
         "drain",
+        "bulkhead_drain",
+        "bulkhead_close",
         "security_close",
         "checkpoint_close",
     ]
@@ -633,8 +673,31 @@ async def test_shadow_application_runtime_rejects_an_empty_executor_registry(
     assert events == [
         "checkpoint_open",
         "persistence_check",
+        "bulkhead_open",
+        "bulkhead_readiness",
         "security_open",
+        "bulkhead_close",
         "security_close",
+        "checkpoint_close",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_shadow_startup_fails_closed_when_durable_bulkhead_is_not_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    _install_open_dependencies(monkeypatch, events, bulkhead_ready=False)
+
+    with pytest.raises(RuntimeError, match="GRAPH_BULKHEAD_UNAVAILABLE"):
+        await GraphApplicationRuntime.open(_shadow_settings(), _bindings())
+
+    assert events == [
+        "checkpoint_open",
+        "persistence_check",
+        "bulkhead_open",
+        "bulkhead_readiness",
+        "bulkhead_close",
         "checkpoint_close",
     ]
 
@@ -655,7 +718,7 @@ async def test_shadow_application_runtime_rejects_a_forged_executor_registry(
             _bindings(executor_registry_factory=forged_factory),
         )
 
-    assert events[-2:] == ["security_close", "checkpoint_close"]
+    assert events[-3:] == ["bulkhead_close", "security_close", "checkpoint_close"]
 
 
 @pytest.mark.asyncio
@@ -663,7 +726,7 @@ async def test_shadow_executor_factory_failure_closes_security_then_checkpoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[str] = []
-    saver, gateways = _install_open_dependencies(monkeypatch, events)
+    saver, gateways, _ = _install_open_dependencies(monkeypatch, events)
 
     def failing_factory(kernel: GraphExecutorKernel) -> ExactShadowExecutorRegistry:
         events.append("executor_factory")
@@ -680,8 +743,11 @@ async def test_shadow_executor_factory_failure_closes_security_then_checkpoint(
     assert events == [
         "checkpoint_open",
         "persistence_check",
+        "bulkhead_open",
+        "bulkhead_readiness",
         "security_open",
         "executor_factory",
+        "bulkhead_close",
         "security_close",
         "checkpoint_close",
     ]
@@ -757,6 +823,35 @@ class _SecurityRuntime:
         self.events.append("security_close")
 
 
+class _DurableBulkhead:
+    def __init__(
+        self,
+        events: list[str],
+        *,
+        ready: bool = True,
+        error: Exception | None = None,
+    ) -> None:
+        self.events = events
+        self.ready = ready
+        self.error = error
+
+    async def check_readiness(self) -> Any:
+        self.events.append("bulkhead_readiness")
+        if self.error is not None:
+            raise self.error
+        return SimpleNamespace(
+            ready=self.ready,
+            code="GRAPH_BULKHEAD_READY" if self.ready else "GRAPH_BULKHEAD_UNAVAILABLE",
+        )
+
+    async def drain(self) -> bool:
+        self.events.append("bulkhead_drain")
+        return True
+
+    async def close(self) -> None:
+        self.events.append("bulkhead_close")
+
+
 class _CheckpointRuntime:
     def __init__(self, events: list[str]) -> None:
         self.events = events
@@ -789,11 +884,13 @@ def _application_runtime(
     events: list[str],
     probe: _Probe | None = None,
     security: _SecurityRuntime | None = None,
+    bulkhead: _DurableBulkhead | None = None,
     gate: _AdmissionGate | None = None,
 ) -> GraphApplicationRuntime:
     return GraphApplicationRuntime(
         checkpoint_runtime=cast(Any, _CheckpointRuntime(events)),
         persistence_probe=cast(Any, probe or _Probe(events)),
+        durable_bulkhead=cast(Any, bulkhead or _DurableBulkhead(events)),
         security_runtime=cast(Any, security or _SecurityRuntime(events)),
         gateway=cast(Any, object()),
         stream_service=cast(Any, object()),
@@ -826,7 +923,7 @@ async def test_application_close_waits_for_both_shared_admission_tokens() -> Non
 
     await gate.leave(reconciliation_token)
     assert await close_task is True
-    assert events == ["security_close", "checkpoint_close"]
+    assert events == ["bulkhead_drain", "bulkhead_close", "security_close", "checkpoint_close"]
 
 
 @pytest.mark.asyncio
@@ -863,6 +960,26 @@ async def test_application_security_readiness_errors_are_fail_closed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_application_bulkhead_readiness_errors_are_fail_closed() -> None:
+    events: list[str] = []
+    runtime = _application_runtime(
+        events=events,
+        bulkhead=_DurableBulkhead(
+            events,
+            error=RuntimeError("private bulkhead database detail"),
+        ),
+    )
+
+    report = await runtime.check_readiness()
+
+    assert report.ready is False
+    assert report.code == "GRAPH_BULKHEAD_CHECK_FAILED"
+    assert report.bulkhead_code == "GRAPH_BULKHEAD_CHECK_FAILED"
+    assert runtime.ready is False
+    assert "private" not in str(report.public_payload())
+
+
+@pytest.mark.asyncio
 async def test_application_close_preserves_dependency_order_when_drain_fails() -> None:
     events: list[str] = []
     runtime = _application_runtime(
@@ -874,9 +991,21 @@ async def test_application_close_preserves_dependency_order_when_drain_fails() -
         await runtime.close()
 
     assert runtime.ready is False
-    assert events == ["drain", "security_close", "checkpoint_close"]
+    assert events == [
+        "drain",
+        "bulkhead_drain",
+        "bulkhead_close",
+        "security_close",
+        "checkpoint_close",
+    ]
     assert await runtime.close() is False
-    assert events == ["drain", "security_close", "checkpoint_close"]
+    assert events == [
+        "drain",
+        "bulkhead_drain",
+        "bulkhead_close",
+        "security_close",
+        "checkpoint_close",
+    ]
 
 
 @pytest.mark.asyncio
@@ -900,8 +1029,11 @@ async def test_partial_open_closes_pool_even_when_security_cleanup_fails(
     assert events == [
         "checkpoint_open",
         "persistence_check",
+        "bulkhead_open",
+        "bulkhead_readiness",
         "security_open",
         "gate_start",
+        "bulkhead_close",
         "security_close",
         "checkpoint_close",
     ]

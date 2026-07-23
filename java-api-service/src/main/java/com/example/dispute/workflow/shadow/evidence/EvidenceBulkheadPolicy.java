@@ -21,6 +21,8 @@ public final class EvidenceBulkheadPolicy implements AutoCloseable {
     public static final int MAX_ROOM_CONCURRENCY = 8;
     public static final int MAX_IDENTIFIER_LENGTH = 128;
     public static final Duration MAX_ACQUIRE_TIMEOUT = Duration.ofSeconds(30);
+    /** This primitive is deliberately not the distributed GRAPH-016 permit authority. */
+    public static final String AUTHORITY_SCOPE = "JAVA_SIGNED_SYNTHETIC_LOCAL_PARITY_ONLY";
     private static final String METRIC_COMPONENT = "evidence_bulkhead";
 
     private final Limits limits;
@@ -34,6 +36,14 @@ public final class EvidenceBulkheadPolicy implements AutoCloseable {
 
     public EvidenceBulkheadPolicy(Limits limits) {
         this.limits = Objects.requireNonNull(limits, "limits must not be null");
+    }
+
+    /**
+     * Process-local permits are only a signed-synthetic parity guard. Production Graph work must
+     * acquire its durable PostgreSQL permit and current Graph lease before dispatch.
+     */
+    public boolean isProductionPermitAuthority() {
+        return false;
     }
 
     public Lease acquire(AdmissionKey key) throws InterruptedException {

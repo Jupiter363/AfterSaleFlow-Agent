@@ -45,6 +45,7 @@ from app.graph_runtime.identity import (
 from app.graph_runtime.intake_binding import require_exact_intake_binding
 from app.graph_runtime.intake_exchange import JavaIntakeExchangeClient
 from app.graph_runtime.intake_executor import CompiledIntakeGraphShadowExecutor
+from app.graph_runtime.postgres_bulkhead import PostgresGraphFanoutBulkhead
 from app.graph_runtime.registry import VersionBinding
 from app.graph_runtime.result import ResultBindings, TERMINAL_DRAFT_ADAPTER
 from app.graph_runtime.state import CommonGraphState, validate_graph_state
@@ -270,6 +271,11 @@ def _executor_registration(
             provider=intake_provider,
             model=intake_model,
         )
+    if configured.graph_key == "evidence.v2":
+        durable_bulkhead = getattr(kernel, "durable_bulkhead", None)
+        if not isinstance(durable_bulkhead, PostgresGraphFanoutBulkhead):
+            raise GraphContractError("evidence.v2 durable PostgreSQL bulkhead is required")
+        raise GraphContractError("evidence.v2 exact executor binding is unavailable")
     binding = _version_binding(configured)
     builder = build_shadow_kernel_graph(
         validate_command=_validate_synthetic_state,

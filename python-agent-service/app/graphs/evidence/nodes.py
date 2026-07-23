@@ -1,15 +1,23 @@
 from __future__ import annotations
 
+import asyncio
 import math
 from collections.abc import Mapping
 from copy import deepcopy
 from typing import Any, cast
+from uuid import uuid4
 
 from langchain_core.runnables import Runnable, RunnableConfig
 from langgraph.runtime import Runtime
 from langgraph.types import Send
 
 from app.contracts.v1.codec import canonical_sha256
+from app.graph_runtime.bulkhead import GraphBulkheadScope, GraphPermitFenceContext
+from app.graph_runtime.persistence_models import GraphFenceContext
+from app.graph_runtime.postgres_bulkhead import (
+    PostgresBulkheadPermit,
+    PostgresGraphFanoutBulkhead,
+)
 from app.graphs.evidence.contracts import (
     ASSESSMENT_OUTPUT_SCHEMA_VERSION,
     MAX_ACTIVE_ITEMS,
@@ -119,8 +127,16 @@ def dispatch_wave(state: EvidenceGraphStateV2) -> list[Send] | str:
 
 
 class AssessEvidenceItemNode:
-    def __init__(self, item_assessor: Runnable[JsonObject, Mapping[str, Any]]) -> None:
+    def __init__(
+        self,
+        item_assessor: Runnable[JsonObject, Mapping[str, Any]],
+        *,
+        bulkhead: PostgresGraphFanoutBulkhead,
+        graph_fence: GraphFenceContext,
+    ) -> None:
         self._item_assessor = item_assessor
+        self._bulkhead = bulkhead
+        self._graph_fence = graph_fence
 
     def __call__(
         self,
@@ -128,6 +144,61 @@ class AssessEvidenceItemNode:
         runtime: Runtime[EvidenceGraphContext],
         config: RunnableConfig,
     ) -> dict[str, Any]:
+        del state, runtime, config
+        raise EvidenceGraphContractError("EVIDENCE_DURABLE_PERMIT_ASYNC_REQUIRED")
+
+    async def ainvoke(
+        self,
+        state: Mapping[str, Any],
+        runtime: Runtime[EvidenceGraphContext],
+        config: RunnableConfig,
+    ) -> dict[str, Any]:
+        evidence_id, work_item, command, manifest = self._prepare_work_item(state, runtime)
+        graph_fence = self._graph_fence
+        permit_fence = _permit_fence(
+            graph_fence,
+            command=command,
+            expected_fencing_token=runtime.context.admission.graph_lease_fencing_token,
+        )
+        scope = GraphBulkheadScope.from_graph_identity(
+            tenant_surrogate=cast(str, command["tenant_surrogate"]),
+            case_id=cast(str, command["case_id"]),
+            room_type=cast(str, command["room_type"]),
+            room_epoch=cast(int, command["room_epoch"]),
+            item_key=evidence_id,
+        )
+        request_id = _permit_request_id(
+            command=command,
+            manifest=manifest,
+            evidence_id=evidence_id,
+        )
+        permit_owner_id = f"permit-worker:{uuid4().hex}"
+        permit = await self._bulkhead.acquire(
+            scope=scope,
+            fence=permit_fence,
+            request_id=request_id,
+            owner_id=permit_owner_id,
+            takeover=True,
+        )
+        try:
+            result = await _assess_with_durable_permit(
+                self._item_assessor,
+                work_item,
+                config,
+                permit,
+            )
+        finally:
+            await _release_permit(permit)
+        if not isinstance(result, Mapping):
+            raise EvidenceGraphContractError("EVIDENCE_ASSESSOR_OUTPUT_INVALID")
+        assessment = cast(JsonObject, deepcopy(dict(result)))
+        return {"raw_outputs": {evidence_id: assessment}}
+
+    @staticmethod
+    def _prepare_work_item(
+        state: Mapping[str, Any],
+        runtime: Runtime[EvidenceGraphContext],
+    ) -> tuple[str, JsonObject, JsonObject, JsonObject]:
         evidence_id = state.get("work_item_key")
         if not isinstance(evidence_id, str):
             raise EvidenceGraphContractError("EVIDENCE_SEND_KEY_INVALID")
@@ -150,11 +221,100 @@ class AssessEvidenceItemNode:
             "profile_versions": deepcopy(cast(JsonObject, manifest["profile_versions"])),
             "item": deepcopy(item),
         }
-        result = self._item_assessor.invoke(work_item, config=config)
-        if not isinstance(result, Mapping):
-            raise EvidenceGraphContractError("EVIDENCE_ASSESSOR_OUTPUT_INVALID")
-        assessment = cast(JsonObject, deepcopy(dict(result)))
-        return {"raw_outputs": {evidence_id: assessment}}
+        return evidence_id, work_item, command, manifest
+
+
+def _permit_fence(
+    graph_fence: GraphFenceContext,
+    *,
+    command: JsonObject,
+    expected_fencing_token: int,
+) -> GraphPermitFenceContext:
+    if (
+        graph_fence.thread_id != command["thread_id"]
+        or graph_fence.command_id != command["command_id"]
+        or graph_fence.fencing_token != expected_fencing_token
+    ):
+        raise EvidenceGraphContractError("EVIDENCE_GRAPH_LEASE_FENCE_MISMATCH")
+    return GraphPermitFenceContext(
+        thread_id=graph_fence.thread_id,
+        command_id=graph_fence.command_id,
+        graph_lease_owner_id=graph_fence.owner_id,
+        graph_lease_fencing_token=graph_fence.fencing_token,
+    )
+
+
+def _permit_request_id(
+    *,
+    command: JsonObject,
+    manifest: JsonObject,
+    evidence_id: str,
+) -> str:
+    binding: JsonObject = {
+        "schema_version": "evidence-bulkhead-request.v1",
+        "command_id": cast(str, command["command_id"]),
+        "logical_run_id": cast(str, command["logical_run_id"]),
+        "attempt_id": cast(str, command["attempt_id"]),
+        "thread_id": cast(str, command["thread_id"]),
+        "manifest_id": cast(str, manifest["manifest_id"]),
+        "manifest_hash": cast(str, manifest["manifest_hash"]),
+        "evidence_id": evidence_id,
+    }
+    return f"evidence:{canonical_sha256(binding)}"
+
+
+async def _release_permit(permit: PostgresBulkheadPermit) -> None:
+    release = asyncio.create_task(permit.release())
+    try:
+        await asyncio.shield(release)
+    except asyncio.CancelledError:
+        await release
+        raise
+
+
+async def _assess_with_durable_permit(
+    assessor: Runnable[JsonObject, Mapping[str, Any]],
+    work_item: JsonObject,
+    config: RunnableConfig,
+    permit: PostgresBulkheadPermit,
+) -> Mapping[str, Any]:
+    await permit.validate_recovery()
+    assessment = asyncio.create_task(assessor.ainvoke(work_item, config=config))
+    heartbeat = asyncio.create_task(_renew_permit(permit))
+    try:
+        done, _ = await asyncio.wait(
+            {assessment, heartbeat},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if heartbeat in done:
+            if heartbeat.cancelled():
+                raise EvidenceGraphContractError("EVIDENCE_PERMIT_HEARTBEAT_CANCELLED")
+            failure = heartbeat.exception()
+            if failure is None:
+                raise EvidenceGraphContractError("EVIDENCE_PERMIT_HEARTBEAT_STOPPED")
+            raise failure
+        result = await assessment
+        await permit.validate_recovery()
+        return result
+    finally:
+        for task in (assessment, heartbeat):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(assessment, heartbeat, return_exceptions=True)
+
+
+async def _renew_permit(permit: PostgresBulkheadPermit) -> None:
+    while True:
+        interval = permit.renewal_interval_seconds
+        if (
+            not isinstance(interval, (int, float))
+            or isinstance(interval, bool)
+            or not math.isfinite(interval)
+            or interval <= 0
+        ):
+            raise EvidenceGraphContractError("EVIDENCE_PERMIT_RENEWAL_INTERVAL_INVALID")
+        await asyncio.sleep(interval)
+        await permit.renew()
 
 
 def validate_item_assessment(

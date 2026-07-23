@@ -71,6 +71,8 @@ class _Connection:
         unsafe_privilege: str | None = None,
         can_create_temporary: bool = False,
         can_write_checkpoints: bool = True,
+        can_execute_fanout: bool = True,
+        can_mutate_fanout: bool = False,
         migration_status: str = "CURRENT",
         restore_status: str = "VERIFIED",
         inconsistent_check: str | None = None,
@@ -84,10 +86,13 @@ class _Connection:
         self.unsafe_privilege = unsafe_privilege
         self.can_create_temporary = can_create_temporary
         self.can_write_checkpoints = can_write_checkpoints
+        self.can_execute_fanout = can_execute_fanout
+        self.can_mutate_fanout = can_mutate_fanout
         self.migration_status = migration_status
         self.restore_status = restore_status
         self.inconsistent_check = inconsistent_check
         self.statements: list[str] = []
+        self.fanout_privilege_params: Any = None
 
     def transaction(self) -> _Transaction:
         return _Transaction()
@@ -122,6 +127,15 @@ class _Connection:
                     "can_mutate_control": self.unsafe_privilege == "control",
                     "can_delete_runtime_rows": self.unsafe_privilege == "delete",
                     "can_mutate_append_only": self.unsafe_privilege == "append_only",
+                }
+            )
+        if "can_execute_fanout" in normalized:
+            self.fanout_privilege_params = params
+            return _Cursor(
+                row={
+                    "can_read_fanout": True,
+                    "can_mutate_fanout": self.can_mutate_fanout,
+                    "can_execute_fanout": self.can_execute_fanout,
                 }
             )
         if "from unnest" in normalized:
@@ -251,6 +265,12 @@ async def test_shadow_readiness_uses_only_bounded_read_only_queries() -> None:
     assert ".checkpoint_blobs', 'insert'" in privilege_probe
     assert ".checkpoint_writes', 'insert'" in privilege_probe
     assert ".checkpoint_writes', 'update'" in privilege_probe
+    assert "agent_graph_cancel_or_release_fanout_permit" in repr(
+        connection.fanout_privilege_params
+    )
+    assert "agent_graph_cancel_queued_fanout_permit" not in repr(
+        connection.fanout_privilege_params
+    )
 
 
 @pytest.mark.asyncio
@@ -329,6 +349,31 @@ async def test_runtime_role_without_checkpoint_write_privileges_is_not_ready() -
     report = await GraphPersistenceReadinessProbe(
         config,
         _Pool(_Connection(config, can_write_checkpoints=False)),
+    ).check()
+
+    assert not report.ready
+    assert report.code == "GRAPH_RUNTIME_ROLE_PRIVILEGED"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("can_execute_fanout", "can_mutate_fanout"),
+    [(False, False), (True, True)],
+)
+async def test_runtime_role_requires_function_only_fanout_authority(
+    can_execute_fanout: bool,
+    can_mutate_fanout: bool,
+) -> None:
+    config = _config()
+    report = await GraphPersistenceReadinessProbe(
+        config,
+        _Pool(
+            _Connection(
+                config,
+                can_execute_fanout=can_execute_fanout,
+                can_mutate_fanout=can_mutate_fanout,
+            )
+        ),
     ).check()
 
     assert not report.ready

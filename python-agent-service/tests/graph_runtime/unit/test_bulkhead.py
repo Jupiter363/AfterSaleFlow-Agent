@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
+from datetime import datetime, timedelta, timezone
+from hashlib import sha256
+from pathlib import Path
+from typing import Any
 
 import pytest
 from hypothesis import given, settings, strategies as st
@@ -10,6 +14,7 @@ from app.graph_runtime.bulkhead import (
     GraphBulkheadConfig,
     GraphBulkheadScope,
     GraphFanoutBulkhead,
+    GraphPermitFenceContext,
 )
 from app.graph_runtime.errors import (
     GraphBulkheadClosedError,
@@ -18,6 +23,16 @@ from app.graph_runtime.errors import (
     GraphBulkheadTimeoutError,
     GraphContractError,
 )
+from app.graph_runtime.postgres_bulkhead import (
+    PostgresBulkheadConfig,
+    PostgresBulkheadPermit,
+    PostgresGraphFanoutBulkhead,
+    PostgresPermitRecord,
+    _new_permit_owner_id,
+)
+
+
+SERVICE_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _config(
@@ -419,3 +434,300 @@ async def test_generated_hierarchical_limits_never_oversubscribe(
     snapshot = await bulkhead.snapshot()
     assert snapshot.active_global == snapshot.queued_global == 0
     assert snapshot.counters.grants == snapshot.counters.releases == 30
+
+
+def test_postgres_defaults_match_signed_synthetic_database_contract() -> None:
+    config = PostgresBulkheadConfig.signed_synthetic_defaults()
+
+    assert (
+        config.global_limit,
+        config.tenant_limit,
+        config.room_limit,
+    ) == (32, 16, 8)
+    assert (
+        config.global_queue_limit,
+        config.tenant_queue_limit,
+        config.room_queue_limit,
+    ) == (256, 128, 100)
+    assert config.permit_lease_seconds == 20
+    assert 0 < config.renewal_interval_seconds < config.permit_lease_seconds
+
+
+def test_default_permit_owner_is_distinct_from_graph_owner_and_each_acquire() -> None:
+    first = _new_permit_owner_id()
+    second = _new_permit_owner_id()
+
+    assert first.startswith("permit-worker:")
+    assert first != second
+    assert first != "worker-1"
+    assert len(first) <= 128
+
+
+def test_durable_scope_uses_database_reconstructable_room_identity() -> None:
+    scope = GraphBulkheadScope.from_graph_identity(
+        tenant_surrogate="tenant-opaque",
+        case_id="case-opaque",
+        room_type="EVIDENCE",
+        room_epoch=7,
+        item_key="EVIDENCE_001",
+    )
+
+    assert scope == GraphBulkheadScope(
+        tenant_key="tenant-opaque",
+        room_key="case-opaque:EVIDENCE:7",
+        item_key="EVIDENCE_001",
+    )
+
+
+def test_durable_migration_enforces_authoritative_scope_and_starvation_free_fifo() -> None:
+    base_path = (
+        SERVICE_ROOT / "migrations" / "graph" / "G004_graph_fanout_bulkhead.sql"
+    )
+    hardening_path = (
+        SERVICE_ROOT
+        / "migrations"
+        / "graph"
+        / "G005_graph_fanout_fairness_and_cancellation.sql"
+    )
+    base = " ".join(base_path.read_text(encoding="utf-8").split()).lower()
+    hardening = " ".join(hardening_path.read_text(encoding="utf-8").split()).lower()
+
+    assert sha256(base_path.read_bytes()).hexdigest() == (
+        "f1b631cd6eb8a704c4a48b36fcfc422f22ea1efc349b4aabc72ca53e61c1a551"
+    )
+    assert "thread.tenant_surrogate = selected_tenant_key" in base
+    assert "concat(thread.case_id, ':', thread.room_type, ':', thread.room_epoch)" in base
+    assert "message = 'graph_fanout_scope_forged'" in base
+    assert "order by permit.queue_sequence" in base
+    assert "agent_graph_fanout_turn_sequence" not in base
+    assert "pg_advisory_xact_lock" in base
+    assert "for update of permit, lease skip locked" in base
+    assert "uq_agent_graph_fanout_logical_active" in base
+    assert "where status in ('queued', 'granted')" in base
+    assert "'expired', 'released', 'timed_out', 'orphaned'" in base
+    assert "existing.status in ('expired', 'released', 'timed_out', 'orphaned')" in base
+    assert "set status = 'orphaned'" in base
+    base_finish = base.split("create function agent_graph_finish_fanout_permit", 1)[1]
+    base_finish = base_finish.split(
+        "create function agent_graph_cancel_queued_fanout_permit", 1
+    )[0]
+    assert "agent_graph_assert_current_fanout_lease" in base_finish
+    assert "lease_expires_at > clock_timestamp()" in base_finish
+
+    assert "create sequence agent_graph_fanout_turn_sequence" in hardening
+    assert "create function agent_graph_register_fanout_tenant_turn" in hardening
+    assert "order by first_queue_sequence, tenant_key" in hardening
+    assert "perform agent_graph_register_fanout_tenant_turn" in hardening
+    assert "trg_agent_graph_register_fanout_tenant_turn" not in hardening
+    assert "join agent_graph_fanout_tenant_turn tenant_turn" in hardening
+    assert "order by tenant_turn.last_granted_sequence, permit.queue_sequence" in hardening
+    assert "coalesce(tenant_turn.last_granted_sequence, 0)" not in hardening
+    assert "nextval('agent_graph_fanout_turn_sequence')" in hardening
+    assert "earlier.room_key = permit.room_key" in hardening
+    assert "earlier.queue_sequence < permit.queue_sequence" in hardening
+
+    acquire = hardening.split(
+        "create or replace function agent_graph_acquire_fanout_permit", 1
+    )[1]
+    acquire = acquire.split(
+        "create or replace function agent_graph_finish_fanout_permit", 1
+    )[0]
+    assert "from agent_graph_fanout_permit_owner_generation owner_generation" in acquire
+    assert "owner_generation.permit_owner_id = selected_permit_owner_id" in acquire
+    assert "message = 'graph_fanout_takeover_owner_reused'" in acquire
+
+    finish = hardening.split(
+        "create or replace function agent_graph_finish_fanout_permit", 1
+    )[1]
+    finish = finish.split(
+        "create function agent_graph_cancel_or_release_fanout_permit", 1
+    )[0]
+    assert "agent_graph_assert_current_fanout_lease" not in finish
+    assert "lease_expires_at > clock_timestamp()" not in finish
+    for exact_binding in (
+        "permit_fencing_token = selected_permit_fence",
+        "permit_owner_id = selected_permit_owner_id",
+        "thread_id = selected_thread_id and command_id = selected_command_id",
+        "graph_lease_owner_id = selected_graph_owner_id",
+        "graph_lease_fencing_token = selected_graph_fence",
+    ):
+        assert exact_binding in finish
+
+    cleanup = hardening.split(
+        "create function agent_graph_cancel_or_release_fanout_permit", 1
+    )[1]
+    assert "status in ('queued', 'granted')" in cleanup
+    assert "when status = 'queued' then 'cancelled' else 'released'" in cleanup
+    assert "agent_graph_assert_current_fanout_lease" not in cleanup
+    for exact_binding in (
+        "request_id = selected_request_id",
+        "permit_owner_id = selected_permit_owner_id",
+        "thread_id = selected_thread_id and command_id = selected_command_id",
+        "graph_lease_owner_id = selected_graph_owner_id",
+        "graph_lease_fencing_token = selected_graph_fence",
+    ):
+        assert exact_binding in cleanup
+
+
+def test_postgres_composite_routines_are_evaluated_once() -> None:
+    source = (
+        SERVICE_ROOT / "app" / "graph_runtime" / "postgres_bulkhead.py"
+    ).read_text(encoding="utf-8")
+
+    assert "select (agent_graph_" not in source
+    for routine in (
+        "agent_graph_acquire_fanout_permit",
+        "agent_graph_renew_fanout_permit",
+        "agent_graph_finish_fanout_permit",
+        "agent_graph_cancel_or_release_fanout_permit",
+        "agent_graph_validate_fanout_recovery",
+    ):
+        assert f"select result.* from {routine}(" in source
+
+
+@pytest.mark.asyncio
+async def test_postgres_cancellation_after_grant_releases_undelivered_permit() -> None:
+    scope = GraphBulkheadScope(
+        tenant_key="tenant-race",
+        room_key="case-race:EVIDENCE:1",
+        item_key="item-race",
+    )
+    fence = GraphPermitFenceContext(
+        thread_id=f"grt.v1.{'3' * 32}",
+        command_id="command-race",
+        graph_lease_owner_id="graph-owner-race",
+        graph_lease_fencing_token=9,
+    )
+    request_id = "permit-race"
+    permit_owner_id = "permit-owner-race"
+
+    class UnusedPool:
+        def connection(self, *, timeout: float) -> None:
+            raise AssertionError("race test overrides all database calls")
+
+    class RaceBulkhead(PostgresGraphFanoutBulkhead):
+        def __init__(self) -> None:
+            super().__init__(UnusedPool(), PostgresBulkheadConfig.signed_synthetic_defaults())
+            self._opened = True  # noqa: SLF001 - isolate the acquire cancellation contract
+            self.database_granted = asyncio.Event()
+            self.database_status = "QUEUED"
+            self.cleanup_task: asyncio.Task[Any] | None = None
+            self.cleanup_params: tuple[Any, ...] | None = None
+
+        async def _acquire_once(
+            self,
+            selected_scope: GraphBulkheadScope,
+            selected_fence: GraphPermitFenceContext,
+            *,
+            request_id: str,
+            owner_id: str,
+            timeout_seconds: float,
+            takeover: bool,
+        ) -> PostgresPermitRecord:
+            assert selected_scope == scope
+            assert selected_fence == fence
+            assert request_id == "permit-race"
+            assert owner_id == "permit-owner-race"
+            assert timeout_seconds == self.config.wait_timeout_seconds
+            assert not takeover
+            self.database_status = "GRANTED"
+            self.database_granted.set()
+            await asyncio.Event().wait()
+            raise AssertionError("the granted row must not be returned after cancellation")
+
+        async def _call_record(
+            self, query: str, params: tuple[Any, ...]
+        ) -> PostgresPermitRecord:
+            assert "agent_graph_cancel_or_release_fanout_permit" in query
+            assert self.database_status == "GRANTED"
+            self.cleanup_task = asyncio.current_task()
+            self.cleanup_params = params
+            self.database_status = "RELEASED"
+            now = datetime.now(timezone.utc)
+            return PostgresPermitRecord(
+                request_id=request_id,
+                scope=scope,
+                fence=fence,
+                permit_owner_id=permit_owner_id,
+                permit_fencing_token=1,
+                status="RELEASED",
+                enqueued_at=now - timedelta(seconds=1),
+                granted_at=now,
+                renewed_at=now,
+                lease_expires_at=now + timedelta(seconds=20),
+                revision=2,
+            )
+
+    bulkhead = RaceBulkhead()
+    acquire_task = asyncio.create_task(
+        bulkhead.acquire(
+            scope,
+            fence,
+            request_id=request_id,
+            owner_id=permit_owner_id,
+        )
+    )
+    await bulkhead.database_granted.wait()
+    acquire_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await acquire_task
+
+    assert bulkhead.database_status == "RELEASED"
+    assert bulkhead.cleanup_task is not None
+    assert bulkhead.cleanup_task is not acquire_task
+    assert bulkhead.cleanup_params == (
+        request_id,
+        fence.thread_id,
+        fence.command_id,
+        fence.graph_lease_owner_id,
+        fence.graph_lease_fencing_token,
+        permit_owner_id,
+    )
+
+
+def test_permit_fence_is_named_and_validated_separately_from_graph_lease() -> None:
+    fence = GraphPermitFenceContext(
+        thread_id=f"grt.v1.{'1' * 32}",
+        command_id="command-1",
+        graph_lease_owner_id="worker-1",
+        graph_lease_fencing_token=3,
+    )
+
+    assert fence.graph_lease_fencing_token == 3
+    with pytest.raises(GraphContractError, match="graph lease fencing token"):
+        GraphPermitFenceContext(
+            thread_id=fence.thread_id,
+            command_id=fence.command_id,
+            graph_lease_owner_id=fence.graph_lease_owner_id,
+            graph_lease_fencing_token=0,
+        )
+
+
+def test_permit_heartbeat_uses_actual_short_graph_lease_window() -> None:
+    now = datetime.now(timezone.utc)
+    fence = GraphPermitFenceContext(
+        thread_id=f"grt.v1.{'2' * 32}",
+        command_id="command-short-lease",
+        graph_lease_owner_id="worker-short-lease",
+        graph_lease_fencing_token=1,
+    )
+    record = PostgresPermitRecord(
+        request_id="permit-short-lease",
+        scope=GraphBulkheadScope("tenant-1", "case-1:EVIDENCE:1", "item-1"),
+        fence=fence,
+        permit_owner_id="worker-short-lease",
+        permit_fencing_token=1,
+        status="GRANTED",
+        enqueued_at=now - timedelta(seconds=1),
+        granted_at=now,
+        renewed_at=now,
+        lease_expires_at=now + timedelta(seconds=3),
+        revision=1,
+    )
+    bulkhead = object.__new__(PostgresGraphFanoutBulkhead)
+    bulkhead._config = PostgresBulkheadConfig.signed_synthetic_defaults()  # noqa: SLF001
+    permit = PostgresBulkheadPermit(bulkhead, record, wait_seconds=0.0)
+
+    assert permit.renewal_interval_seconds == pytest.approx(1.0)
+    assert permit.renewal_due_at == now + timedelta(seconds=1)

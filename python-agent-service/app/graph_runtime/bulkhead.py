@@ -11,6 +11,8 @@ from math import isfinite
 import re
 from time import monotonic
 
+from app.graph_runtime.identity import THREAD_ID_PATTERN, _identifier
+
 from app.graph_runtime.errors import (
     GraphBulkheadClosedError,
     GraphBulkheadDisabledError,
@@ -75,12 +77,59 @@ class GraphBulkheadScope:
 
     tenant_key: str
     room_key: str
+    item_key: str = "default"
 
     def __post_init__(self) -> None:
         if not _OPAQUE_KEY.fullmatch(self.tenant_key):
             raise GraphContractError("bulkhead tenant key must be a bounded opaque identifier")
         if not _OPAQUE_KEY.fullmatch(self.room_key):
             raise GraphContractError("bulkhead room key must be a bounded opaque identifier")
+        if not _OPAQUE_KEY.fullmatch(self.item_key):
+            raise GraphContractError("bulkhead item key must be a bounded opaque identifier")
+
+    @classmethod
+    def from_graph_identity(
+        cls,
+        *,
+        tenant_surrogate: str,
+        case_id: str,
+        room_type: str,
+        room_epoch: int,
+        item_key: str,
+    ) -> GraphBulkheadScope:
+        if (
+            not isinstance(room_epoch, int)
+            or isinstance(room_epoch, bool)
+            or room_epoch < 1
+        ):
+            raise GraphContractError("bulkhead room epoch must be positive")
+        return cls(
+            tenant_key=tenant_surrogate,
+            room_key=f"{case_id}:{room_type}:{room_epoch}",
+            item_key=item_key,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class GraphPermitFenceContext:
+    """Current Graph lease identity required for durable permit operations."""
+
+    thread_id: str
+    command_id: str
+    graph_lease_owner_id: str
+    graph_lease_fencing_token: int
+
+    def __post_init__(self) -> None:
+        if THREAD_ID_PATTERN.fullmatch(self.thread_id) is None:
+            raise GraphContractError("permit fence has an invalid opaque thread ID")
+        _identifier(self.command_id, "command_id")
+        _identifier(self.graph_lease_owner_id, "graph_lease_owner_id")
+        if (
+            not isinstance(self.graph_lease_fencing_token, int)
+            or isinstance(self.graph_lease_fencing_token, bool)
+            or self.graph_lease_fencing_token < 1
+        ):
+            raise GraphContractError("graph lease fencing token must be positive")
 
 
 @dataclass(frozen=True, slots=True)

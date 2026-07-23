@@ -13,6 +13,7 @@ from langchain_core.runnables import Runnable
 from app.contracts.v1.codec import canonical_sha256, canonicalize
 from app.graph_runtime.checkpoint import FencedPostgresSaver, bind_fence_context
 from app.graph_runtime.persistence_models import GraphFenceContext
+from app.graph_runtime.postgres_bulkhead import PostgresGraphFanoutBulkhead
 from app.graphs.evidence.contracts import (
     ASSESSMENT_OUTPUT_SCHEMA_VERSION,
     TERMINAL_OUTPUT_SCHEMA_VERSION,
@@ -193,6 +194,7 @@ def build_evidence_runtime_bundle(
     admission: VerifiedEvidenceAdmission,
     completed_at: str,
     checkpointer: FencedPostgresSaver,
+    bulkhead: PostgresGraphFanoutBulkhead,
     fence: GraphFenceContext,
     runtime_mode: EvidenceRuntimeMode,
     recursion_limit: int = 128,
@@ -206,6 +208,8 @@ def build_evidence_runtime_bundle(
         raise EvidenceGraphContractError("EVIDENCE_RUNTIME_MODE_FORBIDDEN")
     if not isinstance(checkpointer, FencedPostgresSaver):
         raise EvidenceGraphContractError("EVIDENCE_RUNTIME_FENCED_CHECKPOINTER_REQUIRED")
+    if not isinstance(bulkhead, PostgresGraphFanoutBulkhead):
+        raise EvidenceGraphContractError("EVIDENCE_RUNTIME_POSTGRES_BULKHEAD_REQUIRED")
     _validate_runtime_fence(fence, command=command, admission=admission)
     if not _is_rfc3339_instant(completed_at):
         raise EvidenceGraphContractError("EVIDENCE_RUNTIME_COMPLETED_AT_INVALID")
@@ -242,6 +246,8 @@ def build_evidence_runtime_bundle(
     graph = compile_evidence_v2_graph(
         item_assessor=item_assessor,
         checkpointer=checkpointer,
+        bulkhead=bulkhead,
+        graph_fence=fence,
     )
     if graph.checkpointer is not checkpointer:
         raise EvidenceGraphContractError("EVIDENCE_RUNTIME_CHECKPOINTER_BINDING_INVALID")

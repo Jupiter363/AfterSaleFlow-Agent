@@ -1,7 +1,7 @@
 """Controlled Graph PostgreSQL migration job.
 
 Application replicas call readiness only. This module is the sole owner of checkpointer setup and
-G001-G003 DDL under a session advisory lock.
+G001-G005 DDL under a session advisory lock.
 """
 
 from __future__ import annotations
@@ -32,6 +32,8 @@ MIGRATION_FILENAMES: Final[tuple[str, ...]] = (
     "G001_graph_runtime.sql",
     "G002_graph_version_registry.sql",
     "G003_shadow_comparison.sql",
+    "G004_graph_fanout_bulkhead.sql",
+    "G005_graph_fanout_fairness_and_cancellation.sql",
 )
 MIGRATIONS_DIRECTORY: Final[Path] = Path(__file__).resolve().parents[2] / "migrations" / "graph"
 CONTROL_KEY: Final[str] = "primary"
@@ -54,6 +56,10 @@ REQUIRED_MIGRATION_RELATIONS: Final[tuple[str, ...]] = (
     "agent_graph_version_active_reference",
     "agent_graph_shadow_comparison",
     "agent_graph_shadow_cleanup_receipt",
+    "agent_graph_fanout_config",
+    "agent_graph_fanout_tenant_turn",
+    "agent_graph_fanout_permit",
+    "agent_graph_fanout_permit_owner_generation",
 )
 PINNED_PACKAGE_VERSIONS: Final[dict[str, str]] = {
     "langgraph": "1.2.6",
@@ -608,6 +614,10 @@ class GraphMigrationRunner:
             "agent_graph_version_registry",
             "agent_graph_version_active_reference",
             "agent_graph_shadow_cleanup_receipt",
+            "agent_graph_fanout_config",
+            "agent_graph_fanout_tenant_turn",
+            "agent_graph_fanout_permit",
+            "agent_graph_fanout_permit_owner_generation",
         )
         async with connection.transaction():
             await connection.execute(
@@ -683,6 +693,42 @@ class GraphMigrationRunner:
                     schema, runtime, retention
                 )
             )
+            for routine, argument_types in (
+                (
+                    "agent_graph_acquire_fanout_permit",
+                    (
+                        "varchar", "varchar", "varchar", "varchar", "varchar", "varchar",
+                        "varchar", "bigint", "varchar", "double precision", "boolean",
+                    ),
+                ),
+                (
+                    "agent_graph_renew_fanout_permit",
+                    ("varchar", "bigint", "varchar", "varchar", "varchar", "bigint", "varchar"),
+                ),
+                (
+                    "agent_graph_finish_fanout_permit",
+                    (
+                        "varchar", "bigint", "varchar", "varchar", "varchar", "bigint",
+                        "varchar", "boolean",
+                    ),
+                ),
+                (
+                    "agent_graph_cancel_or_release_fanout_permit",
+                    ("varchar", "varchar", "varchar", "varchar", "bigint", "varchar"),
+                ),
+                (
+                    "agent_graph_validate_fanout_recovery",
+                    ("varchar", "bigint", "varchar", "varchar", "varchar", "bigint", "varchar"),
+                ),
+            ):
+                await connection.execute(
+                    sql.SQL("grant execute on function {}.{}({}) to {}").format(
+                        schema,
+                        sql.Identifier(routine),
+                        sql.SQL(", ").join(sql.SQL(item) for item in argument_types),
+                        runtime,
+                    )
+                )
             await connection.execute(
                 sql.SQL(
                     "alter default privileges for role {} in schema {} "

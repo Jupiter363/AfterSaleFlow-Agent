@@ -175,6 +175,15 @@ class EvidenceBulkheadPolicyTest {
         }
     }
 
+    @Test
+    void remainsExplicitlyLocalParityAndNeverClaimsProductionPermitAuthority() {
+        try (EvidenceBulkheadPolicy policy = policy(1, 1, 1, 1, 1)) {
+            assertThat(EvidenceBulkheadPolicy.AUTHORITY_SCOPE)
+                    .isEqualTo("JAVA_SIGNED_SYNTHETIC_LOCAL_PARITY_ONLY");
+            assertThat(policy.isProductionPermitAuthority()).isFalse();
+        }
+    }
+
     private static EvidenceBulkheadPolicy policy(
             int room, int tenant, int global, int tenantQueue, int globalQueue) {
         return new EvidenceBulkheadPolicy(new Limits(

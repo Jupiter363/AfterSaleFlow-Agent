@@ -44,6 +44,10 @@ from app.graph_runtime.persistence_models import (
     GraphPoolConfig,
     GraphReadinessConfig,
 )
+from app.graph_runtime.postgres_bulkhead import (
+    PostgresBulkheadConfig,
+    PostgresGraphFanoutBulkhead,
+)
 from app.graph_runtime.readiness import GraphPersistenceReadinessProbe
 from app.security.graph_runtime import (
     GraphSecurityRuntime,
@@ -62,6 +66,31 @@ from app.security.transport_identity import AsgiMtlsIdentityResolver
 
 GRAPH_READY_PATH = "/ready/graph"
 GRAPH_SHUTDOWN_DRAIN_SECONDS = 5.0
+_SHADOW_BULKHEAD_GLOBAL_LIMIT = 32
+_SHADOW_BULKHEAD_TENANT_LIMIT = 16
+_SHADOW_BULKHEAD_ROOM_LIMIT = 8
+_SHADOW_BULKHEAD_GLOBAL_QUEUE_LIMIT = 256
+_SHADOW_BULKHEAD_TENANT_QUEUE_LIMIT = 128
+_SHADOW_BULKHEAD_ROOM_QUEUE_LIMIT = 100
+_SHADOW_BULKHEAD_PERMIT_LEASE_SECONDS = 20
+_SHADOW_BULKHEAD_WAIT_TIMEOUT_SECONDS = 5.0
+_SHADOW_BULKHEAD_POLL_INTERVAL_SECONDS = 0.05
+
+
+def _shadow_bulkhead_config() -> PostgresBulkheadConfig:
+    """Build the fixed durable capacity only while SHADOW startup is opening."""
+
+    return PostgresBulkheadConfig(
+        global_limit=_SHADOW_BULKHEAD_GLOBAL_LIMIT,
+        tenant_limit=_SHADOW_BULKHEAD_TENANT_LIMIT,
+        room_limit=_SHADOW_BULKHEAD_ROOM_LIMIT,
+        global_queue_limit=_SHADOW_BULKHEAD_GLOBAL_QUEUE_LIMIT,
+        tenant_queue_limit=_SHADOW_BULKHEAD_TENANT_QUEUE_LIMIT,
+        room_queue_limit=_SHADOW_BULKHEAD_ROOM_QUEUE_LIMIT,
+        permit_lease_seconds=_SHADOW_BULKHEAD_PERMIT_LEASE_SECONDS,
+        wait_timeout_seconds=_SHADOW_BULKHEAD_WAIT_TIMEOUT_SECONDS,
+        poll_interval_seconds=_SHADOW_BULKHEAD_POLL_INTERVAL_SECONDS,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +99,7 @@ class GraphExecutorKernel:
 
     saver: FencedPostgresSaver
     gateway: GraphCommandGateway
+    durable_bulkhead: PostgresGraphFanoutBulkhead
 
 
 class ExecutorRegistryFactory(Protocol):
@@ -99,6 +129,7 @@ class GraphRuntimeReadiness:
     accepting: bool
     persistence_code: str
     security_code: str
+    bulkhead_code: str = "GRAPH_BULKHEAD_NOT_CONFIGURED"
 
     def public_payload(self) -> dict[str, str | bool]:
         return {
@@ -108,6 +139,7 @@ class GraphRuntimeReadiness:
             "accepting": self.accepting,
             "persistence_code": self.persistence_code,
             "security_code": self.security_code,
+            "bulkhead_code": self.bulkhead_code,
         }
 
 
@@ -139,6 +171,7 @@ class GraphApplicationRuntime:
         *,
         checkpoint_runtime: GraphCheckpointRuntime,
         persistence_probe: GraphPersistenceReadinessProbe,
+        durable_bulkhead: PostgresGraphFanoutBulkhead,
         security_runtime: GraphSecurityRuntime,
         gateway: GraphCommandGateway,
         stream_service: GatewayBackedGraphCommandStreamService,
@@ -149,6 +182,7 @@ class GraphApplicationRuntime:
     ) -> None:
         self._checkpoint_runtime = checkpoint_runtime
         self._persistence_probe = persistence_probe
+        self._durable_bulkhead = durable_bulkhead
         self._security_runtime = security_runtime
         self._gateway = gateway
         self.stream_service = stream_service
@@ -157,6 +191,7 @@ class GraphApplicationRuntime:
         self.execution_verifier = execution_verifier
         self.reconciliation_verifier = reconciliation_verifier
         self._persistence_ready = True
+        self._bulkhead_ready = True
         self._closed = False
         self._close_complete = False
         self._drained = False
@@ -203,6 +238,7 @@ class GraphApplicationRuntime:
             checkpoint_runtime.pool,
         )
         security_runtime: GraphSecurityRuntime | None = None
+        durable_bulkhead: PostgresGraphFanoutBulkhead | None = None
         try:
             report = await probe.check()
             if not report.ready:
@@ -213,6 +249,14 @@ class GraphApplicationRuntime:
                 input_authorizer=bindings.input_authorizer,
                 acquire_timeout_seconds=settings.graph_pool_acquire_timeout_seconds,
             )
+            durable_bulkhead = PostgresGraphFanoutBulkhead(
+                checkpoint_runtime.pool,
+                _shadow_bulkhead_config(),
+            )
+            await durable_bulkhead.open()
+            bulkhead_report = await durable_bulkhead.check_readiness()
+            if not bulkhead_report.ready:
+                raise RuntimeError(bulkhead_report.code)
             security_runtime = await _open_graph_security_runtime_for_lifecycle(
                 jwks_url=str(settings.graph_jwks_url),
                 timeout_seconds=settings.graph_jwks_timeout_seconds,
@@ -223,6 +267,7 @@ class GraphApplicationRuntime:
                 GraphExecutorKernel(
                     saver=checkpoint_runtime.saver,
                     gateway=gateway,
+                    durable_bulkhead=durable_bulkhead,
                 )
             )
             if type(executors) is not ExactShadowExecutorRegistry:
@@ -247,6 +292,7 @@ class GraphApplicationRuntime:
             runtime = cls(
                 checkpoint_runtime=checkpoint_runtime,
                 persistence_probe=probe,
+                durable_bulkhead=durable_bulkhead,
                 security_runtime=security_runtime,
                 gateway=gateway,
                 stream_service=stream_service,
@@ -263,15 +309,24 @@ class GraphApplicationRuntime:
             return runtime
         except BaseException:
             try:
-                if security_runtime is not None:
-                    await security_runtime.close()
+                if durable_bulkhead is not None:
+                    await durable_bulkhead.close()
             finally:
-                await checkpoint_runtime.close()
+                try:
+                    if security_runtime is not None:
+                        await security_runtime.close()
+                finally:
+                    await checkpoint_runtime.close()
             raise
 
     @property
     def ready(self) -> bool:
-        if self._closed or not self._persistence_ready or not self._admission_gate.accepting:
+        if (
+            self._closed
+            or not self._persistence_ready
+            or not self._bulkhead_ready
+            or not self._admission_gate.accepting
+        ):
             return False
         try:
             return bool(self._security_runtime.readiness().ready)
@@ -287,6 +342,7 @@ class GraphApplicationRuntime:
                 accepting=False,
                 persistence_code="GRAPH_PERSISTENCE_CLOSED",
                 security_code="GRAPH_JWKS_CLOSED",
+                bulkhead_code="GRAPH_BULKHEAD_CLOSED",
             )
         try:
             persistence = await self._persistence_probe.check()
@@ -297,11 +353,18 @@ class GraphApplicationRuntime:
             security = self._security_runtime.readiness()
         except Exception:
             security = None
+        try:
+            bulkhead = await self._durable_bulkhead.check_readiness()
+        except Exception:
+            bulkhead = None
+        self._bulkhead_ready = bool(bulkhead is not None and bulkhead.ready)
         ready = bool(
             persistence is not None
             and persistence.ready
             and security is not None
             and security.ready
+            and bulkhead is not None
+            and bulkhead.ready
             and self._admission_gate.accepting
         )
         if persistence is None:
@@ -312,6 +375,10 @@ class GraphApplicationRuntime:
             code = "GRAPH_JWKS_CHECK_FAILED"
         elif not security.ready:
             code = security.code
+        elif bulkhead is None:
+            code = "GRAPH_BULKHEAD_CHECK_FAILED"
+        elif not bulkhead.ready:
+            code = bulkhead.code
         elif not self._admission_gate.accepting:
             code = "GRAPH_GATEWAY_DRAINING"
         else:
@@ -325,6 +392,9 @@ class GraphApplicationRuntime:
                 persistence.code if persistence is not None else "GRAPH_PERSISTENCE_CHECK_FAILED"
             ),
             security_code=(security.code if security is not None else "GRAPH_JWKS_CHECK_FAILED"),
+            bulkhead_code=(
+                bulkhead.code if bulkhead is not None else "GRAPH_BULKHEAD_CHECK_FAILED"
+            ),
         )
 
     async def close(self) -> bool:
@@ -333,18 +403,26 @@ class GraphApplicationRuntime:
                 return self._drained
             self._closed = True
             drained = False
+            bulkhead_drained = False
             try:
                 try:
                     drained = await self._admission_gate.drain(GRAPH_SHUTDOWN_DRAIN_SECONDS)
                 finally:
                     try:
-                        await self._security_runtime.close()
+                        await self._durable_bulkhead.drain()
+                        bulkhead_drained = True
                     finally:
-                        await self._checkpoint_runtime.close()
+                        try:
+                            await self._durable_bulkhead.close()
+                        finally:
+                            try:
+                                await self._security_runtime.close()
+                            finally:
+                                await self._checkpoint_runtime.close()
             finally:
-                self._drained = drained
+                self._drained = drained and bulkhead_drained
                 self._close_complete = True
-            return drained
+            return self._drained
 
 
 class GraphRuntimeHandle:
@@ -442,6 +520,7 @@ class GraphRuntimeHandle:
                 accepting=False,
                 persistence_code="GRAPH_DISABLED",
                 security_code="GRAPH_DISABLED",
+                bulkhead_code="GRAPH_DISABLED",
             )
         if self._runtime is None:
             return GraphRuntimeReadiness(
@@ -451,6 +530,7 @@ class GraphRuntimeHandle:
                 accepting=False,
                 persistence_code="GRAPH_PERSISTENCE_NOT_STARTED",
                 security_code="GRAPH_JWKS_NOT_STARTED",
+                bulkhead_code="GRAPH_BULKHEAD_NOT_STARTED",
             )
         try:
             return await self._runtime.check_readiness()
@@ -462,6 +542,7 @@ class GraphRuntimeHandle:
                 accepting=False,
                 persistence_code="GRAPH_READINESS_CHECK_FAILED",
                 security_code="GRAPH_READINESS_CHECK_FAILED",
+                bulkhead_code="GRAPH_READINESS_CHECK_FAILED",
             )
 
     def require_runtime(self) -> GraphRuntimeInstance:

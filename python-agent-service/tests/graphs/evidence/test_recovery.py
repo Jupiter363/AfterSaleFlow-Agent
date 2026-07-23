@@ -5,6 +5,7 @@ import random
 import time
 from collections.abc import AsyncIterator
 from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 from dataclasses import replace
 from typing import Any
 
@@ -21,9 +22,12 @@ from langgraph.checkpoint.base import (
 from langgraph.checkpoint.memory import InMemorySaver
 
 from app.contracts.v1.codec import canonical_sha256
+from app.graph_runtime.bulkhead import GraphBulkheadScope, GraphPermitFenceContext
 from app.graph_runtime.checkpoint import FencedPostgresSaver, bind_fence_context
 from app.graph_runtime.persistence_models import GraphFenceContext, GraphFenceError
-from app.graphs.evidence.contracts import EvidenceGraphContractError
+from app.graph_runtime.postgres_bulkhead import PostgresGraphFanoutBulkhead
+from app.graphs.evidence.contracts import EvidenceGraphContext, EvidenceGraphContractError
+from app.graphs.evidence.graph import compile_evidence_v2_graph
 from app.graphs.evidence.runtime import (
     build_evidence_runtime_bundle,
     extract_evidence_terminal_proposal,
@@ -104,6 +108,114 @@ class _MemoryFencedSaver(FencedPostgresSaver):
         return self._memory.get_next_version(current, channel)
 
 
+class _MemoryPostgresPermit:
+    def __init__(
+        self,
+        bulkhead: _MemoryPostgresBulkhead,
+        *,
+        request_id: str,
+        scope: GraphBulkheadScope,
+        fence: GraphPermitFenceContext,
+        owner_id: str,
+    ) -> None:
+        self._bulkhead = bulkhead
+        self.request_id = request_id
+        self.scope = scope
+        self.fence = fence
+        self.owner_id = owner_id
+        self.permit_fencing_token = len(bulkhead.acquisitions) + 1
+        self.lease_expires_at = datetime.now(timezone.utc) + timedelta(seconds=30)
+        self.renewal_due_at = datetime.now(timezone.utc) + timedelta(
+            seconds=bulkhead.renewal_interval_seconds
+        )
+        self.renewal_interval_seconds = bulkhead.renewal_interval_seconds
+        self.wait_seconds = 0.0
+        self.validation_count = 0
+        self.released = False
+
+    async def validate_recovery(self) -> None:
+        self.validation_count += 1
+        if self.released or self.request_id not in self._bulkhead.active:
+            raise RuntimeError("durable permit missing")
+        if self.fence != self._bulkhead.active_fence:
+            raise RuntimeError("stale graph lease")
+        if self._bulkhead.drop_permit_at_validation == self.validation_count:
+            self._bulkhead.active.pop(self.request_id, None)
+            raise RuntimeError("durable permit missing")
+
+    async def renew(self) -> datetime:
+        if self._bulkhead.renew_failure is not None:
+            raise self._bulkhead.renew_failure
+        await self.validate_recovery()
+        self._bulkhead.renewals.append(self.request_id)
+        self.lease_expires_at = datetime.now(timezone.utc) + timedelta(seconds=30)
+        self.renewal_due_at = datetime.now(timezone.utc) + timedelta(
+            seconds=self.renewal_interval_seconds
+        )
+        return self.lease_expires_at
+
+    async def release(self) -> None:
+        if not self.released:
+            self.released = True
+            self._bulkhead.active.pop(self.request_id, None)
+            self._bulkhead.releases.append(self.request_id)
+
+
+class _MemoryPostgresBulkhead(PostgresGraphFanoutBulkhead):
+    """Production-authority test double; it never falls back to a local bulkhead."""
+
+    def __init__(
+        self,
+        *,
+        active_fence: GraphPermitFenceContext | None = None,
+        renewal_interval_seconds: float = 60.0,
+    ) -> None:
+        self.active_fence = active_fence
+        self.renewal_interval_seconds = renewal_interval_seconds
+        self.drop_permit_at_validation: int | None = None
+        self.renew_failure: BaseException | None = None
+        self.acquisitions: list[_MemoryPostgresPermit] = []
+        self.renewals: list[str] = []
+        self.releases: list[str] = []
+        self.active: dict[str, _MemoryPostgresPermit] = {}
+        self.expired_requests: set[str] = set()
+        self.acquire_attempts: list[tuple[str, str]] = []
+
+    async def acquire(
+        self,
+        scope: GraphBulkheadScope,
+        fence: GraphPermitFenceContext,
+        request_id: str,
+        owner_id: str,
+        timeout_seconds: float | None = None,
+        takeover: bool = False,
+    ) -> _MemoryPostgresPermit:
+        del timeout_seconds
+        if not owner_id.startswith("permit-worker:"):
+            raise RuntimeError("invalid permit execution owner")
+        self.acquire_attempts.append((request_id, owner_id))
+        if self.active_fence is None:
+            self.active_fence = fence
+        if fence != self.active_fence:
+            raise RuntimeError("stale graph lease")
+        if request_id in self.active:
+            if request_id not in self.expired_requests:
+                raise RuntimeError("durable permit binding conflict")
+            if not takeover:
+                raise RuntimeError("durable permit takeover required")
+            self.expired_requests.remove(request_id)
+        permit = _MemoryPostgresPermit(
+            self,
+            request_id=request_id,
+            scope=scope,
+            fence=fence,
+            owner_id=owner_id,
+        )
+        self.acquisitions.append(permit)
+        self.active[request_id] = permit
+        return permit
+
+
 def _fence(admission, *, owner_id="worker-a", fencing_token=None) -> GraphFenceContext:
     command = admission.room_graph_command
     return GraphFenceContext(
@@ -124,17 +236,20 @@ def _bundle(
     admission,
     assessment,
     saver=None,
+    bulkhead=None,
     fence=None,
     completed_at=COMPLETED_AT,
     mode=None,
 ):
     selected_fence = fence or _fence(admission)
     selected_saver = saver or _MemoryFencedSaver(selected_fence)
+    selected_bulkhead = bulkhead or _MemoryPostgresBulkhead()
     return build_evidence_runtime_bundle(
         item_assessor=RunnableLambda(assessment),
         admission=admission,
         completed_at=completed_at,
         checkpointer=selected_saver,
+        bulkhead=selected_bulkhead,
         fence=selected_fence,
         runtime_mode=mode or "SIGNED_SYNTHETIC_SHADOW",
     )
@@ -186,6 +301,7 @@ def test_crash_recovery_resumes_same_manifest_and_replays_identical_proposal(
     target = admission.manifest["ordered_item_keys"][-1]
     fence = _fence(admission)
     saver = _MemoryFencedSaver(fence)
+    bulkhead = _MemoryPostgresBulkhead()
     crashed = False
 
     def crash_once(work_item):
@@ -199,6 +315,7 @@ def test_crash_recovery_resumes_same_manifest_and_replays_identical_proposal(
         admission=admission,
         assessment=crash_once,
         saver=saver,
+        bulkhead=bulkhead,
         fence=fence,
     )
     with pytest.raises(RuntimeError, match="synthetic assessment crash"):
@@ -208,6 +325,7 @@ def test_crash_recovery_resumes_same_manifest_and_replays_identical_proposal(
         admission=admission,
         assessment=assessment_factory,
         saver=saver,
+        bulkhead=bulkhead,
         fence=fence,
     )
     recovered_state = _run(recovered.aresume())
@@ -220,6 +338,15 @@ def test_crash_recovery_resumes_same_manifest_and_replays_identical_proposal(
     clean_proposal = clean.terminal_proposal(_run(clean.astart()))
 
     assert recovered_proposal == clean_proposal
+    target_requests = [
+        permit.request_id
+        for permit in bulkhead.acquisitions
+        if permit.scope.item_key == target
+    ]
+    assert len(target_requests) == 2
+    assert len(set(target_requests)) == 1
+    assert len(bulkhead.releases) == len(bulkhead.acquisitions)
+    assert not bulkhead.active
 
 
 def test_recovery_rejects_another_graph_lease_fence_on_the_same_java_manifest(
@@ -377,9 +504,307 @@ def test_runtime_rejects_generic_checkpoint_saver(
             admission=admission,
             completed_at=COMPLETED_AT,
             checkpointer=InMemorySaver(),  # type: ignore[arg-type]
+            bulkhead=_MemoryPostgresBulkhead(),
             fence=_fence(admission),
             runtime_mode="SIGNED_SYNTHETIC_SHADOW",
         )
+
+
+def test_runtime_rejects_missing_postgres_bulkhead(
+    admission,
+    assessment_factory,
+) -> None:
+    fence = _fence(admission)
+    with pytest.raises(
+        EvidenceGraphContractError,
+        match="EVIDENCE_RUNTIME_POSTGRES_BULKHEAD_REQUIRED",
+    ):
+        build_evidence_runtime_bundle(
+            item_assessor=RunnableLambda(assessment_factory),
+            admission=admission,
+            completed_at=COMPLETED_AT,
+            checkpointer=_MemoryFencedSaver(fence),
+            bulkhead=object(),  # type: ignore[arg-type]
+            fence=fence,
+            runtime_mode="SIGNED_SYNTHETIC_SHADOW",
+        )
+
+
+def test_each_async_item_uses_and_releases_a_distinct_durable_permit(
+    admission_factory,
+    assessment_factory,
+) -> None:
+    admission = admission_factory(8)
+    bulkhead = _MemoryPostgresBulkhead()
+    bundle = _bundle(
+        admission=admission,
+        assessment=assessment_factory,
+        bulkhead=bulkhead,
+    )
+
+    state = _run(bundle.astart())
+
+    assert state["result_json"]["writer_mode"] == "PROPOSAL_ONLY"
+    assert len(bulkhead.acquisitions) == 8
+    assert len({permit.request_id for permit in bulkhead.acquisitions}) == 8
+    assert len(bulkhead.releases) == 8
+    assert not bulkhead.active
+    manifest = admission.manifest
+    command = admission.room_graph_command
+    for permit in bulkhead.acquisitions:
+        assert permit.scope.tenant_key == manifest["tenant_surrogate"]
+        assert permit.scope.room_key == (
+            f"{command['case_id']}:{command['room_type']}:{command['room_epoch']}"
+        )
+        assert permit.scope.item_key in manifest["ordered_item_keys"]
+        assert permit.owner_id.startswith("permit-worker:")
+        assert permit.fence.graph_lease_fencing_token == (
+            admission.graph_lease_fencing_token
+        )
+        assert permit.fence.graph_lease_fencing_token != manifest["fencing_token"]
+        assert permit.validation_count == 2
+
+
+def test_post_assessment_permit_loss_fails_closed_and_releases(
+    admission,
+    assessment_factory,
+) -> None:
+    bulkhead = _MemoryPostgresBulkhead()
+    bulkhead.drop_permit_at_validation = 2
+    bundle = _bundle(
+        admission=admission,
+        assessment=assessment_factory,
+        bulkhead=bulkhead,
+    )
+
+    with pytest.raises(RuntimeError, match="durable permit missing"):
+        _run(bundle.astart())
+
+    assert len(bulkhead.acquisitions) == 1
+    assert bulkhead.releases == [bulkhead.acquisitions[0].request_id]
+    assert not bulkhead.active
+
+
+def test_renewal_failure_cancels_assessor_and_releases_permit(
+    admission,
+) -> None:
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def blocked_assessor(_work_item):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    bulkhead = _MemoryPostgresBulkhead(renewal_interval_seconds=0.001)
+    bulkhead.renew_failure = RuntimeError("permit lease lost")
+    bundle = _bundle(
+        admission=admission,
+        assessment=blocked_assessor,
+        bulkhead=bulkhead,
+    )
+
+    async def scenario() -> None:
+        with pytest.raises(RuntimeError, match="permit lease lost"):
+            await bundle.astart()
+        assert started.is_set()
+        assert cancelled.is_set()
+
+    _run(scenario())
+    assert len(bulkhead.releases) == 1
+    assert not bulkhead.active
+
+
+def test_heartbeat_renews_before_accepting_assessment(
+    admission,
+    assessment_factory,
+) -> None:
+    async def delayed_assessor(work_item):
+        await asyncio.sleep(0.01)
+        return assessment_factory(work_item)
+
+    bulkhead = _MemoryPostgresBulkhead(renewal_interval_seconds=0.001)
+    bundle = _bundle(
+        admission=admission,
+        assessment=delayed_assessor,
+        bulkhead=bulkhead,
+    )
+
+    state = _run(bundle.astart())
+
+    assert state["result_json"]["coverage_status"] == "COMPLETE"
+    assert bulkhead.renewals
+    assert len(bulkhead.releases) == 1
+    assert not bulkhead.active
+
+
+def test_runtime_cancellation_releases_the_durable_permit(
+    admission,
+) -> None:
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def blocked_assessor(_work_item):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    bulkhead = _MemoryPostgresBulkhead()
+    bundle = _bundle(
+        admission=admission,
+        assessment=blocked_assessor,
+        bulkhead=bulkhead,
+    )
+
+    async def scenario() -> None:
+        task = asyncio.create_task(bundle.astart())
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert cancelled.is_set()
+
+    _run(scenario())
+    assert len(bulkhead.releases) == 1
+    assert not bulkhead.active
+
+
+def test_higher_graph_lease_takes_over_and_fences_old_item_output(
+    admission_request_factory,
+    admission_verifier_factory,
+    assessment_factory,
+) -> None:
+    request = admission_request_factory(1)
+    original = admission_verifier_factory().verify(request)
+    replacement = admission_verifier_factory().verify(
+        replace(
+            request,
+            graph_lease_fencing_token=request.graph_lease_fencing_token + 1,
+        )
+    )
+    original_fence = _fence(original, owner_id="worker-old")
+    replacement_fence = _fence(replacement, owner_id="worker-new")
+    bulkhead = _MemoryPostgresBulkhead()
+    started = asyncio.Event()
+    complete_old = asyncio.Event()
+
+    async def old_assessor(work_item):
+        started.set()
+        await complete_old.wait()
+        return assessment_factory(work_item)
+
+    old_graph = compile_evidence_v2_graph(
+        item_assessor=RunnableLambda(old_assessor),
+        bulkhead=bulkhead,
+        graph_fence=original_fence,
+    )
+    new_graph = compile_evidence_v2_graph(
+        item_assessor=RunnableLambda(assessment_factory),
+        bulkhead=bulkhead,
+        graph_fence=replacement_fence,
+    )
+
+    async def scenario() -> dict[str, Any]:
+        old_task = asyncio.create_task(
+            old_graph.ainvoke(
+                new_evidence_graph_state(admission=original),
+                context=EvidenceGraphContext(
+                    admission=original,
+                    completed_at=COMPLETED_AT,
+                ),
+                config={"recursion_limit": 32},
+            )
+        )
+        await started.wait()
+        old_permit = bulkhead.acquisitions[0]
+        bulkhead.expired_requests.add(old_permit.request_id)
+        bulkhead.active_fence = GraphPermitFenceContext(
+            thread_id=replacement_fence.thread_id,
+            command_id=replacement_fence.command_id,
+            graph_lease_owner_id=replacement_fence.owner_id,
+            graph_lease_fencing_token=replacement_fence.fencing_token,
+        )
+        replacement_state = await new_graph.ainvoke(
+            new_evidence_graph_state(admission=replacement),
+            context=EvidenceGraphContext(
+                admission=replacement,
+                completed_at=COMPLETED_AT,
+            ),
+            config={"recursion_limit": 32},
+        )
+        new_permit = bulkhead.acquisitions[1]
+        complete_old.set()
+        with pytest.raises(RuntimeError, match="durable permit missing|stale graph lease"):
+            await old_task
+        assert new_permit.request_id == old_permit.request_id
+        assert new_permit.permit_fencing_token > old_permit.permit_fencing_token
+        return replacement_state
+
+    state = _run(scenario())
+    assert state["result_json"]["coverage_status"] == "COMPLETE"
+    assert state["result_json"]["formal_sink_eligible"] is False
+
+
+def test_concurrent_duplicate_request_binding_conflicts_before_assessment(
+    admission,
+    assessment_factory,
+) -> None:
+    fence = _fence(admission)
+    bulkhead = _MemoryPostgresBulkhead()
+    started = asyncio.Event()
+    complete_first = asyncio.Event()
+    duplicate_assessed = False
+
+    async def first_assessor(work_item):
+        started.set()
+        await complete_first.wait()
+        return assessment_factory(work_item)
+
+    def duplicate_assessor(work_item):
+        nonlocal duplicate_assessed
+        duplicate_assessed = True
+        return assessment_factory(work_item)
+
+    first_graph = compile_evidence_v2_graph(
+        item_assessor=RunnableLambda(first_assessor),
+        bulkhead=bulkhead,
+        graph_fence=fence,
+    )
+    duplicate_graph = compile_evidence_v2_graph(
+        item_assessor=RunnableLambda(duplicate_assessor),
+        bulkhead=bulkhead,
+        graph_fence=fence,
+    )
+    context = EvidenceGraphContext(admission=admission, completed_at=COMPLETED_AT)
+
+    async def scenario() -> dict[str, Any]:
+        first = asyncio.create_task(
+            first_graph.ainvoke(
+                new_evidence_graph_state(admission=admission),
+                context=context,
+                config={"recursion_limit": 32},
+            )
+        )
+        await started.wait()
+        with pytest.raises(RuntimeError, match="durable permit binding conflict"):
+            await duplicate_graph.ainvoke(
+                new_evidence_graph_state(admission=admission),
+                context=context,
+                config={"recursion_limit": 32},
+            )
+        complete_first.set()
+        return await first
+
+    state = _run(scenario())
+    assert state["result_json"]["coverage_status"] == "COMPLETE"
+    assert duplicate_assessed is False
+    assert len(bulkhead.acquire_attempts) == 2
+    assert bulkhead.acquire_attempts[0][0] == bulkhead.acquire_attempts[1][0]
+    assert bulkhead.acquire_attempts[0][1] != bulkhead.acquire_attempts[1][1]
 
 
 def test_runtime_rejects_transplanted_and_stale_graph_fences(

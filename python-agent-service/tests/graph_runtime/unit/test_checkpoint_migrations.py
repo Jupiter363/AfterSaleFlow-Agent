@@ -32,7 +32,13 @@ def test_repository_migrations_are_exact_ordered_and_hash_bound() -> None:
     migrations = load_graph_migrations()
 
     assert tuple(migration.filename for migration in migrations) == MIGRATION_FILENAMES
-    assert tuple(migration.version for migration in migrations) == ("G001", "G002", "G003")
+    assert tuple(migration.version for migration in migrations) == (
+        "G001",
+        "G002",
+        "G003",
+        "G004",
+        "G005",
+    )
     assert all(len(migration.sha256) == 64 for migration in migrations)
     assert len(graph_application_signature(migrations)) == 64
 
@@ -313,6 +319,13 @@ def test_migration_and_restore_validation_use_the_same_schema_lock() -> None:
     assert graph_schema_advisory_lock_key("graph_runtime") == (
         "after-sale-flow:graph-schema:graph_runtime"
     )
+
+
+def test_runtime_grants_only_the_race_safe_fanout_cancellation_routine() -> None:
+    source = inspect.getsource(GraphMigrationRunner._apply_runtime_grants)
+
+    assert "agent_graph_cancel_or_release_fanout_permit" in source
+    assert "agent_graph_cancel_queued_fanout_permit" not in source
 
 
 @pytest.mark.asyncio

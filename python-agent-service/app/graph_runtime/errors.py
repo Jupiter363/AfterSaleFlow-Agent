@@ -64,6 +64,24 @@ class GraphBulkheadTimeoutError(GraphRuntimeError):
     retryable = True
 
 
+class GraphBulkheadConfigurationError(GraphRuntimeError):
+    code = "GRAPH_BULKHEAD_CONFIGURATION_INVALID"
+
+
+class GraphPermitUnavailableError(GraphRuntimeError):
+    code = "GRAPH_PERMIT_UNAVAILABLE"
+    retryable = True
+
+
+class GraphPermitLostError(GraphRuntimeError):
+    code = "GRAPH_PERMIT_LOST"
+    retryable = True
+
+
+class GraphPermitBindingError(GraphRuntimeError):
+    code = "GRAPH_PERMIT_BINDING_CONFLICT"
+
+
 class GraphNonceReplayError(GraphRuntimeError):
     code = "GRAPH_INVOCATION_NONCE_REPLAY"
 

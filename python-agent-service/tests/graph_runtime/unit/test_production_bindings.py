@@ -43,6 +43,7 @@ from app.graph_runtime.intake_exchange import (
     INTAKE_PROPOSAL_PUT_PATH,
     JavaIntakeExchangeClient,
 )
+from app.graph_runtime.postgres_bulkhead import PostgresGraphFanoutBulkhead
 from app.graph_runtime.intake_executor import CompiledIntakeGraphShadowExecutor
 from app.graph_runtime.persistence_models import GraphFenceContext
 from app.graph_runtime.checkpoint import FENCE_CONTEXT_KEY, bind_fence_context
@@ -209,6 +210,25 @@ def _intake_binding(command: RoomGraphCommand) -> dict[str, Any]:
 
 def _intake_config(command: RoomGraphCommand) -> GraphShadowBindingSettings:
     values = _intake_binding(command)
+    return GraphShadowBindingSettings.model_construct(
+        **{
+            **values,
+            "allowed_room_types": tuple(values["allowed_room_types"]),
+            "allowed_stage_codes": tuple(values["allowed_stage_codes"]),
+        }
+    )
+
+
+def _evidence_config(command: RoomGraphCommand) -> GraphShadowBindingSettings:
+    values = _binding(command)
+    values.update(
+        {
+            "graph_key": "evidence.v2",
+            "graph_version": "evidence.v2.0.0",
+            "checkpoint_schema_version": "evidence.checkpoint.v2",
+            "allowed_room_types": ["EVIDENCE"],
+        }
+    )
     return GraphShadowBindingSettings.model_construct(
         **{
             **values,
@@ -478,6 +498,7 @@ def test_executor_factory_registers_a_real_exact_compiled_executor() -> None:
         GraphExecutorKernel(
             saver=cast(Any, saver),
             gateway=cast(Any, object()),
+            durable_bulkhead=cast(Any, object()),
         )
     )
     record = RegistryRecord(
@@ -505,7 +526,11 @@ def test_exact_intake_graph_key_requires_all_durable_executor_dependencies() -> 
     with pytest.raises(ValueError, match="dependencies are incomplete"):
         _executor_registration(
             _intake_config(command),
-            GraphExecutorKernel(saver=cast(Any, InMemorySaver()), gateway=cast(Any, object())),
+            GraphExecutorKernel(
+                saver=cast(Any, InMemorySaver()),
+                gateway=cast(Any, object()),
+                durable_bulkhead=cast(Any, object()),
+            ),
         )
 
 
@@ -521,7 +546,11 @@ def test_exact_intake_graph_key_registers_only_the_dedicated_executor() -> None:
 
     registration = _executor_registration(
         _intake_config(command),
-        GraphExecutorKernel(saver=cast(Any, InMemorySaver()), gateway=cast(Any, object())),
+        GraphExecutorKernel(
+            saver=cast(Any, InMemorySaver()),
+            gateway=cast(Any, object()),
+            durable_bulkhead=cast(Any, object()),
+        ),
         intake_transport=cast(Any, object()),
         intake_exchange=Exchange(),
         intake_provider="litellm",
@@ -979,8 +1008,9 @@ def test_intake_dispatch_rejects_version_relabeling_before_registration() -> Non
         _executor_registration(
             drifted,
             GraphExecutorKernel(
-                saver=cast(Any, InMemorySaver()),
-                gateway=cast(Any, object()),
+                    saver=cast(Any, InMemorySaver()),
+                    gateway=cast(Any, object()),
+                    durable_bulkhead=cast(Any, object()),
             ),
         )
 
@@ -1025,6 +1055,7 @@ async def test_synthetic_program_advances_each_checkpoint_and_has_no_effects() -
         GraphExecutorKernel(
             saver=cast(Any, saver),
             gateway=cast(Any, object()),
+            durable_bulkhead=cast(Any, object()),
         )
     )
     registration = registry.resolve_registration(
@@ -1091,6 +1122,25 @@ def test_default_runtime_builder_never_creates_shadow_bindings_implicitly() -> N
     )
     with pytest.raises(ValueError, match="incomplete"):
         build_graph_runtime_bindings(incomplete)
+
+
+@pytest.mark.parametrize("durable", [None, object()])
+def test_evidence_binding_never_falls_back_to_generic_synthetic_executor(
+    durable: object | None,
+) -> None:
+    configured = _evidence_config(_command())
+    kernel = SimpleNamespace(saver=InMemorySaver(), durable_bulkhead=durable)
+
+    with pytest.raises(GraphContractError, match="durable PostgreSQL bulkhead"):
+        _executor_registration(configured, cast(GraphExecutorKernel, kernel))
+
+    exact_bulkhead = object.__new__(PostgresGraphFanoutBulkhead)
+    exact_kernel = SimpleNamespace(
+        saver=InMemorySaver(),
+        durable_bulkhead=exact_bulkhead,
+    )
+    with pytest.raises(GraphContractError, match="exact executor binding is unavailable"):
+        _executor_registration(configured, cast(GraphExecutorKernel, exact_kernel))
 
 
 @pytest.mark.parametrize(

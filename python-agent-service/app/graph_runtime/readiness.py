@@ -38,6 +38,10 @@ REQUIRED_RELATIONS: Final[tuple[str, ...]] = (
     "agent_graph_version_active_reference",
     "agent_graph_shadow_comparison",
     "agent_graph_shadow_cleanup_receipt",
+    "agent_graph_fanout_config",
+    "agent_graph_fanout_tenant_turn",
+    "agent_graph_fanout_permit",
+    "agent_graph_fanout_permit_owner_generation",
 )
 RUNTIME_DELETE_FORBIDDEN_RELATIONS: Final[tuple[str, ...]] = REQUIRED_RELATIONS
 RUNTIME_APPEND_ONLY_RELATIONS: Final[tuple[str, ...]] = (
@@ -48,6 +52,70 @@ RUNTIME_APPEND_ONLY_RELATIONS: Final[tuple[str, ...]] = (
 )
 
 CONSISTENCY_QUERIES: Final[tuple[tuple[str, str], ...]] = (
+    (
+        "fanout_active_fences_consistent",
+        """
+        select exists (
+            select 1 from agent_graph_fanout_permit permit
+             where permit.status = 'GRANTED'
+               and permit.lease_expires_at > clock_timestamp()
+               and not exists (
+                   select 1 from agent_graph_lease lease
+                    where lease.thread_id = permit.thread_id
+                      and lease.command_id = permit.command_id
+                      and lease.owner_id = permit.graph_lease_owner_id
+                      and lease.fencing_token = permit.graph_lease_fencing_token
+                      and lease.released_at is null and lease.cancelled_at is null
+                      and lease.lease_expires_at >= permit.lease_expires_at
+               )
+             limit 1
+        ) as inconsistent
+        """,
+    ),
+    (
+        "fanout_capacity_consistent",
+        """
+        select exists (
+            select 1
+              from agent_graph_fanout_config config
+             where config.config_key = 'signed-synthetic'
+               and (
+                   (select count(*) from agent_graph_fanout_permit permit
+                     where permit.status = 'GRANTED'
+                       and permit.lease_expires_at > clock_timestamp()) > config.global_limit
+                   or exists (
+                       select 1 from agent_graph_fanout_permit permit
+                        where permit.status = 'GRANTED'
+                          and permit.lease_expires_at > clock_timestamp()
+                        group by permit.tenant_key
+                       having count(*) > config.tenant_limit
+                   )
+                   or exists (
+                       select 1 from agent_graph_fanout_permit permit
+                        where permit.status = 'GRANTED'
+                          and permit.lease_expires_at > clock_timestamp()
+                        group by permit.tenant_key, permit.room_key
+                       having count(*) > config.room_limit
+                   )
+               )
+        ) as inconsistent
+        """,
+    ),
+    (
+        "fanout_queued_turns_consistent",
+        """
+        select exists (
+            select 1 from agent_graph_fanout_permit permit
+             where permit.status = 'QUEUED'
+               and permit.wait_deadline_at > clock_timestamp()
+               and not exists (
+                   select 1 from agent_graph_fanout_tenant_turn tenant_turn
+                    where tenant_turn.tenant_key = permit.tenant_key
+               )
+             limit 1
+        ) as inconsistent
+        """,
+    ),
     (
         "command_checkpoint_consistent",
         """
@@ -372,6 +440,84 @@ class GraphPersistenceReadinessProbe:
             and not row["can_mutate_append_only"]
         )
         self._require(checks["runtime_role_read_only"], "GRAPH_RUNTIME_ROLE_PRIVILEGED", checks)
+
+        fanout = await self._fetchone(
+            connection,
+            """
+            select not exists (
+                       select 1 from unnest(%s::text[]) relation(relation_name)
+                        where not has_table_privilege(
+                            current_user, %s || '.' || relation_name, 'SELECT'
+                        )
+                   ) as can_read_fanout,
+                   exists (
+                       select 1 from unnest(%s::text[]) relation(relation_name)
+                        where has_table_privilege(
+                                  current_user, %s || '.' || relation_name, 'INSERT'
+                              )
+                           or has_table_privilege(
+                                  current_user, %s || '.' || relation_name, 'UPDATE'
+                              )
+                           or has_table_privilege(
+                                  current_user, %s || '.' || relation_name, 'DELETE'
+                              )
+                   ) as can_mutate_fanout,
+                   not exists (
+                       select 1
+                         from unnest(%s::text[], %s::smallint[])
+                              expected(routine_name, argument_count)
+                         left join pg_namespace namespace
+                           on namespace.nspname = %s
+                         left join pg_proc procedure
+                           on procedure.pronamespace = namespace.oid
+                          and procedure.proname = expected.routine_name
+                          and procedure.pronargs = expected.argument_count
+                        where procedure.oid is null
+                           or not procedure.prosecdef
+                           or not has_function_privilege(
+                               current_user, procedure.oid, 'EXECUTE'
+                           )
+                   ) as can_execute_fanout
+            """,
+            (
+                [
+                    "agent_graph_fanout_config",
+                    "agent_graph_fanout_tenant_turn",
+                    "agent_graph_fanout_permit",
+                    "agent_graph_fanout_permit_owner_generation",
+                ],
+                self._config.schema,
+                [
+                    "agent_graph_fanout_config",
+                    "agent_graph_fanout_tenant_turn",
+                    "agent_graph_fanout_permit",
+                    "agent_graph_fanout_permit_owner_generation",
+                ],
+                self._config.schema,
+                self._config.schema,
+                self._config.schema,
+                [
+                    "agent_graph_acquire_fanout_permit",
+                    "agent_graph_renew_fanout_permit",
+                    "agent_graph_finish_fanout_permit",
+                    "agent_graph_cancel_or_release_fanout_permit",
+                    "agent_graph_validate_fanout_recovery",
+                ],
+                [11, 7, 8, 6, 7],
+                self._config.schema,
+            ),
+        )
+        checks["runtime_fanout_authority"] = bool(
+            fanout
+            and fanout["can_read_fanout"]
+            and not fanout["can_mutate_fanout"]
+            and fanout["can_execute_fanout"]
+        )
+        self._require(
+            checks["runtime_fanout_authority"],
+            "GRAPH_RUNTIME_ROLE_PRIVILEGED",
+            checks,
+        )
 
     async def _check_relations(self, connection: Any, checks: dict[str, bool]) -> None:
         cursor = await connection.execute(

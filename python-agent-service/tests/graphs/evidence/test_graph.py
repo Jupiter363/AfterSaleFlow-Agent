@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import random
 import threading
@@ -12,6 +13,9 @@ from jsonschema import Draft202012Validator
 from langchain_core.runnables import RunnableLambda
 
 from app.contracts.v1.codec import canonical_sha256
+from app.graph_runtime.bulkhead import GraphBulkheadScope, GraphPermitFenceContext
+from app.graph_runtime.persistence_models import GraphFenceContext
+from app.graph_runtime.postgres_bulkhead import PostgresGraphFanoutBulkhead
 from app.graphs.evidence import (
     MAX_ACTIVE_ITEMS,
     TERMINAL_OUTPUT_SCHEMA_VERSION,
@@ -27,6 +31,72 @@ from app.graphs.evidence.nodes import dispatch_wave, plan_next_deterministic_wav
 ROOT = Path(__file__).resolve().parents[4]
 
 
+class _AsyncPermit:
+    renewal_interval_seconds = 60.0
+
+    async def validate_recovery(self) -> None:
+        return None
+
+    async def renew(self) -> None:
+        return None
+
+    async def release(self) -> None:
+        return None
+
+
+class _AsyncPostgresBulkhead(PostgresGraphFanoutBulkhead):
+    def __init__(self) -> None:
+        pass
+
+    async def acquire(
+        self,
+        scope: GraphBulkheadScope,
+        fence: GraphPermitFenceContext,
+        *,
+        request_id: str | None = None,
+        owner_id: str | None = None,
+        timeout_seconds: float | None = None,
+        takeover: bool = False,
+    ) -> _AsyncPermit:
+        del scope, request_id, timeout_seconds
+        assert owner_id is not None and owner_id.startswith("permit-worker:")
+        assert takeover is True
+        return _AsyncPermit()
+
+
+def _graph_fence(admission) -> GraphFenceContext:
+    command = admission.room_graph_command
+    return GraphFenceContext(
+        thread_id=command["thread_id"],
+        command_id=command["command_id"],
+        owner_id="test-evidence-worker",
+        fencing_token=admission.graph_lease_fencing_token,
+        request_hash=command["request_hash"],
+        room_epoch=command["room_epoch"],
+        graph_key=command["graph_key"],
+        graph_version=command["graph_version"],
+        checkpoint_schema_version=command["checkpoint_schema_version"],
+    )
+
+
+def _compile(admission, item_assessor=None):
+    return compile_evidence_v2_graph(
+        item_assessor=item_assessor,
+        bulkhead=_AsyncPostgresBulkhead(),
+        graph_fence=_graph_fence(admission),
+    )
+
+
+def _invoke(graph, initial, *, context, recursion_limit=32):
+    return asyncio.run(
+        graph.ainvoke(
+            initial,
+            context=context,
+            config={"recursion_limit": recursion_limit},
+        )
+    )
+
+
 @pytest.mark.parametrize("count", [1, 8, 100])
 def test_graph_processes_closed_synthetic_counts_in_deterministic_waves(
     count,
@@ -38,22 +108,26 @@ def test_graph_processes_closed_synthetic_counts_in_deterministic_waves(
         admission=admission,
         completed_at="2026-07-22T12:05:00Z",
     )
-    graph = compile_evidence_v2_graph(item_assessor=RunnableLambda(assessment_factory))
+    graph = _compile(admission, RunnableLambda(assessment_factory))
     initial = new_evidence_graph_state(admission=admission)
     waves: list[list[str]] = []
     final = None
 
-    for update in graph.stream(
-        initial,
-        context=context,
-        config={"recursion_limit": 128},
-        stream_mode="updates",
-    ):
-        planned = update.get("plan_next_deterministic_wave")
-        if planned and planned.get("route") == "dispatch":
-            waves.append(planned["current_wave_keys"])
-        if "checkpoint_terminal" in update:
-            final = update["checkpoint_terminal"]
+    async def collect_updates() -> None:
+        nonlocal final
+        async for update in graph.astream(
+            initial,
+            context=context,
+            config={"recursion_limit": 128},
+            stream_mode="updates",
+        ):
+            planned = update.get("plan_next_deterministic_wave")
+            if planned and planned.get("route") == "dispatch":
+                waves.append(planned["current_wave_keys"])
+            if "checkpoint_terminal" in update:
+                final = update["checkpoint_terminal"]
+
+    asyncio.run(collect_updates())
 
     assert final is not None
     assert [key for wave in waves for key in wave] == initial["ordered_item_keys"]
@@ -88,18 +162,58 @@ def test_graph_never_has_more_than_eight_active_item_assessments(
             with lock:
                 active -= 1
 
-    graph = compile_evidence_v2_graph(item_assessor=RunnableLambda(tracking_assessor))
-    graph.invoke(
+    graph = _compile(admission, RunnableLambda(tracking_assessor))
+    _invoke(
+        graph,
         new_evidence_graph_state(admission=admission),
         context=EvidenceGraphContext(
             admission=admission,
             completed_at="2026-07-22T12:05:00Z",
         ),
-        config={"recursion_limit": 128},
+        recursion_limit=128,
     )
 
     assert calls == 100
     assert 1 <= maximum <= MAX_ACTIVE_ITEMS
+
+
+def test_async_graph_execution_fails_closed_without_durable_permits(
+    admission,
+    context,
+    assessor,
+) -> None:
+    with pytest.raises(
+        EvidenceGraphContractError,
+        match="EVIDENCE_DURABLE_BULKHEAD_REQUIRED",
+    ):
+        compile_evidence_v2_graph(item_assessor=assessor)
+
+    with pytest.raises(
+        EvidenceGraphContractError,
+        match="EVIDENCE_GRAPH_LEASE_FENCE_REQUIRED",
+    ):
+        compile_evidence_v2_graph(
+            item_assessor=assessor,
+            bulkhead=_AsyncPostgresBulkhead(),
+        )
+
+
+def test_sync_graph_execution_cannot_bypass_durable_permits(
+    admission,
+    context,
+    assessor,
+) -> None:
+    graph = _compile(admission, assessor)
+
+    with pytest.raises(
+        EvidenceGraphContractError,
+        match="EVIDENCE_DURABLE_PERMIT_ASYNC_REQUIRED",
+    ):
+        graph.invoke(
+            new_evidence_graph_state(admission=admission),
+            context=context,
+            config={"recursion_limit": 32},
+        )
 
 
 def test_scheduler_rejects_more_than_eight_active_keys(admission_factory) -> None:
@@ -120,13 +234,13 @@ def test_dispatch_rejects_unknown_routes_and_untracked_keys(admission_factory) -
 
 
 def test_graph_fails_closed_when_assessor_is_unconfigured(admission, context) -> None:
-    graph = compile_evidence_v2_graph()
+    graph = _compile(admission)
 
     with pytest.raises(EvidenceGraphContractError, match="EVIDENCE_ITEM_ASSESSOR_NOT_CONFIGURED"):
-        graph.invoke(
+        _invoke(
+            graph,
             new_evidence_graph_state(admission=admission),
             context=context,
-            config={"recursion_limit": 32},
         )
 
 
@@ -142,13 +256,13 @@ def test_graph_rejects_assessment_with_process_authority(
         value["assessment_hash"] = canonical_sha256(value)
         return value
 
-    graph = compile_evidence_v2_graph(item_assessor=RunnableLambda(forbidden_assessor))
+    graph = _compile(admission, RunnableLambda(forbidden_assessor))
 
     with pytest.raises(EvidenceGraphContractError, match="EVIDENCE_ASSESSMENT_FIELDS_INVALID"):
-        graph.invoke(
+        _invoke(
+            graph,
             new_evidence_graph_state(admission=admission),
             context=context,
-            config={"recursion_limit": 32},
         )
 
 
@@ -164,13 +278,13 @@ def test_graph_rejects_missing_or_extra_manifest_coverage(
         value["assessment_hash"] = canonical_sha256(value)
         return value
 
-    graph = compile_evidence_v2_graph(item_assessor=RunnableLambda(wrong_key_assessor))
+    graph = _compile(admission, RunnableLambda(wrong_key_assessor))
 
     with pytest.raises(EvidenceGraphContractError, match="EVIDENCE_ASSESSMENT_REDUCER_KEY_INVALID"):
-        graph.invoke(
+        _invoke(
+            graph,
             new_evidence_graph_state(admission=admission),
             context=context,
-            config={"recursion_limit": 32},
         )
 
 
@@ -190,14 +304,14 @@ def test_proposal_hash_is_completion_order_independent(
             time.sleep(delays[work_item["item"]["evidence_id"]])
             return assessment_factory(work_item)
 
-        graph = compile_evidence_v2_graph(item_assessor=RunnableLambda(delayed))
-        state = graph.invoke(
+        graph = _compile(admission, RunnableLambda(delayed))
+        state = _invoke(
+            graph,
             new_evidence_graph_state(admission=admission),
             context=EvidenceGraphContext(
                 admission=admission,
                 completed_at="2026-07-22T12:05:00Z",
             ),
-            config={"recursion_limit": 32},
         )
         return state["result_json"]
 
@@ -217,11 +331,11 @@ def test_needs_review_remains_a_proposal_not_a_business_decision(
         value["assessment_hash"] = canonical_sha256(value)
         return value
 
-    graph = compile_evidence_v2_graph(item_assessor=RunnableLambda(review_assessor))
-    state = graph.invoke(
+    graph = _compile(admission, RunnableLambda(review_assessor))
+    state = _invoke(
+        graph,
         new_evidence_graph_state(admission=admission),
         context=context,
-        config={"recursion_limit": 32},
     )
 
     assert state["result_json"]["proposed_review_items"] == [
@@ -241,11 +355,11 @@ def test_terminal_proposal_matches_frozen_wire_schema(
     context,
     assessor,
 ) -> None:
-    graph = compile_evidence_v2_graph(item_assessor=assessor)
-    state = graph.invoke(
+    graph = _compile(admission, assessor)
+    state = _invoke(
+        graph,
         new_evidence_graph_state(admission=admission),
         context=context,
-        config={"recursion_limit": 32},
     )
     schema = json.loads(
         (
@@ -262,8 +376,11 @@ def test_terminal_proposal_matches_frozen_wire_schema(
     assert not list(Draft202012Validator(schema).iter_errors(state["result_json"]))
 
 
-def test_graph_topology_is_closed_and_contains_no_process_transition_nodes() -> None:
-    builder = build_evidence_v2_graph()
+def test_graph_topology_is_closed_and_contains_no_process_transition_nodes(admission) -> None:
+    builder = build_evidence_v2_graph(
+        bulkhead=_AsyncPostgresBulkhead(),
+        graph_fence=_graph_fence(admission),
+    )
 
     assert set(builder.nodes) == {
         "authorize_registration_and_manifest",
