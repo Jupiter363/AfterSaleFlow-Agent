@@ -532,9 +532,7 @@ def test_phase5_owner_briefs_unlock_only_wave_a_after_entry_evidence() -> None:
     ]
     assert set(briefs["owners"]) == {"A", "B", "C", "D", "E"}
     assert briefs["wave_a_parallel_launch"]["status"] == "READY"
-    assert briefs["integration_barriers"]["P5-WAVE-A-INTEGRATED"]["status"] == (
-        "BLOCKED"
-    )
+    assert briefs["integration_barriers"]["P5-WAVE-A-INTEGRATED"]["status"] == "OPEN"
     shared = briefs["shared_contract_owner"]
     assert shared["owner"] == "R"
     assert shared["delegated_owners_may_edit"] is False
@@ -637,7 +635,7 @@ def test_phase5_d1_e1_takeovers_require_the_wave_a_integration_barrier() -> None
     briefs = _owner_briefs()
     barrier = briefs["integration_barriers"]["P5-WAVE-A-INTEGRATED"]
 
-    assert barrier["status"] == "BLOCKED"
+    assert barrier["status"] == "OPEN"
     assert "P5_BATCH_1_PASS_ON_MERGED_SHA" in barrier["prerequisites"]
     transfers = {item["owner"]: item for item in barrier["path_takeovers"]}
     assert set(transfers) == {"D", "E"}
@@ -829,7 +827,7 @@ def test_phase5_r2_is_the_only_pre_c3_migration_authorization_gate() -> None:
     assert r2["authorized_migration_path"] == "P5-R2_AUTHORIZED_MIGRATION"
     assert r3["depends_on"] == ["P5-D2", "P5-E2"]
     assert batches["waves"]["candidate_wave"]["tasks"] == ["P5-R3"]
-    assert gate["status"] == "BLOCKED_ON_WAVE_A_ACCEPTANCE"
+    assert gate["status"] == "READY"
     assert gate["authorized_migration_path"] == "P5-R2_AUTHORIZED_MIGRATION"
     assert "P5-R2" in c3["depends_on"]
     assert not any("V043_5" in path for path in c3["owned_files"])
@@ -980,10 +978,8 @@ def test_phase5_owner_briefs_reserve_shared_paths_for_primary_integration() -> N
     ]
     e1_paths = set(briefs["owners"]["E"]["tasks"]["P5-E1"]["owned_files"])
     assert set(foundation[0]["exact_paths"]).issubset(e1_paths)
-    assert _batches()["waves"]["wave_a"]["status"] == "READY"
-    assert _batches()["waves"]["wave_b"]["status"] == (
-        "BLOCKED_ON_WAVE_A_INTEGRATION"
-    )
+    assert _batches()["waves"]["wave_a"]["status"] == "INTEGRATED"
+    assert _batches()["waves"]["wave_b"]["status"] == "READY"
 
 
 def test_phase5_batch0_source_commands_execute_every_declared_baseline_suite() -> None:
