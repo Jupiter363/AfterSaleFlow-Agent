@@ -273,9 +273,10 @@ and the new epoch persists the full selection. Current formal Evidence traffic r
     `V043_4__evidence_graph_bindings.sql`, after the existing Intake migrations
     `V043_2__intake_shadow_comparisons.sql` and
     `V043_3__intake_signed_synthetic_admission.sql`. The candidate must freeze its exact schema
-    before implementation. Wave B may not edit `V043_4`; C owns the separate additive migration
-    identity `V043_5__evidence_finalization_receipt_ledger.sql` for the durable receipt ledger and
-    validated terminal-summary sidecar. V044 and V045 remain reserved by existing plans.
+    before implementation. Wave B may not edit `V043_4`. `P5-R2` must first amend or accept a new
+    additive migration identity in an erratum candidate and evidence commit; until then the only
+    permitted reference is the placeholder `P5-R2_AUTHORIZED_MIGRATION`. V044 and V045 remain
+    reserved by existing plans.
 14. Runtime before promotion is only `DISABLED` or Java-signed synthetic `SHADOW`. Real party data,
     a formal sink, `TEMPORAL` allocation, canary, and promotion remain unreachable.
 15. Phase 5 does not alter Hearing supplementation contracts or behavior.
@@ -341,7 +342,7 @@ cannot mark any of those gates `PASS`.
 | --- | --- | --- | --- |
 | A | `evidence.v2`, bounded scheduler, state, reducers, recovery properties | `python-agent-service/app/graphs/evidence/**`, narrow graph tests | Java, frontend, Domain DB, formal merge |
 | B | Evidence child Workflow, command loop, timers, Activity contracts | `java-api-service/**/workflow/temporal/room/evidence/**` | Domain fact implementation, Python, UI, Hearing behavior |
-| C | Java manifest/asset authority, mode guards, Finalizer, durable receipt/recovery projections | Evidence application/persistence adapters, `V043_5` and exact tests | Workflow decisions, Graph DB, frontend, Hearing supplement |
+| C | Java manifest/asset authority, mode guards, Finalizer, durable receipt projection | Evidence application/persistence adapters and exact tests, plus only the migration path accepted by `P5-R2` | Workflow decisions, Graph DB, frontend, Hearing supplement |
 | D | Java projection/API compatibility and Evidence Vue/store behavior | EvidenceProcessProjectionQuery, EvidenceController process-projection route, view/API/store and focused tests | selectors, Temporal/Python runtime, InternalEvidenceController, formal rules |
 | E | production Graph permit queue, local Java bulkhead parity, selector, observability, crash/rollback harness | Graph `G004`, permit repository/lifecycle/readiness/restore/bindings and narrow Java shadow paths | formal activation, secrets, deployment, other rooms |
 | R | contracts, shared fixtures, exact briefs, integration, reviews, test tokens, candidate evidence | shared contract/plan/report/config paths explicitly granted | duplicating delegated slice implementation |
@@ -418,13 +419,19 @@ D:\miniconda\python.exe scripts/generate_phase5_wave_a_evidence.py `
 
 ### Wave B: Experience And Hardening
 
-- C and B first complete the two post-Wave-A prerequisites. `P5-C3` creates the durable Java finalization
-  receipt ledger and validated terminal-summary sidecar through additive
-  `V043_5__evidence_finalization_receipt_ledger.sql`, without editing `V043_4`. C2 remains port-only;
+- R first closes `P5-R2`, the primary-owned migration-contract erratum/candidate/evidence gate after
+  Wave A acceptance. It may amend or accept one new additive migration identity, but no concrete
+  filename is authorized before that recorded decision: plans name it only as
+  `P5-R2_AUTHORIZED_MIGRATION`. `V043_4` remains immutable. C and B then complete the two
+  post-Wave-A prerequisites. `P5-C3` creates the durable Java finalization receipt ledger and
+  validated terminal-summary sidecar only through the path accepted by `P5-R2`. C2 remains port-only;
   C3 atomically validates and locks a trusted current-authority snapshot (tenant/case/epoch, Java
   room fence, process/room/source revisions, and current fact/source allowlists), immutable
   actual-load receipt ref/hash, receipt binding, proposal hash, and current applicable fences before
-  receipt insert or exact replay returns a sidecar. `P5-B3` adds a Java-readable fenced operational recovery
+  a new receipt insert. An exact committed receipt replay is returned by tenant plus `operationKey`
+  and `requestHash` even after current authority or Graph lease changes. `P5-B3` adds a concrete,
+  unregistered production `EvidenceRoomActivities` read adapter backed by the C3 durable ledger and
+  operational store; B3 separately validates current recovery authority before exposing a Java-readable fenced operational recovery
   projection and reconciles production `EvidenceRoomActivities` only from durable receipt refs and
   current Graph lease validation. Neither task may fabricate terminal or recovery state from
   Temporal memory, create a formal sink, or allocate `TEMPORAL` Evidence.

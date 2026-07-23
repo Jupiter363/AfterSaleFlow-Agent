@@ -680,11 +680,9 @@ def test_phase5_wave_b_requires_durable_java_receipts_before_projection() -> Non
     b3 = briefs["owners"]["B"]["tasks"]["P5-B3"]
     d1 = briefs["owners"]["D"]["tasks"]["P5-D1"]
 
-    assert c3["depends_on"] == ["P5-C2", "P5-WAVE-A-INTEGRATED"]
+    assert c3["depends_on"] == ["P5-C2", "P5-R2", "P5-WAVE-A-INTEGRATED"]
     assert b3["depends_on"] == ["P5-B2", "P5-C3", "P5-WAVE-A-INTEGRATED"]
     assert {
-        "java-api-service/src/main/resources/db/migration/"
-        "V043_5__evidence_finalization_receipt_ledger.sql",
         "java-api-service/src/main/java/com/example/dispute/evidence/application/graph/"
         "EvidenceFinalizationReceiptLookup.java",
         "java-api-service/src/main/java/com/example/dispute/workflow/temporal/room/evidence/"
@@ -704,6 +702,7 @@ def test_phase5_wave_b_requires_durable_java_receipts_before_projection() -> Non
     assert "atomically" in c3_text
     assert "stale/takeover races" in c3_text
     assert "same operationKey with a different requestHash conflict" in c3_text
+    assert "before checking current authority or Graph lease" in c3_text
     assert "Temporal History" in c3_text
     assert "Temporal memory" in " ".join(b3["commit_definition_of_done"])
     assert batches["waves"]["wave_a"]["delegated_tasks"] == [
@@ -764,7 +763,7 @@ def test_phase5_e1_is_durable_graph_permit_work_not_java_bulkhead_authority() ->
         "python-agent-service/app/graph_runtime/migrations.py",
         "python-agent-service/app/graph_runtime/readiness.py",
         "python-agent-service/app/graph_runtime/restore_validation.py",
-        "python-agent-service/app/graph_runtime/graph_lifecycle.py",
+        "python-agent-service/app/api/graph_lifecycle.py",
         "python-agent-service/app/graph_runtime/production_bindings.py",
         "python-agent-service/app/graphs/evidence/runtime.py",
         "python-agent-service/app/graphs/evidence/nodes.py",
@@ -776,6 +775,10 @@ def test_phase5_e1_is_durable_graph_permit_work_not_java_bulkhead_authority() ->
     assert "no fallback" in text
     assert "bounded labels" in text
     assert "local signed-synthetic parity" in text
+    assert "P5-WAVE-A-INTEGRATED" in e1["depends_on"]
+    assert "P5-WAVE-A-INTEGRATED" in batches["task_contracts"]["P5-E1"][
+        "depends_on"
+    ]
     assert all(
         name in maven[2]
         for name in (
@@ -787,6 +790,7 @@ def test_phase5_e1_is_durable_graph_permit_work_not_java_bulkhead_authority() ->
     )
     batch_2 = batches["batches"]["P5-BATCH-2"]
     assert batch_2["requires_tasks"] == [
+        "P5-R2",
         "P5-B3",
         "P5-C3",
         "P5-D1",
@@ -801,12 +805,87 @@ def test_phase5_e1_is_durable_graph_permit_work_not_java_bulkhead_authority() ->
     assert "tests/static/test_phase5_evidence_selector.py" in batch_2[
         "planned_static_tests"
     ]
+    assert "python-agent-service/tests/graph_runtime/unit/test_checkpoint_migrations.py" in batch_2[
+        "planned_python_tests"
+    ]
+    assert {
+        "python-agent-service/tests/graph_runtime/unit/test_gateway_recovery.py",
+        "python-agent-service/tests/graph_runtime/unit/test_production_bindings.py",
+    }.issubset(batch_2["planned_python_tests"])
     assert {
         "EvidenceProcessProjectionAdapterTest",
         "EvidenceRoomControllerTest",
         "EvidenceBulkheadPolicyTest",
         "EvidenceNoFormalSinkGuardTest",
     }.issubset(batch_2["planned_java_test_classes"])
+
+
+def test_phase5_r2_is_the_only_pre_c3_migration_authorization_gate() -> None:
+    briefs = _owner_briefs()
+    batches = _batches()
+    r2 = batches["task_contracts"]["P5-R2"]
+    r3 = batches["task_contracts"]["P5-R3"]
+    gate = briefs["primary_integration_only"]["post_wave_a_migration_contract_gate"]
+    c3 = briefs["owners"]["C"]["tasks"]["P5-C3"]
+
+    assert r2["depends_on"] == ["P5-R1", "P5-WAVE-A-INTEGRATED"]
+    assert r2["authorized_migration_path"] == "P5-R2_AUTHORIZED_MIGRATION"
+    assert r3["depends_on"] == ["P5-D2", "P5-E2"]
+    assert batches["waves"]["candidate_wave"]["tasks"] == ["P5-R3"]
+    assert gate["status"] == "BLOCKED_ON_WAVE_A_ACCEPTANCE"
+    assert gate["authorized_migration_path"] == "P5-R2_AUTHORIZED_MIGRATION"
+    assert "P5-R2" in c3["depends_on"]
+    assert not any("V043_5" in path for path in c3["owned_files"])
+    assert (
+        "java-api-service/src/main/resources/db/migration/"
+        "V043_4__evidence_graph_bindings.sql"
+        in gate["forbidden_paths"]
+    )
+
+
+def test_phase5_batch2_is_serialized_and_executes_each_wave_b_owner_scope() -> None:
+    batches = _batches()
+    batch_2 = batches["batches"]["P5-BATCH-2"]
+    commands = {item["id"]: item for item in batch_2["source_commands"]}
+
+    assert batch_2["execution"]["runner_execution"] == "serial"
+    assert batch_2["execution"]["heavy_parallelism"] == 1
+    assert batch_2["execution"]["light_parallelism"] == 2
+    assert batch_2["execution"]["command_order"] == list(commands)
+    assert set(commands) == {
+        "p5_wave_b_python",
+        "p5_wave_b_postgresql",
+        "p5_wave_b_java",
+        "p5_wave_b_frontend",
+        "p5_wave_b_static",
+    }
+    for command in commands.values():
+        assert command["workdir"]
+        assert command["argv"]
+        assert command["max_duration_seconds"] <= 180
+        assert command["test_token_required"] == (
+            command["resource_class"]
+            in _owner_briefs()["test_token_policy"]["required_resource_classes"]
+        )
+    assert commands["p5_wave_b_postgresql"]["purpose"] == (
+        "direct_postgresql_g004_graph_fanout_bulkhead_queue_integration"
+    )
+    java_selector = next(
+        token
+        for token in commands["p5_wave_b_java"]["argv"]
+        if token.startswith("-Dtest=")
+    )
+    for test_name in (
+        "EvidenceFinalizationReceiptLookupTest",
+        "EvidenceRoomActivitiesReconciliationTest",
+        "EvidenceProcessProjectionAdapterTest",
+        "EvidenceRoomControllerTest",
+        "EvidenceBulkheadPolicyTest",
+        "EvidenceNoFormalSinkGuardTest",
+        "EvidenceTemporalCutoverIntegrationTest",
+        "EvidenceCutoverRollbackTest",
+    ):
+        assert test_name in java_selector
 
 
 def test_phase5_owner_briefs_reserve_shared_paths_for_primary_integration() -> None:

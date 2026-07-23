@@ -112,6 +112,7 @@ integration_barriers:
           - python-agent-service/app/graphs/evidence/nodes.py
           - python-agent-service/app/graphs/evidence/graph.py
           - python-agent-service/tests/graphs/evidence/test_graph.py
+          - python-agent-service/tests/graphs/evidence/test_recovery.py
           - java-api-service/src/main/java/com/example/dispute/workflow/shadow/evidence/EvidenceBulkheadPolicy.java
           - java-api-service/src/main/java/com/example/dispute/workflow/shadow/evidence/EvidenceNoFormalSinkGuard.java
           - java-api-service/src/test/java/com/example/dispute/workflow/shadow/evidence/EvidenceBulkheadPolicyTest.java
@@ -345,24 +346,29 @@ owners:
           - contracts/agent-platform/evidence/v2/evidence-process-projection.schema.json
           - contracts/agent-platform/evidence/v2/evidence-finalization-receipt.schema.json
         output_contracts:
-          - Java-readable fenced operational recovery projection reconciles production EvidenceRoomActivities from validated receipt refs and current Graph lease state
+          - production read adapter implements EvidenceRoomActivities and reads the C3 durable receipt ledger and operational recovery store to reconcile a Java-readable fenced recovery projection
+          - B3 separately validates current recovery authority before exposing recovery state; committed receipt replay remains a C3 receipt-key lookup concern
           - reconciliation is recovery-only and cannot become a formal Evidence Finalizer sink or Temporal allocation path
         owned_files:
           - java-api-service/src/main/java/com/example/dispute/workflow/temporal/room/evidence/EvidenceRoomActivities.java
           - java-api-service/src/main/java/com/example/dispute/workflow/temporal/room/evidence/EvidenceOperationalRecoveryProjection.java
           - java-api-service/src/main/java/com/example/dispute/workflow/temporal/room/evidence/EvidenceOperationalRecoveryReconciler.java
+          - java-api-service/src/main/java/com/example/dispute/workflow/temporal/room/evidence/EvidenceOperationalRecoveryStore.java
+          - java-api-service/src/main/java/com/example/dispute/workflow/infrastructure/persistence/JdbcEvidenceOperationalRecoveryStore.java
           - java-api-service/src/test/java/com/example/dispute/workflow/room/evidence/EvidenceRoomActivitiesReconciliationTest.java
           - java-api-service/src/test/java/com/example/dispute/workflow/room/evidence/EvidenceOperationalRecoveryReconcilerTest.java
+          - java-api-service/src/test/java/com/example/dispute/workflow/infrastructure/persistence/JdbcEvidenceOperationalRecoveryStoreTest.java
         t0_commands:
           - id: B3_MAVEN_TEST
             workdir: java-api-service
-            argv: [./mvnw.cmd, -q, "-Dtest=EvidenceRoomActivitiesReconciliationTest,EvidenceOperationalRecoveryReconcilerTest", test]
+            argv: [./mvnw.cmd, -q, "-Dtest=EvidenceRoomActivitiesReconciliationTest,EvidenceOperationalRecoveryReconcilerTest,JdbcEvidenceOperationalRecoveryStoreTest", test]
             resource_class: maven_test
             test_token_required: true
             max_duration_seconds: 180
         commit_definition_of_done:
           - P5-WAVE-A-INTEGRATED is OPEN before the first edit.
           - Only P5-B3 owned_files are staged.
+          - The concrete production adapter reads the durable receipt ledger and operational store; it is unregistered while TEMPORAL allocation remains forbidden and is never mock-only or port-only.
           - Reconciliation consumes only durable Java receipt refs and a current Graph lease validation; it never manufactures terminal or recovery state from Temporal memory.
           - Java room Graph lease and Java finalization fences are separately validated, and no fallback to local memory or a formal sink exists.
           - Token-granted T0 passes and E records P0 review closure.
@@ -505,21 +511,20 @@ owners:
           - Commit SHA and test-token release are returned to R.
       P5-C3:
         initial_parallel: false
-        depends_on: [P5-C2, P5-WAVE-A-INTEGRATED]
+        depends_on: [P5-C2, P5-R2, P5-WAVE-A-INTEGRATED]
         input_contracts:
           - contracts/agent-platform/evidence/v2/evidence-finalization-receipt.schema.json
           - contracts/agent-platform/evidence/v2/evidence-terminal-proposal.schema.json
         output_contracts:
           - durable Java finalization receipt ledger is the sole source of a validated terminal-summary sidecar; P5-C2 is port-only and makes no durability claim
           - receipt-ref lookup is idempotent and validates a trusted current-authority snapshot/lock for tenant case epoch Java room fence process room and source revisions plus current fact/source allowlists
-          - immutable actual-load receipts are looked up by ref and hash and validated atomically with receipt insert or replay; receipt-ref lookup also validates Graph lease fence and proposal hash before returning a summary
+          - immutable actual-load receipts are looked up by ref and hash and validated atomically before a new receipt insert; exact committed receipt replay is returned by tenant operationKey and requestHash even after current authority or Graph lease changes
           - terminal or recovery state is never fabricated from Temporal memory
         owned_files:
           - java-api-service/src/main/java/com/example/dispute/evidence/application/graph/EvidenceFinalizationReceiptLookup.java
           - java-api-service/src/main/java/com/example/dispute/evidence/application/graph/EvidenceCurrentAuthoritySnapshot.java
           - java-api-service/src/main/java/com/example/dispute/evidence/application/graph/EvidenceTerminalSummary.java
           - java-api-service/src/main/java/com/example/dispute/evidence/infrastructure/persistence/JdbcEvidenceFinalizationReceiptLedger.java
-          - java-api-service/src/main/resources/db/migration/V043_5__evidence_finalization_receipt_ledger.sql
           - java-api-service/src/test/java/com/example/dispute/evidence/EvidenceFinalizationReceiptLookupTest.java
           - java-api-service/src/test/java/com/example/dispute/evidence/infrastructure/persistence/JdbcEvidenceFinalizationReceiptLedgerTest.java
         t0_commands:
@@ -531,13 +536,15 @@ owners:
             max_duration_seconds: 180
         commit_definition_of_done:
           - P5-WAVE-A-INTEGRATED is OPEN before the first edit.
-          - Only P5-C3 owned_files are staged; V043_4 is not edited and V043_5 is additive-only.
-          - Receipt-ref lookup rejects missing foreign stale or conflicting receipt refs and never reads Temporal History as a terminal or recovery authority.
-          - The trusted current-authority snapshot/lock and immutable actual-load receipt ref/hash validations commit atomically with receipt insert/replay.
+          - P5-R2 has accepted and recorded P5-R2_AUTHORIZED_MIGRATION before the first edit; V043_4 remains immutable.
+          - Only P5-C3 owned_files and the exact migration path authorized by P5-R2 are staged.
+          - Receipt-ref lookup returns an exact committed receipt by tenant operationKey and requestHash before checking current authority or Graph lease; missing foreign stale or conflicting receipt refs are rejected and Temporal History is never an authority.
+          - The trusted current-authority snapshot/lock and immutable actual-load receipt ref/hash validations commit atomically before a new insert only.
           - The validated terminal-summary sidecar retains the distinct Java room Graph lease and Java finalization fences.
           - Tests cover stale/takeover races forged self-hashed actual-load receipts foreign caller allowlists same operationKey with a different requestHash conflict and exact commit-response replay.
           - Token-granted T0 passes and A records P0 review closure.
           - Commit SHA migration checksum and test-token release are returned to R.
+        authorized_migration_path: P5-R2_AUTHORIZED_MIGRATION
   D:
     role: Evidence projection API and compatible frontend experience
     status: READY_FOR_WAVE_A_DISPATCH
@@ -608,7 +615,7 @@ owners:
           - contracts/agent-platform/evidence/v2/evidence-process-projection.schema.json
           - contracts/agent-platform/evidence/v2/evidence-finalization-receipt.schema.json
         output_contracts:
-          - EvidenceProcessProjectionQuery reads only the durable Java finalization receipt ledger validated terminal-summary sidecar and current fenced operational recovery projection
+          - EvidenceProcessProjectionQuery reads the C3 durable Java finalization receipt ledger validated terminal-summary sidecar and the same B3 Java operational recovery source
           - authenticated GET /api/disputes/{caseId}/evidence/process-projection is private and no-store and exposes pending active terminal and recovery state without hidden authority
           - API store and view preserve stale-response role-switch and history locks without accessing InternalEvidenceController or Temporal memory
         owned_files:
@@ -805,20 +812,24 @@ owners:
           - python-agent-service/app/graph_runtime/production_bindings.py
           - python-agent-service/app/graph_runtime/readiness.py
           - python-agent-service/app/graph_runtime/restore_validation.py
-          - python-agent-service/app/graph_runtime/graph_lifecycle.py
+          - python-agent-service/app/api/graph_lifecycle.py
           - python-agent-service/app/graphs/evidence/runtime.py
           - python-agent-service/app/graphs/evidence/nodes.py
           - python-agent-service/app/graphs/evidence/graph.py
           - python-agent-service/tests/graph_runtime/unit/test_bulkhead.py
           - python-agent-service/tests/graph_runtime/unit/test_graph_persistence_readiness.py
+          - python-agent-service/tests/graph_runtime/unit/test_checkpoint_migrations.py
+          - python-agent-service/tests/graph_runtime/unit/test_gateway_recovery.py
+          - python-agent-service/tests/graph_runtime/unit/test_production_bindings.py
           - python-agent-service/tests/graph_runtime/integration/test_graph_postgres_runtime.py
           - python-agent-service/tests/api/test_graph_lifecycle.py
           - python-agent-service/tests/graphs/evidence/test_graph.py
+          - python-agent-service/tests/graphs/evidence/test_recovery.py
           - tests/static/test_phase5_evidence_no_sink_bulkhead.py
         t0_commands:
           - id: E1_PYTEST
             workdir: python-agent-service
-            argv: [D:/miniconda/python.exe, -m, pytest, tests/graph_runtime/unit/test_bulkhead.py, tests/graph_runtime/unit/test_graph_persistence_readiness.py, tests/api/test_graph_lifecycle.py, tests/graphs/evidence/test_graph.py, -q]
+            argv: [D:/miniconda/python.exe, -m, pytest, tests/graph_runtime/unit/test_bulkhead.py, tests/graph_runtime/unit/test_graph_persistence_readiness.py, tests/graph_runtime/unit/test_checkpoint_migrations.py, tests/graph_runtime/unit/test_gateway_recovery.py, tests/graph_runtime/unit/test_production_bindings.py, tests/api/test_graph_lifecycle.py, tests/graphs/evidence/test_graph.py, tests/graphs/evidence/test_recovery.py, -q]
             resource_class: light_pytest
             test_token_required: false
             max_duration_seconds: 180
@@ -876,6 +887,23 @@ owners:
 
 primary_integration_only:
   owner: R
+  post_wave_a_migration_contract_gate:
+    task_id: P5-R2
+    status: BLOCKED_ON_WAVE_A_ACCEPTANCE
+    depends_on: [P5-R1, P5-WAVE-A-INTEGRATED]
+    exact_paths:
+      - plans/phase-5-owner-briefs.yaml
+      - plans/phase-5-evidence-pilot-execution.md
+      - plans/phase-5-evidence-pilot-test-batches.yaml
+      - tests/static/test_phase5_evidence_pilot_plan.py
+    forbidden_paths:
+      - java-api-service/src/main/resources/db/migration/V043_4__evidence_graph_bindings.sql
+      - P5-R2_AUTHORIZED_MIGRATION
+    authorized_migration_path: P5-R2_AUTHORIZED_MIGRATION
+    rules:
+      - C3 is blocked until an erratum candidate and evidence commit amend or accept one new additive migration identity.
+      - No concrete migration filename is authorized by this plan; P5-R2_AUTHORIZED_MIGRATION is a placeholder only until that gate records its acceptance.
+      - V043_4 remains immutable and neither this gate nor C3 may enable a formal sink TEMPORAL allocation real-case shadow canary or promotion.
   prebuilt_foundation_candidates:
     - commit: 09d65875ff6edfbc76d0d2a0e42610690e500bfd
       reviewed_chain:
