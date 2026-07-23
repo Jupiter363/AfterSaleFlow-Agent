@@ -878,6 +878,12 @@ def _raw_reports(command_id: str, raw_path: Path, report_suffix: str, cwd: Path)
     return sorted((cwd / "target/surefire-reports").glob(f"TEST-*-{report_suffix}.xml"))
 
 
+def _retained_surefire_name(index: int, report_suffix: str) -> str:
+    if index < 1 or not re.fullmatch(r"p5-[0-9a-f]{12}-[0-9a-f]{8}", report_suffix):
+        raise EvidenceError("Phase 5 retained Surefire report identity is invalid")
+    return f"TEST-{index:03d}-{report_suffix}.xml"
+
+
 def _record_source(
     *,
     command_id: str,
@@ -916,8 +922,8 @@ def _record_source(
         retained_dir = attempt_dir / "raw-surefire"
         retained_dir.mkdir()
         retained_reports = []
-        for report in raw_reports:
-            retained = retained_dir / report.name
+        for index, report in enumerate(raw_reports, start=1):
+            retained = retained_dir / _retained_surefire_name(index, report_suffix)
             shutil.copy2(report, retained)
             retained_reports.append(retained)
         raw_reports = retained_reports

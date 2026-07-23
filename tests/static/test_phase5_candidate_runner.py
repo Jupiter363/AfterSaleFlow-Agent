@@ -193,6 +193,16 @@ def test_command_injection_is_the_only_allowed_argv_delta(tmp_path: Path) -> Non
             assert argv[-1] == f"--junitxml={raw.resolve()}"
 
 
+def test_retained_surefire_names_are_bounded_and_suffix_bound() -> None:
+    suffix = f"p5-{CANDIDATE[:12]}-1234abcd"
+    name = runner._retained_surefire_name(1, suffix)
+
+    assert name == f"TEST-001-{suffix}.xml"
+    assert len(name) < 64
+    with pytest.raises(runner.EvidenceError, match="identity is invalid"):
+        runner._retained_surefire_name(0, suffix)
+
+
 def test_resealed_manifest_rejects_arbitrary_success_command(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
