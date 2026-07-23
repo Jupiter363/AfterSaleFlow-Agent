@@ -1,0 +1,267 @@
+schema_version: hearing-contract-compatibility.v1
+contract: hearing_flow.v2
+accepted_base: d3ea271188be57adac49592879aaf3417e90c5c0
+authority: java_domain_business_truth_with_temporal_future_process_authority
+
+source_snapshot:
+  hash_scope: raw_git_blob_at_accepted_base
+  digest: SHA_256
+  files:
+    - path: docs/contracts/hearing-flow-v2.md
+      sha256: 78cdb606b4c44b20cd4576d4c0585560c2cc79b8244ad46ea4696e6006854d22
+      purpose: authoritative_hearing_flow_v2_business_contract
+    - path: python-agent-service/app/schemas/hearing_flow.py
+      sha256: 5b57f0f47a3b0169f7a59a065235ef5364c1e29737b365b6c293414609c29fce
+      purpose: authoritative_typed_cognition_request_result_and_hash_contract
+    - path: java-api-service/src/main/java/com/example/dispute/hearing/domain/HearingFlowStage.java
+      sha256: 8e1e37231622118ea2d3f46b85605e149817d1e75a21ba5a9c3e9baaccd31606
+      purpose: authoritative_fixed_stage_enum
+    - path: java-api-service/src/main/resources/db/migration/V035__hearing_flow_v2.sql
+      sha256: 1fd05055e7a0104466fa0be5d784e4b78e488356f95085e9735abffd909e6649
+      purpose: authoritative_formal_hearing_ledger_shape
+    - path: java-api-service/src/main/resources/db/migration/V037__key_hearing_party_actions_by_participant_id.sql
+      sha256: 5f3e1ef9cdcccd939ac08a10c3fd118dcbdbd6ca1516f8a54d92ca07dc519984
+      purpose: authoritative_participant_identity_and_compatibility_read_shape
+  accepted_checkpoint:
+    path: docs/runbooks/temporal-first/phase-5-engineering-checkpoint.md
+    sha256: 4575b2386d7a4c3adb3770af6c79d03172bccb761051921114aeb6e077849c0b
+
+gate_state:
+  upstream_engineering_checkpoint: PASS
+  upstream_promotion_gate: PENDING
+  permission: PHASE_6_ENGINEERING_ONLY
+  p6_0_entry_gate: AWAITING_EXACT_SHA_BATCH_0
+  product_implementation_allowed: false
+  formal_hearing_selector: LEGACY
+  graph_runtime_default: DISABLED
+  allowed_runtime_modes: [DISABLED, JAVA_SIGNED_SYNTHETIC_SHADOW]
+  real_case_or_party_data_allowed: false
+  real_shadow_allowed: false
+  formal_graph_sink_allowed: false
+  temporal_hearing_allocation_allowed: false
+  v044_implementation_allowed: false
+  canary_allowed: false
+  promotion_allowed: false
+  migrations:
+    MIG-004: PENDING_PROMOTION
+    MIG-005: PENDING_PROMOTION
+    MIG-006: PENDING_ENGINEERING_AND_PROMOTION
+
+flow_identity:
+  schema_version: hearing_flow.v2
+  selector: LEGACY
+  state_machine: FIXED_15_STAGE_V2
+  generic_three_round_fallback: forbidden
+  legacy_active_flow_writer_transfer: forbidden
+
+stages:
+  - {sequence: 1, code: COURT_PREPARING, owner: SYSTEM, cognitive_operation: null, party_action: NONE, deadline: NONE, durable_output: opening_and_source_matrices_loaded}
+  - {sequence: 2, code: CASE_INTRODUCTION, owner: INTAKE_OFFICER_TEMPLATE, cognitive_operation: null, party_action: NONE, deadline: NONE, durable_output: pre_hearing_case_matrix_introduced}
+  - {sequence: 3, code: EVIDENCE_INTRODUCTION, owner: EVIDENCE_CLERK_TEMPLATE, cognitive_operation: null, party_action: NONE, deadline: NONE, durable_output: pre_hearing_evidence_matrix_introduced}
+  - {sequence: 4, code: INTAKE_QUESTIONS_GENERATING, owner: INTAKE_OFFICER_LLM, cognitive_operation: HEARING_INTAKE_QUESTIONS, party_action: NONE, deadline: NONE, durable_output: hearing_question_set.v1}
+  - {sequence: 5, code: PARTY_ANSWERS_OPEN, owner: PARTIES, cognitive_operation: null, party_action: ONE_TERMINAL_ANSWER_PER_PARTICIPANT, deadline: SHARED_ABSOLUTE, durable_output: two_terminal_answer_actions}
+  - {sequence: 6, code: INTAKE_SYNTHESIZING, owner: INTAKE_OFFICER_LLM, cognitive_operation: HEARING_INTAKE_SYNTHESIS, party_action: NONE, deadline: NONE, durable_output: atomic_case_matrix_and_public_synthesis}
+  - {sequence: 7, code: EVIDENCE_REQUESTS_GENERATING, owner: EVIDENCE_CLERK_LLM, cognitive_operation: HEARING_EVIDENCE_REQUESTS, party_action: NONE, deadline: NONE, durable_output: hearing_evidence_request_set.v1}
+  - {sequence: 8, code: PARTY_EVIDENCE_OPEN, owner: PARTIES, cognitive_operation: null, party_action: ONE_TERMINAL_EVIDENCE_BATCH_PER_PARTICIPANT, deadline: SHARED_ABSOLUTE, durable_output: two_terminal_evidence_batch_actions}
+  - {sequence: 9, code: EVIDENCE_SYNTHESIZING, owner: EVIDENCE_CLERK_LLM, cognitive_operation: HEARING_EVIDENCE_SYNTHESIS, party_action: NONE, deadline: NONE, durable_output: atomic_fact_evidence_matrix_and_public_synthesis}
+  - {sequence: 10, code: DOSSIER_FREEZING, owner: SYSTEM, cognitive_operation: null, party_action: NONE, deadline: NONE, durable_output: trial_dossier.v1}
+  - {sequence: 11, code: JUDGE_V1_GENERATING, owner: PRESIDING_JUDGE_LLM, cognitive_operation: HEARING_JUDGE_V1, party_action: NONE, deadline: NONE, durable_output: judge_proposal.v1}
+  - {sequence: 12, code: JURY_REVIEWING, owner: JURY_PANEL_LLM, cognitive_operation: HEARING_JURY_REVIEW, party_action: NONE, deadline: NONE, durable_output: jury_review_report.v1}
+  - {sequence: 13, code: JUDGE_V2_GENERATING, owner: PRESIDING_JUDGE_LLM, cognitive_operation: HEARING_JUDGE_V2, party_action: NONE, deadline: NONE, durable_output: adjudication_draft.v2}
+  - {sequence: 14, code: HUMAN_REVIEW_OPEN, owner: SYSTEM, cognitive_operation: null, party_action: NONE, deadline: NONE, durable_output: exact_v2_review_packet_and_review_task}
+  - {sequence: 15, code: CLOSED, owner: SYSTEM, cognitive_operation: null, party_action: NONE, deadline: NONE, durable_output: sealed_hearing_room}
+
+cognitive_operations:
+  - java_operation: HEARING_INTAKE_QUESTIONS
+    stage: INTAKE_QUESTIONS_GENERATING
+    python_stage_code: INTAKE_QUESTIONS
+    endpoint: /internal/agents/hearing-flow/intake/questions/stream
+    role: INTAKE_OFFICER
+    request_model: HearingIntakeQuestionsRequest
+    result_model: HearingIntakeQuestionsResult
+    result_schema: hearing_intake_questions.v1
+  - java_operation: HEARING_INTAKE_SYNTHESIS
+    stage: INTAKE_SYNTHESIZING
+    python_stage_code: INTAKE_SYNTHESIS
+    endpoint: /internal/agents/hearing-flow/intake/synthesis/stream
+    role: INTAKE_OFFICER
+    request_model: HearingIntakeSynthesisRequest
+    result_model: HearingIntakeSynthesisResult
+    result_schema: hearing_intake_synthesis.v1
+  - java_operation: HEARING_EVIDENCE_REQUESTS
+    stage: EVIDENCE_REQUESTS_GENERATING
+    python_stage_code: EVIDENCE_REQUESTS
+    endpoint: /internal/agents/hearing-flow/evidence/requests/stream
+    role: EVIDENCE_CLERK
+    request_model: HearingEvidenceRequestsRequest
+    result_model: HearingEvidenceRequestsResult
+    result_schema: hearing_evidence_requests.v1
+  - java_operation: HEARING_EVIDENCE_SYNTHESIS
+    stage: EVIDENCE_SYNTHESIZING
+    python_stage_code: EVIDENCE_SYNTHESIS
+    endpoint: /internal/agents/hearing-flow/evidence/synthesis/stream
+    role: EVIDENCE_CLERK
+    request_model: HearingEvidenceSynthesisRequest
+    result_model: HearingEvidenceSynthesisResult
+    result_schema: hearing_evidence_synthesis.v1
+  - java_operation: HEARING_JUDGE_V1
+    stage: JUDGE_V1_GENERATING
+    python_stage_code: JUDGE_V1
+    endpoint: /internal/agents/hearing-flow/judge/v1/stream
+    role: PRESIDING_JUDGE
+    request_model: HearingJudgeV1Request
+    result_model: HearingJudgeV1Result
+    result_schema: hearing_judge_v1.v1
+  - java_operation: HEARING_JURY_REVIEW
+    stage: JURY_REVIEWING
+    python_stage_code: JURY_REVIEW
+    endpoint: /internal/agents/hearing-flow/jury/review/stream
+    role: JURY_PANEL
+    request_model: HearingJuryReviewRequest
+    result_model: HearingJuryReviewResult
+    result_schema: hearing_jury_review.v1
+  - java_operation: HEARING_JUDGE_V2
+    stage: JUDGE_V2_GENERATING
+    python_stage_code: JUDGE_V2
+    endpoint: /internal/agents/hearing-flow/judge/v2/stream
+    role: PRESIDING_JUDGE
+    request_model: HearingJudgeV2Request
+    result_model: HearingJudgeV2Result
+    result_schema: hearing_judge_v2.v1
+
+protocol:
+  orchestration: TEMPORAL_FUTURE_ORDER_TIME_FAILURE_AUTHORITY
+  cognition: LANGGRAPH_PRIVATE_CHECKPOINT_AND_BOUNDED_PROPOSAL
+  invocation: LCEL_TYPED_REQUEST_RESULT_STREAM
+  request_envelope_required:
+    flow_schema_version: hearing_flow.v2
+    fields: [case_id, workflow_id, stage_code, stage_sequence, stage_deadline_at, source_refs]
+  stage_deadline_at: optional_and_only_non_null_for_party_wait_budget_context
+  request_result_schema_substitution: forbidden
+  unknown_fields: reject
+  hidden_reasoning_persistence: forbidden
+  graph_formal_effects: forbidden
+  lcel_business_or_timing_authority: forbidden
+
+authority_boundaries:
+  java:
+    authority: FORMAL_BUSINESS_TRUTH_AND_ONLY_FORMAL_WRITER
+    stores: [stage, party_action, case_matrix, evidence_matrix, dossier, artifact, message, review_handoff, audit]
+    formal_ledger: V035_WITH_V037_PARTICIPANT_ID_COMPATIBILITY
+  temporal:
+    authority: FUTURE_PROCESS_ORDER_WAITS_DEADLINES_RETRIES_FAILURE_AND_HANDOFF
+    current_formal_allocation: forbidden
+    persisted: [stage_code, immutable_ref, hash, epoch, revision, fence, version_pins]
+    forbidden_payloads: [live_matrix, live_dossier, prompt, token_delta, private_reasoning]
+  graph:
+    authority: PRIVATE_COGNITION_ONLY
+    formal_sink: forbidden
+    domain_mutation: forbidden
+  lcel:
+    authority: TYPED_MODEL_INVOCATION_AND_CLOSED_PARSING_ONLY
+    stage_or_writer_authority: forbidden
+    tool_effects: forbidden
+
+limits:
+  questions_per_set: {min: 1, max: 5}
+  target_roles_per_question: {min: 1, max: 2}
+  evidence_requests_per_set: {min: 0, max: 10}
+  evidence_ids_per_party_batch: {min: 0, max: 50, unique: true}
+  evidence_ids_across_two_party_batches: {min: 0, max: 100, unique: true}
+  party_terminal_submissions_per_wait: {exactly: 2}
+  policy_rules_per_dossier: {min: 1, max: 100, unique_by: [rule_code, rule_version]}
+  jury_findings: {exactly: 6, unique_by: dimension}
+  fact_rows_per_delta: {max: 200}
+  fact_evidence_links_per_matrix: {max: 2000, unique_by: [fact_id, evidence_id]}
+
+participant_identity:
+  authority: AUTHENTICATED_JAVA_STABLE_PARTICIPANT_ID
+  terminal_action_uniqueness: [stage_id, action_type, participant_id]
+  synthesis_participant_count: 2
+  synthesis_participant_ids_distinct: true
+  participant_role: immutable_audit_and_display_snapshot_not_identity
+  derive_participant_id_from_role: forbidden
+  historical_null_identity_backfill_source: case_party_assignment_at_V037_migration
+
+v037_compatibility:
+  historical_reads:
+    accepted_answer_schemas: [hearing_answer_bundle.v1, hearing_party_statement.v1]
+    historical_hearing_answer_bundle_rewrite: forbidden
+    nested_participant_id_promotion_for_python_read: allowed
+  canonical_new_emissions:
+    participant_id_required: true
+    preferred_answer_schema: hearing_party_statement.v1
+    accepted_compatibility_emission_schema: hearing_answer_bundle.v1
+    evidence_schema: hearing_evidence_batch.v1
+    identity_key: participant_id
+  same_idempotency_key_different_payload: reject
+
+hash_contract:
+  digest: SHA_256
+  output: lowercase_hex_64
+  preimage:
+    object_copy: true
+    omit_exactly_named_top_level_hash_field: true
+    key_order: lexicographic_sorted_keys
+    separators: [COMMA, COLON]
+    whitespace: none_outside_json_strings
+    string_encoding: UTF_8
+    ensure_ascii: false
+    implementation_profile: PYTHON_JSON_DUMPS_SORT_KEYS_COMPACT_UTF8
+    implicit_rfc8785: false
+  named_hash_fields:
+    matrix_and_dossier: content_hash
+    judge_v1_result: proposal_hash
+    jury_review_result: review_hash
+    judge_v2_result: judge_v2_hash
+  dossier_answer_bundle_normalization: model_dump_json_exclude_unset_before_top_level_content_hash
+  exact_id_hash_replay: return_existing
+  same_id_different_hash: reject
+
+id_hash_parent_chain:
+  trial_dossier.v1:
+    parents: [case_matrix_id_version_hash, evidence_matrix_id_version_hash, question_set_id, two_answer_actions, request_set_id, two_evidence_batches, policy_rule_versions]
+    freeze: single_shot_immutable
+  judge_proposal.v1:
+    parents: [trial_dossier_id, trial_dossier_hash]
+  jury_review_report.v1:
+    parents: [trial_dossier_id, trial_dossier_hash, proposal_id, proposal_content_hash]
+  adjudication_draft.v2:
+    parents: [trial_dossier_id, trial_dossier_hash, proposal_id, proposal_content_hash, report_id, report_content_hash]
+  substitution: reject_at_every_boundary
+  jury_bypass: forbidden
+  v2_generation_count: 1
+  review_packet: exact_same_v2_object_and_hash_without_new_judge_call
+
+deadlines_and_arbitration:
+  deadline_stages: [PARTY_ANSWERS_OPEN, PARTY_EVIDENCE_OPEN]
+  one_shared_absolute_deadline_per_stage: true
+  first_submission_changes_shared_matrix: false
+  first_submission_changes_deadline: false
+  both_participants_require_terminal_state: true
+  same_temporal_timestamp: deterministic_workflow_event_order
+  committed_java_action_order: monotonic_case_event_sequence
+  duplicate_or_late_signal: return_persisted_terminal_state
+  timeout_emission: identity_complete_AUTO_TIMEOUT_terminal_action
+  get_request_may_advance_or_expire: false_for_future_temporal_epochs
+
+privacy_and_provenance:
+  message_sources: [SYSTEM_STAGE_EVENT, ROLE_TEMPLATE, AGENT_LLM, PARTY_ACTION]
+  role_template_agent_run_id: null
+  agent_llm_requires_completed_agent_run: true
+  judge_llm_before_dossier_freeze: forbidden
+  raw_cross_party_private_submission_disclosure: forbidden
+  settlement_material_disclosure_to_judge_or_jury: forbidden
+  graph_real_party_data: forbidden
+  synthetic_fixture_authority: JAVA_SIGNATURE
+  synthetic_fixture_may_create_formal_fact: false
+
+version_replay_and_rollback:
+  active_flow_pins_immutable: [writer_mode, epoch, revision, fence, workflow_build, graph_version, prompt_version, model_profile, schema_versions, policy_version, guardrail_version]
+  mid_flight_writer_transfer: forbidden
+  captured_history_replay_required_before_promotion: true
+  workflow_change_policy: explicit_version_marker_or_new_workflow_build
+  compatible_worker_retention: until_all_pinned_histories_complete
+  rollback_steps: [freeze_new_commands, drain_or_cancel_in_flight_effects, reconcile_domain_and_process_revisions, stop_new_temporal_epochs]
+  recovery_writer_start: before_first_stage_or_formally_approved_safe_boundary_only
+  recovery_epoch_and_fence: strictly_higher_with_explicit_recovery_record
