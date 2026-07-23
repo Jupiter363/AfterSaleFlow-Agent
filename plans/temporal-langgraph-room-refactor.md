@@ -645,7 +645,12 @@ writer，需在安全 wait边界用更高 epoch/fence回滚。
 **目标**：Temporal Hearing Child Workflow 成为 `hearing_flow.v2` 15 阶段、两个 party wait、deadline、AgentRun
 顺序和 handoff 的唯一 writer；V035 stage/action/dossier/artifact 继续是 Java 正式账本。
 **非目标**：不改变阶段、评审团必经、hash chain、消息 provenance、party privacy、和解隐藏或 UI 六组进度。
-**进入条件**：`MIG-005=PASS`；完整 V2 legacy baseline通过；活跃案件 shadow/parity 和 captured History replay通过。
+**工程进入条件**：Phase 5 [工程检查点](../docs/runbooks/temporal-first/phase-5-engineering-checkpoint.md)
+记录 `PASS` 和 `PHASE_6_ENGINEERING_ONLY`；按
+[ADR 0015](../docs/architecture/adr/0015-phase-6-hearing-engineering-exception.md) 从精确 P6.0 contract candidate
+运行 Batch 0 并单独提交 entry evidence。在此之前实现保持阻塞，Phase 6 Graph/Temporal 运行时只允许 `DISABLED`。
+**推广进入条件**：`MIG-004=PASS`、`MIG-005=PASS`；完整 V2 legacy baseline、经授权活跃案件 shadow/parity、
+deadline 演练和 captured History replay 通过。工程例外不放宽这些条件。
 
 | 顺序 | PR/提交级任务 | 精确影响 |
 | --- | --- | --- |
