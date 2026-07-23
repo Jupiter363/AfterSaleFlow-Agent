@@ -61,11 +61,24 @@ public class EvidenceProcessProjectionAdapter {
                    active_run.active_checkpoint_schema_version,
                    active_run.run_status,
                    cast(:historyMode as boolean) as history_mode,
-                   cast(:actorId as varchar) as scoped_actor_id,
-                   cast(:actorRole as varchar) as scoped_actor_role,
-                   cast(:viewerScopeHash as varchar) as viewer_scope_hash
-              from case_process_projection projection
-              left join case_room_epoch epoch
+                   viewer.actor_id as scoped_actor_id,
+                   viewer.actor_role as scoped_actor_role
+               from case_process_projection projection
+               join fulfillment_dispute_case dispute
+                 on dispute.id = projection.case_id
+               join case_access_session viewer
+                 on viewer.case_id = projection.case_id
+                and viewer.actor_id = :actorId
+                and viewer.actor_role = :actorRole
+                and viewer.status = 'ACTIVE'
+                and viewer.permission_level = case
+                    when :actorRole = 'USER' then 'PARTY_USER'
+                    when :actorRole = 'MERCHANT' then 'PARTY_MERCHANT'
+                    when :actorRole = 'PLATFORM_REVIEWER' then 'REVIEWER_ALL'
+                    else '__DENY__'
+                end
+                and viewer.permission_scopes_json @> cast(:requiredViewerScopes as jsonb)
+               left join case_room_epoch epoch
                 on epoch.case_id = projection.case_id
                and epoch.room_type = 'EVIDENCE'
                and epoch.room_epoch = projection.room_epoch
@@ -111,19 +124,50 @@ public class EvidenceProcessProjectionAdapter {
                        and exists (
                            select 1
                              from jsonb_array_elements_text(run.stream_audience_json) audience
-                            where audience.value = :actorRole
+                             where audience.value = viewer.actor_role
                        )
                        and exists (
                            select 1
                              from jsonb_array_elements_text(
                                  run.stream_audience_actor_ids_json
                              ) audience_actor
-                            where audience_actor.value = :actorId
+                             where audience_actor.value = viewer.actor_id
                        )
                      order by run.created_at desc
                      limit 1
               ) active_run on true
-             where projection.case_id = :caseId
+              where projection.case_id = :caseId
+                and (
+                    (
+                        viewer.actor_role = 'USER'
+                        and (
+                            viewer.actor_id = dispute.user_id
+                            or exists (
+                                select 1
+                                  from case_participant participant
+                                 where participant.case_id = projection.case_id
+                                   and participant.actor_id = viewer.actor_id
+                                   and participant.participant_role = 'USER'
+                                   and participant.participant_status = 'ACTIVE'
+                            )
+                        )
+                    )
+                    or (
+                        viewer.actor_role = 'MERCHANT'
+                        and (
+                            viewer.actor_id = dispute.merchant_id
+                            or exists (
+                                select 1
+                                  from case_participant participant
+                                 where participant.case_id = projection.case_id
+                                   and participant.actor_id = viewer.actor_id
+                                   and participant.participant_role = 'MERCHANT'
+                                   and participant.participant_status = 'ACTIVE'
+                            )
+                        )
+                    )
+                    or viewer.actor_role = 'PLATFORM_REVIEWER'
+                )
             """;
 
     private final NamedParameterJdbcOperations jdbc;
@@ -138,17 +182,16 @@ public class EvidenceProcessProjectionAdapter {
             throw new IllegalArgumentException("caseId must not be blank");
         }
         requireAllowedViewer(actor);
-        String viewerScopeHash = viewerScopeHash(actor);
         List<ProjectionRow> rows = jdbc.query(
                 READ_SQL,
                 new MapSqlParameterSource("caseId", caseId)
                         .addValue("actorId", actor.actorId())
                         .addValue("actorRole", actor.role().name())
-                        .addValue("viewerScopeHash", viewerScopeHash)
+                        .addValue("requiredViewerScopes", "[\"CASE_READ\",\"EVIDENCE_READ\"]")
                         .addValue("historyMode", historyMode),
                 EvidenceProcessProjectionAdapter::row);
         if (rows.size() > 1) {
-            return Optional.of(processing(rows.getFirst(), actor));
+            return Optional.of(processing(rows.getFirst(), requireViewerBinding(rows.getFirst(), actor)));
         }
         return rows.stream().findFirst().map(row -> adapt(row, actor));
     }
@@ -161,10 +204,10 @@ public class EvidenceProcessProjectionAdapter {
     public EvidenceProcessProjectionView adapt(ProjectionRow row, AuthenticatedActor actor) {
         Objects.requireNonNull(row, "row");
         requireAllowedViewer(actor);
-        requireViewerBinding(row, actor);
+        ViewerBinding viewer = requireViewerBinding(row, actor);
         String writerMode = normalized(row.writerMode());
         if ("LEGACY".equals(writerMode)) {
-            return legacy(row, actor);
+            return legacy(row, viewer);
         }
         if (!"SHADOW".equals(writerMode)) {
             throw new IllegalArgumentException("unsupported Evidence writer mode: " + writerMode);
@@ -173,13 +216,13 @@ public class EvidenceProcessProjectionAdapter {
         if (!tupleIsCurrent(row)
                 || !phaseIsKnown(row.roomPhase())
                 || !activeRunTupleIsCurrent(row)) {
-            return processing(row, actor);
+            return processing(row, viewer);
         }
-        return projection(row, actor, EvidenceProcessProjectionView.AVAILABLE, true);
+        return projection(row, viewer, EvidenceProcessProjectionView.AVAILABLE, true);
     }
 
     private static EvidenceProcessProjectionView legacy(
-            ProjectionRow row, AuthenticatedActor actor) {
+            ProjectionRow row, ViewerBinding viewer) {
         ProjectionEvidenceState state = requireState(row);
         String phase = wirePhase(row.roomPhase());
         String terminalReason = terminalReason(phase, state);
@@ -197,10 +240,10 @@ public class EvidenceProcessProjectionAdapter {
                         false,
                         false,
                         false,
-                        actor.actorId(),
-                        actor.role().name(),
-                        row.viewerScopeHash(),
-                        actor.role().name(),
+                        viewer.actorId(),
+                        viewer.actorRole(),
+                        viewerScopeHash(viewer),
+                        viewer.actorRole(),
                         phase,
                         terminalReason,
                         pendingState(phase, row.roomPhase(), row.historyMode(), null),
@@ -224,13 +267,13 @@ public class EvidenceProcessProjectionAdapter {
     }
 
     private static EvidenceProcessProjectionView processing(
-            ProjectionRow row, AuthenticatedActor actor) {
-        return projection(row, actor, EvidenceProcessProjectionView.PROCESSING, false);
+            ProjectionRow row, ViewerBinding viewer) {
+        return projection(row, viewer, EvidenceProcessProjectionView.PROCESSING, false);
     }
 
     private static EvidenceProcessProjectionView projection(
             ProjectionRow row,
-            AuthenticatedActor actor,
+            ViewerBinding viewer,
             String projectionState,
             boolean exposeActiveRun) {
         ProjectionEvidenceState state = requireState(row);
@@ -256,10 +299,10 @@ public class EvidenceProcessProjectionAdapter {
                         false,
                         false,
                         false,
-                        actor.actorId(),
-                        actor.role().name(),
-                        row.viewerScopeHash(),
-                        actor.role().name(),
+                        viewer.actorId(),
+                        viewer.actorRole(),
+                        viewerScopeHash(viewer),
+                        viewer.actorRole(),
                         phase,
                         terminalReason(phase, state),
                         pendingState,
@@ -371,12 +414,13 @@ public class EvidenceProcessProjectionAdapter {
         }
     }
 
-    private static void requireViewerBinding(ProjectionRow row, AuthenticatedActor actor) {
+    private static ViewerBinding requireViewerBinding(ProjectionRow row, AuthenticatedActor actor) {
         if (!actor.actorId().equals(row.scopedActorId())
                 || !actor.role().name().equals(normalized(row.scopedActorRole()))
-                || !viewerScopeHash(actor).equals(row.viewerScopeHash())) {
+                || !ALLOWED_VIEWERS.contains(actor.role())) {
             throw new IllegalArgumentException("stale Evidence projection viewer binding");
         }
+        return new ViewerBinding(row.scopedActorId(), normalized(row.scopedActorRole()));
     }
 
     private static void requireSyntheticShadow(ProjectionRow row) {
@@ -390,10 +434,14 @@ public class EvidenceProcessProjectionAdapter {
     }
 
     static String viewerScopeHash(AuthenticatedActor actor) {
+        return viewerScopeHash(new ViewerBinding(actor.actorId(), actor.role().name()));
+    }
+
+    private static String viewerScopeHash(ViewerBinding viewer) {
         ObjectNode scope = JsonNodeFactory.instance.objectNode();
-        scope.put("actor_id", actor.actorId());
-        scope.put("actor_role", actor.role().name());
-        scope.put("audience", actor.role().name());
+        scope.put("actor_id", viewer.actorId());
+        scope.put("actor_role", viewer.actorRole());
+        scope.put("audience", viewer.actorRole());
         return ContractJson.sha256Hex(scope);
     }
 
@@ -480,8 +528,7 @@ public class EvidenceProcessProjectionAdapter {
                 ProjectionEvidenceState.pending(projectedAt),
                 resultSet.getBoolean("history_mode"),
                 resultSet.getString("scoped_actor_id"),
-                resultSet.getString("scoped_actor_role"),
-                resultSet.getString("viewer_scope_hash"));
+                resultSet.getString("scoped_actor_role"));
     }
 
     private static ActiveGraphRun graphRun(ResultSet resultSet, String logicalRunId)
@@ -579,8 +626,7 @@ public class EvidenceProcessProjectionAdapter {
             ProjectionEvidenceState evidenceState,
             boolean historyMode,
             String scopedActorId,
-            String scopedActorRole,
-            String viewerScopeHash) {
+            String scopedActorRole) {
 
         boolean epochPresent() {
             return epochRoomEpochValue != null;
@@ -602,4 +648,6 @@ public class EvidenceProcessProjectionAdapter {
             return epochFencingTokenValue == null ? 0 : epochFencingTokenValue;
         }
     }
+
+    private record ViewerBinding(String actorId, String actorRole) {}
 }

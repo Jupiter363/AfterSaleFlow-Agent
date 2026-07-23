@@ -27,12 +27,19 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.networknt.schema.JsonSchema;
+import com.networknt.schema.JsonSchemaFactory;
+import com.networknt.schema.SpecVersion;
 import jakarta.validation.Validation;
 import jakarta.validation.Validator;
 import jakarta.validation.ValidatorFactory;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.OffsetDateTime;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Set;
 import java.util.stream.IntStream;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -73,6 +80,11 @@ class EvidenceProcessProjectionAdapterTest {
                 verify(jdbc).query(sql.capture(), parameters.capture(), any(RowMapper.class));
                 assertThat(sql.getValue())
                         .contains(
+                                "join fulfillment_dispute_case dispute",
+                                "join case_access_session viewer",
+                                "viewer.status = 'ACTIVE'",
+                                "viewer.permission_scopes_json",
+                                "participant.participant_status = 'ACTIVE'",
                                 "epoch.room_type = 'EVIDENCE'",
                                 "run.room_type = 'EVIDENCE'",
                                 "run.stream_audience_json",
@@ -82,8 +94,8 @@ class EvidenceProcessProjectionAdapterTest {
                         .isEqualTo(actor.actorId());
                 assertThat(parameters.getValue().getValue("actorRole"))
                         .isEqualTo(role.name());
-                assertThat(parameters.getValue().getValue("viewerScopeHash"))
-                        .isEqualTo(scopeHash(actor));
+                assertThat(parameters.getValue().getValue("requiredViewerScopes"))
+                        .isEqualTo("[\"CASE_READ\",\"EVIDENCE_READ\"]");
                 assertThat(parameters.getValue().getValue("historyMode"))
                         .isEqualTo(historyMode);
             }
@@ -106,7 +118,34 @@ class EvidenceProcessProjectionAdapterTest {
     }
 
     @Test
-    void mapsCurrentShadowTupleToTheCompleteFrozenWireContract() {
+    @SuppressWarnings("unchecked")
+    void readReturnsEmptyForForeignCaseWithoutAnAuthoritativeViewerBinding() {
+        NamedParameterJdbcOperations jdbc = mock(NamedParameterJdbcOperations.class);
+        when(jdbc.query(
+                        anyString(),
+                        any(SqlParameterSource.class),
+                        any(RowMapper.class)))
+                .thenReturn(List.of());
+        EvidenceProcessProjectionAdapter scopedAdapter = new EvidenceProcessProjectionAdapter(jdbc);
+        AuthenticatedActor foreignActor = actor(ActorRole.USER);
+
+        assertThat(scopedAdapter.read("CASE_FOREIGN", foreignActor, false)).isEmpty();
+
+        ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+        verify(jdbc).query(sql.capture(), any(SqlParameterSource.class), any(RowMapper.class));
+        assertThat(sql.getValue())
+                .contains(
+                        "join fulfillment_dispute_case dispute",
+                        "join case_access_session viewer",
+                        "viewer.actor_id = :actorId",
+                        "viewer.actor_role = :actorRole",
+                        "viewer.permission_level = case",
+                        "viewer.permission_scopes_json",
+                        "participant.case_id = projection.case_id");
+    }
+
+    @Test
+    void mapsCurrentShadowTupleToTheCompleteFrozenWireContract() throws IOException {
         AuthenticatedActor actor = actor(ActorRole.USER);
         EvidenceProcessProjectionView view = adapter.adapt(
                 shadowRow(actor, false, true, "ASSESSING", "ACTIVE", pendingState()),
@@ -137,10 +176,11 @@ class EvidenceProcessProjectionAdapterTest {
         assertThat(view.originalDeadlineAt()).isEqualTo(PROJECTED_AT.plusDays(1));
         assertThat(view.projectedAt()).isEqualTo(PROJECTED_AT);
         assertSelfHash(view);
+        assertFrozenSchemaValid(view);
     }
 
     @Test
-    void legacyProjectionUsesTheCompleteUnavailableFallbackContract() {
+    void legacyProjectionUsesTheCompleteUnavailableFallbackContract() throws IOException {
         AuthenticatedActor actor = actor(ActorRole.MERCHANT);
         EvidenceProcessProjectionView view = adapter.adapt(legacyRow(actor), actor);
 
@@ -154,10 +194,11 @@ class EvidenceProcessProjectionAdapterTest {
         assertThat(view.versionPins().promptVersion()).isNotBlank();
         assertThat(view.viewerActorRole()).isEqualTo("MERCHANT");
         assertSelfHash(view);
+        assertFrozenSchemaValid(view);
     }
 
     @Test
-    void historyModeFailsClosedIfAnActiveRunLeaksIntoTheRow() {
+    void historyModeFailsClosedIfAnActiveRunLeaksIntoTheRow() throws IOException {
         AuthenticatedActor actor = actor(ActorRole.USER);
         EvidenceProcessProjectionView view = adapter.adapt(
                 shadowRow(actor, true, true, "ASSESSING", "ACTIVE", pendingState()),
@@ -169,16 +210,23 @@ class EvidenceProcessProjectionAdapterTest {
         assertThat(view.pendingOperationKey()).isNull();
         assertThat(view.activeGraphRun()).isNull();
         assertSelfHash(view);
+        assertFrozenSchemaValid(view);
     }
 
     @Test
-    void closedSyntheticHistoryMayRepresentOneHundredItemsWithoutPublicApproval() {
+    void closedSyntheticHistoryMayRepresentOneHundredItemsWithoutPublicApproval() throws IOException {
         AuthenticatedActor actor = actor(ActorRole.PLATFORM_REVIEWER);
         ProjectionEvidenceState closedState = new ProjectionEvidenceState(
                 PROJECTED_AT.plusDays(1),
                 false,
                 null,
-                new PartyCompletion(true, true, null, null, null, null),
+                new PartyCompletion(
+                        true,
+                        true,
+                        "RECEIPT_INITIATOR_P5_100",
+                        "c".repeat(64),
+                        "RECEIPT_RESPONDENT_P5_100",
+                        "d".repeat(64)),
                 new AssessmentCounts(100, 92, 8, 0, 0),
                 3L,
                 100,
@@ -196,10 +244,11 @@ class EvidenceProcessProjectionAdapterTest {
         assertThat(view.assessmentCounts().manifestItemCount()).isEqualTo(100);
         assertThat(view.pendingState()).isEqualTo("NONE");
         assertThat(view.activeGraphRun()).isNull();
+        assertFrozenSchemaValid(view);
     }
 
     @Test
-    void wireViewContainsEveryFrozenSchemaFieldAndAValidSelfHash() {
+    void wireViewContainsEveryFrozenSchemaFieldAndAValidSelfHash() throws IOException {
         AuthenticatedActor actor = actor(ActorRole.USER);
         EvidenceProcessProjectionView view =
                 adapter.adapt(shadowRow(actor, false, false, "OPEN", "ACTIVE", pendingState()), actor);
@@ -245,10 +294,41 @@ class EvidenceProcessProjectionAdapterTest {
                         "roomRevision",
                         "projectedAt");
         assertSelfHash(view);
+        assertFrozenSchemaValid(view);
     }
 
     @Test
-    void requiredPinsAndProjectionTimestampFailClosed() {
+    void nestedFrozenContractInvariantsFailClosed() {
+        assertThatThrownBy(() -> new PartyCompletion(true, false, null, null, null, null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("initiator completion");
+        assertThatThrownBy(() -> new PartyCompletion(false, false, "RECEIPT", "a".repeat(64), null, null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("initiator completion");
+        assertThatThrownBy(() -> new AssessmentCounts(101, 101, 0, 0, 0))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("assessment counts");
+        assertThatThrownBy(() -> new Recovery("NONE", true, null, null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("NONE recovery");
+        assertThatThrownBy(() -> new Recovery("RESUMABLE", false, null, null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("resumable recovery");
+        assertThatThrownBy(() -> new VersionPins(
+                        "evidence-workflow.synthetic.v1",
+                        null,
+                        null,
+                        null,
+                        "evidence-prompt.v2",
+                        "evidence-model.synthetic.v1",
+                        "evidence-item-assessment.v1",
+                        "evidence-batch-proposal.v1",
+                        "evidence-policy.v2",
+                        "evidence-guardrail.v2",
+                        "evidence-tools.synthetic.v1"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("runtime pins");
+
         assertThatThrownBy(() -> new VersionPins(
                         null,
                         null,
@@ -270,6 +350,24 @@ class EvidenceProcessProjectionAdapterTest {
         assertThatThrownBy(() -> adapter.adapt(missingTimestamp, actor))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("projectedAt");
+    }
+
+    @Test
+    void serializedProjectionFailsTheFrozenSchemaForNestedInvalidValues() throws IOException {
+        JsonSchema schema = frozenProjectionSchema();
+
+        ObjectNode missingCompletionReceipt = serializedShadowProjection();
+        ((ObjectNode) missingCompletionReceipt.get("party_completion"))
+                .put("initiator_completed", true);
+        assertThat(schema.validate(missingCompletionReceipt)).isNotEmpty();
+
+        ObjectNode excessiveCount = serializedShadowProjection();
+        ((ObjectNode) excessiveCount.get("assessment_counts")).put("manifest_item_count", 101);
+        assertThat(schema.validate(excessiveCount)).isNotEmpty();
+
+        ObjectNode invalidRecovery = serializedShadowProjection();
+        ((ObjectNode) invalidRecovery.get("recovery")).put("retryable", true);
+        assertThat(schema.validate(invalidRecovery)).isNotEmpty();
     }
 
     @Test
@@ -436,8 +534,7 @@ class EvidenceProcessProjectionAdapterTest {
                 state,
                 historyMode,
                 actor.actorId(),
-                actor.role().name(),
-                scopeHash(actor));
+                actor.role().name());
     }
 
     private static ProjectionEvidenceState pendingState() {
@@ -466,5 +563,28 @@ class EvidenceProcessProjectionAdapterTest {
         return IntStream.rangeClosed(1, count)
                 .mapToObj(index -> "EVIDENCE_" + index)
                 .toList();
+    }
+
+    private static JsonSchema frozenProjectionSchema() throws IOException {
+        Path path = Path.of(
+                "..",
+                "contracts",
+                "agent-platform",
+                "evidence",
+                "v2",
+                "evidence-process-projection.schema.json");
+        return JsonSchemaFactory.getInstance(SpecVersion.VersionFlag.V202012)
+                .getSchema(JSON.readTree(Files.readString(path)));
+    }
+
+    private static void assertFrozenSchemaValid(EvidenceProcessProjectionView view) throws IOException {
+        Set<?> errors = frozenProjectionSchema().validate(JSON.valueToTree(view));
+        assertThat(errors).isEmpty();
+    }
+
+    private ObjectNode serializedShadowProjection() {
+        AuthenticatedActor actor = actor(ActorRole.USER);
+        return JSON.valueToTree(
+                adapter.adapt(shadowRow(actor, false, false, "OPEN", "ACTIVE", pendingState()), actor));
     }
 }

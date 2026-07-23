@@ -1,6 +1,7 @@
 package com.example.dispute.workflow.projection.evidence;
 
 import com.example.dispute.workflow.contract.v1.ContractJson;
+import com.fasterxml.jackson.annotation.JsonFormat;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import com.fasterxml.jackson.databind.annotation.JsonNaming;
@@ -34,9 +35,9 @@ public record EvidenceProcessProjectionView(
         String terminalReason,
         String pendingState,
         String pendingOperationKey,
-        OffsetDateTime originalDeadlineAt,
+        @JsonFormat(shape = JsonFormat.Shape.STRING) OffsetDateTime originalDeadlineAt,
         boolean warningSent,
-        OffsetDateTime warningSentAt,
+        @JsonFormat(shape = JsonFormat.Shape.STRING) OffsetDateTime warningSentAt,
         PartyCompletion partyCompletion,
         AssessmentCounts assessmentCounts,
         Long dossierVersion,
@@ -48,7 +49,7 @@ public record EvidenceProcessProjectionView(
         VersionPins versionPins,
         long processRevision,
         long roomRevision,
-        OffsetDateTime projectedAt) {
+        @JsonFormat(shape = JsonFormat.Shape.STRING) OffsetDateTime projectedAt) {
 
     public static final String SCHEMA_VERSION = "evidence-process-projection.v1";
     public static final String AVAILABLE = "AVAILABLE";
@@ -147,7 +148,9 @@ public record EvidenceProcessProjectionView(
             throw new IllegalArgumentException("disabled graph runtime cannot expose an active run");
         }
         if ("FAILED".equals(projectionState) || "FAILED".equals(pendingState)) {
-            if (!"FAILED".equals(recovery.state()) || activeGraphRun != null) {
+            if (!"FAILED".equals(recovery.state())
+                    || activeGraphRun != null
+                    || pendingOperationKey != null) {
                 throw new IllegalArgumentException("failed projection requires failed recovery");
             }
         }
@@ -347,6 +350,16 @@ public record EvidenceProcessProjectionView(
             requireNullableHash(initiatorReceiptHash, "initiatorReceiptHash");
             requireNullableIdentifier(respondentReceiptRef, "respondentReceiptRef");
             requireNullableHash(respondentReceiptHash, "respondentReceiptHash");
+            requireCompletionReceipt(
+                    initiatorCompleted,
+                    initiatorReceiptRef,
+                    initiatorReceiptHash,
+                    "initiator");
+            requireCompletionReceipt(
+                    respondentCompleted,
+                    respondentReceiptRef,
+                    respondentReceiptHash,
+                    "respondent");
         }
 
         public static PartyCompletion pending() {
@@ -364,10 +377,15 @@ public record EvidenceProcessProjectionView(
 
         public AssessmentCounts {
             if (manifestItemCount < 0
+                    || manifestItemCount > 100
                     || completedCount < 0
+                    || completedCount > 100
                     || needsReviewCount < 0
+                    || needsReviewCount > 100
                     || failedCount < 0
+                    || failedCount > 100
                     || pendingCount < 0
+                    || pendingCount > 100
                     || completedCount + needsReviewCount + failedCount + pendingCount
                             != manifestItemCount) {
                 throw new IllegalArgumentException("assessment counts are inconsistent");
@@ -428,6 +446,15 @@ public record EvidenceProcessProjectionView(
             requireEnum(state, Set.of("NONE", "RESUMABLE", "RECONCILING", "FAILED"), "state");
             requireNullableIdentifier(checkpointRef, "checkpointRef");
             requireNullableHash(checkpointHash, "checkpointHash");
+            if ("NONE".equals(state)
+                    && (retryable || checkpointRef != null || checkpointHash != null)) {
+                throw new IllegalArgumentException("NONE recovery cannot retry or retain a checkpoint");
+            }
+            if (Set.of("RESUMABLE", "RECONCILING").contains(state)
+                    && (!retryable || checkpointRef == null || checkpointHash == null)) {
+                throw new IllegalArgumentException(
+                        "resumable recovery requires retryable checkpoint evidence");
+            }
         }
 
         public static Recovery none() {
@@ -456,6 +483,17 @@ public record EvidenceProcessProjectionView(
             if (stateSchemaVersion != null
                     && !"evidence-graph-state.v2".equals(stateSchemaVersion)) {
                 throw new IllegalArgumentException("stateSchemaVersion is invalid");
+            }
+            boolean hasAnyRuntimePin = workflowBuildId != null
+                    || graphVersion != null
+                    || checkpointSchemaVersion != null
+                    || stateSchemaVersion != null;
+            boolean hasAllRuntimePins = workflowBuildId != null
+                    && graphVersion != null
+                    && checkpointSchemaVersion != null
+                    && stateSchemaVersion != null;
+            if (hasAnyRuntimePin != hasAllRuntimePins) {
+                throw new IllegalArgumentException("runtime pins must be all present or all absent");
             }
             requireIdentifier(promptVersion, "promptVersion");
             requireIdentifier(modelProfileId, "modelProfileId");
@@ -514,6 +552,15 @@ public record EvidenceProcessProjectionView(
     private static void requireNullableHash(String value, String field) {
         if (value != null) {
             requireHash(value, field);
+        }
+    }
+
+    private static void requireCompletionReceipt(
+            boolean completed, String receiptRef, String receiptHash, String party) {
+        boolean hasReceipt = receiptRef != null || receiptHash != null;
+        if (completed != hasReceipt || (hasReceipt && (receiptRef == null || receiptHash == null))) {
+            throw new IllegalArgumentException(
+                    party + " completion must have a complete receipt or no receipt");
         }
     }
 }
