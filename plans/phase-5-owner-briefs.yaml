@@ -414,7 +414,7 @@ owners:
           - java-api-service/src/main/java/com/example/dispute/evidence/infrastructure/persistence/JdbcEvidenceGraphBindingStore.java
           - java-api-service/src/main/resources/db/migration/V043_4__evidence_graph_bindings.sql
           - java-api-service/src/test/java/com/example/dispute/evidence/EvidenceAssetAuthorizationTest.java
-          - java-api-service/src/test/java/com/example/dispute/evidence/JdbcEvidenceGraphBindingStoreTest.java
+          - java-api-service/src/test/java/com/example/dispute/evidence/infrastructure/persistence/JdbcEvidenceGraphBindingStoreTest.java
         t0_commands:
           - id: C1_MAVEN_TEST
             workdir: java-api-service
@@ -800,6 +800,11 @@ primary_integration_only:
     - plans/phase-5-evidence-pilot-test-batches.yaml
     - tests/static/test_phase5_evidence_pilot_plan.py
     - tests/static/test_phase5_entry_contract_plan.py
+    - scripts/run_phase5_wave_a_checkpoint.py
+    - scripts/generate_phase5_wave_a_evidence.py
+    - tests/static/test_phase5_wave_a_runner.py
+    - tests/static/test_phase5_wave_a_evidence.py
+    - tests/static/test_phase5_wave_a_checkpoint.py
     - python-agent-service/app/graph_runtime/bulkhead.py
     - python-agent-service/app/graph_runtime/errors.py
     - python-agent-service/tests/graph_runtime/unit/test_bulkhead.py

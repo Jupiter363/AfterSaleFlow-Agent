@@ -554,25 +554,113 @@ batches:
     tier: T1
     trigger: wave_a_merged
     purpose: Verify Graph reducer Workflow kernel Java authority and additive persistence once after Wave A integration.
-    requires_tasks: [P5-A1, P5-A2, P5-B1, P5-B2, P5-C1, P5-C2, P5-D0, P5-E0, P5-R1]
+    requires_tasks: [P5-A1, P5-A2, P5-B1, P5-B2, P5-C1, P5-C2, P5-D0, P5-E0]
+    completed_by_task: P5-R1
     planned_python_tests:
       - python-agent-service/tests/graphs/evidence
       - python-agent-service/tests/agents/test_evidence_clerk_turn.py
       - python-agent-service/tests/agents/test_evidence_fact_mapping_policy.py
     planned_java_test_classes:
       - EvidenceRoomWorkflowTest
-      - EvidenceReducerPropertyTest
+      - EvidenceRoomWorkflowReplayTest
+      - EvidenceRoomActivityContractTest
+      - EvidenceRoomWorkflowWorkerRecoveryTest
+      - EvidenceV2ContractFixtureTest
+      - EvidenceAssetAuthorizationTest
+      - JdbcEvidenceGraphBindingStoreTest
       - EvidenceGraphCommandFactoryTest
       - EvidenceGraphResultFinalizerTest
-      - EvidenceAssetAuthorizationTest
+      - EvidenceFinalizationReceiptTest
+      - EvidenceAgentTurnServiceTest
+      - EvidenceProcessProjectionAdapterTest
+      - EvidenceBulkheadPolicyTest
+      - EvidenceNoFormalSinkGuardTest
       - EvidenceSubmissionServiceTest
       - EvidenceCompletionServiceTest
       - EvidenceDossierFreezerTest
+    static_tests:
+      - tests/static/test_phase5_entry_contract_plan.py
+      - tests/static/test_phase5_evidence_contracts.py
+      - tests/static/test_agent_platform_schema_contracts.py
+      - tests/static/test_graph_import_boundaries.py
+      - tests/static/test_phase5_evidence_no_sink_bulkhead.py
+      - tests/static/test_phase5_evidence_pilot_plan.py
+      - tests/static/test_phase5_wave_a_runner.py
+      - tests/static/test_phase5_wave_a_evidence.py
+      - tests/static/test_phase5_wave_a_checkpoint.py
+    source_commands:
+      - id: p5_wave_a_python
+        cwd: python-agent-service
+        report: python-phase5-wave-a-junit.xml
+        resource_class: light_pytest
+        command: >-
+          D:\miniconda\python.exe -m pytest
+          tests/graphs/evidence
+          tests/agents/test_evidence_clerk_turn.py
+          tests/agents/test_evidence_fact_mapping_policy.py
+          -q
+      - id: p5_wave_a_java
+        cwd: java-api-service
+        report: java-phase5-wave-a-junit.xml
+        resource_class: maven_test
+        command: >-
+          .\mvnw.cmd -q -DforkCount=1
+          -Dtest=EvidenceRoomWorkflowTest,EvidenceRoomWorkflowReplayTest,EvidenceRoomActivityContractTest,EvidenceRoomWorkflowWorkerRecoveryTest,EvidenceV2ContractFixtureTest,EvidenceAssetAuthorizationTest,JdbcEvidenceGraphBindingStoreTest,EvidenceGraphCommandFactoryTest,EvidenceGraphResultFinalizerTest,EvidenceFinalizationReceiptTest,EvidenceAgentTurnServiceTest,EvidenceProcessProjectionAdapterTest,EvidenceBulkheadPolicyTest,EvidenceNoFormalSinkGuardTest,EvidenceSubmissionServiceTest,EvidenceCompletionServiceTest,EvidenceDossierFreezerTest
+          test
+      - id: p5_wave_a_static
+        cwd: .
+        report: static-phase5-wave-a-junit.xml
+        resource_class: light_pytest
+        command: >-
+          D:\miniconda\python.exe -m pytest
+          tests/static/test_phase5_entry_contract_plan.py
+          tests/static/test_phase5_evidence_contracts.py
+          tests/static/test_agent_platform_schema_contracts.py
+          tests/static/test_graph_import_boundaries.py
+          tests/static/test_phase5_evidence_no_sink_bulkhead.py
+          tests/static/test_phase5_evidence_pilot_plan.py
+          tests/static/test_phase5_wave_a_runner.py
+          tests/static/test_phase5_wave_a_evidence.py
+          tests/static/test_phase5_wave_a_checkpoint.py
+          -q
     execution:
+      runner: scripts/run_phase5_wave_a_checkpoint.py
+      evidence_generator: scripts/generate_phase5_wave_a_evidence.py
+      accepted_wave_a_base_commit: 496d0d459b97000f62742fe064d8ef70956ea419
+      command_order: [p5_wave_a_python, p5_wave_a_java, p5_wave_a_static]
       heavy_parallelism: 1
       light_parallelism: 2
-      database_workers: 1
+      runner_execution: sequential
+      database: none
       temporal_test_environments: 1
+      maven_token_count: 1
+      maven_fork_count: 1
+      source_reports:
+        - python-phase5-wave-a-junit.xml
+        - java-phase5-wave-a-junit.xml
+        - static-phase5-wave-a-junit.xml
+      execution_manifest: phase5-wave-a-execution-manifest.json
+      task_bindings: task-commit-bindings.json
+      evidence_output: test-reports/temporal-first/<release-id>/phase-5-wave-a
+      evidence_required_files:
+        - candidate-commit.txt
+        - task-commit-bindings.json
+        - phase5-wave-a-execution-manifest.json
+        - python-phase5-wave-a-junit.xml
+        - java-phase5-wave-a-junit.xml
+        - static-phase5-wave-a-junit.xml
+        - wave-a-metrics.json
+        - artifact-sha256.json
+      fresh_run_directory_required: true
+      sealed_manifest_required: true
+      exact_candidate_sha_required: true
+      candidate_sha_must_be_clean_and_detached: true
+      evidence_commit_must_be_later_than_tested_sha: true
+      checkpoint_acceptance_required_to_open_wave_b: true
+      same_sha_retry_allowed_only_for: INFRA
+      product_fixture_or_external_gate_blocks_candidate: true
+      frontend: none
+      browser_or_playwright: none
       real_provider: forbidden
       formal_finalizer_runtime_wiring: forbidden
 

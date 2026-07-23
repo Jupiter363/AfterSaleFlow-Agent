@@ -363,7 +363,56 @@ an untested candidate.
 - D owns compatible projection contracts and baseline API/UI test fixtures that do not depend on
   the final Graph/Workflow implementation.
 - E owns bulkhead/no-formal-sink harnesses, metrics contracts and signed-synthetic test fixtures.
-- R integrates one reviewed commit at a time and runs one deduplicated affected batch.
+- R integrates one reviewed commit at a time, freezes one clean detached merged SHA, and runs the
+  three-source `P5-BATCH-1` checkpoint once. The Python and static sources are token-free; the one
+  Maven source owns the single heavy token and uses `forkCount=1`. Batch 1 runs no frontend,
+  browser, database, real-provider, or formal-sink flow.
+
+`P5-BATCH-1` consumes an external machine-readable task-binding document for `P5-A1`, `P5-A2`,
+`P5-B1`, `P5-B2`, `P5-C1`, `P5-C2`, `P5-D0`, and `P5-E0`. Every record binds the reviewed task
+commit, declared review partner, P0 review `PASS`, and exact T0 command IDs with `PASS`. The runner
+verifies every task commit is an ancestor of the merged candidate. `P5-R1` is completed by this
+integration and checkpoint; it is not a circular pre-run prerequisite.
+
+The runner writes only under a fresh `.codex-run` directory, normalizes three candidate-bound JUnit
+reports, seals its manifest, and permits a same-SHA retry only after an `INFRA` classification.
+`PRODUCT`, `FIXTURE`, and `EXTERNAL_GATE` block the candidate. The generator atomically publishes
+the matrix-declared eight-file LF-stable evidence bundle in a separate evidence-only commit. That
+bundle alone does not open Wave B: R must subsequently authenticate the tested and evidence commits
+in the Wave A checkpoint and update the still-blocked integration barrier.
+
+The task-binding input is an external LF JSON file with
+`schema_version=phase5-wave-a-task-bindings.v1`, the full merged `candidate_commit`, and the exact
+ordered eight-task list. Each task carries `id`, full `commit`, `review_partner`,
+`p0_review=PASS`, and `t0={result: PASS, command_ids: [...]}` exactly as declared by the owner
+brief. Keep this input outside the candidate worktree; the runner validates it and archives the
+canonical copy into its run directory.
+
+From the clean detached merged candidate, R executes:
+
+```powershell
+$candidate = git rev-parse HEAD
+$run = ".codex-run/phase5-wave-a-$($candidate.Substring(0, 12))"
+$taskBindings = Resolve-Path "D:\evidence-input\phase5-wave-a-task-bindings.json"
+D:\miniconda\python.exe scripts/run_phase5_wave_a_checkpoint.py `
+  --candidate-commit $candidate `
+  --execute `
+  --run-dir $run `
+  --task-bindings $taskBindings `
+  --environment-id local-phase5-wave-a
+```
+
+After a source failure, R classifies before retry. Only `INFRA` may use `--resume` on the same SHA;
+all other classifications block the candidate. After a PASS manifest, assemble without rerunning:
+
+```powershell
+$release = "phase-5-wave-a-20260723-$($candidate.Substring(0, 8))"
+D:\miniconda\python.exe scripts/generate_phase5_wave_a_evidence.py `
+  --release-id $release `
+  --candidate-commit $candidate `
+  --base-commit 496d0d459b97000f62742fe064d8ef70956ea419 `
+  --execution-manifest "$run/phase5-wave-a-execution-manifest.json"
+```
 
 ### Wave B: Experience And Hardening
 
