@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import base64
 import hashlib
+import json
 import re
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Literal, TypeAlias, cast
+from typing import Any, Literal, Protocol, TypeAlias, cast
+from weakref import WeakSet
+
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
 
 from app.contracts.v1.codec import canonical_sha256, canonicalize
 
@@ -59,16 +67,141 @@ class EvidenceGraphContractError(ValueError):
 
 
 @dataclass(frozen=True, slots=True)
-class VerifiedEvidenceAdmission:
-    """Trusted gateway output consumed by the graph; it is never a signing authority."""
-
+class EvidenceAdmissionRequest:
     runtime_mode: Literal["SHADOW"]
     room_graph_command: Mapping[str, Any]
-    manifest: Mapping[str, Any]
+    signed_manifest_payload: bytes
     registry_output_schema_version: str
     graph_lease_fencing_token: int
-    validation_steps: tuple[str, ...]
-    direct_java_es256_signature_verified: bool
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "room_graph_command", deepcopy(dict(self.room_graph_command)))
+        object.__setattr__(self, "signed_manifest_payload", bytes(self.signed_manifest_payload))
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedEvidenceVerificationKey:
+    kid: str
+    public_key: ec.EllipticCurvePublicKey
+    algorithm: Literal["ES256"] = "ES256"
+    curve: Literal["P-256"] = "P-256"
+    use: Literal["sig"] = "sig"
+
+
+class EvidenceVerificationKeyResolver(Protocol):
+    def resolve(self, signing_key_id: str) -> ResolvedEvidenceVerificationKey: ...
+
+
+_VERIFIED_ADMISSION_TOKEN = object()
+
+
+class VerifiedEvidenceAdmission:
+    """Opaque result issued only after raw payload and ES256 verification."""
+
+    __slots__ = (
+        "_runtime_mode",
+        "_room_graph_command",
+        "_manifest",
+        "_registry_output_schema_version",
+        "_graph_lease_fencing_token",
+        "_snapshot_payload_sha256",
+        "_token",
+        "__weakref__",
+    )
+
+    def __init__(
+        self,
+        *,
+        runtime_mode: Literal["SHADOW"],
+        room_graph_command: JsonObject,
+        manifest: JsonObject,
+        registry_output_schema_version: str,
+        graph_lease_fencing_token: int,
+        snapshot_payload_sha256: str,
+        _token: object,
+    ) -> None:
+        if _token is not _VERIFIED_ADMISSION_TOKEN:
+            raise EvidenceGraphContractError("EVIDENCE_VERIFIED_ADMISSION_REQUIRED")
+        self._runtime_mode = runtime_mode
+        self._room_graph_command = deepcopy(room_graph_command)
+        self._manifest = deepcopy(manifest)
+        self._registry_output_schema_version = registry_output_schema_version
+        self._graph_lease_fencing_token = graph_lease_fencing_token
+        self._snapshot_payload_sha256 = snapshot_payload_sha256
+        self._token = _token
+
+    @property
+    def runtime_mode(self) -> Literal["SHADOW"]:
+        return self._runtime_mode
+
+    @property
+    def room_graph_command(self) -> JsonObject:
+        return deepcopy(self._room_graph_command)
+
+    @property
+    def manifest(self) -> JsonObject:
+        return deepcopy(self._manifest)
+
+    @property
+    def registry_output_schema_version(self) -> str:
+        return self._registry_output_schema_version
+
+    @property
+    def graph_lease_fencing_token(self) -> int:
+        return self._graph_lease_fencing_token
+
+    @property
+    def snapshot_payload_sha256(self) -> str:
+        return self._snapshot_payload_sha256
+
+
+_VERIFIED_ADMISSIONS: WeakSet[VerifiedEvidenceAdmission] = WeakSet()
+
+
+class EvidenceAdmissionVerifier:
+    def __init__(self, key_resolver: EvidenceVerificationKeyResolver) -> None:
+        self._key_resolver = key_resolver
+
+    def verify(self, request: EvidenceAdmissionRequest) -> VerifiedEvidenceAdmission:
+        if type(request) is not EvidenceAdmissionRequest:
+            raise EvidenceGraphContractError("EVIDENCE_ADMISSION_REQUEST_REQUIRED")
+        if request.runtime_mode != "SHADOW":
+            raise EvidenceGraphContractError("EVIDENCE_RUNTIME_MODE_FORBIDDEN")
+        command = _json_object(request.room_graph_command, "EVIDENCE_COMMAND_INVALID")
+        _verify_room_graph_command(command)
+        snapshot_ref = _required_mapping(command, "domain_snapshot_ref")
+        payload = bytes(request.signed_manifest_payload)
+        payload_hash = _verify_raw_snapshot_reference(snapshot_ref, payload)
+        manifest = _parse_canonical_manifest(payload)
+        _verify_snapshot_identity(snapshot_ref, manifest)
+        if _contains_forbidden_authority(command) or _contains_forbidden_authority(manifest):
+            raise EvidenceGraphContractError("EVIDENCE_FORMAL_AUTHORITY_FORBIDDEN")
+        _verify_internal_manifest_hash(manifest)
+        _verify_direct_java_signature(manifest, self._key_resolver)
+        actor_scope_hash = _verify_actor_scope(command, manifest)
+        _verify_output_pins(
+            request.registry_output_schema_version,
+            command,
+            manifest,
+        )
+        _verify_distinct_fence_authorities(
+            request.graph_lease_fencing_token,
+            manifest,
+        )
+        _verify_command_manifest_bindings(command, manifest, actor_scope_hash)
+        _verify_synthetic_shadow_scope(manifest)
+        _verify_manifest_membership(manifest)
+        admission = VerifiedEvidenceAdmission(
+            runtime_mode=request.runtime_mode,
+            room_graph_command=command,
+            manifest=manifest,
+            registry_output_schema_version=request.registry_output_schema_version,
+            graph_lease_fencing_token=request.graph_lease_fencing_token,
+            snapshot_payload_sha256=payload_hash,
+            _token=_VERIFIED_ADMISSION_TOKEN,
+        )
+        _VERIFIED_ADMISSIONS.add(admission)
+        return admission
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,31 +213,15 @@ class EvidenceGraphContext:
 def validate_verified_admission(
     admission: VerifiedEvidenceAdmission,
 ) -> tuple[JsonObject, JsonObject]:
-    """Recheck immutable bindings in the same order used by the trusted gateway."""
+    """Consume only an opaque result minted by ``EvidenceAdmissionVerifier``."""
 
-    if type(admission) is not VerifiedEvidenceAdmission:
+    if (
+        type(admission) is not VerifiedEvidenceAdmission
+        or admission not in _VERIFIED_ADMISSIONS
+        or admission._token is not _VERIFIED_ADMISSION_TOKEN
+    ):
         raise EvidenceGraphContractError("EVIDENCE_VERIFIED_ADMISSION_REQUIRED")
-    if admission.runtime_mode != "SHADOW":
-        raise EvidenceGraphContractError("EVIDENCE_RUNTIME_MODE_FORBIDDEN")
-    if admission.validation_steps != VERIFIED_ADMISSION_STEPS:
-        raise EvidenceGraphContractError("EVIDENCE_ADMISSION_VALIDATION_ORDER_INVALID")
-    command = _json_object(admission.room_graph_command, "EVIDENCE_COMMAND_INVALID")
-    manifest = _json_object(admission.manifest, "EVIDENCE_MANIFEST_INVALID")
-    if _contains_forbidden_authority(command) or _contains_forbidden_authority(manifest):
-        raise EvidenceGraphContractError("EVIDENCE_FORMAL_AUTHORITY_FORBIDDEN")
-
-    _verify_room_graph_command(command)
-    snapshot_ref = _required_mapping(command, "domain_snapshot_ref")
-    _verify_snapshot_reference(snapshot_ref, manifest)
-    _verify_internal_manifest_hash(manifest)
-    _verify_direct_java_signature_proof(admission, manifest)
-    actor_scope_hash = _verify_actor_scope(command, manifest)
-    _verify_output_pins(admission, command, manifest)
-    _verify_distinct_fence_authorities(admission, manifest)
-    _verify_command_manifest_bindings(command, manifest, actor_scope_hash)
-    _verify_synthetic_shadow_scope(manifest)
-    _verify_manifest_membership(manifest)
-    return command, manifest
+    return admission.room_graph_command, admission.manifest
 
 
 def manifest_items_by_key(manifest: Mapping[str, Any]) -> dict[str, JsonObject]:
@@ -135,17 +252,34 @@ def _verify_room_graph_command(command: JsonObject) -> None:
         raise EvidenceGraphContractError("EVIDENCE_COMMAND_REQUEST_HASH_MISMATCH")
 
 
-def _verify_snapshot_reference(snapshot: Mapping[str, Any], manifest: JsonObject) -> None:
-    full_payload = canonicalize(manifest)
-    full_hash = hashlib.sha256(full_payload).hexdigest()
+def _verify_raw_snapshot_reference(snapshot: Mapping[str, Any], payload: bytes) -> str:
+    full_hash = hashlib.sha256(payload).hexdigest()
     if snapshot.get("sha256") != full_hash:
         raise EvidenceGraphContractError("EVIDENCE_SNAPSHOT_PAYLOAD_HASH_MISMATCH")
-    if snapshot.get("size_bytes") != len(full_payload):
+    if snapshot.get("size_bytes") != len(payload):
         raise EvidenceGraphContractError("EVIDENCE_SNAPSHOT_PAYLOAD_SIZE_MISMATCH")
     uri = snapshot.get("uri")
     match = _CONTENT_ADDRESSED_URI.fullmatch(uri) if isinstance(uri, str) else None
     if match is None or match.group(1) != full_hash:
         raise EvidenceGraphContractError("EVIDENCE_SNAPSHOT_URI_NOT_CONTENT_ADDRESSED")
+    return full_hash
+
+
+def _parse_canonical_manifest(payload: bytes) -> JsonObject:
+    try:
+        decoded = payload.decode("utf-8")
+        parsed = json.loads(decoded, object_pairs_hook=_unique_json_object)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise EvidenceGraphContractError("EVIDENCE_MANIFEST_PAYLOAD_INVALID") from error
+    if not isinstance(parsed, dict):
+        raise EvidenceGraphContractError("EVIDENCE_MANIFEST_INVALID")
+    manifest = _json_object(parsed, "EVIDENCE_MANIFEST_INVALID")
+    if payload != canonicalize(manifest):
+        raise EvidenceGraphContractError("EVIDENCE_MANIFEST_PAYLOAD_NOT_CANONICAL")
+    return manifest
+
+
+def _verify_snapshot_identity(snapshot: Mapping[str, Any], manifest: JsonObject) -> None:
     if snapshot.get("artifact_id") != manifest.get("manifest_id") or snapshot.get(
         "schema_version"
     ) != manifest.get("schema_version"):
@@ -165,18 +299,55 @@ def _verify_internal_manifest_hash(manifest: JsonObject) -> None:
         raise EvidenceGraphContractError("EVIDENCE_MANIFEST_HASH_MISMATCH")
 
 
-def _verify_direct_java_signature_proof(
-    admission: VerifiedEvidenceAdmission,
+def _verify_direct_java_signature(
     manifest: JsonObject,
+    key_resolver: EvidenceVerificationKeyResolver,
 ) -> None:
     signature = manifest.get("signature")
     if (
         manifest.get("signature_algorithm") != "ES256"
         or not isinstance(signature, str)
         or not _P1363_BASE64URL.fullmatch(signature)
-        or not admission.direct_java_es256_signature_verified
     ):
         raise EvidenceGraphContractError("EVIDENCE_DIRECT_JAVA_SIGNATURE_UNVERIFIED")
+    signing_key_id = manifest.get("signing_key_id")
+    manifest_hash = manifest.get("manifest_hash")
+    if (
+        not isinstance(signing_key_id, str)
+        or not signing_key_id
+        or not isinstance(manifest_hash, str)
+    ):
+        raise EvidenceGraphContractError("EVIDENCE_DIRECT_JAVA_SIGNATURE_UNVERIFIED")
+    try:
+        resolved = key_resolver.resolve(signing_key_id)
+    except Exception as error:
+        raise EvidenceGraphContractError("EVIDENCE_SIGNING_KEY_UNAVAILABLE") from error
+    if (
+        type(resolved) is not ResolvedEvidenceVerificationKey
+        or resolved.kid != signing_key_id
+        or resolved.algorithm != "ES256"
+        or resolved.curve != "P-256"
+        or resolved.use != "sig"
+        or not isinstance(resolved.public_key, ec.EllipticCurvePublicKey)
+        or not isinstance(resolved.public_key.curve, ec.SECP256R1)
+    ):
+        raise EvidenceGraphContractError("EVIDENCE_SIGNING_KEY_INVALID")
+    try:
+        raw_signature = base64.urlsafe_b64decode(signature + "==")
+    except (ValueError, TypeError) as error:
+        raise EvidenceGraphContractError("EVIDENCE_SIGNATURE_ENCODING_INVALID") from error
+    if len(raw_signature) != 64:
+        raise EvidenceGraphContractError("EVIDENCE_SIGNATURE_ENCODING_INVALID")
+    r = int.from_bytes(raw_signature[:32], "big")
+    s = int.from_bytes(raw_signature[32:], "big")
+    try:
+        resolved.public_key.verify(
+            encode_dss_signature(r, s),
+            manifest_hash.encode("ascii"),
+            ec.ECDSA(hashes.SHA256()),
+        )
+    except (InvalidSignature, ValueError) as error:
+        raise EvidenceGraphContractError("EVIDENCE_DIRECT_JAVA_SIGNATURE_INVALID") from error
 
 
 def _verify_actor_scope(command: JsonObject, manifest: JsonObject) -> str:
@@ -188,7 +359,7 @@ def _verify_actor_scope(command: JsonObject, manifest: JsonObject) -> str:
 
 
 def _verify_output_pins(
-    admission: VerifiedEvidenceAdmission,
+    registry_output_schema_version: str,
     command: JsonObject,
     manifest: JsonObject,
 ) -> None:
@@ -199,7 +370,7 @@ def _verify_output_pins(
     if (
         terminal_pin != TERMINAL_OUTPUT_SCHEMA_VERSION
         or invocation.get("output_schema_version") != TERMINAL_OUTPUT_SCHEMA_VERSION
-        or admission.registry_output_schema_version != TERMINAL_OUTPUT_SCHEMA_VERSION
+        or registry_output_schema_version != TERMINAL_OUTPUT_SCHEMA_VERSION
     ):
         raise EvidenceGraphContractError("EVIDENCE_TERMINAL_OUTPUT_PIN_MISMATCH")
     if assessment_pin != ASSESSMENT_OUTPUT_SCHEMA_VERSION:
@@ -207,11 +378,10 @@ def _verify_output_pins(
 
 
 def _verify_distinct_fence_authorities(
-    admission: VerifiedEvidenceAdmission,
+    graph_lease_fence: int,
     manifest: JsonObject,
 ) -> None:
     java_room_fence = manifest.get("fencing_token")
-    graph_lease_fence = admission.graph_lease_fencing_token
     if not _is_nonnegative_int(java_room_fence) or not _is_nonnegative_int(graph_lease_fence):
         raise EvidenceGraphContractError("EVIDENCE_FENCE_BINDING_INVALID")
     # Numeric equality is allowed by chance; the named sources remain independent.
@@ -309,6 +479,15 @@ def _json_object(value: Mapping[str, Any], code: str) -> JsonObject:
     except (TypeError, ValueError) as error:
         raise EvidenceGraphContractError(code) from error
     return cast(JsonObject, deepcopy(dict(value)))
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, member in pairs:
+        if key in value:
+            raise ValueError(f"duplicate JSON member: {key}")
+        value[key] = member
+    return value
 
 
 def _contains_forbidden_authority(value: Any) -> bool:

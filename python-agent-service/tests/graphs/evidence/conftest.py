@@ -1,18 +1,24 @@
 from __future__ import annotations
 
 import json
+import base64
 from copy import deepcopy
-from dataclasses import replace
 from pathlib import Path
+
 import pytest
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 from langchain_core.runnables import RunnableLambda
 
 from app.contracts.v1.codec import canonical_sha256, canonicalize
 from app.graphs.evidence.contracts import (
     TERMINAL_OUTPUT_SCHEMA_VERSION,
-    VERIFIED_ADMISSION_STEPS,
+    EvidenceAdmissionRequest,
+    EvidenceAdmissionVerifier,
     EvidenceGraphContext,
     JsonObject,
+    ResolvedEvidenceVerificationKey,
     VerifiedEvidenceAdmission,
 )
 
@@ -23,6 +29,20 @@ EVIDENCE_FIXTURES = CONTRACT_ROOT / "evidence" / "v2" / "fixtures" / "valid"
 COMMAND_FIXTURE = (
     CONTRACT_ROOT / "v1" / "fixtures" / "valid" / "room-graph-command-evidence-valid.json"
 )
+SIGNING_KEY_ID = "KEY_P5_SYNTHETIC_ES256_1"
+PRIVATE_KEY = ec.generate_private_key(ec.SECP256R1())
+
+
+class CountingKeyResolver:
+    def __init__(self) -> None:
+        self.lookups = 0
+
+    def resolve(self, signing_key_id: str) -> ResolvedEvidenceVerificationKey:
+        self.lookups += 1
+        return ResolvedEvidenceVerificationKey(
+            kid=signing_key_id,
+            public_key=PRIVATE_KEY.public_key(),
+        )
 
 
 def load_manifest(count: int) -> JsonObject:
@@ -34,7 +54,7 @@ def load_manifest(count: int) -> JsonObject:
     return json.loads((EVIDENCE_FIXTURES / names[count]).read_text(encoding="utf-8"))
 
 
-def make_admission(count: int = 1) -> VerifiedEvidenceAdmission:
+def make_request(count: int = 1) -> EvidenceAdmissionRequest:
     manifest = load_manifest(count)
     command = json.loads(COMMAND_FIXTURE.read_text(encoding="utf-8"))["instance"]
     binding = manifest["command_binding"]
@@ -53,49 +73,75 @@ def make_admission(count: int = 1) -> VerifiedEvidenceAdmission:
         policy_version=profiles["policy_version"],
         guardrail_version=profiles["guardrail_version"],
     )
-    command["domain_snapshot_ref"]["artifact_id"] = manifest["manifest_id"]
-    command["domain_snapshot_ref"]["schema_version"] = manifest["schema_version"]
-    admission = VerifiedEvidenceAdmission(
-        runtime_mode="SHADOW",
-        room_graph_command=command,
+    return refresh_request(
+        EvidenceAdmissionRequest(
+            runtime_mode="SHADOW",
+            room_graph_command=command,
+            signed_manifest_payload=canonicalize(manifest),
+            registry_output_schema_version=TERMINAL_OUTPUT_SCHEMA_VERSION,
+            graph_lease_fencing_token=41,
+        ),
         manifest=manifest,
-        registry_output_schema_version=TERMINAL_OUTPUT_SCHEMA_VERSION,
-        graph_lease_fencing_token=41,
-        validation_steps=VERIFIED_ADMISSION_STEPS,
-        direct_java_es256_signature_verified=True,
+        refresh_internal_manifest_hash=True,
+        resign=True,
     )
-    return refresh_admission(admission)
 
 
-def refresh_admission(
-    admission: VerifiedEvidenceAdmission,
+def make_admission(count: int = 1) -> VerifiedEvidenceAdmission:
+    return EvidenceAdmissionVerifier(CountingKeyResolver()).verify(make_request(count))
+
+
+def refresh_request(
+    request: EvidenceAdmissionRequest,
     *,
+    command: JsonObject | None = None,
+    manifest: JsonObject | None = None,
     refresh_internal_manifest_hash: bool = False,
-) -> VerifiedEvidenceAdmission:
-    manifest = deepcopy(dict(admission.manifest))
-    command = deepcopy(dict(admission.room_graph_command))
+    resign: bool = False,
+) -> EvidenceAdmissionRequest:
+    updated_manifest = deepcopy(
+        manifest
+        if manifest is not None
+        else json.loads(request.signed_manifest_payload.decode("utf-8"))
+    )
+    updated_command = deepcopy(command if command is not None else dict(request.room_graph_command))
+    updated_manifest["signing_key_id"] = SIGNING_KEY_ID
     if refresh_internal_manifest_hash:
-        preimage = dict(manifest)
+        preimage = dict(updated_manifest)
         preimage.pop("manifest_hash", None)
         preimage.pop("signature", None)
-        manifest["manifest_hash"] = canonical_sha256(preimage)
-    full_payload = canonicalize(manifest)
-    full_hash = canonical_sha256(manifest)
-    snapshot = command["domain_snapshot_ref"]
+        updated_manifest["manifest_hash"] = canonical_sha256(preimage)
+    if resign:
+        der_signature = PRIVATE_KEY.sign(
+            updated_manifest["manifest_hash"].encode("ascii"),
+            ec.ECDSA(hashes.SHA256()),
+        )
+        r, s = decode_dss_signature(der_signature)
+        p1363 = r.to_bytes(32, "big") + s.to_bytes(32, "big")
+        updated_manifest["signature"] = base64.urlsafe_b64encode(p1363).rstrip(b"=").decode()
+    payload = canonicalize(updated_manifest)
+    payload_hash = canonical_sha256(updated_manifest)
+    snapshot = updated_command["domain_snapshot_ref"]
     snapshot.update(
-        artifact_id=manifest["manifest_id"],
-        schema_version=manifest["schema_version"],
-        sha256=full_hash,
-        size_bytes=len(full_payload),
+        artifact_id=updated_manifest["manifest_id"],
+        schema_version=updated_manifest["schema_version"],
+        sha256=payload_hash,
+        size_bytes=len(payload),
         uri=(
-            f"s3://evidence-synthetic-manifests/{manifest['case_id']}/"
-            f"epoch-{manifest['room_epoch']}/{full_hash}.json"
+            f"s3://evidence-synthetic-manifests/{updated_manifest['case_id']}/"
+            f"epoch-{updated_manifest['room_epoch']}/{payload_hash}.json"
         ),
     )
-    command_preimage = dict(command)
+    command_preimage = dict(updated_command)
     command_preimage.pop("request_hash", None)
-    command["request_hash"] = canonical_sha256(command_preimage)
-    return replace(admission, room_graph_command=command, manifest=manifest)
+    updated_command["request_hash"] = canonical_sha256(command_preimage)
+    return EvidenceAdmissionRequest(
+        runtime_mode="SHADOW",
+        room_graph_command=updated_command,
+        signed_manifest_payload=payload,
+        registry_output_schema_version=request.registry_output_schema_version,
+        graph_lease_fencing_token=request.graph_lease_fencing_token,
+    )
 
 
 def assessment_for_work_item(work_item: JsonObject) -> JsonObject:
@@ -161,7 +207,22 @@ def admission_factory():
 
 @pytest.fixture
 def admission_refresher():
-    return refresh_admission
+    return refresh_request
+
+
+@pytest.fixture
+def admission_request_factory():
+    return make_request
+
+
+@pytest.fixture
+def admission_verifier_factory():
+    return lambda resolver=None: EvidenceAdmissionVerifier(resolver or CountingKeyResolver())
+
+
+@pytest.fixture
+def key_resolver_factory():
+    return CountingKeyResolver
 
 
 @pytest.fixture

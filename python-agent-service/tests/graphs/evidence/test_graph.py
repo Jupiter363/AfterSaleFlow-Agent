@@ -5,7 +5,6 @@ import random
 import threading
 import time
 from copy import deepcopy
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -21,7 +20,6 @@ from app.graphs.evidence import (
     build_evidence_v2_graph,
     compile_evidence_v2_graph,
     new_evidence_graph_state,
-    validate_verified_admission,
 )
 from app.graphs.evidence.nodes import dispatch_wave, plan_next_deterministic_wave
 
@@ -288,11 +286,12 @@ def test_graph_topology_is_closed_and_contains_no_process_transition_nodes() -> 
 
 
 def test_manifest_scheduler_rejects_count_above_one_hundred(
-    admission_factory,
+    admission_request_factory,
+    admission_verifier_factory,
     admission_refresher,
 ) -> None:
-    admission = admission_factory(100)
-    manifest = deepcopy(dict(admission.manifest))
+    request = admission_request_factory(100)
+    manifest = json.loads(request.signed_manifest_payload)
     extra = deepcopy(manifest["items"][-1])
     extra["evidence_id"] = "EVIDENCE_SYNTH_101"
     extra["display_order"] = 100
@@ -300,12 +299,14 @@ def test_manifest_scheduler_rejects_count_above_one_hundred(
     manifest["ordered_item_keys"].append(extra["evidence_id"])
     manifest["item_count"] = 101
     broken = admission_refresher(
-        replace(admission, manifest=manifest),
+        request,
+        manifest=manifest,
         refresh_internal_manifest_hash=True,
+        resign=True,
     )
 
     with pytest.raises(
         EvidenceGraphContractError,
         match="EVIDENCE_MANIFEST_MEMBERSHIP_INVALID",
     ):
-        validate_verified_admission(broken)
+        admission_verifier_factory().verify(broken)

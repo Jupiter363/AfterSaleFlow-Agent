@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 from dataclasses import replace
 
@@ -10,6 +11,7 @@ from app.graphs.evidence import (
     ASSESSMENT_OUTPUT_SCHEMA_VERSION,
     TERMINAL_OUTPUT_SCHEMA_VERSION,
     EvidenceGraphContractError,
+    VerifiedEvidenceAdmission,
     merge_evidence_assessments,
     new_evidence_graph_state,
     validate_verified_admission,
@@ -25,9 +27,7 @@ def _rehash_command(command: dict) -> None:
 def test_verified_admission_accepts_full_payload_and_independent_pins(admission) -> None:
     command, manifest = validate_verified_admission(admission)
 
-    assert command["domain_snapshot_ref"]["sha256"] == (
-        "80ed42b9e360d2433c51a91651237f36ae7a7f20b2d9a8846d82145dc0de793f"
-    )
+    assert command["domain_snapshot_ref"]["sha256"] == admission.snapshot_payload_sha256
     assert manifest["manifest_hash"] == (
         "cd6153b05b81e9362cced88872f596bea0cf8e456889cb27bb34fce290be04e3"
     )
@@ -49,57 +49,130 @@ def test_new_state_keeps_room_and_lease_fences_separate(admission) -> None:
     assert state["ordered_item_keys"] == ["EVIDENCE_SYNTH_001"]
 
 
-def test_snapshot_hash_fails_before_manifest_admission(admission) -> None:
-    command = deepcopy(dict(admission.room_graph_command))
-    command["domain_snapshot_ref"]["sha256"] = "0" * 64
+@pytest.mark.parametrize(
+    ("field", "value", "code"),
+    [
+        ("sha256", "0" * 64, "EVIDENCE_SNAPSHOT_PAYLOAD_HASH_MISMATCH"),
+        ("size_bytes", 1, "EVIDENCE_SNAPSHOT_PAYLOAD_SIZE_MISMATCH"),
+        (
+            "uri",
+            "s3://evidence-synthetic-manifests/not-content-addressed.json",
+            "EVIDENCE_SNAPSHOT_URI_NOT_CONTENT_ADDRESSED",
+        ),
+    ],
+)
+def test_snapshot_reference_fails_before_parse_or_key_resolution(
+    admission_request_factory,
+    admission_verifier_factory,
+    key_resolver_factory,
+    field: str,
+    value,
+    code: str,
+) -> None:
+    request = admission_request_factory()
+    command = deepcopy(dict(request.room_graph_command))
+    command["domain_snapshot_ref"][field] = value
     _rehash_command(command)
-    broken = replace(admission, room_graph_command=command)
+    broken = replace(request, room_graph_command=command)
+    resolver = key_resolver_factory()
+
+    with pytest.raises(
+        EvidenceGraphContractError,
+        match=code,
+    ):
+        admission_verifier_factory(resolver).verify(broken)
+    assert resolver.lookups == 0
+
+
+def test_raw_byte_drift_is_rejected_before_json_parse_or_key_resolution(
+    admission_request_factory,
+    admission_verifier_factory,
+    key_resolver_factory,
+) -> None:
+    request = admission_request_factory()
+    drifted = bytearray(request.signed_manifest_payload)
+    drifted[0] = ord("[")
+    broken = replace(request, signed_manifest_payload=bytes(drifted))
+    resolver = key_resolver_factory()
 
     with pytest.raises(
         EvidenceGraphContractError,
         match="EVIDENCE_SNAPSHOT_PAYLOAD_HASH_MISMATCH",
     ):
-        new_evidence_graph_state(admission=broken)
+        admission_verifier_factory(resolver).verify(broken)
+    assert resolver.lookups == 0
 
 
 def test_internal_manifest_hash_is_not_snapshot_payload_hash(
-    admission,
+    admission_request_factory,
+    admission_verifier_factory,
     admission_refresher,
+    key_resolver_factory,
 ) -> None:
-    manifest = deepcopy(dict(admission.manifest))
+    request = admission_request_factory()
+    manifest = json.loads(request.signed_manifest_payload)
     manifest["manifest_hash"] = "f" * 64
-    broken = admission_refresher(replace(admission, manifest=manifest))
+    broken = admission_refresher(request, manifest=manifest)
+    resolver = key_resolver_factory()
 
     with pytest.raises(EvidenceGraphContractError, match="EVIDENCE_MANIFEST_HASH_MISMATCH"):
-        validate_verified_admission(broken)
+        admission_verifier_factory(resolver).verify(broken)
+    assert resolver.lookups == 0
 
 
-def test_direct_java_signature_verification_proof_is_required(admission) -> None:
-    broken = replace(admission, direct_java_es256_signature_verified=False)
+def test_syntactically_valid_but_cryptographically_invalid_signature_is_rejected(
+    admission_request_factory,
+    admission_verifier_factory,
+    admission_refresher,
+    key_resolver_factory,
+) -> None:
+    request = admission_request_factory()
+    manifest = json.loads(request.signed_manifest_payload)
+    manifest["signature"] = "A" * 86
+    broken = admission_refresher(request, manifest=manifest)
+    resolver = key_resolver_factory()
 
     with pytest.raises(
         EvidenceGraphContractError,
-        match="EVIDENCE_DIRECT_JAVA_SIGNATURE_UNVERIFIED",
+        match="EVIDENCE_DIRECT_JAVA_SIGNATURE_INVALID",
     ):
-        validate_verified_admission(broken)
+        admission_verifier_factory(resolver).verify(broken)
+    assert resolver.lookups == 1
+
+
+def test_verified_admission_cannot_be_minted_by_a_caller(admission) -> None:
+    with pytest.raises(EvidenceGraphContractError, match="EVIDENCE_VERIFIED_ADMISSION_REQUIRED"):
+        VerifiedEvidenceAdmission(
+            runtime_mode="SHADOW",
+            room_graph_command=admission.room_graph_command,
+            manifest=admission.manifest,
+            registry_output_schema_version=TERMINAL_OUTPUT_SCHEMA_VERSION,
+            graph_lease_fencing_token=41,
+            snapshot_payload_sha256=admission.snapshot_payload_sha256,
+            _token=object(),
+        )
 
 
 def test_actor_scope_is_derived_from_verified_command(
-    admission,
+    admission_request_factory,
+    admission_verifier_factory,
     admission_refresher,
 ) -> None:
-    manifest = deepcopy(dict(admission.manifest))
+    request = admission_request_factory()
+    manifest = json.loads(request.signed_manifest_payload)
     manifest["actor_scope_hash"] = "0" * 64
     broken = admission_refresher(
-        replace(admission, manifest=manifest),
+        request,
+        manifest=manifest,
         refresh_internal_manifest_hash=True,
+        resign=True,
     )
 
     with pytest.raises(
         EvidenceGraphContractError,
         match="EVIDENCE_ACTOR_SCOPE_HASH_MISMATCH",
     ):
-        validate_verified_admission(broken)
+        admission_verifier_factory().verify(broken)
 
 
 @pytest.mark.parametrize(
@@ -111,16 +184,19 @@ def test_actor_scope_is_derived_from_verified_command(
     ],
 )
 def test_terminal_and_assessment_pins_cannot_be_substituted(
-    admission,
+    admission_request_factory,
+    admission_verifier_factory,
     admission_refresher,
     target: str,
     value: str,
     code: str,
 ) -> None:
-    command = deepcopy(dict(admission.room_graph_command))
-    manifest = deepcopy(dict(admission.manifest))
-    registry = admission.registry_output_schema_version
+    request = admission_request_factory()
+    command = deepcopy(dict(request.room_graph_command))
+    manifest = json.loads(request.signed_manifest_payload)
+    registry = request.registry_output_schema_version
     refresh_internal = False
+    resign = False
     if target == "command":
         command["invocation_context"]["output_schema_version"] = value
         _rehash_command(command)
@@ -129,49 +205,64 @@ def test_terminal_and_assessment_pins_cannot_be_substituted(
     else:
         manifest["profile_versions"]["assessment_output_schema_version"] = value
         refresh_internal = True
+        resign = True
     broken = replace(
-        admission,
+        request,
         room_graph_command=command,
-        manifest=manifest,
         registry_output_schema_version=registry,
     )
     if refresh_internal:
-        broken = admission_refresher(broken, refresh_internal_manifest_hash=True)
+        broken = admission_refresher(
+            broken,
+            manifest=manifest,
+            refresh_internal_manifest_hash=True,
+            resign=resign,
+        )
 
     with pytest.raises(EvidenceGraphContractError, match=code):
-        validate_verified_admission(broken)
+        admission_verifier_factory().verify(broken)
 
 
 def test_authorization_proof_ref_is_rejected_everywhere(
-    admission,
+    admission_request_factory,
+    admission_verifier_factory,
     admission_refresher,
 ) -> None:
-    manifest = deepcopy(dict(admission.manifest))
+    request = admission_request_factory()
+    manifest = json.loads(request.signed_manifest_payload)
     manifest["authorization_proof_ref"] = "legacy-proof"
     broken = admission_refresher(
-        replace(admission, manifest=manifest),
+        request,
+        manifest=manifest,
         refresh_internal_manifest_hash=True,
+        resign=True,
     )
 
     with pytest.raises(
         EvidenceGraphContractError,
         match="EVIDENCE_FORMAL_AUTHORITY_FORBIDDEN",
     ):
-        validate_verified_admission(broken)
+        admission_verifier_factory().verify(broken)
 
 
-def test_graph_lease_fence_is_independently_required(admission) -> None:
-    broken = replace(admission, graph_lease_fencing_token=-1)
+def test_graph_lease_fence_is_independently_required(
+    admission_request_factory,
+    admission_verifier_factory,
+) -> None:
+    broken = replace(admission_request_factory(), graph_lease_fencing_token=-1)
 
     with pytest.raises(EvidenceGraphContractError, match="EVIDENCE_FENCE_BINDING_INVALID"):
-        validate_verified_admission(broken)
+        admission_verifier_factory().verify(broken)
 
 
-def test_runtime_rejects_disabled_or_non_synthetic_execution(admission) -> None:
-    disabled = replace(admission, runtime_mode="DISABLED")
+def test_runtime_rejects_disabled_or_non_synthetic_execution(
+    admission_request_factory,
+    admission_verifier_factory,
+) -> None:
+    disabled = replace(admission_request_factory(), runtime_mode="DISABLED")
 
     with pytest.raises(EvidenceGraphContractError, match="EVIDENCE_RUNTIME_MODE_FORBIDDEN"):
-        validate_verified_admission(disabled)
+        admission_verifier_factory().verify(disabled)
 
 
 def test_keyed_reducer_is_order_independent_and_idempotent(assessment_factory) -> None:
