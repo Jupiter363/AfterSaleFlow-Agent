@@ -8,6 +8,13 @@ from contextvars import copy_context
 from typing import Any, Iterable
 
 from app.llm import AgentOutputSchemaError, AgentServiceUnavailable
+from app.graphs.hearing import (
+    HEARING_OPERATION_IDENTITIES,
+    HearingOperation,
+    compile_hearing_graph_candidates,
+)
+from app.graphs.hearing.lcel import invoke_hearing_lcel
+from app.graphs.hearing.state import HearingGraphInvocation, new_hearing_graph_state
 from app.schemas import (
     CaseAlignmentStatus,
     FactEvidenceCoverageStatus,
@@ -47,13 +54,27 @@ from app.schemas import (
 )
 
 
+_HEARING_GRAPH_CANDIDATES = compile_hearing_graph_candidates()
+
+
 class HearingFlowWorkflows:
     """Seven one-call operations; Java owns introductions and stage transitions."""
 
     def __init__(self, model_runner: Any | None) -> None:
         self._model_runner = model_runner
+        self._hearing_graphs = _HEARING_GRAPH_CANDIDATES
 
     def intake_questions(
+        self, request: HearingIntakeQuestionsRequest
+    ) -> HearingIntakeQuestionsResult:
+        return self._run_operation(
+            HearingOperation.INTAKE_QUESTIONS,
+            request,
+            self._intake_questions_proposal,
+            HearingIntakeQuestionsResult,
+        )
+
+    def _intake_questions_proposal(
         self, request: HearingIntakeQuestionsRequest
     ) -> HearingIntakeQuestionsResult:
         _assert_case_matrix_integrity(
@@ -111,6 +132,16 @@ class HearingFlowWorkflows:
     def intake_synthesis(
         self, request: HearingIntakeSynthesisRequest
     ) -> HearingIntakeSynthesisResult:
+        return self._run_operation(
+            HearingOperation.INTAKE_SYNTHESIS,
+            request,
+            self._intake_synthesis_proposal,
+            HearingIntakeSynthesisResult,
+        )
+
+    def _intake_synthesis_proposal(
+        self, request: HearingIntakeSynthesisRequest
+    ) -> HearingIntakeSynthesisResult:
         _assert_case_matrix_integrity(
             request.case_fact_matrix,
             expected_case_id=request.case_id,
@@ -149,6 +180,16 @@ class HearingFlowWorkflows:
         )
 
     def evidence_requests(
+        self, request: HearingEvidenceRequestsRequest
+    ) -> HearingEvidenceRequestsResult:
+        return self._run_operation(
+            HearingOperation.EVIDENCE_REQUESTS,
+            request,
+            self._evidence_requests_proposal,
+            HearingEvidenceRequestsResult,
+        )
+
+    def _evidence_requests_proposal(
         self, request: HearingEvidenceRequestsRequest
     ) -> HearingEvidenceRequestsResult:
         _assert_case_matrix_integrity(
@@ -208,6 +249,16 @@ class HearingFlowWorkflows:
         )
 
     def evidence_synthesis(
+        self, request: HearingEvidenceSynthesisRequest
+    ) -> HearingEvidenceSynthesisResult:
+        return self._run_operation(
+            HearingOperation.EVIDENCE_SYNTHESIS,
+            request,
+            self._evidence_synthesis_proposal,
+            HearingEvidenceSynthesisResult,
+        )
+
+    def _evidence_synthesis_proposal(
         self, request: HearingEvidenceSynthesisRequest
     ) -> HearingEvidenceSynthesisResult:
         _assert_case_matrix_integrity(
@@ -290,6 +341,14 @@ class HearingFlowWorkflows:
             return [future.result() for future in futures]
 
     def judge_v1(self, request: HearingJudgeV1Request) -> HearingJudgeV1Result:
+        return self._run_operation(
+            HearingOperation.JUDGE_V1,
+            request,
+            self._judge_v1_proposal,
+            HearingJudgeV1Result,
+        )
+
+    def _judge_v1_proposal(self, request: HearingJudgeV1Request) -> HearingJudgeV1Result:
         _validate_dossier_request(request, "hearing_judge_v1")
         output = self._invoke("hearing_judge_v1", request, JudgeV1Draft)
         proposal_id = _stable_id(
@@ -314,6 +373,16 @@ class HearingFlowWorkflows:
         return HearingJudgeV1Result.model_validate(payload)
 
     def jury_review(self, request: HearingJuryReviewRequest) -> HearingJuryReviewResult:
+        return self._run_operation(
+            HearingOperation.JURY_REVIEW,
+            request,
+            self._jury_review_proposal,
+            HearingJuryReviewResult,
+        )
+
+    def _jury_review_proposal(
+        self, request: HearingJuryReviewRequest
+    ) -> HearingJuryReviewResult:
         _validate_v1_binding(request)
         llm_output = self._invoke(
             "hearing_jury_review",
@@ -347,6 +416,14 @@ class HearingFlowWorkflows:
         return HearingJuryReviewResult.model_validate(payload)
 
     def judge_v2(self, request: HearingJudgeV2Request) -> HearingJudgeV2Result:
+        return self._run_operation(
+            HearingOperation.JUDGE_V2,
+            request,
+            self._judge_v2_proposal,
+            HearingJudgeV2Result,
+        )
+
+    def _judge_v2_proposal(self, request: HearingJudgeV2Request) -> HearingJudgeV2Result:
         _validate_v2_binding(request)
         output = self._invoke("hearing_judge_v2", request, HearingJudgeV2Draft)
         known_facts = _case_fact_ids(request.trial_dossier.case_fact_matrix)
@@ -426,6 +503,25 @@ class HearingFlowWorkflows:
         payload["judge_v2_hash"] = content_hash(payload, hash_field="judge_v2_hash")
         return HearingJudgeV2Result.model_validate(payload)
 
+    def _run_operation(
+        self,
+        operation: HearingOperation,
+        request: Any,
+        execute: Any,
+        result_type: Any,
+    ) -> Any:
+        identity = HEARING_OPERATION_IDENTITIES[operation]
+        state = new_hearing_graph_state(
+            identity=identity,
+            operation=operation,
+            request=request,
+        )
+        result = self._hearing_graphs[identity.identity].invoke(
+            state,
+            context=HearingGraphInvocation(request=request, execute=execute),
+        )
+        return result_type.model_validate(result["proposal"])
+
     def _invoke(self, node_name: str, request: Any, output_type: Any) -> Any:
         return self._invoke_payload(
             node_name,
@@ -436,12 +532,12 @@ class HearingFlowWorkflows:
     def _invoke_payload(self, node_name: str, case_data: dict[str, Any], output_type: Any) -> Any:
         if self._model_runner is None:
             raise AgentServiceUnavailable(f"{node_name} model runner is unavailable")
-        generation = self._model_runner.invoke_structured(
+        return invoke_hearing_lcel(
+            model_runner=self._model_runner,
             node_name=node_name,
             case_data=case_data,
             output_type=output_type,
         )
-        return output_type.model_validate(generation.value)
 
 
 def _intake_issue_contexts(request: HearingIntakeSynthesisRequest) -> list[dict[str, Any]]:
