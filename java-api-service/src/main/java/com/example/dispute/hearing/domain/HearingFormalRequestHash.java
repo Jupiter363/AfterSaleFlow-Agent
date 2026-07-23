@@ -1,0 +1,84 @@
+package com.example.dispute.hearing.domain;
+
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.time.Instant;
+import java.util.HexFormat;
+import java.util.Objects;
+
+/** Stable length-prefixed request hash for a formal Hearing mutation. */
+public final class HearingFormalRequestHash {
+
+    private HearingFormalRequestHash() {}
+
+    public static String compute(
+            String commandType,
+            HearingAuthorityExpectation authority,
+            Object... semanticComponents) {
+        Objects.requireNonNull(authority, "authority");
+        MessageDigest digest = sha256Digest();
+        append(digest, commandType);
+        append(digest, authority.tenantSurrogate());
+        append(digest, authority.caseId());
+        append(digest, authority.flowInstanceId());
+        append(digest, authority.epochId());
+        append(digest, authority.roomEpoch());
+        append(digest, authority.writerMode());
+        append(digest, authority.stage());
+        append(digest, authority.stageSequence());
+        append(digest, authority.processRevision());
+        append(digest, authority.roomRevision());
+        append(digest, authority.fencingToken());
+        for (Object component : semanticComponents) {
+            append(digest, component);
+        }
+        return HexFormat.of().formatHex(digest.digest());
+    }
+
+    public static void require(
+            HearingAuthorityCommit commit,
+            String commandType,
+            Object... semanticComponents) {
+        String expected = compute(commandType, commit.authority(), semanticComponents);
+        if (!expected.equals(commit.requestHash())) {
+            throw new IllegalArgumentException(
+                    "requestHash does not bind the complete formal Hearing command");
+        }
+    }
+
+    private static void append(MessageDigest digest, Object value) {
+        if (value instanceof HearingFormalTransition transition) {
+            append(digest, "hearing-formal-transition.v1");
+            append(digest, transition.sourceStageId());
+            append(digest, transition.resultStage());
+            append(digest, transition.resultStageSequence());
+            append(digest, transition.sharedDeadlineAt());
+            append(digest, transition.targetStageId());
+            append(digest, transition.targetInputJson());
+            append(digest, transition.sourceOutputJson());
+            append(digest, transition.actorId());
+            return;
+        }
+        String text = switch (value) {
+            case null -> "<null>";
+            case Enum<?> enumeration -> enumeration.name();
+            case Instant instant -> instant.toString();
+            default -> value.toString();
+        };
+        byte[] bytes = text.getBytes(StandardCharsets.UTF_8);
+        digest.update((byte) (bytes.length >>> 24));
+        digest.update((byte) (bytes.length >>> 16));
+        digest.update((byte) (bytes.length >>> 8));
+        digest.update((byte) bytes.length);
+        digest.update(bytes);
+    }
+
+    private static MessageDigest sha256Digest() {
+        try {
+            return MessageDigest.getInstance("SHA-256");
+        } catch (NoSuchAlgorithmException impossible) {
+            throw new IllegalStateException("SHA-256 is unavailable", impossible);
+        }
+    }
+}

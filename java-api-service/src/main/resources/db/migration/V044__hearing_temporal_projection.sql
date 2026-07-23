@@ -308,6 +308,251 @@ create trigger trg_hearing_domain_receipt_delete_append_only
     before delete on hearing_domain_receipt
     for each row execute function reject_append_only_mutation();
 
+-- V035 already freezes the three decision rows. This insertion guard upgrades
+-- their cross-row ID/hash relationship from a Java convention to a DB invariant.
+create function enforce_hearing_decision_parent_chain()
+returns trigger
+language plpgsql
+as $$
+declare
+    dossier hearing_trial_dossier%rowtype;
+    proposal hearing_flow_artifact%rowtype;
+    report hearing_flow_artifact%rowtype;
+begin
+    select value.*
+      into dossier
+      from hearing_trial_dossier value
+     where value.id = new.trial_dossier_id
+       and value.case_id = new.case_id
+       and value.flow_instance_id = new.flow_instance_id
+       and value.schema_version = 'trial_dossier.v1'
+       and value.content_hash = new.trial_dossier_hash;
+    if not found then
+        raise exception using errcode = '23514',
+            message = 'Hearing decision artifact has no exact frozen dossier';
+    end if;
+
+    if new.artifact_type in ('JURY_REVIEW_REPORT', 'ADJUDICATION_DRAFT') then
+        select value.*
+          into proposal
+          from hearing_flow_artifact value
+         where value.id = new.proposal_id
+           and value.case_id = new.case_id
+           and value.flow_instance_id = new.flow_instance_id
+           and value.trial_dossier_id = dossier.id
+           and value.trial_dossier_hash = dossier.content_hash
+           and value.artifact_type = 'JUDGE_PROPOSAL'
+           and value.schema_version = 'judge_proposal.v1'
+           and value.content_hash = new.proposal_content_hash;
+        if not found then
+            raise exception using errcode = '23514',
+                message = 'Hearing decision artifact has no exact Judge V1 parent';
+        end if;
+    end if;
+
+    if new.artifact_type = 'ADJUDICATION_DRAFT' then
+        select value.*
+          into report
+          from hearing_flow_artifact value
+         where value.id = new.report_id
+           and value.case_id = new.case_id
+           and value.flow_instance_id = new.flow_instance_id
+           and value.trial_dossier_id = dossier.id
+           and value.trial_dossier_hash = dossier.content_hash
+           and value.artifact_type = 'JURY_REVIEW_REPORT'
+           and value.schema_version = 'jury_review_report.v1'
+           and value.proposal_id = proposal.id
+           and value.proposal_content_hash = proposal.content_hash
+           and value.content_hash = new.report_content_hash;
+        if not found then
+            raise exception using errcode = '23514',
+                message = 'Hearing Judge V2 artifact has no exact Jury parent';
+        end if;
+    end if;
+    return new;
+end
+$$;
+
+create trigger trg_hearing_decision_parent_chain
+    before insert on hearing_flow_artifact
+    for each row execute function enforce_hearing_decision_parent_chain();
+
+create table hearing_review_handoff_fact (
+    id varchar(64) primary key,
+    case_id varchar(64) not null unique,
+    flow_instance_id varchar(64) not null unique,
+    trial_dossier_id varchar(64) not null,
+    trial_dossier_hash varchar(64) not null,
+    proposal_id varchar(64) not null,
+    proposal_content_hash varchar(64) not null,
+    report_id varchar(64) not null,
+    report_content_hash varchar(64) not null,
+    judge_v2_id varchar(64) not null unique,
+    judge_v2_hash varchar(64) not null,
+    review_task_id varchar(64) not null unique,
+    review_packet_id varchar(64) not null,
+    content_hash varchar(64) not null,
+    created_at timestamptz not null,
+    created_by varchar(128) not null,
+    constraint fk_hearing_review_handoff_flow
+        foreign key (flow_instance_id, case_id)
+        references hearing_flow_instance(id, case_id),
+    constraint fk_hearing_review_handoff_dossier
+        foreign key (trial_dossier_id, case_id)
+        references hearing_trial_dossier(id, case_id),
+    constraint fk_hearing_review_handoff_proposal
+        foreign key (proposal_id, case_id)
+        references hearing_flow_artifact(id, case_id),
+    constraint fk_hearing_review_handoff_report
+        foreign key (report_id, case_id)
+        references hearing_flow_artifact(id, case_id),
+    constraint fk_hearing_review_handoff_v2
+        foreign key (judge_v2_id, case_id)
+        references hearing_flow_artifact(id, case_id),
+    constraint fk_hearing_review_handoff_task
+        foreign key (review_task_id) references review_task(id),
+    constraint fk_hearing_review_handoff_packet
+        foreign key (review_packet_id) references review_packet(id),
+    constraint ck_hearing_review_handoff_hashes
+        check (
+            trial_dossier_hash ~ '^[0-9a-f]{64}$'
+            and proposal_content_hash ~ '^[0-9a-f]{64}$'
+            and report_content_hash ~ '^[0-9a-f]{64}$'
+            and judge_v2_hash ~ '^[0-9a-f]{64}$'
+            and content_hash ~ '^[0-9a-f]{64}$'
+        )
+);
+
+create function enforce_hearing_review_handoff_chain()
+returns trigger
+language plpgsql
+as $$
+begin
+    if not exists (
+        select 1
+          from hearing_trial_dossier dossier
+          join hearing_flow_artifact proposal
+            on proposal.id = new.proposal_id
+           and proposal.case_id = dossier.case_id
+           and proposal.flow_instance_id = dossier.flow_instance_id
+           and proposal.trial_dossier_id = dossier.id
+           and proposal.trial_dossier_hash = dossier.content_hash
+           and proposal.artifact_type = 'JUDGE_PROPOSAL'
+           and proposal.content_hash = new.proposal_content_hash
+          join hearing_flow_artifact report
+            on report.id = new.report_id
+           and report.case_id = dossier.case_id
+           and report.flow_instance_id = dossier.flow_instance_id
+           and report.trial_dossier_id = dossier.id
+           and report.trial_dossier_hash = dossier.content_hash
+           and report.artifact_type = 'JURY_REVIEW_REPORT'
+           and report.proposal_id = proposal.id
+           and report.proposal_content_hash = proposal.content_hash
+           and report.content_hash = new.report_content_hash
+          join hearing_flow_artifact draft
+            on draft.id = new.judge_v2_id
+           and draft.case_id = dossier.case_id
+           and draft.flow_instance_id = dossier.flow_instance_id
+           and draft.trial_dossier_id = dossier.id
+           and draft.trial_dossier_hash = dossier.content_hash
+           and draft.artifact_type = 'ADJUDICATION_DRAFT'
+           and draft.proposal_id = proposal.id
+           and draft.proposal_content_hash = proposal.content_hash
+           and draft.report_id = report.id
+           and draft.report_content_hash = report.content_hash
+           and draft.content_hash = new.judge_v2_hash
+          join review_task task
+            on task.id = new.review_task_id
+           and task.case_id = dossier.case_id
+           and task.packet_id = new.review_packet_id
+         where dossier.id = new.trial_dossier_id
+           and dossier.case_id = new.case_id
+           and dossier.flow_instance_id = new.flow_instance_id
+           and dossier.content_hash = new.trial_dossier_hash
+    ) then
+        raise exception using errcode = '23514',
+            message = 'Hearing handoff does not bind the exact dossier/V1/Jury/V2/task chain';
+    end if;
+    return new;
+end
+$$;
+
+create trigger trg_hearing_review_handoff_chain
+    before insert on hearing_review_handoff_fact
+    for each row execute function enforce_hearing_review_handoff_chain();
+
+create trigger trg_hearing_review_handoff_append_only
+    before update or truncate on hearing_review_handoff_fact
+    for each statement execute function reject_append_only_mutation();
+
+create trigger trg_hearing_review_handoff_delete_append_only
+    before delete on hearing_review_handoff_fact
+    for each row execute function reject_append_only_mutation();
+
+create table hearing_closure_fact (
+    id varchar(64) primary key,
+    case_id varchar(64) not null unique,
+    flow_instance_id varchar(64) not null unique,
+    handoff_id varchar(64) not null unique,
+    handoff_receipt_id varchar(64) not null unique,
+    handoff_receipt_hash varchar(64) not null,
+    content_hash varchar(64) not null,
+    closed_at timestamptz not null,
+    created_by varchar(128) not null,
+    constraint fk_hearing_closure_flow
+        foreign key (flow_instance_id, case_id)
+        references hearing_flow_instance(id, case_id),
+    constraint fk_hearing_closure_handoff
+        foreign key (handoff_id) references hearing_review_handoff_fact(id),
+    constraint fk_hearing_closure_receipt
+        foreign key (handoff_receipt_id, handoff_receipt_hash)
+        references hearing_domain_receipt(receipt_id, receipt_hash),
+    constraint ck_hearing_closure_hashes
+        check (
+            handoff_receipt_hash ~ '^[0-9a-f]{64}$'
+            and content_hash ~ '^[0-9a-f]{64}$'
+        )
+);
+
+create function enforce_hearing_closure_chain()
+returns trigger
+language plpgsql
+as $$
+begin
+    if not exists (
+        select 1
+          from hearing_review_handoff_fact handoff
+          join hearing_domain_receipt receipt
+            on receipt.receipt_id = new.handoff_receipt_id
+           and receipt.receipt_hash = new.handoff_receipt_hash
+           and receipt.operation_type = 'HANDOFF'
+           and receipt.case_id = handoff.case_id
+           and receipt.flow_instance_id = handoff.flow_instance_id
+           and receipt.result_ref = 'urn:hearing:handoff:' || handoff.id
+           and receipt.result_hash = handoff.content_hash
+         where handoff.id = new.handoff_id
+           and handoff.case_id = new.case_id
+           and handoff.flow_instance_id = new.flow_instance_id
+    ) then
+        raise exception using errcode = '23514',
+            message = 'Hearing closure does not bind the exact handoff receipt';
+    end if;
+    return new;
+end
+$$;
+
+create trigger trg_hearing_closure_chain
+    before insert on hearing_closure_fact
+    for each row execute function enforce_hearing_closure_chain();
+
+create trigger trg_hearing_closure_append_only
+    before update or truncate on hearing_closure_fact
+    for each statement execute function reject_append_only_mutation();
+
+create trigger trg_hearing_closure_delete_append_only
+    before delete on hearing_closure_fact
+    for each row execute function reject_append_only_mutation();
+
 create function enforce_hearing_temporal_projection_authority()
 returns trigger
 language plpgsql
@@ -571,6 +816,8 @@ begin
     if purge_reviewer_role = 'PLATFORM_REVIEWER'
        and purge_case_id is not null
        and old.case_id = purge_case_id then
+        delete from hearing_closure_fact where case_id = old.case_id;
+        delete from hearing_review_handoff_fact where case_id = old.case_id;
         delete from hearing_domain_receipt where epoch_id = old.id and case_id = old.case_id;
         delete from hearing_temporal_projection where epoch_id = old.id and case_id = old.case_id;
     end if;

@@ -7,10 +7,16 @@ import com.example.dispute.hearing.domain.HearingAuthorityCommit;
 import com.example.dispute.hearing.domain.HearingAuthorityExpectation;
 import com.example.dispute.hearing.domain.HearingAuthorityRejectedException;
 import com.example.dispute.hearing.domain.HearingDomainReceipt;
+import com.example.dispute.hearing.domain.HearingFlowActionType;
 import com.example.dispute.hearing.domain.HearingFlowStage;
+import com.example.dispute.hearing.domain.HearingFlowSubmissionStatus;
 import com.example.dispute.hearing.domain.HearingFormalCommitResult;
+import com.example.dispute.hearing.domain.HearingFormalFinalizer;
+import com.example.dispute.hearing.domain.HearingFormalRequestHash;
+import com.example.dispute.hearing.domain.HearingFormalTransition;
 import com.example.dispute.hearing.domain.HearingWriterMode;
 import com.example.dispute.hearing.infrastructure.persistence.JdbcHearingAuthorityLedger;
+import com.example.dispute.hearing.infrastructure.persistence.JdbcHearingFormalFinalizer;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
@@ -54,6 +60,7 @@ class HearingTemporalLedgerIntegrationTest {
 
     private static JdbcTemplate jdbc;
     private static JdbcHearingAuthorityLedger ledger;
+    private static JdbcHearingFormalFinalizer finalizer;
 
     @BeforeAll
     static void startDatabase() {
@@ -69,6 +76,8 @@ class HearingTemporalLedgerIntegrationTest {
         ledger = new JdbcHearingAuthorityLedger(
                 new NamedParameterJdbcTemplate(dataSource),
                 new TransactionTemplate(new DataSourceTransactionManager(dataSource)));
+        finalizer = new JdbcHearingFormalFinalizer(
+                new NamedParameterJdbcTemplate(dataSource), ledger);
     }
 
     @Test
@@ -230,7 +239,189 @@ class HearingTemporalLedgerIntegrationTest {
                 .isZero();
     }
 
+    @Test
+    void formalPartyActionUsesTheAuthorityReceiptAndFailsClosedBeforeAnyFact() {
+        Instant deadline = NOW.plusSeconds(3600);
+        Fixture fixture = insertFixture(
+                "FORMAL_ACTION", HearingFlowStage.PARTY_ANSWERS_OPEN, deadline);
+        String stageId = "STAGE_FORMAL_ACTION_5";
+        jdbc.update(
+                """
+                insert into hearing_flow_stage (
+                    id, flow_instance_id, case_id, stage_code, stage_sequence,
+                    processor_role, stage_status, shared_deadline_at,
+                    input_json, output_json, started_at, created_at, updated_at,
+                    created_by, updated_by
+                ) values (?, ?, ?, 'PARTY_ANSWERS_OPEN', 5, 'PARTIES',
+                    'WAITING_PARTIES', ?, '{}'::jsonb, '{}'::jsonb, ?, ?, ?,
+                    'hearing-ledger-test', 'hearing-ledger-test')
+                """,
+                stageId,
+                fixture.flowId(),
+                fixture.caseId(),
+                deadline.atOffset(ZoneOffset.UTC),
+                NOW.atOffset(ZoneOffset.UTC),
+                NOW.atOffset(ZoneOffset.UTC),
+                NOW.atOffset(ZoneOffset.UTC));
+        HearingAuthorityExpectation authority = new HearingAuthorityExpectation(
+                TENANT,
+                fixture.caseId(),
+                fixture.flowId(),
+                fixture.epochId(),
+                0,
+                HearingWriterMode.LEGACY,
+                HearingFlowStage.PARTY_ANSWERS_OPEN,
+                5,
+                0,
+                0,
+                0);
+        HearingFormalTransition transition = new HearingFormalTransition(
+                stageId,
+                HearingFlowStage.PARTY_ANSWERS_OPEN,
+                5,
+                deadline,
+                null,
+                null,
+                null,
+                "user-FORMAL_ACTION");
+        String payload = "{\"participant_id\":\"user-FORMAL_ACTION\","
+                + "\"participant_role\":\"USER\","
+                + "\"schema_version\":\"hearing_answer_bundle.v1\","
+                + "\"submission_status\":\"SUBMITTED\"}";
+        String contentHash = sha256(payload);
+        String requestId = "request-formal-action";
+        String requestHash = HearingFormalRequestHash.compute(
+                "ACTION",
+                authority,
+                transition,
+                "ACTION_FORMAL_1",
+                HearingFlowActionType.ANSWER_BUNDLE,
+                "hearing_answer_bundle.v1",
+                "user-FORMAL_ACTION",
+                "USER",
+                HearingFlowSubmissionStatus.SUBMITTED,
+                contentHash,
+                null,
+                null,
+                requestId,
+                "user-FORMAL_ACTION");
+        String operationKey = "hearing.party:" + TENANT + ':' + fixture.caseId()
+                + ":0:5:user-FORMAL_ACTION:" + requestId;
+        HearingAuthorityCommit commit = new HearingAuthorityCommit(
+                HearingAuthorityCommit.SCHEMA_VERSION,
+                authority,
+                HearingAuthorityCommit.OperationType.PARTY_TERMINAL,
+                operationKey,
+                requestHash,
+                null,
+                NOW);
+        HearingFormalFinalizer.ActionCommand command = new HearingFormalFinalizer.ActionCommand(
+                commit,
+                transition,
+                "ACTION_FORMAL_1",
+                HearingFlowActionType.ANSWER_BUNDLE,
+                "hearing_answer_bundle.v1",
+                "user-FORMAL_ACTION",
+                "USER",
+                HearingFlowSubmissionStatus.SUBMITTED,
+                payload,
+                contentHash,
+                null,
+                null,
+                requestId,
+                "user-FORMAL_ACTION");
+
+        HearingDomainReceipt first = finalizer.appendAction(command);
+        HearingDomainReceipt replay = finalizer.appendAction(command);
+
+        assertThat(replay).isEqualTo(first);
+        assertThat(first.operationType()).isEqualTo(HearingAuthorityCommit.OperationType.PARTY_TERMINAL);
+        assertThat(number("select count(*) from hearing_flow_action where id = ?", "ACTION_FORMAL_1"))
+                .isEqualTo(1);
+        assertThat(number("select count(*) from hearing_domain_receipt where operation_key = ?", operationKey))
+                .isEqualTo(1);
+
+        Fixture missingStageFixture = insertFixture(
+                "FORMAL_ACTION_FAIL", HearingFlowStage.PARTY_ANSWERS_OPEN, deadline);
+        HearingAuthorityExpectation missingAuthority = new HearingAuthorityExpectation(
+                TENANT,
+                missingStageFixture.caseId(),
+                missingStageFixture.flowId(),
+                missingStageFixture.epochId(),
+                0,
+                HearingWriterMode.LEGACY,
+                HearingFlowStage.PARTY_ANSWERS_OPEN,
+                5,
+                0,
+                0,
+                0);
+        HearingFormalTransition missingTransition = new HearingFormalTransition(
+                "MISSING_FORMAL_STAGE",
+                HearingFlowStage.PARTY_ANSWERS_OPEN,
+                5,
+                deadline,
+                null,
+                null,
+                null,
+                "user-FORMAL_ACTION_FAIL");
+        String failedPayload = payload.replace("user-FORMAL_ACTION", "user-FORMAL_ACTION_FAIL");
+        String failedContentHash = sha256(failedPayload);
+        String failedRequestHash = HearingFormalRequestHash.compute(
+                "ACTION",
+                missingAuthority,
+                missingTransition,
+                "ACTION_FORMAL_FAIL",
+                HearingFlowActionType.ANSWER_BUNDLE,
+                "hearing_answer_bundle.v1",
+                "user-FORMAL_ACTION_FAIL",
+                "USER",
+                HearingFlowSubmissionStatus.SUBMITTED,
+                failedContentHash,
+                null,
+                null,
+                requestId,
+                "user-FORMAL_ACTION_FAIL");
+        HearingAuthorityCommit failedCommit = new HearingAuthorityCommit(
+                HearingAuthorityCommit.SCHEMA_VERSION,
+                missingAuthority,
+                HearingAuthorityCommit.OperationType.PARTY_TERMINAL,
+                "hearing.party:" + TENANT + ':' + missingStageFixture.caseId()
+                        + ":0:5:user-FORMAL_ACTION_FAIL:" + requestId,
+                failedRequestHash,
+                null,
+                NOW);
+        HearingFormalFinalizer.ActionCommand failedCommand = new HearingFormalFinalizer.ActionCommand(
+                failedCommit,
+                missingTransition,
+                "ACTION_FORMAL_FAIL",
+                HearingFlowActionType.ANSWER_BUNDLE,
+                "hearing_answer_bundle.v1",
+                "user-FORMAL_ACTION_FAIL",
+                "USER",
+                HearingFlowSubmissionStatus.SUBMITTED,
+                failedPayload,
+                failedContentHash,
+                null,
+                null,
+                requestId,
+                "user-FORMAL_ACTION_FAIL");
+
+        assertThatThrownBy(() -> finalizer.appendAction(failedCommand))
+                .isInstanceOf(HearingAuthorityRejectedException.class)
+                .extracting(failure -> ((HearingAuthorityRejectedException) failure).code())
+                .isEqualTo("HEARING_SOURCE_STAGE_NOT_EXACT");
+        assertThat(number("select count(*) from hearing_flow_action where case_id = ?", missingStageFixture.caseId()))
+                .isZero();
+        assertThat(number("select count(*) from hearing_domain_receipt where case_id = ?", missingStageFixture.caseId()))
+                .isZero();
+    }
+
     private static Fixture insertFixture(String suffix) {
+        return insertFixture(suffix, HearingFlowStage.COURT_PREPARING, null);
+    }
+
+    private static Fixture insertFixture(
+            String suffix, HearingFlowStage stage, Instant sharedDeadlineAt) {
         String caseId = "CASE_HEARING_" + suffix;
         String roomId = "ROOM_HEARING_" + suffix;
         String stateId = "STATE_HEARING_" + suffix;
@@ -284,11 +475,12 @@ class HearingTemporalLedgerIntegrationTest {
                     room_phase, writer_mode, process_revision, room_epoch,
                     fencing_token, last_command_sequence, last_case_event_sequence,
                     temporal_build_id, projected_at, updated_at
-                ) values (?, ?, 'HEARING', 'HEARING', 'COURT_PREPARING',
+                ) values (?, ?, 'HEARING', 'HEARING', ?,
                     'LEGACY', 0, 0, 0, 0, 0, 'legacy-java.v1', ?, ?)
                 """,
                 caseId,
                 TENANT,
+                stage.name(),
                 now,
                 now);
         jdbc.update(
@@ -319,12 +511,15 @@ class HearingTemporalLedgerIntegrationTest {
                     id, case_id, hearing_state_id, schema_version, current_stage,
                     stage_sequence, flow_status, shared_deadline_at,
                     created_at, updated_at, created_by, updated_by
-                ) values (?, ?, ?, 'hearing_flow.v2', 'COURT_PREPARING', 1,
-                    'ACTIVE', null, ?, ?, 'hearing-ledger-test', 'hearing-ledger-test')
+                ) values (?, ?, ?, 'hearing_flow.v2', ?, ?,
+                    'ACTIVE', ?, ?, ?, 'hearing-ledger-test', 'hearing-ledger-test')
                 """,
                 flowId,
                 caseId,
                 stateId,
+                stage.name(),
+                stage.ordinal() + 1,
+                sharedDeadlineAt == null ? null : sharedDeadlineAt.atOffset(ZoneOffset.UTC),
                 now,
                 now);
         assertThat(number(
@@ -374,6 +569,16 @@ class HearingTemporalLedgerIntegrationTest {
     private static long number(String sql, Object... arguments) {
         Number value = jdbc.queryForObject(sql, Number.class, arguments);
         return value == null ? 0 : value.longValue();
+    }
+
+    private static String sha256(String value) {
+        try {
+            return java.util.HexFormat.of().formatHex(
+                    java.security.MessageDigest.getInstance("SHA-256")
+                            .digest(value.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        } catch (java.security.NoSuchAlgorithmException impossible) {
+            throw new IllegalStateException(impossible);
+        }
     }
 
     private record Fixture(String caseId, String flowId, String epochId) {
