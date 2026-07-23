@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  HEARING_FLOW_GROUPS,
+  HEARING_FLOW_STAGES,
   hearingFlowProgress,
   hearingFlowStage,
   isJudgeLlmStage,
@@ -8,6 +10,15 @@ import {
 } from "./hearingFlow";
 
 describe("hearing flow v2", () => {
+  it("keeps all fifteen stages in the same six presentation groups", () => {
+    expect(HEARING_FLOW_STAGES).toHaveLength(15);
+    expect(new Set(HEARING_FLOW_STAGES.map((stage) => stage.code)).size).toBe(15);
+    expect(HEARING_FLOW_GROUPS).toHaveLength(6);
+    expect(new Set(HEARING_FLOW_STAGES.map((stage) => stage.group))).toEqual(
+      new Set(HEARING_FLOW_GROUPS),
+    );
+  });
+
   it("reads the authoritative stage without inspecting messages", () => {
     expect(hearingFlowStage({ flow_stage: "PARTY_ANSWERS_OPEN" })).toBe(
       "PARTY_ANSWERS_OPEN",

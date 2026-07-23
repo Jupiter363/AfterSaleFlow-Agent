@@ -8,6 +8,7 @@ import com.example.dispute.hearing.application.HearingFlowView;
 import com.example.dispute.hearing.application.HearingPartyActionView;
 import com.example.dispute.hearing.application.SettlementService;
 import com.example.dispute.hearing.application.SettlementView;
+import com.example.dispute.hearing.application.query.HearingProjectionQueryService;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Pattern;
@@ -33,14 +34,17 @@ import org.springframework.web.bind.annotation.RestController;
 public class HearingFlowController {
 
     private final HearingFlowRuntimeService runtimeService;
+    private final HearingProjectionQueryService projectionQueryService;
     private final SettlementService settlementService;
     private final Clock clock;
 
     public HearingFlowController(
             HearingFlowRuntimeService runtimeService,
+            HearingProjectionQueryService projectionQueryService,
             SettlementService settlementService,
             Clock clock) {
         this.runtimeService = runtimeService;
+        this.projectionQueryService = projectionQueryService;
         this.settlementService = settlementService;
         this.clock = clock;
     }
@@ -51,7 +55,7 @@ public class HearingFlowController {
             Authentication authentication,
             HttpServletRequest request) {
         AuthenticatedActor actor = actor(authentication);
-        HearingFlowView flow = runtimeService.get(caseId, actor);
+        HearingFlowView flow = projectionQueryService.get(caseId, actor);
         return success(projection(flow, settlementService.list(caseId, actor)), request);
     }
 
@@ -89,7 +93,7 @@ public class HearingFlowController {
             Authentication authentication,
             HttpServletRequest request) {
         AuthenticatedActor actor = actor(authentication);
-        HearingFlowView flow = runtimeService.completeGate(caseId, actor);
+        HearingFlowView flow = projectionQueryService.completeGate(caseId, actor);
         return success(projection(flow, settlementService.list(caseId, actor)), request);
     }
 

@@ -12,6 +12,20 @@ afterEach(() => {
 
 // 业务位置：【前端 API/SSE 适配】describe：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面操作和访问令牌 正确进入 Java HTTP 请求或 Agent 流事件。上游：页面操作和访问令牌。下游：Java HTTP 请求或 Agent 流事件。边界：统一处理错误和取消，不能伪造服务端状态。
 describe("hearing API", () => {
+  it("keeps complete as a server projection gate", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      json: async () => ({ success: true, data: { status: { stage_code: "CLOSED" } } }),
+    });
+
+    await hearingApi.complete(actor, "CASE_1");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/disputes/CASE_1/hearing/complete",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
   // 业务位置：【前端 API/SSE 适配】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面操作和访问令牌 正确进入 Java HTTP 请求或 Agent 流事件。上游：页面操作和访问令牌。下游：Java HTTP 请求或 Agent 流事件。边界：统一处理错误和取消，不能伪造服务端状态。
   it("submits one natural-language statement for the authenticated party", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue({
