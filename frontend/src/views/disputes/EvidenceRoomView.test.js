@@ -142,6 +142,44 @@ function stressCatalog(role, count = 100, filenameFactory = null) {
   };
 }
 
+function actorPrivacyCatalog() {
+  return {
+    case_id: "CASE_EVIDENCE_1",
+    initiator_role: "USER",
+    initiator_id: "user-local",
+    items: [
+      {
+        ...catalog.items[0],
+        evidence_id: "EVIDENCE_USER_PRIVATE_FIXTURE",
+        submitted_by_role: "USER",
+        submitted_by_id: "user-local",
+        original_filename: "user-private-fixture.pdf",
+        submission_status: "SUBMITTED",
+        requires_human_review: true,
+      },
+      {
+        ...catalog.items[0],
+        evidence_id: "EVIDENCE_MERCHANT_PRIVATE_FIXTURE",
+        submitted_by_role: "MERCHANT",
+        submitted_by_id: "merchant-local",
+        original_filename: "merchant-private-fixture.pdf",
+        submission_status: "SUBMITTED",
+        requires_human_review: true,
+      },
+      {
+        ...catalog.items[0],
+        evidence_id: "EVIDENCE_REVIEWER_PRIVATE_FIXTURE",
+        submitted_by_role: "PLATFORM_REVIEWER",
+        submitted_by_id: "reviewer-local",
+        original_filename: "reviewer-private-fixture.pdf",
+        visibility: "PLATFORM",
+        submission_status: "SUBMITTED",
+        requires_human_review: true,
+      },
+    ],
+  };
+}
+
 const initialCompletion = {
   case_id: "CASE_EVIDENCE_1",
   user_completed: false,
@@ -302,6 +340,54 @@ describe("EvidenceRoomView", () => {
     expect(eventStreamer).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["USER", false, "user-private-fixture.pdf"],
+    ["USER", true, "user-private-fixture.pdf"],
+    ["MERCHANT", false, "merchant-private-fixture.pdf"],
+    ["MERCHANT", true, "merchant-private-fixture.pdf"],
+    ["PLATFORM_REVIEWER", false, "reviewer-private-fixture.pdf"],
+    ["PLATFORM_REVIEWER", true, "reviewer-private-fixture.pdf"],
+  ])(
+    "keeps %s evidence actor-scoped in active/history=%s mode",
+    async (viewerRole, historyMode, ownFilename) => {
+      const { wrapper } = await mountView({
+        viewerRole,
+        historyMode,
+        initialCatalog: actorPrivacyCatalog(),
+      });
+      const originals = wrapper.get("[data-evidence-originals]");
+      const otherFilenames = [
+        "user-private-fixture.pdf",
+        "merchant-private-fixture.pdf",
+        "reviewer-private-fixture.pdf",
+      ].filter((filename) => filename !== ownFilename);
+
+      expect(originals.text()).toContain(ownFilename);
+      for (const filename of otherFilenames) {
+        expect(originals.text()).not.toContain(filename);
+      }
+
+      const reviewQueue = wrapper.get("[data-human-review-queue]");
+      if (viewerRole === "PLATFORM_REVIEWER") {
+        expect(reviewQueue.findAll("[data-human-review-card]")).toHaveLength(3);
+        expect(reviewQueue.text()).toContain("user-private-fixture.pdf");
+        expect(reviewQueue.text()).toContain("merchant-private-fixture.pdf");
+      } else {
+        expect(reviewQueue.findAll("[data-human-review-card]")).toHaveLength(1);
+        expect(reviewQueue.text()).toContain(ownFilename);
+        for (const filename of otherFilenames) {
+          expect(reviewQueue.text()).not.toContain(filename);
+        }
+      }
+
+      if (historyMode) {
+        expect(wrapper.get("[data-complete-evidence]").attributes("disabled"))
+          .toBeDefined();
+        expect(evidenceApi.submitBatch).not.toHaveBeenCalled();
+      }
+    },
+  );
+
   // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
   it("renders an intake-like fixed two-panel evidence room", async () => {
     const { wrapper } = await mountView();
@@ -420,26 +506,34 @@ describe("EvidenceRoomView", () => {
     );
   });
 
-  it.each(["USER", "MERCHANT"])(
-    "renders 100 %s evidence cards inside fixed horizontal rails without moving the footer",
-    async (viewerRole) => {
+  it.each([
+    ["USER", 1],
+    ["MERCHANT", 8],
+    ["USER", 100],
+  ])(
+    "renders a closed synthetic %s catalog with %i items without granting public submission",
+    async (viewerRole, itemCount) => {
       const { wrapper } = await mountView({
         viewerRole,
-        initialCatalog: stressCatalog(viewerRole),
+        historyMode: true,
+        initialCatalog: stressCatalog(viewerRole, itemCount),
       });
 
       const listRail = wrapper.get("[data-evidence-list-scroll]");
       expect(
         listRail.get("[data-evidence-originals]").findAll("[data-evidence-card]"),
-      ).toHaveLength(100);
-      expect(listRail.get("[data-human-review-queue]").findAll("[data-human-review-card]")).toHaveLength(34);
+      ).toHaveLength(itemCount);
+      expect(listRail.get("[data-human-review-queue]").findAll("[data-human-review-card]")).toHaveLength(Math.ceil(itemCount / 3));
       expect(listRail.find(".evidence-footer").exists()).toBe(false);
       expect(wrapper.get("[data-evidence-board-panel] > .evidence-footer").exists()).toBe(true);
-      expect(wrapper.findAll("[data-evidence-status-row]")).toHaveLength(100);
+      expect(wrapper.findAll("[data-evidence-status-row]")).toHaveLength(itemCount);
       expect(wrapper.get("[data-evidence-status-row]").text()).toContain(
         viewerRole === "MERCHANT" ? "商家提交" : "用户提交",
       );
       expect(wrapper.get("[data-evidence-status-row]").text()).toContain("待人工复核");
+      expect(wrapper.get("[data-complete-evidence]").attributes("disabled"))
+        .toBeDefined();
+      expect(evidenceApi.submitBatch).not.toHaveBeenCalled();
     },
   );
 

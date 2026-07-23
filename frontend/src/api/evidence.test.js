@@ -46,6 +46,34 @@ describe("evidenceApi", () => {
     );
   });
 
+  it("preserves the public 50-item limit by surfacing a 51-item rejection", async () => {
+    const evidenceIds = Array.from(
+      { length: 51 },
+      (_, index) => `EVIDENCE_${index + 1}`,
+    );
+    fetch.mockResolvedValueOnce({
+      ok: false,
+      status: 400,
+      json: async () => ({
+        success: false,
+        code: "VALIDATION_FAILED",
+        message: "evidence_ids must contain at most 50 items",
+      }),
+    });
+
+    await expect(
+      evidenceApi.submitBatch(
+        actor,
+        "CASE_1",
+        { evidence_ids: evidenceIds, batch_note: "" },
+        "batch-key-51",
+      ),
+    ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+
+    const submittedBody = JSON.parse(fetch.mock.calls[0][1].body);
+    expect(submittedBody.evidence_ids).toHaveLength(51);
+  });
+
   // 业务位置：【前端 API/SSE 适配】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面操作和访问令牌 正确进入 Java HTTP 请求或 Agent 流事件。上游：页面操作和访问令牌。下游：Java HTTP 请求或 Agent 流事件。边界：统一处理错误和取消，不能伪造服务端状态。
   it("deletes only a pending evidence item through the evidence endpoint", async () => {
     await evidenceApi.deletePending(actor, "CASE_1", "EVIDENCE_1");
