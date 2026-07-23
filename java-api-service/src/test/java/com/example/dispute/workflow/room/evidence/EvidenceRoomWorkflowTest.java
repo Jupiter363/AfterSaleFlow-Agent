@@ -1,5 +1,6 @@
 package com.example.dispute.workflow.room.evidence;
 
+import static io.temporal.api.enums.v1.EventType.EVENT_TYPE_MARKER_RECORDED;
 import static io.temporal.api.enums.v1.EventType.EVENT_TYPE_TIMER_FIRED;
 import static io.temporal.api.enums.v1.EventType.EVENT_TYPE_TIMER_STARTED;
 import static io.temporal.api.enums.v1.EventType.EVENT_TYPE_WORKFLOW_EXECUTION_SIGNALED;
@@ -20,10 +21,20 @@ import io.temporal.api.testservice.v1.UnlockTimeSkippingRequest;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowOptions;
 import io.temporal.client.WorkflowStub;
+import io.temporal.common.WorkflowExecutionHistory;
 import io.temporal.testing.TestWorkflowEnvironment;
+import io.temporal.testing.WorkflowReplayer;
 import io.temporal.worker.Worker;
+import io.temporal.workflow.Workflow;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.function.Predicate;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -83,7 +94,7 @@ class EvidenceRoomWorkflowTest {
     started.workflow().partyCompleted(signal(INITIATOR, "COMPLETE_WARN_INITIATOR", 3));
 
     environment.sleep(Duration.ofMinutes(90));
-    EvidenceRoomSnapshot warned = started.workflow().state();
+    EvidenceRoomSnapshot warned = awaitState(started.workflow(), EvidenceRoomSnapshot::warningSent);
     assertThat(warned.warningSent()).isTrue();
     assertThat(warned.warningAt())
         .isEqualTo(started.start().originalDeadlineAt().minus(Duration.ofMinutes(30)));
@@ -195,6 +206,122 @@ class EvidenceRoomWorkflowTest {
                 CASE_ID, EPOCH, INITIATOR, "COMPLETE_BATCHED_DEADLINE_I"),
             EvidenceOperationKeys.partyComplete(
                 CASE_ID, EPOCH, RESPONDENT, "COMPLETE_BATCHED_DEADLINE_R"));
+  }
+
+  @Test
+  void warningRecordedBeforeCompletionSignalsWinsWhenHistoryIsDeliveredInOneWorkflowTask() {
+    String suffix = "same-task-warning-first";
+    String workflowId = workflowId(suffix);
+    StartedWorkflow started = start(suffix, Duration.ofHours(2));
+    awaitTimerCount(workflowId, EVENT_TYPE_TIMER_STARTED, 1);
+    worker.suspendPolling();
+    try {
+      forceTimeSkippingAcrossPendingWorkflowTask(Duration.ofMinutes(90).plusSeconds(1));
+      awaitTimerCount(workflowId, EVENT_TYPE_TIMER_FIRED, 1);
+      started.workflow().partyCompleted(signal(INITIATOR, "COMPLETE_AFTER_WARNING_I", 5));
+      started.workflow().partyCompleted(signal(RESPONDENT, "COMPLETE_AFTER_WARNING_R", 6));
+      assertLastTimerFiredPrecedesSignals(workflowId);
+    } finally {
+      worker.resumePolling();
+    }
+
+    EvidenceRoomSnapshot result = result(started.workflow());
+    assertThat(result.terminalReason()).isEqualTo("BOTH_PARTIES_COMPLETED");
+    assertThat(result.warningSent()).isTrue();
+    assertThat(result.deadlineExpired()).isFalse();
+    assertThat(result.orderedOperationKeys())
+        .containsExactly(
+            EvidenceOperationKeys.deadlineWarn(CASE_ID, EPOCH, 1),
+            EvidenceOperationKeys.partyComplete(
+                CASE_ID, EPOCH, INITIATOR, "COMPLETE_AFTER_WARNING_I"),
+            EvidenceOperationKeys.partyComplete(
+                CASE_ID, EPOCH, RESPONDENT, "COMPLETE_AFTER_WARNING_R"));
+  }
+
+  @Test
+  void deadlineRecordedBeforeCompletionSignalsWinsWhenHistoryIsDeliveredInOneWorkflowTask() {
+    String suffix = "same-task-deadline-first";
+    String workflowId = workflowId(suffix);
+    StartedWorkflow started = start(suffix, Duration.ofHours(2));
+    environment.sleep(Duration.ofMinutes(90).plusSeconds(1));
+    assertThat(started.workflow().state().warningSent()).isTrue();
+    awaitTimerCount(workflowId, EVENT_TYPE_TIMER_STARTED, 2);
+    worker.suspendPolling();
+    try {
+      forceTimeSkippingAcrossPendingWorkflowTask(Duration.ofMinutes(30).plusSeconds(1));
+      awaitTimerCount(workflowId, EVENT_TYPE_TIMER_FIRED, 2);
+      started.workflow().partyCompleted(signal(INITIATOR, "COMPLETE_AFTER_DEADLINE_I", 7));
+      started.workflow().partyCompleted(signal(RESPONDENT, "COMPLETE_AFTER_DEADLINE_R", 8));
+      assertLastTimerFiredPrecedesSignals(workflowId);
+    } finally {
+      worker.resumePolling();
+    }
+
+    EvidenceRoomSnapshot result = result(started.workflow());
+    assertThat(result.terminalReason()).isEqualTo("DEADLINE_EXPIRED");
+    assertThat(result.warningSent()).isTrue();
+    assertThat(result.deadlineExpired()).isTrue();
+    assertThat(result.initiatorCompleted()).isFalse();
+    assertThat(result.respondentCompleted()).isFalse();
+    assertThat(result.orderedOperationKeys())
+        .containsExactly(
+            EvidenceOperationKeys.deadlineWarn(CASE_ID, EPOCH, 1),
+            EvidenceOperationKeys.deadlineExpire(CASE_ID, EPOCH, 1));
+  }
+
+  @Test
+  void unversionedLegacyCoalescedHistoryReplaysThroughDefaultVersion() throws Exception {
+    String taskQueue = "phase5-evidence-room-legacy-replay";
+    String workflowId = workflowId("legacy-unversioned-race");
+    WorkflowExecutionHistory history;
+
+    try (TestWorkflowEnvironment legacyEnvironment = TestWorkflowEnvironment.newInstance()) {
+      Worker legacyWorker = legacyEnvironment.newWorker(taskQueue);
+      legacyWorker.registerWorkflowImplementationTypes(LegacyEvidenceRoomWorkflowImpl.class);
+      legacyEnvironment.start();
+      WorkflowClient legacyClient = legacyEnvironment.getWorkflowClient();
+      EvidenceRoomWorkflow legacyWorkflow =
+          legacyClient.newWorkflowStub(
+              EvidenceRoomWorkflow.class,
+              WorkflowOptions.newBuilder()
+                  .setWorkflowId(workflowId)
+                  .setTaskQueue(taskQueue)
+                  .build());
+      Instant openedAt = Instant.ofEpochMilli(legacyEnvironment.currentTimeMillis());
+      WorkflowClient.start(
+          legacyWorkflow::run, startAt(openedAt, openedAt.plus(Duration.ofHours(2))));
+      awaitTimerCount(legacyClient, workflowId, EVENT_TYPE_TIMER_STARTED, 1);
+
+      legacyWorker.suspendPolling();
+      try {
+        legacyWorkflow.partyCompleted(signal(INITIATOR, "LEGACY_COMPLETE_I", 9));
+        legacyWorkflow.partyCompleted(signal(RESPONDENT, "LEGACY_COMPLETE_R", 0));
+        forceTimeSkippingAcrossPendingWorkflowTask(
+            legacyEnvironment, Duration.ofMinutes(90).plusSeconds(1));
+        awaitTimerCount(legacyClient, workflowId, EVENT_TYPE_TIMER_FIRED, 1);
+        assertSignalsPrecedeLastTimerFired(legacyClient, workflowId);
+      } finally {
+        legacyWorker.resumePolling();
+      }
+
+      EvidenceRoomSnapshot legacyResult = result(legacyWorkflow);
+      assertThat(legacyResult.terminalReason()).isEqualTo("BOTH_PARTIES_COMPLETED");
+      assertThat(legacyResult.orderedOperationKeys())
+          .contains(
+              EvidenceOperationKeys.partyComplete(CASE_ID, EPOCH, INITIATOR, "LEGACY_COMPLETE_I"),
+              EvidenceOperationKeys.partyComplete(
+                  CASE_ID, EPOCH, RESPONDENT, "LEGACY_COMPLETE_R"));
+      assertThat(
+              legacyResult.orderedOperationKeys().stream()
+                  .filter(EvidenceOperationKeys.deadlineWarn(CASE_ID, EPOCH, 1)::equals)
+                  .count())
+          .isEqualTo(legacyResult.warningSent() ? 1 : 0);
+      history = legacyClient.fetchHistory(workflowId);
+    }
+
+    assertThat(history.getEvents())
+        .noneMatch(event -> event.getEventType() == EVENT_TYPE_MARKER_RECORDED);
+    WorkflowReplayer.replayWorkflowExecution(history, EvidenceRoomWorkflowImpl.class);
   }
 
   @Test
@@ -322,16 +449,36 @@ class EvidenceRoomWorkflowTest {
     return WorkflowStub.fromTyped(workflow).getResult(EvidenceRoomSnapshot.class);
   }
 
+  private static EvidenceRoomSnapshot awaitState(
+      EvidenceRoomWorkflow workflow, Predicate<EvidenceRoomSnapshot> predicate) {
+    long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
+    EvidenceRoomSnapshot state = workflow.state();
+    while (!predicate.test(state) && System.nanoTime() < deadline) {
+      sleepBriefly();
+      state = workflow.state();
+    }
+    assertThat(predicate.test(state)).isTrue();
+    return state;
+  }
+
   private static String workflowId(String suffix) {
     return "evidence-room:" + CASE_ID + ":" + EPOCH + ":" + suffix;
   }
 
   private void awaitTimerCount(
       String workflowId, io.temporal.api.enums.v1.EventType eventType, long expectedCount) {
+    awaitTimerCount(client, workflowId, eventType, expectedCount);
+  }
+
+  private static void awaitTimerCount(
+      WorkflowClient historyClient,
+      String workflowId,
+      io.temporal.api.enums.v1.EventType eventType,
+      long expectedCount) {
     long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
     while (System.nanoTime() < deadline) {
       long count =
-          client.fetchHistory(workflowId).getEvents().stream()
+          historyClient.fetchHistory(workflowId).getEvents().stream()
               .filter(event -> event.getEventType() == eventType)
               .count();
       if (count >= expectedCount) {
@@ -353,7 +500,12 @@ class EvidenceRoomWorkflowTest {
   }
 
   private void assertSignalsPrecedeLastTimerFired(String workflowId) {
-    var events = client.fetchHistory(workflowId).getEvents();
+    assertSignalsPrecedeLastTimerFired(client, workflowId);
+  }
+
+  private static void assertSignalsPrecedeLastTimerFired(
+      WorkflowClient historyClient, String workflowId) {
+    var events = historyClient.fetchHistory(workflowId).getEvents();
     long lastSignalEventId =
         events.stream()
             .filter(event -> event.getEventType() == EVENT_TYPE_WORKFLOW_EXECUTION_SIGNALED)
@@ -369,14 +521,212 @@ class EvidenceRoomWorkflowTest {
     assertThat(lastSignalEventId).isLessThan(lastTimerFiredEventId);
   }
 
+  private void assertLastTimerFiredPrecedesSignals(String workflowId) {
+    var events = client.fetchHistory(workflowId).getEvents();
+    long lastTimerFiredEventId =
+        events.stream()
+            .filter(event -> event.getEventType() == EVENT_TYPE_TIMER_FIRED)
+            .mapToLong(event -> event.getEventId())
+            .max()
+            .orElseThrow();
+    long firstSignalEventId =
+        events.stream()
+            .filter(event -> event.getEventType() == EVENT_TYPE_WORKFLOW_EXECUTION_SIGNALED)
+            .mapToLong(event -> event.getEventId())
+            .min()
+            .orElseThrow();
+    assertThat(lastTimerFiredEventId).isLessThan(firstSignalEventId);
+  }
+
   private void forceTimeSkippingAcrossPendingWorkflowTask(Duration duration) {
+    forceTimeSkippingAcrossPendingWorkflowTask(environment, duration);
+  }
+
+  private static void forceTimeSkippingAcrossPendingWorkflowTask(
+      TestWorkflowEnvironment testEnvironment, Duration duration) {
     var testService =
-        TestServiceGrpc.newBlockingStub(environment.getWorkflowService().getRawChannel());
+        TestServiceGrpc.newBlockingStub(testEnvironment.getWorkflowService().getRawChannel());
     testService.unlockTimeSkipping(UnlockTimeSkippingRequest.getDefaultInstance());
     try {
-      environment.sleep(duration);
+      testEnvironment.sleep(duration);
     } finally {
       testService.lockTimeSkipping(LockTimeSkippingRequest.getDefaultInstance());
+    }
+  }
+
+  // Exact pre-version timer kernel used to generate a real history without a Version marker.
+  public static final class LegacyEvidenceRoomWorkflowImpl implements EvidenceRoomWorkflow {
+
+    private final ArrayDeque<EvidenceRoomSignal> inbox = new ArrayDeque<>();
+    private final Map<String, EvidenceRoomSignal> observedRequests = new LinkedHashMap<>();
+    private final List<String> orderedOperationKeys = new ArrayList<>();
+
+    private EvidenceRoomStart start;
+    private EvidenceTimerPlan timerPlan;
+    private EvidenceRoomPhase roomPhase = EvidenceRoomPhase.OPEN;
+    private String terminalReason;
+    private boolean warningSent;
+    private Instant warningSentAt;
+    private boolean deadlineExpired;
+    private EvidenceRoomSignal initiatorCompletion;
+    private EvidenceRoomSignal respondentCompletion;
+    private String pendingOperationKey;
+    private long processRevision;
+    private long roomRevision;
+    private long duplicateSignalCount;
+    private long rejectedSignalCount;
+    private String protocolErrorCode;
+
+    @Override
+    public EvidenceRoomSnapshot run(EvidenceRoomStart start) {
+      if (this.start != null) {
+        throw new IllegalStateException("Evidence room workflow was initialized more than once");
+      }
+      this.start = Objects.requireNonNull(start, "start must not be null");
+      timerPlan = EvidenceTimerPlan.from(start);
+      processRevision = start.initialProcessRevision();
+      roomRevision = start.initialRoomRevision();
+      roomPhase = EvidenceRoomPhase.WAITING_PARTIES;
+
+      while (roomPhase != EvidenceRoomPhase.COMPLETED) {
+        drainInbox();
+        if (bothPartiesCompleted()) {
+          complete("BOTH_PARTIES_COMPLETED");
+          break;
+        }
+
+        if (!warningSent) {
+          if (awaitInputBefore(timerPlan.warningAt())) {
+            continue;
+          }
+          warningSent = true;
+          warningSentAt = timerPlan.warningAt();
+          appendOperation(timerPlan.warningOperationKey());
+          continue;
+        }
+
+        if (awaitInputBefore(timerPlan.deadlineAt())) {
+          continue;
+        }
+        deadlineExpired = true;
+        appendOperation(timerPlan.expiryOperationKey());
+        complete("DEADLINE_EXPIRED");
+      }
+
+      Workflow.await(Workflow::isEveryHandlerFinished);
+      return state();
+    }
+
+    @Override
+    public void partyCompleted(EvidenceRoomSignal signal) {
+      inbox.addLast(Objects.requireNonNull(signal, "signal must not be null"));
+    }
+
+    @Override
+    public EvidenceRoomSnapshot state() {
+      return new EvidenceRoomSnapshot(
+          "evidence-room-snapshot.v1",
+          start == null ? null : start.tenantSurrogate(),
+          start == null ? null : start.caseId(),
+          start == null ? null : start.roomId(),
+          start == null ? 0 : start.roomEpoch(),
+          start == null ? 0 : start.fencingToken(),
+          roomPhase,
+          terminalReason,
+          start == null ? null : start.openedAt(),
+          start == null ? null : start.originalDeadlineAt(),
+          start == null ? 0 : start.deadlineRevision(),
+          timerPlan == null ? null : timerPlan.warningAt(),
+          warningSent,
+          warningSentAt,
+          deadlineExpired,
+          initiatorCompletion != null,
+          respondentCompletion != null,
+          initiatorCompletion == null ? null : initiatorCompletion.completionRequestId(),
+          respondentCompletion == null ? null : respondentCompletion.completionRequestId(),
+          orderedOperationKeys,
+          pendingOperationKey,
+          processRevision,
+          roomRevision,
+          duplicateSignalCount,
+          rejectedSignalCount,
+          protocolErrorCode);
+    }
+
+    private void drainInbox() {
+      while (!inbox.isEmpty()) {
+        processSignal(inbox.removeFirst());
+      }
+    }
+
+    private void processSignal(EvidenceRoomSignal signal) {
+      EvidenceRoomSignal observed = observedRequests.get(signal.completionRequestId());
+      if (observed != null) {
+        if (observed.equals(signal)) {
+          duplicateSignalCount++;
+        } else {
+          reject("EVIDENCE_COMPLETION_REQUEST_CONFLICT");
+        }
+        return;
+      }
+      observedRequests.put(signal.completionRequestId(), signal);
+
+      String expectedKey =
+          EvidenceOperationKeys.partyComplete(
+              start.caseId(),
+              start.roomEpoch(),
+              signal.participantId(),
+              signal.completionRequestId());
+      if (!expectedKey.equals(signal.operationKey())) {
+        reject("EVIDENCE_COMPLETION_OPERATION_KEY_MISMATCH");
+        return;
+      }
+
+      if (start.initiatorParticipantId().equals(signal.participantId())) {
+        if (initiatorCompletion != null) {
+          duplicateSignalCount++;
+          return;
+        }
+        initiatorCompletion = signal;
+      } else if (start.respondentParticipantId().equals(signal.participantId())) {
+        if (respondentCompletion != null) {
+          duplicateSignalCount++;
+          return;
+        }
+        respondentCompletion = signal;
+      } else {
+        reject("EVIDENCE_COMPLETION_PARTICIPANT_MISMATCH");
+        return;
+      }
+      appendOperation(signal.operationKey());
+    }
+
+    private boolean bothPartiesCompleted() {
+      return initiatorCompletion != null && respondentCompletion != null;
+    }
+
+    private boolean awaitInputBefore(Instant boundary) {
+      long remainingMillis = boundary.toEpochMilli() - Workflow.currentTimeMillis();
+      if (remainingMillis <= 0) {
+        return false;
+      }
+      return Workflow.await(Duration.ofMillis(remainingMillis), () -> !inbox.isEmpty());
+    }
+
+    private void appendOperation(String operationKey) {
+      orderedOperationKeys.add(operationKey);
+      pendingOperationKey = operationKey;
+    }
+
+    private void reject(String errorCode) {
+      rejectedSignalCount++;
+      protocolErrorCode = errorCode;
+    }
+
+    private void complete(String reason) {
+      terminalReason = reason;
+      roomPhase = EvidenceRoomPhase.COMPLETED;
+      pendingOperationKey = null;
     }
   }
 
