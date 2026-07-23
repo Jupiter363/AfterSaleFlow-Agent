@@ -220,6 +220,7 @@ class EvidenceRoomWorkflowTest {
       awaitTimerCount(workflowId, EVENT_TYPE_TIMER_FIRED, 1);
       started.workflow().partyCompleted(signal(INITIATOR, "COMPLETE_AFTER_WARNING_I", 5));
       started.workflow().partyCompleted(signal(RESPONDENT, "COMPLETE_AFTER_WARNING_R", 6));
+      awaitTimerCount(workflowId, EVENT_TYPE_WORKFLOW_EXECUTION_SIGNALED, 2);
       assertLastTimerFiredPrecedesSignals(workflowId);
     } finally {
       worker.resumePolling();
@@ -252,6 +253,7 @@ class EvidenceRoomWorkflowTest {
       awaitTimerCount(workflowId, EVENT_TYPE_TIMER_FIRED, 2);
       started.workflow().partyCompleted(signal(INITIATOR, "COMPLETE_AFTER_DEADLINE_I", 7));
       started.workflow().partyCompleted(signal(RESPONDENT, "COMPLETE_AFTER_DEADLINE_R", 8));
+      awaitTimerCount(workflowId, EVENT_TYPE_WORKFLOW_EXECUTION_SIGNALED, 2);
       assertLastTimerFiredPrecedesSignals(workflowId);
     } finally {
       worker.resumePolling();
