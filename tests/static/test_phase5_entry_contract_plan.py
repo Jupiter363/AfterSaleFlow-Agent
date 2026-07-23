@@ -245,15 +245,72 @@ def test_phase5_evidence_room_command_binds_full_signed_manifest_payload() -> No
 
 def test_phase5_wave_a_authority_owners_share_corrected_admission_contract() -> None:
     briefs = _owner_briefs()
+    batches = yaml.safe_load(TEST_BATCHES.read_text(encoding="utf-8"))
+    barrier = briefs["integration_barriers"]["P5-WAVE-A-INTEGRATED"]
+
     assert briefs["document_status"] == "P5_0_PASS_ENGINEERING_ACTIVE"
     assert briefs["entry_gate"]["status"] == "PASS"
-    assert briefs["wave_a_parallel_launch"]["status"] == "READY"
-    assert briefs["integration_barriers"]["P5-WAVE-A-INTEGRATED"]["status"] == (
-        "BLOCKED"
+    assert briefs["entry_gate"]["engineering_permission"] == (
+        "PHASE_5_ENGINEERING_ONLY"
     )
+    assert briefs["entry_gate"]["phase_6_permission"] == "FORBIDDEN"
+    assert briefs["wave_a_parallel_launch"]["status"] == "READY"
+    assert barrier["status"] == "OPEN"
+    assert barrier["accepted_bindings"] == {
+        "tested_candidate_commit": "edfd54952dcc5a07d87a90fdb094c01b1a7df79b",
+        "evidence_commit": "0292321fdb376c3392c86daf6cf98365bfee7c4a",
+        "acceptance_tooling_candidate_commit": (
+            "ffc1409709046f8859deafc8917481f99f94659a"
+        ),
+        "acceptance_evidence_commit": "c6f9d7dbdd8d9322b219cef866a812a12004f539",
+    }
     assert "P5_0_ENTRY_EVIDENCE_COMMITTED" in briefs["entry_gate"][
         "required_before_dispatch"
     ]
+
+    waves = batches["waves"]
+    assert waves["wave_a"]["status"] == "INTEGRATED"
+    assert waves["wave_b"]["status"] == "READY"
+    assert waves["wave_b"]["delegated_tasks"] == [
+        "P5-B3",
+        "P5-C3",
+        "P5-D1",
+        "P5-D2",
+        "P5-E1",
+        "P5-E2",
+    ]
+    assert waves["candidate_wave"]["status"] == (
+        "BLOCKED_ON_WAVE_B_AND_ENGINEERING_EVIDENCE"
+    )
+
+    accepted_entry = batches["gate"]["accepted_entry_state"]
+    assert accepted_entry["promotion_gate"] == "PENDING"
+    assert accepted_entry["MIG-004"] == "PENDING_PROMOTION"
+    assert accepted_entry["MIG-005"] == "PENDING_PROMOTION"
+    assert batches["gate"]["runtime_modes_allowed"] == [
+        "LEGACY",
+        "DISABLED",
+        "SIGNED_SYNTHETIC_SHADOW",
+    ]
+    traffic = batches["gate"]["traffic_constraints"]
+    for permission in (
+        "formal_evidence_graph_sink_allowed",
+        "temporal_evidence_allocation_allowed",
+        "real_case_shadow_allowed",
+        "production_traffic_allowed",
+        "canary_allowed",
+        "promotion_allowed",
+    ):
+        assert traffic[permission] is False
+
+    for owner in briefs["owners"].values():
+        scope = owner["scope_guard"]
+        assert scope["formal_evidence_sink_allowed"] is False
+        assert scope["temporal_evidence_allocation_allowed"] is False
+        assert scope["allowed_new_runtime_modes"] == [
+            "DISABLED",
+            "SIGNED_SYNTHETIC_SHADOW",
+        ]
 
     common_inputs = {
         "docs/architecture/adr/0013-phase-5-evidence-pre-entry-contract-correction.md",
