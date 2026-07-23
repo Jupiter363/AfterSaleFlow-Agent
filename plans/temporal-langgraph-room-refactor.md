@@ -642,6 +642,11 @@ writer，需在安全 wait边界用更高 epoch/fence回滚。
 
 ### 7.7 Phase 6: Hearing (`MIG-006`)
 
+Phase 6 engineering is executed by `plans/phase-6-hearing-pilot-execution.md` and its exact
+machine schedule `plans/phase-6-hearing-pilot-test-batches.yaml`; both remain subordinate to the
+P6.0 contract pack `docs/runbooks/temporal-first/phase-6-p6.0-contract-pack.md`, the exact-SHA entry
+gate, and ADR 0015.
+
 **目标**：Temporal Hearing Child Workflow 成为 `hearing_flow.v2` 15 阶段、两个 party wait、deadline、AgentRun
 顺序和 handoff 的唯一 writer；V035 stage/action/dossier/artifact 继续是 Java 正式账本。
 **非目标**：不改变阶段、评审团必经、hash chain、消息 provenance、party privacy、和解隐藏或 UI 六组进度。

@@ -1,0 +1,721 @@
+schema_version: phase-owner-briefs.v1
+phase: 6
+name: hearing-pilot-owner-delegation-briefs
+document_status: P6_0_CONTRACT_CANDIDATE_ASSEMBLY
+sources:
+  execution_plan: plans/phase-6-hearing-pilot-execution.md
+  test_matrix: plans/phase-6-hearing-pilot-test-batches.yaml
+  contract_pack: docs/runbooks/temporal-first/phase-6-p6.0-contract-pack.md
+  baseline_inventory: docs/runbooks/temporal-first/phase-6-p6.0-baseline-inventory.md
+  hearing_contract: docs/contracts/hearing-flow-v2.md
+  engineering_exception: docs/architecture/adr/0015-phase-6-hearing-engineering-exception.md
+  compatibility_matrix: contracts/agent-platform/hearing/v2/compatibility-matrix.yaml
+gate:
+  dispatch_state: BLOCKED_PENDING_P6_0_ENTRY_EVIDENCE
+  implementation_authorized: false
+  required_release_receipt: P6-R2_PASS
+  blocked_reasons:
+  - P6_0_EXACT_SHA_BATCH_0_NOT_RUN
+  - P6_0_ENTRY_EVIDENCE_NOT_COMMITTED
+  runtime_modes_allowed:
+  - LEGACY
+  - DISABLED
+  - SIGNED_SYNTHETIC_SHADOW
+  runtime_modes_forbidden:
+  - REAL_CASE_SHADOW
+  - TEMPORAL
+  formal_hearing_graph_sink_allowed: false
+  temporal_hearing_allocation_allowed: false
+  real_case_data_allowed: false
+  canary_or_promotion_allowed: false
+  MIG-006: PENDING_PROMOTION
+  release_rule: R may release the five first-wave briefs only after the separate P6.0 entry-evidence commit records P6-R2_PASS
+    for the exact contract-candidate SHA.
+  MIG-004: PENDING_PROMOTION
+  MIG-005: PENDING_PROMOTION
+team:
+  primary_owner: R
+  delegated_owners:
+  - A
+  - B
+  - C
+  - D
+  - E
+  max_active_primary: 1
+  max_active_delegated: 11
+  max_active_total: 12
+  heavy_test_slots: 1
+  logical_p0_review_lanes:
+  - R1
+  - R2
+  - R3
+  logical_verification_lanes:
+  - V1
+  - V2
+  logical_lookahead_lanes:
+  - L
+  light_test_slots: 2
+  activation_policy: DEPENDENCY_AWARE
+delegation_mapping:
+  note: Owner letters are identical across the execution plan, batch matrix, and these briefs.
+  mappings:
+    A:
+      source_matrix_owner: A
+      source_task_ids:
+      - P6-A1
+      - P6-A2
+    B:
+      source_matrix_owner: B
+      source_task_ids:
+      - P6-B1
+      - P6-B2
+    C:
+      source_matrix_owner: C
+      source_task_ids:
+      - P6-C1
+      - P6-C2
+    D:
+      source_matrix_owner: D
+      source_task_ids:
+      - P6-D1
+      - P6-D2
+    E:
+      source_matrix_owner: E
+      source_task_ids:
+      - P6-E1
+      - P6-E2
+first_wave:
+  status: BLOCKED_ON_P6_R2_PASS
+  simultaneously_active:
+  - A
+  - B
+  - C
+  - D
+  - E
+  shared_path_writes_allowed: false
+  heavy_tests_allowed_for_delegated_owners: false
+  assignments:
+  - owner: A
+    task_id: P6-A1
+    requires:
+    - P6-R2_PASS
+    output: FOUR_EXPLICIT_HEARING_GRAPH_FAMILIES
+  - owner: B
+    task_id: P6-B1
+    requires:
+    - P6-R2_PASS
+    output: PURE_DETERMINISTIC_15_STAGE_WORKFLOW_FOUNDATION
+  - owner: C
+    task_id: P6-C1
+    requires:
+    - P6-R2_PASS
+    output: JAVA_AUTHORITY_RECEIPT_AND_V044_FOUNDATION
+  - owner: D
+    task_id: P6-D1
+    requires:
+    - P6-R2_PASS
+    output: SIDE_EFFECT_FREE_PROJECTION_COMPATIBILITY_FOUNDATION
+  - owner: E
+    task_id: P6-E1
+    requires:
+    - P6-R2_PASS
+    output: FAIL_CLOSED_SELECTOR_AND_SIGNED_SYNTHETIC_FOUNDATION
+second_wave:
+  status: BLOCKED_ON_FIRST_WAVE_AND_BARRIERS
+  assignments:
+  - owner: A
+    task_id: P6-A2
+    requires:
+    - P6-A1
+    - P6-C1
+    - C_AUTHORITY_CONTRACT_PUBLISHED
+  - owner: B
+    task_id: P6-B2
+    requires:
+    - P6-B1
+    - P6-C1
+    - C_AUTHORITY_CONTRACT_PUBLISHED
+  - owner: C
+    task_id: P6-C2
+    requires:
+    - P6-C1
+  - owner: D
+    task_id: P6-D2
+    requires:
+    - P6-D1
+    - P6-C2
+  - owner: E
+    task_id: P6-E2
+    requires:
+    - P6-E1
+    - P6-A2
+    - P6-B2
+    - P6-C2
+owners:
+  A:
+    role: PYTHON_HEARING_GRAPHS_AND_LCEL
+    source_task_ids:
+    - P6-A1
+    - P6-A2
+    objective: Replace the legacy Python orchestration internals with four explicit hearing graph families and governed prompt-model-parser
+      LCEL flows for seven operations, using bounded state, keyed reducers, checkpoint recovery and no formal tools.
+    first_wave:
+      task_id: P6-A1
+      status: BLOCKED_ON_P6_R2_PASS
+      deliverable: graph_state_topology_lcel_and_registry_identity_candidates
+    second_wave:
+      task_id: P6-A2
+      deliverable: bounded_send_reducer_checkpoint_recovery_and_compatibility_adapter
+    owned_paths:
+    - python-agent-service/app/graphs/hearing/**
+    - python-agent-service/tests/graphs/hearing/**
+    - python-agent-service/app/agents/hearing_flow.py
+    - python-agent-service/app/schemas/hearing_flow.py
+    - python-agent-service/tests/agents/test_hearing_flow_v2.py
+    - python-agent-service/app/agents/prompts/dispute_intake_officer/hearing_intake_questions.md
+    - python-agent-service/app/agents/prompts/dispute_intake_officer/hearing_intake_synthesis.md
+    - python-agent-service/app/agents/prompts/evidence_clerk/hearing_evidence_requests.md
+    - python-agent-service/app/agents/prompts/evidence_clerk/hearing_evidence_file_assessment.md
+    - python-agent-service/app/agents/prompts/evidence_clerk/hearing_evidence_synthesis.md
+    - python-agent-service/app/agents/prompts/presiding_judge/hearing_judge_v1.md
+    - python-agent-service/app/agents/prompts/deliberation_panel/hearing_jury_review.md
+    - python-agent-service/app/agents/prompts/presiding_judge/hearing_judge_v2.md
+    forbidden_paths:
+    - python-agent-service/app/main.py
+    - python-agent-service/app/graph_runtime/registry.py
+    - python-agent-service/app/graph_runtime/migrations.py
+    - java-api-service/**
+    - frontend/**
+    - DOMAIN_DATABASE
+    - FORMAL_TOOL_POLICY
+    dependencies:
+      first_wave:
+      - P6-R2_PASS
+      second_wave:
+      - P6-A1
+      - P6-C1
+      - C_AUTHORITY_CONTRACT_PUBLISHED
+      consumes_only:
+      - JAVA_SIGNED_ARTIFACT_REFS
+      - FROZEN_VERSION_PINS
+      - ACTOR_OR_SHARED_SCOPE_BINDING
+    t0_checks:
+    - id: C-T0-GRAPHS
+      kind: PYTEST_PURE_GRAPH
+      selector: python-agent-service/tests/graphs/hearing
+      assertions:
+      - FOUR_GRAPH_IDENTITIES
+      - SEVEN_OPERATIONS
+      - EXPLICIT_ROUTERS
+      - UNKNOWN_ROUTE_FAILS_CLOSED
+      execution_owner: C
+    - id: C-T0-LCEL
+      kind: PYTEST_LCEL
+      selector: python-agent-service/tests/graphs/hearing/test_lcel.py
+      assertions:
+      - PROMPT_PIPE_MODEL_PIPE_PARSER
+      - STRICT_SCHEMA
+      - HUMAN_TEXT_ISOLATED
+      - EMPTY_TOOL_POLICY
+      execution_owner: C
+    - id: C-T0-REDUCER-RECOVERY
+      kind: PYTEST_PROPERTY_AND_RECOVERY
+      selector: python-agent-service/tests/graphs/hearing/test_reducer.py,python-agent-service/tests/graphs/hearing/test_recovery.py
+      assertions:
+      - KEYED_ASSOCIATIVE_REDUCER
+      - IDENTICAL_REPLAY
+      - CONFLICT_FAILS
+      - CHECKPOINT_RESUME
+      execution_owner: C
+    review:
+      reviewers:
+      - B
+      - E
+      required_topics:
+      - NO_DOMAIN_CREDENTIALS
+      - NO_FORMAL_TOOL
+      - PRIVATE_BEFORE_BARRIER
+      - LEASE_FENCING
+      - BOUNDED_STATE
+      merge_gate: ALL_P0_CLOSED
+    definition_of_done:
+    - four_versioned_graph_families_cover_exactly_seven_operations
+    - every_model_path_is_governed_prompt_model_parser_object_flow
+    - raw_private_transcript_never_enters_shared_graph_state
+    - evidence_fanout_is_bounded_keyed_deterministic_and_replay_safe
+    - late_or_stale_graph_results_cannot_be_finalized
+    - legacy_http_shape_remains_compatible_until_R_registration_barrier
+  B:
+    role: TEMPORAL_HEARING_15_STAGE_AND_TIMERS
+    source_task_ids:
+    - P6-B1
+    - P6-B2
+    objective: Implement a deterministic HearingRoomWorkflow with exactly fifteen stages, fourteen adjacent transitions, two
+      shared absolute party deadlines, typed Signals, retries, cancellation and receipt-driven advancement.
+    first_wave:
+      task_id: P6-B1
+      status: BLOCKED_ON_P6_R2_PASS
+      deliverable: pure_workflow_state_transition_and_timer_kernel
+    second_wave:
+      task_id: P6-B2
+      deliverable: activity_receipt_signal_timeout_and_agentrun_ordering
+    owned_paths:
+    - java-api-service/src/main/java/com/example/dispute/workflow/temporal/room/hearing/**
+    - java-api-service/src/test/java/com/example/dispute/workflow/temporal/room/hearing/**
+    - java-api-service/src/main/java/com/example/dispute/workflow/activity/hearing/**
+    - java-api-service/src/test/java/com/example/dispute/workflow/activity/hearing/**
+    forbidden_paths:
+    - java-api-service/src/main/java/com/example/dispute/hearing/**
+    - java-api-service/src/main/resources/db/migration/V044__hearing_temporal_projection.sql
+    - java-api-service/src/main/java/com/example/dispute/workflow/config/TemporalWorkerConfiguration.java
+    - java-api-service/src/main/java/com/example/dispute/workflow/application/epoch/ConfiguredRoomEpochSelector.java
+    - python-agent-service/**
+    - frontend/**
+    dependencies:
+      first_wave:
+      - P6-R2_PASS
+      second_wave:
+      - P6-B1
+      - P6-C1
+      - C_AUTHORITY_CONTRACT_PUBLISHED
+      must_not_depend_on:
+      - Repository
+      - HTTP_CLIENT
+      - MODEL_CLIENT
+      - SYSTEM_CLOCK
+      - RANDOM
+    t0_checks:
+    - id: A-T0-STAGE-GRAPH
+      kind: PURE_TEMPORAL_JUNIT
+      selector: HearingRoomWorkflowTest
+      assertions:
+      - EXACT_15_STAGES
+      - EXACT_14_ADJACENT_EDGES
+      - ALL_ILLEGAL_EDGES_REJECTED
+      execution_owner: R_WITH_HEAVY_TOKEN
+    - id: A-T0-TIMER-RACES
+      kind: PURE_TEMPORAL_TIME_SKIPPING
+      selector: HearingRoomWorkflowTimerTest
+      assertions:
+      - ORIGINAL_DEADLINE_NOT_RESET
+      - SIGNAL_TIMEOUT_DETERMINISTIC
+      - DUPLICATE_SIGNAL_IDEMPOTENT
+      execution_owner: R_WITH_HEAVY_TOKEN
+    - id: A-T0-REPLAY
+      kind: PURE_TEMPORAL_REPLAY
+      selector: HearingRoomWorkflowReplayTest
+      assertions:
+      - NO_NONDETERMINISM
+      - RECEIPT_DRIVEN_ADVANCE
+      - CANCEL_STOPS_PENDING_AGENTRUN
+      execution_owner: R_WITH_HEAVY_TOKEN
+    review:
+      reviewers:
+      - B
+      - E
+      required_topics:
+      - JAVA_RECEIPT_AUTHORITY
+      - TIMER_DETERMINISM
+      - NO_FORMAL_SINK
+      - RETRY_BUDGET
+      merge_gate: ALL_P0_CLOSED
+    definition_of_done:
+    - exactly_fifteen_stage_codes_and_fourteen_forward_edges
+    - two_party_waits_use_workflow_timers_not_langgraph_interrupts
+    - same_tick_signal_timeout_races_have_one_deterministic_result
+    - workflow_state_contains_only_ids_enums_hashes_revisions_and_deadlines
+    - no_repository_http_model_random_or_wall_clock_dependency
+    - no_worker_registration_or_selector_shared_file_edit
+  C:
+    role: JAVA_HEARING_AUTHORITY_FINALIZERS_AND_V044
+    source_task_ids:
+    - P6-C1
+    - P6-C2
+    objective: Preserve Java and Domain PostgreSQL as Hearing business truth while adding V044 epoch, fence and receipt facts,
+      append-only party actions/artifacts, idempotent Finalizers, dossier freeze and review handoff receipts.
+    first_wave:
+      task_id: P6-C1
+      status: BLOCKED_ON_P6_R2_PASS
+      deliverable: v044_authority_fence_receipt_and_activity_contract_foundation
+    second_wave:
+      task_id: P6-C2
+      deliverable: action_artifact_dossier_decision_and_handoff_finalizers
+    owned_paths:
+    - java-api-service/src/main/java/com/example/dispute/hearing/domain/**
+    - java-api-service/src/main/java/com/example/dispute/hearing/infrastructure/persistence/**
+    - java-api-service/src/main/resources/db/migration/V044__hearing_temporal_projection.sql
+    - java-api-service/src/test/java/com/example/dispute/hearing/HearingFlowPersistenceContractTest.java
+    - java-api-service/src/test/java/com/example/dispute/hearing/HearingTemporalLedgerIntegrationTest.java
+    forbidden_paths:
+    - java-api-service/src/main/java/com/example/dispute/hearing/api/**
+    - java-api-service/src/main/java/com/example/dispute/hearing/application/HearingFlowDeadlineScheduler.java
+    - java-api-service/src/main/java/com/example/dispute/hearing/application/HearingReviewHandoffRecoveryScheduler.java
+    - java-api-service/src/main/java/com/example/dispute/workflow/temporal/room/hearing/**
+    - java-api-service/src/main/java/com/example/dispute/workflow/config/**
+    - python-agent-service/**
+    - frontend/**
+    - java-api-service/src/main/resources/db/migration/V035__hearing_flow_v2.sql
+    dependencies:
+      first_wave:
+      - P6-R2_PASS
+      second_wave:
+      - P6-C1
+      publishes:
+      - C_AUTHORITY_CONTRACT_PUBLISHED
+    t0_checks:
+    - id: B-T0-V044
+      kind: MIGRATION_CONTRACT
+      selector: HearingFlowPersistenceContractTest
+      assertions:
+      - ADDITIVE_ONLY
+      - V035_UNCHANGED
+      - LEGACY_BACKFILL
+      - FENCE_AND_RECEIPT_CONSTRAINTS
+      execution_owner: R_WITH_HEAVY_TOKEN
+    - id: B-T0-FINALIZERS
+      kind: JAVA_AUTHORITY_UNIT
+      selector: HearingFlowRuntimeServiceTest
+      assertions:
+      - EXACT_HASH_BINDING
+      - STALE_FENCE_REJECTED
+      - IDEMPOTENT_REPLAY
+      - DB_FAILURE_FAILS_CLOSED
+      execution_owner: R_WITH_HEAVY_TOKEN
+    - id: B-T0-DOSSIER-HANDOFF
+      kind: JAVA_AUTHORITY_UNIT
+      selector: HearingTrialDossierServiceTest,HearingReviewHandoffServiceTest
+      assertions:
+      - ONE_DOSSIER_V1
+      - EXACT_JURY_V2_PARENT_CHAIN
+      - ONE_REVIEW_HANDOFF
+      execution_owner: R_WITH_HEAVY_TOKEN
+    review:
+      reviewers:
+      - A
+      - C
+      - D
+      required_topics:
+      - WORKFLOW_RECEIPT_SHAPE
+      - GRAPH_PROPOSAL_BOUNDARY
+      - QUERY_SIDE_EFFECT_SPLIT
+      - V044_EXPAND_ONLY
+      merge_gate: ALL_P0_CLOSED
+    definition_of_done:
+    - v044_is_additive_and_v035_is_byte_unchanged
+    - every_formal_transition_requires_expected_epoch_revision_fence_and_hashes
+    - duplicate_finalizer_commands_return_the_same_receipt
+    - action_artifact_dossier_decision_and_handoff_facts_remain_append_only
+    - database_failure_never_falls_back_to_temporal_graph_cache_or_ui_state
+    - no_temporal_workflow_graph_or_frontend_edit
+  D:
+    role: HEARING_PROJECTION_AND_FRONTEND_COMPATIBILITY
+    source_task_ids:
+    - P6-D1
+    - P6-D2
+    objective: Split a side-effect-free Hearing query projection and preserve the current API, privacy, history, settlement
+      and six-group court UI behavior without creating business authority in controllers, stores or views.
+    first_wave:
+      task_id: P6-D1
+      status: BLOCKED_ON_P6_R2_PASS
+      deliverable: projection_contract_query_service_and_baseline_fixtures
+    second_wave:
+      task_id: P6-D2
+      deliverable: controller_store_api_and_ui_compatibility_integration
+    owned_paths:
+    - java-api-service/src/main/java/com/example/dispute/hearing/application/query/**
+    - java-api-service/src/main/java/com/example/dispute/workflow/projection/hearing/**
+    - java-api-service/src/main/java/com/example/dispute/hearing/api/HearingFlowController.java
+    - java-api-service/src/test/java/com/example/dispute/hearing/HearingFlowControllerTest.java
+    - java-api-service/src/test/java/com/example/dispute/workflow/projection/hearing/**
+    - frontend/src/views/disputes/HearingCourtView.vue
+    - frontend/src/views/disputes/HearingCourtView.test.js
+    - frontend/src/utils/hearingFlow.js
+    - frontend/src/utils/hearingFlow.test.js
+    - frontend/src/api/hearing.js
+    - frontend/src/api/hearing.test.js
+    - frontend/src/stores/hearing.js
+    - frontend/src/stores/hearing.test.js
+    - java-api-service/src/main/java/com/example/dispute/hearing/application/HearingFlowRuntimeService.java
+    - java-api-service/src/main/java/com/example/dispute/hearing/application/HearingTrialDossierService.java
+    - java-api-service/src/main/java/com/example/dispute/hearing/application/finalization/**
+    - java-api-service/src/test/java/com/example/dispute/hearing/HearingFlowRuntimeServiceTest.java
+    - java-api-service/src/test/java/com/example/dispute/hearing/HearingTrialDossierServiceTest.java
+    forbidden_paths:
+    - java-api-service/src/main/java/com/example/dispute/hearing/domain/**
+    - java-api-service/src/main/java/com/example/dispute/hearing/infrastructure/persistence/**
+    - java-api-service/src/main/java/com/example/dispute/hearing/application/HearingFlowRuntimeService.java
+    - java-api-service/src/main/java/com/example/dispute/workflow/temporal/**
+    - java-api-service/src/main/java/com/example/dispute/workflow/config/**
+    - python-agent-service/**
+    - frontend/src/router/index.js
+    - UI_REDESIGN
+    dependencies:
+      first_wave:
+      - P6-R2_PASS
+      second_wave:
+      - P6-D1
+      - P6-C2
+      compatibility_baseline:
+      - 15_STAGE_CODES
+      - SIX_PROGRESS_GROUPS
+      - SETTLEMENT
+      - HISTORY_READ_ONLY
+      - PARTY_PRIVACY
+    t0_checks:
+    - id: D-T0-PROJECTION
+      kind: JAVA_PROJECTION_CONTRACT
+      selector: HearingFlowControllerTest
+      assertions:
+      - GET_SIDE_EFFECT_FREE
+      - COMPLETE_SIDE_EFFECT_FREE
+      - PRIVATE_FIELDS_FILTERED
+      - HISTORY_READ_ONLY
+      execution_owner: R_WITH_HEAVY_TOKEN
+    - id: D-T0-FRONTEND
+      kind: VITEST_FOCUSED
+      selector: frontend/src/views/disputes/HearingCourtView.test.js,frontend/src/utils/hearingFlow.test.js
+      assertions:
+      - ALL_15_STAGES
+      - SIX_GROUPS_UNCHANGED
+      - HISTORY_LOCKED
+      - NO_OVERLAP_OR_LAYOUT_REGRESSION
+      execution_owner: D
+    - id: D-T0-API-STORE
+      kind: VITEST_FOCUSED
+      selector: frontend/src/api/hearing.test.js,frontend/src/stores/hearing.test.js
+      assertions:
+      - ACTIVE_RUN_RECOVERY
+      - ACTOR_SWITCH_CLEARS_PRIVATE_STATE
+      - NO_CLIENT_AUTHORITY
+      execution_owner: D
+    review:
+      reviewers:
+      - B
+      - E
+      required_topics:
+      - NO_QUERY_SIDE_EFFECT
+      - AUTHORIZED_PROJECTION_ONLY
+      - PRIVACY
+      - HISTORY
+      - NO_UI_AUTHORITY
+      merge_gate: ALL_P0_CLOSED
+    definition_of_done:
+    - hearing_get_and_complete_reads_do_not_advance_or_write
+    - existing_routes_payload_compatibility_and_settlement_behavior_are_preserved
+    - all_fifteen_stages_map_to_the_same_six_progress_groups
+    - history_mode_locks_every_write_path
+    - frontend_never_infers_formal_success_from_animation_or_model_text
+    - no_business_rule_temporal_graph_selector_or_runtime_service_edit
+  E:
+    role: HEARING_SELECTOR_SHADOW_AND_RECOVERY
+    source_task_ids:
+    - P6-E1
+    - P6-E2
+    objective: Implement fail-closed Hearing mode selection, Java-signed synthetic comparison, scheduler detector controls,
+      replay/reconciliation and rollback harnesses while keeping all real Hearing allocation and formal sinks unreachable.
+    first_wave:
+      task_id: P6-E1
+      status: BLOCKED_ON_P6_R2_PASS
+      deliverable: selector_properties_signed_synthetic_admission_and_no_sink_harness
+    second_wave:
+      task_id: P6-E2
+      deliverable: parity_recovery_reconciliation_metrics_and_rollback_harness
+    owned_paths:
+    - java-api-service/src/main/java/com/example/dispute/workflow/config/HearingEpochSelector.java
+    - java-api-service/src/main/java/com/example/dispute/workflow/config/HearingEpochSelectionProperties.java
+    - java-api-service/src/main/java/com/example/dispute/workflow/config/HearingSyntheticShadowConfiguration.java
+    - java-api-service/src/main/java/com/example/dispute/workflow/shadow/hearing/**
+    - java-api-service/src/main/java/com/example/dispute/workflow/recovery/hearing/**
+    - java-api-service/src/main/java/com/example/dispute/workflow/observability/hearing/**
+    - java-api-service/src/main/java/com/example/dispute/hearing/application/HearingFlowDeadlineScheduler.java
+    - java-api-service/src/main/java/com/example/dispute/hearing/application/HearingReviewHandoffRecoveryScheduler.java
+    - java-api-service/src/test/java/com/example/dispute/workflow/config/HearingEpochSelectorTest.java
+    - java-api-service/src/test/java/com/example/dispute/workflow/config/HearingEpochSelectionPropertiesTest.java
+    - java-api-service/src/test/java/com/example/dispute/workflow/config/HearingSyntheticShadowConfigurationTest.java
+    - java-api-service/src/test/java/com/example/dispute/workflow/shadow/hearing/**
+    - java-api-service/src/test/java/com/example/dispute/workflow/recovery/hearing/**
+    - java-api-service/src/test/java/com/example/dispute/workflow/observability/hearing/**
+    - java-api-service/src/test/java/com/example/dispute/hearing/HearingSchedulerModeTest.java
+    - java-api-service/src/main/java/com/example/dispute/hearing/application/HearingReviewHandoffService.java
+    - java-api-service/src/test/java/com/example/dispute/hearing/HearingReviewHandoffServiceTest.java
+    forbidden_paths:
+    - java-api-service/src/main/java/com/example/dispute/workflow/config/TemporalWorkerConfiguration.java
+    - java-api-service/src/main/java/com/example/dispute/workflow/application/epoch/ConfiguredRoomEpochSelector.java
+    - java-api-service/src/main/java/com/example/dispute/workflow/temporal/room/hearing/**
+    - java-api-service/src/main/java/com/example/dispute/hearing/domain/**
+    - java-api-service/src/main/java/com/example/dispute/hearing/infrastructure/persistence/**
+    - java-api-service/src/main/resources/db/migration/**
+    - python-agent-service/**
+    - frontend/**
+    - tests/e2e/test_hearing_flow_v2_live.py
+    - PRODUCTION_SECRETS_OR_DEPLOYMENT
+    dependencies:
+      first_wave:
+      - P6-R2_PASS
+      second_wave:
+      - P6-E1
+      - P6-A2
+      - P6-B2
+      - P6-C2
+      admission_scope: JAVA_SIGNED_SYNTHETIC_FIXTURES_ONLY
+    t0_checks:
+    - id: E-T0-SELECTOR
+      kind: PURE_JAVA_SELECTOR
+      selector: HearingEpochSelectorTest,HearingEpochSelectionPropertiesTest
+      assertions:
+      - UNKNOWN_MODE_FAILS_CLOSED
+      - ACTIVE_LEGACY_UNCHANGED
+      - NO_TEMPORAL_ALLOCATION
+      - PINNED_NEW_EPOCH_ONLY
+      execution_owner: R_WITH_HEAVY_TOKEN
+    - id: E-T0-NO-SINK
+      kind: STATIC_ASSEMBLY
+      selector: HearingSyntheticShadowConfigurationTest
+      assertions:
+      - NO_FORMAL_FINALIZER_BEAN
+      - NO_REAL_CASE_SOURCE
+      - SIGNATURE_AND_SCOPE_REQUIRED
+      - BOUNDED_LABELS
+      execution_owner: R_WITH_HEAVY_TOKEN
+    - id: E-T0-RECOVERY
+      kind: PURE_RELIABILITY_HARNESS
+      selector: HearingReliabilityHarnessTest,HearingSchedulerModeTest
+      assertions:
+      - KILL_REPLAY
+      - LOST_RESPONSE
+      - STALE_FENCE_REJECTED
+      - LEGACY_SCHEDULER_DETECTOR_ONLY
+      - ROLLBACK_TO_ZERO
+      execution_owner: R_WITH_HEAVY_TOKEN
+    review:
+      reviewers:
+      - A
+      - B
+      required_topics:
+      - MODE_IMMUTABILITY
+      - NO_FORMAL_SINK
+      - SIGNED_SYNTHETIC_ONLY
+      - REPLAY
+      - ROLLBACK
+      - METRIC_CARDINALITY
+      merge_gate: ALL_P0_CLOSED
+    definition_of_done:
+    - selector_defaults_to_legacy_or_disabled_and_never_allocates_temporal
+    - signed_synthetic_commands_cannot_resolve_real_case_data_or_formal_finalizer
+    - comparison_rows_are_isolated_idempotent_and_hash_bound
+    - scheduler_modes_are_explicit_and_legacy_writers_remain_active_until_promotion
+    - kill_lost_response_stale_fence_and_rollback_scenarios_are_deterministic
+    - no_real_shadow_live_e2e_secret_deployment_or_shared_config_edit
+shared_path_governance:
+  owner: R
+  direct_delegated_edits_forbidden: true
+  primary_owned_paths:
+  - plans/phase-6-*
+  - docs/runbooks/temporal-first/phase-6-*
+  - tests/static/test_phase6_*.py
+  - contracts/agent-platform/hearing/**
+  - java-api-service/src/main/java/com/example/dispute/workflow/config/TemporalWorkerConfiguration.java
+  - java-api-service/src/main/java/com/example/dispute/workflow/application/epoch/ConfiguredRoomEpochSelector.java
+  - java-api-service/src/main/java/com/example/dispute/workflow/contract/v1/**
+  - java-api-service/src/main/resources/application.yml
+  - java-api-service/src/main/resources/application-local.yml
+  - python-agent-service/app/graph_runtime/registry.py
+  - python-agent-service/app/main.py
+  - frontend/src/router/index.js
+  barriers:
+  - id: C_AUTHORITY_CONTRACT_PUBLISHED
+    producer: C
+    reviewers:
+    - A
+    - C
+    - D
+    integrator: R
+    status: BLOCKED
+    shared_paths:
+    - contracts/agent-platform/hearing/**
+    - java-api-service/src/main/java/com/example/dispute/workflow/contract/v1/**
+    release_condition: HASHED_RECEIPT_AND_ACTIVITY_SCHEMAS_REVIEWED
+  - id: B_TEMPORAL_WORKER_REGISTRATION_READY
+    producer: B
+    reviewers:
+    - B
+    - E
+    integrator: R
+    status: BLOCKED
+    shared_paths:
+    - java-api-service/src/main/java/com/example/dispute/workflow/config/TemporalWorkerConfiguration.java
+    - java-api-service/src/main/resources/application.yml
+    release_condition: PURE_WORKFLOW_REPLAY_AND_NO_ALLOCATION_TESTS_PASS
+  - id: A_GRAPH_REGISTRATION_READY
+    producer: A
+    reviewers:
+    - B
+    - E
+    integrator: R
+    status: BLOCKED
+    shared_paths:
+    - python-agent-service/app/graph_runtime/registry.py
+    - python-agent-service/app/main.py
+    release_condition: FOUR_GRAPH_IDENTITIES_AND_EMPTY_TOOL_POLICY_REVIEWED
+  - id: E_SELECTOR_ADMISSION_READY
+    producer: E
+    reviewers:
+    - A
+    - B
+    integrator: R
+    status: BLOCKED
+    shared_paths:
+    - java-api-service/src/main/java/com/example/dispute/workflow/application/epoch/ConfiguredRoomEpochSelector.java
+    - java-api-service/src/main/resources/application-local.yml
+    release_condition: DISABLED_AND_SIGNED_SYNTHETIC_ONLY_FAIL_CLOSED_TESTS_PASS
+  - id: D_UI_ROUTE_COMPATIBILITY_READY
+    producer: D
+    reviewers:
+    - B
+    - E
+    integrator: R
+    status: BLOCKED
+    shared_paths:
+    - frontend/src/router/index.js
+    release_condition: CURRENT_ROUTE_ROLE_HISTORY_BEHAVIOR_UNCHANGED
+test_policy:
+  delegated_scope: T0_ONLY
+  primary_scope: CENTRALIZED_T1_T2_T3
+  delegated_heavy_commands_forbidden: true
+  heavy_token_owner: R
+  max_heavy_parallelism: 1
+  owner_result_fields:
+  - owner
+  - task_id
+  - candidate_sha
+  - command_or_selector
+  - exit_code
+  - duration
+  - classification
+  failure_classes:
+  - PRODUCT
+  - FIXTURE
+  - INFRA
+  - EXTERNAL_GATE
+  full_regression: EXPLICIT_UNIFIED_CHECKPOINT_ONLY
+integration_order:
+- C_AUTHORITY_CONTRACT_AND_V044
+- A_GRAPH_FAMILIES_AND_LCEL
+- B_TEMPORAL_WORKFLOW_AND_RECEIPTS
+- D_PROJECTION_AND_FRONTEND_COMPATIBILITY
+- E_SELECTOR_SHADOW_RECOVERY_AND_ROLLBACK
+- R_SHARED_BARRIERS_AND_CANDIDATE_CHECKPOINT
+safety_invariants:
+- NO_REAL_CASE_SHADOW
+- NO_TEMPORAL_HEARING_ALLOCATION
+- NO_FORMAL_HEARING_GRAPH_SINK
+- JAVA_DOMAIN_POSTGRESQL_REMAINS_SOLE_FORMAL_WRITER
+- GRAPH_OUTPUT_REMAINS_PROPOSAL_ONLY
+- PARTY_WAITS_NEVER_USE_LANGGRAPH_INTERRUPT
+- V035_REMAINS_IMMUTABLE
+- MIG_006_REMAINS_PENDING_PROMOTION
+- NO_CANARY_OR_PRODUCTION_TRAFFIC_CHANGE
+- SHARED_PATHS_REQUIRE_R_BARRIER_INTEGRATION
+accepted_phase_5_checkpoint_sha: d3ea271188be57adac49592879aaf3417e90c5c0
+phase_5_candidate_sha: c43f969f08755fd6eb90c0845809cda1785d11bf
+phase_5_evidence_sha: 8770d84aac4f653e8953d469246295b6e8c3b8fa

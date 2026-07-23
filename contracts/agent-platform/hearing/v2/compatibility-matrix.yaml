@@ -45,7 +45,7 @@ gate_state:
   migrations:
     MIG-004: PENDING_PROMOTION
     MIG-005: PENDING_PROMOTION
-    MIG-006: PENDING_ENGINEERING_AND_PROMOTION
+    MIG-006: PENDING_PROMOTION
 
 flow_identity:
   schema_version: hearing_flow.v2
