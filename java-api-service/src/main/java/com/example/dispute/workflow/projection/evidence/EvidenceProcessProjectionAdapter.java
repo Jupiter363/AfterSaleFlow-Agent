@@ -19,6 +19,7 @@ import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Function;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcOperations;
 import org.springframework.stereotype.Component;
@@ -178,10 +179,19 @@ public class EvidenceProcessProjectionAdapter {
 
     public Optional<EvidenceProcessProjectionView> read(
             String caseId, AuthenticatedActor actor, boolean historyMode) {
+        return read(caseId, actor, historyMode, ProjectionRow::evidenceState);
+    }
+
+    public Optional<EvidenceProcessProjectionView> read(
+            String caseId,
+            AuthenticatedActor actor,
+            boolean historyMode,
+            Function<ProjectionRow, ProjectionEvidenceState> stateResolver) {
         if (caseId == null || caseId.isBlank()) {
             throw new IllegalArgumentException("caseId must not be blank");
         }
         requireAllowedViewer(actor);
+        Objects.requireNonNull(stateResolver, "stateResolver");
         List<ProjectionRow> rows = jdbc.query(
                 READ_SQL,
                 new MapSqlParameterSource("caseId", caseId)
@@ -189,7 +199,12 @@ public class EvidenceProcessProjectionAdapter {
                         .addValue("actorRole", actor.role().name())
                         .addValue("requiredViewerScopes", "[\"CASE_READ\",\"EVIDENCE_READ\"]")
                         .addValue("historyMode", historyMode),
-                EvidenceProcessProjectionAdapter::row);
+                (resultSet, rowNumber) -> {
+                    ProjectionRow row = row(resultSet, rowNumber);
+                    ProjectionEvidenceState resolved = stateResolver.apply(row);
+                    return row.withEvidenceState(
+                            Objects.requireNonNull(resolved, "resolved Evidence projection state"));
+                });
         if (rows.size() > 1) {
             return Optional.of(processing(rows.getFirst(), requireViewerBinding(rows.getFirst(), actor)));
         }
@@ -646,6 +661,36 @@ public class EvidenceProcessProjectionAdapter {
 
         long epochFencingToken() {
             return epochFencingTokenValue == null ? 0 : epochFencingTokenValue;
+        }
+
+        ProjectionRow withEvidenceState(ProjectionEvidenceState value) {
+            return new ProjectionRow(
+                    tenantSurrogate,
+                    caseId,
+                    roomId,
+                    writerMode,
+                    writerActivationStatus,
+                    projectionRoomEpoch,
+                    projectionProcessRevision,
+                    projectionFencingToken,
+                    roomPhase,
+                    projectedAt,
+                    epochWriterMode,
+                    epochLifecycleStatus,
+                    epochProvisioningStatus,
+                    epochRoomEpochValue,
+                    epochProcessRevisionValue,
+                    roomRevisionValue,
+                    epochFencingTokenValue,
+                    roomWorkflowBuildId,
+                    graphVersion,
+                    checkpointSchemaVersion,
+                    activeRunObserved,
+                    activeGraphRun,
+                    value,
+                    historyMode,
+                    scopedActorId,
+                    scopedActorRole);
         }
     }
 

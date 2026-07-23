@@ -24,6 +24,8 @@ import com.example.dispute.evidence.application.EvidenceVerificationView;
 import com.example.dispute.evidence.application.EvidenceView;
 import com.example.dispute.evidence.application.FrozenEvidenceDossierView;
 import com.example.dispute.evidence.application.RoleScopedEvidenceView;
+import com.example.dispute.workflow.projection.evidence.EvidenceProcessProjectionQuery;
+import com.example.dispute.workflow.projection.evidence.EvidenceProcessProjectionView;
 import com.example.dispute.room.application.IntakeProgressService;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
@@ -35,6 +37,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import org.springframework.format.annotation.DateTimeFormat;
+import org.springframework.http.CacheControl;
 import org.springframework.http.ContentDisposition;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -71,6 +74,7 @@ public class EvidenceController {
     private final EvidenceDossierQueryService dossierQueryService;
     private final EvidenceSubmissionService submissionService;
     private final IntakeProgressService intakeProgressService;
+    private final EvidenceProcessProjectionQuery processProjectionQuery;
     private final Clock clock;
 
     // 所属模块：【证据与版本化卷宗 / HTTP 接口层】「EvidenceController.EvidenceController(EvidenceApplicationService,EvidenceCatalogService,EvidenceVerificationService,EvidenceCompletionService,EvidenceDossierQueryService,EvidenceSubmissionService,Clock)」。
@@ -87,6 +91,7 @@ public class EvidenceController {
             EvidenceDossierQueryService dossierQueryService,
             EvidenceSubmissionService submissionService,
             IntakeProgressService intakeProgressService,
+            EvidenceProcessProjectionQuery processProjectionQuery,
             Clock clock) {
         this.service = service;
         this.catalogService = catalogService;
@@ -95,6 +100,7 @@ public class EvidenceController {
         this.dossierQueryService = dossierQueryService;
         this.submissionService = submissionService;
         this.intakeProgressService = intakeProgressService;
+        this.processProjectionQuery = processProjectionQuery;
         this.clock = clock;
     }
 
@@ -285,6 +291,26 @@ public class EvidenceController {
         return success(
                 completionService.status(
                         caseId, evidenceReadActor(caseId, authentication)), request);
+    }
+
+    @GetMapping("/evidence/process-projection")
+    public ResponseEntity<ApiResponse<EvidenceProcessProjectionView>> processProjection(
+            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
+            @RequestParam(name = "view", required = false, defaultValue = "active") String view,
+            Authentication authentication,
+            HttpServletRequest request) {
+        boolean historyMode = "history".equalsIgnoreCase(view);
+        if (!historyMode && !"active".equalsIgnoreCase(view)) {
+            throw new IllegalArgumentException("view must be active or history");
+        }
+        EvidenceProcessProjectionView projection = processProjectionQuery
+                .read(caseId, evidenceReadActor(caseId, authentication), historyMode)
+                .orElseThrow(() -> new IllegalArgumentException("Evidence process projection is unavailable"));
+        return ResponseEntity.ok()
+                .cacheControl(CacheControl.noStore().cachePrivate())
+                .header(HttpHeaders.PRAGMA, "no-cache")
+                .header(HttpHeaders.VARY, "X-User-Id, X-Role")
+                .body(success(projection, request));
     }
 
     // 所属模块：【证据与版本化卷宗 / HTTP 接口层】「EvidenceController.frozenDossier(String,int,Authentication,HttpServletRequest)」。

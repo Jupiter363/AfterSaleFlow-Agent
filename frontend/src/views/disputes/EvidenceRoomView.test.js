@@ -20,6 +20,7 @@ vi.mock("../../api/evidence", () => ({
   evidenceApi: {
     catalog: vi.fn(),
     completion: vi.fn(),
+    processProjection: vi.fn(),
     upload: vi.fn(),
     submitBatch: vi.fn(),
     deletePending: vi.fn(),
@@ -188,6 +189,29 @@ const initialCompletion = {
   next_room: null,
 };
 
+function signedSyntheticProjection(count, overrides = {}) {
+  return {
+    projection_state: "PROCESSING",
+    writer_mode: "SHADOW",
+    graph_runtime_mode: "SIGNED_SYNTHETIC_SHADOW",
+    formal_sink_allowed: false,
+    temporal_evidence_allocation_allowed: false,
+    real_case_shadow_allowed: false,
+    room_phase: "ASSESSING",
+    pending_state: "AGENT_RUNNING",
+    history_mode: false,
+    assessment_counts: {
+      manifest_item_count: count,
+      completed_count: 0,
+      needs_review_count: 0,
+      failed_count: 0,
+      pending_count: count,
+    },
+    recovery: { state: "NONE" },
+    ...overrides,
+  };
+}
+
 const initialEvidenceMessages = [
   {
     id: "EVIDENCE_OPENING",
@@ -286,6 +310,7 @@ describe("EvidenceRoomView", () => {
     });
     evidenceApi.catalog.mockResolvedValue(catalog);
     evidenceApi.completion.mockResolvedValue(initialCompletion);
+    evidenceApi.processProjection.mockResolvedValue(null);
     evidenceApi.upload.mockResolvedValue({});
     evidenceApi.submitBatch.mockResolvedValue({
       batch_id: "EVIDENCE_BATCH_1",
@@ -335,6 +360,7 @@ describe("EvidenceRoomView", () => {
       (button) => button.attributes("disabled") !== undefined,
     )).toBe(true);
     expect(roomApi.ensureOpening).not.toHaveBeenCalled();
+    expect(roomApi.latestTurnMemory).not.toHaveBeenCalled();
     expect(evidenceApi.upload).not.toHaveBeenCalled();
     expect(completeAction).not.toHaveBeenCalled();
     expect(eventStreamer).not.toHaveBeenCalled();
@@ -441,6 +467,18 @@ describe("EvidenceRoomView", () => {
     expect(wrapper.text()).not.toContain("FACT_INTAKE_");
     expect(wrapper.text()).not.toContain("REQUIRES_HUMAN_REVIEW");
     expect(wrapper.text()).not.toContain("未被庭前冻结证据卷宗覆盖");
+  });
+
+  it("clears private intake facts on scope changes and blocks locked messages", () => {
+    expect(evidenceRoomSource).toMatch(
+      /async function postMessage\(command\)\s*\{\s*if \(historyMode\.value \|\| projectionWriteLocked\.value\) return;/s,
+    );
+    expect(evidenceRoomSource).toMatch(
+      /watch\(role,[\s\S]*?processProjection\.value = null;\s*intakeFactRows\.value = \[\];/s,
+    );
+    expect(evidenceRoomSource).toMatch(
+      /watch\(historyMode,[\s\S]*?resetEvidenceUploadDraft\(\);\s*intakeFactRows\.value = \[\];/s,
+    );
   });
 
   it("encodes a fixed four-card board with horizontal evidence rails", () => {
@@ -2317,6 +2355,67 @@ describe("EvidenceRoomView", () => {
     expect(wrapper.find("[data-evidence-upload-modal]").exists()).toBe(false);
     expect(input.element.value).toBe("");
     expect(evidenceApi.upload).not.toHaveBeenCalled();
+  });
+
+  it.each([1, 8, 100])(
+    "renders a closed signed-synthetic %i-card projection without expanding public submission",
+    async (count) => {
+      const { wrapper } = await mountView({
+        initialCatalog: stressCatalog("USER", count),
+        initialProcessProjection: signedSyntheticProjection(count),
+      });
+
+      const projection = wrapper.get("[data-evidence-process-projection]");
+      expect(projection.attributes("data-projection-mode")).toBe("SIGNED_SYNTHETIC_SHADOW");
+      expect(projection.attributes("data-projection-count")).toBe(String(count));
+      expect(projection.get("[data-evidence-synthetic-count]").text()).toContain(`${count} 项合成证据`);
+      expect(projection.text()).toContain("不会改变公开举证上限");
+      expect(wrapper.findAll("[data-evidence-card]").length).toBeGreaterThan(0);
+      expect(evidenceApi.submitBatch).not.toHaveBeenCalled();
+    },
+  );
+
+  it("keeps disabled graph execution visibly non-public and never renders a synthetic count", async () => {
+    const { wrapper } = await mountView({
+      initialProcessProjection: {
+        graph_runtime_mode: "DISABLED",
+        writer_mode: "LEGACY",
+        formal_sink_allowed: false,
+        temporal_evidence_allocation_allowed: false,
+        real_case_shadow_allowed: false,
+        recovery: { state: "NONE" },
+      },
+    });
+
+    const projection = wrapper.get("[data-evidence-process-projection]");
+    expect(projection.attributes("data-projection-mode")).toBe("DISABLED");
+    expect(projection.text()).toContain("不会创建图运行");
+    expect(projection.find("[data-evidence-synthetic-count]").exists()).toBe(false);
+    expect(wrapper.get("[data-open-evidence-upload]").element.disabled).toBe(false);
+  });
+
+  it("fails closed for recovery and history projections without rendering private authority references", async () => {
+    const { wrapper } = await mountView({
+      initialProcessProjection: signedSyntheticProjection(8, {
+        history_mode: true,
+        recovery: {
+          state: "RESUMABLE",
+          checkpoint_ref: "CHECKPOINT_PRIVATE_REFERENCE",
+          checkpoint_hash: "a".repeat(64),
+        },
+      }),
+    });
+
+    const projection = wrapper.get("[data-evidence-process-projection]");
+    expect(projection.attributes("aria-live")).toBe("polite");
+    expect(projection.get("[data-evidence-recovery-status]").text()).toContain("RESUMABLE");
+    expect(wrapper.text()).not.toContain("CHECKPOINT_PRIVATE_REFERENCE");
+    expect(wrapper.text()).not.toContain("a".repeat(64));
+    expect(wrapper.get("[data-open-evidence-upload]").element.disabled).toBe(true);
+    expect(wrapper.get("[data-complete-evidence]").element.disabled).toBe(true);
+    expect(wrapper.findAll("[data-delete-pending-evidence]").every(
+      (button) => button.element.disabled,
+    )).toBe(true);
   });
 
   it("derives the declaration consequence from initiatorRole instead of a fixed user role", async () => {

@@ -41,6 +41,7 @@ import {
 const props = defineProps({
   initialCatalog: { type: Object, default: null },
   initialCompletion: { type: Object, default: null },
+  initialProcessProjection: { type: Object, default: null },
   initialMessages: { type: Array, default: null },
   viewerRole: { type: String, default: "" },
   deadlineAt: { type: String, default: "" },
@@ -58,6 +59,7 @@ const route = useRoute();
 const router = useRouter();
 const catalog = ref(props.initialCatalog);
 const completion = ref(props.initialCompletion);
+const processProjection = ref(props.initialProcessProjection);
 const uploading = ref(false);
 const submittingBatch = ref(false);
 const completing = ref(false);
@@ -105,6 +107,82 @@ const caseId = computed(
   () => catalog.value?.case_id || route.params.caseId,
 );
 const historyMode = computed(() => route.query.view === "history");
+const projectionHistoryMode = computed(() =>
+  Boolean(processProjection.value?.history_mode ?? processProjection.value?.historyMode),
+);
+const projectionReadOnly = computed(() =>
+  projectionHistoryMode.value ||
+  String(
+    processProjection.value?.room_phase || processProjection.value?.roomPhase || "",
+  ).toUpperCase() === "COMPLETED",
+);
+const projectionState = computed(() =>
+  String(
+    processProjection.value?.projection_state || processProjection.value?.projectionState || "",
+  ).toUpperCase(),
+);
+const projectionPendingState = computed(() =>
+  String(
+    processProjection.value?.pending_state || processProjection.value?.pendingState || "NONE",
+  ).toUpperCase(),
+);
+const projectionRecoveryState = computed(() =>
+  String(
+    processProjection.value?.recovery?.state || "NONE",
+  ).toUpperCase(),
+);
+const projectionRuntimeMode = computed(() =>
+  String(
+    processProjection.value?.graph_runtime_mode || processProjection.value?.graphRuntimeMode || "",
+  ).toUpperCase(),
+);
+const projectionManifestItemCount = computed(() => {
+  const count = Number(
+    processProjection.value?.assessment_counts?.manifest_item_count ??
+      processProjection.value?.assessmentCounts?.manifestItemCount,
+  );
+  return Number.isInteger(count) && count >= 0 && count <= 100 ? count : null;
+});
+const signedSyntheticProjection = computed(() =>
+  projectionRuntimeMode.value === "SIGNED_SYNTHETIC_SHADOW" &&
+  String(
+    processProjection.value?.writer_mode || processProjection.value?.writerMode || "",
+  ).toUpperCase() === "SHADOW" &&
+  processProjection.value?.formal_sink_allowed === false &&
+  processProjection.value?.temporal_evidence_allocation_allowed === false &&
+  processProjection.value?.real_case_shadow_allowed === false &&
+  projectionManifestItemCount.value !== null,
+);
+const projectionDisplay = computed(() => {
+  if (!processProjection.value) return null;
+  if (signedSyntheticProjection.value) {
+    return {
+      kind: "SIGNED_SYNTHETIC_SHADOW",
+      count: projectionManifestItemCount.value,
+      label: "签名合成核验",
+      detail: "仅用于封闭合成验证，不会改变公开举证上限或写入正式裁决。",
+    };
+  }
+  if (projectionRuntimeMode.value === "DISABLED") {
+    return {
+      kind: "DISABLED",
+      count: null,
+      label: "图执行已禁用",
+      detail: "当前沿用既有举证流程，不会创建图运行或扩大公开举证能力。",
+    };
+  }
+  return {
+    kind: "UNAVAILABLE",
+    count: null,
+    label: "流程投影不可用",
+    detail: "页面不会依据未验证的流程投影推断状态或开放额外操作。",
+  };
+});
+const projectionWriteLocked = computed(() =>
+  projectionReadOnly.value ||
+  projectionState.value === "FAILED" ||
+  projectionRecoveryState.value !== "NONE",
+);
 const role = computed(() => props.viewerRole || actor.role);
 const demoActorIds = {
   USER: "user-local",
@@ -214,6 +292,7 @@ const evidenceConversationEmptyText = computed(() => {
 });
 const evidenceComposerDisabled = computed(() =>
   historyMode.value ||
+  projectionWriteLocked.value ||
   !modelConnected.value ||
   !evidenceCatalogReady.value ||
   (shouldEnsureOpening.value && !initialEvidencePlanReady.value) ||
@@ -229,6 +308,13 @@ const evidenceWorkStatus = computed(() => {
     return "STREAMING";
   }
   if (boardStreaming.value) return "BOARD_STREAMING";
+  if (["RESUMABLE", "RECONCILING"].includes(projectionRecoveryState.value)) {
+    return "RECOVERING";
+  }
+  if (projectionRecoveryState.value === "FAILED") return "ERROR";
+  if (projectionReadOnly.value) return "HANDOFF";
+  if (projectionState.value === "PROCESSING") return "PROJECTION_PROCESSING";
+  if (projectionPendingState.value === "AGENT_RUNNING") return "ANALYSING";
   if (!modelConnected.value) {
     return modelConnectionState.value === "checking"
       ? "MODEL_CONNECTING"
@@ -257,6 +343,18 @@ const evidenceWorkStatusCopy = computed(() => {
       eyebrow: "MODEL STATUS",
       title: "正在检测数字人连接",
       description: "正在确认多模态模型是否可用，连接成功后将生成首轮核验计划。",
+      tone: "working",
+    },
+    PROJECTION_PROCESSING: {
+      eyebrow: "PROCESS PROJECTION",
+      title: "庭审流程状态正在同步",
+      description: "正在等待服务端确认当前举证阶段，操作将在状态可用后恢复。",
+      tone: "working",
+    },
+    RECOVERING: {
+      eyebrow: "RECOVERY IN PROGRESS",
+      title: "举证流程正在恢复",
+      description: "服务端正在从已确认的检查点恢复，当前页面不会推断或推进流程状态。",
       tone: "working",
     },
     MODEL_DISCONNECTED: {
@@ -396,6 +494,7 @@ const evidenceUploadGuidance = computed(() => {
 const canCompleteEvidenceLocally = computed(
   () =>
     evidenceCatalogReady.value &&
+    !projectionWriteLocked.value &&
     (!currentActorIsInitiator.value || submittedItems.value.length > 0),
 );
 const effectiveDeadline = computed(
@@ -1011,6 +1110,7 @@ function intakeFactRowsFromTurnMemory(turnMemory) {
 }
 
 async function loadIntakeFactRows(actorSnapshot, caseSnapshot) {
+  if (historyMode.value) return [];
   for (const roomType of ["INTAKE", "EVIDENCE"]) {
     try {
       const turnMemory = await roomApi.latestTurnMemory(
@@ -1043,7 +1143,14 @@ async function load() {
       if (!isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) return;
       completion.value = nextCompletion;
     }
-    if (!intakeFactRows.value.length) {
+    if (processProjection.value === null) {
+      const nextProjection = await evidenceApi.processProjection(actorSnapshot, caseSnapshot, {
+        historyMode: historyMode.value,
+      });
+      if (!isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) return;
+      processProjection.value = nextProjection;
+    }
+    if (!historyMode.value && !intakeFactRows.value.length) {
       const nextFactRows = await loadIntakeFactRows(actorSnapshot, caseSnapshot);
       if (!isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) return;
       intakeFactRows.value = nextFactRows;
@@ -1302,9 +1409,12 @@ async function refreshWorkspace(options = {}) {
   if (nextMessages === null) {
     return false;
   }
-  let [nextCatalog, nextCompletion] = await Promise.all([
+  let [nextCatalog, nextCompletion, nextProjection] = await Promise.all([
     loadCatalogOrEmpty(actorSnapshot, caseSnapshot),
     evidenceApi.completion(actorSnapshot, caseSnapshot),
+    evidenceApi.processProjection(actorSnapshot, caseSnapshot, {
+      historyMode: historyMode.value,
+    }),
   ]);
   if (!isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) {
     return false;
@@ -1316,6 +1426,7 @@ async function refreshWorkspace(options = {}) {
     }
   }
   completion.value = nextCompletion;
+  processProjection.value = nextProjection;
   messages.value = nextMessages;
   if (options.streamBoard) {
     await streamCatalogToBoard(nextCatalog, {
@@ -1486,7 +1597,7 @@ async function refreshUntilAgentReply(afterSequenceNo, context = {}) {
 
 // 业务位置：【前端证据室】postMessage：执行 房间消息和对话记录 对应的业务动作，并将结果交给 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 async function postMessage(command) {
-  if (historyMode.value) return;
+  if (historyMode.value || projectionWriteLocked.value) return;
   const generation = workspaceGeneration;
   const actorSnapshot = { ...effectiveActor.value };
   const caseSnapshot = caseId.value;
@@ -1616,6 +1727,7 @@ function cancelEvidenceUpload() {
 function openEvidenceUploadDialog(event) {
   if (
     historyMode.value ||
+    projectionWriteLocked.value ||
     !evidenceCatalogReady.value ||
     uploading.value ||
     boardStreaming.value ||
@@ -1628,7 +1740,7 @@ function openEvidenceUploadDialog(event) {
 
 // 业务位置：【前端证据室】uploadFiles：在声明表单内选择单份材料，确认前不向后端上传。
 function uploadFiles(event) {
-  if (historyMode.value) {
+  if (historyMode.value || projectionWriteLocked.value) {
     if (event?.target) event.target.value = "";
     return;
   }
@@ -1648,7 +1760,7 @@ function uploadFiles(event) {
 
 // 业务位置：【前端证据室】confirmEvidenceUpload：真实性与相关性声明确认后，才将单份证据及其主张的证明目标提交后端。
 async function confirmEvidenceUpload() {
-  if (historyMode.value || uploading.value || !pendingUploadFile.value) return;
+  if (historyMode.value || projectionWriteLocked.value || uploading.value || !pendingUploadFile.value) return;
   const claimedFact = uploadDeclarationForm.claimedFact.trim();
   if (!claimedFact) {
     uploadDeclarationError.value = "请填写这份证据能够证明的具体内容。";
@@ -1699,7 +1811,7 @@ async function confirmEvidenceUpload() {
 
 // 业务位置：【前端证据室】submitPendingBatch：执行 当前阶段业务数据 对应的业务动作，并将结果交给 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 async function submitPendingBatch() {
-  if (historyMode.value || !pendingItems.value.length || submittingBatch.value) return;
+  if (historyMode.value || projectionWriteLocked.value || !pendingItems.value.length || submittingBatch.value) return;
   const generation = workspaceGeneration;
   const actorSnapshot = { ...effectiveActor.value };
   const caseSnapshot = caseId.value;
@@ -1753,7 +1865,7 @@ async function submitPendingBatch() {
 
 // 业务位置：【前端证据室】deletePendingEvidence：围绕 当前可见证据和附件 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 async function deletePendingEvidence(item) {
-  if (historyMode.value) return;
+  if (historyMode.value || projectionWriteLocked.value) return;
   const id = evidenceId(item);
   if (!id || deletingEvidenceIds.value.has(id)) return;
   deletingEvidenceIds.value = new Set([...deletingEvidenceIds.value, id]);
@@ -1773,7 +1885,7 @@ async function deletePendingEvidence(item) {
 
 // 业务位置：【前端证据室】completeEvidence：执行 当前可见证据和附件 对应的业务动作，并将结果交给 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 async function completeEvidence(event) {
-  if (historyMode.value) return;
+  if (historyMode.value || projectionWriteLocked.value) return;
   if (!evidenceCatalogReady.value) {
     evidenceGateError.value = "证据目录仍在同步，请稍后重试。";
     openModal("gate", event);
@@ -1839,7 +1951,7 @@ function dismissStreamError() {
 
 // 业务位置：【前端证据室】enterHearing：切换与 庭审轮次和法官发言 对应的页面或房间状态，使用户操作匹配当前案件阶段。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
 function enterHearing() {
-  if (historyMode.value) return;
+  if (historyMode.value || projectionWriteLocked.value) return;
   return router.push(`/disputes/${caseId.value}/hearing`);
 }
 
@@ -1866,6 +1978,8 @@ watch(role, async (nextRole, previousRole) => {
   submittingBatch.value = false;
   catalog.value = null;
   completion.value = null;
+  processProjection.value = null;
+  intakeFactRows.value = [];
   selectedEvidence.value = null;
   selectedEvidenceMode.value = "evidence";
   expandedEvidenceGroup.value = null;
@@ -1906,6 +2020,7 @@ watch(historyMode, (historical) => {
   workspaceGeneration += 1;
   uploading.value = false;
   resetEvidenceUploadDraft();
+  intakeFactRows.value = [];
   uploadDeclarationOpen.value = false;
   resetModalController();
   submittingBatch.value = false;
@@ -2005,6 +2120,25 @@ onBeforeUnmount(() => {
             <span class="evidence-kicker">EVIDENCE BOARD</span>
             <h2>已提交证据</h2>
             <p>点击任意证据卡片查看核验结果与人工复核信息。</p>
+            <aside
+              v-if="projectionDisplay"
+              class="evidence-process-projection"
+              :data-projection-mode="projectionDisplay.kind"
+              :data-projection-count="projectionDisplay.count ?? undefined"
+              :data-recovery-state="projectionRecoveryState"
+              data-evidence-process-projection
+              aria-live="polite"
+              aria-atomic="true"
+            >
+              <span class="evidence-process-projection__label">{{ projectionDisplay.label }}</span>
+              <strong v-if="projectionDisplay.count !== null" data-evidence-synthetic-count>
+                {{ projectionDisplay.count }} 项合成证据
+              </strong>
+              <p>{{ projectionDisplay.detail }}</p>
+              <small v-if="projectionRecoveryState !== 'NONE'" data-evidence-recovery-status>
+                恢复状态：{{ projectionRecoveryState }}。页面不会自动重试或推进流程。
+              </small>
+            </aside>
           </div>
           <span
             class="evidence-board__badge"
@@ -2030,10 +2164,10 @@ onBeforeUnmount(() => {
             <button
               type="button"
               class="evidence-uploader__button"
-              :class="{ 'evidence-uploader__button--disabled': historyMode || !evidenceCatalogReady }"
-              :aria-disabled="historyMode || !evidenceCatalogReady"
+              :class="{ 'evidence-uploader__button--disabled': historyMode || projectionWriteLocked || !evidenceCatalogReady }"
+              :aria-disabled="historyMode || projectionWriteLocked || !evidenceCatalogReady"
               data-open-evidence-upload
-              :disabled="historyMode || !evidenceCatalogReady || uploading || boardStreaming || evidenceStreamingRuns.length > 0"
+              :disabled="historyMode || projectionWriteLocked || !evidenceCatalogReady || uploading || boardStreaming || evidenceStreamingRuns.length > 0"
               @click="openEvidenceUploadDialog"
             >
               {{ uploading ? "核验中…" : "选择材料" }}
@@ -2065,7 +2199,7 @@ onBeforeUnmount(() => {
                   type="button"
                   class="evidence-card__remove"
                   data-delete-pending-evidence
-                  :disabled="historyMode || boardStreaming || isDeletingEvidence(item)"
+                  :disabled="historyMode || projectionWriteLocked || boardStreaming || isDeletingEvidence(item)"
                   @click.stop="deletePendingEvidence(item)"
                 >×</button>
                 <span class="evidence-card__preview">
@@ -2099,7 +2233,7 @@ onBeforeUnmount(() => {
               <button
                 type="button"
                 data-submit-evidence-batch
-                :disabled="historyMode || submittingBatch || boardStreaming || evidenceStreamingRuns.length > 0"
+                :disabled="historyMode || projectionWriteLocked || submittingBatch || boardStreaming || evidenceStreamingRuns.length > 0"
                 @click="submitPendingBatch"
               >
                 {{ submittingBatch ? "提交中…" : "提交本批给书记官" }}
@@ -2219,7 +2353,7 @@ onBeforeUnmount(() => {
             v-if="completion?.sealed"
             type="button"
             data-enter-hearing
-            :disabled="historyMode"
+            :disabled="historyMode || projectionWriteLocked"
             @click="enterHearing"
           >
             进入小法庭
@@ -2236,7 +2370,7 @@ onBeforeUnmount(() => {
             v-else
             type="button"
             data-complete-evidence
-            :disabled="historyMode || !evidenceCatalogReady || completing || boardStreaming || evidenceStreamingRuns.length > 0"
+            :disabled="historyMode || projectionWriteLocked || !evidenceCatalogReady || completing || boardStreaming || evidenceStreamingRuns.length > 0"
             @click="completeEvidence"
           >
             {{ completing ? "正在封入证据袋…" : "我方举证完成" }}
@@ -2909,6 +3043,43 @@ onBeforeUnmount(() => {
   background: linear-gradient(135deg, #fff9df, #edfbf4 52%, #edf6ff);
   border: 1px solid #dce9e4;
   border-radius: 18px;
+}
+
+.evidence-process-projection {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 3px 8px;
+  margin-top: 8px;
+  padding: 7px 9px;
+  border: 1px solid #cbd7c5;
+  border-radius: 6px;
+  background: #f4f7f1;
+  color: #405141;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.evidence-process-projection__label {
+  color: #516b51;
+  font-weight: 700;
+}
+
+.evidence-process-projection strong {
+  min-width: 0;
+  color: #243b2a;
+  overflow-wrap: anywhere;
+}
+
+.evidence-process-projection p,
+.evidence-process-projection small {
+  grid-column: 1 / -1;
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.evidence-process-projection small {
+  color: #7d4d2d;
 }
 
 .evidence-uploader > div {

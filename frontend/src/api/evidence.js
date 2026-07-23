@@ -13,6 +13,11 @@ export const evidenceApi = {
     apiRequest(`/disputes/${caseId}/evidence`, actor),
   completion: (actor, caseId) =>
     apiRequest(`/disputes/${caseId}/evidence/completion`, actor),
+  processProjection: (actor, caseId, { historyMode = false } = {}) =>
+    apiRequest(
+      `/disputes/${caseId}/evidence/process-projection?view=${historyMode ? "history" : "active"}`,
+      actor,
+    ),
   upload: (actor, caseId, {
     file,
     evidenceType,

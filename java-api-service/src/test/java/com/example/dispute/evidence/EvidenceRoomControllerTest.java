@@ -13,6 +13,7 @@ import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.example.dispute.common.exception.GlobalExceptionHandler;
@@ -35,12 +36,16 @@ import com.example.dispute.evidence.application.EvidenceDossierQueryService;
 import com.example.dispute.evidence.application.EvidenceVerificationService;
 import com.example.dispute.evidence.application.RoleScopedEvidenceView;
 import com.example.dispute.evidence.application.EvidenceSubmissionService;
+import com.example.dispute.workflow.projection.evidence.EvidenceProcessProjectionQuery;
+import com.example.dispute.workflow.projection.evidence.EvidenceProcessProjectionView;
 import java.time.OffsetDateTime;
 import java.util.List;
+import java.util.Optional;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
 import org.springframework.context.annotation.Import;
+import org.springframework.http.HttpHeaders;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
@@ -70,6 +75,68 @@ class EvidenceRoomControllerTest {
     @MockitoBean private EvidenceCompletionService completionService;
     @MockitoBean private EvidenceDossierQueryService dossierQueryService;
     @MockitoBean private EvidenceSubmissionService submissionService;
+    @MockitoBean private EvidenceProcessProjectionQuery processProjectionQuery;
+
+    @Test
+    void exposesOnlyTheActorScopedProcessProjectionWithPrivateNoStoreHeaders() throws Exception {
+        EvidenceProcessProjectionView projection = new EvidenceProcessProjectionView(
+                        EvidenceProcessProjectionView.SCHEMA_VERSION,
+                        "0".repeat(64),
+                        EvidenceProcessProjectionView.UNAVAILABLE,
+                        "TENANT_legacy",
+                        "CASE_evidence",
+                        null,
+                        0,
+                        0,
+                        "LEGACY",
+                        "DISABLED",
+                        false,
+                        false,
+                        false,
+                        "user-local",
+                        "USER",
+                        "1".repeat(64),
+                        "USER",
+                        "OPEN",
+                        null,
+                        "NONE",
+                        null,
+                        OffsetDateTime.parse("2026-07-23T00:00:00Z"),
+                        false,
+                        null,
+                        EvidenceProcessProjectionView.PartyCompletion.pending(),
+                        EvidenceProcessProjectionView.AssessmentCounts.empty(),
+                        null,
+                        false,
+                        0,
+                        null,
+                        null,
+                        EvidenceProcessProjectionView.Recovery.none(),
+                        EvidenceProcessProjectionView.VersionPins.legacy(),
+                        0,
+                        0,
+                        OffsetDateTime.parse("2026-07-23T00:00:00Z"))
+                .withComputedHash();
+        when(processProjectionQuery.read(eq("CASE_evidence"), any(), eq(false)))
+                .thenReturn(Optional.of(projection));
+
+        mockMvc.perform(
+                        get("/api/disputes/CASE_evidence/evidence/process-projection")
+                                .header(HeaderAuthenticationFilter.USER_ID_HEADER, "user-local")
+                                .header(HeaderAuthenticationFilter.ROLE_HEADER, "USER"))
+                .andExpect(status().isOk())
+                .andExpect(header().string(HttpHeaders.CACHE_CONTROL, org.hamcrest.Matchers.containsString("no-store")))
+                .andExpect(header().string(HttpHeaders.CACHE_CONTROL, org.hamcrest.Matchers.containsString("private")))
+                .andExpect(header().string(HttpHeaders.PRAGMA, "no-cache"))
+                .andExpect(jsonPath("$.data.schema_version")
+                        .value("evidence-process-projection.v1"))
+                .andExpect(jsonPath("$.data.viewer_actor_id").value("user-local"))
+                .andExpect(jsonPath("$.data.formal_sink_allowed").value(false))
+                .andExpect(jsonPath("$.data.temporal_evidence_allocation_allowed").value(false));
+
+        verify(intakeProgressService).assertEvidenceReadAccess(eq("CASE_evidence"), any());
+        verify(processProjectionQuery).read(eq("CASE_evidence"), any(), eq(false));
+    }
 
     // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceRoomControllerTest.exposesTheRoleScopedCatalogOnTheFinalUnversionedApi()」。
     // 具体功能：「EvidenceRoomControllerTest.exposesTheRoleScopedCatalogOnTheFinalUnversionedApi()」：复现“核对完整业务行为（场景方法「exposesTheRoleScopedCatalogOnTheFinalUnversionedApi」）”场景：驱动 「catalogService.catalog」，再用 测试框架断言 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_evidence」、「EVIDENCE_1」、「LOGISTICS_PROOF」、「MERCHANT」。
