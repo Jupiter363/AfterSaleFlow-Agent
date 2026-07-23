@@ -29,6 +29,7 @@ import com.example.dispute.config.DisputeProperties;
 import com.example.dispute.domain.model.RiskLevel;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
+import com.example.dispute.hearing.application.HearingImportedCaseInitializer;
 import com.example.dispute.room.application.IntakeAgentTurnService;
 import com.example.dispute.room.application.IntakeLobbySeed;
 import com.example.dispute.room.application.ParticipantService;
@@ -78,6 +79,7 @@ class SimulatedExternalImportTemplateCycleTest {
     @Mock private IntakeAgentTurnService intakeAgentTurnService;
     @Mock private SimulatedImportTemplateCursorRepository cursorRepository;
     @Mock private RoomEpochAllocator roomEpochAllocator;
+    @Mock private HearingImportedCaseInitializer hearingInitializer;
 
     private final SimulatedExternalDisputeTemplateCatalog catalog =
             new SimulatedExternalDisputeTemplateCatalog();
@@ -394,6 +396,7 @@ class SimulatedExternalImportTemplateCycleTest {
                 catalog,
                 postCommit,
                 roomEpochAllocator,
+                hearingInitializer,
                 new DisputeProperties(
                         Duration.ofHours(2),
                         Duration.ofHours(3),

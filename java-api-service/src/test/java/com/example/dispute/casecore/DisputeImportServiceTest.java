@@ -36,6 +36,7 @@ import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.RiskLevel;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
+import com.example.dispute.hearing.application.HearingImportedCaseInitializer;
 import com.example.dispute.room.domain.PhaseClockType;
 import com.example.dispute.room.domain.RoomType;
 import com.example.dispute.room.domain.RoomStatus;
@@ -90,6 +91,7 @@ class DisputeImportServiceTest {
     @Mock private IntakeAgentTurnService intakeAgentTurnService;
     @Mock private SimulatedImportTemplateCursorRepository simulatedImportCursorRepository;
     @Mock private RoomEpochAllocator roomEpochAllocator;
+    @Mock private HearingImportedCaseInitializer hearingInitializer;
 
     private DisputeImportService service;
     private ExternalCaseImportTransactionService transactionService;
@@ -112,6 +114,7 @@ class DisputeImportServiceTest {
                         new SimulatedExternalDisputeTemplateCatalog(),
                         new PostCommitSideEffectExecutor(Runnable::run),
                         roomEpochAllocator,
+                        hearingInitializer,
                         new DisputeProperties(
                                 Duration.ofHours(2),
                                 Duration.ofHours(3),
@@ -381,6 +384,33 @@ class DisputeImportServiceTest {
     }
 
     @Test
+    void importedHearingStateInitializesTheHearingFlowInsideTheImportCommand() {
+        when(repository.findBySourceSystemAndExternalCaseRef("OMS", "EXT-HEARING-NEW"))
+                .thenReturn(Optional.empty());
+        when(repository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+
+        var imported =
+                service.importDispute(
+                        command(
+                                "EXT-HEARING-NEW",
+                                CaseStatus.HEARING_OPEN,
+                                "HEARING",
+                                OffsetDateTime.parse("2026-07-03T03:00:00Z")),
+                        new AuthenticatedActor("external-adapter", ActorRole.SYSTEM),
+                        "import-hearing-new");
+
+        assertThat(imported.currentRoom()).isEqualTo("HEARING");
+        verify(hearingInitializer).initialize(any(FulfillmentCaseEntity.class));
+        verify(intakeAgentTurnService, never())
+                .startInitialTurn(
+                        any(String.class),
+                        any(AuthenticatedActor.class),
+                        any(IntakeLobbySeed.class),
+                        any(String.class),
+                        any(String.class));
+    }
+
+    @Test
     void terminalImportRecordsAClosedEpochWithoutStartingAClockOrAgent() {
         when(repository.findBySourceSystemAndExternalCaseRef("OMS", "EXT-TERMINAL"))
                 .thenReturn(Optional.empty());
@@ -599,6 +629,60 @@ class DisputeImportServiceTest {
                         "CASE_EXISTING_STATE",
                         RoomType.EVIDENCE);
         verify(clockRepository, never()).save(any());
+    }
+
+    @Test
+    void restoredHearingStateReplaysTheIdempotentHearingInitialization() {
+        FulfillmentCaseEntity existing =
+                hearingCase(
+                        "CASE_HEARING_RESTORE",
+                        "restore-hearing",
+                        "EXT-HEARING-RESTORE");
+        when(repository.findBySourceSystemAndExternalCaseRef("OMS", "EXT-HEARING-RESTORE"))
+                .thenReturn(Optional.of(existing));
+        when(repository.findByIdForUpdate(existing.getId())).thenReturn(Optional.of(existing));
+
+        var restored =
+                service.importDispute(
+                        command("EXT-HEARING-RESTORE"),
+                        new AuthenticatedActor("external-adapter", ActorRole.SYSTEM),
+                        "restore-hearing-request");
+
+        assertThat(restored.id()).isEqualTo(existing.getId());
+        verify(hearingInitializer).initialize(existing);
+        verify(roomRepository)
+                .findByCaseIdAndRoomType(existing.getId(), RoomType.HEARING);
+    }
+
+    @Test
+    void demoReplayOfAHearingCaseInitializesHearingWithoutConsumingAnotherTemplate() {
+        FulfillmentCaseEntity existing =
+                hearingCase(
+                        "CASE_HEARING_DEMO",
+                        "demo-hearing-replay",
+                        "EXT-HEARING-DEMO");
+        when(repository.findByCreationIdempotencyKey("demo-hearing-replay"))
+                .thenReturn(Optional.of(existing));
+        when(repository.findByIdForUpdate(existing.getId())).thenReturn(Optional.of(existing));
+
+        var result =
+                service.simulateExternalImport(
+                        new SimulateExternalImportCommand(
+                                1,
+                                "电商售后争议",
+                                RiskLevel.MEDIUM,
+                                ActorRole.USER,
+                                "user-local",
+                                "merchant-local"),
+                        new AuthenticatedActor("external-dispute-adapter", ActorRole.SYSTEM),
+                        "demo-hearing-replay",
+                        "demo-hearing-trace",
+                        "demo-hearing-request");
+
+        assertThat(result.items()).extracting(ImportedDisputeView::id)
+                .containsExactly(existing.getId());
+        verify(hearingInitializer).initialize(existing);
+        verify(simulatedImportCursorRepository, never()).findByIdForUpdate(any(String.class));
     }
 
     // 所属模块：【案件核心与导入 / 自动化测试层】「DisputeImportServiceTest.rejectsReusingAnImportRequestKeyForAnotherExternalCase()」。
@@ -1000,6 +1084,30 @@ class DisputeImportServiceTest {
                                         "user-local"))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("currentActorId must be user-local");
+    }
+
+    private static FulfillmentCaseEntity hearingCase(
+            String caseId,
+            String creationIdempotencyKey,
+            String externalReference) {
+        return FulfillmentCaseEntity.imported(
+                caseId,
+                "ORDER-HEARING",
+                "AFTER-HEARING",
+                "LOG-HEARING",
+                "user-local",
+                "merchant-local",
+                creationIdempotencyKey,
+                "SIGNED_NOT_RECEIVED",
+                "Imported hearing dispute",
+                "The imported case is already in hearing.",
+                RiskLevel.HIGH,
+                CaseStatus.HEARING_OPEN,
+                "HEARING",
+                OffsetDateTime.parse("2026-07-03T03:00:00Z"),
+                "OMS",
+                externalReference,
+                "external-adapter");
     }
 
     // 所属模块：【案件核心与导入 / 自动化测试层】「DisputeImportServiceTest.command(String)」。

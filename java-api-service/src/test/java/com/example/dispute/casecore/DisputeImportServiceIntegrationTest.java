@@ -28,9 +28,14 @@ import com.example.dispute.common.transaction.PostCommitSideEffectExecutor;
 import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.RiskLevel;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
+import com.example.dispute.hearing.application.HearingFlowRuntimeService;
+import com.example.dispute.hearing.application.HearingImportedCaseInitializer;
+import com.example.dispute.infrastructure.persistence.repository.EvidenceDossierRepository;
 import com.example.dispute.room.application.IntakeAgentTurnService;
 import com.example.dispute.room.application.IntakeLobbySeed;
 import com.example.dispute.room.application.ParticipantService;
+import com.example.dispute.room.domain.RoomType;
+import com.example.dispute.room.infrastructure.persistence.repository.CaseIntakeDossierRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseParticipantRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CasePhaseClockRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
@@ -40,6 +45,7 @@ import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPe
 import com.example.dispute.workflow.infrastructure.persistence.repository.CaseProcessProjectionRepository;
 import com.example.dispute.workflow.infrastructure.persistence.repository.CaseRoomEpochRepository;
 import com.example.dispute.workflow.room.RoomEpochAllocatorTestConfiguration;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -92,6 +98,7 @@ import org.testcontainers.utility.DockerImageName;
 @Import({
     DisputeImportService.class,
     ExternalCaseImportTransactionService.class,
+    HearingImportedCaseInitializer.class,
     SingleInstanceImportGate.class,
     SimulatedExternalDisputeTemplateCatalog.class,
     ParticipantService.class,
@@ -146,7 +153,48 @@ class DisputeImportServiceIntegrationTest {
     @Autowired private PlatformTransactionManager transactionManager;
     @Autowired private CaseRoomEpochRepository roomEpochRepository;
     @Autowired private CaseProcessProjectionRepository processProjectionRepository;
+    @Autowired private CaseIntakeDossierRepository intakeDossierRepository;
+    @Autowired private EvidenceDossierRepository evidenceDossierRepository;
     @MockitoBean private IntakeAgentTurnService intakeAgentTurnService;
+    @MockitoBean private HearingFlowRuntimeService hearingFlowRuntimeService;
+
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void hearingImportAndReplayInitializeTheRuntimeInTheImportTransaction() {
+        AtomicBoolean runtimeObservedTransaction = new AtomicBoolean();
+        doAnswer(
+                        invocation -> {
+                            runtimeObservedTransaction.set(
+                                    TransactionSynchronizationManager.isActualTransactionActive());
+                            return null;
+                        })
+                .when(hearingFlowRuntimeService)
+                .startAfterEvidenceSealed(any(String.class));
+
+        ImportedDisputeView imported =
+                service.importDispute(
+                        hearingCommand("DEMO-DISPUTE-003"),
+                        systemActor(),
+                        "hearing-import-first");
+        ImportedDisputeView restored =
+                service.importDispute(
+                        hearingCommand("DEMO-DISPUTE-003"),
+                        systemActor(),
+                        "hearing-import-replay");
+
+        assertThat(restored.id()).isEqualTo(imported.id());
+        assertThat(runtimeObservedTransaction).isTrue();
+        assertThat(roomRepository.findAllByCaseId(imported.id()))
+                .singleElement()
+                .satisfies(room -> assertThat(room.getRoomType().name()).isEqualTo("HEARING"));
+        assertThat(intakeDossierRepository.findByCaseIdAndRoomType(imported.id(), RoomType.INTAKE))
+                .isPresent();
+        assertThat(evidenceDossierRepository.findTopByCaseIdOrderByDossierVersionDesc(imported.id()))
+                .get()
+                .satisfies(dossier -> assertThat(dossier.getDossierStatus()).isEqualTo("FROZEN"));
+        verify(hearingFlowRuntimeService, times(2))
+                .startAfterEvidenceSealed(imported.id());
+    }
 
     // 所属模块：【案件核心与导入 / 自动化测试层】「DisputeImportServiceIntegrationTest.facadeSuspendsCallerTransactionBeforeAcquiringTheImportGate()」。
     // 具体功能：「DisputeImportServiceIntegrationTest.facadeSuspendsCallerTransactionBeforeAcquiringTheImportGate()」：复现“核对完整业务行为（场景方法「facadeSuspendsCallerTransactionBeforeAcquiringTheImportGate」）”场景：驱动 「service.importDispute」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「EXT-CALLER-TRANSACTION」、「caller-transaction-import」。
@@ -509,6 +557,25 @@ class DisputeImportServiceIntegrationTest {
                 null);
     }
 
+    private static ImportDisputeCommand hearingCommand(String externalReference) {
+        return new ImportDisputeCommand(
+                "DEMO",
+                externalReference,
+                "ORDER-HEARING",
+                "AFTER-HEARING",
+                "LOG-HEARING",
+                "user-local",
+                "merchant-local",
+                "USER",
+                "SIGNED_NOT_RECEIVED",
+                "Imported hearing dispute",
+                "The imported case is already in hearing.",
+                RiskLevel.HIGH,
+                CaseStatus.HEARING_OPEN,
+                "HEARING",
+                java.time.OffsetDateTime.parse("2026-07-10T03:00:00Z"));
+    }
+
     // 所属模块：【案件核心与导入 / 自动化测试层】「DisputeImportServiceIntegrationTest.systemActor()」。
     // 具体功能：「DisputeImportServiceIntegrationTest.systemActor()」：作为测试辅助方法为“核对完整业务行为（场景方法「systemActor」）”组装或读取「AuthenticatedActor」 输入夹具，供本测试类的场景方法复用。
     // 上游调用：「DisputeImportServiceIntegrationTest.systemActor()」由本测试类中的 「DisputeImportServiceIntegrationTest.facadeSuspendsCallerTransactionBeforeAcquiringTheImportGate」、「DisputeImportServiceIntegrationTest.failedInitialTurnRollsBackTheImportAndRetryCreatesExactlyOneCase」、「DisputeImportServiceIntegrationTest.simulatedImportRollsBackTheCaseAndTemplateCursorWhenIntakeFails」、「DisputeImportServiceIntegrationTest.concurrentTransactionalSimulationsConsumeAdjacentTemplates」 调用。
@@ -542,6 +609,11 @@ class DisputeImportServiceIntegrationTest {
         @Bean
         PostCommitSideEffectExecutor postCommitSideEffectExecutor() {
             return new PostCommitSideEffectExecutor(Runnable::run);
+        }
+
+        @Bean
+        ObjectMapper objectMapper() {
+            return new ObjectMapper();
         }
     }
 

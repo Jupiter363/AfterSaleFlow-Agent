@@ -16,6 +16,7 @@ import com.example.dispute.config.DisputeProperties;
 import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
+import com.example.dispute.hearing.application.HearingImportedCaseInitializer;
 import com.example.dispute.room.application.IntakeAgentTurnService;
 import com.example.dispute.room.application.IntakeLobbySeed;
 import com.example.dispute.room.application.ParticipantService;
@@ -65,6 +66,7 @@ public class ExternalCaseImportTransactionService {
     private final SimulatedExternalDisputeTemplateCatalog simulatedImportTemplates;
     private final PostCommitSideEffectExecutor postCommit;
     private final RoomEpochAllocator roomEpochAllocator;
+    private final HearingImportedCaseInitializer hearingInitializer;
     private final DisputeProperties properties;
     private final Clock clock;
 
@@ -84,6 +86,7 @@ public class ExternalCaseImportTransactionService {
             SimulatedExternalDisputeTemplateCatalog simulatedImportTemplates,
             PostCommitSideEffectExecutor postCommit,
             RoomEpochAllocator roomEpochAllocator,
+            HearingImportedCaseInitializer hearingInitializer,
             DisputeProperties properties,
             Clock clock) {
         this.repository = repository;
@@ -95,6 +98,7 @@ public class ExternalCaseImportTransactionService {
         this.simulatedImportTemplates = simulatedImportTemplates;
         this.postCommit = postCommit;
         this.roomEpochAllocator = roomEpochAllocator;
+        this.hearingInitializer = hearingInitializer;
         this.properties = properties;
         this.clock = clock;
     }
@@ -211,6 +215,7 @@ public class ExternalCaseImportTransactionService {
                             participantService.ensureImportedParties(
                                     saved, actor, now);
                             recordRoomEpoch(saved, materializedRoom, now);
+                            initializeHearingIfNeeded(saved, materializedRoom);
                             startIntakeIfNeeded(saved, command, initiatorRole, traceId, requestId);
                             return view(saved);
                         });
@@ -238,7 +243,19 @@ public class ExternalCaseImportTransactionService {
                 actor,
                 now);
         recordRoomEpoch(locked, materializedRoom, now);
+        initializeHearingIfNeeded(locked, materializedRoom);
         return view(locked);
+    }
+
+    private void initializeHearingIfNeeded(
+            FulfillmentCaseEntity dispute,
+            MaterializedRoom materializedRoom) {
+        if (materializedRoom.room().getRoomType() != RoomType.HEARING
+                || (dispute.getCaseStatus() != CaseStatus.HEARING_OPEN
+                        && dispute.getCaseStatus() != CaseStatus.HEARING)) {
+            return;
+        }
+        hearingInitializer.initialize(dispute);
     }
 
     private FulfillmentCaseEntity lockExisting(String caseId) {
