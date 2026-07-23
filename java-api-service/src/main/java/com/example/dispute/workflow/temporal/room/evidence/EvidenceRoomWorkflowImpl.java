@@ -45,29 +45,27 @@ public final class EvidenceRoomWorkflowImpl implements EvidenceRoomWorkflow {
 
     while (roomPhase != EvidenceRoomPhase.COMPLETED) {
       drainInbox();
-      long now = Workflow.currentTimeMillis();
-      if (!warningSent && now >= timerPlan.warningAt().toEpochMilli()) {
-        warningSent = true;
-        warningSentAt = timerPlan.warningAt();
-        appendOperation(timerPlan.warningOperationKey());
-      }
-      if (now >= timerPlan.deadlineAt().toEpochMilli()) {
-        deadlineExpired = true;
-        appendOperation(timerPlan.expiryOperationKey());
-        complete("DEADLINE_EXPIRED");
-        break;
-      }
       if (bothPartiesCompleted()) {
         complete("BOTH_PARTIES_COMPLETED");
         break;
       }
 
-      long nextWakeAt =
-          warningSent
-              ? timerPlan.deadlineAt().toEpochMilli()
-              : timerPlan.warningAt().toEpochMilli();
-      Duration delay = Duration.ofMillis(Math.max(0, nextWakeAt - now));
-      Workflow.await(delay, () -> !inbox.isEmpty());
+      if (!warningSent) {
+        if (awaitInputBefore(timerPlan.warningAt())) {
+          continue;
+        }
+        warningSent = true;
+        warningSentAt = timerPlan.warningAt();
+        appendOperation(timerPlan.warningOperationKey());
+        continue;
+      }
+
+      if (awaitInputBefore(timerPlan.deadlineAt())) {
+        continue;
+      }
+      deadlineExpired = true;
+      appendOperation(timerPlan.expiryOperationKey());
+      complete("DEADLINE_EXPIRED");
     }
 
     Workflow.await(Workflow::isEveryHandlerFinished);
@@ -160,6 +158,14 @@ public final class EvidenceRoomWorkflowImpl implements EvidenceRoomWorkflow {
 
   private boolean bothPartiesCompleted() {
     return initiatorCompletion != null && respondentCompletion != null;
+  }
+
+  private boolean awaitInputBefore(Instant boundary) {
+    long remainingMillis = boundary.toEpochMilli() - Workflow.currentTimeMillis();
+    if (remainingMillis <= 0) {
+      return false;
+    }
+    return Workflow.await(Duration.ofMillis(remainingMillis), () -> !inbox.isEmpty());
   }
 
   private void appendOperation(String operationKey) {

@@ -1,5 +1,8 @@
 package com.example.dispute.workflow.room.evidence;
 
+import static io.temporal.api.enums.v1.EventType.EVENT_TYPE_TIMER_FIRED;
+import static io.temporal.api.enums.v1.EventType.EVENT_TYPE_TIMER_STARTED;
+import static io.temporal.api.enums.v1.EventType.EVENT_TYPE_WORKFLOW_EXECUTION_SIGNALED;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -11,6 +14,9 @@ import com.example.dispute.workflow.temporal.room.evidence.EvidenceRoomStart;
 import com.example.dispute.workflow.temporal.room.evidence.EvidenceRoomWorkflow;
 import com.example.dispute.workflow.temporal.room.evidence.EvidenceRoomWorkflowImpl;
 import com.example.dispute.workflow.temporal.room.evidence.EvidenceTimerPlan;
+import io.temporal.api.testservice.v1.LockTimeSkippingRequest;
+import io.temporal.api.testservice.v1.TestServiceGrpc;
+import io.temporal.api.testservice.v1.UnlockTimeSkippingRequest;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowOptions;
 import io.temporal.client.WorkflowStub;
@@ -32,11 +38,12 @@ class EvidenceRoomWorkflowTest {
 
   private TestWorkflowEnvironment environment;
   private WorkflowClient client;
+  private Worker worker;
 
   @BeforeEach
   void setUp() {
     environment = TestWorkflowEnvironment.newInstance();
-    Worker worker = environment.newWorker(TASK_QUEUE);
+    worker = environment.newWorker(TASK_QUEUE);
     worker.registerWorkflowImplementationTypes(EvidenceRoomWorkflowImpl.class);
     environment.start();
     client = environment.getWorkflowClient();
@@ -130,6 +137,67 @@ class EvidenceRoomWorkflowTest {
   }
 
   @Test
+  void completionSignalsRecordedBeforeWarningWinWhenHistoryIsDeliveredInOneWorkflowTask() {
+    String suffix = "same-task-warning";
+    String workflowId = workflowId(suffix);
+    StartedWorkflow started = start(suffix, Duration.ofHours(2));
+    awaitTimerCount(workflowId, EVENT_TYPE_TIMER_STARTED, 1);
+    worker.suspendPolling();
+    try {
+      started.workflow().partyCompleted(signal(INITIATOR, "COMPLETE_BATCHED_WARNING_I", 1));
+      started.workflow().partyCompleted(signal(RESPONDENT, "COMPLETE_BATCHED_WARNING_R", 2));
+      forceTimeSkippingAcrossPendingWorkflowTask(Duration.ofMinutes(90).plusSeconds(1));
+      awaitTimerCount(workflowId, EVENT_TYPE_TIMER_FIRED, 1);
+      assertSignalsPrecedeLastTimerFired(workflowId);
+    } finally {
+      worker.resumePolling();
+    }
+
+    EvidenceRoomSnapshot result = result(started.workflow());
+    assertThat(result.terminalReason()).isEqualTo("BOTH_PARTIES_COMPLETED");
+    assertThat(result.warningSent()).isFalse();
+    assertThat(result.deadlineExpired()).isFalse();
+    assertThat(result.orderedOperationKeys())
+        .containsExactly(
+            EvidenceOperationKeys.partyComplete(
+                CASE_ID, EPOCH, INITIATOR, "COMPLETE_BATCHED_WARNING_I"),
+            EvidenceOperationKeys.partyComplete(
+                CASE_ID, EPOCH, RESPONDENT, "COMPLETE_BATCHED_WARNING_R"));
+  }
+
+  @Test
+  void completionSignalsRecordedBeforeDeadlineWinWhenHistoryIsDeliveredInOneWorkflowTask() {
+    String suffix = "same-task-deadline";
+    String workflowId = workflowId(suffix);
+    StartedWorkflow started = start(suffix, Duration.ofHours(2));
+    environment.sleep(Duration.ofMinutes(90).plusSeconds(1));
+    assertThat(started.workflow().state().warningSent()).isTrue();
+    awaitTimerCount(workflowId, EVENT_TYPE_TIMER_STARTED, 2);
+    worker.suspendPolling();
+    try {
+      started.workflow().partyCompleted(signal(INITIATOR, "COMPLETE_BATCHED_DEADLINE_I", 3));
+      started.workflow().partyCompleted(signal(RESPONDENT, "COMPLETE_BATCHED_DEADLINE_R", 4));
+      forceTimeSkippingAcrossPendingWorkflowTask(Duration.ofMinutes(30).plusSeconds(1));
+      awaitTimerCount(workflowId, EVENT_TYPE_TIMER_FIRED, 2);
+      assertSignalsPrecedeLastTimerFired(workflowId);
+    } finally {
+      worker.resumePolling();
+    }
+
+    EvidenceRoomSnapshot result = result(started.workflow());
+    assertThat(result.terminalReason()).isEqualTo("BOTH_PARTIES_COMPLETED");
+    assertThat(result.warningSent()).isTrue();
+    assertThat(result.deadlineExpired()).isFalse();
+    assertThat(result.orderedOperationKeys())
+        .containsExactly(
+            EvidenceOperationKeys.deadlineWarn(CASE_ID, EPOCH, 1),
+            EvidenceOperationKeys.partyComplete(
+                CASE_ID, EPOCH, INITIATOR, "COMPLETE_BATCHED_DEADLINE_I"),
+            EvidenceOperationKeys.partyComplete(
+                CASE_ID, EPOCH, RESPONDENT, "COMPLETE_BATCHED_DEADLINE_R"));
+  }
+
+  @Test
   void wrongSemanticOperationKeyIsRejectedWithoutAdvancingPartyState() {
     StartedWorkflow started = start("reject", Duration.ofHours(2));
     EvidenceRoomSignal malformed =
@@ -210,7 +278,7 @@ class EvidenceRoomWorkflowTest {
         client.newWorkflowStub(
             EvidenceRoomWorkflow.class,
             WorkflowOptions.newBuilder()
-                .setWorkflowId("evidence-room:" + CASE_ID + ":" + EPOCH + ":" + suffix)
+                .setWorkflowId(workflowId(suffix))
                 .setTaskQueue(TASK_QUEUE)
                 .build());
     WorkflowClient.start(workflow::run, start);
@@ -252,6 +320,64 @@ class EvidenceRoomWorkflowTest {
 
   private static EvidenceRoomSnapshot result(EvidenceRoomWorkflow workflow) {
     return WorkflowStub.fromTyped(workflow).getResult(EvidenceRoomSnapshot.class);
+  }
+
+  private static String workflowId(String suffix) {
+    return "evidence-room:" + CASE_ID + ":" + EPOCH + ":" + suffix;
+  }
+
+  private void awaitTimerCount(
+      String workflowId, io.temporal.api.enums.v1.EventType eventType, long expectedCount) {
+    long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
+    while (System.nanoTime() < deadline) {
+      long count =
+          client.fetchHistory(workflowId).getEvents().stream()
+              .filter(event -> event.getEventType() == eventType)
+              .count();
+      if (count >= expectedCount) {
+        return;
+      }
+      sleepBriefly();
+    }
+    throw new AssertionError(
+        "expected " + expectedCount + " history events of type " + eventType);
+  }
+
+  private static void sleepBriefly() {
+    try {
+      Thread.sleep(10);
+    } catch (InterruptedException exception) {
+      Thread.currentThread().interrupt();
+      throw new AssertionError("test interrupted", exception);
+    }
+  }
+
+  private void assertSignalsPrecedeLastTimerFired(String workflowId) {
+    var events = client.fetchHistory(workflowId).getEvents();
+    long lastSignalEventId =
+        events.stream()
+            .filter(event -> event.getEventType() == EVENT_TYPE_WORKFLOW_EXECUTION_SIGNALED)
+            .mapToLong(event -> event.getEventId())
+            .max()
+            .orElseThrow();
+    long lastTimerFiredEventId =
+        events.stream()
+            .filter(event -> event.getEventType() == EVENT_TYPE_TIMER_FIRED)
+            .mapToLong(event -> event.getEventId())
+            .max()
+            .orElseThrow();
+    assertThat(lastSignalEventId).isLessThan(lastTimerFiredEventId);
+  }
+
+  private void forceTimeSkippingAcrossPendingWorkflowTask(Duration duration) {
+    var testService =
+        TestServiceGrpc.newBlockingStub(environment.getWorkflowService().getRawChannel());
+    testService.unlockTimeSkipping(UnlockTimeSkippingRequest.getDefaultInstance());
+    try {
+      environment.sleep(duration);
+    } finally {
+      testService.lockTimeSkipping(LockTimeSkippingRequest.getDefaultInstance());
+    }
   }
 
   private record StartedWorkflow(EvidenceRoomWorkflow workflow, EvidenceRoomStart start) {}
