@@ -1,0 +1,41 @@
+{
+  "schema_version": "phase5-wave-a-artifact-index.v1",
+  "candidate_commit": "edfd54952dcc5a07d87a90fdb094c01b1a7df79b",
+  "artifacts": [
+    {
+      "path": "candidate-commit.txt",
+      "sha256": "c7475698b02788e3cef4c9eda83a14aacab29719149e54be2b8b204ef8d8db4e",
+      "bytes": 41
+    },
+    {
+      "path": "task-commit-bindings.json",
+      "sha256": "b9832bc79be1c0b93f32538d2514a201cdedec15cea231b895981e6e0e658c4b",
+      "bytes": 2340
+    },
+    {
+      "path": "phase5-wave-a-execution-manifest.json",
+      "sha256": "f2e66264591a9f2674f49e5aa564cf4d7da6a59f19a13608308a4457c766d957",
+      "bytes": 20227
+    },
+    {
+      "path": "python-phase5-wave-a-junit.xml",
+      "sha256": "602829258ecb5db4532df09038c427be5501f4fe441452e75684e78d71c7f63b",
+      "bytes": 19097
+    },
+    {
+      "path": "java-phase5-wave-a-junit.xml",
+      "sha256": "960b12102bc6dada2fd3221386917a5ef9fea73596859641deb203605fe4f057",
+      "bytes": 126241
+    },
+    {
+      "path": "static-phase5-wave-a-junit.xml",
+      "sha256": "43c5d0848cf70859176e5de4aa516338840a3b60100d44ec6884d67631ea05ab",
+      "bytes": 15972
+    },
+    {
+      "path": "wave-a-metrics.json",
+      "sha256": "45f65687a28ae045cf83b7f07a80dc0a337194c89a9ade9f53ffefacc7971449",
+      "bytes": 5795
+    }
+  ]
+}

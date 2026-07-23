@@ -1,0 +1,405 @@
+{
+  "schema_version": "phase5-wave-a-execution-manifest.v1",
+  "phase": 5,
+  "batch": "P5-BATCH-1",
+  "candidate_commit": "edfd54952dcc5a07d87a90fdb094c01b1a7df79b",
+  "attempt_id": "phase5-wave-a-edfd5495-r1",
+  "status": "PASS",
+  "batch_1": "PASS_AWAITING_EVIDENCE_COMMIT",
+  "wave_a_barrier": "BLOCKED_PENDING_EVIDENCE_COMMIT_AND_CHECKPOINT_ACCEPTANCE",
+  "verification_started_at": "2026-07-23T07:56:49.681+00:00",
+  "verification_finished_at": "2026-07-23T07:58:54.590+00:00",
+  "environment": {
+    "environment_id": "local-win-20260723",
+    "captured_at": "2026-07-23T07:56:49.687+00:00",
+    "host": {
+      "system": "Windows",
+      "release": "11",
+      "machine": "AMD64"
+    },
+    "tools": {
+      "python": {
+        "available": true,
+        "version": "3.12.3",
+        "implementation": "CPython"
+      },
+      "git": {
+        "available": true,
+        "exit_code": 0,
+        "version": "git version 2.44.0.windows.1"
+      },
+      "java": {
+        "available": true,
+        "exit_code": 0,
+        "version": "java version \"21.0.8\" 2025-07-15 LTS"
+      },
+      "node": {
+        "available": true,
+        "exit_code": 0,
+        "version": "v24.15.0"
+      }
+    },
+    "dependency_manifests": [
+      {
+        "path": "python-agent-service/pyproject.toml",
+        "sha256": "89fa516cf0fce8de32f703a38c1be50dd5c8d51f1076512f1a75c7e136875668"
+      },
+      {
+        "path": "python-agent-service/requirements.lock",
+        "sha256": "ec588b073793e6bb74f1fa5cf8630df830fd34afde9596c8b64e9ccd07ac10e3"
+      },
+      {
+        "path": "java-api-service/pom.xml",
+        "sha256": "1b46df62b207a9f0bd3253bba24d1055a88c83f736313561c1fd9b171ca93c58"
+      },
+      {
+        "path": "java-api-service/.mvn/wrapper/maven-wrapper.properties",
+        "sha256": "fd3f8fa8b791a96b39f10907b71c462bed15ba03f9cfe8d136c137406c3a19a6"
+      },
+      {
+        "path": "frontend/package.json",
+        "sha256": "34970a78a8092e8f11a311e9302ea0baf782b7912e9d4a21242b5afea4432e94"
+      },
+      {
+        "path": "frontend/pnpm-lock.yaml",
+        "sha256": "a7a7ef6a83eccff67d18c19c20ebeb537c6fc9e7cd0603dc54b682b0b06cc1db"
+      },
+      {
+        "path": "docker-compose.yml",
+        "sha256": "014cbf196ed61ee871b3e48de73b65da6d5172ec9addaf0da41fc698ff119766"
+      }
+    ],
+    "snapshot_sha256": "c928ebf1c93bc8ebc1969e4d0be9f375fe1469fdaeff66b285f1af9a84dfea62"
+  },
+  "task_bindings": {
+    "path": "task-commit-bindings.json",
+    "sha256": "b9832bc79be1c0b93f32538d2514a201cdedec15cea231b895981e6e0e658c4b",
+    "schema_version": "phase5-wave-a-task-bindings.v1",
+    "tasks": [
+      {
+        "id": "P5-A1",
+        "commit": "6f4152185a38509f990711553cb33829d4a6a7df",
+        "review_partner": "C",
+        "p0_review": "PASS",
+        "t0": {
+          "result": "PASS",
+          "command_ids": [
+            "A1_PYTEST",
+            "A1_CONTRACT_GATE"
+          ]
+        }
+      },
+      {
+        "id": "P5-A2",
+        "commit": "50a05185ef103aeaa13d9257d0f7f059bb762962",
+        "review_partner": "C",
+        "p0_review": "PASS",
+        "t0": {
+          "result": "PASS",
+          "command_ids": [
+            "A2_PYTEST"
+          ]
+        }
+      },
+      {
+        "id": "P5-B1",
+        "commit": "d30bdbd04b4700c0db0bc2b136512697c3124db2",
+        "review_partner": "E",
+        "p0_review": "PASS",
+        "t0": {
+          "result": "PASS",
+          "command_ids": [
+            "B1_MAVEN_TEST"
+          ]
+        }
+      },
+      {
+        "id": "P5-B2",
+        "commit": "e57de4f027b5227ae383bd4a7b58a92fa7c73c4a",
+        "review_partner": "E",
+        "p0_review": "PASS",
+        "t0": {
+          "result": "PASS",
+          "command_ids": [
+            "B2_MAVEN_TEST"
+          ]
+        }
+      },
+      {
+        "id": "P5-C1",
+        "commit": "b4c4a9eaddedbdb2276d4ef71b9743cbb4e1f758",
+        "review_partner": "A",
+        "p0_review": "PASS",
+        "t0": {
+          "result": "PASS",
+          "command_ids": [
+            "C1_MAVEN_TEST",
+            "C1_CONTRACT_GATE"
+          ]
+        }
+      },
+      {
+        "id": "P5-C2",
+        "commit": "edfd54952dcc5a07d87a90fdb094c01b1a7df79b",
+        "review_partner": "A",
+        "p0_review": "PASS",
+        "t0": {
+          "result": "PASS",
+          "command_ids": [
+            "C2_MAVEN_TEST"
+          ]
+        }
+      },
+      {
+        "id": "P5-D0",
+        "commit": "55f73c702b6f8256fd2085a5b62beef880936f45",
+        "review_partner": "R",
+        "p0_review": "PASS",
+        "t0": {
+          "result": "PASS",
+          "command_ids": [
+            "D0_MAVEN_TEST",
+            "D0_VITEST"
+          ]
+        }
+      },
+      {
+        "id": "P5-E0",
+        "commit": "7ba86ab4141889e1b95dcb8909a1d7d9c27fc339",
+        "review_partner": "B",
+        "p0_review": "PASS",
+        "t0": {
+          "result": "PASS",
+          "command_ids": [
+            "E0_STATIC",
+            "E0_CONTRACT_GATE",
+            "E0_MAVEN_TEST"
+          ]
+        }
+      }
+    ]
+  },
+  "commands": [
+    {
+      "id": "p5_wave_a_python",
+      "candidate_commit": "edfd54952dcc5a07d87a90fdb094c01b1a7df79b",
+      "cwd": "python-agent-service",
+      "matrix_command": "D:\\miniconda\\python.exe -m pytest tests/graphs/evidence tests/agents/test_evidence_clerk_turn.py tests/agents/test_evidence_fact_mapping_policy.py -q",
+      "matrix_command_sha256": "edf1c37c7410b4bf2c0134558f63d8b3bc8d10b98811275dd2fe90e27caacead",
+      "executed_command": "'D:\\miniconda\\python.exe' -m pytest tests/graphs/evidence tests/agents/test_evidence_clerk_turn.py tests/agents/test_evidence_fact_mapping_policy.py -q '--junitxml=D:\\学习\\Project\\AfterSaleFlow-Agent\\.codex-run\\phase5-wave-a-candidate-edfd5495-r1\\.codex-run\\phase5-wave-a-edfd5495-r1\\attempts\\p5_wave_a_python-01\\raw-junit.xml'",
+      "executed_argv": [
+        "D:\\miniconda\\python.exe",
+        "-m",
+        "pytest",
+        "tests/graphs/evidence",
+        "tests/agents/test_evidence_clerk_turn.py",
+        "tests/agents/test_evidence_fact_mapping_policy.py",
+        "-q",
+        "--junitxml=D:\\学习\\Project\\AfterSaleFlow-Agent\\.codex-run\\phase5-wave-a-candidate-edfd5495-r1\\.codex-run\\phase5-wave-a-edfd5495-r1\\attempts\\p5_wave_a_python-01\\raw-junit.xml"
+      ],
+      "executed_command_sha256": "219a54f81f7374f560be3b964b581b6a91e0e9b107c1742b3231452f6a61ee39",
+      "started_at": "2026-07-23T07:56:51.068+00:00",
+      "finished_at": "2026-07-23T07:57:23.207+00:00",
+      "duration_seconds": 32.139,
+      "exit_code": 0,
+      "environment_sha256": "c928ebf1c93bc8ebc1969e4d0be9f375fe1469fdaeff66b285f1af9a84dfea62",
+      "stdout_path": "attempts/p5_wave_a_python-01/stdout.log",
+      "stdout_sha256": "0bf5e41e1edce3139e9421f3aed12c776f18acdb091c791e1a01c700919c4fc4",
+      "stderr_path": "attempts/p5_wave_a_python-01/stderr.log",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw_reports": [
+        {
+          "path": "attempts/p5_wave_a_python-01/raw-junit.xml",
+          "sha256": "7c70c414b938601598b8011aa833e9d4f25d6044a11386e452e7ad2244e69f28"
+        }
+      ],
+      "failure_classification": "NONE",
+      "accepted": true,
+      "report": "python-phase5-wave-a-junit.xml",
+      "report_path": "source/python-phase5-wave-a-junit.xml",
+      "report_sha256": "602829258ecb5db4532df09038c427be5501f4fe441452e75684e78d71c7f63b",
+      "tests": 120,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "id": "p5_wave_a_java",
+      "candidate_commit": "edfd54952dcc5a07d87a90fdb094c01b1a7df79b",
+      "cwd": "java-api-service",
+      "matrix_command": ".\\mvnw.cmd -q -DforkCount=1 -Dtest=EvidenceRoomWorkflowTest,EvidenceRoomWorkflowReplayTest,EvidenceRoomActivityContractTest,EvidenceRoomWorkflowWorkerRecoveryTest,EvidenceV2ContractFixtureTest,EvidenceAssetAuthorizationTest,JdbcEvidenceGraphBindingStoreTest,EvidenceGraphCommandFactoryTest,EvidenceGraphResultFinalizerTest,EvidenceFinalizationReceiptTest,EvidenceAgentTurnServiceTest,EvidenceProcessProjectionAdapterTest,EvidenceBulkheadPolicyTest,EvidenceNoFormalSinkGuardTest,EvidenceSubmissionServiceTest,EvidenceCompletionServiceTest,EvidenceDossierFreezerTest test",
+      "matrix_command_sha256": "c5d6bba906e283e3b124dab801bb111d9be12a22a409dfa03c88e72008310b9f",
+      "executed_command": "'.\\mvnw.cmd' -q -DforkCount=1 -Dtest=EvidenceRoomWorkflowTest,EvidenceRoomWorkflowReplayTest,EvidenceRoomActivityContractTest,EvidenceRoomWorkflowWorkerRecoveryTest,EvidenceV2ContractFixtureTest,EvidenceAssetAuthorizationTest,JdbcEvidenceGraphBindingStoreTest,EvidenceGraphCommandFactoryTest,EvidenceGraphResultFinalizerTest,EvidenceFinalizationReceiptTest,EvidenceAgentTurnServiceTest,EvidenceProcessProjectionAdapterTest,EvidenceBulkheadPolicyTest,EvidenceNoFormalSinkGuardTest,EvidenceSubmissionServiceTest,EvidenceCompletionServiceTest,EvidenceDossierFreezerTest -Dsurefire.reportNameSuffix=p5-wa-edfd54952dcc-d13cd8b8 test",
+      "executed_argv": [
+        ".\\mvnw.cmd",
+        "-q",
+        "-DforkCount=1",
+        "-Dtest=EvidenceRoomWorkflowTest,EvidenceRoomWorkflowReplayTest,EvidenceRoomActivityContractTest,EvidenceRoomWorkflowWorkerRecoveryTest,EvidenceV2ContractFixtureTest,EvidenceAssetAuthorizationTest,JdbcEvidenceGraphBindingStoreTest,EvidenceGraphCommandFactoryTest,EvidenceGraphResultFinalizerTest,EvidenceFinalizationReceiptTest,EvidenceAgentTurnServiceTest,EvidenceProcessProjectionAdapterTest,EvidenceBulkheadPolicyTest,EvidenceNoFormalSinkGuardTest,EvidenceSubmissionServiceTest,EvidenceCompletionServiceTest,EvidenceDossierFreezerTest",
+        "-Dsurefire.reportNameSuffix=p5-wa-edfd54952dcc-d13cd8b8",
+        "test"
+      ],
+      "executed_command_sha256": "34713121c52d6b5197ae5349d93a5fc2fbdb629165d28f21b22b5e7f460b7662",
+      "started_at": "2026-07-23T07:57:23.690+00:00",
+      "finished_at": "2026-07-23T07:58:39.425+00:00",
+      "duration_seconds": 75.735,
+      "exit_code": 0,
+      "environment_sha256": "c928ebf1c93bc8ebc1969e4d0be9f375fe1469fdaeff66b285f1af9a84dfea62",
+      "stdout_path": "attempts/p5_wave_a_java-01/stdout.log",
+      "stdout_sha256": "304706dd333694211584825734a54d5c70187f0a36729509d7ce19496bf2d2a1",
+      "stderr_path": "attempts/p5_wave_a_java-01/stderr.log",
+      "stderr_sha256": "9bac2556fa6d21801f928fa71107c23d10229a630be4debab986aaf7b78f7eed",
+      "raw_reports": [
+        {
+          "path": "attempts/p5_wave_a_java-01/raw-surefire/0001-dc2cc895bd169fbd.xml",
+          "sha256": "dc2cc895bd169fbde2b57007eee2449c954c62ce1af123b91cde355b8c6fa313",
+          "original_name": "TEST-com.example.dispute.evidence.application.graph.EvidenceAssetAuthorizationTest-p5-wa-edfd54952dcc-d13cd8b8.xml"
+        },
+        {
+          "path": "attempts/p5_wave_a_java-01/raw-surefire/0002-c420a5c7b92d8c70.xml",
+          "sha256": "c420a5c7b92d8c709a7371d6958c5b45d5fe475840e0c462172c08d519b06498",
+          "original_name": "TEST-com.example.dispute.evidence.application.graph.EvidenceFinalizationReceiptTest-p5-wa-edfd54952dcc-d13cd8b8.xml"
+        },
+        {
+          "path": "attempts/p5_wave_a_java-01/raw-surefire/0003-d836196353615012.xml",
+          "sha256": "d83619635361501229510b26abbe16de4bb7af2850cf1331c7eabc13ad2ed4cb",
+          "original_name": "TEST-com.example.dispute.evidence.application.graph.EvidenceGraphCommandFactoryTest-p5-wa-edfd54952dcc-d13cd8b8.xml"
+        },
+        {
+          "path": "attempts/p5_wave_a_java-01/raw-surefire/0004-11d4bba4e249d872.xml",
+          "sha256": "11d4bba4e249d87246913d8a9a844b37c7ebe7705f8ac59bbd0e65cd8d281614",
+          "original_name": "TEST-com.example.dispute.evidence.application.graph.EvidenceGraphResultFinalizerTest-p5-wa-edfd54952dcc-d13cd8b8.xml"
+        },
+        {
+          "path": "attempts/p5_wave_a_java-01/raw-surefire/0005-1335f30baf3084c9.xml",
+          "sha256": "1335f30baf3084c97fe2654bc0863683c7a8cdfb271acca9c8af3e7bf28d720c",
+          "original_name": "TEST-com.example.dispute.evidence.EvidenceCompletionServiceTest-p5-wa-edfd54952dcc-d13cd8b8.xml"
+        },
+        {
+          "path": "attempts/p5_wave_a_java-01/raw-surefire/0006-003795d301128738.xml",
+          "sha256": "003795d301128738e45e520e2c888319110997830d42f1855a41125df8e2c73f",
+          "original_name": "TEST-com.example.dispute.evidence.EvidenceDossierFreezerTest-p5-wa-edfd54952dcc-d13cd8b8.xml"
+        },
+        {
+          "path": "attempts/p5_wave_a_java-01/raw-surefire/0007-fc906de6d5581bcf.xml",
+          "sha256": "fc906de6d5581bcf98a91c321e3a66b592f3dbe47cba173f4688d70652b8576b",
+          "original_name": "TEST-com.example.dispute.evidence.EvidenceSubmissionServiceTest-p5-wa-edfd54952dcc-d13cd8b8.xml"
+        },
+        {
+          "path": "attempts/p5_wave_a_java-01/raw-surefire/0008-dc77323121578e56.xml",
+          "sha256": "dc77323121578e560eaea0b7bbfa9f144b49a1c1dee819d7bf31b44b04566b36",
+          "original_name": "TEST-com.example.dispute.evidence.infrastructure.persistence.JdbcEvidenceGraphBindingStoreTest-p5-wa-edfd54952dcc-d13cd8b8.xml"
+        },
+        {
+          "path": "attempts/p5_wave_a_java-01/raw-surefire/0009-a3d6053be1d9005a.xml",
+          "sha256": "a3d6053be1d9005a264f85d41160b7cde8a019c56e2a65b49c12b53678299a8b",
+          "original_name": "TEST-com.example.dispute.room.EvidenceAgentTurnServiceTest-p5-wa-edfd54952dcc-d13cd8b8.xml"
+        },
+        {
+          "path": "attempts/p5_wave_a_java-01/raw-surefire/0010-d2f97e8663d972ae.xml",
+          "sha256": "d2f97e8663d972ae4ae5515e3b0f9ed2de654177a0f77200e4bc2ae0b28d4bb8",
+          "original_name": "TEST-com.example.dispute.workflow.contract.v1.EvidenceV2ContractFixtureTest-p5-wa-edfd54952dcc-d13cd8b8.xml"
+        },
+        {
+          "path": "attempts/p5_wave_a_java-01/raw-surefire/0011-e5d90490d15f9f9b.xml",
+          "sha256": "e5d90490d15f9f9b3bbfe9e6dd615a72925fcd6c3485e7f68f1625968bba6de6",
+          "original_name": "TEST-com.example.dispute.workflow.projection.EvidenceProcessProjectionAdapterTest-p5-wa-edfd54952dcc-d13cd8b8.xml"
+        },
+        {
+          "path": "attempts/p5_wave_a_java-01/raw-surefire/0012-6636d2eb8bfb2771.xml",
+          "sha256": "6636d2eb8bfb27719308fc155098348e0260614b7c92f8cbb3a5c8b03fb72c4e",
+          "original_name": "TEST-com.example.dispute.workflow.room.evidence.EvidenceRoomActivityContractTest-p5-wa-edfd54952dcc-d13cd8b8.xml"
+        },
+        {
+          "path": "attempts/p5_wave_a_java-01/raw-surefire/0013-77a40e1754f01347.xml",
+          "sha256": "77a40e1754f013478ab718eebb1d68f0b29be5e95df5a87bc700c8ffcb3c5f8c",
+          "original_name": "TEST-com.example.dispute.workflow.room.evidence.EvidenceRoomWorkflowReplayTest-p5-wa-edfd54952dcc-d13cd8b8.xml"
+        },
+        {
+          "path": "attempts/p5_wave_a_java-01/raw-surefire/0014-2b9683b807e26708.xml",
+          "sha256": "2b9683b807e26708edf1e67cb713e4ca5292d90a2d47a0f159642f12e7626a87",
+          "original_name": "TEST-com.example.dispute.workflow.room.evidence.EvidenceRoomWorkflowTest-p5-wa-edfd54952dcc-d13cd8b8.xml"
+        },
+        {
+          "path": "attempts/p5_wave_a_java-01/raw-surefire/0015-7402ca3f641a7389.xml",
+          "sha256": "7402ca3f641a7389a364c6f8858b30e2bb50b05ccaf717d9cb96ad97e7abd2a5",
+          "original_name": "TEST-com.example.dispute.workflow.room.evidence.EvidenceRoomWorkflowWorkerRecoveryTest-p5-wa-edfd54952dcc-d13cd8b8.xml"
+        },
+        {
+          "path": "attempts/p5_wave_a_java-01/raw-surefire/0016-ee2488f69cb58645.xml",
+          "sha256": "ee2488f69cb58645de9776eb26d192ab445fec7831342fa08f2dbf6ed487552b",
+          "original_name": "TEST-com.example.dispute.workflow.shadow.evidence.EvidenceBulkheadPolicyTest-p5-wa-edfd54952dcc-d13cd8b8.xml"
+        },
+        {
+          "path": "attempts/p5_wave_a_java-01/raw-surefire/0017-09798a3ec6800e82.xml",
+          "sha256": "09798a3ec6800e82f3c838732e2eb1db6659e3ae4aeb6f7192c801ce82fe9757",
+          "original_name": "TEST-com.example.dispute.workflow.shadow.evidence.EvidenceNoFormalSinkGuardTest-p5-wa-edfd54952dcc-d13cd8b8.xml"
+        }
+      ],
+      "failure_classification": "NONE",
+      "accepted": true,
+      "report": "java-phase5-wave-a-junit.xml",
+      "report_path": "source/java-phase5-wave-a-junit.xml",
+      "report_sha256": "960b12102bc6dada2fd3221386917a5ef9fea73596859641deb203605fe4f057",
+      "tests": 144,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "id": "p5_wave_a_static",
+      "candidate_commit": "edfd54952dcc5a07d87a90fdb094c01b1a7df79b",
+      "cwd": ".",
+      "matrix_command": "D:\\miniconda\\python.exe -m pytest tests/static/test_phase5_entry_contract_plan.py tests/static/test_phase5_evidence_contracts.py tests/static/test_agent_platform_schema_contracts.py tests/static/test_graph_import_boundaries.py tests/static/test_phase5_evidence_no_sink_bulkhead.py tests/static/test_phase5_evidence_pilot_plan.py tests/static/test_phase5_wave_a_runner.py tests/static/test_phase5_wave_a_evidence.py tests/static/test_phase5_wave_a_checkpoint.py -q",
+      "matrix_command_sha256": "db44597338069b6867f4f417b4c0cb11c5f4594e77cfb0967e93f957b7b079a4",
+      "executed_command": "'D:\\miniconda\\python.exe' -m pytest tests/static/test_phase5_entry_contract_plan.py tests/static/test_phase5_evidence_contracts.py tests/static/test_agent_platform_schema_contracts.py tests/static/test_graph_import_boundaries.py tests/static/test_phase5_evidence_no_sink_bulkhead.py tests/static/test_phase5_evidence_pilot_plan.py tests/static/test_phase5_wave_a_runner.py tests/static/test_phase5_wave_a_evidence.py tests/static/test_phase5_wave_a_checkpoint.py -q '--junitxml=D:\\学习\\Project\\AfterSaleFlow-Agent\\.codex-run\\phase5-wave-a-candidate-edfd5495-r1\\.codex-run\\phase5-wave-a-edfd5495-r1\\attempts\\p5_wave_a_static-01\\raw-junit.xml'",
+      "executed_argv": [
+        "D:\\miniconda\\python.exe",
+        "-m",
+        "pytest",
+        "tests/static/test_phase5_entry_contract_plan.py",
+        "tests/static/test_phase5_evidence_contracts.py",
+        "tests/static/test_agent_platform_schema_contracts.py",
+        "tests/static/test_graph_import_boundaries.py",
+        "tests/static/test_phase5_evidence_no_sink_bulkhead.py",
+        "tests/static/test_phase5_evidence_pilot_plan.py",
+        "tests/static/test_phase5_wave_a_runner.py",
+        "tests/static/test_phase5_wave_a_evidence.py",
+        "tests/static/test_phase5_wave_a_checkpoint.py",
+        "-q",
+        "--junitxml=D:\\学习\\Project\\AfterSaleFlow-Agent\\.codex-run\\phase5-wave-a-candidate-edfd5495-r1\\.codex-run\\phase5-wave-a-edfd5495-r1\\attempts\\p5_wave_a_static-01\\raw-junit.xml"
+      ],
+      "executed_command_sha256": "33b5ef032f770bd4f4ae680a1ec0a766695b1cad6797c436f52f5e74b97e0158",
+      "started_at": "2026-07-23T07:58:39.940+00:00",
+      "finished_at": "2026-07-23T07:58:54.142+00:00",
+      "duration_seconds": 14.202,
+      "exit_code": 0,
+      "environment_sha256": "c928ebf1c93bc8ebc1969e4d0be9f375fe1469fdaeff66b285f1af9a84dfea62",
+      "stdout_path": "attempts/p5_wave_a_static-01/stdout.log",
+      "stdout_sha256": "093f008a131196ef43649afda21f6e3e042ec1813ca130cc42c84dbca25279d2",
+      "stderr_path": "attempts/p5_wave_a_static-01/stderr.log",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw_reports": [
+        {
+          "path": "attempts/p5_wave_a_static-01/raw-junit.xml",
+          "sha256": "a8bf25d92b45ab4060c43e318b7fe49ecbbe1068baeee9112cce7ad2ac047ca5"
+        }
+      ],
+      "failure_classification": "NONE",
+      "accepted": true,
+      "report": "static-phase5-wave-a-junit.xml",
+      "report_path": "source/static-phase5-wave-a-junit.xml",
+      "report_sha256": "43c5d0848cf70859176e5de4aa516338840a3b60100d44ec6884d67631ea05ab",
+      "tests": 98,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    }
+  ],
+  "quarantined_attempts": [],
+  "pending_failure": null,
+  "quarantined_attempts_reused": false,
+  "promotion_gate": "PENDING",
+  "MIG-004": "PENDING_PROMOTION",
+  "MIG-005": "PENDING_PROMOTION",
+  "manifest_sha256": "03bb6e5292c63a47445d8415d12ecc0f90ae6ed17d588b748a9d4f981954efd6"
+}
