@@ -9,15 +9,19 @@ import secrets
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol, TypeAlias, cast
+from datetime import datetime
+from typing import Any, Literal, TypeAlias, cast
 from weakref import WeakSet
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
 
 from app.contracts.v1.codec import canonical_sha256, canonicalize
+from app.security.invocation_envelope import ResolvedVerificationKey
+from app.security.jwks import JwksVerificationKeyResolver
 
 
 JsonScalar: TypeAlias = str | int | float | bool | None
@@ -45,8 +49,149 @@ VERIFIED_ADMISSION_STEPS = (
 )
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_KEY_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _P1363_BASE64URL = re.compile(r"^[A-Za-z0-9_-]{86}$")
 _CONTENT_ADDRESSED_URI = re.compile(r"^.+/([0-9a-f]{64})\.json$")
+_THREAD_ID = re.compile(r"^grt\.v1\.[0-9a-f]{32}$")
+_EVIDENCE_ID = re.compile(r"^EVIDENCE_[A-Za-z0-9][A-Za-z0-9._:-]{0,118}$")
+_TRACEPARENT = re.compile(r"^00-(?!0{32})[0-9a-f]{32}-(?!0{16})[0-9a-f]{16}-[0-9a-f]{2}$")
+_RFC3339_INSTANT = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$"
+)
+_SYNTHETIC_PARSE_REF = re.compile(r"^urn:synthetic-evidence-parse:[A-Za-z0-9._:/-]{1,470}$")
+_COMMAND_FIELDS = frozenset(
+    {
+        "schema_version",
+        "command_id",
+        "logical_run_id",
+        "attempt_id",
+        "tenant_surrogate",
+        "case_id",
+        "room_type",
+        "room_epoch",
+        "graph_key",
+        "graph_version",
+        "checkpoint_schema_version",
+        "thread_id",
+        "actor_scope",
+        "process_revision",
+        "stage_code",
+        "stage_sequence",
+        "domain_snapshot_ref",
+        "event_ref",
+        "invocation_context",
+        "retry_budget",
+        "deadline_at",
+        "traceparent",
+        "request_hash",
+    }
+)
+_COMMAND_REQUIRED_FIELDS = _COMMAND_FIELDS - {"event_ref"}
+_ACTOR_SCOPE_FIELDS = frozenset({"actor_id", "actor_role", "audience", "capabilities"})
+_SNAPSHOT_FIELDS = frozenset({"artifact_id", "schema_version", "uri", "sha256", "size_bytes"})
+_INVOCATION_FIELDS = frozenset(
+    {
+        "agent_profile_id",
+        "prompt_profile_id",
+        "model_profile_id",
+        "output_schema_version",
+        "policy_version",
+        "guardrail_version",
+        "tool_capabilities",
+        "envelope_key_id",
+        "envelope_nonce",
+    }
+)
+_RETRY_FIELDS = frozenset(
+    {"provider_attempts_remaining", "activity_attempts_remaining", "repairs_remaining"}
+)
+_MANIFEST_FIELDS = frozenset(
+    {
+        "schema_version",
+        "manifest_id",
+        "manifest_hash",
+        "execution_scope",
+        "writer_mode",
+        "formal_sink_eligible",
+        "graph_execution_allowed",
+        "synthetic_fixture_id",
+        "registration_id",
+        "tenant_surrogate",
+        "case_id",
+        "room_id",
+        "room_type",
+        "room_epoch",
+        "fencing_token",
+        "thread_id",
+        "actor_id",
+        "actor_role",
+        "participant_id",
+        "actor_scope_hash",
+        "agent_session_id",
+        "command_binding",
+        "submission_batch_id",
+        "submission_revision",
+        "dossier_target_version",
+        "profile_versions",
+        "issued_at",
+        "not_before",
+        "expires_at",
+        "item_count",
+        "ordered_item_keys",
+        "items",
+        "signature_algorithm",
+        "signing_key_id",
+        "signature",
+    }
+)
+_MANIFEST_COMMAND_FIELDS = frozenset(
+    {
+        "schema_version",
+        "command_id",
+        "logical_run_id",
+        "attempt_id",
+        "command_type",
+        "submitted_at",
+        "deadline_at",
+    }
+)
+_PROFILE_FIELDS = frozenset(
+    {
+        "graph_version",
+        "checkpoint_schema_version",
+        "state_schema_version",
+        "prompt_version",
+        "model_profile_id",
+        "assessment_output_schema_version",
+        "terminal_output_schema_version",
+        "policy_version",
+        "guardrail_version",
+        "tool_policy_version",
+    }
+)
+_ITEM_FIELDS = frozenset(
+    {
+        "schema_version",
+        "evidence_id",
+        "item_hash",
+        "owner_participant_id",
+        "owner_role",
+        "visibility",
+        "object_ref",
+        "immutable_object_version",
+        "object_sha256",
+        "content_type",
+        "byte_size",
+        "original_filename",
+        "parse_ref",
+        "parse_hash",
+        "parse_status",
+        "privacy_basis",
+        "permitted_modalities",
+        "formal_evidence_revision",
+        "display_order",
+    }
+)
 _FORBIDDEN_AUTHORITY_KEYS = frozenset(
     {
         "authorization_proof_ref",
@@ -82,20 +227,85 @@ class EvidenceAdmissionRequest:
 
 
 @dataclass(frozen=True, slots=True)
-class ResolvedEvidenceVerificationKey:
-    kid: str
-    public_key: ec.EllipticCurvePublicKey
-    algorithm: Literal["ES256"] = "ES256"
-    curve: Literal["P-256"] = "P-256"
-    use: Literal["sig"] = "sig"
+class EvidenceJavaSigningKeyPin:
+    signing_key_id: str
+    public_key_sha256: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.signing_key_id, str) or not _KEY_ID.fullmatch(self.signing_key_id):
+            raise EvidenceGraphContractError("EVIDENCE_TRUST_CONFIG_KEY_ID_INVALID")
+        if not isinstance(self.public_key_sha256, str) or not _SHA256.fullmatch(
+            self.public_key_sha256
+        ):
+            raise EvidenceGraphContractError("EVIDENCE_TRUST_CONFIG_FINGERPRINT_INVALID")
 
 
-class EvidenceVerificationKeyResolver(Protocol):
-    def resolve(self, signing_key_id: str) -> ResolvedEvidenceVerificationKey: ...
+@dataclass(frozen=True, slots=True)
+class EvidenceJavaSigningTrustConfig:
+    version: str
+    keys: tuple[EvidenceJavaSigningKeyPin, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.version, str) or not _KEY_ID.fullmatch(self.version):
+            raise EvidenceGraphContractError("EVIDENCE_TRUST_CONFIG_VERSION_INVALID")
+        object.__setattr__(self, "keys", tuple(self.keys))
+        if not all(type(pin) is EvidenceJavaSigningKeyPin for pin in self.keys):
+            raise EvidenceGraphContractError("EVIDENCE_TRUST_CONFIG_KEY_INVALID")
+        key_ids = tuple(pin.signing_key_id for pin in self.keys)
+        if not key_ids:
+            raise EvidenceGraphContractError("EVIDENCE_TRUST_CONFIG_EMPTY")
+        if len(key_ids) != len(set(key_ids)):
+            raise EvidenceGraphContractError("EVIDENCE_TRUST_CONFIG_DUPLICATE_KEY")
 
 
 _VERIFIED_ADMISSION_TOKEN = object()
 _ADMISSION_SEAL_KEY = secrets.token_bytes(32)
+_TRUST_STORE_TOKEN = object()
+_TRUST_STORE_SEAL_KEY = secrets.token_bytes(32)
+
+
+class _EvidenceJavaSigningTrustStore:
+    """Immutable generation captured from the service-owned validated JWKS resolver."""
+
+    __slots__ = (
+        "_generation",
+        "_config_version",
+        "_keys",
+        "_seal",
+        "_token",
+        "__weakref__",
+    )
+
+    def __init__(
+        self,
+        *,
+        generation: int,
+        config_version: str,
+        keys: tuple[ResolvedVerificationKey, ...],
+        _token: object,
+    ) -> None:
+        if _token is not _TRUST_STORE_TOKEN:
+            raise EvidenceGraphContractError("EVIDENCE_TRUST_STORE_BOOTSTRAP_REQUIRED")
+        seal = _trust_store_seal(generation, config_version, keys)
+        object.__setattr__(self, "_generation", generation)
+        object.__setattr__(self, "_config_version", config_version)
+        object.__setattr__(self, "_keys", keys)
+        object.__setattr__(self, "_seal", seal)
+        object.__setattr__(self, "_token", _token)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        del name, value
+        raise EvidenceGraphContractError("EVIDENCE_TRUST_STORE_IMMUTABLE")
+
+    def resolve(self, signing_key_id: str) -> ResolvedVerificationKey:
+        _validate_trust_store(self)
+        matches = tuple(key for key in self._keys if key.kid == signing_key_id)
+        if len(matches) != 1:
+            raise EvidenceGraphContractError("EVIDENCE_SIGNING_KEY_UNAVAILABLE")
+        return matches[0]
+
+
+_TRUST_STORES: WeakSet[_EvidenceJavaSigningTrustStore] = WeakSet()
 
 
 class VerifiedEvidenceAdmission:
@@ -203,8 +413,35 @@ _VERIFIED_ADMISSIONS: WeakSet[VerifiedEvidenceAdmission] = WeakSet()
 
 
 class EvidenceAdmissionVerifier:
-    def __init__(self, key_resolver: EvidenceVerificationKeyResolver) -> None:
-        self._key_resolver = key_resolver
+    __slots__ = ("_trust_store", "_token")
+
+    def __init__(
+        self,
+        trust_store: object = None,
+        *,
+        _token: object = None,
+    ) -> None:
+        if (
+            _token is not _TRUST_STORE_TOKEN
+            or type(trust_store) is not _EvidenceJavaSigningTrustStore
+            or trust_store not in _TRUST_STORES
+        ):
+            raise EvidenceGraphContractError("EVIDENCE_VERIFIER_BOOTSTRAP_REQUIRED")
+        object.__setattr__(self, "_trust_store", trust_store)
+        object.__setattr__(self, "_token", _token)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        del name, value
+        raise EvidenceGraphContractError("EVIDENCE_VERIFIER_IMMUTABLE")
+
+    @classmethod
+    def from_service_jwks(
+        cls,
+        resolver: JwksVerificationKeyResolver,
+        trust_config: EvidenceJavaSigningTrustConfig,
+    ) -> EvidenceAdmissionVerifier:
+        trust_store = _capture_service_jwks_snapshot(resolver, trust_config)
+        return cls(trust_store, _token=_TRUST_STORE_TOKEN)
 
     def verify(self, request: EvidenceAdmissionRequest) -> VerifiedEvidenceAdmission:
         if type(request) is not EvidenceAdmissionRequest:
@@ -212,16 +449,19 @@ class EvidenceAdmissionVerifier:
         if request.runtime_mode != "SHADOW":
             raise EvidenceGraphContractError("EVIDENCE_RUNTIME_MODE_FORBIDDEN")
         command = _json_object(request.room_graph_command, "EVIDENCE_COMMAND_INVALID")
+        if _contains_forbidden_authority(command):
+            raise EvidenceGraphContractError("EVIDENCE_FORMAL_AUTHORITY_FORBIDDEN")
         _verify_room_graph_command(command)
         snapshot_ref = _required_mapping(command, "domain_snapshot_ref")
         payload = bytes(request.signed_manifest_payload)
         payload_hash = _verify_raw_snapshot_reference(snapshot_ref, payload)
         manifest = _parse_canonical_manifest(payload)
         _verify_snapshot_identity(snapshot_ref, manifest)
-        if _contains_forbidden_authority(command) or _contains_forbidden_authority(manifest):
+        if _contains_forbidden_authority(manifest):
             raise EvidenceGraphContractError("EVIDENCE_FORMAL_AUTHORITY_FORBIDDEN")
+        _verify_manifest_schema_shape(manifest)
         _verify_internal_manifest_hash(manifest)
-        _verify_direct_java_signature(manifest, self._key_resolver)
+        _verify_direct_java_signature(manifest, self._trust_store)
         actor_scope_hash = _verify_actor_scope(command, manifest)
         _verify_output_pins(
             request.registry_output_schema_version,
@@ -291,6 +531,12 @@ def manifest_items_by_key(manifest: Mapping[str, Any]) -> dict[str, JsonObject]:
 
 
 def _verify_room_graph_command(command: JsonObject) -> None:
+    _require_exact_fields(
+        command,
+        allowed=_COMMAND_FIELDS,
+        required=_COMMAND_REQUIRED_FIELDS,
+        code="EVIDENCE_COMMAND_FIELDS_INVALID",
+    )
     if command.get("schema_version") != "room-graph-command.v1":
         raise EvidenceGraphContractError("EVIDENCE_COMMAND_SCHEMA_INVALID")
     if command.get("room_type") != "EVIDENCE":
@@ -301,6 +547,85 @@ def _verify_room_graph_command(command: JsonObject) -> None:
         raise EvidenceGraphContractError("EVIDENCE_COMMAND_GRAPH_VERSION_INVALID")
     if "fencing_token" in command:
         raise EvidenceGraphContractError("EVIDENCE_COMMAND_ROOM_FENCE_FORBIDDEN")
+    for name in (
+        "command_id",
+        "logical_run_id",
+        "attempt_id",
+        "tenant_surrogate",
+        "case_id",
+        "graph_key",
+        "graph_version",
+        "checkpoint_schema_version",
+        "stage_code",
+    ):
+        _require_identifier(command.get(name), "EVIDENCE_COMMAND_IDENTIFIER_INVALID")
+    if not isinstance(command.get("thread_id"), str) or not _THREAD_ID.fullmatch(
+        cast(str, command["thread_id"])
+    ):
+        raise EvidenceGraphContractError("EVIDENCE_COMMAND_THREAD_INVALID")
+    for name in ("room_epoch", "process_revision", "stage_sequence"):
+        _require_integer(command.get(name), minimum=0, maximum=9_007_199_254_740_991)
+    actor_scope = _required_mapping(command, "actor_scope")
+    _require_exact_fields(
+        actor_scope,
+        allowed=_ACTOR_SCOPE_FIELDS,
+        required=_ACTOR_SCOPE_FIELDS,
+        code="EVIDENCE_ACTOR_SCOPE_FIELDS_INVALID",
+    )
+    _require_identifier(actor_scope.get("actor_id"), "EVIDENCE_ACTOR_SCOPE_INVALID")
+    if actor_scope.get("actor_role") not in {
+        "USER",
+        "MERCHANT",
+        "PLATFORM_REVIEWER",
+        "ADMIN",
+        "SYSTEM",
+    } or actor_scope.get("audience") not in {
+        "USER",
+        "MERCHANT",
+        "PLATFORM_REVIEWER",
+        "SYSTEM",
+    }:
+        raise EvidenceGraphContractError("EVIDENCE_ACTOR_SCOPE_INVALID")
+    _require_identifier_list(
+        actor_scope.get("capabilities"),
+        maximum=32,
+        code="EVIDENCE_ACTOR_SCOPE_INVALID",
+    )
+    _verify_snapshot_shape(_required_mapping(command, "domain_snapshot_ref"))
+    if "event_ref" in command:
+        _verify_snapshot_shape(_required_mapping(command, "event_ref"))
+    invocation = _required_mapping(command, "invocation_context")
+    _require_exact_fields(
+        invocation,
+        allowed=_INVOCATION_FIELDS,
+        required=_INVOCATION_FIELDS,
+        code="EVIDENCE_INVOCATION_FIELDS_INVALID",
+    )
+    for name in _INVOCATION_FIELDS - {"tool_capabilities"}:
+        _require_identifier(invocation.get(name), "EVIDENCE_INVOCATION_INVALID")
+    _require_identifier_list(
+        invocation.get("tool_capabilities"),
+        maximum=32,
+        code="EVIDENCE_INVOCATION_INVALID",
+    )
+    retry = _required_mapping(command, "retry_budget")
+    _require_exact_fields(
+        retry,
+        allowed=_RETRY_FIELDS,
+        required=_RETRY_FIELDS,
+        code="EVIDENCE_RETRY_BUDGET_INVALID",
+    )
+    for name, maximum in (
+        ("provider_attempts_remaining", 2),
+        ("activity_attempts_remaining", 3),
+        ("repairs_remaining", 1),
+    ):
+        _require_integer(retry.get(name), minimum=0, maximum=maximum)
+    _require_instant(command.get("deadline_at"), "EVIDENCE_COMMAND_DEADLINE_INVALID")
+    if not isinstance(command.get("traceparent"), str) or not _TRACEPARENT.fullmatch(
+        cast(str, command["traceparent"])
+    ):
+        raise EvidenceGraphContractError("EVIDENCE_COMMAND_TRACEPARENT_INVALID")
     request_hash = command.get("request_hash")
     if not isinstance(request_hash, str) or not _SHA256.fullmatch(request_hash):
         raise EvidenceGraphContractError("EVIDENCE_COMMAND_REQUEST_HASH_INVALID")
@@ -344,6 +669,116 @@ def _verify_snapshot_identity(snapshot: Mapping[str, Any], manifest: JsonObject)
         raise EvidenceGraphContractError("EVIDENCE_SNAPSHOT_IDENTITY_MISMATCH")
 
 
+def _verify_manifest_schema_shape(manifest: JsonObject) -> None:
+    _require_exact_fields(
+        manifest,
+        allowed=_MANIFEST_FIELDS,
+        required=_MANIFEST_FIELDS,
+        code="EVIDENCE_MANIFEST_FIELDS_INVALID",
+    )
+    for name in (
+        "manifest_id",
+        "synthetic_fixture_id",
+        "registration_id",
+        "tenant_surrogate",
+        "case_id",
+        "room_id",
+        "actor_id",
+        "participant_id",
+        "agent_session_id",
+        "submission_batch_id",
+        "signing_key_id",
+    ):
+        _require_identifier(manifest.get(name), "EVIDENCE_MANIFEST_IDENTIFIER_INVALID")
+    for name in ("manifest_hash", "actor_scope_hash"):
+        _require_sha256(manifest.get(name), "EVIDENCE_MANIFEST_HASH_INVALID")
+    if not isinstance(manifest.get("thread_id"), str) or not _THREAD_ID.fullmatch(
+        cast(str, manifest["thread_id"])
+    ):
+        raise EvidenceGraphContractError("EVIDENCE_MANIFEST_THREAD_INVALID")
+    if manifest.get("actor_role") not in {"USER", "MERCHANT"}:
+        raise EvidenceGraphContractError("EVIDENCE_MANIFEST_ACTOR_ROLE_INVALID")
+    for name, minimum in (
+        ("room_epoch", 0),
+        ("fencing_token", 1),
+        ("submission_revision", 1),
+        ("dossier_target_version", 1),
+    ):
+        _require_integer(
+            manifest.get(name),
+            minimum=minimum,
+            maximum=9_007_199_254_740_991,
+        )
+    if (
+        type(manifest.get("formal_sink_eligible")) is not bool
+        or type(manifest.get("graph_execution_allowed")) is not bool
+    ):
+        raise EvidenceGraphContractError("EVIDENCE_MANIFEST_BOOLEAN_INVALID")
+    issued_at = _require_instant(manifest.get("issued_at"), "EVIDENCE_MANIFEST_TIME_INVALID")
+    not_before = _require_instant(
+        manifest.get("not_before"),
+        "EVIDENCE_MANIFEST_TIME_INVALID",
+    )
+    expires_at = _require_instant(
+        manifest.get("expires_at"),
+        "EVIDENCE_MANIFEST_TIME_INVALID",
+    )
+    if issued_at > not_before or not_before >= expires_at:
+        raise EvidenceGraphContractError("EVIDENCE_MANIFEST_TIME_INVALID")
+
+    command_binding = _required_mapping(manifest, "command_binding")
+    _require_exact_fields(
+        command_binding,
+        allowed=_MANIFEST_COMMAND_FIELDS,
+        required=_MANIFEST_COMMAND_FIELDS,
+        code="EVIDENCE_MANIFEST_COMMAND_FIELDS_INVALID",
+    )
+    if (
+        command_binding.get("schema_version") != "evidence-room-command.v1"
+        or command_binding.get("command_type") != "EVIDENCE_ASSESS_BATCH"
+    ):
+        raise EvidenceGraphContractError("EVIDENCE_MANIFEST_COMMAND_INVALID")
+    for name in ("command_id", "logical_run_id", "attempt_id"):
+        _require_identifier(
+            command_binding.get(name),
+            "EVIDENCE_MANIFEST_COMMAND_INVALID",
+        )
+    submitted_at = _require_instant(
+        command_binding.get("submitted_at"),
+        "EVIDENCE_MANIFEST_COMMAND_INVALID",
+    )
+    deadline_at = _require_instant(
+        command_binding.get("deadline_at"),
+        "EVIDENCE_MANIFEST_COMMAND_INVALID",
+    )
+    if deadline_at <= submitted_at:
+        raise EvidenceGraphContractError("EVIDENCE_MANIFEST_COMMAND_INVALID")
+
+    profiles = _required_mapping(manifest, "profile_versions")
+    _require_exact_fields(
+        profiles,
+        allowed=_PROFILE_FIELDS,
+        required=_PROFILE_FIELDS,
+        code="EVIDENCE_PROFILE_FIELDS_INVALID",
+    )
+    for name in _PROFILE_FIELDS:
+        _require_identifier(profiles.get(name), "EVIDENCE_PROFILE_INVALID")
+    if (
+        profiles.get("graph_version") != EVIDENCE_GRAPH_VERSION
+        or profiles.get("state_schema_version") != EVIDENCE_STATE_SCHEMA_VERSION
+    ):
+        raise EvidenceGraphContractError("EVIDENCE_PROFILE_INVALID")
+
+    if (
+        manifest.get("schema_version") != "evidence-batch-manifest.v1"
+        or manifest.get("room_type") != "EVIDENCE"
+        or manifest.get("signature_algorithm") != "ES256"
+        or not isinstance(manifest.get("signature"), str)
+        or not _P1363_BASE64URL.fullmatch(cast(str, manifest["signature"]))
+    ):
+        raise EvidenceGraphContractError("EVIDENCE_MANIFEST_SCHEMA_INVALID")
+
+
 def _verify_internal_manifest_hash(manifest: JsonObject) -> None:
     manifest_hash = manifest.get("manifest_hash")
     if not isinstance(manifest_hash, str) or not _SHA256.fullmatch(manifest_hash):
@@ -359,7 +794,7 @@ def _verify_internal_manifest_hash(manifest: JsonObject) -> None:
 
 def _verify_direct_java_signature(
     manifest: JsonObject,
-    key_resolver: EvidenceVerificationKeyResolver,
+    trust_store: _EvidenceJavaSigningTrustStore,
 ) -> None:
     signature = manifest.get("signature")
     if (
@@ -377,11 +812,13 @@ def _verify_direct_java_signature(
     ):
         raise EvidenceGraphContractError("EVIDENCE_DIRECT_JAVA_SIGNATURE_UNVERIFIED")
     try:
-        resolved = key_resolver.resolve(signing_key_id)
+        resolved = trust_store.resolve(signing_key_id)
+    except EvidenceGraphContractError:
+        raise
     except Exception as error:
         raise EvidenceGraphContractError("EVIDENCE_SIGNING_KEY_UNAVAILABLE") from error
     if (
-        type(resolved) is not ResolvedEvidenceVerificationKey
+        type(resolved) is not ResolvedVerificationKey
         or resolved.kid != signing_key_id
         or resolved.algorithm != "ES256"
         or resolved.curve != "P-256"
@@ -502,6 +939,7 @@ def _verify_manifest_membership(manifest: JsonObject) -> None:
         not _is_nonnegative_int(item_count)
         or cast(int, item_count) < 1
         or cast(int, item_count) > MAX_MANIFEST_ITEMS
+        or cast(int, item_count) not in {1, 8, 100}
         or not isinstance(ordered, list)
         or not isinstance(items, list)
         or len(ordered) != item_count
@@ -512,14 +950,175 @@ def _verify_manifest_membership(manifest: JsonObject) -> None:
         raise EvidenceGraphContractError("EVIDENCE_MANIFEST_MEMBERSHIP_INVALID")
     item_keys: list[str] = []
     for item in items:
-        if not isinstance(item, dict) or item.get("schema_version") != "evidence-item-manifest.v1":
+        if not isinstance(item, dict):
+            raise EvidenceGraphContractError("EVIDENCE_ITEM_INVALID")
+        _require_exact_fields(
+            item,
+            allowed=_ITEM_FIELDS,
+            required=_ITEM_FIELDS,
+            code="EVIDENCE_ITEM_FIELDS_INVALID",
+        )
+        if item.get("schema_version") != "evidence-item-manifest.v1":
             raise EvidenceGraphContractError("EVIDENCE_ITEM_INVALID")
         evidence_id = item.get("evidence_id")
-        if not isinstance(evidence_id, str) or not evidence_id:
+        if not isinstance(evidence_id, str) or not _EVIDENCE_ID.fullmatch(evidence_id):
             raise EvidenceGraphContractError("EVIDENCE_ITEM_INVALID")
+        for name in ("owner_participant_id", "immutable_object_version"):
+            _require_identifier(item.get(name), "EVIDENCE_ITEM_INVALID")
+        for name in ("item_hash", "object_sha256"):
+            _require_sha256(item.get(name), "EVIDENCE_ITEM_INVALID")
+        item_preimage = dict(item)
+        item_hash = cast(str, item_preimage.pop("item_hash"))
+        if not hmac.compare_digest(item_hash, canonical_sha256(item_preimage)):
+            raise EvidenceGraphContractError("EVIDENCE_ITEM_HASH_MISMATCH")
+        if item.get("owner_role") not in {"USER", "MERCHANT"} or item.get("visibility") not in {
+            "PRIVATE",
+            "PARTIES",
+            "PLATFORM_REVIEWER",
+        }:
+            raise EvidenceGraphContractError("EVIDENCE_ITEM_ACCESS_SCOPE_INVALID")
+        object_ref = item.get("object_ref")
+        if (
+            not isinstance(object_ref, str)
+            or len(object_ref) > 512
+            or not object_ref.startswith("urn:synthetic-evidence:")
+        ):
+            raise EvidenceGraphContractError("EVIDENCE_ITEM_OBJECT_REF_INVALID")
+        if item.get("content_type") not in {
+            "application/pdf",
+            "image/jpeg",
+            "image/png",
+            "text/plain",
+        }:
+            raise EvidenceGraphContractError("EVIDENCE_ITEM_CONTENT_TYPE_INVALID")
+        _require_integer(item.get("byte_size"), minimum=1, maximum=10_485_760)
+        filename = item.get("original_filename")
+        if (
+            not isinstance(filename, str)
+            or not filename
+            or len(filename) > 255
+            or any(character in filename for character in ("/", "\\", "\x00"))
+            or any(ord(character) < 32 for character in filename)
+        ):
+            raise EvidenceGraphContractError("EVIDENCE_ITEM_FILENAME_INVALID")
+        _verify_item_parse_binding(item)
+        if item.get("privacy_basis") != "SIGNED_SYNTHETIC_FIXTURE":
+            raise EvidenceGraphContractError("EVIDENCE_ITEM_PRIVACY_BASIS_INVALID")
+        modalities = item.get("permitted_modalities")
+        if (
+            not isinstance(modalities, list)
+            or not 1 <= len(modalities) <= 4
+            or not all(isinstance(modality, str) for modality in modalities)
+            or len(modalities) != len(set(cast(list[str], modalities)))
+            or not set(cast(list[str], modalities))
+            <= {"TEXT", "IMAGE_PIXELS", "PDF_METADATA", "OCR"}
+        ):
+            raise EvidenceGraphContractError("EVIDENCE_ITEM_MODALITIES_INVALID")
+        _require_integer(
+            item.get("formal_evidence_revision"),
+            minimum=1,
+            maximum=9_007_199_254_740_991,
+        )
+        _require_integer(
+            item.get("display_order"),
+            minimum=0,
+            maximum=9_007_199_254_740_991,
+        )
         item_keys.append(evidence_id)
     if item_keys != ordered:
         raise EvidenceGraphContractError("EVIDENCE_MANIFEST_ITEM_ORDER_MISMATCH")
+
+
+def _require_exact_fields(
+    value: Mapping[str, Any],
+    *,
+    allowed: frozenset[str],
+    required: frozenset[str],
+    code: str,
+) -> None:
+    fields = frozenset(value)
+    if not required <= fields or not fields <= allowed:
+        raise EvidenceGraphContractError(code)
+
+
+def _require_identifier(value: Any, code: str) -> str:
+    if not isinstance(value, str) or not _KEY_ID.fullmatch(value):
+        raise EvidenceGraphContractError(code)
+    return value
+
+
+def _require_sha256(value: Any, code: str) -> str:
+    if not isinstance(value, str) or not _SHA256.fullmatch(value):
+        raise EvidenceGraphContractError(code)
+    return value
+
+
+def _require_integer(value: Any, *, minimum: int, maximum: int) -> int:
+    if type(value) is not int or not minimum <= value <= maximum:
+        raise EvidenceGraphContractError("EVIDENCE_INTEGER_INVALID")
+    return value
+
+
+def _require_identifier_list(value: Any, *, maximum: int, code: str) -> list[str]:
+    if not isinstance(value, list) or len(value) > maximum:
+        raise EvidenceGraphContractError(code)
+    if any(not isinstance(member, str) or not _KEY_ID.fullmatch(member) for member in value):
+        raise EvidenceGraphContractError(code)
+    if len(value) != len(set(cast(list[str], value))):
+        raise EvidenceGraphContractError(code)
+    return cast(list[str], value)
+
+
+def _require_instant(value: Any, code: str) -> datetime:
+    if not isinstance(value, str) or not _RFC3339_INSTANT.fullmatch(value):
+        raise EvidenceGraphContractError(code)
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise EvidenceGraphContractError(code) from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise EvidenceGraphContractError(code)
+    return parsed
+
+
+def _verify_snapshot_shape(snapshot: Mapping[str, Any]) -> None:
+    _require_exact_fields(
+        snapshot,
+        allowed=_SNAPSHOT_FIELDS,
+        required=_SNAPSHOT_FIELDS,
+        code="EVIDENCE_SNAPSHOT_FIELDS_INVALID",
+    )
+    _require_identifier(snapshot.get("artifact_id"), "EVIDENCE_SNAPSHOT_INVALID")
+    _require_identifier(snapshot.get("schema_version"), "EVIDENCE_SNAPSHOT_INVALID")
+    uri = snapshot.get("uri")
+    if (
+        not isinstance(uri, str)
+        or not 1 <= len(uri) <= 1024
+        or not uri.startswith(("s3:", "minio:", "urn:"))
+        or len(uri.split(":", 1)[1]) == 0
+        or any(character.isspace() for character in uri)
+    ):
+        raise EvidenceGraphContractError("EVIDENCE_SNAPSHOT_INVALID")
+    _require_sha256(snapshot.get("sha256"), "EVIDENCE_SNAPSHOT_INVALID")
+    _require_integer(snapshot.get("size_bytes"), minimum=0, maximum=1_073_741_824)
+
+
+def _verify_item_parse_binding(item: Mapping[str, Any]) -> None:
+    status = item.get("parse_status")
+    parse_ref = item.get("parse_ref")
+    parse_hash = item.get("parse_hash")
+    if status == "AVAILABLE":
+        if (
+            not isinstance(parse_ref, str)
+            or len(parse_ref) > 512
+            or not _SYNTHETIC_PARSE_REF.fullmatch(parse_ref)
+        ):
+            raise EvidenceGraphContractError("EVIDENCE_ITEM_PARSE_BINDING_INVALID")
+        _require_sha256(parse_hash, "EVIDENCE_ITEM_PARSE_BINDING_INVALID")
+        return
+    if status in {"NOT_REQUESTED", "FAILED"} and parse_ref is None and parse_hash is None:
+        return
+    raise EvidenceGraphContractError("EVIDENCE_ITEM_PARSE_BINDING_INVALID")
 
 
 def _required_mapping(value: Mapping[str, Any], name: str) -> Mapping[str, Any]:
@@ -547,6 +1146,119 @@ def _decode_admission_payload(payload: bytes, code: str) -> JsonObject:
     if not isinstance(value, dict) or payload != canonicalize(value):
         raise EvidenceGraphContractError(code)
     return _json_object(value, code)
+
+
+def _capture_service_jwks_snapshot(
+    resolver: JwksVerificationKeyResolver,
+    trust_config: EvidenceJavaSigningTrustConfig,
+) -> _EvidenceJavaSigningTrustStore:
+    if type(resolver) is not JwksVerificationKeyResolver:
+        raise EvidenceGraphContractError("EVIDENCE_SERVICE_JWKS_REQUIRED")
+    if type(trust_config) is not EvidenceJavaSigningTrustConfig:
+        raise EvidenceGraphContractError("EVIDENCE_TRUST_CONFIG_REQUIRED")
+    before = resolver.snapshot()
+    if (
+        before.generation < 1
+        or not before.key_ids
+        or len(before.key_ids) != len(set(before.key_ids))
+    ):
+        raise EvidenceGraphContractError("EVIDENCE_SERVICE_JWKS_NOT_READY")
+    keys: list[ResolvedVerificationKey] = []
+    configured = {pin.signing_key_id: pin for pin in trust_config.keys}
+    try:
+        for signing_key_id in sorted(configured):
+            key = resolver.resolve(signing_key_id)
+            _validate_resolved_evidence_key(key, signing_key_id)
+            actual_fingerprint = _public_key_sha256(key.public_key)
+            if not hmac.compare_digest(
+                actual_fingerprint,
+                configured[signing_key_id].public_key_sha256,
+            ):
+                raise EvidenceGraphContractError("EVIDENCE_TRUST_CONFIG_KEY_MISMATCH")
+            keys.append(key)
+    except EvidenceGraphContractError:
+        raise
+    except Exception as error:
+        raise EvidenceGraphContractError("EVIDENCE_SERVICE_JWKS_INVALID") from error
+    after = resolver.snapshot()
+    if before != after:
+        raise EvidenceGraphContractError("EVIDENCE_SERVICE_JWKS_ROTATED_DURING_BOOTSTRAP")
+    trust_store = _EvidenceJavaSigningTrustStore(
+        generation=before.generation,
+        config_version=trust_config.version,
+        keys=tuple(keys),
+        _token=_TRUST_STORE_TOKEN,
+    )
+    _TRUST_STORES.add(trust_store)
+    return trust_store
+
+
+def _validate_resolved_evidence_key(
+    key: ResolvedVerificationKey,
+    expected_key_id: str,
+) -> None:
+    if (
+        type(key) is not ResolvedVerificationKey
+        or key.kid != expected_key_id
+        or key.algorithm != "ES256"
+        or key.curve != "P-256"
+        or key.use != "sig"
+        or not isinstance(key.public_key, ec.EllipticCurvePublicKey)
+        or not isinstance(key.public_key.curve, ec.SECP256R1)
+    ):
+        raise EvidenceGraphContractError("EVIDENCE_SERVICE_JWKS_KEY_INVALID")
+
+
+def _trust_store_seal(
+    generation: int,
+    config_version: str,
+    keys: tuple[ResolvedVerificationKey, ...],
+) -> str:
+    descriptors = []
+    for key in keys:
+        _validate_resolved_evidence_key(key, key.kid)
+        descriptors.append(
+            {
+                "kid": key.kid,
+                "public_key_sha256": _public_key_sha256(key.public_key),
+                "algorithm": key.algorithm,
+                "curve": key.curve,
+                "use": key.use,
+            }
+        )
+    preimage = canonicalize(
+        {
+            "schema_version": "evidence-java-signing-trust-store.v1",
+            "generation": generation,
+            "config_version": config_version,
+            "keys": descriptors,
+        }
+    )
+    return hmac.new(_TRUST_STORE_SEAL_KEY, preimage, hashlib.sha256).hexdigest()
+
+
+def _validate_trust_store(trust_store: _EvidenceJavaSigningTrustStore) -> None:
+    if (
+        type(trust_store) is not _EvidenceJavaSigningTrustStore
+        or trust_store not in _TRUST_STORES
+        or trust_store._token is not _TRUST_STORE_TOKEN
+    ):
+        raise EvidenceGraphContractError("EVIDENCE_TRUST_STORE_INVALID")
+    expected = _trust_store_seal(
+        trust_store._generation,
+        trust_store._config_version,
+        trust_store._keys,
+    )
+    if not hmac.compare_digest(trust_store._seal, expected):
+        raise EvidenceGraphContractError("EVIDENCE_TRUST_STORE_INVALID")
+
+
+def _public_key_sha256(public_key: ec.EllipticCurvePublicKey) -> str:
+    public_der = public_key.public_bytes(
+        serialization.Encoding.DER,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    return hashlib.sha256(public_der).hexdigest()
 
 
 def _admission_seal(

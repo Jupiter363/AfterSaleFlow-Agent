@@ -6,18 +6,24 @@ import pickle
 from copy import deepcopy
 from dataclasses import replace
 
+import jwt
 import pytest
+from cryptography.hazmat.primitives.asymmetric import ec
 
 from app.contracts.v1.codec import canonical_sha256
 from app.graphs.evidence import (
     ASSESSMENT_OUTPUT_SCHEMA_VERSION,
     TERMINAL_OUTPUT_SCHEMA_VERSION,
+    EvidenceAdmissionVerifier,
     EvidenceGraphContractError,
+    EvidenceJavaSigningTrustConfig,
     VerifiedEvidenceAdmission,
     merge_evidence_assessments,
     new_evidence_graph_state,
     validate_verified_admission,
 )
+from app.security.invocation_envelope import InvocationEnvelopeError
+from app.security.jwks import JwksVerificationKeyResolver
 
 
 def _rehash_command(command: dict) -> None:
@@ -66,7 +72,6 @@ def test_new_state_keeps_room_and_lease_fences_separate(admission) -> None:
 def test_snapshot_reference_fails_before_parse_or_key_resolution(
     admission_request_factory,
     admission_verifier_factory,
-    key_resolver_factory,
     field: str,
     value,
     code: str,
@@ -76,70 +81,329 @@ def test_snapshot_reference_fails_before_parse_or_key_resolution(
     command["domain_snapshot_ref"][field] = value
     _rehash_command(command)
     broken = replace(request, room_graph_command=command)
-    resolver = key_resolver_factory()
 
     with pytest.raises(
         EvidenceGraphContractError,
         match=code,
     ):
-        admission_verifier_factory(resolver).verify(broken)
-    assert resolver.lookups == 0
+        admission_verifier_factory().verify(broken)
 
 
 def test_raw_byte_drift_is_rejected_before_json_parse_or_key_resolution(
     admission_request_factory,
     admission_verifier_factory,
-    key_resolver_factory,
 ) -> None:
     request = admission_request_factory()
     drifted = bytearray(request.signed_manifest_payload)
     drifted[0] = ord("[")
     broken = replace(request, signed_manifest_payload=bytes(drifted))
-    resolver = key_resolver_factory()
 
     with pytest.raises(
         EvidenceGraphContractError,
         match="EVIDENCE_SNAPSHOT_PAYLOAD_HASH_MISMATCH",
     ):
-        admission_verifier_factory(resolver).verify(broken)
-    assert resolver.lookups == 0
+        admission_verifier_factory().verify(broken)
 
 
 def test_internal_manifest_hash_is_not_snapshot_payload_hash(
     admission_request_factory,
     admission_verifier_factory,
     admission_refresher,
-    key_resolver_factory,
 ) -> None:
     request = admission_request_factory()
     manifest = json.loads(request.signed_manifest_payload)
     manifest["manifest_hash"] = "f" * 64
     broken = admission_refresher(request, manifest=manifest)
-    resolver = key_resolver_factory()
 
     with pytest.raises(EvidenceGraphContractError, match="EVIDENCE_MANIFEST_HASH_MISMATCH"):
-        admission_verifier_factory(resolver).verify(broken)
-    assert resolver.lookups == 0
+        admission_verifier_factory().verify(broken)
 
 
 def test_syntactically_valid_but_cryptographically_invalid_signature_is_rejected(
     admission_request_factory,
     admission_verifier_factory,
     admission_refresher,
-    key_resolver_factory,
 ) -> None:
     request = admission_request_factory()
     manifest = json.loads(request.signed_manifest_payload)
     manifest["signature"] = "A" * 86
     broken = admission_refresher(request, manifest=manifest)
-    resolver = key_resolver_factory()
 
     with pytest.raises(
         EvidenceGraphContractError,
         match="EVIDENCE_DIRECT_JAVA_SIGNATURE_INVALID",
     ):
-        admission_verifier_factory(resolver).verify(broken)
-    assert resolver.lookups == 1
+        admission_verifier_factory().verify(broken)
+
+
+def test_attacker_generated_key_cannot_self_sign_an_admission(
+    admission_request_factory,
+    admission_verifier_factory,
+    admission_refresher,
+) -> None:
+    attacker_key = ec.generate_private_key(ec.SECP256R1())
+    request = admission_request_factory()
+    manifest = json.loads(request.signed_manifest_payload)
+    broken = admission_refresher(
+        request,
+        manifest=manifest,
+        resign=True,
+        signing_key=attacker_key,
+    )
+
+    with pytest.raises(
+        EvidenceGraphContractError,
+        match="EVIDENCE_DIRECT_JAVA_SIGNATURE_INVALID",
+    ):
+        admission_verifier_factory().verify(broken)
+
+
+def test_unknown_signing_key_id_fails_closed(
+    admission_request_factory,
+    admission_verifier_factory,
+    admission_refresher,
+) -> None:
+    request = admission_request_factory()
+    manifest = json.loads(request.signed_manifest_payload)
+    manifest["signing_key_id"] = "KEY_ATTACKER_UNKNOWN"
+    broken = admission_refresher(
+        request,
+        manifest=manifest,
+        refresh_internal_manifest_hash=True,
+        resign=True,
+    )
+
+    with pytest.raises(
+        EvidenceGraphContractError,
+        match="EVIDENCE_SIGNING_KEY_UNAVAILABLE",
+    ):
+        admission_verifier_factory().verify(broken)
+
+
+def test_duplicate_service_jwks_key_ids_fail_before_verifier_bootstrap(
+    service_trust_config_factory,
+) -> None:
+    key = ec.generate_private_key(ec.SECP256R1())
+    public = jwt.algorithms.ECAlgorithm.to_jwk(key.public_key(), as_dict=True)
+    candidate = {**public, "kid": "KEY_DUPLICATE", "use": "sig", "alg": "ES256"}
+    resolver = JwksVerificationKeyResolver()
+
+    with pytest.raises(InvocationEnvelopeError, match="INVOCATION_JWKS_DUPLICATE_KEY"):
+        resolver.install({"keys": [candidate, dict(candidate)]})
+    with pytest.raises(
+        EvidenceGraphContractError,
+        match="EVIDENCE_SERVICE_JWKS_NOT_READY",
+    ):
+        EvidenceAdmissionVerifier.from_service_jwks(
+            resolver,
+            service_trust_config_factory(),
+        )
+    valid_config = service_trust_config_factory()
+    with pytest.raises(
+        EvidenceGraphContractError,
+        match="EVIDENCE_TRUST_CONFIG_DUPLICATE_KEY",
+    ):
+        EvidenceJavaSigningTrustConfig(
+            version="evidence-java-keys.synthetic.duplicate",
+            keys=valid_config.keys + valid_config.keys,
+        )
+
+
+def test_verifier_constructor_resolver_substitution_and_replacement_are_blocked(
+    admission_verifier_factory,
+    service_jwks_factory,
+    service_trust_config_factory,
+) -> None:
+    class AttackerResolver:
+        def resolve(self, signing_key_id):
+            del signing_key_id
+            return None
+
+    with pytest.raises(
+        EvidenceGraphContractError,
+        match="EVIDENCE_VERIFIER_BOOTSTRAP_REQUIRED",
+    ):
+        EvidenceAdmissionVerifier(AttackerResolver())
+    with pytest.raises(
+        EvidenceGraphContractError,
+        match="EVIDENCE_SERVICE_JWKS_REQUIRED",
+    ):
+        EvidenceAdmissionVerifier.from_service_jwks(
+            AttackerResolver(),
+            service_trust_config_factory(),
+        )
+
+    attacker_key = ec.generate_private_key(ec.SECP256R1())
+    substituted_resolver = service_jwks_factory(private_key=attacker_key)
+    with pytest.raises(
+        EvidenceGraphContractError,
+        match="EVIDENCE_TRUST_CONFIG_KEY_MISMATCH",
+    ):
+        EvidenceAdmissionVerifier.from_service_jwks(
+            substituted_resolver,
+            service_trust_config_factory(),
+        )
+
+    verifier = admission_verifier_factory()
+    with pytest.raises(EvidenceGraphContractError, match="EVIDENCE_VERIFIER_IMMUTABLE"):
+        verifier._trust_store = AttackerResolver()
+
+
+def test_key_rotation_publishes_a_new_immutable_trust_snapshot(
+    admission_request_factory,
+    admission_refresher,
+    service_jwks_factory,
+    service_trust_config_factory,
+) -> None:
+    resolver = service_jwks_factory()
+    original_config = service_trust_config_factory()
+    original_verifier = EvidenceAdmissionVerifier.from_service_jwks(
+        resolver,
+        original_config,
+    )
+    original_request = admission_request_factory()
+
+    rotated_key = ec.generate_private_key(ec.SECP256R1())
+    public = jwt.algorithms.ECAlgorithm.to_jwk(rotated_key.public_key(), as_dict=True)
+    resolver.install(
+        {
+            "keys": [
+                {
+                    **public,
+                    "kid": "KEY_P5_ROTATED_ES256_2",
+                    "use": "sig",
+                    "alg": "ES256",
+                }
+            ]
+        },
+        retain_key_ids={"KEY_P5_SYNTHETIC_ES256_1"},
+    )
+    rotated_pin = service_trust_config_factory(
+        private_key=rotated_key,
+        signing_key_id="KEY_P5_ROTATED_ES256_2",
+        version="evidence-java-keys.synthetic.v2",
+    )
+    rotated_config = EvidenceJavaSigningTrustConfig(
+        version="evidence-java-keys.synthetic.v2",
+        keys=original_config.keys + rotated_pin.keys,
+    )
+    rotated_verifier = EvidenceAdmissionVerifier.from_service_jwks(
+        resolver,
+        rotated_config,
+    )
+    rotated_manifest = json.loads(original_request.signed_manifest_payload)
+    rotated_manifest["signing_key_id"] = "KEY_P5_ROTATED_ES256_2"
+    rotated_request = admission_refresher(
+        original_request,
+        manifest=rotated_manifest,
+        refresh_internal_manifest_hash=True,
+        resign=True,
+        signing_key=rotated_key,
+    )
+
+    assert original_verifier.verify(original_request).manifest
+    with pytest.raises(
+        EvidenceGraphContractError,
+        match="EVIDENCE_SIGNING_KEY_UNAVAILABLE",
+    ):
+        original_verifier.verify(rotated_request)
+    assert rotated_verifier.verify(original_request).manifest
+    assert rotated_verifier.verify(rotated_request).manifest
+
+
+def test_rehashed_command_with_an_unknown_field_fails_closed(
+    admission_request_factory,
+    admission_verifier_factory,
+) -> None:
+    request = admission_request_factory()
+    command = deepcopy(dict(request.room_graph_command))
+    command["future_extension"] = "not-admitted"
+    _rehash_command(command)
+
+    with pytest.raises(
+        EvidenceGraphContractError,
+        match="EVIDENCE_COMMAND_FIELDS_INVALID",
+    ):
+        admission_verifier_factory().verify(replace(request, room_graph_command=command))
+
+
+@pytest.mark.parametrize(
+    ("target", "code"),
+    [
+        ("manifest", "EVIDENCE_MANIFEST_FIELDS_INVALID"),
+        ("profile", "EVIDENCE_PROFILE_FIELDS_INVALID"),
+    ],
+)
+def test_resigned_manifest_with_an_unknown_field_fails_closed(
+    admission_request_factory,
+    admission_verifier_factory,
+    admission_refresher,
+    target: str,
+    code: str,
+) -> None:
+    request = admission_request_factory()
+    manifest = json.loads(request.signed_manifest_payload)
+    if target == "manifest":
+        manifest["future_extension"] = "not-admitted"
+    else:
+        manifest["profile_versions"]["future_extension"] = "not-admitted"
+    broken = admission_refresher(
+        request,
+        manifest=manifest,
+        refresh_internal_manifest_hash=True,
+        resign=True,
+    )
+
+    with pytest.raises(EvidenceGraphContractError, match=code):
+        admission_verifier_factory().verify(broken)
+
+
+def test_resigned_item_with_an_unknown_hashed_field_fails_closed(
+    admission_request_factory,
+    admission_verifier_factory,
+    admission_refresher,
+) -> None:
+    request = admission_request_factory()
+    manifest = json.loads(request.signed_manifest_payload)
+    item = manifest["items"][0]
+    item["future_extension"] = "not-admitted"
+    item_preimage = dict(item)
+    item_preimage.pop("item_hash")
+    item["item_hash"] = canonical_sha256(item_preimage)
+    broken = admission_refresher(
+        request,
+        manifest=manifest,
+        refresh_internal_manifest_hash=True,
+        resign=True,
+    )
+
+    with pytest.raises(
+        EvidenceGraphContractError,
+        match="EVIDENCE_ITEM_FIELDS_INVALID",
+    ):
+        admission_verifier_factory().verify(broken)
+
+
+def test_resigned_manifest_without_synthetic_fixture_id_fails_closed(
+    admission_request_factory,
+    admission_verifier_factory,
+    admission_refresher,
+) -> None:
+    request = admission_request_factory()
+    manifest = json.loads(request.signed_manifest_payload)
+    manifest.pop("synthetic_fixture_id")
+    broken = admission_refresher(
+        request,
+        manifest=manifest,
+        refresh_internal_manifest_hash=True,
+        resign=True,
+    )
+
+    with pytest.raises(
+        EvidenceGraphContractError,
+        match="EVIDENCE_MANIFEST_FIELDS_INVALID",
+    ):
+        admission_verifier_factory().verify(broken)
 
 
 def test_verified_admission_cannot_be_minted_by_a_caller(admission) -> None:

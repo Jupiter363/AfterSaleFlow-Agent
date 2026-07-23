@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-import json
 import base64
+import hashlib
+import json
 from copy import deepcopy
 from pathlib import Path
 
+import jwt
 import pytest
 from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 from langchain_core.runnables import RunnableLambda
@@ -17,10 +20,12 @@ from app.graphs.evidence.contracts import (
     EvidenceAdmissionRequest,
     EvidenceAdmissionVerifier,
     EvidenceGraphContext,
+    EvidenceJavaSigningKeyPin,
+    EvidenceJavaSigningTrustConfig,
     JsonObject,
-    ResolvedEvidenceVerificationKey,
     VerifiedEvidenceAdmission,
 )
+from app.security.jwks import JwksVerificationKeyResolver
 
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -33,16 +38,50 @@ SIGNING_KEY_ID = "KEY_P5_SYNTHETIC_ES256_1"
 PRIVATE_KEY = ec.generate_private_key(ec.SECP256R1())
 
 
-class CountingKeyResolver:
-    def __init__(self) -> None:
-        self.lookups = 0
+def service_jwks_resolver(
+    *,
+    private_key: ec.EllipticCurvePrivateKey = PRIVATE_KEY,
+    signing_key_id: str = SIGNING_KEY_ID,
+) -> JwksVerificationKeyResolver:
+    public_jwk = jwt.algorithms.ECAlgorithm.to_jwk(
+        private_key.public_key(),
+        as_dict=True,
+    )
+    resolver = JwksVerificationKeyResolver()
+    resolver.install(
+        {
+            "keys": [
+                {
+                    **public_jwk,
+                    "kid": signing_key_id,
+                    "use": "sig",
+                    "alg": "ES256",
+                }
+            ]
+        }
+    )
+    return resolver
 
-    def resolve(self, signing_key_id: str) -> ResolvedEvidenceVerificationKey:
-        self.lookups += 1
-        return ResolvedEvidenceVerificationKey(
-            kid=signing_key_id,
-            public_key=PRIVATE_KEY.public_key(),
-        )
+
+def service_trust_config(
+    *,
+    private_key: ec.EllipticCurvePrivateKey = PRIVATE_KEY,
+    signing_key_id: str = SIGNING_KEY_ID,
+    version: str = "evidence-java-keys.synthetic.v1",
+) -> EvidenceJavaSigningTrustConfig:
+    public_der = private_key.public_key().public_bytes(
+        serialization.Encoding.DER,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    return EvidenceJavaSigningTrustConfig(
+        version=version,
+        keys=(
+            EvidenceJavaSigningKeyPin(
+                signing_key_id=signing_key_id,
+                public_key_sha256=hashlib.sha256(public_der).hexdigest(),
+            ),
+        ),
+    )
 
 
 def load_manifest(count: int) -> JsonObject:
@@ -88,7 +127,10 @@ def make_request(count: int = 1) -> EvidenceAdmissionRequest:
 
 
 def make_admission(count: int = 1) -> VerifiedEvidenceAdmission:
-    return EvidenceAdmissionVerifier(CountingKeyResolver()).verify(make_request(count))
+    return EvidenceAdmissionVerifier.from_service_jwks(
+        service_jwks_resolver(),
+        service_trust_config(),
+    ).verify(make_request(count))
 
 
 def refresh_request(
@@ -98,6 +140,7 @@ def refresh_request(
     manifest: JsonObject | None = None,
     refresh_internal_manifest_hash: bool = False,
     resign: bool = False,
+    signing_key: ec.EllipticCurvePrivateKey = PRIVATE_KEY,
 ) -> EvidenceAdmissionRequest:
     updated_manifest = deepcopy(
         manifest
@@ -105,14 +148,14 @@ def refresh_request(
         else json.loads(request.signed_manifest_payload.decode("utf-8"))
     )
     updated_command = deepcopy(command if command is not None else dict(request.room_graph_command))
-    updated_manifest["signing_key_id"] = SIGNING_KEY_ID
+    updated_manifest.setdefault("signing_key_id", SIGNING_KEY_ID)
     if refresh_internal_manifest_hash:
         preimage = dict(updated_manifest)
         preimage.pop("manifest_hash", None)
         preimage.pop("signature", None)
         updated_manifest["manifest_hash"] = canonical_sha256(preimage)
     if resign:
-        der_signature = PRIVATE_KEY.sign(
+        der_signature = signing_key.sign(
             updated_manifest["manifest_hash"].encode("ascii"),
             ec.ECDSA(hashes.SHA256()),
         )
@@ -217,12 +260,23 @@ def admission_request_factory():
 
 @pytest.fixture
 def admission_verifier_factory():
-    return lambda resolver=None: EvidenceAdmissionVerifier(resolver or CountingKeyResolver())
+    def factory(resolver=None, trust_config=None):
+        return EvidenceAdmissionVerifier.from_service_jwks(
+            resolver or service_jwks_resolver(),
+            trust_config or service_trust_config(),
+        )
+
+    return factory
 
 
 @pytest.fixture
-def key_resolver_factory():
-    return CountingKeyResolver
+def service_jwks_factory():
+    return service_jwks_resolver
+
+
+@pytest.fixture
+def service_trust_config_factory():
+    return service_trust_config
 
 
 @pytest.fixture
