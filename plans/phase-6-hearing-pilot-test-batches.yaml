@@ -1,7 +1,7 @@
 schema_version: phase-test-batches.v1
 phase: 6
 name: hearing-pilot-engineering-shadow
-document_status: P6_0_CONTRACT_CANDIDATE_ASSEMBLY
+document_status: P6_0_CONTRACT_CANDIDATE
 
 documents:
   execution_plan: plans/phase-6-hearing-pilot-execution.md
@@ -34,7 +34,7 @@ gate:
     MIG-005: PENDING_PROMOTION
     P6.0: NOT_RUN
     MIG-006: PENDING_PROMOTION
-  entry_decision: CONTRACT_CANDIDATE_ASSEMBLY
+  entry_decision: CONTRACT_CANDIDATE_READY
   product_implementation: BLOCKED_PENDING_EXACT_SHA_BATCH_0_AND_ENTRY_EVIDENCE
   implementation_allowed_when:
     - PHASE_5_ENGINEERING_CHECKPOINT_PASS
@@ -485,7 +485,7 @@ checks:
 
 batches:
   draft_validation:
-    status: RUNNABLE_DURING_CONTRACT_CANDIDATE_ASSEMBLY
+    status: RUNNABLE_ON_CONTRACT_CANDIDATE
     purpose: Validate document consistency only; does not pass P6.0 or authorize implementation.
     commands:
       - id: static_phase6_draft
@@ -498,7 +498,7 @@ batches:
           tests/static/test_phase6_entry_checkpoint.py
           tests/static/test_temporal_refactor_traceability.py
   batch_0_entry:
-    status: READY_AFTER_CONTRACT_CANDIDATE_COMMIT_AND_P0_REVIEW
+    status: READY_FOR_EXACT_SHA_BATCH_0
     owner: R
     exact_clean_detached_sha_required: true
     fresh_run_directory_required: true

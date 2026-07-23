@@ -107,11 +107,11 @@ def test_phase6_candidate_is_linked_and_remains_fail_closed() -> None:
 
     assert matrix["schema_version"] == "phase-test-batches.v1"
     assert matrix["phase"] == 6
-    assert matrix["document_status"] == "P6_0_CONTRACT_CANDIDATE_ASSEMBLY"
+    assert matrix["document_status"] == "P6_0_CONTRACT_CANDIDATE"
     assert matrix["gate"]["contract_gate"] == "P6.0"
     assert matrix["gate"]["contract_gate_status"] == "NOT_RUN"
     assert matrix["gate"]["accepted_phase_5_checkpoint_sha"] == BASE_SHA
-    assert matrix["gate"]["entry_decision"] == "CONTRACT_CANDIDATE_ASSEMBLY"
+    assert matrix["gate"]["entry_decision"] == "CONTRACT_CANDIDATE_READY"
 
     observed = matrix["gate"]["observed_entry_state"]
     assert observed == {
@@ -365,7 +365,7 @@ def test_phase6_owner_briefs_are_blocked_disjoint_and_execution_ready() -> None:
 
     assert briefs["schema_version"] == "phase-owner-briefs.v1"
     assert briefs["phase"] == 6
-    assert briefs["document_status"] == "P6_0_CONTRACT_CANDIDATE_ASSEMBLY"
+    assert briefs["document_status"] == "P6_0_CONTRACT_CANDIDATE"
     assert briefs["accepted_phase_5_checkpoint_sha"] == BASE_SHA
     gate = briefs["gate"]
     assert gate["dispatch_state"] == "BLOCKED_PENDING_P6_0_ENTRY_EVIDENCE"
@@ -510,10 +510,10 @@ def test_phase6_centralizes_heavy_tests_and_defers_unified_suites() -> None:
     matrix = _matrix()
     batches = matrix["batches"]
 
-    assert batches["draft_validation"]["status"] == "RUNNABLE_DURING_CONTRACT_CANDIDATE_ASSEMBLY"
+    assert batches["draft_validation"]["status"] == "RUNNABLE_ON_CONTRACT_CANDIDATE"
     assert (
         batches["batch_0_entry"]["status"]
-        == "READY_AFTER_CONTRACT_CANDIDATE_COMMIT_AND_P0_REVIEW"
+        == "READY_FOR_EXACT_SHA_BATCH_0"
     )
     entry = batches["batch_0_entry"]
     sources = entry["source_commands"]

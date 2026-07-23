@@ -38,18 +38,18 @@ def _ready_matrix() -> dict:
     return matrix
 
 
-def test_blocked_plan_lists_exact_sources_but_authorizes_zero_execution() -> None:
+def test_ready_plan_lists_exact_sources_but_executes_nothing() -> None:
     plan = runner.entry_plan(CANDIDATE)
 
     assert plan["phase"] == 6
     assert plan["candidate_commit"] == CANDIDATE
-    assert plan["execution_allowed"] is False
+    assert plan["execution_allowed"] is True
     assert plan["executed_source_count"] == 0
     assert plan["execution_order"] == list(runner.COMMAND_ORDER)
     assert {item["id"]: item["report"] for item in plan["commands"]} == (
         runner.SOURCE_REPORTS
     )
-    assert plan["blocked_reasons"]
+    assert plan["blocked_reasons"] == []
     assert plan["runtime_restrictions"] == {
         "real_case_data": "forbidden",
         "real_case_shadow": "forbidden",
@@ -62,6 +62,9 @@ def test_blocked_plan_lists_exact_sources_but_authorizes_zero_execution() -> Non
 def test_execute_rejects_blocked_gate_before_any_source_or_run_directory(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    blocked = _ready_matrix()
+    blocked["gate"]["entry_decision"] = "CONTRACT_CANDIDATE_ASSEMBLY"
+    monkeypatch.setattr(runner, "load_matrix", lambda: blocked)
     calls: list[str] = []
     monkeypatch.setattr(
         runner,
@@ -85,7 +88,7 @@ def test_execute_rejects_blocked_gate_before_any_source_or_run_directory(
     assert not run_root.exists()
 
 
-def test_cli_help_and_plan_are_the_only_blocked_state_successes() -> None:
+def test_cli_help_and_ready_plan_do_not_execute_sources() -> None:
     help_result = subprocess.run(
         [sys.executable, str(SCRIPT), "--help"],
         cwd=ROOT,
@@ -102,28 +105,11 @@ def test_cli_help_and_plan_are_the_only_blocked_state_successes() -> None:
         text=True,
         encoding="utf-8",
     )
-    execute_result = subprocess.run(
-        [
-            sys.executable,
-            str(SCRIPT),
-            "--candidate-commit",
-            CANDIDATE,
-            "--execute",
-            "--run-dir",
-            str(ROOT / ".codex-run" / "blocked-phase6-static-test"),
-        ],
-        cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-    )
-
     assert help_result.returncode == 0
     assert plan_result.returncode == 0
-    assert json.loads(plan_result.stdout)["execution_allowed"] is False
-    assert execute_result.returncode == 2
-    assert "Phase 6 entry execution is blocked" in execute_result.stderr
+    plan = json.loads(plan_result.stdout)
+    assert plan["execution_allowed"] is True
+    assert plan["executed_source_count"] == 0
 
 
 def test_gate_requires_phase5_authority_permission_candidate_and_ready_batch() -> None:

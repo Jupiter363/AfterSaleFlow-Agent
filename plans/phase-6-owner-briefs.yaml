@@ -1,7 +1,7 @@
 schema_version: phase-owner-briefs.v1
 phase: 6
 name: hearing-pilot-owner-delegation-briefs
-document_status: P6_0_CONTRACT_CANDIDATE_ASSEMBLY
+document_status: P6_0_CONTRACT_CANDIDATE
 sources:
   execution_plan: plans/phase-6-hearing-pilot-execution.md
   test_matrix: plans/phase-6-hearing-pilot-test-batches.yaml

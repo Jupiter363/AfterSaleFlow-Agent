@@ -3,7 +3,7 @@
 ## Entry State And Authorization
 
 ```text
-document_status: P6_0_CONTRACT_CANDIDATE_ASSEMBLY
+document_status: P6_0_CONTRACT_CANDIDATE
 contract_gate: P6.0 NOT_RUN
 accepted_phase_5_checkpoint_sha: d3ea271188be57adac49592879aaf3417e90c5c0
 phase_5_candidate_sha: c43f969f08755fd6eb90c0845809cda1785d11bf
