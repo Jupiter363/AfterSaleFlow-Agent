@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import base64
+import hmac
 import hashlib
 import json
 import re
+import secrets
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
@@ -93,6 +95,7 @@ class EvidenceVerificationKeyResolver(Protocol):
 
 
 _VERIFIED_ADMISSION_TOKEN = object()
+_ADMISSION_SEAL_KEY = secrets.token_bytes(32)
 
 
 class VerifiedEvidenceAdmission:
@@ -100,11 +103,12 @@ class VerifiedEvidenceAdmission:
 
     __slots__ = (
         "_runtime_mode",
-        "_room_graph_command",
-        "_manifest",
+        "_room_graph_command_payload",
+        "_manifest_payload",
         "_registry_output_schema_version",
         "_graph_lease_fencing_token",
         "_snapshot_payload_sha256",
+        "_seal",
         "_token",
         "__weakref__",
     )
@@ -122,13 +126,47 @@ class VerifiedEvidenceAdmission:
     ) -> None:
         if _token is not _VERIFIED_ADMISSION_TOKEN:
             raise EvidenceGraphContractError("EVIDENCE_VERIFIED_ADMISSION_REQUIRED")
-        self._runtime_mode = runtime_mode
-        self._room_graph_command = deepcopy(room_graph_command)
-        self._manifest = deepcopy(manifest)
-        self._registry_output_schema_version = registry_output_schema_version
-        self._graph_lease_fencing_token = graph_lease_fencing_token
-        self._snapshot_payload_sha256 = snapshot_payload_sha256
-        self._token = _token
+        command_payload = canonicalize(room_graph_command)
+        manifest_payload = canonicalize(manifest)
+        seal = _admission_seal(
+            runtime_mode=runtime_mode,
+            room_graph_command_payload=command_payload,
+            manifest_payload=manifest_payload,
+            registry_output_schema_version=registry_output_schema_version,
+            graph_lease_fencing_token=graph_lease_fencing_token,
+            snapshot_payload_sha256=snapshot_payload_sha256,
+        )
+        object.__setattr__(self, "_runtime_mode", runtime_mode)
+        object.__setattr__(self, "_room_graph_command_payload", command_payload)
+        object.__setattr__(self, "_manifest_payload", manifest_payload)
+        object.__setattr__(
+            self,
+            "_registry_output_schema_version",
+            registry_output_schema_version,
+        )
+        object.__setattr__(
+            self,
+            "_graph_lease_fencing_token",
+            graph_lease_fencing_token,
+        )
+        object.__setattr__(self, "_snapshot_payload_sha256", snapshot_payload_sha256)
+        object.__setattr__(self, "_seal", seal)
+        object.__setattr__(self, "_token", _token)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        del name, value
+        raise EvidenceGraphContractError("EVIDENCE_VERIFIED_ADMISSION_IMMUTABLE")
+
+    def __copy__(self) -> VerifiedEvidenceAdmission:
+        raise EvidenceGraphContractError("EVIDENCE_VERIFIED_ADMISSION_COPY_FORBIDDEN")
+
+    def __deepcopy__(self, memo: dict[int, object]) -> VerifiedEvidenceAdmission:
+        del memo
+        raise EvidenceGraphContractError("EVIDENCE_VERIFIED_ADMISSION_COPY_FORBIDDEN")
+
+    def __reduce_ex__(self, protocol: int) -> object:
+        del protocol
+        raise EvidenceGraphContractError("EVIDENCE_VERIFIED_ADMISSION_PICKLE_FORBIDDEN")
 
     @property
     def runtime_mode(self) -> Literal["SHADOW"]:
@@ -136,11 +174,17 @@ class VerifiedEvidenceAdmission:
 
     @property
     def room_graph_command(self) -> JsonObject:
-        return deepcopy(self._room_graph_command)
+        return _decode_admission_payload(
+            self._room_graph_command_payload,
+            "EVIDENCE_COMMAND_INVALID",
+        )
 
     @property
     def manifest(self) -> JsonObject:
-        return deepcopy(self._manifest)
+        return _decode_admission_payload(
+            self._manifest_payload,
+            "EVIDENCE_MANIFEST_INVALID",
+        )
 
     @property
     def registry_output_schema_version(self) -> str:
@@ -221,6 +265,20 @@ def validate_verified_admission(
         or admission._token is not _VERIFIED_ADMISSION_TOKEN
     ):
         raise EvidenceGraphContractError("EVIDENCE_VERIFIED_ADMISSION_REQUIRED")
+    expected_seal = _admission_seal(
+        runtime_mode=admission._runtime_mode,
+        room_graph_command_payload=admission._room_graph_command_payload,
+        manifest_payload=admission._manifest_payload,
+        registry_output_schema_version=admission._registry_output_schema_version,
+        graph_lease_fencing_token=admission._graph_lease_fencing_token,
+        snapshot_payload_sha256=admission._snapshot_payload_sha256,
+    )
+    if not hmac.compare_digest(admission._seal, expected_seal):
+        raise EvidenceGraphContractError("EVIDENCE_VERIFIED_ADMISSION_SEAL_INVALID")
+    if hashlib.sha256(admission._manifest_payload).hexdigest() != (
+        admission._snapshot_payload_sha256
+    ):
+        raise EvidenceGraphContractError("EVIDENCE_VERIFIED_ADMISSION_SEAL_INVALID")
     return admission.room_graph_command, admission.manifest
 
 
@@ -479,6 +537,39 @@ def _json_object(value: Mapping[str, Any], code: str) -> JsonObject:
     except (TypeError, ValueError) as error:
         raise EvidenceGraphContractError(code) from error
     return cast(JsonObject, deepcopy(dict(value)))
+
+
+def _decode_admission_payload(payload: bytes, code: str) -> JsonObject:
+    try:
+        value = json.loads(payload.decode("utf-8"), object_pairs_hook=_unique_json_object)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise EvidenceGraphContractError(code) from error
+    if not isinstance(value, dict) or payload != canonicalize(value):
+        raise EvidenceGraphContractError(code)
+    return _json_object(value, code)
+
+
+def _admission_seal(
+    *,
+    runtime_mode: str,
+    room_graph_command_payload: bytes,
+    manifest_payload: bytes,
+    registry_output_schema_version: str,
+    graph_lease_fencing_token: int,
+    snapshot_payload_sha256: str,
+) -> str:
+    preimage = canonicalize(
+        {
+            "schema_version": "evidence-verified-admission-seal.v1",
+            "runtime_mode": runtime_mode,
+            "room_graph_command_sha256": hashlib.sha256(room_graph_command_payload).hexdigest(),
+            "manifest_payload_sha256": hashlib.sha256(manifest_payload).hexdigest(),
+            "registry_output_schema_version": registry_output_schema_version,
+            "graph_lease_fencing_token": graph_lease_fencing_token,
+            "snapshot_payload_sha256": snapshot_payload_sha256,
+        }
+    )
+    return hmac.new(_ADMISSION_SEAL_KEY, preimage, hashlib.sha256).hexdigest()
 
 
 def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:

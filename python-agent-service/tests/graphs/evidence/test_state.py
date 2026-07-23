@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import copy
 import json
+import pickle
 from copy import deepcopy
 from dataclasses import replace
 
@@ -151,6 +153,52 @@ def test_verified_admission_cannot_be_minted_by_a_caller(admission) -> None:
             snapshot_payload_sha256=admission.snapshot_payload_sha256,
             _token=object(),
         )
+
+
+def test_post_mint_nested_mutation_cannot_change_admission(admission) -> None:
+    manifest = admission.manifest
+    command = admission.room_graph_command
+    manifest["profile_versions"]["terminal_output_schema_version"] = "tampered.v1"
+    command["actor_scope"]["capabilities"].append("forged.write")
+
+    verified_command, verified_manifest = validate_verified_admission(admission)
+
+    assert verified_manifest["profile_versions"]["terminal_output_schema_version"] == (
+        TERMINAL_OUTPUT_SCHEMA_VERSION
+    )
+    assert verified_command["actor_scope"]["capabilities"] == ["evidence_parser.read"]
+
+
+def test_direct_slot_replacement_is_blocked(admission) -> None:
+    with pytest.raises(
+        EvidenceGraphContractError,
+        match="EVIDENCE_VERIFIED_ADMISSION_IMMUTABLE",
+    ):
+        admission._manifest_payload = b"{}"
+
+
+def test_consume_revalidates_seal_after_low_level_slot_tamper(admission_factory) -> None:
+    admission = admission_factory()
+    object.__setattr__(admission, "_manifest_payload", b"{}")
+
+    with pytest.raises(
+        EvidenceGraphContractError,
+        match="EVIDENCE_VERIFIED_ADMISSION_SEAL_INVALID",
+    ):
+        validate_verified_admission(admission)
+
+
+@pytest.mark.parametrize(
+    ("operation", "code"),
+    [
+        (copy.copy, "EVIDENCE_VERIFIED_ADMISSION_COPY_FORBIDDEN"),
+        (copy.deepcopy, "EVIDENCE_VERIFIED_ADMISSION_COPY_FORBIDDEN"),
+        (pickle.dumps, "EVIDENCE_VERIFIED_ADMISSION_PICKLE_FORBIDDEN"),
+    ],
+)
+def test_copy_deepcopy_and_pickle_are_forbidden(admission, operation, code: str) -> None:
+    with pytest.raises(EvidenceGraphContractError, match=code):
+        operation(admission)
 
 
 def test_actor_scope_is_derived_from_verified_command(
