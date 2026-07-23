@@ -706,6 +706,54 @@ batches:
       browser_or_playwright: none
       real_provider: forbidden
       formal_finalizer_runtime_wiring: forbidden
+    acceptance:
+      status: READY_FOR_SEPARATE_ACCEPTANCE_RUN
+      tested_candidate_commit: edfd54952dcc5a07d87a90fdb094c01b1a7df79b
+      evidence_commit: 0292321fdb376c3392c86daf6cf98365bfee7c4a
+      evidence_path: test-reports/temporal-first/phase-5-wave-a-20260723-edfd5495/phase-5-wave-a
+      acceptance_runner: scripts/run_phase5_wave_a_acceptance.py
+      acceptance_generator: scripts/generate_phase5_wave_a_acceptance.py
+      acceptance_execution_manifest: phase5-wave-a-acceptance-execution.json
+      acceptance_schema: phase5-wave-a-acceptance.v1
+      acceptance_output: test-reports/temporal-first/phase-5-wave-a-acceptance-20260723-edfd5495/phase-5-wave-a-acceptance
+      acceptance_required_files:
+        - accepted-tooling-candidate.txt
+        - phase5-wave-a-acceptance.json
+        - artifact-sha256.json
+      trusted_chain:
+        - tested_candidate_is_direct_parent_of_evidence_commit
+        - evidence_commit_is_ancestor_of_reviewed_tooling_candidate
+        - acceptance_evidence_commit_is_direct_child_of_reviewed_tooling_candidate
+        - state_transition_commit_is_direct_child_of_acceptance_evidence_commit
+      pre_state:
+        P5-WAVE-A-INTEGRATED: BLOCKED
+        wave_b: BLOCKED_ON_WAVE_A_INTEGRATION
+        promotion_gate: PENDING
+        MIG-004: PENDING_PROMOTION
+        MIG-005: PENDING_PROMOTION
+      acceptance_evidence_result: PASS_AWAITING_STATE_TRANSITION_COMMIT
+      evidence_commit_alone_opens_wave_b: false
+      acceptance_evidence_commit_alone_opens_wave_b: false
+      state_transition:
+        required: true
+        exact_paths:
+          - plans/phase-5-evidence-pilot-execution.md
+          - plans/phase-5-evidence-pilot-test-batches.yaml
+          - plans/phase-5-owner-briefs.yaml
+        required_bindings:
+          - tested_candidate_commit
+          - evidence_commit
+          - acceptance_tooling_candidate_commit
+          - acceptance_evidence_commit
+        target_state:
+          wave_a: INTEGRATED
+          P5-WAVE-A-INTEGRATED: OPEN
+          wave_b: READY
+          P5-R2: READY
+          candidate_wave: BLOCKED_ON_WAVE_B_AND_ENGINEERING_EVIDENCE
+          promotion_gate: PENDING
+          MIG-004: PENDING_PROMOTION
+          MIG-005: PENDING_PROMOTION
 
   P5-BATCH-2:
     tier: T2

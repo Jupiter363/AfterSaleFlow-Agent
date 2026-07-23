@@ -90,10 +90,15 @@ integration_barriers:
       - P5-D0_COMMITTED_AND_REVIEWED
       - P5-E0_COMMITTED_AND_REVIEWED
       - P5_BATCH_1_PASS_ON_MERGED_SHA
+      - P5_WAVE_A_EVIDENCE_COMMIT_AUTHENTICATED
+      - P5_WAVE_A_ACCEPTANCE_EVIDENCE_COMMITTED
+      - P5_WAVE_A_STATE_TRANSITION_COMMITTED
     rules:
       - D1 and E1 may not edit any takeover file before this barrier is OPEN.
       - A B and C become dependency-fix-only after this barrier and need an exact-file grant from R.
       - R records the merged SHA before opening D1 and E1.
+      - The Wave A evidence commit and acceptance evidence commit both leave this barrier BLOCKED.
+      - Only a direct-child state transition commit binding the tested evidence tooling and acceptance evidence SHAs may set this barrier OPEN and Wave B READY.
     path_takeovers:
       - owner: D
         from_task: P5-D0
@@ -949,9 +954,14 @@ primary_integration_only:
     - tests/static/test_phase5_entry_contract_plan.py
     - scripts/run_phase5_wave_a_checkpoint.py
     - scripts/generate_phase5_wave_a_evidence.py
+    - scripts/run_phase5_wave_a_acceptance.py
+    - scripts/generate_phase5_wave_a_acceptance.py
     - tests/static/test_phase5_wave_a_runner.py
     - tests/static/test_phase5_wave_a_evidence.py
     - tests/static/test_phase5_wave_a_checkpoint.py
+    - tests/static/test_phase5_wave_a_acceptance.py
+    - contracts/agent-platform/evidence/v2/phase5-wave-a-acceptance.schema.json
+    - docs/runbooks/temporal-first/phase-5-wave-a-acceptance.md
     - java-api-service/src/main/java/com/example/dispute/workflow/config/TemporalWorkerConfiguration.java
     - java-api-service/src/main/java/com/example/dispute/workflow/config/OrchestrationCutoverProperties.java
   rules:
@@ -959,4 +969,5 @@ primary_integration_only:
     - Integrating a foundation candidate grants no owner permission to wire Evidence runtime formal sinks or TEMPORAL allocation.
     - Shared contract files and selector assembly are merged only after delegated commits are reviewed.
     - R owns Batch 1 Batch 2 candidate evidence failure classification and exact-SHA checkpoint execution.
+    - R keeps Wave A and Wave B blocked in the reviewed tooling commit and the acceptance evidence-only commit; a later state-transition-only commit opens the barrier.
     - Integration may wire only DISABLED or Java-signed synthetic SHADOW; formal Evidence allocation remains forbidden.

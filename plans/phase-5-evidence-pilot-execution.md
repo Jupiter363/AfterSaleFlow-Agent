@@ -384,6 +384,18 @@ the matrix-declared eight-file LF-stable evidence bundle in a separate evidence-
 bundle alone does not open Wave B: R must subsequently authenticate the tested and evidence commits
 in the Wave A checkpoint and update the still-blocked integration barrier.
 
+Wave A acceptance uses a fail-closed four-commit handoff after the tested candidate: the eight-file
+evidence-only commit, a reviewed tooling-only commit, a three-file acceptance-evidence-only commit,
+and a state-transition-only commit. The acceptance runner reads the fixed eight files from Git blobs,
+requires the tested candidate to be the evidence commit's sole parent, independently recounts
+`120 + 144 + 98 = 362` JUnit cases with zero failures, errors, or skips, and keeps promotion plus
+`MIG-004` and `MIG-005` pending. The generator result is
+`PASS_AWAITING_STATE_TRANSITION_COMMIT`; it does not open the barrier and does not embed its future
+commit SHA. The final state-transition commit must be the direct child of the acceptance evidence
+commit, bind all four earlier full SHAs, modify only the three Phase 5 governance plans, leave the
+candidate wave and all runtime/promotion gates blocked, and only then set `P5-WAVE-A-INTEGRATED` to
+`OPEN`, Wave A to `INTEGRATED`, Wave B to `READY`, and `P5-R2` to `READY`.
+
 The task-binding input is an external LF JSON file with
 `schema_version=phase5-wave-a-task-bindings.v1`, the full merged `candidate_commit`, and the exact
 ordered eight-task list. Each task carries `id`, full `commit`, `review_partner`,

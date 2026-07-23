@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aftersale-flow.local/contracts/evidence/v2/phase5-wave-a-acceptance.schema.json",
+  "title": "Phase 5 Wave A Acceptance Evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "phase",
+    "checkpoint",
+    "result",
+    "tested_candidate_commit",
+    "accepted_base_commit",
+    "evidence_commit",
+    "evidence_tree_oid",
+    "artifact_index_sha256",
+    "artifact_index_blob_oid",
+    "acceptance_tooling_candidate_commit",
+    "evidence_path",
+    "evidence_file_count",
+    "evidence_artifacts",
+    "totals",
+    "decision",
+    "runtime_restrictions"
+  ],
+  "properties": {
+    "schema_version": {"const": "phase5-wave-a-acceptance.v1"},
+    "phase": {"const": 5},
+    "checkpoint": {"const": "P5-WAVE-A-INTEGRATED"},
+    "result": {"const": "PASS_AWAITING_STATE_TRANSITION_COMMIT"},
+    "tested_candidate_commit": {"$ref": "#/$defs/commit"},
+    "accepted_base_commit": {"$ref": "#/$defs/commit"},
+    "evidence_commit": {"$ref": "#/$defs/commit"},
+    "evidence_tree_oid": {"$ref": "#/$defs/commit"},
+    "artifact_index_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "artifact_index_blob_oid": {"$ref": "#/$defs/commit"},
+    "acceptance_tooling_candidate_commit": {"$ref": "#/$defs/commit"},
+    "evidence_path": {"const": "test-reports/temporal-first/phase-5-wave-a-20260723-edfd5495/phase-5-wave-a"},
+    "evidence_file_count": {"const": 8},
+    "evidence_artifacts": {
+      "type": "array",
+      "minItems": 8,
+      "maxItems": 8,
+      "items": {"$ref": "#/$defs/artifact"}
+    },
+    "totals": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tests", "failures", "errors", "skipped"],
+      "properties": {
+        "tests": {"const": 362},
+        "failures": {"const": 0},
+        "errors": {"const": 0},
+        "skipped": {"const": 0}
+      }
+    },
+    "decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "P5-WAVE-A-INTEGRATED",
+        "wave_b",
+        "evidence_commit_alone_opens_wave_b",
+        "state_transition_commit_required",
+        "acceptance_commit_is_derived_from_git_history",
+        "promotion_gate",
+        "MIG-004",
+        "MIG-005"
+      ],
+      "properties": {
+        "P5-WAVE-A-INTEGRATED": {"const": "BLOCKED_PENDING_STATE_TRANSITION_COMMIT"},
+        "wave_b": {"const": "BLOCKED_PENDING_STATE_TRANSITION_COMMIT"},
+        "evidence_commit_alone_opens_wave_b": {"const": false},
+        "state_transition_commit_required": {"const": true},
+        "acceptance_commit_is_derived_from_git_history": {"const": true},
+        "promotion_gate": {"const": "PENDING"},
+        "MIG-004": {"const": "PENDING_PROMOTION"},
+        "MIG-005": {"const": "PENDING_PROMOTION"}
+      }
+    },
+    "runtime_restrictions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["real_provider", "formal_evidence_sink", "temporal_evidence_allocation", "real_case_shadow", "canary", "promotion"],
+      "properties": {
+        "real_provider": {"const": false},
+        "formal_evidence_sink": {"const": false},
+        "temporal_evidence_allocation": {"const": false},
+        "real_case_shadow": {"const": false},
+        "canary": {"const": false},
+        "promotion": {"const": false}
+      }
+    }
+  },
+  "$defs": {
+    "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "bytes"],
+      "properties": {
+        "path": {
+          "enum": [
+            "candidate-commit.txt",
+            "task-commit-bindings.json",
+            "phase5-wave-a-execution-manifest.json",
+            "python-phase5-wave-a-junit.xml",
+            "java-phase5-wave-a-junit.xml",
+            "static-phase5-wave-a-junit.xml",
+            "wave-a-metrics.json",
+            "artifact-sha256.json"
+          ]
+        },
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "bytes": {"type": "integer", "minimum": 0, "maximum": 2000000}
+      }
+    }
+  }
+}
