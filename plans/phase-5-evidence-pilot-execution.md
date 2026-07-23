@@ -561,8 +561,10 @@ promotion or permit Hearing supplementation work under Phase 5.
 
 ### P5.R2 Migration Contract Gate Record
 
-- Candidate: `c2c6e51c3f099ecbe867679b75a44a5b6ffb736e`.
-- Evidence: `test-reports/temporal-first/phase-5-r2-20260723-c2c6e51c/phase-5-r2-migration-contract/phase5-r2-migration-contract-gate.json`.
+- Candidate: `f6ab86a43b656cfaaff363bffc6c4b9e8f96e6dc`.
+- Supersedes: `c2c6e51c3f099ecbe867679b75a44a5b6ffb736e`.
+- Evidence: `test-reports/temporal-first/phase-5-r2-20260723-f6ab86a4/phase-5-r2-migration-contract/phase5-r2-migration-contract-gate.json`.
 - Authorized migration: `java-api-service/src/main/resources/db/migration/V043_5__evidence_finalization_and_operational_recovery.sql`.
 - V043_4 SHA-256: `f2872430c63db6b8f561ef982ea4b3329d04bd7ecde744aaa625880c02399cb0`.
+- Source command: `p5_r2_static_migration_contract_gate=PASS`.
 - Runtime guard: formal sink, `TEMPORAL` allocation, real-case shadow, canary, promotion, and production traffic remain forbidden.

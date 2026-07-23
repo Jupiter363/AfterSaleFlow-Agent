@@ -383,8 +383,9 @@ task_contracts:
     depends_on: [P5-R1, P5-WAVE-A-INTEGRATED]
     output: migration_contract_erratum_candidate_and_evidence_gate
     authorized_migration_path: java-api-service/src/main/resources/db/migration/V043_5__evidence_finalization_and_operational_recovery.sql
-    accepted_candidate_commit: c2c6e51c3f099ecbe867679b75a44a5b6ffb736e
-    evidence_path: test-reports/temporal-first/phase-5-r2-20260723-c2c6e51c/phase-5-r2-migration-contract
+    accepted_candidate_commit: f6ab86a43b656cfaaff363bffc6c4b9e8f96e6dc
+    supersedes_candidate_commit: c2c6e51c3f099ecbe867679b75a44a5b6ffb736e
+    evidence_path: test-reports/temporal-first/phase-5-r2-20260723-f6ab86a4/phase-5-r2-migration-contract
     exact_paths:
       - docs/architecture/adr/0014-phase-5-evidence-migration-contract-erratum.md
       - docs/architecture/contracts/phase-5-evidence-migration-contract-erratum.yaml

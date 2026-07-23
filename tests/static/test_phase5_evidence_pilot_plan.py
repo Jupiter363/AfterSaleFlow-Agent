@@ -834,6 +834,9 @@ def test_phase5_r2_is_the_only_pre_c3_migration_authorization_gate() -> None:
     assert gate["status"] == "ACCEPTED"
     assert gate["authorized_migration_path"] == R2_AUTHORIZED_MIGRATION
     assert gate["accepted_candidate_commit"] == (
+        "f6ab86a43b656cfaaff363bffc6c4b9e8f96e6dc"
+    )
+    assert gate["supersedes_candidate_commit"] == (
         "c2c6e51c3f099ecbe867679b75a44a5b6ffb736e"
     )
     assert "P5-R2" in c3["depends_on"]

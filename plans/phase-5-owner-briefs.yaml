@@ -901,8 +901,9 @@ primary_integration_only:
   post_wave_a_migration_contract_gate:
     task_id: P5-R2
     status: ACCEPTED
-    accepted_candidate_commit: c2c6e51c3f099ecbe867679b75a44a5b6ffb736e
-    evidence_path: test-reports/temporal-first/phase-5-r2-20260723-c2c6e51c/phase-5-r2-migration-contract
+    accepted_candidate_commit: f6ab86a43b656cfaaff363bffc6c4b9e8f96e6dc
+    supersedes_candidate_commit: c2c6e51c3f099ecbe867679b75a44a5b6ffb736e
+    evidence_path: test-reports/temporal-first/phase-5-r2-20260723-f6ab86a4/phase-5-r2-migration-contract
     depends_on: [P5-R1, P5-WAVE-A-INTEGRATED]
     current_plan_paths:
       - plans/phase-5-owner-briefs.yaml
