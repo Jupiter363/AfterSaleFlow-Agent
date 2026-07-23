@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -164,6 +165,7 @@ def test_plan_builds_four_serial_deduplicated_sources_and_keeps_all_gates() -> N
 
     java = commands["java_phase_5_deduplicated"]["argv"]
     java_classes = runner._java_classes(java)
+    assert java[0] == (r".\mvnw.cmd" if os.name == "nt" else "./mvnw")
     assert len(java_classes) == len(set(java_classes))
     assert java.count("-DforkCount=1") == 1
     assert all(

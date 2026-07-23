@@ -174,14 +174,19 @@ def focused_commands(matrix: dict[str, Any] | None = None) -> dict[str, dict[str
     static: list[str] = []
     seen = {"python": set(), "java": set(), "frontend": set(), "static": set()}
     python_executable = "D:/miniconda/python.exe"
-    java_executable = ".\\mvnw.cmd"
+    java_executable = ".\\mvnw.cmd" if os.name == "nt" else "./mvnw"
     frontend_prefix = ["node", "node_modules/vitest/vitest.mjs", "run"]
 
     for item in _source_commands(matrix):
         command_id = str(item.get("id", ""))
         argv = _source_argv(item)
         if command_id.endswith("_java"):
-            java_executable = argv[0]
+            if argv[0].replace("\\", "/") not in {
+                "./mvnw",
+                "./mvnw.cmd",
+                "mvnw.cmd",
+            }:
+                raise EvidenceError("Phase 5 Java source uses an untrusted Maven launcher")
             _append_unique(java, seen["java"], _java_classes(argv))
         elif command_id.endswith("_frontend"):
             frontend_prefix = list(argv[:3])
