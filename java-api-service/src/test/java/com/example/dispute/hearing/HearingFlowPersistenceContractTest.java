@@ -159,11 +159,11 @@ class HearingFlowPersistenceContractTest {
                 .doesNotContain("truncate hearing_flow_")
                 .doesNotContain("alter column participant_id");
         assertThat(sha256(migrationDirectory.resolve("V035__hearing_flow_v2.sql")))
-                .isEqualTo("ae74633cb318961a12397fc5c7f9fcc0f3ae13e4b82372e240af05b6976423cf");
+                .isEqualTo("1fd05055e7a0104466fa0be5d784e4b78e488356f95085e9735abffd909e6649");
         assertThat(sha256(
                         migrationDirectory.resolve(
                                 "V037__key_hearing_party_actions_by_participant_id.sql")))
-                .isEqualTo("a060583e7764531b562ec88befedd3b3f535ecede0bc2c7faa09f198f471a71c");
+                .isEqualTo("5f3e1ef9cdcccd939ac08a10c3fd118dcbdbd6ca1516f8a54d92ca07dc519984");
     }
 
     @Test
@@ -225,8 +225,12 @@ class HearingFlowPersistenceContractTest {
 
     private static String sha256(Path path) throws IOException {
         try {
+            byte[] normalized = Files.readString(path)
+                    .replace("\r\n", "\n")
+                    .replace('\r', '\n')
+                    .getBytes(java.nio.charset.StandardCharsets.UTF_8);
             return HexFormat.of().formatHex(
-                    MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(path)));
+                    MessageDigest.getInstance("SHA-256").digest(normalized));
         } catch (NoSuchAlgorithmException impossible) {
             throw new IllegalStateException("SHA-256 is unavailable", impossible);
         }

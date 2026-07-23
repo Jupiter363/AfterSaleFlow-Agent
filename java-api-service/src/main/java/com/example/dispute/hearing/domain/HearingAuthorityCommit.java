@@ -39,7 +39,9 @@ public record HearingAuthorityCommit(
             case HANDOFF -> "hearing.handoff";
             case CLOSE -> "hearing.close";
         };
-        if (!operationKey.startsWith(requiredPrefix)) {
+        if (!operationKey.startsWith(requiredPrefix)
+                || operationKey.length() == requiredPrefix.length()
+                || ".:".indexOf(operationKey.charAt(requiredPrefix.length())) < 0) {
             throw new IllegalArgumentException("operationKey does not match operationType");
         }
         if (requestHash == null || !SHA256.matcher(requestHash).matches()) {
