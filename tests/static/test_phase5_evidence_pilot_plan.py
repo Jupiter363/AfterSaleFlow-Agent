@@ -775,10 +775,7 @@ def test_phase5_e1_is_durable_graph_permit_work_not_java_bulkhead_authority() ->
     assert "no fallback" in text
     assert "bounded labels" in text
     assert "local signed-synthetic parity" in text
-    assert "P5-WAVE-A-INTEGRATED" in e1["depends_on"]
-    assert "P5-WAVE-A-INTEGRATED" in batches["task_contracts"]["P5-E1"][
-        "depends_on"
-    ]
+    assert e1["depends_on"] == batches["task_contracts"]["P5-E1"]["depends_on"]
     assert all(
         name in maven[2]
         for name in (
@@ -841,6 +838,11 @@ def test_phase5_r2_is_the_only_pre_c3_migration_authorization_gate() -> None:
         "V043_4__evidence_graph_bindings.sql"
         in gate["forbidden_paths"]
     )
+    assert gate["candidate_and_evidence_paths"] == r2["exact_paths"]
+    assert gate["t0_commands"] == [r2["source_command"]]
+    assert "separate_evidence_commit_records_candidate_sha_concrete_filename_checksums_and_artifact_sha256" in r2[
+        "definition_of_done"
+    ]
 
 
 def test_phase5_batch2_is_serialized_and_executes_each_wave_b_owner_scope() -> None:
@@ -886,6 +888,47 @@ def test_phase5_batch2_is_serialized_and_executes_each_wave_b_owner_scope() -> N
         "EvidenceCutoverRollbackTest",
     ):
         assert test_name in java_selector
+
+
+def test_phase5_batch2_planned_selectors_equal_declared_source_commands() -> None:
+    batch_2 = _batches()["batches"]["P5-BATCH-2"]
+    commands = {item["id"]: item for item in batch_2["source_commands"]}
+
+    python_selectors = {
+        token
+        for command_id in ("p5_wave_b_python", "p5_wave_b_postgresql")
+        for token in commands[command_id]["argv"]
+        if isinstance(token, str) and token.startswith("tests/")
+    }
+    assert python_selectors == {
+        path.removeprefix("python-agent-service/")
+        for path in batch_2["planned_python_tests"]
+    }
+
+    java_selector = next(
+        token
+        for token in commands["p5_wave_b_java"]["argv"]
+        if token.startswith("-Dtest=")
+    )
+    assert set(java_selector.removeprefix("-Dtest=").split(",")) == set(
+        batch_2["planned_java_test_classes"]
+    )
+
+    frontend_selectors = {
+        token
+        for token in commands["p5_wave_b_frontend"]["argv"]
+        if isinstance(token, str) and token.startswith("src/") and token.endswith(".test.js")
+    }
+    assert frontend_selectors == {
+        path.removeprefix("frontend/") for path in batch_2["frontend_tests"]
+    }
+
+    static_selectors = {
+        token
+        for token in commands["p5_wave_b_static"]["argv"]
+        if isinstance(token, str) and token.startswith("tests/")
+    }
+    assert static_selectors == set(batch_2["planned_static_tests"])
 
 
 def test_phase5_owner_briefs_reserve_shared_paths_for_primary_integration() -> None:

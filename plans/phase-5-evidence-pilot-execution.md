@@ -422,7 +422,11 @@ D:\miniconda\python.exe scripts/generate_phase5_wave_a_evidence.py `
 - R first closes `P5-R2`, the primary-owned migration-contract erratum/candidate/evidence gate after
   Wave A acceptance. It may amend or accept one new additive migration identity, but no concrete
   filename is authorized before that recorded decision: plans name it only as
-  `P5-R2_AUTHORIZED_MIGRATION`. `V043_4` remains immutable. C and B then complete the two
+  `P5-R2_AUTHORIZED_MIGRATION`. R2's exact candidate surface is ADR 0014, the P5.R2 checkpoint
+  runbook, its runner/static gate, and `test-reports/temporal-first/<release-id>/phase-5-r2-migration-contract/`.
+  Its static gate runs on one clean detached candidate SHA; a separate evidence-only commit records
+  that SHA, the concrete additive migration filename, command results, checksums, and artifact
+  SHA-256 values before C3 dispatch. `V043_4` remains immutable. C and B then complete the two
   post-Wave-A prerequisites. `P5-C3` creates the durable Java finalization receipt ledger and
   validated terminal-summary sidecar only through the path accepted by `P5-R2`. C2 remains port-only;
   C3 atomically validates and locks a trusted current-authority snapshot (tenant/case/epoch, Java

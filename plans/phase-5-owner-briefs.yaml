@@ -785,7 +785,7 @@ owners:
           - Commit SHA and exact T0 results are returned to R.
       P5-E1:
         initial_parallel: false
-        depends_on: [P5-E0, P5-A2, P5-B2, P5-C2, P5-WAVE-A-INTEGRATED]
+        depends_on: [P5-E0, P5-0, P5-A2, P5-B2, P5-C2, P5-WAVE-A-INTEGRATED]
         input_contracts:
           - contracts/agent-platform/evidence/v2/evidence-batch-manifest.schema.json
           - contracts/agent-platform/evidence/v2/evidence-terminal-proposal.schema.json
@@ -891,19 +891,38 @@ primary_integration_only:
     task_id: P5-R2
     status: BLOCKED_ON_WAVE_A_ACCEPTANCE
     depends_on: [P5-R1, P5-WAVE-A-INTEGRATED]
-    exact_paths:
+    current_plan_paths:
       - plans/phase-5-owner-briefs.yaml
       - plans/phase-5-evidence-pilot-execution.md
       - plans/phase-5-evidence-pilot-test-batches.yaml
       - tests/static/test_phase5_evidence_pilot_plan.py
+    candidate_and_evidence_paths:
+      - docs/architecture/adr/0014-phase-5-evidence-migration-contract-erratum.md
+      - docs/architecture/contracts/phase-5-evidence-migration-contract-erratum.yaml
+      - docs/runbooks/temporal-first/phase-5-p5.r2-migration-contract-checkpoint.md
+      - scripts/run_phase5_r2_migration_contract_gate.py
+      - tests/static/test_phase5_r2_migration_contract_gate.py
+      - test-reports/temporal-first/<release-id>/phase-5-r2-migration-contract/
     forbidden_paths:
       - java-api-service/src/main/resources/db/migration/V043_4__evidence_graph_bindings.sql
       - P5-R2_AUTHORIZED_MIGRATION
     authorized_migration_path: P5-R2_AUTHORIZED_MIGRATION
+    t0_commands:
+      - id: p5_r2_static_migration_contract_gate
+        workdir: .
+        argv: [D:/miniconda/python.exe, -m, pytest, tests/static/test_phase5_r2_migration_contract_gate.py, tests/static/test_phase5_evidence_pilot_plan.py, -q]
+        resource_class: light_pytest
+        test_token_required: false
+        max_duration_seconds: 180
     rules:
       - C3 is blocked until an erratum candidate and evidence commit amend or accept one new additive migration identity.
       - No concrete migration filename is authorized by this plan; P5-R2_AUTHORIZED_MIGRATION is a placeholder only until that gate records its acceptance.
       - V043_4 remains immutable and neither this gate nor C3 may enable a formal sink TEMPORAL allocation real-case shadow canary or promotion.
+    commit_definition_of_done:
+      - The candidate commit contains the ADR/contract erratum, runner, and static gate that name exactly one new additive migration filename without editing V043_4.
+      - p5_r2_static_migration_contract_gate passes on that exact clean detached candidate SHA.
+      - The runner writes the candidate SHA, concrete migration filename, command results, checksums, and artifact SHA-256 values under the R2 evidence path.
+      - A separate evidence-only commit records the accepted candidate SHA and makes P5-R2_AUTHORIZED_MIGRATION resolvable to that concrete filename before C3 dispatch.
   prebuilt_foundation_candidates:
     - commit: 09d65875ff6edfbc76d0d2a0e42610690e500bfd
       reviewed_chain:

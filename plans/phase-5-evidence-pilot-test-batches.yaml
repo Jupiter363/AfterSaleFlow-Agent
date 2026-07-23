@@ -383,11 +383,30 @@ task_contracts:
     depends_on: [P5-R1, P5-WAVE-A-INTEGRATED]
     output: migration_contract_erratum_candidate_and_evidence_gate
     authorized_migration_path: P5-R2_AUTHORIZED_MIGRATION
+    exact_paths:
+      - docs/architecture/adr/0014-phase-5-evidence-migration-contract-erratum.md
+      - docs/architecture/contracts/phase-5-evidence-migration-contract-erratum.yaml
+      - docs/runbooks/temporal-first/phase-5-p5.r2-migration-contract-checkpoint.md
+      - scripts/run_phase5_r2_migration_contract_gate.py
+      - tests/static/test_phase5_r2_migration_contract_gate.py
+      - test-reports/temporal-first/<release-id>/phase-5-r2-migration-contract/
+    forbidden_paths:
+      - java-api-service/src/main/resources/db/migration/V043_4__evidence_graph_bindings.sql
+      - P5-R2_AUTHORIZED_MIGRATION
+    source_command:
+      id: p5_r2_static_migration_contract_gate
+      workdir: .
+      argv: [D:/miniconda/python.exe, -m, pytest, tests/static/test_phase5_r2_migration_contract_gate.py, tests/static/test_phase5_evidence_pilot_plan.py, -q]
+      resource_class: light_pytest
+      test_token_required: false
+      max_duration_seconds: 180
     definition_of_done:
       - erratum_amends_or_accepts_one_new_additive_migration_identity
       - V043_4_remains_immutable
       - exact_candidate_and_evidence_commit_record_authorized_migration_path
       - P5-R2_AUTHORIZED_MIGRATION_is_recorded_before_C3_dispatch
+      - source_command_passes_on_exact_clean_detached_candidate_sha
+      - separate_evidence_commit_records_candidate_sha_concrete_filename_checksums_and_artifact_sha256
   P5-R3:
     owner: R
     depends_on: [P5-D2, P5-E2]
@@ -709,6 +728,7 @@ batches:
       - EvidenceFinalizationReceiptLookupTest
       - JdbcEvidenceFinalizationReceiptLedgerTest
       - EvidenceOperationalRecoveryReconcilerTest
+      - JdbcEvidenceOperationalRecoveryStoreTest
       - EvidenceRoomActivitiesReconciliationTest
       - EvidenceProcessProjectionAdapterTest
       - EvidenceRoomControllerTest
@@ -736,7 +756,7 @@ batches:
     source_commands:
       - id: p5_wave_b_python
         workdir: python-agent-service
-        argv: [D:/miniconda/python.exe, -m, pytest, tests/graphs/evidence/test_graph.py, tests/graphs/evidence/test_recovery.py, tests/graph_runtime/unit/test_bulkhead.py, tests/graph_runtime/unit/test_graph_persistence_readiness.py, tests/graph_runtime/unit/test_checkpoint_migrations.py, tests/graph_runtime/unit/test_gateway_recovery.py, tests/graph_runtime/unit/test_production_bindings.py, tests/api/test_graph_lifecycle.py, -q]
+        argv: [D:/miniconda/python.exe, -m, pytest, tests/graphs/evidence, tests/graphs/evidence/test_recovery.py, tests/graphs/evidence/test_graph.py, tests/graph_runtime/unit/test_bulkhead.py, tests/graph_runtime/unit/test_graph_persistence_readiness.py, tests/graph_runtime/unit/test_checkpoint_migrations.py, tests/graph_runtime/unit/test_gateway_recovery.py, tests/graph_runtime/unit/test_production_bindings.py, tests/api/test_graph_lifecycle.py, tests/security, -q]
         resource_class: light_pytest
         test_token_required: false
         max_duration_seconds: 180
@@ -749,13 +769,13 @@ batches:
         purpose: direct_postgresql_g004_graph_fanout_bulkhead_queue_integration
       - id: p5_wave_b_java
         workdir: java-api-service
-        argv: [./mvnw.cmd, -q, "-Dtest=EvidenceFinalizationReceiptLookupTest,JdbcEvidenceFinalizationReceiptLedgerTest,EvidenceRoomActivitiesReconciliationTest,EvidenceOperationalRecoveryReconcilerTest,JdbcEvidenceOperationalRecoveryStoreTest,EvidenceProcessProjectionAdapterTest,EvidenceRoomControllerTest,EvidenceBulkheadPolicyTest,EvidenceNoFormalSinkGuardTest,EvidenceBulkheadIntegrationTest,EvidenceShadowParityServiceTest,EvidenceTemporalCutoverIntegrationTest,EvidenceCutoverRollbackTest,EvidenceRoomWorkflowRecoveryTest", test]
+        argv: [./mvnw.cmd, -q, "-Dtest=EvidenceFinalizationReceiptLookupTest,JdbcEvidenceFinalizationReceiptLedgerTest,EvidenceRoomActivitiesReconciliationTest,EvidenceOperationalRecoveryReconcilerTest,JdbcEvidenceOperationalRecoveryStoreTest,EvidenceProcessProjectionAdapterTest,EvidenceRoomControllerTest,EvidenceRoomWorkflowRecoveryTest,EvidenceTemporalCutoverIntegrationTest,EvidenceBulkheadPolicyTest,EvidenceNoFormalSinkGuardTest,EvidenceShadowParityServiceTest,EvidenceCutoverRollbackTest,EvidenceBulkheadIntegrationTest,EvidenceApiIntegrationTest,EvidenceAgentTurnServiceTest,EvidenceWindowWorkflowTest", test]
         resource_class: maven_test
         test_token_required: true
         max_duration_seconds: 180
       - id: p5_wave_b_frontend
         workdir: frontend
-        argv: [node, node_modules/vitest/vitest.mjs, run, src/api/evidence.test.js, src/stores/evidence.test.js, src/views/disputes/EvidenceRoomView.test.js, --maxWorkers=2, --minWorkers=1]
+        argv: [node, node_modules/vitest/vitest.mjs, run, src/views/disputes/EvidenceRoomView.test.js, src/components/room/RoomShell.test.js, src/api/evidence.test.js, src/stores/evidence.test.js, src/api/agentStream.test.js, src/stores/agentStream.test.js, --maxWorkers=2, --minWorkers=1]
         resource_class: light_frontend_unit
         test_token_required: false
         max_duration_seconds: 180
