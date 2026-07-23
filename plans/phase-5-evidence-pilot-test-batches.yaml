@@ -884,6 +884,40 @@ batches:
       - java_phase_5_deduplicated
       - frontend_phase_5_deduplicated
       - static_phase_5_deduplicated
+    tooling:
+      runner: scripts/run_phase5_candidate_checkpoint.py
+      evidence_generator: scripts/generate_phase5_candidate_evidence.py
+      focused_contract_tests:
+        - tests/static/test_phase5_candidate_runner.py
+        - tests/static/test_phase5_candidate_evidence.py
+      plan_argv:
+        - D:/miniconda/python.exe
+        - scripts/run_phase5_candidate_checkpoint.py
+        - --candidate-commit
+        - <candidate-sha>
+      execute_argv:
+        - D:/miniconda/python.exe
+        - scripts/run_phase5_candidate_checkpoint.py
+        - --candidate-commit
+        - <candidate-sha>
+        - --execute
+        - --run-dir
+        - test-reports/temporal-first/<release-id>/phase-5-candidate-run
+        - --environment-id
+        - <environment-id>
+      evidence_argv:
+        - D:/miniconda/python.exe
+        - scripts/generate_phase5_candidate_evidence.py
+        - --release-id
+        - <release-id>
+        - --candidate-commit
+        - <candidate-sha>
+        - --base-commit
+        - <phase-5-engineering-base-sha>
+        - --engineering-started-at
+        - <rfc3339-timestamp>
+        - --execution-manifest
+        - test-reports/temporal-first/<release-id>/phase-5-candidate-run/phase5-candidate-execution-manifest.json
     execution:
       strategy: deduplicated_source_suites_then_derived_batch_views
       heavy_parallelism: 1
@@ -906,6 +940,10 @@ batches:
         - batch-1-junit.xml
         - batch-2-junit.xml
         - batch-3-junit.xml
+      authenticated_archive_files:
+        - phase5-candidate-execution-manifest.json
+        - artifact-sha256.json
+      authenticated_bundle_file_count: 16
       required_status_output:
         engineering_checkpoint: PASS_or_FAIL
         promotion_gate: PENDING

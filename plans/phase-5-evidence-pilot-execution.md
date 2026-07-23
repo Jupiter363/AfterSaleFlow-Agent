@@ -506,6 +506,14 @@ Every accepted command record includes candidate SHA, environment manifest, time
 exit code, report path, and SHA-256. Failures are classified `PRODUCT`, `FIXTURE`, `INFRA`, or
 `EXTERNAL_GATE` before a bounded rerun. Results from different candidate commits are never mixed.
 
+`P5-BATCH-3` is executed only through `scripts/run_phase5_candidate_checkpoint.py` on one clean,
+detached candidate SHA. The runner derives the four deduplicated source commands from the
+machine-readable schedule, rejects mixed or repeated attempts, and permits at most one explicitly
+classified `INFRA` rerun for the same source and SHA. After the manifest reaches `PASS`,
+`scripts/generate_phase5_candidate_evidence.py` atomically assembles the candidate-bound evidence
+bundle, including the archived sealed execution manifest and `artifact-sha256.json`. The exact plan,
+execute, and evidence argv are recorded under `P5-BATCH-3.tooling` in the test-batch schedule.
+
 ## Rollback Protocol
 
 ### Engineering Rollback
@@ -535,6 +543,8 @@ The Phase 5 engineering checkpoint can pass only when one candidate proves all f
 complete 1/8/100 terminal coverage at maximum room concurrency eight, tenant/global bounded-queue
 behavior, deterministic reducer/hash output, authorized actual-load claims, Temporal timer/race
 recovery, exactly one Java merge/freeze, all baseline behaviors, and fail-closed runtime defaults.
+The candidate runner and evidence generator contract tests must pass on that same candidate before
+the evidence-only commit is created.
 
 The report shape is:
 

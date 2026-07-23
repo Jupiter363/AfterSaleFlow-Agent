@@ -965,10 +965,14 @@ primary_integration_only:
     - scripts/generate_phase5_wave_a_evidence.py
     - scripts/run_phase5_wave_a_acceptance.py
     - scripts/generate_phase5_wave_a_acceptance.py
+    - scripts/run_phase5_candidate_checkpoint.py
+    - scripts/generate_phase5_candidate_evidence.py
     - tests/static/test_phase5_wave_a_runner.py
     - tests/static/test_phase5_wave_a_evidence.py
     - tests/static/test_phase5_wave_a_checkpoint.py
     - tests/static/test_phase5_wave_a_acceptance.py
+    - tests/static/test_phase5_candidate_runner.py
+    - tests/static/test_phase5_candidate_evidence.py
     - contracts/agent-platform/evidence/v2/phase5-wave-a-acceptance.schema.json
     - docs/runbooks/temporal-first/phase-5-wave-a-acceptance.md
     - java-api-service/src/main/java/com/example/dispute/workflow/config/TemporalWorkerConfiguration.java
@@ -978,5 +982,6 @@ primary_integration_only:
     - Integrating a foundation candidate grants no owner permission to wire Evidence runtime formal sinks or TEMPORAL allocation.
     - Shared contract files and selector assembly are merged only after delegated commits are reviewed.
     - R owns Batch 1 Batch 2 candidate evidence failure classification and exact-SHA checkpoint execution.
+    - R alone runs the Batch 3 candidate runner and evidence generator on one clean detached SHA; delegated owners cannot reuse, re-seal, or mix attempt artifacts.
     - R keeps Wave A and Wave B blocked in the reviewed tooling commit and the acceptance evidence-only commit; a later state-transition-only commit opens the barrier.
     - Integration may wire only DISABLED or Java-signed synthetic SHADOW; formal Evidence allocation remains forbidden.
