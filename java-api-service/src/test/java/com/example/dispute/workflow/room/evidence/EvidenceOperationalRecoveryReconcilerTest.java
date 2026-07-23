@@ -3,9 +3,12 @@ package com.example.dispute.workflow.room.evidence;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.example.dispute.evidence.application.graph.EvidenceFinalizationReceiptLookup;
+import com.example.dispute.evidence.application.graph.EvidenceFinalizationReceiptLookup.CommittedFinalization;
 import com.example.dispute.workflow.temporal.room.evidence.EvidenceActivityProtocol;
 import com.example.dispute.workflow.temporal.room.evidence.EvidenceActivityProtocol.ActivityRequest;
 import com.example.dispute.workflow.temporal.room.evidence.EvidenceActivityProtocol.InvocationMode;
+import com.example.dispute.workflow.temporal.room.evidence.EvidenceActivityProtocol.ReceiptLookupResult;
 import com.example.dispute.workflow.temporal.room.evidence.EvidenceFinalizationReceiptRef;
 import com.example.dispute.workflow.temporal.room.evidence.EvidenceOperationalRecoveryReconciler;
 import com.example.dispute.workflow.temporal.room.evidence.EvidenceOperationalRecoveryReconciler.RecoveryAuthorityRejectedException;
@@ -24,6 +27,7 @@ class EvidenceOperationalRecoveryReconcilerTest {
     ActivityRequest request = EvidenceRoomActivityContractTest.request(InvocationMode.RETRY_RECONCILE_ONLY);
     DurableReceipt durable = durable(request);
     EvidenceOperationalRecoveryReconciler reconciler = new EvidenceOperationalRecoveryReconciler(
+        new FixedReceiptLookup(durable),
         new FixedStore(durable, javaAuthority(request)), graphReader(durable.terminalSummary()));
 
     var projection = reconciler.reconcile(request);
@@ -38,6 +42,7 @@ class EvidenceOperationalRecoveryReconcilerTest {
   void absentReceiptNeverUsesTemporalRequestMemoryToFabricateRecovery() {
     ActivityRequest request = EvidenceRoomActivityContractTest.request(InvocationMode.RETRY_RECONCILE_ONLY);
     EvidenceOperationalRecoveryReconciler reconciler = new EvidenceOperationalRecoveryReconciler(
+        new FixedReceiptLookup(null),
         new FixedStore(null, javaAuthority(request)), ignored -> {
           throw new AssertionError("no Graph lookup is valid without a durable receipt");
         });
@@ -48,31 +53,38 @@ class EvidenceOperationalRecoveryReconcilerTest {
   }
 
   @Test
-  void staleLiveGraphLeaseFailsClosedEvenWhenTheJavaReceiptIsReplayable() {
+  void committedReceiptReplaySurvivesGraphLeaseTakeoverWhileRecoveryRejects() {
     ActivityRequest request = EvidenceRoomActivityContractTest.request(InvocationMode.RETRY_RECONCILE_ONLY);
     DurableReceipt durable = durable(request);
     EvidenceOperationalRecoveryReconciler reconciler = new EvidenceOperationalRecoveryReconciler(
+        new FixedReceiptLookup(durable),
         new FixedStore(durable, javaAuthority(request)), ignored -> {
-          throw new IllegalStateException("stale Graph lease");
+          throw new IllegalStateException("Graph lease was taken over");
         });
 
+    assertThat(reconciler.loadCommittedReceipt(request))
+        .isEqualTo(EvidenceActivityProtocol.ReceiptLookupResult.committed(durable.receipt()));
     assertThatThrownBy(() -> reconciler.reconcile(request))
         .isInstanceOf(RecoveryAuthorityRejectedException.class)
         .hasMessageContaining("current Graph lease");
   }
 
   @Test
-  void disabledOrNonSyntheticAuthorityCannotTurnAReceiptIntoRecoveryState() {
+  void committedReceiptReplaySurvivesJavaAuthorityTakeoverWhileRecoveryRejects() {
     ActivityRequest request = EvidenceRoomActivityContractTest.request(InvocationMode.RETRY_RECONCILE_ONLY);
     DurableReceipt durable = durable(request);
-    JavaRecoveryAuthority disabled = new JavaRecoveryAuthority(
+    JavaRecoveryAuthority takeover = new JavaRecoveryAuthority(
         request.tenantSurrogate(), request.caseId(), "ROOM_P5_EVIDENCE_1", "EVIDENCE",
-        "2".repeat(64), request.roomEpoch(), request.fencingToken(), 3,
-        request.processRevision(), request.roomRevision(),
-        "DISABLED", false, false, false);
+        "5".repeat(64), request.roomEpoch() + 1, request.fencingToken() + 1, 4,
+        request.processRevision() + 1, request.roomRevision() + 1,
+        "SIGNED_SYNTHETIC_SHADOW", true, false, false);
     EvidenceOperationalRecoveryReconciler reconciler = new EvidenceOperationalRecoveryReconciler(
-        new FixedStore(durable, disabled), graphReader(durable.terminalSummary()));
+        new FixedReceiptLookup(durable), new FixedStore(durable, takeover), ignored -> {
+          throw new AssertionError("Graph lease must not be checked after Java authority takeover");
+        });
 
+    assertThat(reconciler.loadCommittedReceipt(request))
+        .isEqualTo(EvidenceActivityProtocol.ReceiptLookupResult.committed(durable.receipt()));
     assertThatThrownBy(() -> reconciler.reconcile(request))
         .isInstanceOf(RecoveryAuthorityRejectedException.class)
         .hasMessageContaining("current Java recovery authority");
@@ -100,8 +112,25 @@ class EvidenceOperationalRecoveryReconcilerTest {
     return requirement -> { };
   }
 
+  record FixedReceiptLookup(DurableReceipt durable) implements EvidenceFinalizationReceiptLookup {
+    @Override
+    public Optional<CommittedFinalization> findExact(EvidenceFinalizationReceiptRef ignored) {
+      throw new AssertionError("receipt replay must use the semantic Activity lookup");
+    }
+
+    @Override
+    public Optional<CommittedFinalization> findForActivity(ActivityRequest ignored) {
+      throw new AssertionError("the test lookup supplies the protocol result directly");
+    }
+
+    @Override
+    public ReceiptLookupResult lookupForActivity(ActivityRequest request) {
+      return lookupResult(durable, request);
+    }
+  }
+
   record FixedStore(DurableReceipt durable, JavaRecoveryAuthority authority)
-      implements EvidenceOperationalRecoveryStore {
+      implements EvidenceOperationalRecoveryStore, EvidenceFinalizationReceiptLookup {
     @Override
     public Optional<DurableReceipt> findCommitted(ActivityRequest ignored) {
       return Optional.ofNullable(durable);
@@ -111,5 +140,31 @@ class EvidenceOperationalRecoveryReconcilerTest {
     public Optional<JavaRecoveryAuthority> findCurrentJavaAuthority(RecoveryScope ignored) {
       return Optional.ofNullable(authority);
     }
+
+    @Override
+    public Optional<CommittedFinalization> findExact(EvidenceFinalizationReceiptRef ignored) {
+      throw new AssertionError("receipt replay must use the semantic Activity lookup");
+    }
+
+    @Override
+    public Optional<CommittedFinalization> findForActivity(ActivityRequest ignored) {
+      throw new AssertionError("the test lookup supplies the protocol result directly");
+    }
+
+    @Override
+    public ReceiptLookupResult lookupForActivity(ActivityRequest request) {
+      return lookupResult(durable, request);
+    }
+  }
+
+  private static ReceiptLookupResult lookupResult(DurableReceipt durable, ActivityRequest request) {
+    if (durable == null) {
+      return ReceiptLookupResult.notCommitted();
+    }
+    if (!durable.receipt().matches(request)) {
+      throw new IllegalArgumentException(
+          "fixed C3 lookup requires tenant, operationKey, and requestHash to match");
+    }
+    return ReceiptLookupResult.committed(durable.receipt());
   }
 }

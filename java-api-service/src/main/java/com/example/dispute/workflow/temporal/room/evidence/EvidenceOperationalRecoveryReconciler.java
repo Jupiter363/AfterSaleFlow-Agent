@@ -3,6 +3,7 @@ package com.example.dispute.workflow.temporal.room.evidence;
 import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.evidence.application.graph.EvidenceCurrentAuthoritySnapshot.GraphLeaseAuthority;
 import com.example.dispute.evidence.application.graph.EvidenceCurrentAuthoritySnapshot.GraphLeaseRequirement;
+import com.example.dispute.evidence.application.graph.EvidenceFinalizationReceiptLookup;
 import com.example.dispute.workflow.projection.evidence.EvidenceProcessProjectionAdapter;
 import com.example.dispute.workflow.projection.evidence.EvidenceProcessProjectionQuery.StateEnricher;
 import com.example.dispute.workflow.projection.evidence.EvidenceProcessProjectionView.Recovery;
@@ -17,19 +18,27 @@ import java.util.Optional;
  */
 public final class EvidenceOperationalRecoveryReconciler {
 
+  private final EvidenceFinalizationReceiptLookup receiptLookup;
   private final EvidenceOperationalRecoveryStore store;
   private final GraphLeaseAuthority graphLeaseAuthority;
 
   public EvidenceOperationalRecoveryReconciler(
-      EvidenceOperationalRecoveryStore store, GraphLeaseAuthority graphLeaseAuthority) {
+      EvidenceFinalizationReceiptLookup receiptLookup,
+      EvidenceOperationalRecoveryStore store,
+      GraphLeaseAuthority graphLeaseAuthority) {
+    this.receiptLookup = Objects.requireNonNull(receiptLookup, "receiptLookup");
     this.store = Objects.requireNonNull(store, "store");
     this.graphLeaseAuthority = Objects.requireNonNull(graphLeaseAuthority, "graphLeaseAuthority");
   }
 
+  /** Convenience for a combined adapter that exposes the C3 and recovery read boundaries. */
+  public EvidenceOperationalRecoveryReconciler(
+      EvidenceOperationalRecoveryStore store, GraphLeaseAuthority graphLeaseAuthority) {
+    this(requireReceiptLookup(store), store, graphLeaseAuthority);
+  }
+
   public ReceiptLookupResult loadCommittedReceipt(ActivityRequest request) {
-    return reconcile(request)
-        .map(projection -> ReceiptLookupResult.committed(projection.receipt()))
-        .orElseGet(ReceiptLookupResult::notCommitted);
+    return receiptLookup.lookupForActivity(Objects.requireNonNull(request, "request"));
   }
 
   public Optional<EvidenceOperationalRecoveryProjection> reconcile(ActivityRequest request) {
@@ -82,6 +91,16 @@ public final class EvidenceOperationalRecoveryReconciler {
 
   private static RecoveryAuthorityRejectedException rejected(String message, Throwable cause) {
     return new RecoveryAuthorityRejectedException(message, cause);
+  }
+
+  private static EvidenceFinalizationReceiptLookup requireReceiptLookup(
+      EvidenceOperationalRecoveryStore store) {
+    Objects.requireNonNull(store, "store");
+    if (store instanceof EvidenceFinalizationReceiptLookup lookup) {
+      return lookup;
+    }
+    throw new IllegalArgumentException(
+        "a combined recovery store must also implement EvidenceFinalizationReceiptLookup");
   }
 
   /**
