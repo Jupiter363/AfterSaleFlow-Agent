@@ -247,13 +247,15 @@ result invalidates the candidate.
 ### Exact-Candidate Two-Commit Gate
 
 1. **Contract-candidate commit `C6`:** freeze only the approved plan, ADR, contract pack, machine
-   schedule, static gates, closed schemas and fixtures, exact owner briefs, and entry runner. It
+   schedule, static gates, closed schemas and fixtures, exact owner briefs, entry runner, and
+   evidence generator. It
    contains no product implementation, V044, runtime activation, API, or UI change.
 2. **Exact-SHA Batch 0:** the primary creates a clean detached worktree at exactly `C6`, verifies no
    unrecorded tracked changes, and runs every source command selected by the machine schedule.
    Every attempt records candidate SHA, argv and command hash, environment hash, start/end/duration,
    exit code, stdout/stderr and JUnit paths/hashes, test counts, and failure classification.
-3. **Entry-evidence commit `E6`:** archive the immutable reports separately. Only `E6` may record
+3. **Entry-evidence commit `E6`:** the candidate-bound generator authenticates the sealed runner
+   manifest and archives the immutable reports separately. Only `E6` may record
    `contract_gate: P6.0 PASS` and authorize A-E to implement. Batch 0 reports from another SHA,
    another working tree state, an unsealed retry, or a later implementation commit are invalid.
 

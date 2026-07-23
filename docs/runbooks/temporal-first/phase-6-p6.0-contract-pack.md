@@ -42,7 +42,8 @@ The governing sources are:
 
 P6.0 follows a two-commit gate. The contract-candidate commit contains approved contract/static
 material only. Batch 0 runs from that exact clean detached SHA. A separate entry-evidence commit
-records immutable reports and may set P6.0 to `PASS`. Until both commits exist and every upstream
+records immutable reports through the candidate-bound evidence generator and may set P6.0 to
+`PASS`. Until both commits exist and every upstream
 authorization remains valid, implementation is blocked.
 
 ## Open P0 Contract Gaps

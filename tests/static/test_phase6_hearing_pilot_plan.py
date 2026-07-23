@@ -543,7 +543,11 @@ def test_phase6_centralizes_heavy_tests_and_defers_unified_suites() -> None:
         if source["id"] == "static_phase6_entry"
     )
     assert "tests/static/test_phase6_entry_checkpoint.py" in static_command
+    assert "tests/static/test_phase6_entry_evidence.py" in static_command
     assert "tests/static/test_phase6_entry_checkpoint.py" in batches[
+        "draft_validation"
+    ]["commands"][0]["command"]
+    assert "tests/static/test_phase6_entry_evidence.py" in batches[
         "draft_validation"
     ]["commands"][0]["command"]
     assert "tests/static/test_phase6_entry_checkpoint.py" in batches[
@@ -561,6 +565,7 @@ def test_phase6_centralizes_heavy_tests_and_defers_unified_suites() -> None:
         "SOURCE_SUITES_GREEN_AWAITING_SEPARATE_ENTRY_EVIDENCE"
     )
     assert ENTRY_RUNNER.is_file()
+    assert (ROOT / matrix["documents"]["entry_evidence_generator"]).is_file()
 
     assert batches["batch_1_foundation"]["owner"] == "R"
     assert batches["batch_2_integration"]["owner"] == "R"

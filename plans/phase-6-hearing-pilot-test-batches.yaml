@@ -18,6 +18,8 @@ documents:
   baseline_manifest: tests/baseline/current-room-baseline.yaml
   static_gate: tests/static/test_phase6_hearing_pilot_plan.py
   entry_runner: scripts/run_phase6_entry_checkpoint.py
+  entry_evidence_generator: scripts/generate_phase6_entry_evidence.py
+  entry_evidence_static_gate: tests/static/test_phase6_entry_evidence.py
 
 gate:
   contract_gate: P6.0
@@ -496,6 +498,7 @@ batches:
           tests/static/test_phase6_hearing_contracts.py
           tests/static/test_phase6_hearing_pilot_plan.py
           tests/static/test_phase6_entry_checkpoint.py
+          tests/static/test_phase6_entry_evidence.py
           tests/static/test_temporal_refactor_traceability.py
   batch_0_entry:
     status: READY_FOR_EXACT_SHA_BATCH_0
@@ -529,6 +532,7 @@ batches:
           tests/static/test_phase6_hearing_contracts.py
           tests/static/test_phase6_hearing_pilot_plan.py
           tests/static/test_phase6_entry_checkpoint.py
+          tests/static/test_phase6_entry_evidence.py
           tests/static/test_temporal_refactor_traceability.py
           --junitxml={raw_report}
       - id: python_phase6_entry
@@ -597,6 +601,7 @@ batches:
       - tests/static/test_phase6_hearing_contracts.py
       - tests/static/test_phase6_hearing_pilot_plan.py
       - tests/static/test_phase6_entry_checkpoint.py
+      - tests/static/test_phase6_entry_evidence.py
       - tests/static/test_temporal_refactor_traceability.py
     assertions:
       - EXACT_15_STAGE_ORDER_AND_14_ADJACENT_EDGES
