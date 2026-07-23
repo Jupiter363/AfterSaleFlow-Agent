@@ -101,17 +101,23 @@ def _range(prefix: str, first: int, last: int) -> list[str]:
     return [f"{prefix}-{number:03d}" for number in range(first, last + 1)]
 
 
-def test_phase6_candidate_is_linked_and_remains_fail_closed() -> None:
+def test_phase6_accepted_entry_is_linked_and_remains_fail_closed() -> None:
     matrix = _matrix()
     plan, contract, source = _document_texts()
 
     assert matrix["schema_version"] == "phase-test-batches.v1"
     assert matrix["phase"] == 6
-    assert matrix["document_status"] == "P6_0_CONTRACT_CANDIDATE"
+    assert matrix["document_status"] == "P6_0_PASS_ENGINEERING_ACTIVE"
     assert matrix["gate"]["contract_gate"] == "P6.0"
-    assert matrix["gate"]["contract_gate_status"] == "NOT_RUN"
+    assert matrix["gate"]["contract_gate_status"] == "PASS"
     assert matrix["gate"]["accepted_phase_5_checkpoint_sha"] == BASE_SHA
-    assert matrix["gate"]["entry_decision"] == "CONTRACT_CANDIDATE_READY"
+    assert matrix["gate"]["accepted_phase_6_candidate_sha"] == (
+        "f338eb5df0c37d40a7b7293a1ae999dc8ea18b0c"
+    )
+    assert matrix["gate"]["phase_6_entry_evidence_sha"] == (
+        "07ec856ff23fb166b73aae72895dad8b2fd13264"
+    )
+    assert matrix["gate"]["entry_decision"] == "ENTRY_EVIDENCE_ACCEPTED"
 
     observed = matrix["gate"]["observed_entry_state"]
     assert observed == {
@@ -120,7 +126,7 @@ def test_phase6_candidate_is_linked_and_remains_fail_closed() -> None:
         "next_phase_permission": "PHASE_6_ENGINEERING_ONLY",
         "MIG-004": "PENDING_PROMOTION",
         "MIG-005": "PENDING_PROMOTION",
-        "P6.0": "NOT_RUN",
+        "P6.0": "PASS",
         "MIG-006": "PENDING_PROMOTION",
     }
     assert set(matrix["gate"]["runtime_modes_allowed_now"]) == {
@@ -133,9 +139,10 @@ def test_phase6_candidate_is_linked_and_remains_fail_closed() -> None:
         "TEMPORAL",
     }
 
+    assert BASE_SHA in plan and BASE_SHA in contract
+    assert "engineering_execution: ALLOWED" in plan
+    assert "engineering_execution: BLOCKED" in contract
     for text in (plan, contract):
-        assert BASE_SHA in text
-        assert "engineering_execution: BLOCKED" in text
         assert "phase_5_engineering_checkpoint: PASS" in text
         assert "MIG-005: PENDING_PROMOTION" in text
         assert "MIG-006" in text
@@ -359,17 +366,18 @@ def test_phase6_uses_one_primary_five_owners_and_six_support_lanes() -> None:
     }
 
 
-def test_phase6_owner_briefs_are_blocked_disjoint_and_execution_ready() -> None:
+def test_phase6_owner_briefs_are_released_disjoint_and_execution_ready() -> None:
     briefs = _owner_briefs()
     matrix = _matrix()
 
     assert briefs["schema_version"] == "phase-owner-briefs.v1"
     assert briefs["phase"] == 6
-    assert briefs["document_status"] == "P6_0_CONTRACT_CANDIDATE"
+    assert briefs["document_status"] == "P6_0_PASS_ENGINEERING_ACTIVE"
     assert briefs["accepted_phase_5_checkpoint_sha"] == BASE_SHA
     gate = briefs["gate"]
-    assert gate["dispatch_state"] == "BLOCKED_PENDING_P6_0_ENTRY_EVIDENCE"
-    assert gate["implementation_authorized"] is False
+    assert gate["dispatch_state"] == "READY_FOR_FIRST_WAVE"
+    assert gate["implementation_authorized"] is True
+    assert gate["blocked_reasons"] == []
     assert gate["required_release_receipt"] == "P6-R2_PASS"
     assert gate["runtime_modes_allowed"] == [
         "LEGACY",
@@ -419,7 +427,7 @@ def test_phase6_owner_briefs_are_blocked_disjoint_and_execution_ready() -> None:
         assert owner["dependencies"]
         assert owner["review"]
         assert owner["definition_of_done"]
-        assert owner["first_wave"]["status"] == "BLOCKED_ON_P6_R2_PASS"
+        assert owner["first_wave"]["status"] == "READY"
         assert mappings[owner_id] == {
             "source_matrix_owner": source_matrix_owners[owner_id],
             "source_task_ids": tasks,
@@ -443,7 +451,7 @@ def test_phase6_owner_briefs_are_blocked_disjoint_and_execution_ready() -> None:
     }
 
     first_wave = briefs["first_wave"]
-    assert first_wave["status"] == "BLOCKED_ON_P6_R2_PASS"
+    assert first_wave["status"] == "READY"
     assert first_wave["simultaneously_active"] == ["A", "B", "C", "D", "E"]
     assert first_wave["shared_path_writes_allowed"] is False
     assert first_wave["heavy_tests_allowed_for_delegated_owners"] is False
@@ -511,10 +519,11 @@ def test_phase6_centralizes_heavy_tests_and_defers_unified_suites() -> None:
     batches = matrix["batches"]
 
     assert batches["draft_validation"]["status"] == "RUNNABLE_ON_CONTRACT_CANDIDATE"
-    assert (
-        batches["batch_0_entry"]["status"]
-        == "READY_FOR_EXACT_SHA_BATCH_0"
+    assert batches["batch_0_entry"]["status"] == "PASS"
+    assert batches["batch_0_entry"]["accepted_candidate_commit"] == (
+        "f338eb5df0c37d40a7b7293a1ae999dc8ea18b0c"
     )
+    assert batches["batch_0_entry"]["source_test_counts"]["total"] == 148
     entry = batches["batch_0_entry"]
     sources = entry["source_commands"]
     assert {source["id"] for source in sources} == {
@@ -668,9 +677,9 @@ def test_phase6_baseline_inventory_is_factual_blocked_and_complete() -> None:
 
     assert "inventory_status: BASELINE_ONLY" in inventory
     assert f"observed_commit: {BASE_SHA}" in inventory
-    assert "contract_gate: P6.0 NOT_RUN" in inventory
-    assert "engineering_execution: BLOCKED" in inventory
-    assert "implementation_authorization: BLOCKED_PENDING_P6_0_ENTRY_EVIDENCE" in inventory
+    assert "contract_gate: P6.0 PASS" in inventory
+    assert "engineering_execution: ALLOWED_UNDER_ADR_0015" in inventory
+    assert "implementation_authorization: ALLOWED_DISABLED_OR_JAVA_SIGNED_SYNTHETIC_SHADOW_ONLY" in inventory
     assert "closes no Phase 6 implementation gap" in inventory
 
     expected_counts = {

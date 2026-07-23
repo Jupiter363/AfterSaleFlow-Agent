@@ -1,7 +1,7 @@
 schema_version: phase-test-batches.v1
 phase: 6
 name: hearing-pilot-engineering-shadow
-document_status: P6_0_CONTRACT_CANDIDATE
+document_status: P6_0_PASS_ENGINEERING_ACTIVE
 
 documents:
   execution_plan: plans/phase-6-hearing-pilot-execution.md
@@ -20,10 +20,14 @@ documents:
   entry_runner: scripts/run_phase6_entry_checkpoint.py
   entry_evidence_generator: scripts/generate_phase6_entry_evidence.py
   entry_evidence_static_gate: tests/static/test_phase6_entry_evidence.py
+  entry_checkpoint: docs/runbooks/temporal-first/phase-6-p6.0-entry-checkpoint.md
 
 gate:
   contract_gate: P6.0
-  contract_gate_status: NOT_RUN
+  contract_gate_status: PASS
+  accepted_phase_6_candidate_sha: f338eb5df0c37d40a7b7293a1ae999dc8ea18b0c
+  phase_6_entry_evidence_sha: 07ec856ff23fb166b73aae72895dad8b2fd13264
+  phase_6_entry_evidence_path: test-reports/temporal-first/phase-6-entry-20260724-f338eb5d/phase-6-entry
   accepted_phase_5_checkpoint_sha: d3ea271188be57adac49592879aaf3417e90c5c0
   phase_5_candidate_sha: c43f969f08755fd6eb90c0845809cda1785d11bf
   phase_5_evidence_sha: 8770d84aac4f653e8953d469246295b6e8c3b8fa
@@ -34,10 +38,10 @@ gate:
     next_phase_permission: PHASE_6_ENGINEERING_ONLY
     MIG-004: PENDING_PROMOTION
     MIG-005: PENDING_PROMOTION
-    P6.0: NOT_RUN
+    P6.0: PASS
     MIG-006: PENDING_PROMOTION
-  entry_decision: CONTRACT_CANDIDATE_READY
-  product_implementation: BLOCKED_PENDING_EXACT_SHA_BATCH_0_AND_ENTRY_EVIDENCE
+  entry_decision: ENTRY_EVIDENCE_ACCEPTED
+  product_implementation: ALLOWED_UNDER_ADR_0015_ENGINEERING_RESTRICTIONS
   implementation_allowed_when:
     - PHASE_5_ENGINEERING_CHECKPOINT_PASS
     - ADR_0015_ACCEPTED_FOR_ENGINEERING_ONLY
@@ -501,7 +505,10 @@ batches:
           tests/static/test_phase6_entry_evidence.py
           tests/static/test_temporal_refactor_traceability.py
   batch_0_entry:
-    status: READY_FOR_EXACT_SHA_BATCH_0
+    status: PASS
+    accepted_candidate_commit: f338eb5df0c37d40a7b7293a1ae999dc8ea18b0c
+    entry_evidence_commit: 07ec856ff23fb166b73aae72895dad8b2fd13264
+    source_test_counts: {static: 37, python: 23, java: 18, frontend: 70, total: 148}
     owner: R
     exact_clean_detached_sha_required: true
     fresh_run_directory_required: true

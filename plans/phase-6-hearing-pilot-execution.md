@@ -3,9 +3,11 @@
 ## Status
 
 ```text
-plan_status: READY_FOR_P6_0_ENTRY_GATE
-engineering_execution: BLOCKED_UNTIL_EXACT_CANDIDATE_BATCH_0_AND_SEPARATE_ENTRY_EVIDENCE
-contract_gate: P6.0 NOT_RUN
+plan_status: PHASE_6_ENGINEERING_ACTIVE
+engineering_execution: ALLOWED_WITH_DISABLED_OR_JAVA_SIGNED_SYNTHETIC_SHADOW_RESTRICTIONS
+contract_gate: P6.0 PASS
+phase_6_candidate_C6: f338eb5df0c37d40a7b7293a1ae999dc8ea18b0c
+phase_6_evidence_E6: 07ec856ff23fb166b73aae72895dad8b2fd13264
 phase_5_candidate_C: c43f969f08755fd6eb90c0845809cda1785d11bf
 phase_5_evidence_E: 8770d84aac4f653e8953d469246295b6e8c3b8fa
 phase_5_acceptance_A: d3ea271188be57adac49592879aaf3417e90c5c0
@@ -16,7 +18,7 @@ MIG-004: PENDING_PROMOTION
 MIG-005: PENDING_PROMOTION
 MIG-006: PENDING_PROMOTION
 phase_6_engineering_exception: ADR_0015
-next_phase_permission: PHASE_6_ENGINEERING_ONLY_AFTER_P6_0_PASS
+next_phase_permission: PHASE_6_ENGINEERING_ONLY
 team_shape: one primary + eleven dependency-activated delegated roles
 implementation_owners: five disjoint owners A-E
 p0_review_lanes: three read-only lanes R1-R3
@@ -27,7 +29,7 @@ current_java_hearing_flow_v2: FUTURE_LEGACY_WRITER_MODE
 removed_generic_hearing_fallback: NOT_A_LEGACY_MODE
 graph_runtime_default: DISABLED
 allowed_phase_6_engineering_runtime: DISABLED or Java-signed synthetic SHADOW
-V044_before_P6_0_entry: FORBIDDEN
+V044_engineering_after_P6_0: ALLOWED_ADDITIVE_ONLY
 temporal_hearing_allocation: FORBIDDEN
 formal_graph_sink: FORBIDDEN
 real_or_party_data_shadow: FORBIDDEN
@@ -46,13 +48,12 @@ MIG-004: PENDING_PROMOTION
 MIG-005: PENDING_PROMOTION
 ```
 
-That handoff permits only the Phase 6 contract-entry process. It is not P6.0 evidence, Phase 6
-implementation authorization, a runtime grant, or promotion. P6.0 remains `NOT_RUN`. Except for
-the closed contract, static gate, owner-brief, runner, and fixture artifacts that form the P6.0
-candidate itself, every product-code, product-test, migration, runtime schema, configuration, API,
-or UI implementation change is blocked until Batch 0 passes on one exact clean candidate SHA and
-a separate entry-evidence commit records the acceptance. In particular, no `V044` file may be
-created before that entry commit.
+The Phase 5 handoff permitted the Phase 6 contract-entry process. P6.0 subsequently passed on exact
+candidate `f338eb5df0c37d40a7b7293a1ae999dc8ea18b0c`; evidence commit
+`07ec856ff23fb166b73aae72895dad8b2fd13264` is its direct child and contains exactly the eight
+generated evidence artifacts. Batch 0 passed 148 tests with zero failures, errors, or skips. This
+authorizes Phase 6 engineering implementation under ADR 0015, but it is not a runtime allocation or
+promotion grant.
 
 Phase 6 engineering is governed by
 [ADR 0015](../docs/architecture/adr/0015-phase-6-hearing-engineering-exception.md). The exception
@@ -259,7 +260,8 @@ result invalidates the candidate.
    `contract_gate: P6.0 PASS` and authorize A-E to implement. Batch 0 reports from another SHA,
    another working tree state, an unsealed retry, or a later implementation commit are invalid.
 
-Until all three steps finish, this state is mandatory:
+Before the accepted `C6/E6` pair above, this state was mandatory. It remains the fail-closed state
+for any replacement candidate, but the recorded P6.0 checkpoint now releases A-E:
 
 ```text
 contract_gate: P6.0 NOT_RUN

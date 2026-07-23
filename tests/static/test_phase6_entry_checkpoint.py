@@ -38,18 +38,19 @@ def _ready_matrix() -> dict:
     return matrix
 
 
-def test_ready_plan_lists_exact_sources_but_executes_nothing() -> None:
+def test_accepted_plan_lists_exact_sources_but_blocks_a_second_execution() -> None:
     plan = runner.entry_plan(CANDIDATE)
 
     assert plan["phase"] == 6
     assert plan["candidate_commit"] == CANDIDATE
-    assert plan["execution_allowed"] is True
+    assert plan["execution_allowed"] is False
     assert plan["executed_source_count"] == 0
     assert plan["execution_order"] == list(runner.COMMAND_ORDER)
     assert {item["id"]: item["report"] for item in plan["commands"]} == (
         runner.SOURCE_REPORTS
     )
-    assert plan["blocked_reasons"] == []
+    assert "P6_CONTRACT_CANDIDATE_NOT_READY" in plan["blocked_reasons"]
+    assert "P6_BATCH_0_NOT_READY" in plan["blocked_reasons"]
     assert plan["runtime_restrictions"] == {
         "real_case_data": "forbidden",
         "real_case_shadow": "forbidden",
@@ -62,9 +63,6 @@ def test_ready_plan_lists_exact_sources_but_executes_nothing() -> None:
 def test_execute_rejects_blocked_gate_before_any_source_or_run_directory(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    blocked = _ready_matrix()
-    blocked["gate"]["entry_decision"] = "CONTRACT_CANDIDATE_ASSEMBLY"
-    monkeypatch.setattr(runner, "load_matrix", lambda: blocked)
     calls: list[str] = []
     monkeypatch.setattr(
         runner,
@@ -88,7 +86,7 @@ def test_execute_rejects_blocked_gate_before_any_source_or_run_directory(
     assert not run_root.exists()
 
 
-def test_cli_help_and_ready_plan_do_not_execute_sources() -> None:
+def test_cli_help_and_accepted_plan_do_not_execute_sources() -> None:
     help_result = subprocess.run(
         [sys.executable, str(SCRIPT), "--help"],
         cwd=ROOT,
@@ -108,7 +106,7 @@ def test_cli_help_and_ready_plan_do_not_execute_sources() -> None:
     assert help_result.returncode == 0
     assert plan_result.returncode == 0
     plan = json.loads(plan_result.stdout)
-    assert plan["execution_allowed"] is True
+    assert plan["execution_allowed"] is False
     assert plan["executed_source_count"] == 0
 
 

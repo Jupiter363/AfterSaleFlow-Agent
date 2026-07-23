@@ -1,7 +1,9 @@
 schema_version: phase-owner-briefs.v1
 phase: 6
 name: hearing-pilot-owner-delegation-briefs
-document_status: P6_0_CONTRACT_CANDIDATE
+document_status: P6_0_PASS_ENGINEERING_ACTIVE
+accepted_candidate_commit: f338eb5df0c37d40a7b7293a1ae999dc8ea18b0c
+entry_evidence_commit: 07ec856ff23fb166b73aae72895dad8b2fd13264
 sources:
   execution_plan: plans/phase-6-hearing-pilot-execution.md
   test_matrix: plans/phase-6-hearing-pilot-test-batches.yaml
@@ -11,12 +13,10 @@ sources:
   engineering_exception: docs/architecture/adr/0015-phase-6-hearing-engineering-exception.md
   compatibility_matrix: contracts/agent-platform/hearing/v2/compatibility-matrix.yaml
 gate:
-  dispatch_state: BLOCKED_PENDING_P6_0_ENTRY_EVIDENCE
-  implementation_authorized: false
+  dispatch_state: READY_FOR_FIRST_WAVE
+  implementation_authorized: true
   required_release_receipt: P6-R2_PASS
-  blocked_reasons:
-  - P6_0_EXACT_SHA_BATCH_0_NOT_RUN
-  - P6_0_ENTRY_EVIDENCE_NOT_COMMITTED
+  blocked_reasons: []
   runtime_modes_allowed:
   - LEGACY
   - DISABLED
@@ -85,7 +85,7 @@ delegation_mapping:
       - P6-E1
       - P6-E2
 first_wave:
-  status: BLOCKED_ON_P6_R2_PASS
+  status: READY
   simultaneously_active:
   - A
   - B
@@ -161,7 +161,7 @@ owners:
       LCEL flows for seven operations, using bounded state, keyed reducers, checkpoint recovery and no formal tools.
     first_wave:
       task_id: P6-A1
-      status: BLOCKED_ON_P6_R2_PASS
+      status: READY
       deliverable: graph_state_topology_lcel_and_registry_identity_candidates
     second_wave:
       task_id: P6-A2
@@ -254,7 +254,7 @@ owners:
       shared absolute party deadlines, typed Signals, retries, cancellation and receipt-driven advancement.
     first_wave:
       task_id: P6-B1
-      status: BLOCKED_ON_P6_R2_PASS
+      status: READY
       deliverable: pure_workflow_state_transition_and_timer_kernel
     second_wave:
       task_id: P6-B2
@@ -335,7 +335,7 @@ owners:
       append-only party actions/artifacts, idempotent Finalizers, dossier freeze and review handoff receipts.
     first_wave:
       task_id: P6-C1
-      status: BLOCKED_ON_P6_R2_PASS
+      status: READY
       deliverable: v044_authority_fence_receipt_and_activity_contract_foundation
     second_wave:
       task_id: P6-C2
@@ -416,7 +416,7 @@ owners:
       and six-group court UI behavior without creating business authority in controllers, stores or views.
     first_wave:
       task_id: P6-D1
-      status: BLOCKED_ON_P6_R2_PASS
+      status: READY
       deliverable: projection_contract_query_service_and_baseline_fixtures
     second_wave:
       task_id: P6-D2
@@ -515,7 +515,7 @@ owners:
       replay/reconciliation and rollback harnesses while keeping all real Hearing allocation and formal sinks unreachable.
     first_wave:
       task_id: P6-E1
-      status: BLOCKED_ON_P6_R2_PASS
+      status: READY
       deliverable: selector_properties_signed_synthetic_admission_and_no_sink_harness
     second_wave:
       task_id: P6-E2

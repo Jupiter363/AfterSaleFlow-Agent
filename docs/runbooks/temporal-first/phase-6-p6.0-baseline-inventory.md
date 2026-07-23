@@ -5,15 +5,15 @@
 ```text
 inventory_status: BASELINE_ONLY
 observed_commit: d3ea271188be57adac49592879aaf3417e90c5c0
-contract_gate: P6.0 NOT_RUN
-engineering_execution: BLOCKED
+contract_gate: P6.0 PASS
+engineering_execution: ALLOWED_UNDER_ADR_0015
 phase_5_engineering_checkpoint: PASS
 phase_6_engineering_exception: ADR_0015_ACCEPTED_FOR_ENGINEERING_ONLY
-next_phase_permission: PHASE_6_ENGINEERING_ONLY_AFTER_P6_0_PASS
+next_phase_permission: PHASE_6_ENGINEERING_ONLY
 MIG-004: PENDING_PROMOTION
 MIG-005: PENDING_PROMOTION
 MIG-006: PENDING_PROMOTION
-implementation_authorization: BLOCKED_PENDING_P6_0_ENTRY_EVIDENCE
+implementation_authorization: ALLOWED_DISABLED_OR_JAVA_SIGNED_SYNTHETIC_SHADOW_ONLY
 ```
 
 This inventory records the Hearing behavior and code shape present at the accepted Phase 5
@@ -415,5 +415,6 @@ These are observed gaps, not implementation tasks authorized by this inventory:
 
 This inventory adds no product source code, schema, fixture, migration, configuration, runtime
 selector, formal sink, UI behavior, real-data permission, canary, or promotion evidence. It records
-the upstream closure of `P6-G0` but closes no Phase 6 implementation gap. P6.0 entry remains subject
-to the exact contract-candidate SHA, Batch 0, and separate entry-evidence commit.
+the upstream closure of `P6-G0` but closes no Phase 6 implementation gap. The separate P6.0
+checkpoint authenticates the accepted candidate/evidence pair; any replacement candidate remains
+subject to a fresh exact-SHA Batch 0 and separate evidence commit.
