@@ -12,6 +12,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 BASE = "d18a1f130a925429e8c2dfd11352cea4ca8673a0"
+C7 = "0aa260f722fced0eba4314bd4793e415b5bf0b05"
 MATRIX_PATH = ROOT / "contracts/agent-platform/outcome/v1/compatibility-matrix.yaml"
 SCHEMA_PATH = (
     ROOT
@@ -24,11 +25,11 @@ CHECKPOINT_PATH = (
 CONTRACT_PACK_PATH = (
     ROOT / "docs/runbooks/temporal-first/phase-7-p7.0-contract-pack.md"
 )
-MIGRATION_PATH = (
-    ROOT
-    / "java-api-service/src/main/resources/db/migration/"
-    "V045__outcome_operation_receipt_compensation.sql"
+MIGRATION_DIRECTORY = "java-api-service/src/main/resources/db/migration"
+MIGRATION_RELATIVE = (
+    f"{MIGRATION_DIRECTORY}/V045__outcome_operation_receipt_compensation.sql"
 )
+MIGRATION_PATH = ROOT / MIGRATION_RELATIVE
 
 DECISIONS = {
     "APPROVE",
@@ -53,6 +54,17 @@ def _git_blob(revision: str, path: str) -> bytes:
         capture_output=True,
     )
     return completed.stdout
+
+
+def _git_tree_paths(revision: str, path: str) -> set[str]:
+    completed = subprocess.run(
+        ["git", "ls-tree", "-r", "--name-only", revision, "--", path],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return set(completed.stdout.splitlines())
 
 
 def test_source_snapshot_is_bound_to_exact_accepted_a6_git_blobs() -> None:
@@ -180,7 +192,7 @@ def test_private_review_graph_is_bounded_read_only_and_has_no_tools() -> None:
     assert envelope["unknown_fields"] == "reject"
 
 
-def test_v045_is_reserved_absent_and_specified_as_an_additive_append_only_ledger() -> None:
+def test_v045_was_absent_at_c7_and_is_now_an_additive_append_only_ledger() -> None:
     matrix = _matrix()
     gate = matrix["gate_state"]
     contract = matrix["v045_ledger_contract"]
@@ -191,7 +203,29 @@ def test_v045_is_reserved_absent_and_specified_as_an_additive_append_only_ledger
     assert contract["destructive_rewrite_of_existing_approval_or_action_history"] == (
         "forbidden"
     )
-    assert not MIGRATION_PATH.exists()
+    assert MIGRATION_RELATIVE not in _git_tree_paths(C7, MIGRATION_DIRECTORY)
+    assert MIGRATION_PATH.is_file()
+
+    sql = MIGRATION_PATH.read_text(encoding="utf-8").lower()
+    for table in (
+        "outcome_operation",
+        "outcome_operation_attempt_observation",
+        "outcome_operation_receipt",
+        "outcome_compensation_parent_binding",
+    ):
+        assert f"create table {table} (" in sql
+        assert f"before update or truncate on {table}" in sql
+        assert f"before delete on {table}" in sql
+    for destructive_statement in (
+        "alter table ",
+        "drop table ",
+        "truncate table ",
+        "delete from ",
+    ):
+        assert not any(
+            line.lstrip().startswith(destructive_statement)
+            for line in sql.splitlines()
+        )
 
     operation = contract["logical_records"]["operation"]
     receipt = contract["logical_records"]["receipt"]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from fnmatch import fnmatchcase
 from pathlib import Path
 
@@ -14,11 +15,11 @@ RELEASE_ID = "phase-7-entry-20260724-0aa260f7"
 PLAN_PATH = ROOT / "plans/phase-7-outcome-pilot-execution.md"
 MATRIX_PATH = ROOT / "plans/phase-7-outcome-pilot-test-batches.yaml"
 BRIEFS_PATH = ROOT / "plans/phase-7-owner-briefs.yaml"
-V045_PATH = (
-    ROOT
-    / "java-api-service/src/main/resources/db/migration/"
-    "V045__outcome_operation_receipt_compensation.sql"
+MIGRATION_DIRECTORY = "java-api-service/src/main/resources/db/migration"
+V045_RELATIVE = (
+    f"{MIGRATION_DIRECTORY}/V045__outcome_operation_receipt_compensation.sql"
 )
+V045_PATH = ROOT / V045_RELATIVE
 
 EXPECTED_REPORTS = {
     "static_phase7_entry": "static-phase7-entry.xml",
@@ -32,6 +33,22 @@ def _yaml(path: Path) -> dict:
     value = yaml.safe_load(path.read_text(encoding="utf-8"))
     assert isinstance(value, dict)
     return value
+
+
+def _git(*args: str) -> str:
+    completed = subprocess.run(
+        ["git", *args],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return completed.stdout.strip()
+
+
+def _git_tree_paths(revision: str, path: str) -> set[str]:
+    output = _git("ls-tree", "-r", "--name-only", revision, "--", path)
+    return set(output.splitlines())
 
 
 def _overlaps(left: str, right: str) -> bool:
@@ -74,7 +91,7 @@ def test_p7_plan_accepts_exact_c7_e7_and_releases_engineering_only() -> None:
         "ALLOWED_UNDER_ADR_0016_ENGINEERING_RESTRICTIONS"
     )
     assert gate["V045"] == "ALLOWED_ADDITIVE_ONLY_UNDER_ADR_0016"
-    assert not V045_PATH.exists()
+    assert V045_PATH.is_file()
 
     assert briefs["accepted_phase_6_checkpoint_A6"] == BASE
     assert briefs["accepted_phase_7_candidate_C7"] == C7
@@ -87,6 +104,19 @@ def test_p7_plan_accepts_exact_c7_e7_and_releases_engineering_only() -> None:
     assert "contract_gate: P7.0 PASS" in plan
     assert "ADR_0016_ACCEPTED_FOR_ENGINEERING_ONLY" in plan
     assert "P7_0_ENGINEERING_ENTRY_PASS" in plan
+
+
+def test_c7_excludes_v045_and_current_tree_preserves_prior_migration_blobs() -> None:
+    candidate_paths = _git_tree_paths(C7, MIGRATION_DIRECTORY)
+    assert candidate_paths
+    assert V045_RELATIVE not in candidate_paths
+    assert V045_PATH.is_file()
+
+    for relative in candidate_paths:
+        assert (ROOT / relative).is_file(), relative
+        candidate_blob = _git("rev-parse", f"{C7}:{relative}")
+        current_blob = _git("hash-object", "--path", relative, relative)
+        assert current_blob == candidate_blob, relative
 
 
 def test_two_commit_gate_and_candidate_scope_are_closed() -> None:
