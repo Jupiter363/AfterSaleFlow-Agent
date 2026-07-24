@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.after-sale-flow.example/agent-platform/outcome/v1/outcome-synthetic-noop-receipt.schema.json",
+  "title": "Outcome Java-signed Synthetic No-op Receipt v1",
+  "description": "Exact engineering-only Outcome SHADOW marker. It proves a Java-admitted synthetic projection performed no tool invocation, external effect, formal write, or closure-relevant receipt.",
+  "type": "object",
+  "additionalProperties": false,
+  "x-max-encoded-bytes": 32768,
+  "x-canonicalization": "RFC_8785",
+  "x-self-hash": {
+    "algorithm": "SHA-256",
+    "field": "receipt_hash",
+    "preimage": "omit_top_level_fields",
+    "omit_fields": ["receipt_hash", "signature"]
+  },
+  "x-signature": {
+    "algorithm": "ES256",
+    "covers": "receipt_hash",
+    "input_encoding": "ASCII_LOWERCASE_HEX_TEXT",
+    "encoding": "JOSE_P1363_BASE64URL"
+  },
+  "required": [
+    "schema_version",
+    "marker",
+    "runtime_mode",
+    "traffic_source",
+    "output_sink",
+    "fixture_id",
+    "workflow_id",
+    "operation_id",
+    "packet_ref",
+    "packet_hash",
+    "request_hash",
+    "epoch",
+    "revision",
+    "fence",
+    "synthetic_only",
+    "contains_real_case_or_party_data",
+    "tool_invoked",
+    "external_effect_created",
+    "formal_business_write_created",
+    "projection_only",
+    "issued_at",
+    "signer",
+    "signature_algorithm",
+    "signing_key_id",
+    "receipt_hash",
+    "signature"
+  ],
+  "properties": {
+    "schema_version": {"const": "outcome-synthetic-noop-receipt.v1"},
+    "marker": {"const": "JAVA_SIGNED_SYNTHETIC_NOOP_V1"},
+    "runtime_mode": {"const": "JAVA_SIGNED_SYNTHETIC_NOOP_SHADOW"},
+    "traffic_source": {"const": "SIGNED_SYNTHETIC"},
+    "output_sink": {"const": "ISOLATED_COMPARISON_LEDGER"},
+    "fixture_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^OUTCOME_SYNTHETIC_[A-Z0-9._:-]+$"
+    },
+    "workflow_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^outcome-synthetic/[A-Za-z0-9._:-]+(?:/[A-Za-z0-9._:-]+)*$"
+    },
+    "operation_id": {"$ref": "#/$defs/identifier"},
+    "packet_ref": {"$ref": "#/$defs/opaque_ref"},
+    "packet_hash": {"$ref": "#/$defs/sha256"},
+    "request_hash": {"$ref": "#/$defs/sha256"},
+    "epoch": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "revision": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+    "fence": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "synthetic_only": {"const": true},
+    "contains_real_case_or_party_data": {"const": false},
+    "tool_invoked": {"const": false},
+    "external_effect_created": {"const": false},
+    "formal_business_write_created": {"const": false},
+    "projection_only": {"const": true},
+    "issued_at": {"type": "string", "format": "date-time"},
+    "signer": {"const": "JAVA_CONTROL_PLANE"},
+    "signature_algorithm": {"const": "ES256"},
+    "signing_key_id": {"$ref": "#/$defs/identifier"},
+    "receipt_hash": {"$ref": "#/$defs/sha256"},
+    "signature": {
+      "type": "string",
+      "minLength": 86,
+      "maxLength": 86,
+      "pattern": "^[A-Za-z0-9_-]{86}$"
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "opaque_ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^(?![A-Za-z][A-Za-z0-9+.-]*://)[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

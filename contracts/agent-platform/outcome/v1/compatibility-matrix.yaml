@@ -1,0 +1,519 @@
+schema_version: outcome-contract-compatibility.v1
+contract: outcome_flow.v1
+accepted_base: d18a1f130a925429e8c2dfd11352cea4ca8673a0
+authority: java_postgresql_business_truth_with_temporal_future_process_authority
+
+source_snapshot:
+  hash_scope: raw_git_blob_at_accepted_base
+  digest: SHA_256
+  files:
+    - path: plans/temporal-langgraph-room-refactor.md
+      sha256: 32ce57aad00d8f91da04161051f5870c76920dab03e78a77dcf2e91ba92c04e6
+      purpose: authoritative_phase_7_target_ordering_ledger_compensation_and_rollback_plan
+    - path: docs/acceptance/current-room-function-baseline.md
+      sha256: b5670fa75ee1c50388bb93ff15246ee1ab1c3227c86d52fc8cac7c0cd6dfa30d
+      purpose: authoritative_existing_draft_review_outcome_and_projection_compatibility_baseline
+    - path: docs/architecture/adr/0001-process-domain-cognitive-authority.md
+      sha256: eefe4a3d62564c12e5c2f76d78862158d2e1d9c82cc07176cd35320df8e0574a
+      purpose: authoritative_process_domain_and_cognition_boundary
+    - path: java-api-service/src/main/java/com/example/dispute/domain/model/ApprovalDecisionType.java
+      sha256: e3c9b50d65a5a73d3bf7ced2ef7d7b114b01f5cf5dc3681caa92920a5e920ea6
+      purpose: authoritative_five_human_decision_vocabulary
+    - path: java-api-service/src/main/java/com/example/dispute/review/application/ReviewApplicationService.java
+      sha256: 63d82c65e1ecd2d98a8e2235b9f1e26978103f2b790cf5c540dfc3183cc7210e
+      purpose: authoritative_review_idempotency_hash_and_java_decision_write_behavior
+    - path: java-api-service/src/main/java/com/example/dispute/executor/application/ToolExecutorService.java
+      sha256: 107ed27b31256ab51f689bf96b1777d53022ed1d73348fc6fbd3c377bc11889e
+      purpose: authoritative_existing_approved_action_execution_boundary
+    - path: java-api-service/src/main/java/com/example/dispute/evaluation/application/CaseClosureService.java
+      sha256: ee9e14326fa0fc766ec7c0730cd07836133a37a9843a2660038c0b28a6bf68d5
+      purpose: authoritative_existing_all_actions_succeeded_closure_and_evaluation_boundary
+    - path: java-api-service/src/main/java/com/example/dispute/room/domain/RoomType.java
+      sha256: 7dc7dff0044c019c8e0bd9e7bbea92abe5139bb87fbc188a49aeff608b5aa5f9
+      purpose: authoritative_room_type_vocabulary_without_draft_or_outcome
+    - path: python-agent-service/app/agents/review_copilot.py
+      sha256: daaef70d3a6148efca12af8d2cfc6c630916f8354ead82ef817685e0e49fcf06
+      purpose: authoritative_existing_read_only_frozen_packet_copilot_boundary
+  accepted_checkpoint:
+    path: docs/runbooks/temporal-first/phase-6-engineering-checkpoint.md
+    sha256: 0e12a447bbc45866b556d8e25a048e78b315847adad11a96b3e209215485fd8b
+
+gate_state:
+  upstream_engineering_checkpoint: PASS
+  upstream_promotion_gate: PENDING
+  permission: PHASE_7_ENGINEERING_ONLY
+  engineering_exception_token: ADR_0016_ACCEPTED_FOR_ENGINEERING_ONLY
+  p7_0_entry_gate: NOT_RUN
+  contract_candidate_state: CONTRACT_CANDIDATE_READY
+  entry_evidence_effect: P7_0_ENGINEERING_ENTRY_PASS
+  entry_evidence_recorded: false
+  phase_7_implementation_allowed: false
+  formal_outcome_selector: LEGACY
+  outcome_workflow_status: NOT_IMPLEMENTED
+  graph_runtime_default: DISABLED
+  allowed_runtime_modes: [DISABLED, JAVA_SIGNED_SYNTHETIC_NOOP_SHADOW]
+  v045_status: RESERVED_NOT_IMPLEMENTED
+  real_case_or_party_data_allowed: false
+  real_tool_invocation_allowed: false
+  real_external_effect_allowed: false
+  real_shadow_allowed: false
+  formal_outcome_workflow_allowed: false
+  temporal_outcome_allocation_allowed: false
+  formal_graph_sink_allowed: false
+  production_traffic_allowed: false
+  canary_allowed: false
+  promotion_allowed: false
+  migrations:
+    MIG-006: PENDING_PROMOTION
+    MIG-007: PENDING_PROMOTION
+
+flow_identity:
+  schema_version: outcome_flow.v1
+  selector: LEGACY
+  workflow_type: OutcomeRoomWorkflow
+  current_formal_workflow: forbidden
+  current_temporal_allocation: forbidden
+  review_graph_key: outcome/review.v1
+  graph_visibility: PRIVATE
+  graph_formal_sink: forbidden
+  projections: [DRAFT, OUTCOME]
+  room_types: [INTAKE, EVIDENCE, HEARING, REVIEW]
+  draft_or_outcome_as_room_type: forbidden
+  existing_route_and_api_compatibility: required
+
+authority_boundaries:
+  java_postgresql:
+    authority: SOLE_FORMAL_BUSINESS_TRUTH_AND_ONLY_FORMAL_WRITER
+    owns:
+      - frozen_review_packet
+      - human_review_task
+      - human_decision
+      - approved_action_snapshot
+      - operation_ledger
+      - external_receipt_ledger
+      - compensation_ledger
+      - case_status
+      - closed_snapshot
+      - evaluation_ledger
+      - outbox
+      - audit
+    atomic_write_boundary: java_transaction_with_revision_and_fence_validation
+    model_or_workflow_may_substitute_formal_fact: false
+  temporal:
+    authority: FUTURE_TIME_ORDER_WAIT_RETRY_FAILURE_COMPENSATION_AND_HANDOFF_ONLY
+    may_persist:
+      - bounded_identifier
+      - immutable_ref
+      - sha256
+      - epoch
+      - revision
+      - fence
+      - version_pin
+      - deterministic_branch_marker
+    may_not_decide:
+      - human_decision
+      - approved_action_content
+      - external_effect_truth
+      - closure_eligibility
+      - evaluation_business_result
+    current_formal_authority: forbidden
+  langgraph:
+    authority: PRIVATE_READ_ONLY_REVIEW_COGNITION_ONLY
+    graph_key: outcome/review.v1
+    formal_sink: forbidden
+    domain_mutation: forbidden
+    process_mutation: forbidden
+    tool_capability: NONE
+  langchain_lcel:
+    authority: TYPED_PROMPT_MODEL_PARSER_EXECUTION_PROTOCOL_ONLY
+    business_authority: forbidden
+    process_authority: forbidden
+    tool_effects: forbidden
+
+human_review:
+  owner: AUTHORIZED_PLATFORM_REVIEWER
+  decision_authority: AUTHORIZED_PLATFORM_REVIEWER_ONLY
+  system_may_emit_or_impersonate_human_decision: false
+  frozen_decision_vocabulary:
+    - APPROVE
+    - MODIFY_AND_APPROVE
+    - REJECT
+    - REQUEST_MORE_EVIDENCE
+    - ESCALATE_MANUAL
+  decision_semantics:
+    APPROVE:
+      approved_snapshot: exact_frozen_original_action_snapshot
+      execution_handoff: allowed_after_java_commit
+    MODIFY_AND_APPROVE:
+      approved_snapshot: reviewer_supplied_snapshot_with_diff_and_new_hash
+      execution_handoff: allowed_after_java_commit
+    REJECT:
+      execution_handoff: forbidden
+      external_effects: forbidden
+    REQUEST_MORE_EVIDENCE:
+      execution_handoff: forbidden
+      next_business_transition: java_authorized_evidence_revision
+    ESCALATE_MANUAL:
+      origin: REVIEWER_SUBMITTED
+      execution_handoff: forbidden
+      next_business_transition: manual_handoff
+  sla_expiration:
+    actor: SYSTEM
+    fact_type: SYSTEM_SLA_ESCALATION
+    receipt_type: SYSTEM_SLA_ESCALATION
+    persisted_by: JAVA_POSTGRESQL
+    terminal_wait_outcome: SYSTEM_SLA_ESCALATION
+    next_process_state: MANUAL_ESCALATION
+    human_decision: NONE
+    approval_record_creation: forbidden
+    reviewer_impersonation: forbidden
+    auto_approve: forbidden
+    approved_snapshot_creation: forbidden
+    execution_handoff: forbidden
+  immutability:
+    committed_decision_rewrite: forbidden
+    decision_type_expansion_without_new_contract_version: forbidden
+    same_idempotency_key_same_request_hash: return_existing
+    same_idempotency_key_different_request_hash: reject
+  approval_binding:
+    required_parents:
+      - frozen_review_packet_ref
+      - frozen_review_packet_hash
+      - adjudication_draft_ref
+      - adjudication_draft_hash
+      - action_snapshot_ref
+      - action_snapshot_hash
+      - policy_version
+      - reviewer_authority_ref
+    parent_substitution: reject
+    model_proposal_is_human_decision: false
+
+review_wait_and_races:
+  wait_owner: TEMPORAL_FUTURE_ONLY
+  current_wait_owner: LEGACY
+  human_terminal_decisions_per_review_epoch: AT_MOST_ONE_REVIEWER_SUBMITTED
+  terminal_wait_outcomes: [HUMAN_DECISION_COMMITTED, SYSTEM_SLA_ESCALATION]
+  decision_vs_sla_expiration:
+    arbitration: deterministic_workflow_event_order_plus_committed_java_revision
+    decision_committed_first: return_persisted_human_decision_and_cancel_sla_branch
+    sla_expiration_committed_first: persist_SYSTEM_SLA_ESCALATION_receipt_without_ApprovalRecord_and_reject_late_epoch_decision
+  duplicate_signal: return_persisted_terminal_state
+  conflicting_signal: reject_and_audit
+  stale_epoch_revision_or_fence: reject
+  temporal_unavailable:
+    java_command_acceptance: durable_only_when_contractually_enabled
+    process_projection_advance: forbidden_until_orchestration_delivery
+    fallback_to_legacy_writer_for_same_epoch: forbidden
+
+review_graph:
+  graph_key: outcome/review.v1
+  checkpoint_scope: private_reviewer_and_frozen_packet
+  input_material:
+    required:
+      - frozen_review_packet_ref
+      - frozen_review_packet_hash
+      - bounded_fact_refs
+      - bounded_rule_refs
+      - bounded_draft_refs
+      - bounded_deliberation_refs
+      - packet_revision
+      - graph_version_pins
+    raw_packet_in_workflow_envelope: forbidden
+    live_case_or_party_lookup: forbidden
+  output:
+    kind: non_binding_cited_review_assistance
+    citations_must_be_subset_of_input_refs: true
+    approval_or_execution_authority: false
+  forbidden:
+    - tool_calls
+    - tool_parameters
+    - credentials
+    - raw_prompts
+    - hidden_reasoning
+    - formal_decision
+    - action_snapshot_mutation
+    - process_transition
+    - cross_reviewer_memory
+
+v045_ledger_contract:
+  migration: V045
+  status: RESERVED_NOT_IMPLEMENTED
+  migration_shape: ADDITIVE_ONLY
+  destructive_rewrite_of_existing_approval_or_action_history: forbidden
+  java_postgresql_formal_ledger: true
+  logical_records:
+    operation:
+      immutable_identity: [case_id, outcome_epoch, operation_id]
+      unique_keys: [operation_key]
+      status_vocabulary: [PLANNED, DISPATCHING, RECONCILING, SUCCEEDED, FAILED]
+      terminal_statuses: [SUCCEEDED, FAILED]
+      ambiguous_as_operation_terminal_status: forbidden
+      required_binding:
+        - approval_record_ref
+        - approved_action_snapshot_ref
+        - approved_action_snapshot_hash
+        - request_ref
+        - request_hash
+        - effect_class
+        - required_for_closure
+        - epoch
+        - revision
+        - fence
+      operation_key_reuse_same_request_hash: return_existing
+      operation_key_reuse_different_request_hash: reject
+      request_hash_recomputed_from_canonical_request: required
+      raw_request_payload_in_temporal_history: forbidden
+    receipt:
+      immutable_parent: operation_id
+      required_binding:
+        - receipt_id
+        - operation_id
+        - operation_key
+        - request_hash
+        - external_idempotency_key_hash
+        - result_ref
+        - result_hash
+        - terminal_status
+        - observed_at
+      terminal_statuses: [SUCCEEDED, FAILED]
+      ambiguous_as_authoritative_receipt_status: forbidden
+      success_without_external_receipt_or_explicit_query_confirmation: forbidden
+      mutable_overwrite: forbidden
+    attempt_observation:
+      record_type: EXECUTION_ATTEMPT_OBSERVATION
+      immutable_parent: operation_id
+      lost_response_status: AMBIGUOUS
+      status_is_terminal_operation_fact: false
+      status_is_authoritative_external_receipt: false
+      operation_status_while_unresolved: RECONCILING
+      external_effect_truth_while_unresolved: UNKNOWN
+      blocks_closure: true
+      blocks_compensation_decision: true
+      blocks_blind_retry: true
+      resolution: authoritative_receipt_query_or_manual_reconciliation
+    compensation:
+      immutable_parent_chain:
+        - original_operation_id
+        - original_success_receipt_id
+        - compensation_operation_id
+        - compensation_receipt_id
+      required_binding:
+        - compensation_policy_version
+        - compensation_request_hash
+        - epoch
+        - revision
+        - fence
+      compensate_without_original_terminal_success_receipt: forbidden
+      compensation_decision_while_ambiguous_observation_unresolved: forbidden
+      parent_substitution: reject
+
+external_effect_protocol:
+  invocation_owner: JAVA_TOOL_ACTIVITY_FUTURE_ONLY
+  agent_or_graph_direct_invocation: forbidden
+  operation_key_required: true
+  external_idempotency_key_required: true
+  request_hash_required: true
+  pre_dispatch_ledger_commit_required: true
+  receipt_commit_required: true
+  timeout_after_possible_dispatch:
+    classification: AMBIGUOUS
+    ledger_record_type: EXECUTION_ATTEMPT_OBSERVATION
+    operation_status: RECONCILING
+    authoritative_terminal_receipt_created: false
+    blind_retry: forbidden
+    closure: blocked
+    compensation_decision: blocked
+    required_next_step: query_external_status_with_same_idempotency_identity
+  query_results:
+    CONFIRMED_SUCCESS: persist_terminal_success_receipt_without_reinvocation
+    CONFIRMED_FAILURE: persist_terminal_failure_and_apply_retry_taxonomy
+    NOT_FOUND_SAFE_TO_RETRY: retry_only_when_tool_capability_contract_explicitly_allows
+    UNRESOLVED: manual_recovery
+  tool_without_idempotency_or_query_capability:
+    automatic_retry_after_ambiguous_dispatch: forbidden
+    recovery: manual_only
+  irreversible_effect:
+    automatic_compensation: forbidden_unless_explicitly_supported_and_policy_approved
+    recovery: manual_only
+
+retry_and_compensation:
+  retry_taxonomy:
+    PRE_DISPATCH_TRANSIENT: bounded_retry_allowed
+    POST_DISPATCH_AMBIGUOUS: query_before_any_retry
+    TERMINAL_BUSINESS_REJECTION: no_retry
+    NON_RETRYABLE_CONTRACT_OR_AUTH_FAILURE: manual_recovery
+    RETRYABLE_CONFIRMED_FAILURE: bounded_retry_with_same_operation_identity
+  compensation_order: reverse_successful_effect_order
+  compensation_idempotency: operation_key_plus_compensation_request_hash
+  compensation_failure: persist_failure_and_enter_manual_recovery
+  compensation_decision_while_ambiguous_observation_unresolved: forbidden
+  workflow_completion_while_compensation_in_flight: forbidden
+  redis_lock_authority: NONE
+  redis_lock_use: optional_contention_optimization_only
+
+closure_and_evaluation:
+  closure_authority: JAVA_POSTGRESQL
+  required_operation_set:
+    frozen_ref_and_hash: required
+    required_operation_count: explicit_including_zero
+    late_addition_or_removal: forbidden
+  closure_gate:
+    approval_decision_in: [APPROVE, MODIFY_AND_APPROVE]
+    approved_action_snapshot_hash_matches: required
+    every_required_operation_has_terminal_success_receipt: required
+    unresolved_ambiguous_attempt_observation_count: 0
+    failed_required_receipt_count: 0
+    in_flight_operation_count: 0
+    in_flight_compensation_count: 0
+    unresolved_manual_recovery_count: 0
+    stale_epoch_revision_or_fence: reject
+  closed_snapshot:
+    creation: atomic_with_java_closed_transition
+    immutable: true
+    required_parents:
+      - approval_record_ref_and_hash
+      - approved_action_snapshot_ref_and_hash
+      - required_operation_set_ref_and_hash
+      - terminal_receipt_refs_and_hashes
+      - final_case_revision
+      - policy_and_schema_versions
+  evaluation:
+    starts_after_closed_snapshot_commit: true
+    input: immutable_closed_snapshot_ref_and_hash_only
+    retries_may_not_reopen_case: true
+    may_not_mutate:
+      - business_fact
+      - human_decision
+      - approved_action
+      - operation_or_receipt
+      - case_status
+      - process_revision
+      - workflow_branch
+      - policy
+      - prompt
+    failure: evaluation_ledger_retry_or_manual_recovery_without_reopening_case
+
+envelope_contract:
+  maximum_encoded_bytes: 32768
+  allowed_value_classes:
+    - bounded_identifier
+    - immutable_ref
+    - lowercase_sha256
+    - bounded_integer
+    - enum
+    - boolean
+    - rfc3339_timestamp
+    - version_pin
+  required_coordination_fields: [epoch, revision, fence]
+  required_identity_fields: [workflow_id, operation_id]
+  raw_sensitive_or_effect_material_forbidden:
+    - raw_case_payload
+    - raw_party_payload
+    - evidence_bytes
+    - packet_body
+    - prompt
+    - hidden_reasoning
+    - token
+    - credential
+    - secret
+    - private_key
+    - tool_parameters
+    - raw_external_response
+    - url
+    - signed_url
+  unknown_fields: reject
+
+synthetic_noop_shadow:
+  allowed_mode: JAVA_SIGNED_SYNTHETIC_NOOP_SHADOW
+  schema: outcome-synthetic-noop-receipt.schema.json
+  exact_literals:
+    schema_version: outcome-synthetic-noop-receipt.v1
+    marker: JAVA_SIGNED_SYNTHETIC_NOOP_V1
+    runtime_mode: JAVA_SIGNED_SYNTHETIC_NOOP_SHADOW
+    traffic_source: SIGNED_SYNTHETIC
+    output_sink: ISOLATED_COMPARISON_LEDGER
+    synthetic_only: true
+    contains_real_case_or_party_data: false
+    tool_invoked: false
+    external_effect_created: false
+    formal_business_write_created: false
+    projection_only: true
+  signer: JAVA_CONTROL_PLANE
+  canonicalization: RFC_8785
+  self_hash:
+    algorithm: SHA_256
+    field: receipt_hash
+    omit_exactly: [receipt_hash, signature]
+  signature:
+    algorithm: ES256
+    covers: receipt_hash
+    input_encoding: ASCII_LOWERCASE_HEX_TEXT
+    encoding: JOSE_P1363_BASE64URL
+  signature_verification_before_admission: required
+  formal_operation_or_receipt_satisfaction: forbidden
+  closure_gate_satisfaction: forbidden
+  real_tool_adapter_reachability: forbidden
+  fixture_paths:
+    valid:
+      - fixtures/valid/outcome-synthetic-noop-receipt-valid.json
+    invalid:
+      - fixtures/invalid/outcome-synthetic-noop-receipt-real-effect.json
+      - fixtures/invalid/outcome-synthetic-noop-receipt-raw-url.json
+
+determinism_replay_and_rollback:
+  active_epoch_pins_immutable:
+    - selector
+    - workflow_build
+    - graph_version
+    - prompt_version
+    - model_profile
+    - schema_versions
+    - policy_version
+    - tool_capability_version
+    - compensation_policy_version
+    - epoch
+    - revision
+    - fence
+  workflow_change_policy: explicit_version_marker_or_new_workflow_build
+  nondeterminism_sources_forbidden:
+    - wall_clock_outside_workflow_clock
+    - random_without_side_effect_marker
+    - unordered_collection_iteration
+    - environment_dependent_branch
+    - mutable_external_read_without_activity_result
+  required_race_tests:
+    - reviewer_decision_vs_sla_timeout
+    - duplicate_same_hash_decision
+    - conflicting_decision
+    - activity_commit_then_response_loss
+    - tool_timeout_after_external_success
+    - status_query_then_retry
+    - compensation_failure
+    - closure_vs_late_receipt
+    - evaluation_retry_after_closed
+  replay:
+    captured_history_replay_required_before_promotion: true
+    compatible_worker_retention: until_all_pinned_histories_complete
+    replay_failure: promotion_blocking
+  rollback:
+    stop_new_outcome_epochs: first
+    preserve_human_decisions_and_external_receipts: always
+    never_transfer_active_epoch_to_legacy_writer: true
+    in_flight_effects: drain_query_compensate_or_manual_recovery
+    legacy_entry_may_not_claim_existing_operation_key: true
+    reopen_closed_case: forbidden
+    synthetic_shadow_disable: immediate_and_effect_free
+
+entry_acceptance:
+  required_before_implementation:
+    - exact_accepted_base_source_hashes_match
+    - compatibility_matrix_yaml_parses
+    - synthetic_noop_schema_parses
+    - all_valid_fixtures_validate
+    - all_invalid_fixtures_fail_validation
+    - p7_engineering_exception_is_accepted
+    - p7_0_batch_0_records_pass_for_exact_contract_candidate_sha
+  required_engineering_exception_token: ADR_0016_ACCEPTED_FOR_ENGINEERING_ONLY
+  required_evidence_effect: P7_0_ENGINEERING_ENTRY_PASS
+  current_result: NOT_RUN
+  implementation_must_remain_blocked: true
