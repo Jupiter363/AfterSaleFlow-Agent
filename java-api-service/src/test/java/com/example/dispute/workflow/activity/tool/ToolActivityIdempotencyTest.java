@@ -32,7 +32,7 @@ class ToolActivityIdempotencyTest {
         assertThat(first.formalBusinessWriteCreated()).isFalse();
         assertThat(first.projectionOnly()).isTrue();
         assertThat(first.effectMode()).isEqualTo("NOOP");
-        assertThat(first.javaSignatureVerified()).isTrue();
+        assertThat(first.signer()).isEqualTo(SyntheticNoopExecutionCommand.SIGNER);
         assertThat(first.externalAdapter()).isEqualTo("SYNTHETIC_NOOP_ONLY");
         assertThat(first.externalEffectPerformed()).isFalse();
         assertThat(first.formalFactWritten()).isFalse();

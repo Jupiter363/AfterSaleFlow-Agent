@@ -89,10 +89,6 @@ public record SyntheticNoopExecutionReceipt(
         return "NOOP";
     }
 
-    public boolean javaSignatureVerified() {
-        return true;
-    }
-
     public String externalAdapter() {
         return "SYNTHETIC_NOOP_ONLY";
     }

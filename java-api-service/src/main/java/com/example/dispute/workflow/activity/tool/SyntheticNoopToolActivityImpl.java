@@ -5,6 +5,9 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 import java.util.Objects;
+import com.example.dispute.workflow.contract.outcome.v1.OutcomeExecutionAttemptObservation;
+import com.example.dispute.workflow.contract.outcome.v1.OutcomeOperationCommand;
+import com.example.dispute.workflow.contract.outcome.v1.OutcomeSyntheticNoopReceipt;
 
 /** Pure adapter: validates a Java signature and returns a signed, deterministic zero-effect receipt. */
 public final class SyntheticNoopToolActivityImpl implements SyntheticNoopToolActivity {
@@ -21,11 +24,12 @@ public final class SyntheticNoopToolActivityImpl implements SyntheticNoopToolAct
     @Override
     public SyntheticNoopExecutionReceipt execute(SyntheticNoopExecutionCommand command) {
         Objects.requireNonNull(command, "command must not be null");
-        if (!signatureVerifier.verify(command)) {
-            throw new ExecutionException(
-                    FailureClass.CONTRACT_INVALID,
-                    "synthetic fixture signature verification failed");
-        }
+        requireVerifiedSignature(command);
+        return executeVerified(command);
+    }
+
+    private SyntheticNoopExecutionReceipt executeVerified(
+            SyntheticNoopExecutionCommand command) {
         String signingKeyId = receiptSigner.signingKeyId();
         if (signingKeyId == null || !signingKeyId.startsWith("outcome-synthetic-")) {
             throw new ExecutionException(
@@ -61,6 +65,68 @@ public final class SyntheticNoopToolActivityImpl implements SyntheticNoopToolAct
                 signingKeyId,
                 receiptHash,
                 signature);
+    }
+
+    public VerifiedExecution verifyAndExecute(
+            OutcomeOperationCommand command, SyntheticNoopExecutionCommand signedFixture) {
+        VerifiedInvocation invocation = verifyInvocation(command, signedFixture);
+        SyntheticNoopExecutionReceipt internalReceipt =
+                executeVerified(invocation.signedFixture());
+        OutcomeSyntheticNoopReceipt wireReceipt =
+                SyntheticOutcomeProtocolAdapter.toWire(invocation.command(), internalReceipt);
+        return new VerifiedExecution(
+                invocation,
+                internalReceipt,
+                wireReceipt,
+                sha256(
+                        invocation.capabilityHash()
+                                + "\n"
+                                + internalReceipt.receiptHash()));
+    }
+
+    public VerifiedAmbiguousAttempt verifyAmbiguousAttempt(
+            OutcomeOperationCommand command,
+            SyntheticNoopExecutionCommand signedFixture,
+            OutcomeExecutionAttemptObservation observation) {
+        VerifiedInvocation invocation = verifyInvocation(command, signedFixture);
+        SyntheticOutcomeProtocolAdapter.requireAmbiguousMatch(invocation.command(), observation);
+        return new VerifiedAmbiguousAttempt(
+                invocation,
+                observation,
+                sha256(
+                        invocation.capabilityHash()
+                                + "\n"
+                                + observation.observationHash()));
+    }
+
+    private VerifiedInvocation verifyInvocation(
+            OutcomeOperationCommand command, SyntheticNoopExecutionCommand signedFixture) {
+        SyntheticNoopExecutionCommand bound =
+                SyntheticOutcomeProtocolAdapter.bind(command, signedFixture);
+        requireVerifiedSignature(bound);
+        return new VerifiedInvocation(
+                command,
+                bound,
+                sha256(
+                        command.commandId()
+                                + "\n"
+                                + command.requestHash()
+                                + "\n"
+                                + command.epoch()
+                                + "\n"
+                                + command.revision()
+                                + "\n"
+                                + command.fence()
+                                + "\n"
+                                + bound.signature()));
+    }
+
+    private void requireVerifiedSignature(SyntheticNoopExecutionCommand command) {
+        if (!signatureVerifier.verify(command)) {
+            throw new ExecutionException(
+                    FailureClass.CONTRACT_INVALID,
+                    "synthetic fixture signature verification failed");
+        }
     }
 
     private static String canonicalPreimage(
@@ -104,4 +170,78 @@ public final class SyntheticNoopToolActivityImpl implements SyntheticNoopToolAct
             throw new IllegalStateException("SHA-256 is required", exception);
         }
     }
+
+    public static final class VerifiedExecution {
+        private final VerifiedInvocation invocation;
+        private final SyntheticNoopExecutionReceipt internalReceipt;
+        private final OutcomeSyntheticNoopReceipt wireReceipt;
+        private final String capabilityHash;
+
+        private VerifiedExecution(
+                VerifiedInvocation invocation,
+                SyntheticNoopExecutionReceipt internalReceipt,
+                OutcomeSyntheticNoopReceipt wireReceipt,
+                String capabilityHash) {
+            this.invocation = invocation;
+            this.internalReceipt = internalReceipt;
+            this.wireReceipt = wireReceipt;
+            this.capabilityHash = capabilityHash;
+        }
+
+        public OutcomeOperationCommand command() {
+            return invocation.command();
+        }
+
+        public SyntheticNoopExecutionCommand signedFixture() {
+            return invocation.signedFixture();
+        }
+
+        public SyntheticNoopExecutionReceipt internalReceipt() {
+            return internalReceipt;
+        }
+
+        public OutcomeSyntheticNoopReceipt wireReceipt() {
+            return wireReceipt;
+        }
+
+        public String capabilityHash() {
+            return capabilityHash;
+        }
+    }
+
+    public static final class VerifiedAmbiguousAttempt {
+        private final VerifiedInvocation invocation;
+        private final OutcomeExecutionAttemptObservation observation;
+        private final String capabilityHash;
+
+        private VerifiedAmbiguousAttempt(
+                VerifiedInvocation invocation,
+                OutcomeExecutionAttemptObservation observation,
+                String capabilityHash) {
+            this.invocation = invocation;
+            this.observation = observation;
+            this.capabilityHash = capabilityHash;
+        }
+
+        public OutcomeOperationCommand command() {
+            return invocation.command();
+        }
+
+        public SyntheticNoopExecutionCommand signedFixture() {
+            return invocation.signedFixture();
+        }
+
+        public OutcomeExecutionAttemptObservation observation() {
+            return observation;
+        }
+
+        public String capabilityHash() {
+            return capabilityHash;
+        }
+    }
+
+    private record VerifiedInvocation(
+            OutcomeOperationCommand command,
+            SyntheticNoopExecutionCommand signedFixture,
+            String capabilityHash) {}
 }
