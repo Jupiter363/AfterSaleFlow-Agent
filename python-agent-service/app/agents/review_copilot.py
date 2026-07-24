@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Protocol
 
 from app.agents.profiles import final_agent_profiles
 from app.harness.guardrails import GuardrailChecker
@@ -15,14 +16,35 @@ from app.schemas import ReviewCopilotAnswer, ReviewCopilotRequest
 ReviewAnswerer = Callable[[ReviewCopilotRequest], ReviewCopilotAnswer]
 
 
+class ReviewGraphRunner(Protocol):
+    def query(self, request: ReviewCopilotRequest) -> ReviewCopilotAnswer: ...
+
+
 class ReviewCopilot:
     # 所属模块：Agent 角色能力 > review_copilot；函数角色：对象依赖初始化。
     # 具体功能：`__init__` 注入并保存处理本阶段状态需要的客户端、配置或策略依赖；关键协作调用：`GuardrailChecker`、`final_agent_profiles`。
     # 上下游：上游为 受治理的案件上下文和角色提示词；下游为 协作调用 `GuardrailChecker`、`final_agent_profiles`。
     # 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
-    def __init__(self, answerer: ReviewAnswerer) -> None:
-        self.profile = final_agent_profiles()["review_copilot"]
+    def __init__(
+        self,
+        answerer: ReviewAnswerer | None = None,
+        *,
+        graph_runner: ReviewGraphRunner | None = None,
+    ) -> None:
+        if (answerer is None) == (graph_runner is None):
+            raise ValueError("exactly one review answerer or private graph runner is required")
+        base_profile = final_agent_profiles()["review_copilot"]
+        self.profile = base_profile.model_copy(
+            update={
+                "allowed_tools": frozenset(),
+                "budget": base_profile.budget.model_copy(
+                    update={"max_tool_calls": 0}
+                ),
+                "risk_policy": "outcome-review-advisory-only-v1",
+            }
+        )
         self._answerer = answerer
+        self._graph_runner = graph_runner
         self._guardrails = GuardrailChecker()
 
     # 所属模块：Agent 角色能力 > review_copilot；函数角色：类/闭包内部方法。
@@ -31,7 +53,25 @@ class ReviewCopilot:
     # 系统意义：该函数在系统中的业务边界是：服从角色权限、上下文范围和非最终结论边界。
     def query(self, request: ReviewCopilotRequest) -> ReviewCopilotAnswer:
         self._guardrails.assert_safe_input(request.question)
-        answer = ReviewCopilotAnswer.model_validate(self._answerer(request))
+        if self._graph_runner is not None:
+            answer = self._graph_runner.query(request)
+        else:
+            assert self._answerer is not None
+            answer = self._answerer(request)
+        return self.validate_answer(request, answer)
+
+    def validate_answer(
+        self,
+        request: ReviewCopilotRequest,
+        answer: ReviewCopilotAnswer,
+    ) -> ReviewCopilotAnswer:
+        answer = ReviewCopilotAnswer.model_validate(answer)
+        if (
+            answer.approval_performed
+            or answer.execution_triggered
+            or answer.is_final_decision
+        ):
+            raise ValueError("review copilot cannot perform a formal decision or execution")
         self._validate_refs(
             "fact",
             answer.fact_refs,
@@ -65,6 +105,10 @@ class ReviewCopilot:
                 available_refs,
             )
             self._guardrails.assert_safe_output(statement.text)
+        for uncertainty in answer.uncertainties:
+            self._guardrails.assert_safe_output(uncertainty)
+        for focus in answer.suggested_review_focus:
+            self._guardrails.assert_safe_output(focus)
         self._guardrails.assert_safe_output(answer.answer)
         return answer
 
