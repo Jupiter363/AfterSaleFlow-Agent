@@ -247,6 +247,10 @@ ALLOWED_CANDIDATE_PREFIXES = (
     "python-agent-service/tests/graphs/outcome/",
     "tests/static/test_phase7_",
 )
+GOVERNANCE_COMPATIBILITY_BLOBS = {
+    "AGENTS.md": "5b6c25506004b94120b4fc8843464941866741bc",
+    "plans/agent-collaboration-execution.md": "9e54f6b0952f46d6e966328f6615c178376479d2",
+}
 ALLOWED_CANDIDATE_EXACT = {
     V045_PATH,
     "frontend/src/api/review.js",
@@ -267,6 +271,7 @@ ALLOWED_CANDIDATE_EXACT = {
     "plans/phase-7-owner-briefs.yaml",
     RUNNER_PATH,
     "scripts/generate_phase7_candidate_evidence.py",
+    *GOVERNANCE_COMPATIBILITY_BLOBS,
 }
 
 
@@ -610,6 +615,33 @@ def _assert_candidate_source_inventory(candidate: str, records: Sequence[dict[st
     _git_regular_blobs_under(candidate, "python-agent-service/tests/graphs/outcome")
 
 
+def _assert_governance_compatibility(
+    candidate: str, records: Sequence[dict[str, str]]
+) -> None:
+    observed = sorted(
+        (
+            item
+            for item in records
+            if item["path"] in GOVERNANCE_COMPATIBILITY_BLOBS
+        ),
+        key=lambda item: item["path"],
+    )
+    if not observed:
+        return
+
+    expected = [
+        {"status": "M", "path": path}
+        for path in sorted(GOVERNANCE_COMPATIBILITY_BLOBS)
+    ]
+    if observed != expected:
+        raise EvidenceError("Phase 7 candidate governance compatibility drift is incomplete")
+    for path, expected_blob in GOVERNANCE_COMPATIBILITY_BLOBS.items():
+        if _git_tree_entry(candidate, path)[2] != expected_blob:
+            raise EvidenceError(
+                f"Phase 7 candidate governance compatibility blob drifted: {path}"
+            )
+
+
 def capture_source_tree(candidate_commit: str) -> dict[str, Any]:
     candidate = _assert_candidate(candidate_commit)
     assert_base_ancestor(PHASE7_ENTRY_EVIDENCE, candidate)
@@ -631,6 +663,7 @@ def capture_source_tree(candidate_commit: str) -> dict[str, Any]:
             raise EvidenceError(f"Phase 7 candidate changed forbidden authority path: {path}")
         if not _path_allowed(path):
             raise EvidenceError(f"Phase 7 candidate contains an undeclared path: {path}")
+    _assert_governance_compatibility(candidate, records)
     _assert_candidate_source_inventory(candidate, records)
     _assert_prior_migrations(candidate)
     _assert_frozen_authority(candidate)

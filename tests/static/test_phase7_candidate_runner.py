@@ -331,6 +331,52 @@ def test_candidate_scope_requires_additive_v045_and_rejects_prior_migration(
         runner.capture_source_tree(CANDIDATE)
 
 
+def test_candidate_scope_accepts_only_pinned_governance_compatibility_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runner, "_assert_candidate", lambda value: value)
+    monkeypatch.setattr(runner, "assert_base_ancestor", lambda *_: None)
+    monkeypatch.setattr(runner, "_assert_frozen_authority", lambda *_: None)
+    monkeypatch.setattr(runner, "_assert_prior_migrations", lambda *_: None)
+    monkeypatch.setattr(runner, "_assert_candidate_source_inventory", lambda *_: None)
+    monkeypatch.setattr(runner, "_git_output", lambda *args: "b" * 40)
+    records = [
+        {"status": "A", "path": runner.V045_PATH},
+        {"status": "A", "path": runner.RUNNER_PATH},
+        *[
+            {"status": "M", "path": path}
+            for path in sorted(runner.GOVERNANCE_COMPATIBILITY_BLOBS)
+        ],
+    ]
+    monkeypatch.setattr(runner, "_changed_path_records", lambda _: records)
+    monkeypatch.setattr(
+        runner,
+        "_git_tree_entry",
+        lambda _candidate, path: (
+            "100644",
+            "blob",
+            runner.GOVERNANCE_COMPATIBILITY_BLOBS.get(path, "b" * 40),
+            path,
+        ),
+    )
+
+    snapshot = runner.capture_source_tree(CANDIDATE)
+    assert snapshot["changed_paths"] == records
+
+    monkeypatch.setattr(runner, "_changed_path_records", lambda _: records[:-1])
+    with pytest.raises(runner.EvidenceError, match="governance compatibility drift is incomplete"):
+        runner.capture_source_tree(CANDIDATE)
+
+    monkeypatch.setattr(runner, "_changed_path_records", lambda _: records)
+    monkeypatch.setattr(
+        runner,
+        "_git_tree_entry",
+        lambda _candidate, path: ("100644", "blob", "0" * 40, path),
+    )
+    with pytest.raises(runner.EvidenceError, match="governance compatibility blob drifted"):
+        runner.capture_source_tree(CANDIDATE)
+
+
 def test_candidate_scope_rejects_worker_selector_and_formal_activation_paths(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
