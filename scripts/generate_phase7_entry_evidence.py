@@ -12,7 +12,7 @@ import subprocess
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 try:
     from scripts import run_phase7_entry_checkpoint as runner
@@ -25,11 +25,15 @@ METRICS_NAME = "entry-metrics.json"
 CANDIDATE_NAME = "candidate.txt"
 HASH_INDEX_NAME = "artifact-sha256.json"
 ATTRIBUTES_NAME = ".gitattributes"
+PROVENANCE_MANIFEST_NAME = "provenance-manifest.json"
 EVIDENCE_SCHEMA = "phase7-entry-evidence.v1"
 HASH_INDEX_SCHEMA = "phase7-entry-artifact-index.v1"
+PROVENANCE_MANIFEST_SCHEMA = "phase7-entry-provenance-manifest.v1"
 ENTRY_EFFECT = "P7_0_ENGINEERING_ENTRY_PASS"
 POST_EVIDENCE_PERMISSION = "PHASE_7_ENGINEERING_ONLY_AFTER_P7_0_PASS"
 ATTRIBUTES_BYTES = b"* -text\n**/* -text\n"
+WINDOWS_PORTABLE_PATH_LIMIT = 248
+PORTABLE_MAX_ARCHIVE_RELATIVE = "p/3q99/r/99-ffffffffffff.xml"
 
 
 def _json_lf_bytes(document: Any) -> bytes:
@@ -131,45 +135,121 @@ def _archive_manifest(
     return hashlib.sha256(payload).hexdigest()
 
 
-def _provenance_paths(manifest: dict[str, Any]) -> list[str]:
-    values: list[str] = []
+def _safe_source_path(value: str) -> str:
+    normalized = value.replace("\\", "/")
+    path = PurePosixPath(normalized)
+    if (
+        not normalized
+        or path.is_absolute()
+        or path.anchor
+        or any(part in {"", ".", ".."} or ":" in part for part in path.parts)
+        or not normalized.startswith("attempts/")
+    ):
+        raise runner.EvidenceError(
+            f"execution provenance path is not a safe attempt-bound relative path: {value}"
+        )
+    return path.as_posix()
+
+
+def _safe_archive_path(value: str) -> str:
+    normalized = value.replace("\\", "/")
+    path = PurePosixPath(normalized)
+    if (
+        not normalized
+        or path.is_absolute()
+        or path.anchor
+        or any(part in {"", ".", ".."} or ":" in part for part in path.parts)
+        or not normalized.startswith("p/")
+        or len(path.parts) != 4
+        or not re.fullmatch(
+            r"p/[0-3][aq][0-9]{2}/[oer]/[0-9]{2}-[0-9a-f]{12}\.(?:log|xml)",
+            normalized,
+        )
+    ):
+        raise runner.EvidenceError(f"provenance archive path is unsafe: {value}")
+    return path.as_posix()
+
+
+def _provenance_specs(manifest: dict[str, Any]) -> list[dict[str, Any]]:
     commands = manifest.get("commands")
     quarantined = manifest.get("quarantined_attempts")
     if not isinstance(commands, list) or not isinstance(quarantined, list):
         raise runner.EvidenceError("execution provenance command lists are invalid")
-    records = [*commands, *quarantined]
-    for record in records:
-        if not isinstance(record, dict):
-            raise runner.EvidenceError("execution provenance record must be an object")
-        for field in ("stdout_path", "stderr_path"):
-            value = record.get(field)
-            if not isinstance(value, str):
-                raise runner.EvidenceError(f"execution provenance {field} is missing")
-            values.append(value)
-        raw_reports = record.get("raw_reports")
-        if not isinstance(raw_reports, list):
-            raise runner.EvidenceError("execution provenance raw_reports is invalid")
-        for raw in raw_reports:
-            if not isinstance(raw, dict) or not isinstance(raw.get("path"), str):
-                raise runner.EvidenceError("execution provenance raw report path is invalid")
-            values.append(raw["path"])
-    normalized: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        path = Path(value.replace("\\", "/"))
-        normalized_value = path.as_posix()
-        if (
-            path.is_absolute()
-            or ".." in path.parts
-            or not normalized_value.startswith("attempts/")
-            or normalized_value in seen
-        ):
-            raise runner.EvidenceError(
-                f"execution provenance path escapes, duplicates, or is not attempt-bound: {value}"
-            )
-        seen.add(normalized_value)
-        normalized.append(normalized_value)
-    return normalized
+    specs: list[dict[str, Any]] = []
+    source_paths: set[str] = set()
+    archive_paths: set[str] = set()
+    grouped = (("accepted", commands), ("quarantined", quarantined))
+    command_positions = {command_id: index for index, command_id in enumerate(runner.COMMAND_ORDER)}
+    for scope, records in grouped:
+        for record_index, record in enumerate(records):
+            if record_index > 99:
+                raise runner.EvidenceError("execution provenance has too many command attempts")
+            if not isinstance(record, dict):
+                raise runner.EvidenceError("execution provenance record must be an object")
+            command_id = record.get("id")
+            if command_id not in command_positions:
+                raise runner.EvidenceError("execution provenance record has an unknown command")
+            artifacts: list[tuple[str, int, Any, Any]] = [
+                ("stdout", 0, record.get("stdout_path"), record.get("stdout_sha256")),
+                ("stderr", 0, record.get("stderr_path"), record.get("stderr_sha256")),
+            ]
+            raw_reports = record.get("raw_reports")
+            if not isinstance(raw_reports, list):
+                raise runner.EvidenceError("execution provenance raw_reports is invalid")
+            for raw_index, raw in enumerate(raw_reports):
+                if not isinstance(raw, dict):
+                    raise runner.EvidenceError("execution provenance raw report is invalid")
+                artifacts.append(("raw", raw_index, raw.get("path"), raw.get("sha256")))
+            for kind, ordinal, source_value, source_sha256 in artifacts:
+                if ordinal > 99:
+                    raise runner.EvidenceError("execution provenance has too many raw reports")
+                if not isinstance(source_value, str) or not re.fullmatch(
+                    r"[0-9a-f]{64}", str(source_sha256)
+                ):
+                    raise runner.EvidenceError("execution provenance source binding is incomplete")
+                source_path = _safe_source_path(source_value)
+                if source_path in source_paths:
+                    raise runner.EvidenceError(
+                        f"execution provenance source path is duplicated: {source_path}"
+                    )
+                scope_code = "a" if scope == "accepted" else "q"
+                kind_code = {"stdout": "o", "stderr": "e", "raw": "r"}[kind]
+                suffix = ".xml" if kind == "raw" else ".log"
+                digest_input = (
+                    f"{scope}\0{record_index}\0{command_id}\0{kind}\0{ordinal}\0{source_path}"
+                ).encode("utf-8")
+                digest = hashlib.sha256(digest_input).hexdigest()[:12]
+                archive_path = (
+                    f"p/{command_positions[command_id]}{scope_code}{record_index:02d}/"
+                    f"{kind_code}/{ordinal:02d}-{digest}{suffix}"
+                )
+                if archive_path in archive_paths or not archive_path.startswith("p/"):
+                    raise runner.EvidenceError(
+                        f"execution provenance archive path collides: {archive_path}"
+                    )
+                source_paths.add(source_path)
+                archive_paths.add(archive_path)
+                specs.append(
+                    {
+                        "command_id": command_id,
+                        "record_scope": scope,
+                        "record_index": record_index,
+                        "kind": kind,
+                        "ordinal": ordinal,
+                        "source_path": source_path,
+                        "source_sha256": source_sha256,
+                        "archive_path": archive_path,
+                    }
+                )
+    return specs
+
+
+def _provenance_paths(manifest: dict[str, Any]) -> list[str]:
+    return [item["source_path"] for item in _provenance_specs(manifest)]
+
+
+def _provenance_archive_paths(manifest: dict[str, Any]) -> list[str]:
+    return [item["archive_path"] for item in _provenance_specs(manifest)]
 
 
 def _indexed_names(manifest: dict[str, Any]) -> list[str]:
@@ -179,12 +259,43 @@ def _indexed_names(manifest: dict[str, Any]) -> list[str]:
         runner.MANIFEST_NAME,
         *runner.SOURCE_REPORTS.values(),
         METRICS_NAME,
-        *_provenance_paths(manifest),
+        PROVENANCE_MANIFEST_NAME,
+        *_provenance_archive_paths(manifest),
     ]
 
 
+def _utf16_path_units(path: Path) -> int:
+    return len(str(path.absolute()).encode("utf-16-le")) // 2
+
+
+def _assert_portable_output_paths(
+    output_dir: Path, relative_paths: Sequence[str]
+) -> None:
+    root = output_dir.absolute()
+    seen: set[str] = set()
+    for relative in relative_paths:
+        normalized = PurePosixPath(relative.replace("\\", "/"))
+        if (
+            normalized.is_absolute()
+            or normalized.anchor
+            or any(part in {"", ".", ".."} or ":" in part for part in normalized.parts)
+        ):
+            raise runner.EvidenceError(f"evidence output path is unsafe: {relative}")
+        value = normalized.as_posix()
+        if value in seen:
+            raise runner.EvidenceError(f"evidence output path collides: {value}")
+        seen.add(value)
+        final_path = root.joinpath(*normalized.parts)
+        length = _utf16_path_units(final_path)
+        if length > WINDOWS_PORTABLE_PATH_LIMIT:
+            raise runner.EvidenceError(
+                f"evidence output path exceeds portable Windows budget "
+                f"{WINDOWS_PORTABLE_PATH_LIMIT}: {length} UTF-16 units: {final_path}"
+            )
+
+
 def _copy_provenance_artifact(
-    *, run_root: Path, output_dir: Path, relative: str
+    *, run_root: Path, output_dir: Path, relative: str, archive_path: str | None = None
 ) -> None:
     normalized = relative.replace("\\", "/")
     lexical = PurePosixPath(normalized)
@@ -243,6 +354,19 @@ def _copy_provenance_artifact(
     if not source.is_relative_to(source_root):
         raise runner.EvidenceError(f"execution provenance source escapes run root: {relative}")
 
+    archive_value = _safe_archive_path(archive_path) if archive_path is not None else normalized
+    archive_lexical = PurePosixPath(archive_value.replace("\\", "/"))
+    if (
+        archive_lexical.is_absolute()
+        or archive_lexical.anchor
+        or any(
+            part in {"", ".", ".."} or ":" in part
+            for part in archive_lexical.parts
+        )
+    ):
+        raise runner.EvidenceError(
+            f"execution provenance archive path is unsafe: {archive_path}"
+        )
     destination_root_lexical = output_dir.absolute()
     destination_root_metadata = lstat_no_reparse(
         destination_root_lexical, context="provenance destination root"
@@ -251,7 +375,7 @@ def _copy_provenance_artifact(
         raise runner.EvidenceError("execution provenance destination root is not a directory")
     destination_root = destination_root_lexical.resolve(strict=True)
     destination_parent = destination_root_lexical
-    for part in lexical.parts[:-1]:
+    for part in archive_lexical.parts[:-1]:
         destination_parent /= part
         try:
             destination_parent.mkdir()
@@ -268,7 +392,7 @@ def _copy_provenance_artifact(
         raise runner.EvidenceError(
             f"execution provenance destination parent escapes output root: {relative}"
         )
-    destination = destination_parent / lexical.parts[-1]
+    destination = destination_parent / archive_lexical.parts[-1]
     try:
         destination.lstat()
     except FileNotFoundError:
@@ -334,6 +458,103 @@ def _copy_provenance_artifact(
         raise runner.EvidenceError(
             f"execution provenance destination is not a regular file: {relative}"
         )
+
+
+def _build_provenance_manifest(
+    *, manifest: dict[str, Any], candidate: str, output_dir: Path
+) -> dict[str, Any]:
+    artifacts: list[dict[str, Any]] = []
+    for spec in _provenance_specs(manifest):
+        archive = output_dir / spec["archive_path"]
+        digest = runner._sha256(archive)
+        if digest != spec["source_sha256"]:
+            raise runner.EvidenceError(
+                f"archived provenance bytes drifted for {spec['source_path']}"
+            )
+        artifacts.append(
+            {
+                **spec,
+                "archive_sha256": digest,
+                "bytes": archive.stat().st_size,
+            }
+        )
+    return {
+        "schema_version": PROVENANCE_MANIFEST_SCHEMA,
+        "candidate_commit": candidate,
+        "artifact_count": len(artifacts),
+        "artifacts": artifacts,
+    }
+
+
+def _validate_provenance_manifest(
+    *,
+    manifest: dict[str, Any],
+    provenance: dict[str, Any],
+    candidate: str,
+    artifact_reader: Callable[[str], bytes],
+) -> dict[str, str]:
+    if set(provenance) != {
+        "schema_version",
+        "candidate_commit",
+        "artifact_count",
+        "artifacts",
+    }:
+        raise runner.EvidenceError("provenance manifest field set drifted")
+    artifacts = provenance.get("artifacts")
+    expected = _provenance_specs(manifest)
+    if (
+        provenance.get("schema_version") != PROVENANCE_MANIFEST_SCHEMA
+        or provenance.get("candidate_commit") != candidate
+        or provenance.get("artifact_count") != len(expected)
+        or not isinstance(artifacts, list)
+        or len(artifacts) != len(expected)
+    ):
+        raise runner.EvidenceError("provenance manifest authority or count drifted")
+    mapping: dict[str, str] = {}
+    archive_paths: set[str] = set()
+    expected_keys = {
+        "command_id",
+        "record_scope",
+        "record_index",
+        "kind",
+        "ordinal",
+        "source_path",
+        "source_sha256",
+        "archive_path",
+        "archive_sha256",
+        "bytes",
+    }
+    for expected_item, actual in zip(expected, artifacts, strict=True):
+        if not isinstance(actual, dict) or set(actual) != expected_keys:
+            raise runner.EvidenceError("provenance artifact mapping field set drifted")
+        if any(actual.get(field) != value for field, value in expected_item.items()):
+            raise runner.EvidenceError("provenance source-to-archive mapping drifted")
+        archive_path = actual["archive_path"]
+        source_path = actual["source_path"]
+        if (
+            archive_path in archive_paths
+            or source_path in mapping
+            or archive_path != _safe_archive_path(archive_path)
+        ):
+            raise runner.EvidenceError("provenance mapping collides or traverses")
+        try:
+            payload = artifact_reader(archive_path)
+        except (OSError, KeyError) as exception:
+            raise runner.EvidenceError(
+                f"cannot read mapped provenance artifact {archive_path}: {exception}"
+            ) from exception
+        digest = hashlib.sha256(payload).hexdigest()
+        if (
+            actual.get("source_sha256") != digest
+            or actual.get("archive_sha256") != digest
+            or actual.get("bytes") != len(payload)
+        ):
+            raise runner.EvidenceError(
+                f"provenance artifact byte identity drifted: {archive_path}"
+            )
+        archive_paths.add(archive_path)
+        mapping[source_path] = archive_path
+    return mapping
 
 
 def load_green_manifest(
@@ -471,6 +692,10 @@ def _validate_bundle(
     index: dict[str, Any],
     release_id: str,
 ) -> None:
+    _assert_portable_output_paths(
+        output_dir,
+        [HASH_INDEX_NAME, *_indexed_names(manifest)],
+    )
     expected = {
         HASH_INDEX_NAME,
         *_indexed_names(manifest),
@@ -493,6 +718,7 @@ def _validate_bundle(
                 CANDIDATE_NAME,
                 runner.MANIFEST_NAME,
                 METRICS_NAME,
+                PROVENANCE_MANIFEST_NAME,
                 *runner.SOURCE_REPORTS.values(),
             },
         )
@@ -506,6 +732,27 @@ def _validate_bundle(
     runner._assert_execution_manifest_seal(archived)
     if _load_json(output_dir / METRICS_NAME, "entry metrics") != metrics:
         raise runner.EvidenceError("entry metrics changed during assembly")
+    provenance = _load_json(
+        output_dir / PROVENANCE_MANIFEST_NAME, "provenance manifest"
+    )
+    _validate_provenance_manifest(
+        manifest=manifest,
+        provenance=provenance,
+        candidate=candidate,
+        artifact_reader=lambda relative: (output_dir / relative).read_bytes(),
+    )
+    expected_provenance_metrics = {
+        "archived": True,
+        "artifact_count": provenance["artifact_count"],
+        "mapping_manifest": PROVENANCE_MANIFEST_NAME,
+        "mapping_manifest_sha256": runner._sha256(
+            output_dir / PROVENANCE_MANIFEST_NAME
+        ),
+        "source_paths": _provenance_paths(manifest),
+        "archive_paths": _provenance_archive_paths(manifest),
+    }
+    if metrics.get("execution_provenance") != expected_provenance_metrics:
+        raise runner.EvidenceError("entry provenance metrics drifted")
     if _load_json(output_dir / HASH_INDEX_NAME, "artifact index") != index:
         raise runner.EvidenceError("artifact index changed during assembly")
     indexed_names = [artifact.get("path") for artifact in index.get("artifacts", [])]
@@ -534,6 +781,10 @@ def assemble_entry_evidence(
     base = runner._assert_candidate(base_commit, "base commit")
     run_root = execution_manifest_path.resolve().parent
     source_dir = run_root / "source"
+    _assert_portable_output_paths(
+        output_dir,
+        [HASH_INDEX_NAME, *_indexed_names(manifest)],
+    )
     output_dir.mkdir(parents=True, exist_ok=False)
     (output_dir / ATTRIBUTES_NAME).write_bytes(ATTRIBUTES_BYTES)
     (output_dir / CANDIDATE_NAME).write_bytes((candidate + "\n").encode("ascii"))
@@ -545,12 +796,26 @@ def assemble_entry_evidence(
         if runner._sha256(source) != record["report_sha256"]:
             raise runner.EvidenceError(f"accepted report {record['report']} drifted")
         shutil.copyfile(source, output_dir / record["report"])
-    for relative in _provenance_paths(manifest):
+    for spec in _provenance_specs(manifest):
         _copy_provenance_artifact(
             run_root=run_root,
             output_dir=output_dir,
-            relative=relative,
+            relative=spec["source_path"],
+            archive_path=spec["archive_path"],
         )
+    provenance = _build_provenance_manifest(
+        manifest=manifest,
+        candidate=candidate,
+        output_dir=output_dir,
+    )
+    _write_json_lf(output_dir / PROVENANCE_MANIFEST_NAME, provenance)
+    _validate_provenance_manifest(
+        manifest=manifest,
+        provenance=provenance,
+        candidate=candidate,
+        artifact_reader=lambda relative: (output_dir / relative).read_bytes(),
+    )
+    provenance_sha256 = runner._sha256(output_dir / PROVENANCE_MANIFEST_NAME)
 
     source_suites, totals = _source_metrics(manifest, output_dir)
     metrics = {
@@ -598,8 +863,11 @@ def assemble_entry_evidence(
         },
         "execution_provenance": {
             "archived": True,
-            "artifact_count": len(_provenance_paths(manifest)),
-            "paths": _provenance_paths(manifest),
+            "artifact_count": provenance["artifact_count"],
+            "mapping_manifest": PROVENANCE_MANIFEST_NAME,
+            "mapping_manifest_sha256": provenance_sha256,
+            "source_paths": _provenance_paths(manifest),
+            "archive_paths": _provenance_archive_paths(manifest),
         },
         "entry_decision": {
             "engineering_execution": "BLOCKED_UNTIL_THIS_EVIDENCE_COMMIT",
@@ -822,6 +1090,10 @@ def verify_evidence_commit(
     )
     runner._assert_execution_manifest_seal(manifest)
     expected_names = {HASH_INDEX_NAME, *_indexed_names(manifest)}
+    _assert_portable_output_paths(
+        ROOT / prefix,
+        sorted(expected_names),
+    )
     expected_paths = {f"{prefix}/{name}" for name in expected_names}
     records = [
         line
@@ -864,10 +1136,25 @@ def verify_evidence_commit(
         CANDIDATE_NAME,
         runner.MANIFEST_NAME,
         METRICS_NAME,
+        PROVENANCE_MANIFEST_NAME,
         *runner.SOURCE_REPORTS.values(),
     }
     if any(b"\r" in blobs[name] for name in primary_lf):
         raise runner.EvidenceError("committed primary Phase 7 evidence contains non-LF bytes")
+    try:
+        provenance = json.loads(blobs[PROVENANCE_MANIFEST_NAME])
+    except (UnicodeDecodeError, json.JSONDecodeError) as exception:
+        raise runner.EvidenceError(
+            f"committed provenance manifest is invalid: {exception}"
+        ) from exception
+    if not isinstance(provenance, dict):
+        raise runner.EvidenceError("committed provenance manifest must be an object")
+    provenance_mapping = _validate_provenance_manifest(
+        manifest=manifest,
+        provenance=provenance,
+        candidate=candidate,
+        artifact_reader=lambda relative: blobs[relative],
+    )
     expected_manifest_keys = {
         "schema_version",
         "phase",
@@ -1053,9 +1340,12 @@ def verify_evidence_commit(
             raise runner.EvidenceError(f"{command_id}: committed execution record drifted")
         for stream in ("stdout", "stderr"):
             relative = record.get(f"{stream}_path")
-            if not isinstance(relative, str) or relative not in blobs:
+            archive_path = provenance_mapping.get(relative) if isinstance(relative, str) else None
+            if archive_path is None or archive_path not in blobs:
                 raise runner.EvidenceError(f"{command_id}: committed {stream} provenance is missing")
-            if record.get(f"{stream}_sha256") != hashlib.sha256(blobs[relative]).hexdigest():
+            if record.get(f"{stream}_sha256") != hashlib.sha256(
+                blobs[archive_path]
+            ).hexdigest():
                 raise runner.EvidenceError(f"{command_id}: committed {stream} hash drifted")
         raw_records = record.get("raw_reports")
         if not isinstance(raw_records, list) or len(raw_records) != contract["expected_report_count"]:
@@ -1084,10 +1374,10 @@ def verify_evidence_commit(
             if (
                 not isinstance(raw, dict)
                 or set(raw) != {"path", "sha256"}
-                or raw.get("path") not in blobs
+                or provenance_mapping.get(raw.get("path")) not in blobs
             ):
                 raise runner.EvidenceError(f"{command_id}: committed raw provenance is missing")
-            raw_payload = blobs[raw["path"]]
+            raw_payload = blobs[provenance_mapping[raw["path"]]]
             if raw.get("sha256") != hashlib.sha256(raw_payload).hexdigest():
                 raise runner.EvidenceError(f"{command_id}: committed raw report hash drifted")
             fingerprints, raw_summary = _junit_summary(raw_payload, f"{command_id} raw")
@@ -1195,9 +1485,12 @@ def verify_evidence_commit(
             raise runner.EvidenceError("committed quarantined command provenance drifted")
         for field in ("stdout", "stderr"):
             relative = record.get(f"{field}_path")
-            if not isinstance(relative, str) or relative not in blobs:
+            archive_path = provenance_mapping.get(relative) if isinstance(relative, str) else None
+            if archive_path is None or archive_path not in blobs:
                 raise runner.EvidenceError("committed quarantined stream is missing")
-            if record.get(f"{field}_sha256") != hashlib.sha256(blobs[relative]).hexdigest():
+            if record.get(f"{field}_sha256") != hashlib.sha256(
+                blobs[archive_path]
+            ).hexdigest():
                 raise runner.EvidenceError("committed quarantined stream hash drifted")
         raw_records = record.get("raw_reports")
         if not isinstance(raw_records, list) or record.get("raw_report_count") != len(raw_records):
@@ -1213,9 +1506,14 @@ def verify_evidence_commit(
             ).as_posix(),
         )
         for raw in raw_records:
-            if not isinstance(raw, dict) or raw.get("path") not in blobs:
+            if (
+                not isinstance(raw, dict)
+                or provenance_mapping.get(raw.get("path")) not in blobs
+            ):
                 raise runner.EvidenceError("committed quarantined raw report is missing")
-            if raw.get("sha256") != hashlib.sha256(blobs[raw["path"]]).hexdigest():
+            if raw.get("sha256") != hashlib.sha256(
+                blobs[provenance_mapping[raw["path"]]]
+            ).hexdigest():
                 raise runner.EvidenceError("committed quarantined raw report hash drifted")
 
     metrics = _committed_json(evidence, f"{prefix}/{METRICS_NAME}", "entry metrics")
@@ -1318,8 +1616,13 @@ def verify_evidence_commit(
         or metrics.get("execution_provenance")
         != {
             "archived": True,
-            "artifact_count": len(_provenance_paths(manifest)),
-            "paths": _provenance_paths(manifest),
+            "artifact_count": provenance["artifact_count"],
+            "mapping_manifest": PROVENANCE_MANIFEST_NAME,
+            "mapping_manifest_sha256": hashlib.sha256(
+                blobs[PROVENANCE_MANIFEST_NAME]
+            ).hexdigest(),
+            "source_paths": _provenance_paths(manifest),
+            "archive_paths": _provenance_archive_paths(manifest),
         }
         or decision != expected_decision
         or restrictions != expected_restrictions
@@ -1367,7 +1670,23 @@ def generate_entry_evidence(
     base = runner._assert_candidate(base_commit, "base commit")
     run_root = execution_manifest_path.resolve().parent
     output = output_dir.resolve()
-    staging = output.with_name(f".{output.name}.assembling")
+    staging_digest = hashlib.sha256(
+        f"{candidate}\0{release_id}\0{output}".encode("utf-8")
+    ).hexdigest()[:8]
+    staging = output.with_name(f".p7-{staging_digest}")
+    _assert_portable_output_paths(
+        output,
+        [
+            ATTRIBUTES_NAME,
+            HASH_INDEX_NAME,
+            CANDIDATE_NAME,
+            runner.MANIFEST_NAME,
+            METRICS_NAME,
+            PROVENANCE_MANIFEST_NAME,
+            *runner.SOURCE_REPORTS.values(),
+            PORTABLE_MAX_ARCHIVE_RELATIVE,
+        ],
+    )
     runner.assert_candidate_run_directory(run_root)
     runner.assert_clean_detached_candidate(candidate, allowed_untracked_roots=(run_root,))
     runner._assert_upstream_authority(candidate)

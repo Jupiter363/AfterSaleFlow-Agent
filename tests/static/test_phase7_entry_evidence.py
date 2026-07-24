@@ -208,6 +208,37 @@ def _green_run(tmp_path: Path) -> tuple[Path, dict[str, object]]:
     return manifest_path, persisted
 
 
+def _with_long_java_surefire_source(
+    manifest_path: Path, manifest: dict[str, object]
+) -> tuple[dict[str, object], str, bytes]:
+    java_record = next(
+        item
+        for item in manifest["commands"]
+        if item["id"] == "java_phase7_entry"
+    )
+    raw_record = java_record["raw_reports"][0]
+    original_relative = raw_record["path"]
+    original = manifest_path.parent / original_relative
+    suffix = f"-{java_record['report_suffix']}.xml"
+    empty_name = f"TEST-{suffix}"
+    target_units = generator.WINDOWS_PORTABLE_PATH_LIMIT + 4
+    filler_units = target_units - generator._utf16_path_units(
+        original.with_name(empty_name)
+    )
+    assert filler_units > 0
+    long_name = f"TEST-{'D' * filler_units}{suffix}"
+    destination = original.with_name(long_name)
+    original.replace(destination)
+    long_relative = destination.relative_to(manifest_path.parent).as_posix()
+    raw_record["path"] = long_relative
+    runner._write_manifest(manifest_path, manifest)
+    persisted = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert generator.WINDOWS_PORTABLE_PATH_LIMIT < generator._utf16_path_units(
+        destination
+    ) <= target_units
+    return persisted, long_relative, destination.read_bytes()
+
+
 def test_provenance_copy_rejects_lexical_file_symlink_to_in_root_regular_file(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -609,11 +640,22 @@ def test_post_commit_verifier_rejects_extra_non_evidence_change(
 
 
 def test_post_commit_verifier_accepts_direct_child_with_nested_java_raw_provenance(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    tmp_path_factory: pytest.TempPathFactory,
 ) -> None:
     manifest_path, manifest = _green_run(tmp_path)
-    release_id = "phase-7-entry-test"
-    output = tmp_path / "committed-evidence"
+    manifest, long_source_path, long_source_bytes = _with_long_java_surefire_source(
+        manifest_path, manifest
+    )
+    release_id = "r" + "x" * 79
+    output = (
+        tmp_path_factory.mktemp("p7e")
+        / "test-reports"
+        / "temporal-first"
+        / release_id
+        / "phase-7-entry"
+    )
     generator.assemble_entry_evidence(
         manifest=manifest,
         execution_manifest_path=manifest_path,
@@ -632,18 +674,43 @@ def test_post_commit_verifier_accepts_direct_child_with_nested_java_raw_provenan
         (output / generator.HASH_INDEX_NAME).read_text(encoding="utf-8")
     )
     indexed = {item["path"]: item for item in index["artifacts"]}
+    provenance = json.loads(
+        (output / generator.PROVENANCE_MANIFEST_NAME).read_text(encoding="utf-8")
+    )
+    expected_mapping = {
+        item["source_path"]: item["archive_path"]
+        for item in generator._provenance_specs(manifest)
+    }
+    mapping = {
+        item["source_path"]: item["archive_path"]
+        for item in provenance["artifacts"]
+    }
+    assert mapping == expected_mapping
+    assert provenance["artifact_count"] == len(mapping)
+    assert long_source_path in mapping
     for raw in java_record["raw_reports"]:
         relative = raw["path"]
         source = manifest_path.parent / relative
-        archived = output / relative
+        archive_relative = mapping[relative]
+        archived = output / archive_relative
         assert archived.is_file()
-        assert archived.parent.name == "raw-surefire"
+        assert archive_relative.startswith("p/")
         assert archived.read_bytes() == source.read_bytes()
-        assert indexed[relative] == {
-            "path": relative,
+        assert indexed[archive_relative] == {
+            "path": archive_relative,
             "sha256": runner._sha256(source),
             "bytes": source.stat().st_size,
         }
+    assert (output / mapping[long_source_path]).read_bytes() == long_source_bytes
+    final_paths = [path for path in output.rglob("*") if path.is_file()]
+    assert final_paths
+    assert max(generator._utf16_path_units(path) for path in final_paths) <= (
+        generator.WINDOWS_PORTABLE_PATH_LIMIT
+    )
+    assert all(
+        path.relative_to(output).as_posix() != long_source_path
+        for path in final_paths
+    )
     _bypass_candidate_authority(monkeypatch)
     prefix = f"test-reports/temporal-first/{release_id}/phase-7-entry"
     committed = {
@@ -685,6 +752,69 @@ def test_post_commit_verifier_accepts_direct_child_with_nested_java_raw_provenan
     )
     assert verified["MIG-006"] == "PENDING_PROMOTION"
     assert verified["MIG-007"] == "PENDING_PROMOTION"
+
+
+@pytest.mark.parametrize("mutation", ("tamper", "collision", "traversal"))
+def test_provenance_manifest_rejects_tamper_collision_and_traversal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    manifest_path, manifest = _green_run(tmp_path)
+    output = tmp_path / "mapped-evidence"
+    generator.assemble_entry_evidence(
+        manifest=manifest,
+        execution_manifest_path=manifest_path,
+        output_dir=output,
+        release_id="phase-7-provenance-negative",
+        base_commit=BASE,
+        candidate_commit=CANDIDATE,
+        changed_paths=["plans/phase-7-outcome-pilot-execution.md"],
+    )
+    provenance = json.loads(
+        (output / generator.PROVENANCE_MANIFEST_NAME).read_text(encoding="utf-8")
+    )
+    artifacts = provenance["artifacts"]
+    if mutation == "tamper":
+        artifacts[0]["archive_sha256"] = "0" * 64
+        match = "byte identity drifted"
+    else:
+        expected = [dict(item) for item in generator._provenance_specs(manifest)]
+        if mutation == "collision":
+            artifacts[1]["archive_path"] = artifacts[0]["archive_path"]
+            expected[1]["archive_path"] = expected[0]["archive_path"]
+            match = "collides"
+        else:
+            artifacts[0]["archive_path"] = "p/0a00/r/../escape.xml"
+            expected[0]["archive_path"] = "p/0a00/r/../escape.xml"
+            match = "unsafe|traverses"
+        monkeypatch.setattr(generator, "_provenance_specs", lambda _: expected)
+
+    with pytest.raises(runner.EvidenceError, match=match):
+        generator._validate_provenance_manifest(
+            manifest=manifest,
+            provenance=provenance,
+            candidate=CANDIDATE,
+            artifact_reader=lambda relative: (output / relative).read_bytes(),
+        )
+
+
+def test_portable_output_path_rejects_any_final_path_over_windows_budget(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    root = tmp_path_factory.mktemp("p7b")
+    relative = generator.PORTABLE_MAX_ARCHIVE_RELATIVE
+    output = root / "x"
+    while generator._utf16_path_units(output / relative) <= (
+        generator.WINDOWS_PORTABLE_PATH_LIMIT
+    ):
+        output = output.with_name(output.name + "x")
+
+    with pytest.raises(
+        runner.EvidenceError, match="exceeds portable Windows budget"
+    ):
+        generator._assert_portable_output_paths(output, [relative])
+    assert not output.exists()
 
 
 def test_post_commit_verifier_rejects_fake_minima_metrics_and_contradictory_grants(
