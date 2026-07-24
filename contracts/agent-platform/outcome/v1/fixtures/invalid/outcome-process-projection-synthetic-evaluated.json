@@ -1,0 +1,8 @@
+{
+  "schema_version": "outcome-process-projection.v1", "workflow_id": "outcome:CASE_SYNTHETIC:1", "case_id": "CASE_SYNTHETIC", "phase": "EVALUATED",
+  "required_operation_set_ref": "urn:operation-set:synthetic", "required_operation_set_hash": "3131313131313131313131313131313131313131313131313131313131313131", "required_operation_count": 0, "terminal_success_receipt_count": 0,
+  "unresolved_ambiguous_count": 0, "failed_required_receipt_count": 0, "in_flight_operation_count": 0, "in_flight_compensation_count": 0, "unresolved_manual_recovery_count": 0,
+  "closure_receipt_ref": "urn:forged-closure:synthetic", "closure_receipt_hash": "3232323232323232323232323232323232323232323232323232323232323232",
+  "evaluation_receipt_ref": "urn:forged-evaluation:synthetic", "evaluation_receipt_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+  "epoch": 1, "revision": 2, "fence": 1, "writer_mode": "SHADOW", "runtime_mode": "JAVA_SIGNED_SYNTHETIC_NOOP_SHADOW", "synthetic_noop_marker": "JAVA_SIGNED_SYNTHETIC_NOOP_V1", "projection_only": true
+}

@@ -1,0 +1,6 @@
+{
+  "schema_version": "outcome-sla-escalation-receipt.v1", "workflow_id": "outcome:CASE_002:1", "case_id": "CASE_002", "receipt_id": "SLA_RECEIPT_001", "receipt_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "review_task_id": "REVIEW_002",
+  "frozen_review_packet_ref": "urn:review-packet:002", "frozen_review_packet_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "fact_type": "SYSTEM_SLA_ESCALATION", "actor": "SYSTEM",
+  "deadline_at": "2026-07-24T08:00:00Z", "committed_at": "2026-07-24T08:00:01Z", "epoch": 1, "source_revision": 20, "revision": 21, "fence": 4, "committed_event_sequence": 1,
+  "execution_authorized": false, "approval_record_created": false, "synthetic_only": true
+}

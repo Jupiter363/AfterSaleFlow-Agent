@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.after-sale-flow.example/agent-platform/outcome/v1/outcome-workflow-start.schema.json",
+  "title": "Outcome Workflow Start v1",
+  "type": "object",
+  "additionalProperties": false,
+  "x-max-encoded-bytes": 32768,
+  "required": ["schema_version", "workflow_id", "case_id", "review_task_id", "frozen_review_packet_ref", "frozen_review_packet_hash", "adjudication_draft_ref", "adjudication_draft_hash", "action_snapshot_ref", "action_snapshot_hash", "required_operation_set_ref", "required_operation_set_hash", "required_operation_count", "epoch", "revision", "fence", "review_deadline_at", "runtime_mode", "workflow_build", "policy_version", "graph_version", "prompt_version", "model_profile", "synthetic_only"],
+  "properties": {
+    "schema_version": {"const": "outcome-workflow-start.v1"},
+    "workflow_id": {"$ref": "#/$defs/id"}, "case_id": {"$ref": "#/$defs/id"}, "review_task_id": {"$ref": "#/$defs/id"},
+    "frozen_review_packet_ref": {"$ref": "#/$defs/ref"}, "frozen_review_packet_hash": {"$ref": "#/$defs/hash"},
+    "adjudication_draft_ref": {"$ref": "#/$defs/ref"}, "adjudication_draft_hash": {"$ref": "#/$defs/hash"},
+    "action_snapshot_ref": {"$ref": "#/$defs/ref"}, "action_snapshot_hash": {"$ref": "#/$defs/hash"},
+    "required_operation_set_ref": {"$ref": "#/$defs/ref"}, "required_operation_set_hash": {"$ref": "#/$defs/hash"}, "required_operation_count": {"$ref": "#/$defs/count"},
+    "epoch": {"$ref": "#/$defs/positive"}, "revision": {"$ref": "#/$defs/count"}, "fence": {"$ref": "#/$defs/positive"},
+    "review_deadline_at": {"$ref": "#/$defs/timestamp"},
+    "runtime_mode": {"enum": ["DISABLED", "JAVA_SIGNED_SYNTHETIC_NOOP_SHADOW", "TEMPORAL"]},
+    "workflow_build": {"$ref": "#/$defs/id"}, "policy_version": {"$ref": "#/$defs/id"}, "graph_version": {"$ref": "#/$defs/id"}, "prompt_version": {"$ref": "#/$defs/id"}, "model_profile": {"$ref": "#/$defs/id"},
+    "synthetic_only": {"type": "boolean"}
+  },
+  "allOf": [
+    {"if": {"properties": {"runtime_mode": {"const": "JAVA_SIGNED_SYNTHETIC_NOOP_SHADOW"}}}, "then": {"properties": {"synthetic_only": {"const": true}}}},
+    {"if": {"properties": {"runtime_mode": {"const": "TEMPORAL"}}}, "then": {"properties": {"synthetic_only": {"const": false}}}}
+  ],
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+    "ref": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "^(?![A-Za-z][A-Za-z0-9+.-]*://)[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$"},
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "count": {"type": "integer", "minimum": 0, "maximum": 9007199254740991}, "positive": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "timestamp": {"type": "string", "format": "date-time"}
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "schema_version": "outcome-operation-receipt.v1", "workflow_id": "outcome:CASE_003:1", "case_id": "CASE_003", "receipt_id": "OP_RECEIPT_001", "receipt_hash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "operation_id": "OP_003", "operation_key_hash": "1010101010101010101010101010101010101010101010101010101010101010",
+  "request_hash": "1212121212121212121212121212121212121212121212121212121212121212", "external_idempotency_key_hash": "1313131313131313131313131313131313131313131313131313131313131313", "result_ref": "urn:operation-result:003", "result_hash": "1414141414141414141414141414141414141414141414141414141414141414",
+  "terminal_status": "SUCCEEDED", "operation_sequence": 0, "required_for_closure": true, "compensable": true, "observed_at": "2026-07-24T08:06:00Z", "epoch": 1, "source_revision": 12, "revision": 13, "fence": 5, "committed_event_sequence": 3, "runtime_mode": "TEMPORAL", "synthetic_noop": false
+}

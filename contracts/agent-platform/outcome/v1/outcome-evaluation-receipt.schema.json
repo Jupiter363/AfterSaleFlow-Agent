@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema", "$id": "https://schemas.after-sale-flow.example/agent-platform/outcome/v1/outcome-evaluation-receipt.schema.json", "title": "Outcome Evaluation Receipt v1",
+  "type": "object", "additionalProperties": false, "x-max-encoded-bytes": 32768,
+  "required": ["schema_version", "workflow_id", "case_id", "receipt_id", "receipt_hash", "closed_snapshot_ref", "closed_snapshot_hash", "evaluation_ledger_ref", "evaluation_ledger_hash", "status", "evaluated_at", "epoch", "source_revision", "revision", "fence", "committed_event_sequence", "case_reopened"],
+  "properties": {
+    "schema_version": {"const": "outcome-evaluation-receipt.v1"}, "workflow_id": {"$ref": "#/$defs/id"}, "case_id": {"$ref": "#/$defs/id"}, "receipt_id": {"$ref": "#/$defs/id"}, "receipt_hash": {"$ref": "#/$defs/hash"}, "closed_snapshot_ref": {"$ref": "#/$defs/ref"}, "closed_snapshot_hash": {"$ref": "#/$defs/hash"}, "evaluation_ledger_ref": {"$ref": "#/$defs/ref"}, "evaluation_ledger_hash": {"$ref": "#/$defs/hash"}, "status": {"enum": ["SUCCEEDED", "FAILED", "MANUAL_RECOVERY_PENDING"]}, "evaluated_at": {"$ref": "#/$defs/timestamp"},
+    "epoch": {"$ref": "#/$defs/positive"}, "source_revision": {"$ref": "#/$defs/count"}, "revision": {"$ref": "#/$defs/count"}, "fence": {"$ref": "#/$defs/positive"}, "committed_event_sequence": {"$ref": "#/$defs/count"}, "case_reopened": {"const": false}
+  },
+  "$defs": {"id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"}, "ref": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "^(?![A-Za-z][A-Za-z0-9+.-]*://)[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$"}, "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "count": {"type": "integer", "minimum": 0, "maximum": 9007199254740991}, "positive": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}, "timestamp": {"type": "string", "format": "date-time"}}
+}

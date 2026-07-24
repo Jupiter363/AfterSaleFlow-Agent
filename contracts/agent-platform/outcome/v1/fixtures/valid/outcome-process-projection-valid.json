@@ -1,0 +1,4 @@
+{
+  "schema_version": "outcome-process-projection.v1", "workflow_id": "outcome:CASE_001:1", "case_id": "CASE_001", "phase": "EXECUTING", "terminal_review_receipt_ref": "urn:decision-receipt:001", "terminal_review_receipt_hash": "5555555555555555555555555555555555555555555555555555555555555555", "required_operation_set_ref": "urn:operation-set:001", "required_operation_set_hash": "4444444444444444444444444444444444444444444444444444444444444444", "required_operation_count": 1, "terminal_success_receipt_count": 0, "unresolved_ambiguous_count": 0, "failed_required_receipt_count": 0, "in_flight_operation_count": 1, "in_flight_compensation_count": 0, "unresolved_manual_recovery_count": 0,
+  "epoch": 1, "revision": 12, "fence": 3, "writer_mode": "SHADOW", "runtime_mode": "JAVA_SIGNED_SYNTHETIC_NOOP_SHADOW", "synthetic_noop_marker": "JAVA_SIGNED_SYNTHETIC_NOOP_V1", "projection_only": true
+}

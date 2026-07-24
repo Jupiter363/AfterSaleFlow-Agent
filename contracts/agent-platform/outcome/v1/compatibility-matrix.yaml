@@ -517,3 +517,30 @@ entry_acceptance:
   required_evidence_effect: P7_0_ENGINEERING_ENTRY_PASS
   current_result: NOT_RUN
   implementation_must_remain_blocked: true
+
+wire_protocol:
+  schema_version: outcome-wire-protocol.v1
+  maximum_encoded_bytes: 32768
+  unknown_fields: reject
+  java_package: com.example.dispute.workflow.contract.outcome.v1
+  contracts:
+    - {schema_file: outcome-workflow-start.schema.json, schema_version: outcome-workflow-start.v1, java_type: OutcomeWorkflowStart}
+    - {schema_file: outcome-reviewer-decision-receipt.schema.json, schema_version: outcome-reviewer-decision-receipt.v1, java_type: OutcomeReviewDecisionReceipt}
+    - {schema_file: outcome-sla-escalation-receipt.schema.json, schema_version: outcome-sla-escalation-receipt.v1, java_type: OutcomeSlaEscalationReceipt}
+    - {schema_file: outcome-operation-command.schema.json, schema_version: outcome-operation-command.v1, java_type: OutcomeOperationCommand}
+    - {schema_file: outcome-operation-receipt.schema.json, schema_version: outcome-operation-receipt.v1, java_type: OutcomeOperationReceipt}
+    - {schema_file: outcome-execution-attempt-observation.schema.json, schema_version: outcome-execution-attempt-observation.v1, java_type: OutcomeExecutionAttemptObservation}
+    - {schema_file: outcome-attempt-reconciliation-receipt.schema.json, schema_version: outcome-attempt-reconciliation-receipt.v1, java_type: OutcomeAttemptReconciliationReceipt}
+    - {schema_file: outcome-compensation-receipt.schema.json, schema_version: outcome-compensation-receipt.v1, java_type: OutcomeCompensationReceipt}
+    - {schema_file: outcome-closure-receipt.schema.json, schema_version: outcome-closure-receipt.v1, java_type: OutcomeClosureReceipt}
+    - {schema_file: outcome-evaluation-receipt.schema.json, schema_version: outcome-evaluation-receipt.v1, java_type: OutcomeEvaluationReceipt}
+    - {schema_file: outcome-process-projection.schema.json, schema_version: outcome-process-projection.v1, java_type: OutcomeProjection}
+    - {schema_file: outcome-synthetic-noop-receipt.schema.json, schema_version: outcome-synthetic-noop-receipt.v1, java_type: OutcomeSyntheticNoopReceipt}
+  invariants:
+    reviewer_decisions: [APPROVE, MODIFY_AND_APPROVE, REJECT, REQUEST_MORE_EVIDENCE, ESCALATE_MANUAL]
+    sla_fact_type: SYSTEM_SLA_ESCALATION
+    authoritative_operation_terminal_statuses: [SUCCEEDED, FAILED]
+    ambiguous_attempt_fact: EXECUTION_ATTEMPT_OBSERVATION
+    ambiguous_is_terminal: false
+    synthetic_noop_marker: JAVA_SIGNED_SYNTHETIC_NOOP_V1
+    synthetic_noop_satisfies_closure: false

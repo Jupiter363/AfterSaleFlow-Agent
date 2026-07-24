@@ -1,0 +1,5 @@
+{
+  "schema_version": "outcome-attempt-reconciliation-receipt.v1", "workflow_id": "outcome:CASE_004:1", "case_id": "CASE_004", "receipt_id": "RECON_RECEIPT_001", "receipt_hash": "1919191919191919191919191919191919191919191919191919191919191919", "observation_id": "OBS_001", "observation_hash": "1515151515151515151515151515151515151515151515151515151515151515", "operation_id": "OP_004", "operation_key_hash": "1616161616161616161616161616161616161616161616161616161616161616",
+  "request_hash": "1717171717171717171717171717171717171717171717171717171717171717", "external_idempotency_key_hash": "1818181818181818181818181818181818181818181818181818181818181818", "operation_sequence": 0, "required_for_closure": true, "compensable": true,
+  "resolution": "UNRESOLVED", "retry_allowed": false, "manual_recovery_required": true, "reconciled_at": "2026-07-24T08:08:00Z", "epoch": 1, "source_revision": 14, "revision": 15, "fence": 6, "committed_event_sequence": 5
+}

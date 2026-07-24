@@ -1,0 +1,4 @@
+{
+  "schema_version": "outcome-evaluation-receipt.v1", "workflow_id": "outcome:CASE_006:1", "case_id": "CASE_006", "receipt_id": "EVAL_RECEIPT_BAD", "receipt_hash": "2929292929292929292929292929292929292929292929292929292929292929", "closed_snapshot_ref": "urn:closed-snapshot:006", "closed_snapshot_hash": "2828282828282828282828282828282828282828282828282828282828282828", "evaluation_ledger_ref": "urn:evaluation-ledger:006", "evaluation_ledger_hash": "3030303030303030303030303030303030303030303030303030303030303030", "status": "SUCCEEDED", "evaluated_at": "2026-07-24T08:13:00Z", "epoch": 1, "source_revision": 50, "revision": 51, "fence": 8, "committed_event_sequence": 11,
+  "case_reopened": true
+}

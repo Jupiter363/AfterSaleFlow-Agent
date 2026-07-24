@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.after-sale-flow.example/agent-platform/outcome/v1/outcome-reviewer-decision-receipt.schema.json",
+  "title": "Outcome Reviewer Decision Receipt v1",
+  "type": "object", "additionalProperties": false, "x-max-encoded-bytes": 32768,
+  "required": ["schema_version", "workflow_id", "case_id", "receipt_id", "receipt_hash", "review_task_id", "reviewer_authority_ref", "frozen_review_packet_ref", "frozen_review_packet_hash", "action_snapshot_ref", "action_snapshot_hash", "decision_record_ref", "decision_record_hash", "required_operation_set_ref", "required_operation_set_hash", "required_operation_count", "decision", "execution_authorized", "request_hash", "idempotency_key_hash", "policy_version", "epoch", "source_revision", "revision", "fence", "committed_event_sequence", "committed_at", "synthetic_only"],
+  "properties": {
+    "schema_version": {"const": "outcome-reviewer-decision-receipt.v1"},
+    "workflow_id": {"$ref": "#/$defs/id"}, "case_id": {"$ref": "#/$defs/id"}, "receipt_id": {"$ref": "#/$defs/id"}, "receipt_hash": {"$ref": "#/$defs/hash"}, "review_task_id": {"$ref": "#/$defs/id"},
+    "reviewer_authority_ref": {"$ref": "#/$defs/ref"}, "frozen_review_packet_ref": {"$ref": "#/$defs/ref"}, "frozen_review_packet_hash": {"$ref": "#/$defs/hash"},
+    "action_snapshot_ref": {"$ref": "#/$defs/ref"}, "action_snapshot_hash": {"$ref": "#/$defs/hash"},
+    "approved_action_snapshot_ref": {"$ref": "#/$defs/ref"}, "approved_action_snapshot_hash": {"$ref": "#/$defs/hash"},
+    "decision_record_ref": {"$ref": "#/$defs/ref"}, "decision_record_hash": {"$ref": "#/$defs/hash"}, "reason_ref": {"$ref": "#/$defs/ref"}, "reason_hash": {"$ref": "#/$defs/hash"},
+    "operation_key_hash": {"$ref": "#/$defs/hash"}, "required_operation_set_ref": {"$ref": "#/$defs/ref"}, "required_operation_set_hash": {"$ref": "#/$defs/hash"}, "required_operation_count": {"$ref": "#/$defs/count"},
+    "decision": {"enum": ["APPROVE", "MODIFY_AND_APPROVE", "REJECT", "REQUEST_MORE_EVIDENCE", "ESCALATE_MANUAL"]}, "execution_authorized": {"type": "boolean"},
+    "request_hash": {"$ref": "#/$defs/hash"}, "idempotency_key_hash": {"$ref": "#/$defs/hash"}, "policy_version": {"$ref": "#/$defs/id"},
+    "epoch": {"$ref": "#/$defs/positive"}, "source_revision": {"$ref": "#/$defs/count"}, "revision": {"$ref": "#/$defs/count"}, "fence": {"$ref": "#/$defs/positive"}, "committed_event_sequence": {"$ref": "#/$defs/count"}, "committed_at": {"$ref": "#/$defs/timestamp"}, "synthetic_only": {"type": "boolean"}
+  },
+  "allOf": [
+    {"if": {"properties": {"decision": {"enum": ["APPROVE", "MODIFY_AND_APPROVE"]}}}, "then": {"required": ["approved_action_snapshot_ref", "approved_action_snapshot_hash", "operation_key_hash"], "properties": {"execution_authorized": {"const": true}}}, "else": {"properties": {"execution_authorized": {"const": false}}, "not": {"anyOf": [{"required": ["approved_action_snapshot_ref"]}, {"required": ["approved_action_snapshot_hash"]}, {"required": ["operation_key_hash"]}]}}}
+  ],
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"}, "ref": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "^(?![A-Za-z][A-Za-z0-9+.-]*://)[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$"}, "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "count": {"type": "integer", "minimum": 0, "maximum": 9007199254740991}, "positive": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}, "timestamp": {"type": "string", "format": "date-time"}
+  }
+}

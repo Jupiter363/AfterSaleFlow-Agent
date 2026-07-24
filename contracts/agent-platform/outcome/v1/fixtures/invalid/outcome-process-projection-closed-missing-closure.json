@@ -1,0 +1,6 @@
+{
+  "schema_version": "outcome-process-projection.v1", "workflow_id": "outcome:CASE_006:1", "case_id": "CASE_006", "phase": "CLOSED",
+  "required_operation_set_ref": "urn:operation-set:006", "required_operation_set_hash": "2626262626262626262626262626262626262626262626262626262626262626", "required_operation_count": 1, "terminal_success_receipt_count": 1,
+  "unresolved_ambiguous_count": 0, "failed_required_receipt_count": 0, "in_flight_operation_count": 0, "in_flight_compensation_count": 0, "unresolved_manual_recovery_count": 0,
+  "epoch": 1, "revision": 50, "fence": 8, "writer_mode": "LEGACY", "runtime_mode": "DISABLED", "projection_only": false
+}
