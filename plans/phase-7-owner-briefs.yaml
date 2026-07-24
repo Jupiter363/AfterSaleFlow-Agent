@@ -25,10 +25,7 @@ gate:
   required_release_receipt: P7-R2_PASS_FROM_SEPARATE_DIRECT_CHILD_EVIDENCE_COMMIT
   required_entry_decision: CONTRACT_CANDIDATE_READY
   release_effect: P7_0_ENGINEERING_ENTRY_PASS
-  blocked_reasons:
-    - CONTRACT_CANDIDATE_NOT_FROZEN
-    - EXACT_SHA_BATCH_0_NOT_RUN
-    - ENTRY_EVIDENCE_NOT_COMMITTED
+  blocked_reasons: [CONTRACT_CANDIDATE_NOT_FROZEN, EXACT_SHA_BATCH_0_NOT_RUN, ENTRY_EVIDENCE_NOT_COMMITTED]
   formal_mode: LEGACY
   allowed_after_pass: [DISABLED, JAVA_SIGNED_SYNTHETIC_NOOP_SHADOW]
   forbidden_modes: [REAL_CASE_SHADOW, TEMPORAL]
@@ -40,135 +37,158 @@ gate:
   MIG-006: PENDING_PROMOTION
   MIG-007: PENDING_PROMOTION
   phase_7_engineering_exception: ADR_0016_ACCEPTED_FOR_ENGINEERING_ONLY
-  release_rule: R may release A-E only after a separate direct-child evidence commit authenticates all four green Batch 0 reports for the exact P7 contract-candidate SHA.
+  release_rule: R releases A-G only after a separate direct-child evidence commit authenticates all four green Batch 0 reports for the exact P7 contract-candidate SHA.
 
 team:
   primary_owner: R
-  delegated_implementation_owners: [A, B, C, D, E]
-  logical_p0_review_lanes: [R1, R2, R3]
+  delegated_implementation_owners: [A, B, C, D, E, F, G]
+  logical_p0_review_lanes: [R1]
   logical_verification_lanes: [V1, V2]
   logical_lookahead_lane: L
   max_active_primary: 1
   max_active_delegated: 11
   max_active_total: 12
-  heavy_test_slots: 1
+  heavy_test_slots: 2
+  combined_maven_testcontainers_heavy_process_limit: 2
   light_test_slots: 2
   maven_fork_count: 1
   frontend_vitest_process_slots: 1
   frontend_cli_worker_override: OMITTED_USE_REPOSITORY_POOL_CONFIG
   activation_policy: DEPENDENCY_AWARE
+  roles_are_scheduled_only_when_work_is_ready: true
   shared_writer_policy: ONE_OWNER_PER_PATH
   implementation_release_state: BLOCKED
 
+delegation_mapping:
+  A: [P7-A1, P7-A2]
+  B: [P7-B1, P7-B2]
+  C: [P7-C1, P7-C2]
+  D: [P7-D1, P7-D2]
+  E: [P7-E1, P7-E2]
+  F: [P7-F1, P7-F2]
+  G: [P7-G1, P7-G2]
+
 first_wave:
   status: BLOCKED_ON_P7_R2_PASS
-  planned_simultaneously_active: [A, B, C, D, E]
-  note: C and D may begin only their dependency-free skeletons; contract-bound integration waits for B/A/C publication barriers. E runs Python then frontend sequentially.
+  planned_simultaneously_active: [A, B, C, D, E, F, G]
+  shared_path_writes_allowed: false
+  note: Each owner has a disjoint foundation scope after P7-R2 PASS; cross-owner binding waits for explicit publication barriers.
   assignments:
-    - owner: A
-      task_id: P7-A1
-      output: PURE_UNREGISTERED_OUTCOME_WORKFLOW_KERNEL_AND_PROTOCOL
-    - owner: B
-      task_id: P7-B1
-      output: JAVA_FROZEN_PACKET_AND_HUMAN_DECISION_AUTHORITY
-    - owner: C
-      task_id: P7-C1
-      output: ADDITIVE_V045_OPERATION_RECEIPT_COMPENSATION_LEDGER
-    - owner: D
-      task_id: P7-D1
-      output: SYNTHETIC_NOOP_EXECUTION_CLOSURE_EVALUATION
-    - owner: E
-      task_id: P7-E1
-      output: PRIVATE_OUTCOME_REVIEW_GRAPH_THEN_FRONTEND_COMPATIBILITY
+    - {owner: A, task_id: P7-A1, output: SHARED_OUTCOME_WIRE_PROTOCOL_CONTRACTS}
+    - {owner: B, task_id: P7-B1, output: PURE_UNREGISTERED_OUTCOME_WORKFLOW_KERNEL}
+    - {owner: C, task_id: P7-C1, output: JAVA_FROZEN_PACKET_AND_HUMAN_DECISION_AUTHORITY}
+    - {owner: D, task_id: P7-D1, output: ADDITIVE_V045_OPERATION_RECEIPT_COMPENSATION_LEDGER}
+    - {owner: E, task_id: P7-E1, output: SYNTHETIC_NOOP_EXECUTION_CLOSURE_EVALUATION}
+    - {owner: F, task_id: P7-F1, output: PRIVATE_OUTCOME_REVIEW_GRAPH}
+    - {owner: G, task_id: P7-G1, output: DRAFT_REVIEW_OUTCOME_FRONTEND_COMPATIBILITY}
+
+second_wave:
+  status: BLOCKED_ON_FIRST_WAVE_AND_PUBLICATION_BARRIERS
+  assignments:
+    - {owner: A, task_id: P7-A2, requires: [P7-A1]}
+    - {owner: B, task_id: P7-B2, requires: [P7-B1, A_OUTCOME_WIRE_PROTOCOL_PUBLISHED]}
+    - {owner: C, task_id: P7-C2, requires: [P7-C1, A_OUTCOME_WIRE_PROTOCOL_PUBLISHED]}
+    - {owner: D, task_id: P7-D2, requires: [P7-D1, A_OUTCOME_WIRE_PROTOCOL_PUBLISHED, C_REVIEW_PROTOCOL_PUBLISHED]}
+    - {owner: E, task_id: P7-E2, requires: [P7-E1, A_OUTCOME_WIRE_PROTOCOL_PUBLISHED, B_WORKFLOW_PROTOCOL_PUBLISHED, D_LEDGER_CONTRACT_PUBLISHED]}
+    - {owner: F, task_id: P7-F2, requires: [P7-F1, A_OUTCOME_WIRE_PROTOCOL_PUBLISHED, C_REVIEW_PACKET_CONTRACT_PUBLISHED]}
+    - {owner: G, task_id: P7-G2, requires: [P7-G1, C_REVIEW_PROJECTION_PUBLISHED, E_OUTCOME_PROJECTION_PUBLISHED]}
 
 owners:
   A:
-    role: TEMPORAL_OUTCOME_KERNEL_AND_PROTOCOL_ONLY
+    role: SHARED_OUTCOME_WIRE_AND_PROTOCOL_CONTRACTS
     task_ids: [P7-A1, P7-A2]
-    objective: Implement a pure deterministic Outcome Workflow kernel for review wait/SLA, receipt-driven decisions, synthetic execution/compensation, closure and evaluation ordering without registration, allocation, repositories or Activity implementations.
+    objective: Freeze closed cross-language Outcome command receipt and projection contracts without runtime behavior.
+    owned_paths:
+      - contracts/agent-platform/outcome/v1/**
+      - java-api-service/src/main/java/com/example/dispute/workflow/contract/outcome/**
+      - java-api-service/src/test/java/com/example/dispute/workflow/contract/outcome/**
+    forbidden_paths:
+      - java-api-service/src/main/java/com/example/dispute/workflow/temporal/**
+      - java-api-service/src/main/java/com/example/dispute/workflow/activity/**
+      - java-api-service/src/main/java/com/example/dispute/workflow/config/**
+      - java-api-service/src/main/java/com/example/dispute/review/**
+      - java-api-service/src/main/java/com/example/dispute/executor/**
+      - java-api-service/src/main/resources/db/migration/**
+      - python-agent-service/**
+      - frontend/**
+    dependencies:
+      start: [P7-R2_PASS]
+      publishes: [A_OUTCOME_WIRE_PROTOCOL_PUBLISHED]
+    deliverables:
+      - closed versioned Java wire records matching approved JSON schemas
+      - bounded IDs hashes revisions fences deadlines modes and receipt references only
+      - exact five-decision vocabulary and synthetic no-op markers
+      - compatibility and invalid fixture tests
+    focused_checks: [OutcomeWireContractTest, OutcomeProtocolCompatibilityTest]
+    definition_of_done:
+      - no_runtime_service_repository_worker_selector_graph_or_ui_code
+      - unknown_versions_fields_modes_and_decisions_fail_closed
+      - contracts_contain_no_packet_body_prompt_credentials_or_external_payload
+
+  B:
+    role: TEMPORAL_OUTCOME_KERNEL_ONLY
+    task_ids: [P7-B1, P7-B2]
+    objective: Implement a pure deterministic Outcome Workflow kernel for review SLA decisions synthetic operation ordering compensation closure and evaluation references.
     owned_paths:
       - java-api-service/src/main/java/com/example/dispute/workflow/temporal/room/outcome/**
       - java-api-service/src/test/java/com/example/dispute/workflow/temporal/room/outcome/**
     forbidden_paths:
+      - java-api-service/src/main/java/com/example/dispute/workflow/contract/outcome/**
       - java-api-service/src/main/java/com/example/dispute/workflow/config/**
       - java-api-service/src/main/java/com/example/dispute/workflow/activity/**
       - java-api-service/src/main/java/com/example/dispute/review/**
       - java-api-service/src/main/java/com/example/dispute/executor/**
-      - java-api-service/src/main/java/com/example/dispute/outcome/**
-      - java-api-service/src/main/java/com/example/dispute/evaluation/**
       - java-api-service/src/main/resources/**
       - python-agent-service/**
       - frontend/**
     dependencies:
       start: [P7-R2_PASS]
-      integration: [B_REVIEW_PROTOCOL_PUBLISHED, C_OPERATION_PROTOCOL_PUBLISHED]
+      integration: [A_OUTCOME_WIRE_PROTOCOL_PUBLISHED]
+      publishes: [B_WORKFLOW_PROTOCOL_PUBLISHED]
     must_not_depend_on: [SPRING, REPOSITORY, HTTP_CLIENT, MODEL_CLIENT, SYSTEM_CLOCK, RANDOM, ENVIRONMENT_CONFIG]
-    deliverables:
-      - explicit deterministic state and transition table
-      - immutable review SLA deadline and same-tick decision/timer rule
-      - five typed decision outcomes with no automatic timeout approval
-      - operation and compensation ordering by receipt references
-      - closure before evaluation ordering
-      - replay tests with IDs hashes revisions deadlines and receipts only
-    focused_checks:
-      - OutcomeRoomWorkflowTest
-      - OutcomeRoomWorkflowTimerTest
-      - OutcomeRoomWorkflowReplayTest
-    review_topics: [DETERMINISM, NO_REGISTRATION, NO_FORMAL_SINK, NO_PAYLOADS_IN_HISTORY, NO_AUTO_APPROVAL]
+    focused_checks: [OutcomeRoomWorkflowTest, OutcomeRoomWorkflowTimerTest, OutcomeRoomWorkflowReplayTest]
     definition_of_done:
-      - kernel_is_pure_and_replay_safe
-      - review_decision_timer_race_has_one_history_defined_result
+      - kernel_is_unregistered_unallocated_pure_and_replay_safe
+      - same_tick_decision_and_timer_race_has_one_history_defined_result
       - workflow_advances_only_from_typed_java_receipts
-      - non_execution_decisions_create_no_operation
-      - no_worker_config_selector_activity_repository_or_runtime_edit
+      - no_auto_approval_activity_implementation_or_formal_sink
 
-  B:
+  C:
     role: JAVA_HUMAN_REVIEW_AUTHORITY
-    task_ids: [P7-B1, P7-B2]
-    objective: Preserve Java as sole ReviewPacket and human-decision authority with immutable packet hashes, actor-bound commands, five decision types, real MODIFY_AND_APPROVE diffs, idempotent receipts and compatibility queries.
+    task_ids: [P7-C1, P7-C2]
+    objective: Preserve Java as sole frozen ReviewPacket and actor-bound five-decision authority with immutable idempotent receipts and compatible queries.
     owned_paths:
       - java-api-service/src/main/java/com/example/dispute/review/api/**
       - java-api-service/src/main/java/com/example/dispute/review/application/**
       - java-api-service/src/main/java/com/example/dispute/review/domain/**
       - java-api-service/src/test/java/com/example/dispute/review/**
     forbidden_paths:
-      - java-api-service/src/main/java/com/example/dispute/review/infrastructure/persistence/**
-      - java-api-service/src/main/resources/db/migration/**
       - java-api-service/src/main/java/com/example/dispute/workflow/**
       - java-api-service/src/main/java/com/example/dispute/executor/**
-      - java-api-service/src/main/java/com/example/dispute/tool/**
       - java-api-service/src/main/java/com/example/dispute/outcome/**
       - java-api-service/src/main/java/com/example/dispute/evaluation/**
+      - java-api-service/src/main/resources/db/migration/**
       - python-agent-service/**
       - frontend/**
     dependencies:
       start: [P7-R2_PASS]
-      publishes: [B_REVIEW_PROTOCOL_PUBLISHED, B_REVIEW_PACKET_CONTRACT_PUBLISHED, B_REVIEW_PROJECTION_PUBLISHED]
+      integration: [A_OUTCOME_WIRE_PROTOCOL_PUBLISHED]
+      publishes: [C_REVIEW_PROTOCOL_PUBLISHED, C_REVIEW_PACKET_CONTRACT_PUBLISHED, C_REVIEW_PROJECTION_PUBLISHED]
     deliverables:
       - frozen packet identity version and content hash
       - actor task state deadline policy and request-hash validation
       - APPROVE MODIFY_AND_APPROVE REQUEST_MORE_EVIDENCE REJECT ESCALATE_MANUAL commands
-      - non-empty reason and confirmation enforcement
-      - first-valid-decision-wins idempotent receipt
-      - legacy and structured compatibility query DTOs
-    focused_checks:
-      - ReviewApplicationServiceV2Test
-      - FrozenReviewPacketTest
-      - ApprovalPolicyEngineTest
-      - ReviewControllerTest
-      - ReviewDecisionConcurrencyTest
-    review_topics: [HUMAN_ONLY_AUTHORITY, PACKET_IMMUTABILITY, ACTOR_BINDING, IDEMPOTENCY, NO_TOOL_CALL]
+      - first-valid-decision-wins idempotent receipt and legacy query compatibility
+    focused_checks: [ReviewApplicationServiceV2Test, FrozenReviewPacketTest, ApprovalPolicyEngineTest, ReviewControllerTest, ReviewDecisionConcurrencyTest]
     definition_of_done:
-      - graph_browser_and_controller_cannot_decide_or_execute
-      - same_command_replay_returns_same_receipt
-      - different_actor_packet_hash_reason_or_decision_conflicts
-      - MODIFY_AND_APPROVE_has_real_diff_and_preserves_frozen_identity
-      - REQUEST_MORE_EVIDENCE_REJECT_ESCALATE_MANUAL_emit_no_execution_request
+      - graph_browser_controller_cannot_decide_or_execute
+      - changed_actor_packet_hash_reason_or_decision_conflicts
+      - non_execution_decisions_emit_no_operation_request
 
-  C:
+  D:
     role: V045_OPERATION_RECEIPT_COMPENSATION_PERSISTENCE
-    task_ids: [P7-C1, P7-C2]
-    objective: Add an append-only additive V045 engineering ledger for epoch fence operation request receipt compensation and closure prerequisites, with exact hashes, unique idempotency and stale-writer rejection.
+    task_ids: [P7-D1, P7-D2]
+    objective: Add an append-only additive V045 ledger for epoch fence operation request receipt compensation and closure prerequisites.
     owned_paths:
       - java-api-service/src/main/resources/db/migration/V045__outcome_operation_receipt_compensation.sql
       - java-api-service/src/main/java/com/example/dispute/executor/domain/ledger/**
@@ -182,39 +202,25 @@ owners:
       - java-api-service/src/main/java/com/example/dispute/executor/api/**
       - java-api-service/src/main/java/com/example/dispute/workflow/**
       - java-api-service/src/main/java/com/example/dispute/review/**
-      - java-api-service/src/main/java/com/example/dispute/tool/**
       - java-api-service/src/main/java/com/example/dispute/outcome/**
       - java-api-service/src/main/java/com/example/dispute/evaluation/**
       - python-agent-service/**
       - frontend/**
     dependencies:
       start: [P7-R2_PASS]
-      contract_binding: [B_REVIEW_PROTOCOL_PUBLISHED]
-      publishes: [C_OPERATION_PROTOCOL_PUBLISHED, C_LEDGER_CONTRACT_PUBLISHED]
-    ledger_requirements:
-      - immutable operation key and canonical request hash
-      - decision packet action snapshot epoch revision and fence binding
-      - append-only receipt with provider reference and bounded redacted metadata
-      - compensation child bound to exact parent operation and receipt hash
-      - unique identical replay and conflict rejection
-      - explicit irreversible and manual recovery state
-      - closure prerequisite query without closure authority
-    focused_checks:
-      - OutcomeV045MigrationContractTest
-      - OutcomeOperationLedgerPersistenceTest
-      - OutcomeOperationLedgerIntegrationTest
-    review_topics: [ADDITIVE_MIGRATION, APPEND_ONLY, FENCE, HASH_PARENTAGE, LOST_RESPONSE, NO_REDIS_TRUTH]
+      integration: [A_OUTCOME_WIRE_PROTOCOL_PUBLISHED, C_REVIEW_PROTOCOL_PUBLISHED]
+      publishes: [D_LEDGER_CONTRACT_PUBLISHED]
+    focused_checks: [OutcomeV045MigrationContractTest, OutcomeOperationLedgerPersistenceTest, OutcomeOperationLedgerIntegrationTest]
     definition_of_done:
-      - V045_is_additive_and_prior_migrations_are_unchanged
-      - stale_fence_and_hash_substitution_fail_closed
-      - receipt_or_compensation_never_replaces_original_operation
-      - identical_operation_replay_is_stable_and_conflict_is_rejected
+      - V045_is_additive_and_prior_migrations_unchanged
+      - stale_fence_hash_substitution_and_conflicting_replay_fail_closed
+      - operation_receipt_and_compensation_parentage_is_append_only
       - no_service_controller_workflow_tool_graph_or_frontend_edit
 
-  D:
+  E:
     role: SYNTHETIC_NOOP_EXECUTION_CLOSURE_AND_EVALUATION
-    task_ids: [P7-D1, P7-D2]
-    objective: Implement deterministic Java-signed synthetic no-op execution and compensation Activities, Outcome projection, closure ordering and read-only evaluation while ensuring no real capability, credential, case source or formal runtime is reachable.
+    task_ids: [P7-E1, P7-E2]
+    objective: Implement deterministic signed synthetic no-op execution and compensation Activities Outcome projection closure ordering and read-only evaluation without real capability.
     owned_paths:
       - java-api-service/src/main/java/com/example/dispute/workflow/activity/tool/**
       - java-api-service/src/test/java/com/example/dispute/workflow/activity/tool/**
@@ -228,119 +234,92 @@ owners:
       - java-api-service/src/test/java/com/example/dispute/executor/ToolExecutorServiceIntegrationTest.java
       - java-api-service/src/test/java/com/example/dispute/executor/ToolRegistryTest.java
       - java-api-service/src/main/java/com/example/dispute/tool/application/SimulatedExecutionTool.java
-      - java-api-service/src/test/java/com/example/dispute/tool/**
       - java-api-service/src/main/java/com/example/dispute/outcome/**
       - java-api-service/src/test/java/com/example/dispute/outcome/**
       - java-api-service/src/main/java/com/example/dispute/evaluation/**
       - java-api-service/src/test/java/com/example/dispute/evaluation/**
     forbidden_paths:
-      - java-api-service/src/main/resources/db/migration/**
+      - java-api-service/src/main/java/com/example/dispute/workflow/contract/outcome/**
+      - java-api-service/src/main/java/com/example/dispute/workflow/temporal/**
+      - java-api-service/src/main/java/com/example/dispute/workflow/config/**
       - java-api-service/src/main/java/com/example/dispute/review/**
       - java-api-service/src/main/java/com/example/dispute/executor/domain/ledger/**
       - java-api-service/src/main/java/com/example/dispute/executor/infrastructure/persistence/**
-      - java-api-service/src/main/java/com/example/dispute/workflow/temporal/**
-      - java-api-service/src/main/java/com/example/dispute/workflow/config/**
-      - java-api-service/src/main/java/com/example/dispute/tool/api/**
-      - java-api-service/src/main/java/com/example/dispute/tool/application/ToolRegistry.java
+      - java-api-service/src/main/resources/db/migration/**
       - python-agent-service/**
       - frontend/**
     dependencies:
       start: [P7-R2_PASS]
-      integration: [A_WORKFLOW_PROTOCOL_PUBLISHED, C_LEDGER_CONTRACT_PUBLISHED]
-      publishes: [D_OUTCOME_PROJECTION_PUBLISHED, D_SYNTHETIC_EXECUTION_READY]
-    capability_boundary:
-      input: JAVA_SIGNED_NON_CASE_FIXTURES_ONLY
-      adapter: DETERMINISTIC_NOOP
-      network: FORBIDDEN
-      credentials: FORBIDDEN
-      real_side_effect: FORBIDDEN
-    focused_checks:
-      - ToolActivityIdempotencyTest
-      - CompensationWorkflowTest
-      - CaseOutcomeServiceTest
-      - CaseOutcomeControllerTest
-      - CaseClosureServiceTest
-      - RestClientEvaluationAgentClientTest
-      - OutcomeClosureEvaluationOrderingTest
-      - OutcomeSyntheticNoopAssemblyTest
-    review_topics: [NO_REAL_TOOL, RETRY_TAXONOMY, COMPENSATION, CLOSURE_GATE, EVALUATION_READ_ONLY]
+      integration: [A_OUTCOME_WIRE_PROTOCOL_PUBLISHED, B_WORKFLOW_PROTOCOL_PUBLISHED, D_LEDGER_CONTRACT_PUBLISHED]
+      publishes: [E_OUTCOME_PROJECTION_PUBLISHED, E_SYNTHETIC_EXECUTION_READY]
+    capability_boundary: {input: JAVA_SIGNED_NON_CASE_FIXTURES_ONLY, adapter: DETERMINISTIC_NOOP, network: FORBIDDEN, credentials: FORBIDDEN, real_side_effect: FORBIDDEN}
+    focused_checks: [ToolActivityIdempotencyTest, CompensationWorkflowTest, CaseOutcomeServiceTest, CaseOutcomeControllerTest, CaseClosureServiceTest, RestClientEvaluationAgentClientTest, OutcomeClosureEvaluationOrderingTest, OutcomeSyntheticNoopAssemblyTest]
     definition_of_done:
-      - synthetic_adapter_cannot_resolve_real_case_or_network_capability
-      - every_effect_result_is_finalized_through_C_ledger_contract
-      - closure_waits_for_all_required_terminal_receipts
+      - adapter_cannot_resolve_real_case_network_or_credentials
+      - closure_waits_for_required_terminal_receipts
       - evaluation_reads_exact_closed_snapshot_and_cannot_mutate_process
-      - projection_distinguishes_real_receipt_from_explicit_simulation
 
-  E:
-    role: PRIVATE_OUTCOME_GRAPH_THEN_FRONTEND_COMPATIBILITY
-    task_ids: [P7-E1, P7-E2]
-    objective: First implement a private read-only outcome.review.v1 LangGraph and compatibility adapter; after that scope is stable and Java projections publish, preserve Draft Review and Outcome frontend behavior without creating client authority.
-    execution_rule: P7_E1_AND_P7_E2_ARE_SEQUENTIAL_AND_MUST_NOT_HAVE_CONCURRENT_WRITERS
-    python_scope:
-      task_id: P7-E1
-      owned_paths:
-        - python-agent-service/app/graphs/outcome/**
-        - python-agent-service/tests/graphs/outcome/**
-        - python-agent-service/app/agents/review_copilot.py
-        - python-agent-service/tests/agents/test_review_copilot.py
-      forbidden_paths:
-        - python-agent-service/app/main.py
-        - python-agent-service/app/graph_runtime/registry.py
-        - python-agent-service/app/evaluation.py
-        - java-api-service/**
-        - frontend/**
-      dependencies:
-        start: [P7-R2_PASS]
-        packet_binding: [B_REVIEW_PACKET_CONTRACT_PUBLISHED]
-      requirements:
-        - exact frozen ReviewPacket refs only
-        - private reviewer scope and actor binding
-        - bounded serializable StateGraph state
-        - governed prompt pipe model pipe strict parser
-        - empty tool capability and no Domain credentials
-        - checkpoint resume and stale command fencing
-      focused_checks:
-        - python -m pytest -q tests/graphs/outcome tests/agents/test_review_copilot.py tests/test_evaluation.py
-    frontend_scope:
-      task_id: P7-E2
-      owned_paths:
-        - frontend/src/views/disputes/AdjudicationDraftView.vue
-        - frontend/src/views/disputes/AdjudicationDraftView.test.js
-        - frontend/src/views/disputes/OutcomeView.vue
-        - frontend/src/views/disputes/OutcomeView.test.js
-        - frontend/src/views/reviews/ReviewQueueView.vue
-        - frontend/src/views/reviews/ReviewQueueView.test.js
-        - frontend/src/views/reviews/ReviewWorkbenchView.vue
-        - frontend/src/views/reviews/ReviewWorkbenchView.test.js
-        - frontend/src/views/ReviewWorkbenchView.vue
-        - frontend/src/views/ReviewWorkbenchView.test.js
-        - frontend/src/api/review.js
-        - frontend/src/api/review.test.js
-        - frontend/src/stores/review.js
-      forbidden_paths:
-        - frontend/src/router/index.js
-        - frontend/src/api/cases.js
-        - java-api-service/**
-        - python-agent-service/**
-        - UI_REDESIGN
-      dependencies: [P7-E1, B_REVIEW_PROJECTION_PUBLISHED, D_OUTCOME_PROJECTION_PUBLISHED]
-      requirements:
-        - party and reviewer Draft legacy compatibility
-        - reviewer-only command controls and history read-only mode
-        - queue contains PENDING and IN_REVIEW without packet leakage
-        - five decisions require reason and confirmation
-        - Outcome fixed sections and controlled action receipt state
-        - no receipt means explicitly simulated not executed
-        - browser never calls tool or infers closure from animation or model text
-      focused_checks:
-        - node node_modules/vitest/vitest.mjs run src/views/disputes/AdjudicationDraftView.test.js src/views/disputes/OutcomeView.test.js src/views/reviews/ReviewQueueView.test.js src/views/reviews/ReviewWorkbenchView.test.js src/views/ReviewWorkbenchView.test.js src/api/review.test.js
-    review_topics: [PRIVATE_PACKET_SCOPE, EMPTY_TOOL_POLICY, LEGACY_READER, REVIEWER_AUTH, SIMULATION_LABEL, NO_CLIENT_AUTHORITY]
+  F:
+    role: PRIVATE_OUTCOME_GRAPH_AND_LCEL
+    task_ids: [P7-F1, P7-F2]
+    objective: Implement private read-only outcome.review.v1 LangGraph and the Python compatibility adapter with no tool capability.
+    owned_paths:
+      - python-agent-service/app/graphs/outcome/**
+      - python-agent-service/tests/graphs/outcome/**
+      - python-agent-service/app/agents/review_copilot.py
+      - python-agent-service/tests/agents/test_review_copilot.py
+    forbidden_paths:
+      - python-agent-service/app/main.py
+      - python-agent-service/app/graph_runtime/registry.py
+      - python-agent-service/app/evaluation.py
+      - java-api-service/**
+      - frontend/**
+    dependencies:
+      start: [P7-R2_PASS]
+      integration: [A_OUTCOME_WIRE_PROTOCOL_PUBLISHED, C_REVIEW_PACKET_CONTRACT_PUBLISHED]
+      publishes: [F_PRIVATE_GRAPH_READY]
+    focused_checks:
+      - python -m pytest -q tests/graphs/outcome tests/agents/test_review_copilot.py tests/test_evaluation.py
     definition_of_done:
-      - graph_is_private_advisory_and_read_only
-      - packet_frozen_after_graph_start_is_not_silently_refreshed
-      - frontend_preserves_legacy_and_structured_readers
-      - unauthorized_or_history_modes_have_no_decision_controls
-      - real_receipt_failure_and_simulated_animation_are_visibly_distinct
+      - exact_frozen_packet_refs_private_actor_scope_and_bounded_state
+      - governed_prompt_pipe_model_pipe_strict_parser
+      - empty_tool_policy_no_domain_credentials_and_stale_fence_rejection
+
+  G:
+    role: DRAFT_REVIEW_OUTCOME_FRONTEND_COMPATIBILITY
+    task_ids: [P7-G1, P7-G2]
+    objective: Preserve Draft Review and Outcome frontend compatibility authorization and explicit simulated-vs-real presentation without client authority.
+    owned_paths:
+      - frontend/src/views/disputes/AdjudicationDraftView.vue
+      - frontend/src/views/disputes/AdjudicationDraftView.test.js
+      - frontend/src/views/disputes/OutcomeView.vue
+      - frontend/src/views/disputes/OutcomeView.test.js
+      - frontend/src/views/reviews/ReviewQueueView.vue
+      - frontend/src/views/reviews/ReviewQueueView.test.js
+      - frontend/src/views/reviews/ReviewWorkbenchView.vue
+      - frontend/src/views/reviews/ReviewWorkbenchView.test.js
+      - frontend/src/views/ReviewWorkbenchView.vue
+      - frontend/src/views/ReviewWorkbenchView.test.js
+      - frontend/src/api/review.js
+      - frontend/src/api/review.test.js
+      - frontend/src/stores/review.js
+    forbidden_paths:
+      - frontend/src/router/index.js
+      - frontend/src/api/cases.js
+      - java-api-service/**
+      - python-agent-service/**
+      - UI_REDESIGN
+    dependencies:
+      start: [P7-R2_PASS]
+      integration: [C_REVIEW_PROJECTION_PUBLISHED, E_OUTCOME_PROJECTION_PUBLISHED]
+      publishes: [G_FRONTEND_COMPATIBILITY_READY]
+    focused_checks:
+      - node node_modules/vitest/vitest.mjs run src/views/disputes/AdjudicationDraftView.test.js src/views/disputes/OutcomeView.test.js src/views/reviews/ReviewQueueView.test.js src/views/reviews/ReviewWorkbenchView.test.js src/views/ReviewWorkbenchView.test.js src/api/review.test.js
+    definition_of_done:
+      - legacy_and_structured_readers_remain_supported
+      - unauthorized_and_history_modes_have_no_decision_controls
+      - real_receipt_failure_and_simulated_animation_are_distinct
+      - browser_never_calls_tool_or_infers_closure
 
 primary_integration_owner:
   owner: R
@@ -349,7 +328,6 @@ primary_integration_owner:
     - plans/phase-7-*
     - docs/architecture/adr/0016-phase-7-*
     - docs/runbooks/temporal-first/phase-7-*
-    - contracts/agent-platform/outcome/**
     - tests/static/test_phase7_*.py
     - scripts/run_phase7_*.py
     - scripts/generate_phase7_*.py
@@ -362,70 +340,28 @@ primary_integration_owner:
     - python-agent-service/app/main.py
     - frontend/src/router/index.js
   responsibilities:
-    - authenticate exact C6 E6 A6 chain
-    - freeze contract candidate and run exact-SHA Batch 0
-    - archive separate direct-child entry evidence
-    - publish shared Java receipt and graph schemas
-    - integrate owner commits without concurrent shared-path writers
+    - authenticate exact C6 E6 A6 and P7 entry evidence
+    - integrate A-G without taking an owner path or creating concurrent writers
     - prove worker registration selector allocation and formal sinks remain absent
     - freeze one exact-SHA engineering candidate and evidence
-  forbidden_actions:
-    - real_tool_or_case_data
-    - production_secret_or_deployment
-    - temporal_outcome_allocation
-    - formal_workflow_activation
-    - canary_or_promotion
-    - MIG_006_OR_MIG_007_PASS_CLAIM
+  forbidden_actions: [REAL_TOOL_OR_CASE_DATA, PRODUCTION_SECRET_OR_DEPLOYMENT, TEMPORAL_OUTCOME_ALLOCATION, FORMAL_WORKFLOW_ACTIVATION, CANARY_OR_PROMOTION, MIG_006_OR_MIG_007_PASS_CLAIM]
 
 barriers:
-  - id: P7_R2_PASS
-    producer: R
-    status: BLOCKED
-    release_condition: SEPARATE_DIRECT_CHILD_ENTRY_EVIDENCE_AUTHENTICATES_FOUR_GREEN_EXACT_SHA_SOURCES
-  - id: B_REVIEW_PROTOCOL_PUBLISHED
-    producer: B
-    status: BLOCKED
-    consumers: [A, C]
-    release_condition: PACKET_DECISION_RECEIPT_SCHEMA_REVIEWED_WITH_NO_P0
-  - id: B_REVIEW_PACKET_CONTRACT_PUBLISHED
-    producer: B
-    status: BLOCKED
-    consumers: [E]
-    release_condition: FROZEN_PACKET_ALLOWLIST_AND_PRIVATE_SCOPE_REVIEWED
-  - id: C_LEDGER_CONTRACT_PUBLISHED
-    producer: C
-    status: BLOCKED
-    consumers: [D, R]
-    release_condition: OPERATION_RECEIPT_COMPENSATION_HASH_PARENTAGE_REVIEWED
-  - id: A_WORKFLOW_PROTOCOL_PUBLISHED
-    producer: A
-    status: BLOCKED
-    consumers: [D, R]
-    release_condition: PURE_PROTOCOL_AND_REPLAY_SURFACE_REVIEWED
-  - id: B_REVIEW_PROJECTION_PUBLISHED
-    producer: B
-    status: BLOCKED
-    consumers: [E]
-    release_condition: LEGACY_AND_STRUCTURED_QUERY_SHAPES_FROZEN
-  - id: D_OUTCOME_PROJECTION_PUBLISHED
-    producer: D
-    status: BLOCKED
-    consumers: [E]
-    release_condition: ACTION_RECEIPT_SIMULATION_CLOSURE_EVALUATION_SHAPES_FROZEN
+  - {id: P7_R2_PASS, producer: R, status: BLOCKED, release_condition: SEPARATE_DIRECT_CHILD_ENTRY_EVIDENCE_AUTHENTICATES_FOUR_GREEN_EXACT_SHA_SOURCES}
+  - {id: A_OUTCOME_WIRE_PROTOCOL_PUBLISHED, producer: A, status: BLOCKED, consumers: [B, C, D, E, F, R], release_condition: CLOSED_SCHEMAS_AND_JAVA_WIRE_TYPES_REVIEWED_WITH_NO_P0}
+  - {id: B_WORKFLOW_PROTOCOL_PUBLISHED, producer: B, status: BLOCKED, consumers: [E, R], release_condition: PURE_REPLAY_SAFE_WORKFLOW_PROTOCOL_REVIEWED}
+  - {id: C_REVIEW_PROTOCOL_PUBLISHED, producer: C, status: BLOCKED, consumers: [D, R], release_condition: PACKET_DECISION_RECEIPT_AUTHORITY_REVIEWED}
+  - {id: C_REVIEW_PACKET_CONTRACT_PUBLISHED, producer: C, status: BLOCKED, consumers: [F], release_condition: FROZEN_PACKET_ALLOWLIST_AND_PRIVATE_SCOPE_REVIEWED}
+  - {id: C_REVIEW_PROJECTION_PUBLISHED, producer: C, status: BLOCKED, consumers: [G], release_condition: LEGACY_AND_STRUCTURED_QUERY_SHAPES_FROZEN}
+  - {id: D_LEDGER_CONTRACT_PUBLISHED, producer: D, status: BLOCKED, consumers: [E, R], release_condition: OPERATION_RECEIPT_COMPENSATION_HASH_PARENTAGE_REVIEWED}
+  - {id: E_OUTCOME_PROJECTION_PUBLISHED, producer: E, status: BLOCKED, consumers: [G], release_condition: ACTION_RECEIPT_SIMULATION_CLOSURE_EVALUATION_SHAPES_FROZEN}
 
 support_lanes:
   R1:
-    role: P0_TEMPORAL_DETERMINISM_AND_AUTHORITY_REVIEW
+    role: CONSOLIDATED_P0_REVIEW
     write_access: false
-    starts_when: A_OR_SHARED_PROTOCOL_HAS_STABLE_DIFF
-  R2:
-    role: P0_TRANSACTION_IDEMPOTENCY_AND_COMPENSATION_REVIEW
-    write_access: false
-    starts_when: B_C_OR_D_HAS_STABLE_DIFF
-  R3:
-    role: P0_PRIVACY_TOOL_CAPABILITY_AND_CLIENT_AUTHORITY_REVIEW
-    write_access: false
-    starts_when: D_OR_E_HAS_STABLE_DIFF
+    starts_when: ANY_OWNER_OR_SHARED_INTEGRATION_HAS_STABLE_DIFF
+    required_topics: [TEMPORAL_DETERMINISM_AND_AUTHORITY, TRANSACTION_IDEMPOTENCY_AND_COMPENSATION, PRIVACY_TOOL_CAPABILITY_AND_CLIENT_AUTHORITY]
   V1:
     role: LIGHT_PYTHON_STATIC_FRONTEND_VERIFICATION
     write_access: false
@@ -433,14 +369,16 @@ support_lanes:
   V2:
     role: PRIMARY_CONTROLLED_MAVEN_TEMPORAL_TESTCONTAINERS_VERIFICATION
     write_access: false
-    max_concurrent_heavy_processes: 1
+    max_concurrent_heavy_processes: 2
+    batch0_max_concurrent_heavy_processes: 1
   L:
     role: PHASE8_ENGINEERING_LOOKAHEAD_AND_TRACEABILITY
     write_access: false
     may_not_change_phase7_gate_or_scope: true
 
 review_policy:
-  in_flight_p0_review_target: AT_LEAST_HALF_OF_READY_REVIEW_LANES
+  in_flight_p0_review_target: R1_ACTIVE_WHEN_ANY_STABLE_REVIEWABLE_DIFF_EXISTS
+  p0_review_lane_count: 1
   post_commit_scope: P0_ONLY
   merge_gate: ALL_P0_CLOSED
   p1_and_lower: RECORD_FOR_LATER_DO_NOT_BLOCK_FUNCTIONAL_INTEGRATION
@@ -449,8 +387,11 @@ review_policy:
 
 test_policy:
   delegated_owner_runs_focused_light_checks_only: true
-  primary_owns_heavy_token: true
-  max_maven_or_testcontainers_processes: 1
+  primary_owns_heavy_tokens: true
+  heavy_token_count: 2
+  max_combined_maven_testcontainers_heavy_processes: 2
+  batch0_runner_execution: SEQUENTIAL
+  batch0_max_heavy_processes: 1
   max_light_processes: 2
   max_frontend_vitest_processes: 1
   frontend_worker_count_control: REPOSITORY_VITEST_CONFIG_NOT_CLI_OVERRIDE
@@ -459,13 +400,4 @@ test_policy:
 
 release_ceiling:
   maximum_engineering_result: PHASE_8_ENGINEERING_ONLY
-  remains_forbidden:
-    - FORMAL_OUTCOME_WORKFLOW
-    - TEMPORAL_OUTCOME_ALLOCATION
-    - REAL_TOOL_EFFECT
-    - REAL_CASE_OR_PARTY_DATA_SHADOW
-    - PRODUCTION_TRAFFIC
-    - CANARY
-    - PROMOTION
-    - MIG_006_PASS
-    - MIG_007_PASS
+  remains_forbidden: [FORMAL_OUTCOME_WORKFLOW, TEMPORAL_OUTCOME_ALLOCATION, REAL_TOOL_EFFECT, REAL_CASE_OR_PARTY_DATA_SHADOW, PRODUCTION_TRAFFIC, CANARY, PROMOTION, MIG_006_PASS, MIG_007_PASS]

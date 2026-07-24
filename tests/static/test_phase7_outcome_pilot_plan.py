@@ -104,46 +104,63 @@ def test_two_commit_gate_and_candidate_scope_are_closed() -> None:
             assert value is False, key
 
 
-def test_one_primary_five_disjoint_implementation_owners_and_support_lanes() -> None:
+def test_one_primary_seven_disjoint_implementation_owners_and_support_lanes() -> None:
     matrix = _yaml(MATRIX_PATH)
     briefs = _yaml(BRIEFS_PATH)
     team = briefs["team"]
     assert team == {
         "primary_owner": "R",
-        "delegated_implementation_owners": ["A", "B", "C", "D", "E"],
-        "logical_p0_review_lanes": ["R1", "R2", "R3"],
+        "delegated_implementation_owners": ["A", "B", "C", "D", "E", "F", "G"],
+        "logical_p0_review_lanes": ["R1"],
         "logical_verification_lanes": ["V1", "V2"],
         "logical_lookahead_lane": "L",
         "max_active_primary": 1,
         "max_active_delegated": 11,
         "max_active_total": 12,
-        "heavy_test_slots": 1,
+        "heavy_test_slots": 2,
+        "combined_maven_testcontainers_heavy_process_limit": 2,
         "light_test_slots": 2,
         "maven_fork_count": 1,
         "frontend_vitest_process_slots": 1,
         "frontend_cli_worker_override": "OMITTED_USE_REPOSITORY_POOL_CONFIG",
         "activation_policy": "DEPENDENCY_AWARE",
+        "roles_are_scheduled_only_when_work_is_ready": True,
         "shared_writer_policy": "ONE_OWNER_PER_PATH",
         "implementation_release_state": "BLOCKED",
     }
-    assert matrix["team"]["implementation_owners"] == ["A", "B", "C", "D", "E"]
-    assert set(briefs["owners"]) == set("ABCDE")
+    assert matrix["team"] == {
+        "primary": "R",
+        "implementation_owners": ["A", "B", "C", "D", "E", "F", "G"],
+        "logical_p0_review_lanes": ["R1"],
+        "logical_verification_lanes": ["V1", "V2"],
+        "logical_lookahead_lane": "L",
+        "activation": "DEPENDENCY_AWARE",
+        "roles_are_scheduled_only_when_work_is_ready": True,
+        "shared_path_writes": "PRIMARY_ONLY",
+        "implementation_owner_write_domains_disjoint": True,
+    }
+    assert set(briefs["owners"]) == set("ABCDEFG")
+    assert {
+        owner_id: owner["role"] for owner_id, owner in briefs["owners"].items()
+    } == {
+        "A": "SHARED_OUTCOME_WIRE_AND_PROTOCOL_CONTRACTS",
+        "B": "TEMPORAL_OUTCOME_KERNEL_ONLY",
+        "C": "JAVA_HUMAN_REVIEW_AUTHORITY",
+        "D": "V045_OPERATION_RECEIPT_COMPENSATION_PERSISTENCE",
+        "E": "SYNTHETIC_NOOP_EXECUTION_CLOSURE_AND_EVALUATION",
+        "F": "PRIVATE_OUTCOME_GRAPH_AND_LCEL",
+        "G": "DRAFT_REVIEW_OUTCOME_FRONTEND_COMPATIBILITY",
+    }
 
     task_ids: list[str] = []
     paths_by_owner: dict[str, list[str]] = {}
     for owner_id, owner in briefs["owners"].items():
         assert owner["task_ids"] == [f"P7-{owner_id}1", f"P7-{owner_id}2"]
-        assert owner["forbidden_paths"] if owner_id != "E" else (
-            owner["python_scope"]["forbidden_paths"]
-            and owner["frontend_scope"]["forbidden_paths"]
-        )
-        assert owner["focused_checks"] if owner_id != "E" else (
-            owner["python_scope"]["focused_checks"]
-            and owner["frontend_scope"]["focused_checks"]
-        )
+        assert owner["forbidden_paths"]
+        assert owner["focused_checks"]
         task_ids.extend(owner["task_ids"])
         paths_by_owner[owner_id] = _owner_paths(owner)
-    assert len(task_ids) == len(set(task_ids)) == 10
+    assert len(task_ids) == len(set(task_ids)) == 14
 
     owners = list(paths_by_owner)
     for index, left_owner in enumerate(owners):
@@ -153,6 +170,14 @@ def test_one_primary_five_disjoint_implementation_owners_and_support_lanes() -> 
                     assert not _overlaps(left, right), (
                         f"owner path overlap {left_owner}/{right_owner}: {left} / {right}"
                     )
+
+    support = briefs["support_lanes"]
+    assert set(support) == {"R1", "V1", "V2", "L"}
+    assert support["R1"]["role"] == "CONSOLIDATED_P0_REVIEW"
+    assert briefs["review_policy"]["p0_review_lane_count"] == 1
+    assert support["V1"]["max_concurrent_light_processes"] == 2
+    assert support["V2"]["max_concurrent_heavy_processes"] == 2
+    assert support["V2"]["batch0_max_concurrent_heavy_processes"] == 1
 
 
 def test_primary_exclusively_owns_shared_integration_and_gate_paths() -> None:
@@ -164,7 +189,6 @@ def test_primary_exclusively_owns_shared_integration_and_gate_paths() -> None:
         "plans/phase-7-*",
         "docs/architecture/adr/0016-phase-7-*",
         "docs/runbooks/temporal-first/phase-7-*",
-        "contracts/agent-platform/outcome/**",
         "tests/static/test_phase7_*.py",
         "scripts/run_phase7_*.py",
         "scripts/generate_phase7_*.py",
@@ -176,10 +200,10 @@ def test_primary_exclusively_owns_shared_integration_and_gate_paths() -> None:
     }
     assert expected_global <= set(primary["owned_paths"])
     assert {
-        "temporal_outcome_allocation",
-        "formal_workflow_activation",
-        "real_tool_or_case_data",
-        "canary_or_promotion",
+        "TEMPORAL_OUTCOME_ALLOCATION",
+        "FORMAL_WORKFLOW_ACTIVATION",
+        "REAL_TOOL_OR_CASE_DATA",
+        "CANARY_OR_PROMOTION",
     } <= set(primary["forbidden_actions"])
 
     delegated = [
@@ -191,18 +215,28 @@ def test_primary_exclusively_owns_shared_integration_and_gate_paths() -> None:
         assert all(not _overlaps(global_path, path) for path in delegated)
 
 
-def test_test_budget_is_one_heavy_two_light_and_unified_work_is_deferred() -> None:
+def test_test_budget_is_two_heavy_two_light_with_sequential_batch_zero() -> None:
     matrix = _yaml(MATRIX_PATH)
     resources = matrix["resources"]
-    assert resources["heavy_test_slots"] == 1
+    assert resources["heavy_test_slots"] == 2
+    assert resources["combined_maven_testcontainers_heavy_process_limit"] == 2
     assert resources["light_test_slots"] == 2
     assert resources["maven_fork_count"] == 1
-    assert matrix["batches"]["batch_0_entry"]["max_parallel_heavy_sources"] == 1
-    assert matrix["batches"]["batch_0_entry"]["max_parallel_light_sources"] == 2
+    entry = matrix["batches"]["batch_0_entry"]
+    assert entry["runner_execution"] == "SEQUENTIAL"
+    assert entry["maximum_heavy_processes"] == 1
+    assert entry["maximum_light_processes"] == 2
+    assert entry["max_parallel_heavy_sources"] == 1
+    assert entry["max_parallel_light_sources"] == 2
+    assert entry["implementation_capacity_not_inherited_by_entry_runner"] is True
 
     briefs = _yaml(BRIEFS_PATH)
     policy = briefs["test_policy"]
-    assert policy["max_maven_or_testcontainers_processes"] == 1
+    assert policy["primary_owns_heavy_tokens"] is True
+    assert policy["heavy_token_count"] == 2
+    assert policy["max_combined_maven_testcontainers_heavy_processes"] == 2
+    assert policy["batch0_runner_execution"] == "SEQUENTIAL"
+    assert policy["batch0_max_heavy_processes"] == 1
     assert policy["max_light_processes"] == 2
     assert policy["full_or_e2e_at_unified_checkpoint_only"] is True
     assert matrix["batches"]["unified_or_promotion"] == {
@@ -313,21 +347,31 @@ def test_batch_zero_gate_blocks_before_sources_and_never_claims_pass() -> None:
         "P7_0_ENGINEERING_ENTRY_PASS_FROM_SEPARATE_DIRECT_CHILD_EVIDENCE_COMMIT"
     )
     assert gate["gate_change_policy"][2] == (
-        "No owner A through E may write product code before the separate evidence commit."
+        "No owner A through G may write product code before the separate evidence commit."
     )
 
 
 def test_task_dag_releases_every_owner_only_after_p7_r2_pass() -> None:
     matrix = _yaml(MATRIX_PATH)
     dag = matrix["task_dag"]
-    for task_id in ("P7-A1", "P7-B1", "P7-C1", "P7-D1", "P7-E1"):
-        assert dag[task_id]["requires"] == ["P7-R2_PASS"]
-    assert set(dag["P7-R3"]["requires"]) == {
+    for task_id in (
         "P7-A1",
         "P7-B1",
+        "P7-C1",
+        "P7-D1",
+        "P7-E1",
+        "P7-F1",
+        "P7-G1",
+    ):
+        assert dag[task_id]["requires"] == ["P7-R2_PASS"]
+    assert set(dag["P7-R3"]["requires"]) == {
+        "P7-A2",
+        "P7-B2",
         "P7-C2",
         "P7-D2",
         "P7-E2",
+        "P7-F2",
+        "P7-G2",
     }
     assignments = _yaml(BRIEFS_PATH)["first_wave"]["assignments"]
     assert [(item["owner"], item["task_id"]) for item in assignments] == [
@@ -336,6 +380,8 @@ def test_task_dag_releases_every_owner_only_after_p7_r2_pass() -> None:
         ("C", "P7-C1"),
         ("D", "P7-D1"),
         ("E", "P7-E1"),
+        ("F", "P7-F1"),
+        ("G", "P7-G1"),
     ]
 
 

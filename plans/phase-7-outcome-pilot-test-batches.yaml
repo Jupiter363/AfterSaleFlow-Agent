@@ -76,7 +76,7 @@ gate:
   gate_change_policy:
     - Any candidate content change requires a new exact-SHA Batch 0.
     - A6 does not implicitly pass P7.0.
-    - No owner A through E may write product code before the separate evidence commit.
+    - No owner A through G may write product code before the separate evidence commit.
     - Missing exception contract fixture schema runner report or evidence hash fails closed.
   contract_candidate_allowed_paths:
     - plans/phase-7-outcome-pilot-execution.md
@@ -117,7 +117,8 @@ mode_contract:
 
 resources:
   primary_owner: R
-  heavy_test_slots: 1
+  heavy_test_slots: 2
+  combined_maven_testcontainers_heavy_process_limit: 2
   light_test_slots: 2
   maven_fork_count: 1
   frontend_vitest_process_slots: 1
@@ -139,13 +140,14 @@ resources:
 
 team:
   primary: R
-  implementation_owners: [A, B, C, D, E]
-  logical_p0_review_lanes: [R1, R2, R3]
+  implementation_owners: [A, B, C, D, E, F, G]
+  logical_p0_review_lanes: [R1]
   logical_verification_lanes: [V1, V2]
   logical_lookahead_lane: L
   activation: DEPENDENCY_AWARE
+  roles_are_scheduled_only_when_work_is_ready: true
   shared_path_writes: PRIMARY_ONLY
-  owner_E_subscopes: SEQUENTIAL_PYTHON_THEN_FRONTEND
+  implementation_owner_write_domains_disjoint: true
 
 task_dag:
   P7-R0:
@@ -158,32 +160,50 @@ task_dag:
     result: P7_0_PASS_OR_BLOCKED_ENTRY_EVIDENCE
     requires: [P7-R1_ALL_PASS]
   P7-A1:
+    result: OUTCOME_WIRE_PROTOCOL_CONTRACT_FOUNDATION
+    requires: [P7-R2_PASS]
+  P7-A2:
+    result: OUTCOME_WIRE_PROTOCOL_COMPATIBILITY_PUBLISHED
+    requires: [P7-A1]
+  P7-B1:
     result: PURE_OUTCOME_WORKFLOW_KERNEL
     requires: [P7-R2_PASS]
-  P7-B1:
+  P7-B2:
+    result: OUTCOME_WORKFLOW_BOUND_TO_SHARED_PROTOCOL
+    requires: [P7-B1, A_OUTCOME_WIRE_PROTOCOL_PUBLISHED]
+  P7-C1:
     result: FROZEN_PACKET_AND_FIVE_DECISION_AUTHORITY
     requires: [P7-R2_PASS]
-  P7-C1:
+  P7-C2:
+    result: REVIEW_AUTHORITY_BOUND_TO_SHARED_PROTOCOL
+    requires: [P7-C1, A_OUTCOME_WIRE_PROTOCOL_PUBLISHED]
+  P7-D1:
     result: V045_OPERATION_RECEIPT_COMPENSATION_LEDGER_FOUNDATION
     requires: [P7-R2_PASS]
-  P7-C2:
-    result: V045_LEDGER_BOUND_TO_REVIEW_PROTOCOL
-    requires: [P7-C1, B_REVIEW_CONTRACT_PUBLISHED]
-  P7-D1:
+  P7-D2:
+    result: V045_LEDGER_BOUND_TO_PROTOCOL_AND_REVIEW
+    requires: [P7-D1, A_OUTCOME_WIRE_PROTOCOL_PUBLISHED, C_REVIEW_PROTOCOL_PUBLISHED]
+  P7-E1:
     result: SYNTHETIC_NOOP_EXECUTION_CLOSURE_EVALUATION_FOUNDATION
     requires: [P7-R2_PASS]
-  P7-D2:
+  P7-E2:
     result: SYNTHETIC_NOOP_EXECUTION_BOUND_TO_WORKFLOW_AND_LEDGER
-    requires: [P7-D1, A_WORKFLOW_PROTOCOL_PUBLISHED, C_LEDGER_CONTRACT_PUBLISHED]
-  P7-E1:
+    requires: [P7-E1, A_OUTCOME_WIRE_PROTOCOL_PUBLISHED, B_WORKFLOW_PROTOCOL_PUBLISHED, D_LEDGER_CONTRACT_PUBLISHED]
+  P7-F1:
     result: PRIVATE_OUTCOME_REVIEW_GRAPH
     requires: [P7-R2_PASS]
-  P7-E2:
-    result: DRAFT_REVIEW_OUTCOME_FRONTEND_COMPATIBILITY
-    requires: [P7-E1, B_REVIEW_PROJECTION_PUBLISHED, D_OUTCOME_PROJECTION_PUBLISHED]
+  P7-F2:
+    result: PRIVATE_OUTCOME_GRAPH_BOUND_TO_PACKET_PROTOCOL
+    requires: [P7-F1, A_OUTCOME_WIRE_PROTOCOL_PUBLISHED, C_REVIEW_PACKET_CONTRACT_PUBLISHED]
+  P7-G1:
+    result: DRAFT_REVIEW_OUTCOME_FRONTEND_COMPATIBILITY_FOUNDATION
+    requires: [P7-R2_PASS]
+  P7-G2:
+    result: FRONTEND_BOUND_TO_JAVA_PROJECTIONS
+    requires: [P7-G1, C_REVIEW_PROJECTION_PUBLISHED, E_OUTCOME_PROJECTION_PUBLISHED]
   P7-R3:
     result: FAIL_CLOSED_SHARED_ASSEMBLY
-    requires: [P7-A1, P7-B1, P7-C2, P7-D2, P7-E2]
+    requires: [P7-A2, P7-B2, P7-C2, P7-D2, P7-E2, P7-F2, P7-G2]
   P7-R4:
     result: PHASE7_ENGINEERING_CANDIDATE
     requires: [P7-R3, ALL_P0_CLOSED, BATCH_1_PASS, BATCH_2_PASS]
@@ -208,8 +228,12 @@ batches:
     fresh_run_directory_required: true
     sealed_execution_manifest_required: true
     all_four_sources_required: true
+    runner_execution: SEQUENTIAL
+    maximum_heavy_processes: 1
+    maximum_light_processes: 2
     max_parallel_light_sources: 2
     max_parallel_heavy_sources: 1
+    implementation_capacity_not_inherited_by_entry_runner: true
     accepted_candidate_commit: null
     entry_evidence_commit: null
     source_test_counts: null

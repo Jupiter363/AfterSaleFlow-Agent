@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import stat
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -20,6 +22,32 @@ runner = generator.runner
 CANDIDATE = "a" * 40
 EVIDENCE = "e" * 40
 BASE = "d18a1f130a925429e8c2dfd11352cea4ca8673a0"
+
+
+def _symlink_or_mock_lstat(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    link: Path,
+    target: Path,
+    is_directory: bool,
+) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=is_directory)
+        return
+    except OSError:
+        original = Path.lstat
+
+        def lstat(path: Path) -> object:
+            if path == link:
+                return SimpleNamespace(
+                    st_mode=stat.S_IFLNK | 0o777,
+                    st_dev=0,
+                    st_ino=0,
+                    st_file_attributes=0,
+                )
+            return original(path)
+
+        monkeypatch.setattr(Path, "lstat", lstat)
 
 
 def _junit(
@@ -178,6 +206,139 @@ def _green_run(tmp_path: Path) -> tuple[Path, dict[str, object]]:
     runner._write_manifest(manifest_path, manifest)
     persisted = json.loads(manifest_path.read_text(encoding="utf-8"))
     return manifest_path, persisted
+
+
+def test_provenance_copy_rejects_lexical_file_symlink_to_in_root_regular_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    run_root = tmp_path / "run"
+    output = tmp_path / "output"
+    parent = run_root / "attempts" / "source-01"
+    parent.mkdir(parents=True)
+    output.mkdir()
+    target = parent / "real.log"
+    target.write_bytes(b"trusted bytes\n")
+    link = parent / "alias.log"
+    _symlink_or_mock_lstat(
+        monkeypatch,
+        link=link,
+        target=target,
+        is_directory=False,
+    )
+
+    with pytest.raises(
+        runner.EvidenceError, match="link, junction, or reparse point"
+    ):
+        generator._copy_provenance_artifact(
+            run_root=run_root,
+            output_dir=output,
+            relative="attempts/source-01/alias.log",
+        )
+
+    assert not (output / "attempts/source-01/alias.log").exists()
+
+
+@pytest.mark.parametrize("linked_side", ("source", "destination"))
+def test_provenance_copy_rejects_symlinked_parent_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, linked_side: str
+) -> None:
+    run_root = tmp_path / "run"
+    output = tmp_path / "output"
+    run_root.mkdir()
+    output.mkdir()
+    relative = "attempts/source-01/stdout.log"
+
+    if linked_side == "source":
+        target_parent = run_root / "real-source"
+        target_parent.mkdir()
+        (target_parent / "stdout.log").write_bytes(b"source\n")
+        link = run_root / "attempts"
+        _symlink_or_mock_lstat(
+            monkeypatch,
+            link=link,
+            target=target_parent,
+            is_directory=True,
+        )
+    else:
+        source = run_root / relative
+        source.parent.mkdir(parents=True)
+        source.write_bytes(b"source\n")
+        target_parent = output / "real-destination"
+        target_parent.mkdir()
+        link = output / "attempts"
+        _symlink_or_mock_lstat(
+            monkeypatch,
+            link=link,
+            target=target_parent,
+            is_directory=True,
+        )
+
+    with pytest.raises(
+        runner.EvidenceError, match="link, junction, or reparse point"
+    ):
+        generator._copy_provenance_artifact(
+            run_root=run_root,
+            output_dir=output,
+            relative=relative,
+        )
+
+
+@pytest.mark.parametrize("reparse_kind", ("parent", "file"))
+def test_provenance_copy_rejects_windows_reparse_parent_or_file_metadata(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, reparse_kind: str
+) -> None:
+    run_root = tmp_path / "run"
+    output = tmp_path / "output"
+    source = run_root / "attempts" / "source-01" / "stdout.log"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"source\n")
+    output.mkdir()
+    flagged = source.parent if reparse_kind == "parent" else source
+    original = Path.lstat
+
+    def lstat(path: Path) -> object:
+        metadata = original(path)
+        if path != flagged:
+            return metadata
+        return SimpleNamespace(
+            st_mode=metadata.st_mode,
+            st_dev=metadata.st_dev,
+            st_ino=metadata.st_ino,
+            st_file_attributes=0x400,
+        )
+
+    monkeypatch.setattr(Path, "lstat", lstat)
+    with pytest.raises(
+        runner.EvidenceError, match="link, junction, or reparse point"
+    ):
+        generator._copy_provenance_artifact(
+            run_root=run_root,
+            output_dir=output,
+            relative="attempts/source-01/stdout.log",
+        )
+
+    assert not (output / "attempts/source-01/stdout.log").exists()
+
+
+def test_provenance_copy_never_overwrites_existing_destination(tmp_path: Path) -> None:
+    run_root = tmp_path / "run"
+    output = tmp_path / "output"
+    relative = "attempts/source-01/stdout.log"
+    source = run_root / relative
+    destination = output / relative
+    source.parent.mkdir(parents=True)
+    destination.parent.mkdir(parents=True)
+    source.write_bytes(b"new source bytes\n")
+    destination.write_bytes(b"existing immutable bytes\n")
+
+    with pytest.raises(runner.EvidenceError, match="destination already exists"):
+        generator._copy_provenance_artifact(
+            run_root=run_root,
+            output_dir=output,
+            relative=relative,
+        )
+
+    assert destination.read_bytes() == b"existing immutable bytes\n"
 
 
 @pytest.mark.parametrize("drift", ("argv", "cwd", "command_hash"))
@@ -447,7 +608,7 @@ def test_post_commit_verifier_rejects_extra_non_evidence_change(
         )
 
 
-def test_post_commit_verifier_accepts_direct_child_evidence_only_commit(
+def test_post_commit_verifier_accepts_direct_child_with_nested_java_raw_provenance(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     manifest_path, manifest = _green_run(tmp_path)
@@ -462,6 +623,27 @@ def test_post_commit_verifier_accepts_direct_child_evidence_only_commit(
         candidate_commit=CANDIDATE,
         changed_paths=["plans/phase-7-outcome-pilot-execution.md"],
     )
+    java_record = next(
+        item
+        for item in manifest["commands"]
+        if item["id"] == "java_phase7_entry"
+    )
+    index = json.loads(
+        (output / generator.HASH_INDEX_NAME).read_text(encoding="utf-8")
+    )
+    indexed = {item["path"]: item for item in index["artifacts"]}
+    for raw in java_record["raw_reports"]:
+        relative = raw["path"]
+        source = manifest_path.parent / relative
+        archived = output / relative
+        assert archived.is_file()
+        assert archived.parent.name == "raw-surefire"
+        assert archived.read_bytes() == source.read_bytes()
+        assert indexed[relative] == {
+            "path": relative,
+            "sha256": runner._sha256(source),
+            "bytes": source.stat().st_size,
+        }
     _bypass_candidate_authority(monkeypatch)
     prefix = f"test-reports/temporal-first/{release_id}/phase-7-entry"
     committed = {
@@ -630,3 +812,76 @@ def test_generate_is_atomic_and_rejects_output_collision(
             execution_manifest_path=manifest_path,
             output_dir=output,
         )
+
+
+def test_cli_omitted_base_uses_exact_a6_default_declared_in_help(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    parser = generator._parser()
+    help_text = parser.format_help()
+    normalized_help = " ".join(help_text.split())
+    assert "--base-commit" in help_text
+    assert "defaults to and must remain the exact accepted" in normalized_help
+    assert BASE in normalized_help
+
+    manifest = tmp_path / runner.MANIFEST_NAME
+    captured: dict[str, object] = {}
+
+    def generate(**arguments: object) -> dict[str, object]:
+        captured.update(arguments)
+        return {
+            "candidate_commit": CANDIDATE,
+            "result": "PASS_AWAITING_EVIDENCE_COMMIT",
+            "entry_decision": {
+                "engineering_execution": "BLOCKED_UNTIL_THIS_EVIDENCE_COMMIT",
+                "entry_effect_after_commit": "P7_0_ENGINEERING_ENTRY_PASS",
+                "promotion_gate": "PENDING",
+            },
+        }
+
+    monkeypatch.setattr(generator, "generate_entry_evidence", generate)
+    result = generator.main(
+        [
+            "--release-id",
+            "phase-7-entry-cli-default",
+            "--candidate-commit",
+            CANDIDATE,
+            "--execution-manifest",
+            str(manifest),
+            "--output-dir",
+            str(tmp_path / "evidence"),
+        ]
+    )
+    assert result == 0
+    assert captured["base_commit"] == BASE
+    assert captured["execution_manifest_path"] == manifest
+    assert "PASS_AWAITING_EVIDENCE_COMMIT" in capsys.readouterr().out
+
+    verified: dict[str, object] = {}
+
+    def verify(**arguments: object) -> dict[str, object]:
+        verified.update(arguments)
+        return {
+            "status": "EVIDENCE_COMMIT_VERIFIED",
+            "candidate_commit": CANDIDATE,
+        }
+
+    monkeypatch.setattr(generator, "verify_evidence_commit", verify)
+    result = generator.main(
+        [
+            "--release-id",
+            "phase-7-entry-cli-default",
+            "--candidate-commit",
+            CANDIDATE,
+            "--verify-evidence-commit",
+            EVIDENCE,
+        ]
+    )
+    assert result == 0
+    assert verified == {
+        "evidence_commit": EVIDENCE,
+        "candidate_commit": CANDIDATE,
+        "release_id": "phase-7-entry-cli-default",
+    }

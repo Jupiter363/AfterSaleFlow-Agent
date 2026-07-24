@@ -165,12 +165,13 @@ and machine schedule, and contain no Phase 7 product implementation or V045 migr
 
 1. **P7 contract candidate:** freeze only planning, contracts, engineering exception, static gates,
    closed fixtures/schemas, owner briefs, entry runner, and evidence generator.
-2. **Exact-SHA Batch 0:** run exactly four source commands from a clean detached worktree at the
-   candidate SHA. Use one Maven lane and at most two simultaneous light lanes. Do not reuse a report
-   from another SHA or attempt.
+2. **Exact-SHA Batch 0:** run exactly four source commands sequentially from a clean detached
+   worktree at the candidate SHA. The entry runner has one heavy-process ceiling because it has
+   exactly one Java source; its light-process ceiling remains two even though sequential execution
+   uses one source process at a time. Do not reuse a report from another SHA or attempt.
 3. **Separate P7 entry-evidence commit:** direct child of the candidate, containing only immutable
    generated evidence and the entry decision. Only this commit may record
-   `P7_0_ENGINEERING_ENTRY_PASS` and release owners A-E.
+   `P7_0_ENGINEERING_ENTRY_PASS` and release owners A-G.
 
 Until step 3 succeeds, the mandatory state is:
 
@@ -192,36 +193,43 @@ allowed only after classification and must retain a fresh attempt directory.
 | Step | Owner | Depends on | Deliverable and boundary |
 | --- | --- | --- | --- |
 | P7.0 | Primary, V1, V2 | accepted `C6/E6/A6` | Contract candidate, exact-SHA four-source Batch 0, separate evidence commit; no implementation before PASS |
-| P7.1 | A | P7.0 PASS | Pure deterministic Outcome Workflow kernel/protocol and replay tests; no worker registration or Activity implementation |
-| P7.2 | B | P7.0 PASS | Frozen ReviewPacket and actor-bound five-decision Java authority with idempotent receipts |
-| P7.3 | C | P7.0 PASS, B contract | Additive V045 operation/receipt/compensation/fence ledger and persistence tests |
-| P7.4 | D | P7.0 PASS, A/C contracts | Deterministic synthetic no-op execution, compensation, closure, and read-only evaluation ordering |
-| P7.5 | E-Python | P7.0 PASS, B packet contract | Private `outcome.review.v1` graph and compatibility adapter; no tools |
-| P7.6 | E-Frontend | B/D projection contracts, E-Python stable | Draft/Review/Outcome compatibility and simulated-vs-real presentation; sequential after E-Python |
-| P7.7 | Primary | A-E integrated | Shared contracts, worker/config/selector remain fail-closed, registration absent, synthetic assembly only |
-| P7.8 | R1-R3, V1-V2 | stable integrated SHA | P0 review, focused recovery/parity checks, exact-SHA engineering candidate evidence |
+| P7.1 | A | P7.0 PASS | Shared Outcome wire/protocol schemas and compatibility fixtures only; no runtime implementation |
+| P7.2 | B | P7.0 PASS, A protocol | Pure deterministic Outcome Workflow kernel and replay tests; no worker registration or Activity implementation |
+| P7.3 | C | P7.0 PASS, A protocol | Frozen ReviewPacket and actor-bound five-decision Java authority with idempotent receipts |
+| P7.4 | D | P7.0 PASS, A/C contracts | Additive V045 operation/receipt/compensation/fence ledger and persistence tests |
+| P7.5 | E | P7.0 PASS, A/B/D contracts | Deterministic synthetic no-op execution, compensation, closure, and read-only evaluation ordering |
+| P7.6 | F | P7.0 PASS, A/C packet contracts | Private `outcome.review.v1` graph and compatibility adapter; no tools |
+| P7.7 | G | P7.0 PASS, C/E projections | Draft/Review/Outcome compatibility and simulated-vs-real presentation |
+| P7.8 | Primary, R1, V1-V2 | A-G integrated | Fail-closed shared assembly, consolidated P0 review, focused recovery/parity checks, and exact-SHA evidence |
 
-The five implementation owners have disjoint write domains. Owner E has two sequential subscopes;
-the Python and frontend scopes must not be delegated to concurrent writers under the same owner.
-The primary alone owns shared worker/config/selector/registry/router/integration files.
+The seven implementation owners have disjoint write domains. Protocol, Python, and frontend work
+are independent owners rather than sequential subscopes of one writer. The primary alone owns
+global worker/config/selector/registry/router/integration files.
 
 ## Owner Topology
 
-- **A - Temporal Outcome kernel/protocol:** `workflow/temporal/room/outcome/**` and its tests only.
-- **B - Java human review authority:** review API/application/domain and focused unit tests; no
+- **A - shared Outcome wire/protocol contracts:** new Outcome contract types, closed schemas, and
+  fixtures only; no workflow, service, persistence, Graph, UI, or runtime registration.
+- **B - Temporal Outcome kernel:** `workflow/temporal/room/outcome/**` and its tests only.
+- **C - Java human review authority:** review API/application/domain and focused unit tests; no
   persistence migration, tool execution, Workflow, Python, or frontend.
-- **C - V045 persistence ledger:** migration plus isolated execution-ledger domain/persistence and
+- **D - V045 persistence ledger:** migration plus isolated execution-ledger domain/persistence and
   database contract tests; no service/controller/workflow/tool implementation.
-- **D - Synthetic execution/closure/evaluation:** deterministic no-op tool Activities, outcome and
+- **E - Synthetic execution/closure/evaluation:** deterministic no-op tool Activities, outcome and
   evaluation application behavior, and focused tests; no migration/review/Graph/frontend.
-- **E - Graph then frontend compatibility:** first private Python outcome graph, then Vue/API/store
-  compatibility after published Java projection contracts.
-- **Primary - integration:** shared protocol schemas, Temporal worker/config/selector, graph
-  registry/main, Vue router, application configuration, candidate/evidence tooling, and final merge.
+- **F - private Outcome Graph:** Python `outcome/review.v1`, governed LCEL, compatibility adapter,
+  and focused Python tests only.
+- **G - frontend compatibility:** Vue Draft/Review/Outcome views, review API/store, and focused
+  frontend tests only.
+- **Primary - integration:** Temporal worker/config/selector, Graph registry/main, Vue router,
+  application configuration, candidate/evidence tooling, and final merge.
 
-Support lanes are read-only unless the primary explicitly transfers an unowned fix: three P0 review
-lanes, two verification lanes, and one lookahead lane. Only the primary owns the Maven/Testcontainers
-token. At most two light test processes may run simultaneously.
+Support lanes are read-only unless the primary explicitly transfers an unowned fix: exactly one
+consolidated P0 review lane, two verification lanes, and one lookahead lane. During Phase 7
+implementation the primary controls a combined ceiling of two Maven/Testcontainers/heavy processes
+and two light processes. Roles activate only when a stable diff or runnable shard exists; they are
+logical responsibilities, not permanently occupied agent slots. Batch 0 is the narrower sequential
+exception described above and never uses more than one heavy process.
 
 ## Batched Verification
 

@@ -4,12 +4,14 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
-from pathlib import Path, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Sequence
 
 try:
@@ -179,6 +181,159 @@ def _indexed_names(manifest: dict[str, Any]) -> list[str]:
         METRICS_NAME,
         *_provenance_paths(manifest),
     ]
+
+
+def _copy_provenance_artifact(
+    *, run_root: Path, output_dir: Path, relative: str
+) -> None:
+    normalized = relative.replace("\\", "/")
+    lexical = PurePosixPath(normalized)
+    if (
+        not normalized
+        or lexical.is_absolute()
+        or lexical.anchor
+        or any(part in {"", ".", ".."} or ":" in part for part in lexical.parts)
+    ):
+        raise runner.EvidenceError(
+            f"execution provenance path is not a safe lexical relative path: {relative}"
+        )
+
+    def lstat_no_reparse(path: Path, *, context: str) -> os.stat_result:
+        try:
+            metadata = path.lstat()
+        except OSError as exception:
+            raise runner.EvidenceError(f"cannot lstat {context} {path}: {exception}") from exception
+        attributes = int(getattr(metadata, "st_file_attributes", 0))
+        reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+        junction_check = getattr(path, "is_junction", None)
+        try:
+            junction = bool(junction_check()) if callable(junction_check) else False
+        except OSError as exception:
+            raise runner.EvidenceError(
+                f"cannot authenticate junction state for {context} {path}: {exception}"
+            ) from exception
+        if stat.S_ISLNK(metadata.st_mode) or junction or attributes & reparse_flag:
+            raise runner.EvidenceError(f"{context} is a link, junction, or reparse point: {path}")
+        return metadata
+
+    source_root_lexical = run_root.absolute()
+    source_root_metadata = lstat_no_reparse(
+        source_root_lexical, context="provenance source root"
+    )
+    if not stat.S_ISDIR(source_root_metadata.st_mode):
+        raise runner.EvidenceError("execution provenance source root is not a directory")
+    source_root = source_root_lexical.resolve(strict=True)
+    source_lexical = source_root_lexical
+    for part in lexical.parts[:-1]:
+        source_lexical /= part
+        metadata = lstat_no_reparse(source_lexical, context="provenance source parent")
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise runner.EvidenceError(
+                f"execution provenance source parent is not a directory: {source_lexical}"
+            )
+    source_lexical /= lexical.parts[-1]
+    source_metadata = lstat_no_reparse(
+        source_lexical, context="provenance source artifact"
+    )
+    if not stat.S_ISREG(source_metadata.st_mode):
+        raise runner.EvidenceError(
+            f"execution provenance source is not a regular file: {relative}"
+        )
+    source = source_lexical.resolve(strict=True)
+    if not source.is_relative_to(source_root):
+        raise runner.EvidenceError(f"execution provenance source escapes run root: {relative}")
+
+    destination_root_lexical = output_dir.absolute()
+    destination_root_metadata = lstat_no_reparse(
+        destination_root_lexical, context="provenance destination root"
+    )
+    if not stat.S_ISDIR(destination_root_metadata.st_mode):
+        raise runner.EvidenceError("execution provenance destination root is not a directory")
+    destination_root = destination_root_lexical.resolve(strict=True)
+    destination_parent = destination_root_lexical
+    for part in lexical.parts[:-1]:
+        destination_parent /= part
+        try:
+            destination_parent.mkdir()
+        except FileExistsError:
+            pass
+        metadata = lstat_no_reparse(
+            destination_parent, context="provenance destination parent"
+        )
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise runner.EvidenceError(
+                f"execution provenance destination parent is not a directory: {destination_parent}"
+            )
+    if not destination_parent.resolve(strict=True).is_relative_to(destination_root):
+        raise runner.EvidenceError(
+            f"execution provenance destination parent escapes output root: {relative}"
+        )
+    destination = destination_parent / lexical.parts[-1]
+    try:
+        destination.lstat()
+    except FileNotFoundError:
+        pass
+    except OSError as exception:
+        raise runner.EvidenceError(
+            f"cannot authenticate provenance destination {relative}: {exception}"
+        ) from exception
+    else:
+        raise runner.EvidenceError(
+            f"execution provenance destination already exists: {relative}"
+        )
+
+    read_flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    write_flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        source_descriptor = os.open(source_lexical, read_flags)
+    except OSError as exception:
+        raise runner.EvidenceError(
+            f"cannot open provenance source without following links {relative}: {exception}"
+        ) from exception
+    try:
+        opened_source = os.fstat(source_descriptor)
+        if (
+            not stat.S_ISREG(opened_source.st_mode)
+            or (opened_source.st_dev, opened_source.st_ino)
+            != (source_metadata.st_dev, source_metadata.st_ino)
+        ):
+            raise runner.EvidenceError(
+                f"execution provenance source changed during authentication: {relative}"
+            )
+        try:
+            destination_descriptor = os.open(destination, write_flags, 0o600)
+        except OSError as exception:
+            raise runner.EvidenceError(
+                f"cannot exclusively create provenance destination {relative}: {exception}"
+            ) from exception
+        try:
+            opened_destination = os.fstat(destination_descriptor)
+            if not stat.S_ISREG(opened_destination.st_mode):
+                raise runner.EvidenceError(
+                    f"execution provenance destination is not regular: {relative}"
+                )
+            with os.fdopen(source_descriptor, "rb", closefd=False) as source_stream:
+                with os.fdopen(destination_descriptor, "wb", closefd=False) as destination_stream:
+                    shutil.copyfileobj(source_stream, destination_stream, length=1024 * 1024)
+                    destination_stream.flush()
+                    os.fsync(destination_descriptor)
+        finally:
+            os.close(destination_descriptor)
+    finally:
+        os.close(source_descriptor)
+    destination_metadata = lstat_no_reparse(
+        destination, context="provenance destination artifact"
+    )
+    if not stat.S_ISREG(destination_metadata.st_mode):
+        raise runner.EvidenceError(
+            f"execution provenance destination is not a regular file: {relative}"
+        )
 
 
 def load_green_manifest(
@@ -391,10 +546,11 @@ def assemble_entry_evidence(
             raise runner.EvidenceError(f"accepted report {record['report']} drifted")
         shutil.copyfile(source, output_dir / record["report"])
     for relative in _provenance_paths(manifest):
-        source = run_root / relative
-        destination = output_dir / relative
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, destination)
+        _copy_provenance_artifact(
+            run_root=run_root,
+            output_dir=output_dir,
+            relative=relative,
+        )
 
     source_suites, totals = _source_metrics(manifest, output_dir)
     metrics = {
@@ -1257,7 +1413,14 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--release-id", required=True, type=_release_id)
     parser.add_argument("--candidate-commit", required=True)
-    parser.add_argument("--base-commit")
+    parser.add_argument(
+        "--base-commit",
+        default=runner.PHASE6_ACCEPTANCE_COMMIT,
+        help=(
+            "Phase 7 contract base; defaults to and must remain the exact accepted "
+            f"A6 {runner.PHASE6_ACCEPTANCE_COMMIT}."
+        ),
+    )
     parser.add_argument("--execution-manifest", type=Path)
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument(
@@ -1274,7 +1437,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     try:
         if arguments.verify_evidence_commit:
-            if arguments.base_commit or arguments.execution_manifest or arguments.output_dir:
+            if (
+                arguments.base_commit != runner.PHASE6_ACCEPTANCE_COMMIT
+                or arguments.execution_manifest
+                or arguments.output_dir
+            ):
                 raise runner.EvidenceError(
                     "--verify-evidence-commit cannot be combined with generation arguments"
                 )
@@ -1285,9 +1452,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             print(json.dumps(verification, sort_keys=True))
             return 0
-        if not arguments.base_commit or arguments.execution_manifest is None:
+        if arguments.execution_manifest is None:
             raise runner.EvidenceError(
-                "generation requires --base-commit and --execution-manifest"
+                "generation requires --execution-manifest"
             )
     except (runner.EvidenceError, OSError, KeyError, TypeError, ValueError) as exception:
         print(f"Phase 7 entry evidence rejected: {exception}", file=sys.stderr)
