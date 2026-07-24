@@ -1,0 +1,8 @@
+<?xml version='1.0' encoding='utf-8'?>
+<testsuites name="python-phase7-entry" tests="3" failures="0" errors="0" skipped="0" time="0.033" candidate_commit="0aa260f722fced0eba4314bd4793e415b5bf0b05" source_command_id="python_phase7_entry">
+  <testsuite name="pytest" source_report="python-phase7-entry.xml" tests="3" failures="0" errors="0" skipped="0" time="0.033">
+    <testcase classname="tests.test_evaluation" name="test_closed_case_evaluation_reports_deterministic_approval_metrics" time="0.020" />
+    <testcase classname="tests.test_evaluation" name="test_evaluation_prompt_is_offline_read_only_and_cannot_mutate_rules" time="0.011" />
+    <testcase classname="tests.test_evaluation" name="test_evaluation_schema_rejects_any_online_case_state" time="0.002" />
+  </testsuite>
+</testsuites>

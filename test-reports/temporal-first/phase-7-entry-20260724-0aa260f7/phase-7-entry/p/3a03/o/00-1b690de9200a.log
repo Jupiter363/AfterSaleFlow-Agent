@@ -1,0 +1,17 @@
+
+[1m[7m[36m RUN [39m[27m[22m [36mv3.0.8 [39m[90mD:/学习/Project/AfterSaleFlow-Agent/.worktrees/p6-hearing-entry/frontend[39m
+
+ [32m✓[39m src/api/review.test.js [2m([22m[2m3 tests[22m[2m)[22m[90m 14[2mms[22m[39m
+ [32m✓[39m src/views/reviews/ReviewQueueView.test.js [2m([22m[2m2 tests[22m[2m)[22m[90m 82[2mms[22m[39m
+ [32m✓[39m src/views/disputes/OutcomeView.test.js [2m([22m[2m9 tests[22m[2m)[22m[90m 163[2mms[22m[39m
+ [32m✓[39m src/views/disputes/AdjudicationDraftView.test.js [2m([22m[2m14 tests[22m[2m)[22m[33m 350[2mms[22m[39m
+ [32m✓[39m src/views/reviews/ReviewWorkbenchView.test.js [2m([22m[2m12 tests[22m[2m)[22m[33m 919[2mms[22m[39m
+   [33m[2m✓[22m[39m ReviewWorkbenchView[2m > [22mstreams the reviewer copilot answer through the shared AgentRun component [33m403[2mms[22m[39m
+ [32m✓[39m src/views/ReviewWorkbenchView.test.js [2m([22m[2m1 test[22m[2m)[22m[90m 165[2mms[22m[39m
+
+[2m Test Files [22m [1m[32m6 passed[39m[22m[90m (6)[39m
+[2m      Tests [22m [1m[32m41 passed[39m[22m[90m (41)[39m
+[2m   Start at [22m 18:43:45
+[2m   Duration [22m 6.57s[2m (transform 1.44s, setup 0ms, collect 7.71s, tests 1.69s, environment 11.73s, prepare 2.56s)[22m
+
+JUNIT report written to D:/学习/Project/AfterSaleFlow-Agent/.worktrees/p6-hearing-entry/.codex-run/phase7-entry-20260724-0aa260f7/attempts/frontend_phase7_entry-01/raw-junit.xml

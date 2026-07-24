@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites name="vitest tests" tests="41" failures="0" errors="0" time="1.6926205">
+    <testsuite name="src/api/review.test.js" timestamp="2026-07-24T10:43:52.449Z" hostname="LAPTOP-VJM9RQM6" tests="3" failures="0" errors="0" skipped="0" time="0.0141756">
+        <testcase classname="src/api/review.test.js" name="reviewApi &gt; sends reviewer identity and a purpose-scoped idempotency key" time="0.0084465">
+        </testcase>
+        <testcase classname="src/api/review.test.js" name="reviewApi &gt; starts terminal review through the durable room-transition endpoint" time="0.0013459">
+        </testcase>
+        <testcase classname="src/api/review.test.js" name="reviewApi &gt; shows a readable fallback when the backend omits an error message" time="0.0027142">
+        </testcase>
+    </testsuite>
+    <testsuite name="src/views/ReviewWorkbenchView.test.js" timestamp="2026-07-24T10:43:52.452Z" hostname="LAPTOP-VJM9RQM6" tests="1" failures="0" errors="0" skipped="0" time="0.1647827">
+        <testcase classname="src/views/ReviewWorkbenchView.test.js" name="ReviewWorkbenchView &gt; requires explicit confirmation before submitting a reviewer decision" time="0.1637861">
+        </testcase>
+    </testsuite>
+    <testsuite name="src/views/disputes/AdjudicationDraftView.test.js" timestamp="2026-07-24T10:43:52.452Z" hostname="LAPTOP-VJM9RQM6" tests="14" failures="0" errors="0" skipped="0" time="0.3495421">
+        <testcase classname="src/views/disputes/AdjudicationDraftView.test.js" name="AdjudicationDraftView &gt; uses the shared room header, judge card and fixed dossier height" time="0.0926025">
+        </testcase>
+        <testcase classname="src/views/disputes/AdjudicationDraftView.test.js" name="AdjudicationDraftView &gt; matches the agent-card width and keeps both scroll ends inside the frame" time="0.0285617">
+        </testcase>
+        <testcase classname="src/views/disputes/AdjudicationDraftView.test.js" name="AdjudicationDraftView &gt; uses the parchment directly without an outer card surface" time="0.0275489">
+        </testcase>
+        <testcase classname="src/views/disputes/AdjudicationDraftView.test.js" name="AdjudicationDraftView &gt; maps the judge output into conclusion, issue, evidence, policy and review sections" time="0.0268484">
+        </testcase>
+        <testcase classname="src/views/disputes/AdjudicationDraftView.test.js" name="AdjudicationDraftView &gt; maps the complete V2 remedy payload into one continuous document" time="0.0267277">
+        </testcase>
+        <testcase classname="src/views/disputes/AdjudicationDraftView.test.js" name="AdjudicationDraftView &gt; keeps historical string-only V2 sections readable" time="0.0232348">
+        </testcase>
+        <testcase classname="src/views/disputes/AdjudicationDraftView.test.js" name="AdjudicationDraftView &gt; renders an explicit evidence gap without inventing an evidence id" time="0.0131703">
+        </testcase>
+        <testcase classname="src/views/disputes/AdjudicationDraftView.test.js" name="AdjudicationDraftView &gt; keeps a fixed dossier with internal scroll areas and the boundary at the bottom" time="0.0145587">
+        </testcase>
+        <testcase classname="src/views/disputes/AdjudicationDraftView.test.js" name="AdjudicationDraftView &gt; shows the same read-only hearing draft to USER" time="0.0120393">
+        </testcase>
+        <testcase classname="src/views/disputes/AdjudicationDraftView.test.js" name="AdjudicationDraftView &gt; shows the same read-only hearing draft to MERCHANT" time="0.0193287">
+        </testcase>
+        <testcase classname="src/views/disputes/AdjudicationDraftView.test.js" name="AdjudicationDraftView &gt; shows the same read-only hearing draft to PLATFORM_REVIEWER" time="0.0130316">
+        </testcase>
+        <testcase classname="src/views/disputes/AdjudicationDraftView.test.js" name="AdjudicationDraftView &gt; starts terminal review only when the platform reviewer clicks the handoff" time="0.0276942">
+        </testcase>
+        <testcase classname="src/views/disputes/AdjudicationDraftView.test.js" name="AdjudicationDraftView &gt; does not show the terminal-review handoff to either party" time="0.0111288">
+        </testcase>
+        <testcase classname="src/views/disputes/AdjudicationDraftView.test.js" name="AdjudicationDraftView &gt; keeps a historical draft read-only even for the platform reviewer" time="0.0115452">
+        </testcase>
+    </testsuite>
+    <testsuite name="src/views/disputes/OutcomeView.test.js" timestamp="2026-07-24T10:43:52.457Z" hostname="LAPTOP-VJM9RQM6" tests="9" failures="0" errors="0" skipped="0" time="0.1628883">
+        <testcase classname="src/views/disputes/OutcomeView.test.js" name="OutcomeView &gt; uses the shared room header for the read-only execution result page" time="0.0595482">
+        </testcase>
+        <testcase classname="src/views/disputes/OutcomeView.test.js" name="OutcomeView &gt; shows the V2 hearing adjudication and its actual draft version" time="0.0142903">
+        </testcase>
+        <testcase classname="src/views/disputes/OutcomeView.test.js" name="OutcomeView &gt; shows the administrator review opinion without exposing review operations" time="0.0137706">
+        </testcase>
+        <testcase classname="src/views/disputes/OutcomeView.test.js" name="OutcomeView &gt; derives the approved plan type and description from an action-only plan" time="0.0140841">
+        </testcase>
+        <testcase classname="src/views/disputes/OutcomeView.test.js" name="OutcomeView &gt; supports the handling direction and natural-language execution plan contract" time="0.0070702">
+        </testcase>
+        <testcase classname="src/views/disputes/OutcomeView.test.js" name="OutcomeView &gt; animates a frontend mock execution when no real action receipt exists" time="0.0304806">
+        </testcase>
+        <testcase classname="src/views/disputes/OutcomeView.test.js" name="OutcomeView &gt; keeps structured real execution receipts when actions are available" time="0.0100395">
+        </testcase>
+        <testcase classname="src/views/disputes/OutcomeView.test.js" name="OutcomeView &gt; does not treat a rejected human review as an approved final result" time="0.0060993">
+        </testcase>
+        <testcase classname="src/views/disputes/OutcomeView.test.js" name="OutcomeView &gt; keeps every result section behind the approved-result boundary" time="0.005653">
+        </testcase>
+    </testsuite>
+    <testsuite name="src/views/reviews/ReviewQueueView.test.js" timestamp="2026-07-24T10:43:52.460Z" hostname="LAPTOP-VJM9RQM6" tests="2" failures="0" errors="0" skipped="0" time="0.0824989">
+        <testcase classname="src/views/reviews/ReviewQueueView.test.js" name="ReviewQueueView &gt; turns frozen review tasks into a lightweight reviewer launchpad" time="0.0667232">
+        </testcase>
+        <testcase classname="src/views/reviews/ReviewQueueView.test.js" name="ReviewQueueView &gt; loads pending and in-review tasks so a reviewer can re-enter active work" time="0.0139987">
+        </testcase>
+    </testsuite>
+    <testsuite name="src/views/reviews/ReviewWorkbenchView.test.js" timestamp="2026-07-24T10:43:52.461Z" hostname="LAPTOP-VJM9RQM6" tests="12" failures="0" errors="0" skipped="0" time="0.9187329">
+        <testcase classname="src/views/reviews/ReviewWorkbenchView.test.js" name="ReviewWorkbenchView &gt; locks copilot and decision controls when reopening historical review" time="0.1404368">
+        </testcase>
+        <testcase classname="src/views/reviews/ReviewWorkbenchView.test.js" name="ReviewWorkbenchView &gt; clears an open decision confirmation when the active view becomes historical" time="0.0612155">
+        </testcase>
+        <testcase classname="src/views/reviews/ReviewWorkbenchView.test.js" name="ReviewWorkbenchView &gt; shows the frozen packet, review copilot and human-only controls" time="0.0648727">
+        </testcase>
+        <testcase classname="src/views/reviews/ReviewWorkbenchView.test.js" name="ReviewWorkbenchView &gt; maps uppercase business fields throughout the readable review workspace" time="0.0394687">
+        </testcase>
+        <testcase classname="src/views/reviews/ReviewWorkbenchView.test.js" name="ReviewWorkbenchView &gt; renders backend snake_case remedy actions as concrete execution work" time="0.0191871">
+        </testcase>
+        <testcase classname="src/views/reviews/ReviewWorkbenchView.test.js" name="ReviewWorkbenchView &gt; renders backend snake_case adjudication draft fields instead of waiting copy" time="0.0182289">
+        </testcase>
+        <testcase classname="src/views/reviews/ReviewWorkbenchView.test.js" name="ReviewWorkbenchView &gt; unwraps and renders the frozen hearing_flow.v2 adjudication artifact" time="0.0259077">
+        </testcase>
+        <testcase classname="src/views/reviews/ReviewWorkbenchView.test.js" name="ReviewWorkbenchView &gt; requires a reason and explicit second confirmation before a final decision" time="0.0398486">
+        </testcase>
+        <testcase classname="src/views/reviews/ReviewWorkbenchView.test.js" name="ReviewWorkbenchView &gt; requires a real execution-plan change before modify and approve" time="0.0623476">
+        </testcase>
+        <testcase classname="src/views/reviews/ReviewWorkbenchView.test.js" name="ReviewWorkbenchView &gt; renders nested intake and evidence fields without exposing raw schema keys" time="0.0288131">
+        </testcase>
+        <testcase classname="src/views/reviews/ReviewWorkbenchView.test.js" name="ReviewWorkbenchView &gt; never exposes final decision controls before the packet is frozen" time="0.0142555">
+        </testcase>
+        <testcase classname="src/views/reviews/ReviewWorkbenchView.test.js" name="ReviewWorkbenchView &gt; streams the reviewer copilot answer through the shared AgentRun component" time="0.4026949">
+        </testcase>
+    </testsuite>
+</testsuites>
