@@ -12,24 +12,24 @@ When the collaboration runtime has capacity, use one primary agent and eleven de
 
 | Role | Logical slots | Responsibility |
 | --- | ---: | --- |
-| Implementation owners | 5 | Make disjoint, concrete implementation changes and focused checks. |
-| In-flight P0 review lanes | 3 | Independently inspect active high-risk changes before commit or integration. |
-| Verification lanes | 2 | Run light test shards; one role also brokers the single Maven/Testcontainers lane and evidence. |
+| Implementation owners | 7 | Make disjoint, concrete implementation changes and focused checks. |
+| In-flight P0 review lanes | 1 | Independently inspect active high-risk changes before commit or integration. |
+| Verification lanes | 2 | Run light test shards and broker up to two isolated Maven/Testcontainers lanes and evidence. |
 | Lookahead lane | 1 | Read-only inventory, dependency mapping, next-wave brief preparation, and risk discovery. |
 
-The topology is logical ownership, not a requirement to sample eleven models at once. A constrained runtime must keep all five implementation ownership domains and schedule them in waves as slots release. Do not collapse owners into an unbounded generalist role merely because the active-agent limit is lower.
+The topology is logical ownership, not a requirement to sample eleven models at once. A constrained runtime must keep all seven implementation ownership domains and schedule them in waves as slots release. Do not collapse owners into an unbounded generalist role merely because the active-agent limit is lower.
 
 ## Active-resource limits and launch order
 
 Use the following resource budget unless a stricter runtime or task constraint applies:
 
-- Limit simultaneous model sampling to 6-8 agents, including review, verification, and lookahead work.
+- Activate up to all eleven delegated roles when dependencies and host capacity make them useful; do not keep idle roles running merely to fill slots.
 - Limit light test execution to two processes.
-- Reserve one process for Maven/Testcontainers. It is a serialized lane and is brokered by one verification role.
+- Allow at most two Maven/Testcontainers processes, one brokered by each verification role. Concurrent heavy processes must use isolated worktrees, build output, report suffixes, containers, networks, and dynamically allocated ports; otherwise serialize them.
 - Keep the primary as the sole mainline integrator. Integration, shared-file resolution, and final evidence assembly are not delegated concurrently.
 - Stagger delegated starts by 10-20 seconds, then backfill released slots from the queued logical roles.
 
-The primary starts enough implementation owners to establish progress, then fills review, verification, and lookahead roles without violating the resource budget. Reviews should inspect a stable patch, worktree, commit candidate, or explicitly shared diff rather than edit the same file as an implementation owner.
+The primary starts enough implementation owners to establish progress, then fills the single review lane, verification lanes, and lookahead role without violating the resource budget. Review should inspect a stable patch, worktree, commit candidate, or explicitly shared diff rather than edit the same file as an implementation owner.
 
 ## Adaptive model matrix
 
@@ -59,7 +59,7 @@ Agents must preserve unrelated changes and must not reset, overwrite, or stage p
 
 P0 includes security, authorization, data integrity, transactionality, Temporal ordering or race behavior, irreversible migration behavior, contractual compatibility, and other defects that can cause production loss or a gate failure.
 
-Keep at least 50% of the planned P0 review capacity in flight while implementation is active. In the target topology, this means at least two review lanes are active or queued against stable P0 candidates once P0 implementation begins; the third lane covers final or independent adversarial inspection. Start an in-flight review when an owner has a reviewable diff, rather than waiting for all implementation to finish.
+Keep the single planned P0 review lane active or queued against a stable P0-sensitive candidate while implementation is active. Start review when an owner has a reviewable diff, rather than waiting for all implementation to finish. Reuse the same lane sequentially for independent or final adversarial inspection; do not create concurrent review lanes.
 
 Post-commit review is reserved for P0 concerns. Routine correctness, style, and test feedback must be handled before commit or during integration. A final P0 review uses `sol` `xhigh` when available and examines the integrated candidate, relevant tests, and evidence before promotion past the applicable gate.
 
@@ -74,11 +74,11 @@ On a 429, 503, timeout, or usage-limit failure:
 3. Use the nearest available model class from the matrix, retaining the same acceptance criteria and P0 review requirements.
 4. Integrate only reviewed, attributable changes. The primary decides whether to continue from the preserved diff or restart that narrow role.
 
-When capacity is below the target topology, retain the five logical implementation owners, queue the remaining roles, and reuse slots immediately as work completes. Under pressure, defer lookahead first, then non-P0 in-flight review; do not defer required verification, Maven/Testcontainers serialization, or P0 review.
+When capacity is below the target topology, retain the seven logical implementation owners, queue the remaining roles, and reuse slots immediately as work completes. Under pressure, defer lookahead first; do not defer required verification, Maven/Testcontainers isolation/serialization, or the single P0 review lane.
 
 ## Verification scheduling
 
-Use focused static checks and focused tests while each owner edits. The two light verification lanes may run independent test shards, but never start more than two light test processes together. The Maven/Testcontainers broker serializes that work in its one reserved process and captures the relevant evidence.
+Use focused static checks and focused tests while each owner edits. The two light verification lanes may run independent test shards, but never start more than two light test processes together. The two verification owners may each broker one Maven/Testcontainers process and capture attributable evidence. If the heavy shards share a worktree, build directory, fixed port, database, container, or report path, they must run serially instead.
 
 Batch expensive Maven, Testcontainers, cross-service, full regression, end-to-end, and browser verification at the agreed unified checkpoint, unless the user explicitly requests it or a stricter phase gate requires it earlier. Do not run a full regression suite or end-to-end flow after each individual task. The primary records the candidate SHA, commands, results, failures, and rerun decisions needed by the applicable phase plan.
 
