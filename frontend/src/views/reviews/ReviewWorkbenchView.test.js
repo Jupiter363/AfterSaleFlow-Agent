@@ -371,6 +371,7 @@ describe("ReviewWorkbenchView", () => {
       decision: "APPROVE",
       reason: "证据链与规则适用均已核验",
       approved_plan: null,
+      confirmed: true,
     });
     expect(wrapper.text()).toContain("终审决定已提交");
   });
@@ -403,6 +404,7 @@ describe("ReviewWorkbenchView", () => {
       decision: "MODIFY_AND_APPROVE",
       reason: "金额需要按责任比例调整",
       approved_plan: changedPlan,
+      confirmed: true,
     });
   });
 
@@ -507,6 +509,60 @@ describe("ReviewWorkbenchView", () => {
 
     expect(wrapper.find("[data-review-decisions]").exists()).toBe(false);
     expect(wrapper.text()).toContain("冻结审核包生成前仅可只读旁观");
+  });
+
+  it.each([
+    {
+      name: "non reviewer",
+      overrides: { viewerRole: "MERCHANT" },
+      message: "当前角色只能查看",
+    },
+    {
+      name: "another assigned reviewer",
+      overrides: {
+        initialPacket: { ...packet, assigned_reviewer_id: "reviewer-else" },
+      },
+      message: "另一名平台审核员",
+    },
+    {
+      name: "expired packet",
+      overrides: {
+        initialPacket: { ...packet, expires_at: "2026-07-03T11:59:59+08:00" },
+      },
+      message: "超过有效期",
+    },
+    {
+      name: "closed task",
+      overrides: {
+        initialPacket: { ...packet, review_task_status: "APPROVED" },
+      },
+      message: "离开可办理队列",
+    },
+  ])("keeps decisions read-only for $name", async ({ overrides, message }) => {
+    const { wrapper } = await mountView(overrides);
+
+    expect(wrapper.find("[data-review-decisions]").exists()).toBe(false);
+    expect(wrapper.text()).toContain(message);
+  });
+
+  it("accepts the additive structured packet and task projection", async () => {
+    const { wrapper } = await mountView({
+      initialPacket: {
+        review_packet: {
+          ...packet,
+          packetId: "PACKET_STRUCTURED",
+          packet_version: undefined,
+          packetVersion: 5,
+          contentHash: "a".repeat(64),
+          status: "FROZEN",
+        },
+        reviewTaskStatus: "IN_REVIEW",
+      },
+    });
+
+    expect(wrapper.get("[data-packet-status]").text()).toBe("已冻结");
+    expect(wrapper.text()).toContain("冻结审核包 v5");
+    expect(wrapper.findAll("[data-decision]")).toHaveLength(5);
   });
 
   // 业务位置：【前端审核工作台】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 冻结审核包、Agent 建议和履约动作 正确进入 审核员批准、修改、补证或人工交接。上游：冻结审核包、Agent 建议和履约动作。下游：审核员批准、修改、补证或人工交接。边界：决定必须显式由有权限审核员提交。

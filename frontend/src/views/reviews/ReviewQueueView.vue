@@ -6,7 +6,12 @@
 <script setup>
 import { onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
-import { reviewApi } from "../../api/review";
+import {
+  ACTIVE_REVIEW_STATUSES,
+  mergeActiveReviewTasks,
+  reviewApi,
+  toReviewTaskSummary,
+} from "../../api/review";
 import { actor } from "../../state/actor";
 
 const props = defineProps({
@@ -14,10 +19,12 @@ const props = defineProps({
 });
 
 const router = useRouter();
-const tasks = ref(props.initialTasks || []);
+const tasks = ref(mergeActiveReviewTasks([props.initialTasks || []]));
 const loading = ref(false);
 const error = ref("");
-const activeReviewStatuses = ["PENDING", "IN_REVIEW"];
+const activeReviewStatuses = ACTIVE_REVIEW_STATUSES.filter(
+  (status) => status !== "ASSIGNED",
+);
 const priorityLabels = {
   URGENT: "急件",
   HIGH: "高优先",
@@ -43,9 +50,7 @@ async function load() {
     const taskGroups = await Promise.all(
       activeReviewStatuses.map((status) => reviewApi.list(actor, status)),
     );
-    tasks.value = Array.from(
-      new Map(taskGroups.flat().map((task) => [task.id, task])).values(),
-    );
+    tasks.value = mergeActiveReviewTasks(taskGroups);
   } catch (failure) {
     error.value = failure.message;
   } finally {

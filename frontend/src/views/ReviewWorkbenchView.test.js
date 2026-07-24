@@ -9,6 +9,9 @@ import { actor } from "../state/actor";
 import ReviewWorkbenchView from "./ReviewWorkbenchView.vue";
 
 vi.mock("../api/review", () => ({
+  mergeActiveReviewTasks: (groups) =>
+    Array.from(new Map(groups.flat().map((task) => [task.id, task])).values()),
+  normalizeReviewPacket: (value) => value,
   reviewApi: {
     list: vi.fn(),
     packet: vi.fn(),

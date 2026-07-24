@@ -167,6 +167,7 @@ describe("OutcomeView", () => {
     });
 
     const execution = wrapper.get("[data-outcome-execution]");
+    expect(execution.attributes("data-execution-mode")).toBe("SIMULATED");
     expect(execution.find("[data-mock-execution]").exists()).toBe(true);
     expect(execution.text()).toContain("方案下发");
     expect(execution.text()).not.toContain("模拟执行完成");
@@ -184,6 +185,7 @@ describe("OutcomeView", () => {
 
     expect(execution.text()).toContain("模拟执行完成");
     expect(wrapper.find("[data-execution-receipt]").exists()).toBe(false);
+    expect(wrapper.get("[data-outcome-closure]").text()).toContain("尚未确认结案");
   });
 
   it("keeps structured real execution receipts when actions are available", async () => {
@@ -211,6 +213,7 @@ describe("OutcomeView", () => {
 
     const execution = wrapper.get("[data-outcome-execution]");
     const receipt = execution.get("[data-execution-receipt]");
+    expect(execution.attributes("data-execution-mode")).toBe("REAL");
     expect(execution.find("[data-mock-execution]").exists()).toBe(false);
     expect(receipt.text()).toContain("RESHIP-20260703-1");
     expect(receipt.text()).toContain("warehouse_tool");
@@ -218,6 +221,84 @@ describe("OutcomeView", () => {
     expect(receipt.find("pre").exists()).toBe(false);
     expect(receipt.text()).not.toContain('"response"');
     expect(receipt.text()).not.toContain("{");
+  });
+
+  it("renders a zero-effect synthetic projection as simulated and never as closure", async () => {
+    const wrapper = await mountOutcome({
+      ...approvedOutcome,
+      case_status: "APPROVED_FOR_EXECUTION",
+      closed_at: null,
+      actions: [],
+      execution: {
+        mode: "SIMULATED",
+        status: "OBSERVED_NO_EFFECT",
+        actions: [],
+        receipts: [{
+          operation_id: "OP_SYNTHETIC_1",
+          request_hash: "a".repeat(64),
+          receipt_hash: "b".repeat(64),
+        }],
+        synthetic_only: true,
+        formal_receipt_present: false,
+      },
+      closure: { status: "NOT_CLOSURE_ELIGIBLE", closed_at: null },
+    });
+
+    const execution = wrapper.get("[data-outcome-execution]");
+    expect(execution.attributes("data-execution-mode")).toBe("SIMULATED");
+    expect(execution.get("[data-execution-mode-label]").text()).toContain("不是正式回执");
+    expect(execution.get("[data-synthetic-receipt-state]").text()).toContain("1 条零影响观察记录");
+    expect(execution.find("[data-execution-receipt]").exists()).toBe(false);
+    expect(wrapper.get("[data-outcome-closure]").attributes("data-closure-status"))
+      .toBe("NOT_CLOSURE_ELIGIBLE");
+    expect(wrapper.get("[data-outcome-closure]").text()).toContain("尚未确认结案");
+    expect(wrapper.text()).not.toContain("案件已结案");
+  });
+
+  it("shows explicit NONE without starting the mock animation", async () => {
+    const wrapper = await mountOutcome({
+      ...approvedOutcome,
+      actions: [],
+      execution: { mode: "NONE", status: "NOT_APPLICABLE" },
+      closure: { status: "OPEN", closed_at: null },
+    });
+
+    const execution = wrapper.get("[data-outcome-execution]");
+    expect(execution.attributes("data-execution-mode")).toBe("NONE");
+    expect(execution.find("[data-mock-execution]").exists()).toBe(false);
+    expect(execution.get("[data-no-execution]").text()).toContain("不会用动画或模型文本推断执行成功");
+  });
+
+  it("keeps a real failed receipt visible and never covers it with animation", async () => {
+    const wrapper = await mountOutcome({
+      ...approvedOutcome,
+      case_status: "APPROVED_FOR_EXECUTION",
+      closed_at: null,
+      actions: [],
+      execution: {
+        mode: "REAL",
+        status: "FAILED",
+        failure_code: "TOOL_REJECTED",
+        failure_message: "退款通道拒绝请求",
+        receipts: [{
+          receipt_id: "RECEIPT_FAILED_1",
+          operation_id: "OP_REAL_1",
+          action_type: "REFUND",
+          terminal_status: "FAILED",
+          failure_code: "TOOL_REJECTED",
+          failure_message: "退款通道拒绝请求",
+        }],
+        formal_receipt_present: true,
+      },
+      closure: { status: "BLOCKED", closed_at: null },
+    });
+
+    const execution = wrapper.get("[data-outcome-execution]");
+    expect(execution.attributes("data-execution-mode")).toBe("REAL");
+    expect(execution.find("[data-mock-execution]").exists()).toBe(false);
+    expect(execution.get("[data-execution-failure]").text()).toContain("退款通道拒绝请求");
+    expect(execution.get("[data-execution-receipt]").text()).toContain("执行失败");
+    expect(wrapper.get("[data-outcome-closure]").text()).toContain("尚未确认结案");
   });
 
   it("does not treat a rejected human review as an approved final result", async () => {

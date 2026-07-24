@@ -140,6 +140,7 @@ async function mountDraft(
   startReviewAction = vi.fn(),
   historyMode = false,
   outcome = initialOutcome,
+  serverNow = "",
 ) {
   actor.id = role === "PLATFORM_REVIEWER" ? "reviewer-local" : `${role.toLowerCase()}-local`;
   actor.role = role;
@@ -158,7 +159,12 @@ async function mountDraft(
   );
   await router.isReady();
   const wrapper = mount(AdjudicationDraftView, {
-    props: { initialOutcome: outcome, viewerRole: role, startReviewAction },
+    props: {
+      initialOutcome: outcome,
+      viewerRole: role,
+      startReviewAction,
+      serverNow,
+    },
     global: { plugins: [router] },
   });
   return { wrapper, router, startReviewAction };
@@ -406,5 +412,56 @@ describe("AdjudicationDraftView", () => {
     expect(wrapper.get("[data-room-history-banner]").text()).toContain("历史浏览模式");
     expect(wrapper.find("[data-enter-review-room]").exists()).toBe(false);
     expect(startReviewAction).not.toHaveBeenCalled();
+  });
+
+  it("reads the structured open task projection without dropping legacy draft content", async () => {
+    const structuredOutcome = {
+      ...initialOutcome,
+      review_task_id: undefined,
+      review_task_status: undefined,
+      review_task: {
+        taskId: "REVIEW_STRUCTURED",
+        taskStatus: "PENDING",
+        packetStatus: "FROZEN",
+        dueAt: "2026-08-01T10:00:00Z",
+      },
+    };
+    const { wrapper, router, startReviewAction } = await mountDraft(
+      "PLATFORM_REVIEWER",
+      vi.fn(),
+      false,
+      structuredOutcome,
+      "2026-07-24T10:00:00Z",
+    );
+
+    expect(wrapper.get("[data-draft-reasoning]").text()).toContain("签收人身份仍存在争议");
+    await wrapper.get("[data-enter-review-room]").trigger("click");
+    await flushPromises();
+    expect(startReviewAction).toHaveBeenCalledWith("REVIEW_STRUCTURED");
+    expect(router.currentRoute.value.path).toBe("/reviews/REVIEW_STRUCTURED");
+  });
+
+  it.each([
+    { packetStatus: "PREPARING", dueAt: "2026-08-01T10:00:00Z" },
+    { packetStatus: "FROZEN", dueAt: "2026-07-23T10:00:00Z" },
+  ])("hides review entry when the structured task is not actionable", async (reviewTask) => {
+    const { wrapper } = await mountDraft(
+      "PLATFORM_REVIEWER",
+      vi.fn(),
+      false,
+      {
+        ...initialOutcome,
+        review_task_id: undefined,
+        review_task_status: undefined,
+        review_task: {
+          taskId: "REVIEW_LOCKED",
+          taskStatus: "PENDING",
+          ...reviewTask,
+        },
+      },
+      "2026-07-24T10:00:00Z",
+    );
+
+    expect(wrapper.find("[data-enter-review-room]").exists()).toBe(false);
   });
 });

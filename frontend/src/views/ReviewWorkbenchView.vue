@@ -6,7 +6,11 @@
 <script setup>
 import { computed, onMounted, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { reviewApi } from "../api/review";
+import {
+  mergeActiveReviewTasks,
+  normalizeReviewPacket,
+  reviewApi,
+} from "../api/review";
 import JsonPanel from "../components/JsonPanel.vue";
 import { actor } from "../state/actor";
 import { statusType } from "../utils/format";
@@ -17,15 +21,36 @@ const packet = ref(null);
 const loading = ref(false);
 const reason = ref("");
 const modifiedPlan = ref("{}");
-const canDecide = computed(() =>
-  ["PLATFORM_REVIEWER", "ADMIN"].includes(actor.role),
-);
+const canDecide = computed(() => {
+  const packetStatus = String(packet.value?.status || "FROZEN").toUpperCase();
+  const taskStatus = String(selectedTask.value?.status || "").toUpperCase();
+  const deadline = Math.min(
+    ...[packet.value?.expires_at, packet.value?.review_deadline, selectedTask.value?.due_at]
+      .map((value) => Date.parse(value || ""))
+      .filter(Number.isFinite),
+  );
+  const assignedReviewerId =
+    selectedTask.value?.assigned_reviewer_id ||
+    packet.value?.assigned_reviewer_id ||
+    "";
+  return (
+    actor.role === "PLATFORM_REVIEWER" &&
+    ["PENDING", "ASSIGNED", "IN_REVIEW"].includes(taskStatus) &&
+    packetStatus === "FROZEN" &&
+    (!Number.isFinite(deadline) || deadline > Date.now()) &&
+    (!assignedReviewerId || assignedReviewerId === actor.id)
+  );
+});
 
 // 业务位置：【前端案件页面】loadTasks：读取 当前阶段业务数据，并依据当前案件、角色和会话权限裁剪成可用输入。上游：路由参数、API 数据和状态仓库。下游：用户可操作的案件视图。边界：页面状态不得绕过后端权限。
 async function loadTasks() {
   loading.value = true;
   try {
-    tasks.value = await reviewApi.list(actor);
+    const groups = await Promise.all([
+      reviewApi.list(actor, "PENDING"),
+      reviewApi.list(actor, "IN_REVIEW"),
+    ]);
+    tasks.value = mergeActiveReviewTasks(groups);
   } catch (error) {
     ElMessage.error(error.message);
   } finally {
@@ -37,7 +62,7 @@ async function loadTasks() {
 async function selectTask(task) {
   try {
     selectedTask.value = task;
-    packet.value = await reviewApi.packet(actor, task.id);
+    packet.value = normalizeReviewPacket(await reviewApi.packet(actor, task.id));
     modifiedPlan.value = JSON.stringify(packet.value.remedy, null, 2);
   } catch (error) {
     ElMessage.error(error.message);
@@ -62,6 +87,33 @@ async function decide(decision) {
       ElMessage.error("修改后的方案不是有效 JSON");
       return;
     }
+    const originalPlan = packet.value?.remedy || {};
+    if (
+      !approvedPlan ||
+      Array.isArray(approvedPlan) ||
+      typeof approvedPlan !== "object" ||
+      JSON.stringify(normalizedJson(approvedPlan)) ===
+        JSON.stringify(normalizedJson(originalPlan))
+    ) {
+      ElMessage.warning("修改后批准必须提交真实方案差异");
+      return;
+    }
+    if (
+      approvedPlan.id !== originalPlan.id ||
+      Object.keys(approvedPlan).some(
+        (key) => !Object.prototype.hasOwnProperty.call(originalPlan, key),
+      ) ||
+      Object.keys(originalPlan)
+        .filter((key) => key !== "actions")
+        .some(
+          (key) =>
+            JSON.stringify(normalizedJson(approvedPlan[key])) !==
+            JSON.stringify(normalizedJson(originalPlan[key])),
+        )
+    ) {
+      ElMessage.error("只能修改执行动作，冻结方案身份和版本必须保持不变");
+      return;
+    }
   }
   try {
     await ElMessageBox.confirm(
@@ -73,6 +125,7 @@ async function decide(decision) {
       decision,
       reason: reason.value,
       approved_plan: approvedPlan,
+      confirmed: true,
     });
     ElMessage.success("审核决定已提交");
     packet.value = null;
@@ -83,6 +136,18 @@ async function decide(decision) {
     if (error === "cancel" || error === "close") return;
     ElMessage.error(error.message);
   }
+}
+
+function normalizedJson(value) {
+  if (Array.isArray(value)) return value.map(normalizedJson);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.keys(value)
+        .sort()
+        .map((key) => [key, normalizedJson(value[key])]),
+    );
+  }
+  return value;
 }
 
 onMounted(loadTasks);

@@ -42,7 +42,49 @@ const MOCK_EXECUTION_STEP_INTERVAL_MS = 5_000;
 const caseId = computed(
   () => outcome.value?.case_id || route.params.caseId,
 );
-const actions = computed(() => outcome.value?.actions || []);
+function objectValue(value) {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value
+    : {};
+}
+
+function listValue(value) {
+  return Array.isArray(value) ? value.filter(Boolean) : [];
+}
+
+function firstValue(source, ...keys) {
+  for (const key of keys) {
+    const value = source?.[key];
+    if (value !== undefined && value !== null) return value;
+  }
+  return undefined;
+}
+
+const executionProjection = computed(() =>
+  objectValue(
+    outcome.value?.execution ||
+      outcome.value?.execution_projection ||
+      outcome.value?.executionProjection,
+  ),
+);
+const actionRecords = computed(() => {
+  const projected = firstValue(executionProjection.value, "actions", "action_records", "actionRecords");
+  return listValue(projected).length
+    ? listValue(projected)
+    : listValue(outcome.value?.actions);
+});
+const structuredReceipts = computed(() =>
+  listValue(
+    firstValue(
+      executionProjection.value,
+      "receipts",
+      "operation_receipts",
+      "operationReceipts",
+      "action_receipts",
+      "actionReceipts",
+    ),
+  ),
+);
 const persistedDecision = computed(
   () => outcome.value?.final_decision || outcome.value?.finalDecision || null,
 );
@@ -94,6 +136,144 @@ const isFinalOutcome = computed(() => {
     (!reviewTaskStatus.value || reviewTaskStatus.value === "APPROVED")
   );
 });
+const executionMode = computed(() => {
+  const projection = executionProjection.value;
+  const explicit = String(
+    firstValue(
+      projection,
+      "mode",
+      "execution_mode",
+      "executionMode",
+      "effect_mode",
+      "effectMode",
+    ) || "",
+  )
+    .trim()
+    .toUpperCase();
+  if (["REAL", "FORMAL", "ACTION_RECORD"].includes(explicit)) return "REAL";
+  if (
+    [
+      "SIMULATED",
+      "SYNTHETIC",
+      "SYNTHETIC_NOOP",
+      "JAVA_SIGNED_SYNTHETIC_NOOP_SHADOW",
+    ].includes(explicit)
+  ) {
+    return "SIMULATED";
+  }
+  if (["NONE", "NO_ACTION", "NOT_APPLICABLE"].includes(explicit)) return "NONE";
+  if (explicit) return "NONE";
+  if (actionRecords.value.length) {
+    const allSynthetic = actionRecords.value.every(
+      (action) =>
+        action.synthetic_only === true ||
+        action.syntheticOnly === true ||
+        action.result?.simulated === true,
+    );
+    return allSynthetic ? "SIMULATED" : "REAL";
+  }
+  if (structuredReceipts.value.length) {
+    return projection.formal_receipt_present === true ||
+      projection.formalReceiptPresent === true
+      ? "REAL"
+      : "SIMULATED";
+  }
+  return isFinalOutcome.value ? "SIMULATED" : "NONE";
+});
+const executionProjectionStatus = computed(() =>
+  String(
+    firstValue(
+      executionProjection.value,
+      "status",
+      "execution_status",
+      "executionStatus",
+    ) || "",
+  )
+    .trim()
+    .toUpperCase(),
+);
+const actions = computed(() => {
+  if (executionMode.value !== "REAL") return [];
+  if (actionRecords.value.length) return actionRecords.value;
+  return structuredReceipts.value.map((receipt, index) => ({
+    action_record_id:
+      receipt.action_record_id ||
+      receipt.actionRecordId ||
+      receipt.operation_id ||
+      receipt.operationId ||
+      `RECEIPT_${index + 1}`,
+    action_type: receipt.action_type || receipt.actionType || "OPERATION_RECEIPT",
+    execution_status:
+      receipt.terminal_status ||
+      receipt.terminalStatus ||
+      receipt.status ||
+      executionProjectionStatus.value,
+    external_result_ref:
+      receipt.external_result_ref ||
+      receipt.externalResultRef ||
+      receipt.receipt_id ||
+      receipt.receiptId ||
+      "",
+    error_code: receipt.failure_code || receipt.failureCode || "",
+    error_message: receipt.failure_message || receipt.failureMessage || "",
+  }));
+});
+const executionFailure = computed(() => {
+  const projection = executionProjection.value;
+  const failedAction = actionRecords.value.find((action) =>
+    ["FAILED", "MANUAL_RECOVERY_REQUIRED"].includes(actionExecutionStatus(action)),
+  );
+  const code =
+    firstValue(projection, "failure_code", "failureCode") ||
+    failedAction?.error_code ||
+    failedAction?.errorCode ||
+    "";
+  const message =
+    firstValue(projection, "failure_message", "failureMessage") ||
+    failedAction?.error_message ||
+    failedAction?.errorMessage ||
+    "";
+  const failedStatus = [
+    "FAILED",
+    "MANUAL_RECOVERY_REQUIRED",
+    "RECONCILING",
+    "AMBIGUOUS",
+  ].includes(executionProjectionStatus.value);
+  return code || message || failedAction || failedStatus
+    ? {
+        code: String(code || executionProjectionStatus.value || "EXECUTION_FAILED"),
+        message: String(message || "执行回执显示异常，案件尚不能视为执行或结案成功。"),
+      }
+    : null;
+});
+const closureProjection = computed(() =>
+  objectValue(
+    outcome.value?.closure ||
+      outcome.value?.closure_projection ||
+      outcome.value?.closureProjection,
+  ),
+);
+const closureStatus = computed(() => {
+  const explicit = String(
+    firstValue(closureProjection.value, "status", "closure_status", "closureStatus") || "",
+  )
+    .trim()
+    .toUpperCase();
+  if (explicit) return explicit;
+  return String(outcome.value?.case_status || outcome.value?.caseStatus || "")
+    .trim()
+    .toUpperCase();
+});
+const closedAt = computed(
+  () =>
+    firstValue(closureProjection.value, "closed_at", "closedAt") ||
+    outcome.value?.closed_at ||
+    outcome.value?.closedAt ||
+    "",
+);
+const caseClosed = computed(
+  () => ["CLOSED", "COMMITTED"].includes(closureStatus.value) && Boolean(closedAt.value),
+);
 const hearingDecision = computed(() => {
   const source = adjudicationDraft.value || {};
   return {
@@ -189,30 +369,44 @@ const approvedPlanSource = computed(() =>
     ? "管理员批准快照"
     : "已批准历史方案",
 );
-const heroKicker = computed(() =>
-  loading.value
-    ? "正在加载"
-    : isFinalOutcome.value
-      ? "四段结果已归档"
-      : "等待最终结果",
-);
+const heroKicker = computed(() => {
+  if (loading.value) return "正在加载";
+  if (caseClosed.value) return "四段结果已归档";
+  return isFinalOutcome.value ? "最终决定已确认" : "等待最终结果";
+});
 const heroStatusTitle = computed(() => {
   if (loading.value) return "正在获取最终结果";
+  if (caseClosed.value) return "案件已结案";
   return isFinalOutcome.value ? "管理员审核已完成" : "等待审核通过";
 });
 const heroStatusDetail = computed(() => {
   if (loading.value) return "正在同步裁决、审核与执行信息";
-  if (isFinalOutcome.value) return "庭审裁决、审核意见与执行方案已生效";
+  if (caseClosed.value) return "服务端已确认执行与结案状态";
+  if (isFinalOutcome.value) return "最终决定已生效，执行与结案状态以服务端回执为准";
   return "审核通过后展示完整四段结果";
 });
 
 function actionExecutionStatus(action) {
-  return action.execution_status || action.executionStatus || action.status || "";
+  return String(
+    action.execution_status || action.executionStatus || action.status || "",
+  )
+    .trim()
+    .toUpperCase();
 }
 
 const executionSummary = computed(() => {
+  if (executionFailure.value) {
+    return {
+      label: "执行异常",
+      detail: executionFailure.value.message,
+      state: "attention",
+    };
+  }
   const statuses = actions.value.map(actionExecutionStatus);
   if (!statuses.length) {
+    if (executionProjectionStatus.value === "SUCCEEDED") {
+      return { label: "执行完成", detail: "服务端已记录正式成功回执", state: "complete" };
+    }
     return {
       label: "等待执行回执",
       detail: "方案已生效，正在等待执行系统返回真实处理进度",
@@ -244,7 +438,7 @@ const executionSummary = computed(() => {
 });
 
 const shouldUseMockExecution = computed(
-  () => isFinalOutcome.value && actions.value.length === 0,
+  () => isFinalOutcome.value && executionMode.value === "SIMULATED",
 );
 const mockExecutionStatus = computed(() => {
   if (mockExecutionStage.value >= MOCK_EXECUTION_STEPS.length) {
@@ -265,6 +459,20 @@ const mockExecutionProgress = computed(() =>
     ),
   ),
 );
+const executionHeading = computed(() => {
+  if (executionMode.value === "REAL") return executionSummary.value;
+  if (executionMode.value === "SIMULATED") return mockExecutionStatus.value;
+  return {
+    label: "无执行事实",
+    detail: "服务端未声明需要执行的正式动作",
+    state: "neutral",
+  };
+});
+const executionModeLabel = computed(() => ({
+  REAL: `${actions.value.length} 项真实回执`,
+  SIMULATED: "模拟展示，不是正式回执",
+  NONE: "无正式执行动作",
+}[executionMode.value]));
 const footerNoticeText =
   "庭审裁决、管理员审核、最终方案与执行情况会共同归档到案件结果。";
 
@@ -282,6 +490,7 @@ const actionLabels = {
   NOTIFY_MERCHANT: "通知商家",
   NOTIFY_USER: "通知用户",
   CLOSE_CASE: "关闭案件",
+  OPERATION_RECEIPT: "执行回执",
 };
 const statusLabels = {
   SUCCEEDED: "执行成功",
@@ -291,6 +500,9 @@ const statusLabels = {
   MANUAL_REQUIRED: "等待人工处理",
   COMPENSATING: "补偿处理中",
   COMPENSATED: "已补偿处理",
+  RECONCILING: "回执核对中",
+  AMBIGUOUS: "执行状态待核对",
+  MANUAL_RECOVERY_REQUIRED: "需要人工恢复",
 };
 const resultLabels = {
   amount: "金额",
@@ -684,19 +896,32 @@ onBeforeUnmount(() => {
           class="outcome-stage outcome-stage--execution"
           data-outcome-execution
           data-execution-board
+          :data-execution-mode="executionMode"
         >
           <header class="outcome-stage__heading">
             <span class="outcome-stage__index">04</span>
             <div>
               <span class="outcome-kicker">执行情况</span>
-              <h2>{{ actions.length ? executionSummary.label : mockExecutionStatus.label }}</h2>
+              <h2>{{ executionHeading.label }}</h2>
             </div>
-            <strong :data-state="actions.length ? executionSummary.state : mockExecutionStatus.state">
-              {{ actions.length ? `${actions.length} 项真实回执` : "前端 Mock 演示" }}
+            <strong :data-state="executionHeading.state" data-execution-mode-label>
+              {{ executionModeLabel }}
             </strong>
           </header>
 
-          <div v-if="actions.length" class="execution-board__grid execution-board__grid--stage">
+          <p
+            v-if="executionFailure"
+            class="execution-mode-notice execution-mode-notice--error"
+            data-execution-failure
+            role="alert"
+          >
+            执行异常：{{ executionFailure.message }}
+          </p>
+
+          <div
+            v-if="executionMode === 'REAL' && actions.length"
+            class="execution-board__grid execution-board__grid--stage"
+          >
             <article
               v-for="(action, index) in actions"
               :key="action.action_record_id || action.actionRecordId || index"
@@ -728,7 +953,19 @@ onBeforeUnmount(() => {
             </article>
           </div>
 
-          <div v-else class="mock-execution" data-mock-execution>
+          <p
+            v-else-if="executionMode === 'REAL'"
+            class="execution-mode-notice"
+            data-real-execution-pending
+          >
+            {{ executionHeading.detail }}。当前没有可展示的正式回执明细。
+          </p>
+
+          <div
+            v-else-if="executionMode === 'SIMULATED'"
+            class="mock-execution"
+            data-mock-execution
+          >
             <div class="mock-execution__summary">
               <div class="mock-execution__signal" :data-state="mockExecutionStatus.state" aria-hidden="true">
                 <i></i>
@@ -757,7 +994,26 @@ onBeforeUnmount(() => {
             <p class="mock-execution__notice">
               此处为前端 Mock 动画，仅用于展示执行流程，不代表真实资金或履约结果。
             </p>
+            <p
+              v-if="structuredReceipts.length"
+              class="mock-execution__notice"
+              data-synthetic-receipt-state
+            >
+              已收到 {{ structuredReceipts.length }} 条零影响观察记录；它们不是正式执行回执，不能用于结案。
+            </p>
           </div>
+
+          <p v-else class="execution-mode-notice" data-no-execution>
+            无正式执行动作。页面不会用动画或模型文本推断执行成功。
+          </p>
+
+          <p
+            class="execution-closure-state"
+            data-outcome-closure
+            :data-closure-status="closureStatus || 'UNKNOWN'"
+          >
+            结案状态：{{ caseClosed ? "服务端已确认结案" : "尚未确认结案" }}
+          </p>
         </section>
       </div>
 
@@ -1257,6 +1513,10 @@ onBeforeUnmount(() => {
 .execution-result dd { margin: 0; overflow-wrap: anywhere; color: #405069; font-size: 11px; }
 .execution-board article > i { display: grid; place-items: center; width: 27px; height: 27px; color: #267252; background: #def5e8; border-radius: 50%; font-style: normal; }
 .execution-board article > i:not([data-status="SUCCEEDED"]) { color: #9a6d25; background: #fff0cc; }
+.execution-mode-notice,
+.execution-closure-state { margin: 14px 0 0; padding: 12px 14px; color: #5d6b80; background: #f6f8fb; border: 1px solid #e1e7ef; border-radius: 8px; font-size: 12px; }
+.execution-mode-notice--error { color: #8c3442; background: #fff1f2; border-color: #efcbd1; }
+.execution-closure-state { color: #52677f; background: #eef5f8; }
 .execution-assistant {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);

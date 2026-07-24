@@ -17,7 +17,11 @@ import {
 import { useRoute } from "vue-router";
 import { extractAgentRunDescriptor } from "../../api/agentStream";
 import { evidenceApi } from "../../api/evidence";
-import { reviewApi } from "../../api/review";
+import {
+  ACTIVE_REVIEW_STATUSES,
+  normalizeReviewPacket as normalizeReviewApiPacket,
+  reviewApi,
+} from "../../api/review";
 import DigitalHuman from "../../components/avatar/DigitalHuman.vue";
 import AgentStreamErrorDialog from "../../components/room/AgentStreamErrorDialog.vue";
 import ConversationStream from "../../components/room/ConversationStream.vue";
@@ -38,12 +42,24 @@ const props = defineProps({
 });
 
 const route = useRoute();
-const packet = ref(normalizeReviewPacket(props.initialPacket));
+const normalizedInitialPacket = normalizeReviewPacket(props.initialPacket);
+const packet = ref(normalizedInitialPacket);
 const evidenceCatalog = ref(null);
 const loading = ref(!props.initialPacket);
-const taskOpen = ref(Boolean(props.initialPacket));
+const initialTaskStatus = String(
+  normalizedInitialPacket?.review_task_status ||
+    (props.initialPacket ? "IN_REVIEW" : ""),
+)
+  .trim()
+  .toUpperCase();
+const taskOpen = ref(
+  Boolean(props.initialPacket) && ACTIVE_REVIEW_STATUSES.includes(initialTaskStatus),
+);
 const taskStateKnown = ref(Boolean(props.initialPacket));
-const taskStatus = ref(props.initialPacket ? "IN_REVIEW" : "");
+const taskStatus = ref(initialTaskStatus);
+const taskAssignedReviewerId = ref(
+  normalizedInitialPacket?.assigned_reviewer_id || "",
+);
 const taskLookupError = ref("");
 const activeSection = ref("overview");
 const reason = ref("");
@@ -70,11 +86,12 @@ const historyMode = computed(() => route.query.view === "history");
 const effectiveServerNow = computed(
   () => props.serverNow || new Date().toISOString(),
 );
-const packetExpiry = computed(
-  () =>
-    packet.value?.expires_at ||
-    new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(),
-);
+const packetExpiry = computed(() => {
+  const deadlines = [packet.value?.expires_at, packet.value?.review_deadline]
+    .map((value) => Date.parse(value || ""))
+    .filter(Number.isFinite);
+  return deadlines.length ? new Date(Math.min(...deadlines)).toISOString() : "";
+});
 const clockNow = ref(Date.now());
 const clockAnchorLocal = ref(Date.now());
 const clockAnchorServer = ref(Date.parse(effectiveServerNow.value));
@@ -88,8 +105,11 @@ const packetExpired = computed(() => {
   return estimatedServerNow >= expiresAt;
 });
 const hasReviewerWriteCapability = computed(() => {
-  if (props.viewerRole) return props.viewerRole === "PLATFORM_REVIEWER";
-  return actor.role === "PLATFORM_REVIEWER" && actor.id === "reviewer-local";
+  const role = props.viewerRole || actor.role;
+  if (role !== "PLATFORM_REVIEWER") return false;
+  const assignedReviewerId =
+    taskAssignedReviewerId.value || packet.value?.assigned_reviewer_id || "";
+  return !assignedReviewerId || assignedReviewerId === actor.id;
 });
 const canDecide = computed(
   () =>
@@ -776,15 +796,16 @@ function policyEntries(draft) {
 }
 
 function normalizeReviewPacket(value) {
-  if (!value) return value;
-  const artifact = value.draft;
+  const normalized = normalizeReviewApiPacket(value);
+  if (!normalized) return normalized;
+  const artifact = normalized.draft;
   if (
     artifact?.schema_version === "adjudication_draft.v2" &&
     artifact.draft &&
     typeof artifact.draft === "object"
   ) {
     return {
-      ...value,
+      ...normalized,
       draft: {
         ...artifact.draft,
         artifact_id: artifact.draft_id,
@@ -794,7 +815,7 @@ function normalizeReviewPacket(value) {
       },
     };
   }
-  return value;
+  return normalized;
 }
 
 function draftAttention(draft) {
@@ -1026,6 +1047,15 @@ const decisionReadonlyMessage = computed(() => {
       ? "无法确认审核任务状态，决定与解释官已保守锁定。"
       : "审核任务已离开可办理队列，当前页面仅保留冻结材料。";
   }
+  if ((props.viewerRole || actor.role) !== "PLATFORM_REVIEWER") {
+    return "当前角色只能查看获授权的冻结材料，不能提交终审决定。";
+  }
+  if (!hasReviewerWriteCapability.value) {
+    return "该任务已分配给另一名平台审核员，当前页面保持只读。";
+  }
+  if (packet.value?.status !== "FROZEN") {
+    return "冻结审核包生成前仅可只读旁观，系统不会展示任何批准按钮。";
+  }
   return "冻结审核包生成前仅可只读旁观，系统不会展示任何批准按钮。";
 });
 const decisionResultMessage = computed(() => {
@@ -1084,16 +1114,20 @@ const clockTimer = setInterval(() => {
 async function loadTaskAccess() {
   taskLookupError.value = "";
   try {
-    const statuses = ["PENDING", "ASSIGNED", "IN_REVIEW"];
+    const statuses = ACTIVE_REVIEW_STATUSES;
     const groups = await Promise.all(
       statuses.map((status) => reviewApi.list(actor, status)),
     );
     const task = groups.flat().find((item) => item.id === reviewId.value);
-    taskOpen.value = Boolean(task);
+    taskOpen.value = Boolean(
+      task && ACTIVE_REVIEW_STATUSES.includes(task.status),
+    );
     taskStatus.value = task?.status || "";
+    taskAssignedReviewerId.value = task?.assigned_reviewer_id || "";
   } catch (failure) {
     taskOpen.value = false;
     taskStatus.value = "";
+    taskAssignedReviewerId.value = "";
     taskLookupError.value = failure?.message || "审核任务状态查询失败";
   } finally {
     taskStateKnown.value = true;
@@ -1309,6 +1343,7 @@ async function submitDecision() {
       pendingDecision.value === "MODIFY_AND_APPROVE"
         ? approvedPlanDraft.value
         : null,
+    confirmed: true,
   };
   submittedDecision.value = pendingDecision.value;
   try {

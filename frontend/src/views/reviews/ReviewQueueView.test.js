@@ -97,4 +97,30 @@ describe("ReviewQueueView", () => {
     expect(wrapper.text()).toContain("待审核");
     expect(wrapper.text()).toContain("审核中");
   });
+
+  it("never renders packet or proposal bodies supplied with a queue item", async () => {
+    const { wrapper } = await (async () => {
+      const router = createRouter({
+        history: createMemoryHistory(),
+        routes: [{ path: "/reviews", component: { template: "<div />" } }],
+      });
+      await router.push("/reviews");
+      await router.isReady();
+      return {
+        wrapper: mount(ReviewQueueView, {
+          props: {
+            initialTasks: [{
+              ...tasks[0],
+              review_packet: { draft: "PRIVATE_PACKET_BODY" },
+              proposal: { action: "PRIVATE_PROPOSAL" },
+            }],
+          },
+          global: { plugins: [router] },
+        }),
+      };
+    })();
+
+    expect(wrapper.text()).not.toContain("PRIVATE_PACKET_BODY");
+    expect(wrapper.text()).not.toContain("PRIVATE_PROPOSAL");
+  });
 });

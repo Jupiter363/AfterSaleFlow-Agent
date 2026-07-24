@@ -2,7 +2,11 @@
 import { computed, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { disputeApi } from "../../api/disputes";
-import { reviewApi } from "../../api/review";
+import {
+  ACTIVE_REVIEW_STATUSES,
+  normalizeReviewTask,
+  reviewApi,
+} from "../../api/review";
 import DigitalHuman from "../../components/avatar/DigitalHuman.vue";
 import RoomShell from "../../components/room/RoomShell.vue";
 import { actor } from "../../state/actor";
@@ -12,6 +16,7 @@ const props = defineProps({
   initialOutcome: { type: Object, default: null },
   viewerRole: { type: String, default: "" },
   startReviewAction: { type: Function, default: null },
+  serverNow: { type: String, default: "" },
 });
 
 const route = useRoute();
@@ -71,18 +76,48 @@ const historyMode = computed(() => route.query.view === "history");
 const draft = computed(
   () => outcome.value?.adjudication_draft || outcome.value?.adjudicationDraft || null,
 );
-const reviewTaskId = computed(
-  () => outcome.value?.review_task_id || outcome.value?.reviewTaskId || "",
+const reviewTask = computed(() =>
+  normalizeReviewTask(
+    outcome.value?.review_task ||
+      outcome.value?.reviewTask || {
+        id: outcome.value?.review_task_id || outcome.value?.reviewTaskId,
+        status:
+          outcome.value?.review_task_status || outcome.value?.reviewTaskStatus,
+        due_at:
+          outcome.value?.review_deadline || outcome.value?.reviewDeadline,
+        packet_status:
+          outcome.value?.review_packet_status || outcome.value?.reviewPacketStatus,
+      },
+  ),
 );
-const reviewTaskStatus = computed(
-  () => outcome.value?.review_task_status || outcome.value?.reviewTaskStatus || "",
-);
+const reviewTaskId = computed(() => reviewTask.value.id);
+const reviewTaskStatus = computed(() => reviewTask.value.status);
+const reviewPacketFrozen = computed(() => {
+  const explicitStatus = String(
+    reviewTask.value.packet_status ||
+      reviewTask.value.packetStatus ||
+      outcome.value?.review_packet_status ||
+      outcome.value?.reviewPacketStatus ||
+      "",
+  )
+    .trim()
+    .toUpperCase();
+  // Legacy outcome projections only exposed an active task after packet freeze.
+  return explicitStatus ? explicitStatus === "FROZEN" : true;
+});
+const reviewTaskExpired = computed(() => {
+  const deadline = Date.parse(reviewTask.value.due_at || "");
+  const now = Date.parse(props.serverNow || "") || Date.now();
+  return Number.isFinite(deadline) && deadline <= now;
+});
 const canEnterReview = computed(
   () =>
     !historyMode.value &&
     role.value === "PLATFORM_REVIEWER" &&
     Boolean(reviewTaskId.value) &&
-    ["PENDING", "ASSIGNED", "IN_REVIEW"].includes(reviewTaskStatus.value),
+    ACTIVE_REVIEW_STATUSES.includes(reviewTaskStatus.value) &&
+    reviewPacketFrozen.value &&
+    !reviewTaskExpired.value,
 );
 const draftVersion = computed(() => draft.value?.draft_version || draft.value?.draftVersion || 1);
 const draftId = computed(() => identifier(draft.value?.id));
