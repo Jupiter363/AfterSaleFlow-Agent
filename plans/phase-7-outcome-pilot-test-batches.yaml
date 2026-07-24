@@ -1,7 +1,7 @@
 schema_version: phase-test-batches.v1
 phase: 7
 name: outcome-engineering-noop-shadow
-document_status: P7_0_NOT_RUN_IMPLEMENTATION_BLOCKED
+document_status: P7_0_PASS_ENGINEERING_ACTIVE
 
 documents:
   execution_plan: plans/phase-7-outcome-pilot-execution.md
@@ -26,9 +26,14 @@ documents:
 
 gate:
   contract_gate: P7.0
-  contract_gate_status: NOT_RUN
-  implementation_authorized: false
-  implementation_owners_state: BLOCKED
+  contract_gate_status: PASS
+  implementation_authorized: true
+  implementation_owners_state: READY
+  accepted_phase_7_candidate_C7: 0aa260f722fced0eba4314bd4793e415b5bf0b05
+  accepted_phase_7_evidence_E7: e29cefb3e028bb84f6a227e46fecdf5711eba48c
+  phase_7_entry_release: phase-7-entry-20260724-0aa260f7
+  phase_7_entry_evidence_path: test-reports/temporal-first/phase-7-entry-20260724-0aa260f7/phase-7-entry
+  entry_evidence_relationship: E7_IS_DIRECT_CHILD_OF_C7
   accepted_phase_6_candidate_C6: ea046eae2792cd5afb9929bca40da8fb8c77a9bd
   accepted_phase_6_evidence_E6: e674263e9026e3fec46ec295767d432807f5ab44
   accepted_phase_6_checkpoint_A6: d18a1f130a925429e8c2dfd11352cea4ca8673a0
@@ -36,13 +41,15 @@ gate:
     phase_6_engineering_checkpoint: PASS
     next_phase_permission: PHASE_7_ENGINEERING_ONLY
     phase_7_engineering_exception: ADR_0016_ACCEPTED_FOR_ENGINEERING_ONLY
+    P7.0: PASS
     MIG-006: PENDING_PROMOTION
     MIG-007: PENDING_PROMOTION
   required_entry: EXACT_C6_E6_A6_PLUS_PHASE7_ENGINEERING_EXCEPTION_AND_P7_0_EXACT_SHA_EVIDENCE
-  entry_decision: NOT_RUN
+  entry_decision: ENTRY_EVIDENCE_ACCEPTED
   entry_effect_after_green_evidence: P7_0_ENGINEERING_ENTRY_PASS
-  product_implementation: BLOCKED
-  V045: FORBIDDEN_BEFORE_SEPARATE_ENTRY_EVIDENCE
+  entry_effect_status: REALIZED
+  product_implementation: ALLOWED_UNDER_ADR_0016_ENGINEERING_RESTRICTIONS
+  V045: ALLOWED_ADDITIVE_ONLY_UNDER_ADR_0016
   two_commit_gate:
     commit_1: P7_0_CONTRACT_CANDIDATE
     exact_sha_batch: BATCH_0_ALL_FOUR_SOURCES
@@ -50,7 +57,7 @@ gate:
     implementation_after: COMMIT_2_RECORDS_P7_0_PASS_FOR_EXACT_COMMIT_1_SHA
     mixed_product_implementation_in_commit_1: false
     reuse_reports_from_another_sha_or_attempt: false
-  runtime_modes_allowed_now: [LEGACY, DISABLED]
+  runtime_modes_allowed_now: [LEGACY, DISABLED, JAVA_SIGNED_SYNTHETIC_NOOP_SHADOW]
   runtime_mode_allowed_after_p7_0: JAVA_SIGNED_SYNTHETIC_NOOP_SHADOW
   runtime_modes_forbidden: [REAL_CASE_SHADOW, TEMPORAL]
   traffic_constraints:
@@ -157,7 +164,7 @@ task_dag:
     result: FOUR_SOURCE_BATCH_0_REPORTS
     requires: [P7-R0]
   P7-R2:
-    result: P7_0_PASS_OR_BLOCKED_ENTRY_EVIDENCE
+    result: P7_0_ENGINEERING_ENTRY_PASS
     requires: [P7-R1_ALL_PASS]
   P7-A1:
     result: OUTCOME_WIRE_PROTOCOL_CONTRACT_FOUNDATION
@@ -222,7 +229,7 @@ batches:
           for p in ('plans/phase-7-outcome-pilot-test-batches.yaml','plans/phase-7-owner-briefs.yaml')]"
 
   batch_0_entry:
-    status: NOT_RUN
+    status: PASS
     owner: R
     exact_clean_detached_sha_required: true
     fresh_run_directory_required: true
@@ -234,9 +241,12 @@ batches:
     max_parallel_light_sources: 2
     max_parallel_heavy_sources: 1
     implementation_capacity_not_inherited_by_entry_runner: true
-    accepted_candidate_commit: null
-    entry_evidence_commit: null
-    source_test_counts: null
+    accepted_candidate_commit: 0aa260f722fced0eba4314bd4793e415b5bf0b05
+    entry_evidence_commit: e29cefb3e028bb84f6a227e46fecdf5711eba48c
+    release: phase-7-entry-20260724-0aa260f7
+    evidence_path: test-reports/temporal-first/phase-7-entry-20260724-0aa260f7/phase-7-entry
+    source_test_counts: {static: 78, python: 3, java: 18, frontend: 41, total: 140}
+    evidence_relationship: DIRECT_CHILD
     execution_gate:
       required_candidate_state: P7_0_CONTRACT_CANDIDATE_COMMITTED
       required_upstream_checkpoint: d18a1f130a925429e8c2dfd11352cea4ca8673a0
@@ -328,7 +338,7 @@ batches:
     required_result: P7_0_ENGINEERING_ENTRY_PASS_FROM_SEPARATE_DIRECT_CHILD_EVIDENCE_COMMIT
 
   batch_1_foundation:
-    status: PLANNED_BLOCKED_ON_P7_0
+    status: READY_FOR_OWNER_IMPLEMENTATION
     owner: R
     java_test_classes:
       - OutcomeRoomWorkflowTest

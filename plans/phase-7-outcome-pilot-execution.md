@@ -3,9 +3,14 @@
 ## Status
 
 ```text
-plan_status: P7_0_CONTRACT_CANDIDATE_PREPARATION
-contract_gate: P7.0 NOT_RUN
-engineering_execution: BLOCKED
+plan_status: P7_0_PASS_ENGINEERING_ACTIVE
+contract_gate: P7.0 PASS
+engineering_execution: ALLOWED_UNDER_ADR_0016_ENGINEERING_RESTRICTIONS
+accepted_phase_7_candidate_C7: 0aa260f722fced0eba4314bd4793e415b5bf0b05
+accepted_phase_7_evidence_E7: e29cefb3e028bb84f6a227e46fecdf5711eba48c
+phase_7_entry_release: phase-7-entry-20260724-0aa260f7
+phase_7_entry_evidence_path: test-reports/temporal-first/phase-7-entry-20260724-0aa260f7/phase-7-entry
+phase_7_entry_source_counts: static=78 python=3 java=18 frontend=41 total=140
 accepted_phase_6_candidate_C6: ea046eae2792cd5afb9929bca40da8fb8c77a9bd
 accepted_phase_6_evidence_E6: e674263e9026e3fec46ec295767d432807f5ab44
 accepted_phase_6_checkpoint_A6: d18a1f130a925429e8c2dfd11352cea4ca8673a0
@@ -25,23 +30,25 @@ canary: FORBIDDEN
 promotion: FORBIDDEN
 ```
 
-Phase 6 acceptance `A6` permits only a Phase 7 engineering entry process. It does not satisfy the
-master plan's production entry condition `MIG-006=PASS`, does not authorize a formal Outcome
-Workflow, and does not make `MIG-006` or `MIG-007` pass. Phase 7 implementation remains blocked
-until a contract-candidate commit is frozen, all four Batch 0 source commands pass from a clean
-detached worktree at that exact SHA, and a separate direct-child evidence commit records P7.0
-`PASS`.
+Phase 6 acceptance `A6` permitted only a Phase 7 engineering entry process. Contract candidate
+`C7=0aa260f722fced0eba4314bd4793e415b5bf0b05` subsequently passed all four exact-SHA Batch 0
+sources: 78 static, 3 Python, 18 Java, and 41 frontend tests, 140 total. Direct-child evidence
+commit `E7=e29cefb3e028bb84f6a227e46fecdf5711eba48c` authenticates the reports under release
+`phase-7-entry-20260724-0aa260f7` and realizes `P7_0_ENGINEERING_ENTRY_PASS`.
+
+This releases A-G for Phase 7 engineering implementation under ADR 0016. It does not satisfy the
+master plan's production entry condition `MIG-006=PASS`, authorize a formal Outcome Workflow, or
+make `MIG-006` or `MIG-007` pass.
 
 This plan is used with [the Phase 7 test matrix](./phase-7-outcome-pilot-test-batches.yaml),
 [the Phase 7 owner briefs](./phase-7-owner-briefs.yaml), section 7.8 of the
 [master refactor plan](./temporal-langgraph-room-refactor.md), the current-room behavior baseline,
 and the platform acceptance checklist. ADR 0016 supplies only the bounded engineering exception;
-the contract pack must be part of the contract candidate. Until P7.0 passes, this document is
-planning only.
+the accepted contract pack, candidate, and evidence commit define the active engineering boundary.
 
 ## Engineering Boundary
 
-### Goals After P7.0 Passes
+### Active Engineering Goals
 
 - Build an unreachable, deterministic `OutcomeRoomWorkflow` kernel for review wait/SLA, five human
   decisions, synthetic no-op execution/compensation, closure, and evaluation ordering.
@@ -144,7 +151,7 @@ credential, external payload, or evaluation content.
 - Closure precedes evaluation. Evaluation reads a CLOSED snapshot and has no workflow, decision,
   action, closure, outbox, or tool write capability.
 
-## P7.0 Exact-Candidate Gate
+## Accepted P7.0 Exact-Candidate Gate
 
 ### Accepted Upstream Evidence
 
@@ -156,10 +163,10 @@ E6 = e674263e9026e3fec46ec295767d432807f5ab44
 A6 = d18a1f130a925429e8c2dfd11352cea4ca8673a0
 ```
 
-`A6` records `PHASE_7_ENGINEERING_ONLY`; it is not a promotion receipt. The P7.0 candidate must
-verify this exact chain and `ADR_0016_ACCEPTED_FOR_ENGINEERING_ONLY`, freeze the exception and
-contract pack, bind the owner briefs
-and machine schedule, and contain no Phase 7 product implementation or V045 migration.
+`A6` records `PHASE_7_ENGINEERING_ONLY`; it is not a promotion receipt. The accepted `C7/E7` pair
+verifies this exact chain and `ADR_0016_ACCEPTED_FOR_ENGINEERING_ONLY`, freezes the exception,
+contract pack, owner briefs, and machine schedule, and keeps Phase 7 product implementation and
+V045 out of the candidate commit.
 
 ### Two-Commit Entry Protocol
 
@@ -173,7 +180,7 @@ and machine schedule, and contain no Phase 7 product implementation or V045 migr
    generated evidence and the entry decision. Only this commit may record
    `P7_0_ENGINEERING_ENTRY_PASS` and release owners A-G.
 
-Until step 3 succeeds, the mandatory state is:
+Before the accepted `C7/E7` pair, the mandatory fail-closed state was:
 
 ```text
 contract_gate: P7.0 NOT_RUN
@@ -187,6 +194,17 @@ formal_outcome_writer: LEGACY_JAVA
 Any product failure, fixture error, exact-SHA mismatch, dirty candidate, missing source report,
 evidence-generator mismatch, or contract ambiguity blocks implementation. Infrastructure retry is
 allowed only after classification and must retain a fresh attempt directory.
+
+The accepted entry record is:
+
+```text
+contract_gate: P7.0 PASS
+entry_decision: ENTRY_EVIDENCE_ACCEPTED
+candidate: 0aa260f722fced0eba4314bd4793e415b5bf0b05
+evidence: e29cefb3e028bb84f6a227e46fecdf5711eba48c
+source_counts: static=78 python=3 java=18 frontend=41 total=140
+implementation_owners: A-G READY
+```
 
 ## Delivery Sequence
 
@@ -242,7 +260,7 @@ exception described above and never uses more than one heavy process.
 - **Unified/promotion:** deferred. Real tools, real data, canary, load, chaos, production, `MIG-006`,
   and `MIG-007` cannot be passed by Phase 7 synthetic evidence.
 
-No later batch in the planning candidate claims PASS. Exact commands and resource controls are
+No later engineering batch currently claims PASS. Exact commands and resource controls remain
 authoritative in the machine-readable test matrix.
 
 ## Engineering Exit And Handoff

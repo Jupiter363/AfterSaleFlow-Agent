@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -18,13 +19,41 @@ assert SPEC is not None and SPEC.loader is not None
 runner = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = runner
 SPEC.loader.exec_module(runner)
-ORIGINAL_LOAD_MATRIX = runner.load_matrix
 
+C7 = "0aa260f722fced0eba4314bd4793e415b5bf0b05"
 CANDIDATE = "a" * 40
 
 
+def _candidate_matrix() -> dict:
+    process = subprocess.run(
+        [
+            "git",
+            "show",
+            f"{C7}:plans/phase-7-outcome-pilot-test-batches.yaml",
+        ],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    value = yaml.safe_load(process.stdout)
+    assert isinstance(value, dict)
+    return value
+
+
+EXACT_C7_MATRIX = _candidate_matrix()
+
+
+@pytest.fixture(autouse=True)
+def _use_exact_c7_candidate_matrix(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        runner, "load_matrix", lambda: copy.deepcopy(EXACT_C7_MATRIX)
+    )
+
+
 def _ready_matrix() -> dict:
-    matrix = copy.deepcopy(ORIGINAL_LOAD_MATRIX())
+    matrix = copy.deepcopy(EXACT_C7_MATRIX)
     matrix["document_status"] = "ENTRY_CANDIDATE_READY"
     return matrix
 
@@ -61,7 +90,9 @@ def test_plan_maps_all_four_sources_without_executing_them() -> None:
     }
 
 
-def test_cli_help_and_ready_plan_do_not_execute_sources() -> None:
+def test_cli_help_and_ready_plan_do_not_execute_sources(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     help_result = subprocess.run(
         [sys.executable, str(SCRIPT), "--help"],
         cwd=ROOT,
@@ -70,17 +101,9 @@ def test_cli_help_and_ready_plan_do_not_execute_sources() -> None:
         text=True,
         encoding="utf-8",
     )
-    plan_result = subprocess.run(
-        [sys.executable, str(SCRIPT), "--candidate-commit", CANDIDATE],
-        cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-    )
     assert help_result.returncode == 0
-    assert plan_result.returncode == 0
-    plan = json.loads(plan_result.stdout)
+    assert runner.main(["--candidate-commit", CANDIDATE]) == 0
+    plan = json.loads(capsys.readouterr().out)
     assert plan["execution_allowed"] is True
     assert plan["executed_source_count"] == 0
 

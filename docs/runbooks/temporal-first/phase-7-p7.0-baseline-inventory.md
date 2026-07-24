@@ -2,27 +2,38 @@
 
 ## Observation Boundary
 
-This factual inventory is observed at the accepted Phase 6 checkpoint:
+This factual inventory is observed at the accepted Phase 6 checkpoint and the accepted P7.0
+contract-entry evidence:
 
 ```text
-C6: ea046eae2792cd5afb9929bca40da8fb8c77a9bd
-E6: e674263e9026e3fec46ec295767d432807f5ab44
 A6: d18a1f130a925429e8c2dfd11352cea4ca8673a0
 phase_6_engineering_checkpoint: PASS
-current_permission: PHASE_7_ENGINEERING_ONLY
-contract_gate: P7.0 NOT_RUN
-contract_candidate_state: CONTRACT_CANDIDATE_READY
+C7: 0aa260f722fced0eba4314bd4793e415b5bf0b05
+E7: e29cefb3e028bb84f6a227e46fecdf5711eba48c
+release: phase-7-entry-20260724-0aa260f7
+contract_gate: P7.0 PASS
+entry_effect: P7_0_ENGINEERING_ENTRY_PASS
+engineering_implementation: ALLOWED_UNDER_ADR_0016_ONLY
 next_phase_permission: PHASE_7_ENGINEERING_ONLY_AFTER_P7_0_PASS
-implementation: BLOCKED
-engineering_execution: BLOCKED
 MIG-006: PENDING_PROMOTION
 MIG-007: PENDING_PROMOTION
 formal_outcome_selector: LEGACY
+allowed_new_runtime_modes: [DISABLED, JAVA_SIGNED_SYNTHETIC_NOOP_SHADOW]
+temporal_outcome_allocation: FORBIDDEN
+formal_outcome_workflow: FORBIDDEN
+formal_outcome_graph_sink: FORBIDDEN
+real_tool_effects: FORBIDDEN
+real_or_party_data_shadow: FORBIDDEN
+production_traffic: FORBIDDEN
+canary: FORBIDDEN
+promotion: FORBIDDEN
+java_outcome_business_truth: SOLE_FORMAL_TRUTH
 ```
 
-The corresponding exception is `ADR_0016_ACCEPTED_FOR_ENGINEERING_ONLY`. This inventory describes
-the legacy baseline that Phase 7 must preserve; it is not entry evidence and does not realize
-`P7_0_ENGINEERING_ENTRY_PASS`.
+The corresponding exception is `ADR_0016_ACCEPTED_FOR_ENGINEERING_ONLY`. `E7`, as the direct child
+of `C7`, realizes `P7_0_ENGINEERING_ENTRY_PASS`; the separate P7.0 checkpoint records that decision.
+This inventory still describes the legacy baseline Phase 7 must preserve. Entry acceptance closes
+no product implementation gap and changes no formal runtime or writer.
 
 ## Current End-To-End Baseline
 
@@ -234,8 +245,8 @@ Temporal Outcome allocation or external exactly-once guarantee.
 
 | Gap | Current evidence | Gate effect |
 | --- | --- | --- |
-| `P7-G0` | exact accepted `C6/E6/A6` chain and ADR 0016 are present | closed only for contract-candidate assembly |
-| `P7-G1` | P7.0 is `NOT_RUN`; no exact-SHA evidence commit exists | all implementation remains blocked |
+| `P7-G0` | accepted `A6`, ADR 0016, exact `C7`, and direct-child `E7` are present | entry authorization chain accepted; no product gap closed |
+| `P7-G1` | 140 exact-candidate Batch 0 tests passed and `E7` realizes `P7_0_ENGINEERING_ENTRY_PASS` | entry-only gap closed; engineering allowed under ADR 0016 |
 | `P7-G2` | no Outcome Workflow, durable review wait, SLA timer, or replay fixture | Temporal cannot own Outcome time/failure |
 | `P7-G3` | Java review decisions exist, but no epoch/fence domain receipt protocol exists | formal selector must remain `LEGACY` |
 | `P7-G4` | direct Copilot class, no `outcome/review.v1` StateGraph/checkpoint/capability | graph cannot enter engineering shadow |
@@ -245,14 +256,15 @@ Temporal Outcome allocation or external exactly-once guarantee.
 | `P7-G8` | existing UI/history readers cover legacy facts only | Phase 7 compatibility parity is unproven |
 | `P7-G9` | no signed synthetic no-op trace, timer race, response-loss, compensation, or replay evidence | no Phase 7 engineering checkpoint or promotion claim |
 
-`P7-G0` permits preparation of this candidate only. It does not close any Phase 7 product or
-runtime gap.
+`P7-G0` and `P7-G1` close only the contract-entry prerequisites. They close no Phase 7 product,
+runtime, migration, reliability, replay, privacy, effect, compensation, UI, or promotion gap.
 
 ## Non-Authorization Statement
 
-This inventory adds no product source, migration, schema, fixture, runtime selector, Workflow,
-Activity, graph, checkpoint, tool adapter, receipt, compensation, UI behavior, external call,
-real-data permission, deployment, canary, promotion, or production evidence. It explicitly closes
-no implementation gap. `P7.0 NOT_RUN`, `engineering_execution: BLOCKED`, `MIG-006:
-PENDING_PROMOTION`, `MIG-007: PENDING_PROMOTION`, and `formal_outcome_selector: LEGACY` remain
-authoritative until the exact contract candidate and a separate evidence commit pass the gate.
+This inventory adds no product source, migration, runtime selector, Workflow, Activity, graph,
+checkpoint, tool adapter, receipt, compensation, UI behavior, external call, real-data permission,
+deployment, canary, promotion, or production evidence. The accepted candidate contains only entry
+contracts, synthetic-no-op schema/fixtures, plans, evidence tooling, and static tests. P7.0 entry
+explicitly closes no product implementation gap. `MIG-006: PENDING_PROMOTION`, `MIG-007:
+PENDING_PROMOTION`, and `formal_outcome_selector: LEGACY` remain authoritative; all formal, real
+effect/data/shadow, production, canary, and promotion paths remain forbidden.

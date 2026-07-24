@@ -8,6 +8,9 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 BASE = "d18a1f130a925429e8c2dfd11352cea4ca8673a0"
+C7 = "0aa260f722fced0eba4314bd4793e415b5bf0b05"
+E7 = "e29cefb3e028bb84f6a227e46fecdf5711eba48c"
+RELEASE_ID = "phase-7-entry-20260724-0aa260f7"
 PLAN_PATH = ROOT / "plans/phase-7-outcome-pilot-execution.md"
 MATRIX_PATH = ROOT / "plans/phase-7-outcome-pilot-test-batches.yaml"
 BRIEFS_PATH = ROOT / "plans/phase-7-owner-briefs.yaml"
@@ -44,34 +47,44 @@ def _owner_paths(owner: dict) -> list[str]:
     return paths
 
 
-def test_p7_plan_is_exact_a6_entry_and_all_implementation_remains_blocked() -> None:
+def test_p7_plan_accepts_exact_c7_e7_and_releases_engineering_only() -> None:
     matrix = _yaml(MATRIX_PATH)
     briefs = _yaml(BRIEFS_PATH)
     plan = PLAN_PATH.read_text(encoding="utf-8")
 
     assert matrix["schema_version"] == "phase-test-batches.v1"
     assert matrix["phase"] == 7
-    assert matrix["document_status"] == "P7_0_NOT_RUN_IMPLEMENTATION_BLOCKED"
+    assert matrix["document_status"] == "P7_0_PASS_ENGINEERING_ACTIVE"
     gate = matrix["gate"]
     assert gate["accepted_phase_6_checkpoint_A6"] == BASE
     assert gate["contract_gate"] == "P7.0"
-    assert gate["contract_gate_status"] == "NOT_RUN"
-    assert gate["entry_decision"] == "NOT_RUN"
+    assert gate["contract_gate_status"] == "PASS"
+    assert gate["entry_decision"] == "ENTRY_EVIDENCE_ACCEPTED"
     assert gate["entry_effect_after_green_evidence"] == (
         "P7_0_ENGINEERING_ENTRY_PASS"
     )
-    assert gate["implementation_authorized"] is False
-    assert gate["implementation_owners_state"] == "BLOCKED"
-    assert gate["product_implementation"] == "BLOCKED"
-    assert gate["V045"] == "FORBIDDEN_BEFORE_SEPARATE_ENTRY_EVIDENCE"
+    assert gate["entry_effect_status"] == "REALIZED"
+    assert gate["accepted_phase_7_candidate_C7"] == C7
+    assert gate["accepted_phase_7_evidence_E7"] == E7
+    assert gate["phase_7_entry_release"] == RELEASE_ID
+    assert gate["entry_evidence_relationship"] == "E7_IS_DIRECT_CHILD_OF_C7"
+    assert gate["implementation_authorized"] is True
+    assert gate["implementation_owners_state"] == "READY"
+    assert gate["product_implementation"] == (
+        "ALLOWED_UNDER_ADR_0016_ENGINEERING_RESTRICTIONS"
+    )
+    assert gate["V045"] == "ALLOWED_ADDITIVE_ONLY_UNDER_ADR_0016"
     assert not V045_PATH.exists()
 
     assert briefs["accepted_phase_6_checkpoint_A6"] == BASE
-    assert briefs["gate"]["status"] == "NOT_RUN"
-    assert briefs["gate"]["dispatch_state"] == "BLOCKED"
-    assert briefs["gate"]["implementation_authorized"] is False
-    assert briefs["first_wave"]["status"] == "BLOCKED_ON_P7_R2_PASS"
-    assert "P7.0" in plan and "NOT_RUN" in plan
+    assert briefs["accepted_phase_7_candidate_C7"] == C7
+    assert briefs["accepted_phase_7_evidence_E7"] == E7
+    assert briefs["gate"]["status"] == "PASS"
+    assert briefs["gate"]["dispatch_state"] == "READY_FOR_FIRST_WAVE"
+    assert briefs["gate"]["implementation_authorized"] is True
+    assert briefs["gate"]["blocked_reasons"] == []
+    assert briefs["first_wave"]["status"] == "READY"
+    assert "contract_gate: P7.0 PASS" in plan
     assert "ADR_0016_ACCEPTED_FOR_ENGINEERING_ONLY" in plan
     assert "P7_0_ENGINEERING_ENTRY_PASS" in plan
 
@@ -92,7 +105,11 @@ def test_two_commit_gate_and_candidate_scope_are_closed() -> None:
         "WORKER_REGISTRATION_OR_SELECTOR_ADMISSION",
         "REAL_OR_PRODUCTION_CONFIGURATION",
     }
-    assert gate["runtime_modes_allowed_now"] == ["LEGACY", "DISABLED"]
+    assert gate["runtime_modes_allowed_now"] == [
+        "LEGACY",
+        "DISABLED",
+        "JAVA_SIGNED_SYNTHETIC_NOOP_SHADOW",
+    ]
     assert gate["runtime_mode_allowed_after_p7_0"] == (
         "JAVA_SIGNED_SYNTHETIC_NOOP_SHADOW"
     )
@@ -126,7 +143,7 @@ def test_one_primary_seven_disjoint_implementation_owners_and_support_lanes() ->
         "activation_policy": "DEPENDENCY_AWARE",
         "roles_are_scheduled_only_when_work_is_ready": True,
         "shared_writer_policy": "ONE_OWNER_PER_PATH",
-        "implementation_release_state": "BLOCKED",
+        "implementation_release_state": "READY",
     }
     assert matrix["team"] == {
         "primary": "R",
@@ -260,10 +277,18 @@ def test_test_budget_is_two_heavy_two_light_with_sequential_batch_zero() -> None
 
 def test_batch_zero_has_exact_four_ids_reports_and_commands() -> None:
     entry = _yaml(MATRIX_PATH)["batches"]["batch_0_entry"]
-    assert entry["status"] == "NOT_RUN"
-    assert entry["accepted_candidate_commit"] is None
-    assert entry["entry_evidence_commit"] is None
-    assert entry["source_test_counts"] is None
+    assert entry["status"] == "PASS"
+    assert entry["accepted_candidate_commit"] == C7
+    assert entry["entry_evidence_commit"] == E7
+    assert entry["release"] == RELEASE_ID
+    assert entry["source_test_counts"] == {
+        "static": 78,
+        "python": 3,
+        "java": 18,
+        "frontend": 41,
+        "total": 140,
+    }
+    assert entry["evidence_relationship"] == "DIRECT_CHILD"
     assert entry["all_four_sources_required"] is True
     assert entry["source_reports"] == EXPECTED_REPORTS
     commands = {item["id"]: item for item in entry["source_commands"]}
@@ -320,7 +345,7 @@ def test_batch_zero_has_exact_four_ids_reports_and_commands() -> None:
         assert frontend.count(test_path) == 1
 
 
-def test_batch_zero_gate_blocks_before_sources_and_never_claims_pass() -> None:
+def test_accepted_batch_preserves_the_historical_fail_closed_runner_contract() -> None:
     matrix = _yaml(MATRIX_PATH)
     gate = matrix["gate"]
     entry = matrix["batches"]["batch_0_entry"]
@@ -387,11 +412,7 @@ def test_task_dag_releases_every_owner_only_after_p7_r2_pass() -> None:
 
 def test_documents_resolve_and_release_ceiling_remains_engineering_only() -> None:
     matrix = _yaml(MATRIX_PATH)
-    entry_checkpoint = matrix["documents"]["entry_checkpoint"]
-    assert not (ROOT / entry_checkpoint).exists()
-    for name, path in matrix["documents"].items():
-        if name == "entry_checkpoint":
-            continue
+    for path in matrix["documents"].values():
         assert (ROOT / path).is_file(), path
     for path in _yaml(BRIEFS_PATH)["sources"].values():
         assert (ROOT / path).is_file(), path
