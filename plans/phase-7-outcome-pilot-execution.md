@@ -6,6 +6,14 @@
 plan_status: P7_0_PASS_ENGINEERING_ACTIVE
 contract_gate: P7.0 PASS
 engineering_execution: ALLOWED_UNDER_ADR_0016_ENGINEERING_RESTRICTIONS
+phase_7_engineering_state: BATCHES_1_AND_2_PASS_AWAITING_C7_ENG_FREEZE
+batch_1_foundation: PASS
+batch_2_integration: PASS
+batch_3_candidate_tooling: IMPLEMENTED_CHECKPOINT_NOT_RUN
+phase_7_engineering_candidate_C7_eng: NOT_FROZEN
+phase_7_engineering_evidence_E7_eng: NOT_CREATED
+phase_7_checkpoint_A7: NOT_CREATED
+phase_7_engineering_checkpoint: NOT_RUN
 accepted_phase_7_candidate_C7: 0aa260f722fced0eba4314bd4793e415b5bf0b05
 accepted_phase_7_evidence_E7: e29cefb3e028bb84f6a227e46fecdf5711eba48c
 phase_7_entry_release: phase-7-entry-20260724-0aa260f7
@@ -39,6 +47,11 @@ commit `E7=e29cefb3e028bb84f6a227e46fecdf5711eba48c` authenticates the reports u
 This releases A-G for Phase 7 engineering implementation under ADR 0016. It does not satisfy the
 master plan's production entry condition `MIG-006=PASS`, authorize a formal Outcome Workflow, or
 make `MIG-006` or `MIG-007` pass.
+
+Phase 7 implementation has passed Batch 1 foundations and Batch 2 integration preflight. The Batch 3
+runner, evidence generator, and their focused static contract tests are implemented, but no
+engineering candidate has been frozen. Consolidated candidate-bound P0 review, the exact-SHA
+four-source Batch 3 run, and the engineering checkpoint remain unrecorded.
 
 This plan is used with [the Phase 7 test matrix](./phase-7-outcome-pilot-test-batches.yaml),
 [the Phase 7 owner briefs](./phase-7-owner-briefs.yaml), section 7.8 of the
@@ -244,24 +257,76 @@ global worker/config/selector/registry/router/integration files.
 
 Support lanes are read-only unless the primary explicitly transfers an unowned fix: exactly one
 consolidated P0 review lane, two verification lanes, and one lookahead lane. During Phase 7
-implementation the primary controls a combined ceiling of two Maven/Testcontainers/heavy processes
-and two light processes. Roles activate only when a stable diff or runnable shard exists; they are
-logical responsibilities, not permanently occupied agent slots. Batch 0 is the narrower sequential
-exception described above and never uses more than one heavy process.
+implementation the primary controls a ceiling of two isolated Maven/Testcontainers processes, one
+P0 review process, and two light processes. Roles activate only when a stable diff or runnable shard
+exists; they are logical responsibilities, not permanently occupied agent slots. Batch 0 is the
+narrower sequential exception described above and never uses more than one heavy process.
 
 ## Batched Verification
 
 - **Batch 0:** entry baseline only, exact candidate SHA, four source commands, no implementation.
-- **Batch 1:** owner foundations after P7.0 PASS; pure Workflow, Java authority, migration contract,
-  no-op execution, Graph, and focused frontend units.
-- **Batch 2:** integrated operation/receipt/compensation, reviewer race, closure/evaluation ordering,
-  compatibility readers, and synthetic recovery.
-- **Batch 3:** one frozen Phase 7 engineering candidate and immutable evidence from the same SHA.
+- **Batch 1 - PASS:** owner foundations after P7.0 PASS; pure Workflow, Java
+  authority, migration contract, no-op execution, Graph, and focused frontend units.
+- **Batch 2 - PASS:** integrated operation/receipt/compensation, reviewer race,
+  closure/evaluation ordering, compatibility readers, and synthetic recovery.
+- **Batch 3 - tooling implemented, checkpoint not run:** one future frozen Phase 7 engineering
+  candidate, four exact-SHA sources, candidate-bound P0 disposition, and immutable evidence.
 - **Unified/promotion:** deferred. Real tools, real data, canary, load, chaos, production, `MIG-006`,
   and `MIG-007` cannot be passed by Phase 7 synthetic evidence.
 
 No later engineering batch currently claims PASS. Exact commands and resource controls remain
 authoritative in the machine-readable test matrix.
+
+## Batch 3 Engineering Candidate Tooling
+
+`P7-R3` owns fail-closed shared assembly and candidate preparation. The implemented checkpoint
+tooling is candidate content, not evidence that the implementation or tests passed:
+
+- runner: `scripts/run_phase7_candidate_checkpoint.py`
+- evidence generator and post-commit verifier: `scripts/generate_phase7_candidate_evidence.py`
+- runner contract tests: `tests/static/test_phase7_candidate_runner.py`
+- evidence contract tests: `tests/static/test_phase7_candidate_evidence.py`
+
+After Batch 1, Batch 2, and shared assembly are independently closed, `P7-R3` may freeze exactly one
+clean engineering candidate `C7-eng`. `P7-R4` then runs these four sources sequentially from a clean
+detached worktree at that exact SHA:
+
+| Ordered source | Exact selector | Normalized artifact | Raw provenance |
+| --- | --- | --- | --- |
+| `static_phase7_candidate` | nine Phase 7 entry, contract, plan, router, candidate, and traceability static files frozen in the matrix | `static-phase7-candidate.xml` | one pytest JUnit plus stdout/stderr |
+| `python_phase7_candidate` | `tests/graphs/outcome`, `tests/agents/test_review_copilot.py`, `tests/test_evaluation.py` | `python-phase7-candidate.xml` | one pytest JUnit plus stdout/stderr |
+| `java_phase7_candidate` | the 24 exact Maven classes frozen in the matrix, including `JdbcOutcomeOperationLedgerTest` | `java-phase7-candidate.xml` | 24 suffixed Surefire XML files plus stdout/stderr |
+| `frontend_phase7_candidate` | the six Draft, Outcome, Review, and review API Vitest files frozen in the matrix | `frontend-phase7-candidate.xml` | one Vitest JUnit plus stdout/stderr |
+
+The sealed execution manifest retains source argv, contract, environment, source-tree, stdout,
+stderr, raw-report, normalized-report, and SHA-256 bindings. The evidence bundle copies all four
+normalized reports and maps every accepted or quarantined raw JUnit/stdout/stderr artifact through
+`provenance-manifest.json`; normalized testcase fingerprints must replay exactly from the retained
+raw provenance.
+
+Evidence generation also requires a separately authored, explicitly supplied external absolute-path
+`p0-review-disposition.json`. Its source must be a regular no-follow file outside the candidate
+workspace, run directory, evidence output, and staging directory, and it cannot be candidate-tracked.
+The generator snapshots it before assembly and rejects source-byte or identity drift. The document has
+schema `phase7-p0-review-disposition.v1`, the exact `C7-eng` SHA, review scope
+`CONSOLIDATED_POST_INTEGRATION_P0_ONLY`, all three frozen P0 topics, status `ALL_P0_CLOSED`, zero
+open P0 findings, and sorted unique closed finding IDs. This input is not inferred from runner
+green status and cannot be reused for another candidate.
+
+The engineering checkpoint uses a three-commit topology:
+
+1. **`C7-eng`:** exact integrated engineering candidate, including the candidate runner, generator,
+   static tooling contracts, and the additive V045 implementation.
+2. **`E7-eng`:** evidence-only sole-parent direct child of `C7-eng`; it adds only the immutable
+   `test-reports/temporal-first/<release>/phase-7-candidate/**` bundle authenticated by the generator.
+3. **`A7`:** checkpoint-only sole-parent direct child of `E7-eng`; it records acceptance of the
+   verified `C7-eng/E7-eng` chain and no broader runtime or promotion authority.
+
+The runner can report only `PHASE_7_ENGINEERING_SOURCES_GREEN_AWAITING_SEPARATE_EVIDENCE`.
+`E7-eng` must be verified as the sole-parent evidence child before `A7`; only `A7` may record the
+accepted Phase 7 engineering checkpoint and at most `PHASE_8_ENGINEERING_ONLY`. Throughout all
+three commits, `MIG-006` and `MIG-007` remain `PENDING_PROMOTION`, and formal activation, Temporal
+Outcome allocation, real effects, real-case shadow, canary, and promotion remain forbidden.
 
 ## Engineering Exit And Handoff
 

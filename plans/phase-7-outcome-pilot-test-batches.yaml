@@ -2,6 +2,7 @@ schema_version: phase-test-batches.v1
 phase: 7
 name: outcome-engineering-noop-shadow
 document_status: P7_0_PASS_ENGINEERING_ACTIVE
+engineering_status: BATCHES_1_AND_2_PASS_AWAITING_C7_ENG_FREEZE
 
 documents:
   execution_plan: plans/phase-7-outcome-pilot-execution.md
@@ -23,6 +24,10 @@ documents:
   static_entry_evidence_gate: tests/static/test_phase7_entry_evidence.py
   entry_runner: scripts/run_phase7_entry_checkpoint.py
   entry_evidence_generator: scripts/generate_phase7_entry_evidence.py
+  candidate_runner: scripts/run_phase7_candidate_checkpoint.py
+  candidate_evidence_generator: scripts/generate_phase7_candidate_evidence.py
+  candidate_runner_static_test: tests/static/test_phase7_candidate_runner.py
+  candidate_evidence_static_test: tests/static/test_phase7_candidate_evidence.py
 
 gate:
   contract_gate: P7.0
@@ -48,6 +53,11 @@ gate:
   entry_decision: ENTRY_EVIDENCE_ACCEPTED
   entry_effect_after_green_evidence: P7_0_ENGINEERING_ENTRY_PASS
   entry_effect_status: REALIZED
+  current_engineering_state: BATCHES_1_AND_2_PASS_AWAITING_C7_ENG_FREEZE
+  batch_1_status: PASS
+  batch_2_status: PASS
+  batch_3_tooling_status: IMPLEMENTED_CHECKPOINT_NOT_RUN
+  phase_7_engineering_checkpoint: NOT_RUN
   product_implementation: ALLOWED_UNDER_ADR_0016_ENGINEERING_RESTRICTIONS
   V045: ALLOWED_ADDITIVE_ONLY_UNDER_ADR_0016
   two_commit_gate:
@@ -126,6 +136,8 @@ resources:
   primary_owner: R
   heavy_test_slots: 2
   combined_maven_testcontainers_heavy_process_limit: 2
+  isolated_maven_process_limit: 2
+  p0_review_process_limit: 1
   light_test_slots: 2
   maven_fork_count: 1
   frontend_vitest_process_slots: 1
@@ -209,11 +221,25 @@ task_dag:
     result: FRONTEND_BOUND_TO_JAVA_PROJECTIONS
     requires: [P7-G1, C_REVIEW_PROJECTION_PUBLISHED, E_OUTCOME_PROJECTION_PUBLISHED]
   P7-R3:
-    result: FAIL_CLOSED_SHARED_ASSEMBLY
+    result: FAIL_CLOSED_SHARED_ASSEMBLY_AND_C7_ENG_PREPARATION
     requires: [P7-A2, P7-B2, P7-C2, P7-D2, P7-E2, P7-F2, P7-G2]
+    current_status: READY_TO_FREEZE_C7_ENG
+    freeze_gate: [BATCH_1_PASS, BATCH_2_PASS]
+    tooling:
+      runner: scripts/run_phase7_candidate_checkpoint.py
+      evidence_generator: scripts/generate_phase7_candidate_evidence.py
+      static_contract_tests:
+        - tests/static/test_phase7_candidate_runner.py
+        - tests/static/test_phase7_candidate_evidence.py
+    result_commit: C7_ENG_EXACT_INTEGRATED_ENGINEERING_CANDIDATE
   P7-R4:
-    result: PHASE7_ENGINEERING_CANDIDATE
-    requires: [P7-R3, ALL_P0_CLOSED, BATCH_1_PASS, BATCH_2_PASS]
+    result: E7_ENG_EVIDENCE_THEN_A7_ENGINEERING_CHECKPOINT
+    requires: [P7-R3, BATCH_1_PASS, BATCH_2_PASS, EXACT_C7_ENG_ALL_P0_CLOSED_INPUT]
+    current_status: BLOCKED_NOT_RUN
+    candidate_bound_input: EXACT_C7_ENG_ALL_P0_CLOSED_DISPOSITION
+    commit_topology: C7_ENG_TO_DIRECT_CHILD_E7_ENG_TO_DIRECT_CHILD_A7
+    decision_ceiling: PHASE_7_ENGINEERING_CHECKPOINT_ONLY
+    maximum_next_phase_permission: PHASE_8_ENGINEERING_ONLY
 
 batches:
   draft_validation:
@@ -338,7 +364,7 @@ batches:
     required_result: P7_0_ENGINEERING_ENTRY_PASS_FROM_SEPARATE_DIRECT_CHILD_EVIDENCE_COMMIT
 
   batch_1_foundation:
-    status: READY_FOR_OWNER_IMPLEMENTATION
+    status: PASS
     owner: R
     java_test_classes:
       - OutcomeRoomWorkflowTest
@@ -346,7 +372,11 @@ batches:
       - ReviewApplicationServiceV2Test
       - FrozenReviewPacketTest
       - ApprovalPolicyEngineTest
-      - OutcomeOperationLedgerPersistenceTest
+      - JdbcOutcomeOperationLedgerTest
+      - OutcomeOperationLedgerIntegrationTest
+      - ReviewTemporalCommandIntegrationTest
+      - OutcomeReliabilityHarnessTest
+      - OutcomeUnregisteredAssemblyGuardTest
       - ToolActivityIdempotencyTest
       - CaseClosureServiceTest
       - RestClientEvaluationAgentClientTest
@@ -371,7 +401,7 @@ batches:
       - LEGACY_FRONTEND_COMPATIBILITY
 
   batch_2_integration:
-    status: PLANNED_BLOCKED_ON_BATCH_1
+    status: PASS
     owner: R
     planned_test_classes:
       - ReviewTemporalCommandIntegrationTest
@@ -381,6 +411,7 @@ batches:
       - OutcomeClosureEvaluationOrderingTest
       - OutcomeSyntheticNoopAssemblyTest
       - OutcomeReliabilityHarnessTest
+      - OutcomeUnregisteredAssemblyGuardTest
     assertions:
       - REVIEW_DECISION_AND_SLA_SAME_TICK_DETERMINISTIC
       - DUPLICATE_DECISION_AND_OPERATION_RETURN_IDENTICAL_RECEIPT
@@ -392,22 +423,201 @@ batches:
       - NO_REAL_CASE_SOURCE_TOOL_EFFECT_FORMAL_SINK_OR_TEMPORAL_ALLOCATION
 
   batch_3_engineering_candidate:
-    status: PLANNED_NOT_RUN
+    status: TOOLING_IMPLEMENTED_CHECKPOINT_NOT_RUN
     owner: R
+    runner: scripts/run_phase7_candidate_checkpoint.py
+    evidence_generator: scripts/generate_phase7_candidate_evidence.py
+    static_contract_tests:
+      - tests/static/test_phase7_candidate_runner.py
+      - tests/static/test_phase7_candidate_evidence.py
     exact_clean_candidate_sha_required: true
     all_sources_rerun_from_same_sha: true
     evidence_commit_must_be_separate_direct_child: true
+    runner_execution: SEQUENTIAL
+    maximum_isolated_maven_processes: 2
+    maximum_p0_review_processes: 1
+    maximum_light_processes: 2
+    observed_maximum_source_processes: 1
+    source_order:
+      - static_phase7_candidate
+      - python_phase7_candidate
+      - java_phase7_candidate
+      - frontend_phase7_candidate
+    source_reports:
+      static_phase7_candidate: static-phase7-candidate.xml
+      python_phase7_candidate: python-phase7-candidate.xml
+      java_phase7_candidate: java-phase7-candidate.xml
+      frontend_phase7_candidate: frontend-phase7-candidate.xml
+    source_commands:
+      - id: static_phase7_candidate
+        cwd: .
+        resource_class: light
+        report: static-phase7-candidate.xml
+        report_kind: PYTEST_JUNIT
+        expected_report_count: 1
+        selected_test_file_count: 9
+        minimum_tests: 78
+        selectors:
+          - tests/static/test_phase7_entry_checkpoint.py
+          - tests/static/test_phase7_entry_evidence.py
+          - tests/static/test_phase7_outcome_contracts.py
+          - tests/static/test_phase7_outcome_pilot_plan.py
+          - tests/static/test_phase7_p7_0_entry_checkpoint.py
+          - tests/static/test_phase7_router_contract.py
+          - tests/static/test_phase7_candidate_runner.py
+          - tests/static/test_phase7_candidate_evidence.py
+          - tests/static/test_temporal_refactor_traceability.py
+        command: >-
+          D:\miniconda\python.exe -m pytest -q
+          tests/static/test_phase7_entry_checkpoint.py
+          tests/static/test_phase7_entry_evidence.py
+          tests/static/test_phase7_outcome_contracts.py
+          tests/static/test_phase7_outcome_pilot_plan.py
+          tests/static/test_phase7_p7_0_entry_checkpoint.py
+          tests/static/test_phase7_router_contract.py
+          tests/static/test_phase7_candidate_runner.py
+          tests/static/test_phase7_candidate_evidence.py
+          tests/static/test_temporal_refactor_traceability.py
+          --junitxml={raw_report}
+      - id: python_phase7_candidate
+        cwd: python-agent-service
+        resource_class: light
+        report: python-phase7-candidate.xml
+        report_kind: PYTEST_JUNIT
+        expected_report_count: 1
+        selected_test_file_count: 3
+        minimum_tests: 22
+        selectors:
+          - tests/graphs/outcome
+          - tests/agents/test_review_copilot.py
+          - tests/test_evaluation.py
+        command: >-
+          D:\miniconda\python.exe -m pytest -q tests/graphs/outcome
+          tests/agents/test_review_copilot.py tests/test_evaluation.py
+          --junitxml={raw_report}
+      - id: java_phase7_candidate
+        cwd: java-api-service
+        resource_class: heavy
+        report: java-phase7-candidate.xml
+        report_kind: SUREFIRE_GLOB
+        raw_report_glob: target/surefire-reports/TEST-*-{report_suffix}.xml
+        expected_report_count: 24
+        selected_test_file_count: 24
+        minimum_tests: 80
+        selectors:
+          - OutcomeWireContractTest
+          - OutcomeProtocolCompatibilityTest
+          - OutcomeRoomWorkflowTest
+          - OutcomeRoomWorkflowTimerTest
+          - OutcomeRoomWorkflowReplayTest
+          - ReviewApplicationServiceV2Test
+          - FrozenReviewPacketTest
+          - ApprovalPolicyEngineTest
+          - ReviewControllerTest
+          - ReviewDecisionConcurrencyTest
+          - OutcomeV045MigrationContractTest
+          - JdbcOutcomeOperationLedgerTest
+          - OutcomeOperationLedgerIntegrationTest
+          - ToolActivityIdempotencyTest
+          - CompensationWorkflowTest
+          - CaseOutcomeServiceTest
+          - CaseOutcomeControllerTest
+          - CaseClosureServiceTest
+          - RestClientEvaluationAgentClientTest
+          - OutcomeClosureEvaluationOrderingTest
+          - OutcomeSyntheticNoopAssemblyTest
+          - ReviewTemporalCommandIntegrationTest
+          - OutcomeReliabilityHarnessTest
+          - OutcomeUnregisteredAssemblyGuardTest
+        command: >-
+          .\mvnw.cmd -q -DforkCount=1
+          -Dtest=OutcomeWireContractTest,OutcomeProtocolCompatibilityTest,OutcomeRoomWorkflowTest,OutcomeRoomWorkflowTimerTest,OutcomeRoomWorkflowReplayTest,ReviewApplicationServiceV2Test,FrozenReviewPacketTest,ApprovalPolicyEngineTest,ReviewControllerTest,ReviewDecisionConcurrencyTest,OutcomeV045MigrationContractTest,JdbcOutcomeOperationLedgerTest,OutcomeOperationLedgerIntegrationTest,ToolActivityIdempotencyTest,CompensationWorkflowTest,CaseOutcomeServiceTest,CaseOutcomeControllerTest,CaseClosureServiceTest,RestClientEvaluationAgentClientTest,OutcomeClosureEvaluationOrderingTest,OutcomeSyntheticNoopAssemblyTest,ReviewTemporalCommandIntegrationTest,OutcomeReliabilityHarnessTest,OutcomeUnregisteredAssemblyGuardTest
+          -Dsurefire.reportNameSuffix={report_suffix} test
+      - id: frontend_phase7_candidate
+        cwd: frontend
+        resource_class: light
+        report: frontend-phase7-candidate.xml
+        report_kind: VITEST_JUNIT
+        expected_report_count: 1
+        selected_test_file_count: 6
+        minimum_tests: 60
+        selectors:
+          - src/views/disputes/AdjudicationDraftView.test.js
+          - src/views/disputes/OutcomeView.test.js
+          - src/views/reviews/ReviewQueueView.test.js
+          - src/views/reviews/ReviewWorkbenchView.test.js
+          - src/views/ReviewWorkbenchView.test.js
+          - src/api/review.test.js
+        command: >-
+          node node_modules/vitest/vitest.mjs run
+          src/views/disputes/AdjudicationDraftView.test.js
+          src/views/disputes/OutcomeView.test.js
+          src/views/reviews/ReviewQueueView.test.js
+          src/views/reviews/ReviewWorkbenchView.test.js
+          src/views/ReviewWorkbenchView.test.js
+          src/api/review.test.js
+          --reporter=default --reporter=junit
+          --outputFile.junit={raw_report}
+    p0_review_disposition_input:
+      cli_flag: --p0-review-disposition
+      filename_in_evidence_bundle: p0-review-disposition.json
+      source_path_kind: EXPLICIT_ABSOLUTE_EXTERNAL_REGULAR_FILE
+      source_must_not_be_candidate_tracked: true
+      source_must_be_outside: [CANDIDATE_WORKSPACE, RUN_DIRECTORY, EVIDENCE_OUTPUT_DIRECTORY, EVIDENCE_STAGING_DIRECTORY]
+      authenticated_source_snapshot_must_remain_unchanged_during_generation: true
+      schema_version: phase7-p0-review-disposition.v1
+      candidate_commit: EXACT_C7_ENG_SHA
+      review_scope: CONSOLIDATED_POST_INTEGRATION_P0_ONLY
+      status: ALL_P0_CLOSED
+      open_p0_count: 0
+      closed_finding_ids: SORTED_UNIQUE_P0_IDS
+      reviewed_topics:
+        - TEMPORAL_DETERMINISM_AND_AUTHORITY
+        - TRANSACTION_IDEMPOTENCY_AND_COMPENSATION
+        - PRIVACY_TOOL_CAPABILITY_AND_CLIENT_AUTHORITY
+      inferred_from_green_sources: false
+      reusable_for_another_candidate: false
+    execution_manifest:
+      filename: phase7-candidate-execution-manifest.json
+      schema_version: phase7-candidate-execution-manifest.v1
+      terminal_green_status: PHASE_7_ENGINEERING_SOURCES_GREEN_AWAITING_SEPARATE_EVIDENCE
+      normalized_reports_directory: r
+      accepted_attempt_directory_pattern: a/<source-alias>-<attempt-number>
+      raw_non_java_report_pattern: a/<source-alias>-<attempt-number>/junit.xml
+      raw_java_report_pattern: a/j-<attempt-number>/raw/j-<ordinal>.xml
+      stdout_stderr_per_attempt: true
+      normalized_must_replay_exact_raw_testcase_fingerprints: true
+    three_commit_checkpoint:
+      commit_1_C7_eng: EXACT_INTEGRATED_ENGINEERING_CANDIDATE
+      commit_2_E7_eng: EVIDENCE_ONLY_SOLE_PARENT_DIRECT_CHILD_OF_C7_ENG
+      commit_3_A7: CHECKPOINT_ONLY_SOLE_PARENT_DIRECT_CHILD_OF_E7_ENG
+      evidence_commit_verifier_flag: --verify-evidence-commit
+      A7_maximum_permission: PHASE_8_ENGINEERING_ONLY
+      MIG-006: PENDING_PROMOTION
+      MIG-007: PENDING_PROMOTION
     required_artifacts:
+      - .gitattributes
+      - candidate.txt
       - phase7-candidate-execution-manifest.json
       - static-phase7-candidate.xml
       - python-phase7-candidate.xml
-      - java-phase7-candidate-surefire-reports
+      - java-phase7-candidate.xml
       - frontend-phase7-candidate.xml
-      - raw-stdout-stderr-with-sha256-index
-      - source-tree-and-environment-manifest
-      - p0-review-disposition
+      - source-tree-environment.json
+      - p0-review-disposition.json
+      - provenance-manifest.json
+      - p/<source-position><scope><record-index>/<kind>/<ordinal>-<sha12>.<xml-or-log>
       - phase7-engineering-decision.json
+      - artifact-sha256.json
+    provenance_artifacts_include:
+      - ACCEPTED_AND_QUARANTINED_STDOUT
+      - ACCEPTED_AND_QUARANTINED_STDERR
+      - ACCEPTED_AND_QUARANTINED_RAW_JUNIT
+      - FOUR_NORMALIZED_EXACT_CANDIDATE_JUNIT_REPORTS
     decision_ceiling: PHASE_7_ENGINEERING_CHECKPOINT_ONLY
+    next_phase_permission_after_verified_checkpoint: PHASE_8_ENGINEERING_ONLY
+    MIG-006: PENDING_PROMOTION
+    MIG-007: PENDING_PROMOTION
     forbidden_claims:
       - MIG_006_PASS
       - MIG_007_PASS
@@ -426,6 +636,7 @@ batches:
 
 evidence_rules:
   candidate_bound: true
+  p0_review_disposition_is_external_absolute_untracked_and_snapshotted: true
   clean_detached_worktree: true
   single_candidate_sha_per_checkpoint: true
   immutable_raw_reports: true

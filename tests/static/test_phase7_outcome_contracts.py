@@ -13,6 +13,12 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 BASE = "d18a1f130a925429e8c2dfd11352cea4ca8673a0"
 C7 = "0aa260f722fced0eba4314bd4793e415b5bf0b05"
+PHASE_7_INTENTIONALLY_MUTATED_SNAPSHOT_PATHS = frozenset(
+    {
+        "java-api-service/src/main/java/com/example/dispute/review/application/ReviewApplicationService.java",
+        "python-agent-service/app/agents/review_copilot.py",
+    }
+)
 MATRIX_PATH = ROOT / "contracts/agent-platform/outcome/v1/compatibility-matrix.yaml"
 SCHEMA_PATH = (
     ROOT
@@ -75,10 +81,27 @@ def test_source_snapshot_is_bound_to_exact_accepted_a6_git_blobs() -> None:
     assert snapshot["digest"] == "SHA_256"
     assert len(snapshot["files"]) == 9
 
-    for pin in snapshot["files"]:
-        accepted = _git_blob(BASE, pin["path"])
+    pins_by_path = {pin["path"]: pin for pin in snapshot["files"]}
+    assert len(pins_by_path) == len(snapshot["files"])
+    assert PHASE_7_INTENTIONALLY_MUTATED_SNAPSHOT_PATHS <= set(pins_by_path)
+
+    accepted_by_path: dict[str, bytes] = {}
+    for path, pin in pins_by_path.items():
+        accepted = _git_blob(BASE, path)
         assert hashlib.sha256(accepted).hexdigest() == pin["sha256"]
-        assert _git_blob("HEAD", pin["path"]) == accepted
+        accepted_by_path[path] = accepted
+
+    changed_pinned_paths = {
+        path
+        for path, accepted in accepted_by_path.items()
+        if _git_blob("HEAD", path) != accepted
+    }
+    assert changed_pinned_paths == (
+        PHASE_7_INTENTIONALLY_MUTATED_SNAPSHOT_PATHS
+    )
+    for path, accepted in accepted_by_path.items():
+        if path not in PHASE_7_INTENTIONALLY_MUTATED_SNAPSHOT_PATHS:
+            assert _git_blob("HEAD", path) == accepted
 
     checkpoint = snapshot["accepted_checkpoint"]
     accepted_checkpoint = _git_blob(BASE, checkpoint["path"])
