@@ -183,6 +183,10 @@ def test_source_contracts_freeze_exact_selectors_and_provisional_minima() -> Non
         "persistence/JdbcOutcomeOperationLedgerTest.java"
     ) in runner.JAVA_TEST_SOURCE_PATHS
     assert "OutcomeUnregisteredAssemblyGuardTest" in java["command"]
+    assert runner._path_allowed(
+        "java-api-service/src/test/java/com/example/dispute/outcome/"
+        "CaseOutcomeControllerTest.java"
+    )
     assert contracts["frontend_phase7_candidate"]["selected_test_file_count"] == 6
 
 

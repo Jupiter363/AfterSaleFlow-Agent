@@ -266,6 +266,7 @@ ALLOWED_CANDIDATE_EXACT = {
     "frontend/src/views/reviews/ReviewQueueView.test.js",
     "frontend/src/views/reviews/ReviewWorkbenchView.vue",
     "frontend/src/views/reviews/ReviewWorkbenchView.test.js",
+    "java-api-service/src/test/java/com/example/dispute/outcome/CaseOutcomeControllerTest.java",
     "plans/phase-7-outcome-pilot-execution.md",
     "plans/phase-7-outcome-pilot-test-batches.yaml",
     "plans/phase-7-owner-briefs.yaml",
