@@ -8,9 +8,11 @@ package com.example.dispute.review;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.never;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -24,6 +26,8 @@ import com.example.dispute.review.api.ReviewController;
 import com.example.dispute.review.application.*;
 import java.util.List;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
@@ -52,7 +56,15 @@ class ReviewControllerTest {
     @Test void reviewerCanListAndSubmitAuditedDecision() throws Exception{
         when(service.list(any(),any())).thenReturn(List.of(new ReviewTaskView("REVIEW_1","CASE_1","REMEDY_1","PACKET_1","PENDING","URGENT","PLATFORM_REVIEWER",null,null,null)));
         when(service.start(eq("REVIEW_1"),any())).thenReturn(new ReviewTaskView("REVIEW_1","CASE_1","REMEDY_1","PACKET_1","IN_REVIEW","URGENT","PLATFORM_REVIEWER","reviewer-local",null,null));
-        when(service.decide(eq("REVIEW_1"),any(),any())).thenReturn(new ReviewDecisionView("APPROVAL_1","REVIEW_1","CASE_1","APPROVE","APPROVED","APPROVED_FOR_EXECUTION",true));
+        when(service.decide(eq("REVIEW_1"),any(),any())).thenReturn(new ReviewDecisionView(
+                "APPROVAL_1","REVIEW_1","CASE_1","APPROVE","APPROVED",
+                "APPROVED_FOR_EXECUTION",true,
+                ReviewDecisionReceiptTestFixture.mint(
+                        "review-decision-receipt.v1","RECEIPT_internal","HUMAN_DECISION",
+                        "REVIEW_1","CASE_1","PACKET_1",1,"a".repeat(64),"APPROVE",
+                        "reviewer-local","policy-v1","b".repeat(64),"c".repeat(64),
+                        "c".repeat(64),1,1,1,true,false,
+                        java.time.OffsetDateTime.parse("2026-07-24T09:00:00Z"))));
         mvc.perform(get("/api/reviews").header(HeaderAuthenticationFilter.USER_ID_HEADER,"reviewer-local").header(HeaderAuthenticationFilter.ROLE_HEADER,"PLATFORM_REVIEWER"))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.data[0].priority").value("URGENT"));
         mvc.perform(post("/api/reviews/REVIEW_1/start").header(HeaderAuthenticationFilter.USER_ID_HEADER,"reviewer-local")
@@ -62,6 +74,46 @@ class ReviewControllerTest {
                         .header(HeaderAuthenticationFilter.ROLE_HEADER,"PLATFORM_REVIEWER").header("Idempotency-Key","decision-1")
                         .contentType(MediaType.APPLICATION_JSON).content("{\"decision\":\"APPROVE\",\"reason\":\"verified\"}"))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.data.execution_allowed").value(true));
+        mvc.perform(post("/api/reviews/REVIEW_1/decision")
+                        .header(HeaderAuthenticationFilter.USER_ID_HEADER,"reviewer-local")
+                        .header(HeaderAuthenticationFilter.ROLE_HEADER,"PLATFORM_REVIEWER")
+                        .header("Idempotency-Key","decision-legacy")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"decision\":\"APPROVE\",\"reason\":\"legacy confirmed\",\"confirmed\":true}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.receipt").doesNotExist());
+        verify(service,never()).decideWithTrustedOutcomeContext(anyString(),any(),any(),any());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings={
+            "room_epoch","roomEpoch","room-epoch","workflow_id","receipt_hash",
+            "source_revision","committed_event_sequence","required_operation_set_ref",
+            "required_operation_set_hash","required_operation_count","idempotency_key_hash",
+            "synthetic_only","expected_binding","expectedBinding","outcome_epoch","outcomeEpoch",
+            "epoch","fencing_token","fencingToken","fence","process_revision",
+            "processRevision","revision","request_hash","requestHash","packet_hash",
+            "packetHash","packet_id","packetId","packet","action_hash","actionHash",
+            "action","policy_version","policyVersion","policy","reviewer_authority_ref",
+            "reviewerAuthorityRef","arbitrary_unknown"
+    })
+    void rejectsEveryUnknownClientPropertyBeforeCallingTheService(String field) throws Exception {
+        mvc.perform(post("/api/reviews/REVIEW_attack/decision")
+                        .header(HeaderAuthenticationFilter.USER_ID_HEADER,"reviewer-local")
+                        .header(HeaderAuthenticationFilter.ROLE_HEADER,"PLATFORM_REVIEWER")
+                        .header("Idempotency-Key","decision-attack")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "decision":"APPROVE",
+                                  "reason":"forge authority",
+                                  "%s":99
+                                }
+                                """.formatted(field)))
+                .andExpect(status().isBadRequest());
+
+        verify(service,never()).decide(eq("REVIEW_attack"),any(),any());
+        verify(service,never()).decideWithTrustedOutcomeContext(anyString(),any(),any(),any());
     }
 
     // 所属模块：【平台人工终审 / 自动化测试层】「ReviewControllerTest.rejectsAnotherPlatformReviewerDecisionWithForbidden()」。

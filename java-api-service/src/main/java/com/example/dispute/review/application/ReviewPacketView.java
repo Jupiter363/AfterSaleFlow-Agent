@@ -29,6 +29,7 @@ public record ReviewPacketView(
         String skillVersion,
         String profileVersion,
         String actionHash,
+        String contentHash,
         JsonNode agentRunRefs,
         java.time.OffsetDateTime frozenAt,
         java.time.OffsetDateTime expiresAt,
@@ -39,4 +40,32 @@ public record ReviewPacketView(
         JsonNode draft,
         JsonNode remedy,
         JsonNode riskFlags,
-        String status) {}
+        String status,
+        String reviewTaskStatus,
+        String assignedReviewerId,
+        java.time.OffsetDateTime reviewDeadline) {
+
+    public ReviewPacketView {
+        agentRunRefs = copy(agentRunRefs);
+        caseSummary = copy(caseSummary);
+        claims = copy(claims);
+        issues = copy(issues);
+        evidenceMatrix = copy(evidenceMatrix);
+        draft = copy(draft);
+        remedy = copy(remedy);
+        riskFlags = copy(riskFlags);
+    }
+
+    @Override public JsonNode agentRunRefs() { return copy(agentRunRefs); }
+    @Override public JsonNode caseSummary() { return copy(caseSummary); }
+    @Override public JsonNode claims() { return copy(claims); }
+    @Override public JsonNode issues() { return copy(issues); }
+    @Override public JsonNode evidenceMatrix() { return copy(evidenceMatrix); }
+    @Override public JsonNode draft() { return copy(draft); }
+    @Override public JsonNode remedy() { return copy(remedy); }
+    @Override public JsonNode riskFlags() { return copy(riskFlags); }
+
+    private static JsonNode copy(JsonNode value) {
+        return value == null ? null : value.deepCopy();
+    }
+}

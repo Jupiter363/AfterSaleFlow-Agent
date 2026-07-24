@@ -74,12 +74,12 @@ public class CaseOutcomeController {
     }
 
     // 所属模块：【裁决结果查询 / HTTP 接口层】「CaseOutcomeController.confirmDraft(String,String,OutcomeReviewDecisionRequest,Authentication,HttpServletRequest)」。
-    // 具体功能：「CaseOutcomeController.confirmDraft(String,String,OutcomeReviewDecisionRequest,Authentication,HttpServletRequest)」：处理「POST /review/confirm」请求，把路径、查询参数和认证主体转换为应用层调用，主要委托 「service.confirmDraft」、「ApiResponse.success」、「body.reason」、「actor」，并返回「ApiResponse<ReviewDecisionView>」。
+    // 具体功能：「CaseOutcomeController.confirmDraft(String,String,OutcomeReviewDecisionRequest,Authentication,HttpServletRequest)」：处理「POST /review/confirm」请求，把路径、查询参数和认证主体转换为应用层调用，主要委托 「service.confirmDraft」、「ApiResponse.success」、「body.reason」、「actor」，并返回「ApiResponse<LegacyDecisionResponse>」。
     // 上游调用：「CaseOutcomeController.confirmDraft(String,String,OutcomeReviewDecisionRequest,Authentication,HttpServletRequest)」的上游是携带认证信息与 Trace/Request ID 的「POST /review/confirm」HTTP 请求。
-    // 下游影响：「CaseOutcomeController.confirmDraft(String,String,OutcomeReviewDecisionRequest,Authentication,HttpServletRequest)」向下依次触达 「service.confirmDraft」、「ApiResponse.success」、「body.reason」、「actor」；计算结果以「ApiResponse<ReviewDecisionView>」交给调用方。
+    // 下游影响：「CaseOutcomeController.confirmDraft(String,String,OutcomeReviewDecisionRequest,Authentication,HttpServletRequest)」向下依次触达 「service.confirmDraft」、「ApiResponse.success」、「body.reason」、「actor」；计算结果以「ApiResponse<LegacyDecisionResponse>」交给调用方。
     // 系统意义：「CaseOutcomeController.confirmDraft(String,String,OutcomeReviewDecisionRequest,Authentication,HttpServletRequest)」是外部请求进入业务事实源的边界，必须先完成身份/参数校验，再由应用服务决定事务和权限。
     @PostMapping("/review/confirm")
-    public ApiResponse<ReviewDecisionView> confirmDraft(
+    public ApiResponse<LegacyDecisionResponse> confirmDraft(
             @PathVariable
                     @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}")
                     String caseId,
@@ -88,23 +88,24 @@ public class CaseOutcomeController {
             Authentication authentication,
             HttpServletRequest request) {
         return ApiResponse.success(
-                service.confirmDraft(
-                        caseId,
-                        body.reason(),
-                        idempotencyKey,
-                        actor(authentication)),
+                LegacyDecisionResponse.from(
+                        service.confirmDraft(
+                                caseId,
+                                body.reason(),
+                                idempotencyKey,
+                                actor(authentication))),
                 correlationId(request, TraceIdFilter.REQUEST_ATTRIBUTE),
                 correlationId(request, TraceIdFilter.TRACE_ATTRIBUTE),
                 Instant.now(clock));
     }
 
     // 所属模块：【裁决结果查询 / HTTP 接口层】「CaseOutcomeController.modifyDraft(String,String,OutcomeReviewDecisionRequest,Authentication,HttpServletRequest)」。
-    // 具体功能：「CaseOutcomeController.modifyDraft(String,String,OutcomeReviewDecisionRequest,Authentication,HttpServletRequest)」：处理「POST /review/modify」请求，把路径、查询参数和认证主体转换为应用层调用，主要委托 「service.modifyDraft」、「ApiResponse.success」、「body.reason」、「body.approvedPlan」，并返回「ApiResponse<ReviewDecisionView>」。
+    // 具体功能：「CaseOutcomeController.modifyDraft(String,String,OutcomeReviewDecisionRequest,Authentication,HttpServletRequest)」：处理「POST /review/modify」请求，把路径、查询参数和认证主体转换为应用层调用，主要委托 「service.modifyDraft」、「ApiResponse.success」、「body.reason」、「body.approvedPlan」，并返回「ApiResponse<LegacyDecisionResponse>」。
     // 上游调用：「CaseOutcomeController.modifyDraft(String,String,OutcomeReviewDecisionRequest,Authentication,HttpServletRequest)」的上游是携带认证信息与 Trace/Request ID 的「POST /review/modify」HTTP 请求。
-    // 下游影响：「CaseOutcomeController.modifyDraft(String,String,OutcomeReviewDecisionRequest,Authentication,HttpServletRequest)」向下依次触达 「service.modifyDraft」、「ApiResponse.success」、「body.reason」、「body.approvedPlan」；计算结果以「ApiResponse<ReviewDecisionView>」交给调用方。
+    // 下游影响：「CaseOutcomeController.modifyDraft(String,String,OutcomeReviewDecisionRequest,Authentication,HttpServletRequest)」向下依次触达 「service.modifyDraft」、「ApiResponse.success」、「body.reason」、「body.approvedPlan」；计算结果以「ApiResponse<LegacyDecisionResponse>」交给调用方。
     // 系统意义：「CaseOutcomeController.modifyDraft(String,String,OutcomeReviewDecisionRequest,Authentication,HttpServletRequest)」是外部请求进入业务事实源的边界，必须先完成身份/参数校验，再由应用服务决定事务和权限。
     @PostMapping("/review/modify")
-    public ApiResponse<ReviewDecisionView> modifyDraft(
+    public ApiResponse<LegacyDecisionResponse> modifyDraft(
             @PathVariable
                     @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}")
                     String caseId,
@@ -113,12 +114,13 @@ public class CaseOutcomeController {
             Authentication authentication,
             HttpServletRequest request) {
         return ApiResponse.success(
-                service.modifyDraft(
-                        caseId,
-                        body.reason(),
-                        body.approvedPlan(),
-                        idempotencyKey,
-                        actor(authentication)),
+                LegacyDecisionResponse.from(
+                        service.modifyDraft(
+                                caseId,
+                                body.reason(),
+                                body.approvedPlan(),
+                                idempotencyKey,
+                                actor(authentication))),
                 correlationId(request, TraceIdFilter.REQUEST_ATTRIBUTE),
                 correlationId(request, TraceIdFilter.TRACE_ATTRIBUTE),
                 Instant.now(clock));
@@ -143,6 +145,28 @@ public class CaseOutcomeController {
         Object value = request.getAttribute(attribute);
         if (value instanceof String id && !id.isBlank()) return id;
         throw new IllegalStateException("correlation id filter did not run");
+    }
+
+    /** Public decision response retaining only the established HTTP projection. */
+    public record LegacyDecisionResponse(
+            String approvalRecordId,
+            String taskId,
+            String caseId,
+            String decision,
+            String taskStatus,
+            String caseStatus,
+            boolean executionAllowed) {
+
+        private static LegacyDecisionResponse from(ReviewDecisionView decision) {
+            return new LegacyDecisionResponse(
+                    decision.approvalRecordId(),
+                    decision.taskId(),
+                    decision.caseId(),
+                    decision.decision(),
+                    decision.taskStatus(),
+                    decision.caseStatus(),
+                    decision.executionAllowed());
+        }
     }
 
     // 所属模块：【裁决结果查询 / HTTP 接口层】类型「OutcomeReviewDecisionRequest」。

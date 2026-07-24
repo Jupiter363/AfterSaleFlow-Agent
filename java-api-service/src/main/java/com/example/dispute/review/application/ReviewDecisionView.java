@@ -18,4 +18,25 @@ public record ReviewDecisionView(
         String decision,
         String taskStatus,
         String caseStatus,
-        boolean executionAllowed) {}
+        boolean executionAllowed,
+        ReviewDecisionReceiptView receipt) {
+
+    public ReviewDecisionView(
+            String approvalRecordId,
+            String taskId,
+            String caseId,
+            String decision,
+            String taskStatus,
+            String caseStatus,
+            boolean executionAllowed) {
+        this(
+                approvalRecordId,
+                taskId,
+                caseId,
+                decision,
+                taskStatus,
+                caseStatus,
+                executionAllowed,
+                null);
+    }
+}

@@ -18,7 +18,17 @@ public record ReviewDecisionCommand(
         ApprovalDecisionType decision,
         String reason,
         JsonNode approvedPlan,
-        String idempotencyKey) {
+        String idempotencyKey,
+        boolean confirmed) {
+
+    /** Preserves the legacy Java call shape; legacy callers already represent a confirmed action. */
+    public ReviewDecisionCommand(
+            ApprovalDecisionType decision,
+            String reason,
+            JsonNode approvedPlan,
+            String idempotencyKey) {
+        this(decision, reason, approvedPlan, idempotencyKey, true);
+    }
 
     // 所属模块：【平台人工终审 / 应用编排层】「ReviewDecisionCommand.ReviewDecisionCommand(ApprovalDecisionType,String,JsonNode,String)」。
     // 具体功能：「ReviewDecisionCommand.ReviewDecisionCommand(ApprovalDecisionType,String,JsonNode,String)」：在不可变「ReviewDecisionCommand」写入组件前校验 「decision」(ApprovalDecisionType)、「reason」(String)、「approvedPlan」(JsonNode)、「idempotencyKey」(String)，非法输入会抛出 「IllegalArgumentException」。
@@ -36,5 +46,14 @@ public record ReviewDecisionCommand(
         if (idempotencyKey == null || idempotencyKey.isBlank()) {
             throw new IllegalArgumentException("idempotency key is required");
         }
+        if (!confirmed) {
+            throw new IllegalArgumentException("review decision confirmation is required");
+        }
+        approvedPlan = approvedPlan == null ? null : approvedPlan.deepCopy();
+    }
+
+    @Override
+    public JsonNode approvedPlan() {
+        return approvedPlan == null ? null : approvedPlan.deepCopy();
     }
 }

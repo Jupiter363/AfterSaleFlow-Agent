@@ -19,6 +19,9 @@ import com.example.dispute.review.application.ReviewDecisionCommand;
 import com.example.dispute.review.application.ReviewDecisionView;
 import com.example.dispute.review.application.ReviewPacketView;
 import com.example.dispute.review.application.ReviewTaskView;
+import com.fasterxml.jackson.annotation.JsonAnySetter;
+import com.fasterxml.jackson.annotation.JsonAlias;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
@@ -100,13 +103,15 @@ public class ReviewController {
     // 下游影响：「ReviewController.decide(String,String,DecisionRequest,Authentication,HttpServletRequest)」向下依次触达 「service.decide」、「body.decision」、「body.reason」、「body.approvedPlan」；计算结果以「ApiResponse<ReviewDecisionView>」交给调用方。
     // 系统意义：「ReviewController.decide(String,String,DecisionRequest,Authentication,HttpServletRequest)」是外部请求进入业务事实源的边界，必须先完成身份/参数校验，再由应用服务决定事务和权限。
     @PostMapping("/{taskId}/decision")
-    public ApiResponse<ReviewDecisionView> decide(
+    public ApiResponse<LegacyDecisionResponse> decide(
             @PathVariable @NotBlank String taskId,
             @RequestHeader("Idempotency-Key") @NotBlank String idempotencyKey,
             @Valid @RequestBody DecisionRequest body,
             Authentication authentication,HttpServletRequest request){
-        return success(service.decide(taskId,new ReviewDecisionCommand(
-                body.decision(),body.reason(),body.approvedPlan(),idempotencyKey),actor(authentication)),request);
+        ReviewDecisionView decision=service.decide(taskId,new ReviewDecisionCommand(
+                body.decision(),body.reason(),body.approvedPlan(),idempotencyKey,
+                body.confirmed()),actor(authentication));
+        return success(LegacyDecisionResponse.from(decision),request);
     }
 
     // 所属模块：【平台人工终审 / HTTP 接口层】「ReviewController.queryCopilot(String,String,CopilotQueryRequest,Authentication,HttpServletRequest)」。
@@ -179,7 +184,45 @@ public class ReviewController {
     public record DecisionRequest(
             @NotNull ApprovalDecisionType decision,
             @NotBlank @Size(max=2000) String reason,
-            JsonNode approvedPlan){}
+            @JsonProperty("approvedPlan") @JsonAlias("approved_plan") JsonNode approvedPlan,
+            Boolean confirmed){
+
+        public DecisionRequest(
+                ApprovalDecisionType decision,
+                String reason,
+                JsonNode approvedPlan) {
+            this(decision,reason,approvedPlan,true);
+        }
+
+        public DecisionRequest {
+            // Omission preserves the legacy endpoint shape; explicit false always fails closed.
+            confirmed=confirmed==null?Boolean.TRUE:confirmed;
+        }
+
+        @JsonAnySetter
+        public void rejectUnknownProperty(String fieldName,JsonNode ignoredValue) {
+            throw new IllegalArgumentException(
+                    "Unknown public review decision property: "+fieldName);
+        }
+    }
+
+    /** Public decision response retaining only the established HTTP projection. */
+    public record LegacyDecisionResponse(
+            String approvalRecordId,
+            String taskId,
+            String caseId,
+            String decision,
+            String taskStatus,
+            String caseStatus,
+            boolean executionAllowed) {
+
+        private static LegacyDecisionResponse from(ReviewDecisionView decision) {
+            return new LegacyDecisionResponse(
+                    decision.approvalRecordId(),decision.taskId(),decision.caseId(),
+                    decision.decision(),decision.taskStatus(),decision.caseStatus(),
+                    decision.executionAllowed());
+        }
+    }
     // 所属模块：【平台人工终审 / HTTP 接口层】类型「CopilotQueryRequest」。
     // 类型职责：定义CopilotQuery跨层传递时使用的不可变数据契约；本类型显式提供 框架生成的默认访问器。
     // 协作关系：由同模块控制器、应用服务或框架生命周期创建和调用。

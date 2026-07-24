@@ -6,14 +6,17 @@
  */
 package com.example.dispute.outcome;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import com.example.dispute.common.api.ApiResponse;
 import com.example.dispute.common.exception.GlobalExceptionHandler;
 import com.example.dispute.common.trace.TraceIdFilter;
 import com.example.dispute.config.CommonConfiguration;
@@ -28,18 +31,27 @@ import com.example.dispute.outcome.application.AdjudicationDraftView;
 import com.example.dispute.outcome.application.CaseOutcomeService;
 import com.example.dispute.outcome.application.CaseOutcomeView;
 import com.example.dispute.outcome.application.FinalDecisionView;
+import com.example.dispute.review.application.ReviewDecisionReceiptView;
 import com.example.dispute.review.application.ReviewDecisionView;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.servlet.http.HttpServletRequest;
+import java.lang.reflect.Method;
+import java.lang.reflect.ParameterizedType;
+import java.lang.reflect.RecordComponent;
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
+import java.util.Arrays;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
+import org.springframework.security.core.Authentication;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PostMapping;
 
 // 所属模块：【裁决结果查询 / 自动化测试层】类型「CaseOutcomeControllerTest」。
 // 类型职责：集中验证案件结果的业务场景、权限边界和持久化/外部协作契约；本类型显式提供 「returnsTheHumanConfirmedDecisionAndExecutionReceipts」、「reviewerConfirmsTheOutcomeDraftThroughCaseEndpoint」、「reviewerModifiesTheOutcomeDraftThroughCaseEndpoint」。
@@ -170,7 +182,8 @@ class CaseOutcomeControllerTest {
                                 "APPROVE",
                                 "APPROVED",
                                 "APPROVED_FOR_EXECUTION",
-                                true));
+                                true,
+                                mock(ReviewDecisionReceiptView.class)));
 
         mockMvc.perform(
                         post("/api/disputes/CASE_outcome/outcome/review/confirm")
@@ -184,7 +197,8 @@ class CaseOutcomeControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.task_id").value("REVIEW_1"))
                 .andExpect(jsonPath("$.data.decision").value("APPROVE"))
-                .andExpect(jsonPath("$.data.execution_allowed").value(true));
+                .andExpect(jsonPath("$.data.execution_allowed").value(true))
+                .andExpect(jsonPath("$.data.receipt").doesNotExist());
     }
 
     // 所属模块：【裁决结果查询 / 自动化测试层】「CaseOutcomeControllerTest.reviewerModifiesTheOutcomeDraftThroughCaseEndpoint()」。
@@ -208,7 +222,8 @@ class CaseOutcomeControllerTest {
                                 "MODIFY_AND_APPROVE",
                                 "APPROVED",
                                 "APPROVED_FOR_EXECUTION",
-                                true));
+                                true,
+                                mock(ReviewDecisionReceiptView.class)));
 
         mockMvc.perform(
                         post("/api/disputes/CASE_outcome/outcome/review/modify")
@@ -236,6 +251,52 @@ class CaseOutcomeControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.task_id").value("REVIEW_2"))
                 .andExpect(jsonPath("$.data.decision").value("MODIFY_AND_APPROVE"))
-                .andExpect(jsonPath("$.data.execution_allowed").value(true));
+                .andExpect(jsonPath("$.data.execution_allowed").value(true))
+                .andExpect(jsonPath("$.data.receipt").doesNotExist());
+    }
+
+    @Test
+    void outcomeHttpEndpointsExposeOnlyTheLegacyDecisionProjection() throws Exception {
+        assertLegacyDecisionProjection("confirmDraft");
+        assertLegacyDecisionProjection("modifyDraft");
+
+        assertThat(
+                        Arrays.stream(CaseOutcomeController.class.getDeclaredMethods())
+                                .filter(
+                                        method ->
+                                                method.isAnnotationPresent(GetMapping.class)
+                                                        || method.isAnnotationPresent(PostMapping.class))
+                                .map(method -> method.getGenericReturnType().getTypeName()))
+                .noneMatch(typeName -> typeName.contains(ReviewDecisionView.class.getName()));
+        assertThat(
+                        Arrays.stream(
+                                        CaseOutcomeController.LegacyDecisionResponse.class
+                                                .getRecordComponents())
+                                .map(RecordComponent::getName))
+                .containsExactly(
+                        "approvalRecordId",
+                        "taskId",
+                        "caseId",
+                        "decision",
+                        "taskStatus",
+                        "caseStatus",
+                        "executionAllowed");
+    }
+
+    private static void assertLegacyDecisionProjection(String methodName) throws Exception {
+        Method endpoint =
+                CaseOutcomeController.class.getMethod(
+                        methodName,
+                        String.class,
+                        String.class,
+                        CaseOutcomeController.OutcomeReviewDecisionRequest.class,
+                        Authentication.class,
+                        HttpServletRequest.class);
+
+        assertThat(endpoint.getReturnType()).isEqualTo(ApiResponse.class);
+        assertThat(endpoint.getGenericReturnType()).isInstanceOf(ParameterizedType.class);
+        ParameterizedType responseType = (ParameterizedType) endpoint.getGenericReturnType();
+        assertThat(responseType.getActualTypeArguments())
+                .containsExactly(CaseOutcomeController.LegacyDecisionResponse.class);
     }
 }
