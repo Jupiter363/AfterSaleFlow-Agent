@@ -1,0 +1,315 @@
+{
+  "candidate_changed_paths": [
+    "plans/temporal-langgraph-room-refactor.md",
+    "plans/phase-8-production-hardening-execution.md",
+    "plans/phase-8-production-hardening-test-batches.yaml",
+    "plans/phase-8-owner-briefs.yaml",
+    "docs/runbooks/temporal-first/phase-8-p8.0-baseline-inventory.md",
+    "docs/runbooks/temporal-first/phase-8-p8.0-contract-pack.md",
+    "docs/runbooks/temporal-first/phase-8-p8.0-review-closure.md",
+    "tests/static/test_phase8_production_hardening_plan.py",
+    "scripts/run_phase8_entry_checkpoint.py",
+    "scripts/generate_phase8_entry_evidence.py",
+    "tests/static/test_phase8_entry_runner.py",
+    "tests/static/test_phase8_entry_evidence.py"
+  ],
+  "candidate_commit": "74f4cb6bc2ac78f17aacdb36378e72ff650d60b6",
+  "candidate_diff": [
+    {
+      "git_blob_sha": "ee1a0bcdc92c5afdc32feb1e3fde112d4aadc8cb",
+      "mode": "100644",
+      "path": "plans/temporal-langgraph-room-refactor.md",
+      "status": "M",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "2d817fefad905c61f4a7c4c5f6afd6d558f46bc6",
+      "mode": "100644",
+      "path": "plans/phase-8-production-hardening-execution.md",
+      "status": "A",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "3e37d778dcbca8819b12144d8e4f32d7dd54744e",
+      "mode": "100644",
+      "path": "plans/phase-8-production-hardening-test-batches.yaml",
+      "status": "A",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "4526a999c6584f185fb5eef7f52a480f2967356d",
+      "mode": "100644",
+      "path": "plans/phase-8-owner-briefs.yaml",
+      "status": "A",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "8c5f1eb17f00b86154cb200f8fb831a57d9a0d86",
+      "mode": "100644",
+      "path": "docs/runbooks/temporal-first/phase-8-p8.0-baseline-inventory.md",
+      "status": "A",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "3c25903a46eedaaa415fa8d3c83f56a5aefe7178",
+      "mode": "100644",
+      "path": "docs/runbooks/temporal-first/phase-8-p8.0-contract-pack.md",
+      "status": "A",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "a45ff9454f180dc27e045ca24bd762d824414d51",
+      "mode": "100644",
+      "path": "docs/runbooks/temporal-first/phase-8-p8.0-review-closure.md",
+      "status": "A",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "694d30ab5ef7c100a9148a63d4ffd866f2e2a873",
+      "mode": "100644",
+      "path": "tests/static/test_phase8_production_hardening_plan.py",
+      "status": "A",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "8da3607e68596bc30634b4908e615a2486bee1aa",
+      "mode": "100644",
+      "path": "scripts/run_phase8_entry_checkpoint.py",
+      "status": "A",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "ee6130ae78d570e28dd401df20bde480d52301d4",
+      "mode": "100644",
+      "path": "scripts/generate_phase8_entry_evidence.py",
+      "status": "A",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "0d5f876469b5ea62f0f44fee74724183da9e2bb1",
+      "mode": "100644",
+      "path": "tests/static/test_phase8_entry_runner.py",
+      "status": "A",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "72d573bcef3bf8fe822c1978dffdc653e9c31bac",
+      "mode": "100644",
+      "path": "tests/static/test_phase8_entry_evidence.py",
+      "status": "A",
+      "type": "blob"
+    }
+  ],
+  "candidate_tree_sha": "63c3e8259cd5fdc2bd0efd656a87d55f03ea87c7",
+  "closed_finding_ids": [
+    "P0-P8-HANDOFF-001",
+    "P0-P8-ENTRY-TOPOLOGY-002",
+    "P0-P8-BASELINE-003",
+    "P0-P8-REFERENCE-004",
+    "P0-P8-SCHEDULER-005",
+    "P0-P8-V046-006",
+    "P0-P8-V047-007",
+    "P0-P8-RELEASE-008",
+    "P0-P8-RECOVERY-009",
+    "P0-P8-PRIVACY-010",
+    "P0-P8-TEAM-011",
+    "P0-P8-TEST-LIMITS-012",
+    "P0-P8-AUTHORITY-013"
+  ],
+  "cryptographic_production_attestation": false,
+  "disposition_author_id": "primary-integrator-root",
+  "independent_disposition": true,
+  "open_p0_count": 0,
+  "production_reuse": "FORBIDDEN",
+  "review_lanes": [
+    {
+      "disposition": "ALL_P0_CLOSED",
+      "lane": "authority",
+      "open_p0_count": 0,
+      "receipt": {
+        "candidate_commit": "74f4cb6bc2ac78f17aacdb36378e72ff650d60b6",
+        "candidate_diff_sha256": "5d0c3dca604845e28a9c76438c8ab434bb9e5b5978bc6d5b25af112c4dd920c0",
+        "candidate_tree_sha": "63c3e8259cd5fdc2bd0efd656a87d55f03ea87c7",
+        "closed_finding_ids": [
+          "P0-P8-HANDOFF-001",
+          "P0-P8-ENTRY-TOPOLOGY-002",
+          "P0-P8-BASELINE-003",
+          "P0-P8-SCHEDULER-005",
+          "P0-P8-RELEASE-008",
+          "P0-P8-RECOVERY-009",
+          "P0-P8-TEAM-011",
+          "P0-P8-TEST-LIMITS-012",
+          "P0-P8-AUTHORITY-013"
+        ],
+        "disposition": "ALL_P0_CLOSED",
+        "lane": "authority",
+        "open_p0_count": 0,
+        "reviewed_path_blobs_sha256": "c18eeae31da3b8264a369ae605b236d7f81fef85394474f03e8a5da975c15817",
+        "reviewed_topics": [
+          "P0-P8-HANDOFF-001",
+          "P0-P8-ENTRY-TOPOLOGY-002",
+          "P0-P8-BASELINE-003",
+          "P0-P8-SCHEDULER-005",
+          "P0-P8-RELEASE-008",
+          "P0-P8-RECOVERY-009",
+          "P0-P8-TEAM-011",
+          "P0-P8-TEST-LIMITS-012",
+          "P0-P8-AUTHORITY-013"
+        ],
+        "reviewer_id": "agent:p8-replacement-c8-p0-authority",
+        "schema_version": "phase8-entry-p0-lane-review-receipt.v1",
+        "self_approved": false,
+        "source_artifact_set_sha256": "2693b8eed646d4d03caade4711a3ac836131ed7e8b27ff640429a133c78ebd35"
+      },
+      "review_receipt_sha256": "eb966b6ae92a47a08b4b4ae16e25e6afc51c9a0e6c84ae0008d42bf2c7d45515",
+      "reviewer_id": "agent:p8-replacement-c8-p0-authority",
+      "self_approved": false
+    },
+    {
+      "disposition": "ALL_P0_CLOSED",
+      "lane": "data_migration",
+      "open_p0_count": 0,
+      "receipt": {
+        "candidate_commit": "74f4cb6bc2ac78f17aacdb36378e72ff650d60b6",
+        "candidate_diff_sha256": "5d0c3dca604845e28a9c76438c8ab434bb9e5b5978bc6d5b25af112c4dd920c0",
+        "candidate_tree_sha": "63c3e8259cd5fdc2bd0efd656a87d55f03ea87c7",
+        "closed_finding_ids": [
+          "P0-P8-REFERENCE-004",
+          "P0-P8-V046-006",
+          "P0-P8-V047-007",
+          "P0-P8-RECOVERY-009",
+          "P0-P8-AUTHORITY-013"
+        ],
+        "disposition": "ALL_P0_CLOSED",
+        "lane": "data_migration",
+        "open_p0_count": 0,
+        "reviewed_path_blobs_sha256": "c18eeae31da3b8264a369ae605b236d7f81fef85394474f03e8a5da975c15817",
+        "reviewed_topics": [
+          "P0-P8-REFERENCE-004",
+          "P0-P8-V046-006",
+          "P0-P8-V047-007",
+          "P0-P8-RECOVERY-009",
+          "P0-P8-AUTHORITY-013"
+        ],
+        "reviewer_id": "agent:p8-replacement-c8-p0-data",
+        "schema_version": "phase8-entry-p0-lane-review-receipt.v1",
+        "self_approved": false,
+        "source_artifact_set_sha256": "2693b8eed646d4d03caade4711a3ac836131ed7e8b27ff640429a133c78ebd35"
+      },
+      "review_receipt_sha256": "041efa09bc01ada225b5223ebdc78557d8ada6208098f5a6fb66f1627ab6b73e",
+      "reviewer_id": "agent:p8-replacement-c8-p0-data",
+      "self_approved": false
+    },
+    {
+      "disposition": "ALL_P0_CLOSED",
+      "lane": "security_privacy",
+      "open_p0_count": 0,
+      "receipt": {
+        "candidate_commit": "74f4cb6bc2ac78f17aacdb36378e72ff650d60b6",
+        "candidate_diff_sha256": "5d0c3dca604845e28a9c76438c8ab434bb9e5b5978bc6d5b25af112c4dd920c0",
+        "candidate_tree_sha": "63c3e8259cd5fdc2bd0efd656a87d55f03ea87c7",
+        "closed_finding_ids": [
+          "P0-P8-ENTRY-TOPOLOGY-002",
+          "P0-P8-RELEASE-008",
+          "P0-P8-PRIVACY-010",
+          "P0-P8-AUTHORITY-013"
+        ],
+        "disposition": "ALL_P0_CLOSED",
+        "lane": "security_privacy",
+        "open_p0_count": 0,
+        "reviewed_path_blobs_sha256": "c18eeae31da3b8264a369ae605b236d7f81fef85394474f03e8a5da975c15817",
+        "reviewed_topics": [
+          "P0-P8-ENTRY-TOPOLOGY-002",
+          "P0-P8-RELEASE-008",
+          "P0-P8-PRIVACY-010",
+          "P0-P8-AUTHORITY-013"
+        ],
+        "reviewer_id": "agent:p8-replacement-c8-p0-security",
+        "schema_version": "phase8-entry-p0-lane-review-receipt.v1",
+        "self_approved": false,
+        "source_artifact_set_sha256": "2693b8eed646d4d03caade4711a3ac836131ed7e8b27ff640429a133c78ebd35"
+      },
+      "review_receipt_sha256": "320aa3dfed005f460348dfc71d19bc74f3beefc33fbd8c759163bb18cef34147",
+      "reviewer_id": "agent:p8-replacement-c8-p0-security",
+      "self_approved": false
+    }
+  ],
+  "review_scope": "CONSOLIDATED_POST_INTEGRATION_P0_ONLY",
+  "reviewed_path_blobs": [
+    {
+      "path": "plans/temporal-langgraph-room-refactor.md",
+      "sha256": "c89549f4f4dac614ee8f96a73f19031c8ea31195bc62ad395b9dc85b282f8a67"
+    },
+    {
+      "path": "plans/phase-8-production-hardening-execution.md",
+      "sha256": "dc0e0a328e3fbd17638d39f1ff40177737bd2c88b1f299ba45b02fa3a7ba4dfa"
+    },
+    {
+      "path": "plans/phase-8-production-hardening-test-batches.yaml",
+      "sha256": "15047f814aab938c32a85109c7164ac2817f3b9427946ce03ba29a55fbc1dfc1"
+    },
+    {
+      "path": "plans/phase-8-owner-briefs.yaml",
+      "sha256": "4660d842e0dafef6647a22597c8e082e48d1fba92a4f43554b8aa5f6fe3e8fc7"
+    },
+    {
+      "path": "docs/runbooks/temporal-first/phase-8-p8.0-baseline-inventory.md",
+      "sha256": "ccdba0cf97d70e92f107bb49056201938b5ecda919aa66a7fa94e8c50a2e6687"
+    },
+    {
+      "path": "docs/runbooks/temporal-first/phase-8-p8.0-contract-pack.md",
+      "sha256": "74590134798d970970b02a1ce97eb67e14e49751eb1554f52a2a26d4547864ef"
+    },
+    {
+      "path": "docs/runbooks/temporal-first/phase-8-p8.0-review-closure.md",
+      "sha256": "9550683032286c1116ba7fb55813583897100803a55ec4116e062ebe9fdaad32"
+    },
+    {
+      "path": "tests/static/test_phase8_production_hardening_plan.py",
+      "sha256": "42f78cb07c8ad5fc7371399f32cf3056f929b999907d87746a2dd35569efcf3a"
+    },
+    {
+      "path": "scripts/run_phase8_entry_checkpoint.py",
+      "sha256": "9cdb4dfe53a0e83b4fda8b30a4007e5f62b92ea7dac4049744b74e5fef799f92"
+    },
+    {
+      "path": "scripts/generate_phase8_entry_evidence.py",
+      "sha256": "077c174d0fb2d4436aa87b93a1c792e8c2a60e351d5d3c3ef10b2f5e9e3e3064"
+    },
+    {
+      "path": "tests/static/test_phase8_entry_runner.py",
+      "sha256": "c81e766ecf3226bd1609abd3b9600148932760ffb550b3d246fe4a63df0b3d53"
+    },
+    {
+      "path": "tests/static/test_phase8_entry_evidence.py",
+      "sha256": "8b6872517ed0fc93b5c0e8f63816e47215676a32aabf03c938f2639c4261d1f6"
+    }
+  ],
+  "reviewed_topics": [
+    "P0-P8-HANDOFF-001",
+    "P0-P8-ENTRY-TOPOLOGY-002",
+    "P0-P8-BASELINE-003",
+    "P0-P8-REFERENCE-004",
+    "P0-P8-SCHEDULER-005",
+    "P0-P8-V046-006",
+    "P0-P8-V047-007",
+    "P0-P8-RELEASE-008",
+    "P0-P8-RECOVERY-009",
+    "P0-P8-PRIVACY-010",
+    "P0-P8-TEAM-011",
+    "P0-P8-TEST-LIMITS-012",
+    "P0-P8-AUTHORITY-013"
+  ],
+  "schema_version": "phase8-entry-p0-review-disposition.v1",
+  "self_approved": false,
+  "source_artifact_sha256": {
+    "p/00-stdout.log": "ee7f59fe61df9c3dd8cb2c442811cdf5604e0b17ae3bb7d7de32d9642af8b67e",
+    "p/01-stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "p/02-junit.xml": "45e1430a77cf6bf5ed58e27ecd4426b52cfdd2cf1c60e6f69aef06f94b7441aa",
+    "phase8-entry-execution-manifest.json": "7f4a939dbfb051d53b5e47266c7b567bb66dd44750eb07cdc89a71f0d8e73626",
+    "source-tree-environment.json": "b45eaf9f6450fda4dc0dac2f3dc5b8e457c10c0816d9140e89a959ac67250fd5",
+    "static-phase8-entry.xml": "992918edf2da7c11674c7df83c10dc2a716098f55a723bb77a46ccf6114fe340"
+  },
+  "status": "ALL_P0_CLOSED",
+  "trust_ceiling": "ENGINEERING_PROCESS_ATTESTATION_NON_HOSTILE_LOCAL_OPERATOR"
+}

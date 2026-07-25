@@ -1,0 +1,457 @@
+{
+  "MIG-006": "PENDING_PROMOTION",
+  "MIG-007": "PENDING_PROMOTION",
+  "MIG-008": "PENDING_PROMOTION",
+  "accepted_phase_7_authority": {
+    "candidate_C7": "4ddeeabb39ce7b7de41ecc4f44e17ece389d2840",
+    "checkpoint_A7": "e3acedc64d161f0342c8db3d5c313c2f404ea462",
+    "checkpoint_document_sha256": "65b0b3836b89fb8e81ceac5ef4ba2afb18532d37f1e533f39a7b954c71c7b1ae",
+    "checkpoint_scope": [
+      {
+        "git_blob_sha": "b85fb156587a926a026c7c5fb04381dde5e65a36",
+        "mode": "100644",
+        "path": "docs/runbooks/temporal-first/phase-7-engineering-checkpoint.md",
+        "type": "blob"
+      },
+      {
+        "git_blob_sha": "659f8e93203f265f02d69793da8f925e4ffdaeb7",
+        "mode": "100644",
+        "path": "tests/static/test_phase7_engineering_checkpoint.py",
+        "type": "blob"
+      }
+    ],
+    "evidence_E7": "f1c1ca16228641f1072eb358c6df9235dc239914",
+    "evidence_indexed_blob_count": 46,
+    "evidence_prefix": "test-reports/temporal-first/phase-7-20260725-4ddeeabb/phase-7-candidate",
+    "evidence_regular_blob_count": 47
+  },
+  "accepted_phase_7_candidate_C7": "4ddeeabb39ce7b7de41ecc4f44e17ece389d2840",
+  "accepted_phase_7_checkpoint_A7": "e3acedc64d161f0342c8db3d5c313c2f404ea462",
+  "accepted_phase_7_evidence_E7": "f1c1ca16228641f1072eb358c6df9235dc239914",
+  "attempt_ledger": {
+    "attempt_number": 1,
+    "candidate_sha": "74f4cb6bc2ac78f17aacdb36378e72ff650d60b6",
+    "path": "D:\\\u5b66\u4e60\\Project\\.codex-run\\.phase8-entry-attempts\\74f4cb6bc2ac78f17aacdb36378e72ff650d60b6.json",
+    "run_dir": "D:\\\u5b66\u4e60\\Project\\.codex-run\\phase8-entry-74f4cb6bc2ac",
+    "sha256": "86b6b3a4b1c5fe93b2a71d7295e5b81c58f08f7be9b5238df2bf1de9f57be61d"
+  },
+  "candidate_changed_paths": [
+    "plans/temporal-langgraph-room-refactor.md",
+    "plans/phase-8-production-hardening-execution.md",
+    "plans/phase-8-production-hardening-test-batches.yaml",
+    "plans/phase-8-owner-briefs.yaml",
+    "docs/runbooks/temporal-first/phase-8-p8.0-baseline-inventory.md",
+    "docs/runbooks/temporal-first/phase-8-p8.0-contract-pack.md",
+    "docs/runbooks/temporal-first/phase-8-p8.0-review-closure.md",
+    "tests/static/test_phase8_production_hardening_plan.py",
+    "scripts/run_phase8_entry_checkpoint.py",
+    "scripts/generate_phase8_entry_evidence.py",
+    "tests/static/test_phase8_entry_runner.py",
+    "tests/static/test_phase8_entry_evidence.py"
+  ],
+  "candidate_commit": "74f4cb6bc2ac78f17aacdb36378e72ff650d60b6",
+  "candidate_diff": [
+    {
+      "git_blob_sha": "ee1a0bcdc92c5afdc32feb1e3fde112d4aadc8cb",
+      "mode": "100644",
+      "path": "plans/temporal-langgraph-room-refactor.md",
+      "status": "M",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "2d817fefad905c61f4a7c4c5f6afd6d558f46bc6",
+      "mode": "100644",
+      "path": "plans/phase-8-production-hardening-execution.md",
+      "status": "A",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "3e37d778dcbca8819b12144d8e4f32d7dd54744e",
+      "mode": "100644",
+      "path": "plans/phase-8-production-hardening-test-batches.yaml",
+      "status": "A",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "4526a999c6584f185fb5eef7f52a480f2967356d",
+      "mode": "100644",
+      "path": "plans/phase-8-owner-briefs.yaml",
+      "status": "A",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "8c5f1eb17f00b86154cb200f8fb831a57d9a0d86",
+      "mode": "100644",
+      "path": "docs/runbooks/temporal-first/phase-8-p8.0-baseline-inventory.md",
+      "status": "A",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "3c25903a46eedaaa415fa8d3c83f56a5aefe7178",
+      "mode": "100644",
+      "path": "docs/runbooks/temporal-first/phase-8-p8.0-contract-pack.md",
+      "status": "A",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "a45ff9454f180dc27e045ca24bd762d824414d51",
+      "mode": "100644",
+      "path": "docs/runbooks/temporal-first/phase-8-p8.0-review-closure.md",
+      "status": "A",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "694d30ab5ef7c100a9148a63d4ffd866f2e2a873",
+      "mode": "100644",
+      "path": "tests/static/test_phase8_production_hardening_plan.py",
+      "status": "A",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "8da3607e68596bc30634b4908e615a2486bee1aa",
+      "mode": "100644",
+      "path": "scripts/run_phase8_entry_checkpoint.py",
+      "status": "A",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "ee6130ae78d570e28dd401df20bde480d52301d4",
+      "mode": "100644",
+      "path": "scripts/generate_phase8_entry_evidence.py",
+      "status": "A",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "0d5f876469b5ea62f0f44fee74724183da9e2bb1",
+      "mode": "100644",
+      "path": "tests/static/test_phase8_entry_runner.py",
+      "status": "A",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "72d573bcef3bf8fe822c1978dffdc653e9c31bac",
+      "mode": "100644",
+      "path": "tests/static/test_phase8_entry_evidence.py",
+      "status": "A",
+      "type": "blob"
+    }
+  ],
+  "candidate_parent": "e3acedc64d161f0342c8db3d5c313c2f404ea462",
+  "candidate_sha": "74f4cb6bc2ac78f17aacdb36378e72ff650d60b6",
+  "candidate_tree_sha": "63c3e8259cd5fdc2bd0efd656a87d55f03ea87c7",
+  "commands": [
+    {
+      "accepted": true,
+      "argv": [
+        "D:/miniconda/python.exe",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/static/test_phase7_engineering_checkpoint.py",
+        "tests/static/test_phase8_production_hardening_plan.py",
+        "tests/static/test_phase8_entry_runner.py",
+        "tests/static/test_phase8_entry_evidence.py",
+        "tests/static/test_temporal_refactor_traceability.py",
+        "--junitxml=D:\\\u5b66\u4e60\\Project\\.codex-run\\phase8-entry-74f4cb6bc2ac\\p\\02-junit.xml"
+      ],
+      "argv_sha256": "e911ba1f46fb67970a4e83141f0b2ffe2c239547456326b4f985b9d3cb38c055",
+      "candidate_sha_after": "74f4cb6bc2ac78f17aacdb36378e72ff650d60b6",
+      "candidate_sha_before": "74f4cb6bc2ac78f17aacdb36378e72ff650d60b6",
+      "cwd": ".",
+      "duration_ms": 44717,
+      "ended_at": "2026-07-25T11:58:53.330+00:00",
+      "errors": 0,
+      "exit_code": 0,
+      "failure_classification": "NONE",
+      "failures": 0,
+      "id": "static_phase8_entry",
+      "normalized_report_path": "static-phase8-entry.xml",
+      "normalized_report_sha256": "992918edf2da7c11674c7df83c10dc2a716098f55a723bb77a46ccf6114fe340",
+      "raw_report_path": "p/02-junit.xml",
+      "raw_report_sha256": "45e1430a77cf6bf5ed58e27ecd4426b52cfdd2cf1c60e6f69aef06f94b7441aa",
+      "report_kind": "PYTEST_JUNIT",
+      "resource_class": "light",
+      "shell": false,
+      "skipped": 0,
+      "started_at": "2026-07-25T11:58:08.613+00:00",
+      "stderr_path": "p/01-stderr.log",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_path": "p/00-stdout.log",
+      "stdout_sha256": "ee7f59fe61df9c3dd8cb2c442811cdf5604e0b17ae3bb7d7de32d9642af8b67e",
+      "tests": 113
+    }
+  ],
+  "contract_gate": "P8.0_NOT_RUN",
+  "dependency_git_blobs": [
+    {
+      "git_blob_sha": "ee1a0bcdc92c5afdc32feb1e3fde112d4aadc8cb",
+      "mode": "100644",
+      "path": "plans/temporal-langgraph-room-refactor.md",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "2d817fefad905c61f4a7c4c5f6afd6d558f46bc6",
+      "mode": "100644",
+      "path": "plans/phase-8-production-hardening-execution.md",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "3e37d778dcbca8819b12144d8e4f32d7dd54744e",
+      "mode": "100644",
+      "path": "plans/phase-8-production-hardening-test-batches.yaml",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "4526a999c6584f185fb5eef7f52a480f2967356d",
+      "mode": "100644",
+      "path": "plans/phase-8-owner-briefs.yaml",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "8c5f1eb17f00b86154cb200f8fb831a57d9a0d86",
+      "mode": "100644",
+      "path": "docs/runbooks/temporal-first/phase-8-p8.0-baseline-inventory.md",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "3c25903a46eedaaa415fa8d3c83f56a5aefe7178",
+      "mode": "100644",
+      "path": "docs/runbooks/temporal-first/phase-8-p8.0-contract-pack.md",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "a45ff9454f180dc27e045ca24bd762d824414d51",
+      "mode": "100644",
+      "path": "docs/runbooks/temporal-first/phase-8-p8.0-review-closure.md",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "694d30ab5ef7c100a9148a63d4ffd866f2e2a873",
+      "mode": "100644",
+      "path": "tests/static/test_phase8_production_hardening_plan.py",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "8da3607e68596bc30634b4908e615a2486bee1aa",
+      "mode": "100644",
+      "path": "scripts/run_phase8_entry_checkpoint.py",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "ee6130ae78d570e28dd401df20bde480d52301d4",
+      "mode": "100644",
+      "path": "scripts/generate_phase8_entry_evidence.py",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "0d5f876469b5ea62f0f44fee74724183da9e2bb1",
+      "mode": "100644",
+      "path": "tests/static/test_phase8_entry_runner.py",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "72d573bcef3bf8fe822c1978dffdc653e9c31bac",
+      "mode": "100644",
+      "path": "tests/static/test_phase8_entry_evidence.py",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "659f8e93203f265f02d69793da8f925e4ffdaeb7",
+      "mode": "100644",
+      "path": "tests/static/test_phase7_engineering_checkpoint.py",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "6f4a5e2f4cefacd0573ab36d776148558c23257f",
+      "mode": "100644",
+      "path": "tests/static/test_temporal_refactor_traceability.py",
+      "type": "blob"
+    }
+  ],
+  "environment": {
+    "architecture": "AMD64",
+    "candidate_sha": "74f4cb6bc2ac78f17aacdb36378e72ff650d60b6",
+    "candidate_tree_sha": "63c3e8259cd5fdc2bd0efd656a87d55f03ea87c7",
+    "captured_at": "2026-07-25T11:58:07.311+00:00",
+    "command_argv_sha256": "e911ba1f46fb67970a4e83141f0b2ffe2c239547456326b4f985b9d3cb38c055",
+    "dependency_git_blobs": [
+      {
+        "git_blob_sha": "ee1a0bcdc92c5afdc32feb1e3fde112d4aadc8cb",
+        "mode": "100644",
+        "path": "plans/temporal-langgraph-room-refactor.md",
+        "type": "blob"
+      },
+      {
+        "git_blob_sha": "2d817fefad905c61f4a7c4c5f6afd6d558f46bc6",
+        "mode": "100644",
+        "path": "plans/phase-8-production-hardening-execution.md",
+        "type": "blob"
+      },
+      {
+        "git_blob_sha": "3e37d778dcbca8819b12144d8e4f32d7dd54744e",
+        "mode": "100644",
+        "path": "plans/phase-8-production-hardening-test-batches.yaml",
+        "type": "blob"
+      },
+      {
+        "git_blob_sha": "4526a999c6584f185fb5eef7f52a480f2967356d",
+        "mode": "100644",
+        "path": "plans/phase-8-owner-briefs.yaml",
+        "type": "blob"
+      },
+      {
+        "git_blob_sha": "8c5f1eb17f00b86154cb200f8fb831a57d9a0d86",
+        "mode": "100644",
+        "path": "docs/runbooks/temporal-first/phase-8-p8.0-baseline-inventory.md",
+        "type": "blob"
+      },
+      {
+        "git_blob_sha": "3c25903a46eedaaa415fa8d3c83f56a5aefe7178",
+        "mode": "100644",
+        "path": "docs/runbooks/temporal-first/phase-8-p8.0-contract-pack.md",
+        "type": "blob"
+      },
+      {
+        "git_blob_sha": "a45ff9454f180dc27e045ca24bd762d824414d51",
+        "mode": "100644",
+        "path": "docs/runbooks/temporal-first/phase-8-p8.0-review-closure.md",
+        "type": "blob"
+      },
+      {
+        "git_blob_sha": "694d30ab5ef7c100a9148a63d4ffd866f2e2a873",
+        "mode": "100644",
+        "path": "tests/static/test_phase8_production_hardening_plan.py",
+        "type": "blob"
+      },
+      {
+        "git_blob_sha": "8da3607e68596bc30634b4908e615a2486bee1aa",
+        "mode": "100644",
+        "path": "scripts/run_phase8_entry_checkpoint.py",
+        "type": "blob"
+      },
+      {
+        "git_blob_sha": "ee6130ae78d570e28dd401df20bde480d52301d4",
+        "mode": "100644",
+        "path": "scripts/generate_phase8_entry_evidence.py",
+        "type": "blob"
+      },
+      {
+        "git_blob_sha": "0d5f876469b5ea62f0f44fee74724183da9e2bb1",
+        "mode": "100644",
+        "path": "tests/static/test_phase8_entry_runner.py",
+        "type": "blob"
+      },
+      {
+        "git_blob_sha": "72d573bcef3bf8fe822c1978dffdc653e9c31bac",
+        "mode": "100644",
+        "path": "tests/static/test_phase8_entry_evidence.py",
+        "type": "blob"
+      },
+      {
+        "git_blob_sha": "659f8e93203f265f02d69793da8f925e4ffdaeb7",
+        "mode": "100644",
+        "path": "tests/static/test_phase7_engineering_checkpoint.py",
+        "type": "blob"
+      },
+      {
+        "git_blob_sha": "6f4a5e2f4cefacd0573ab36d776148558c23257f",
+        "mode": "100644",
+        "path": "tests/static/test_temporal_refactor_traceability.py",
+        "type": "blob"
+      }
+    ],
+    "environment_id": "local-phase8-batch0",
+    "environment_sha256": "a31e34078bc1de8e0aedd5410f4f69f2c990fd3f9f758c9152b3a6662d0eb8b8",
+    "git_version": "git version 2.44.0.windows.1",
+    "os": "Windows",
+    "os_release": "11",
+    "pytest_plugin_autoload_disabled": true,
+    "python_executable": "D:/miniconda/python.exe",
+    "python_implementation": "CPython",
+    "python_version": "3.12.3",
+    "schema_version": "phase8-entry-source-tree-environment.v1",
+    "snapshot_sha256": "a31e34078bc1de8e0aedd5410f4f69f2c990fd3f9f758c9152b3a6662d0eb8b8",
+    "source_git_blobs": [
+      {
+        "git_blob_sha": "694d30ab5ef7c100a9148a63d4ffd866f2e2a873",
+        "mode": "100644",
+        "path": "tests/static/test_phase8_production_hardening_plan.py",
+        "type": "blob"
+      },
+      {
+        "git_blob_sha": "0d5f876469b5ea62f0f44fee74724183da9e2bb1",
+        "mode": "100644",
+        "path": "tests/static/test_phase8_entry_runner.py",
+        "type": "blob"
+      },
+      {
+        "git_blob_sha": "72d573bcef3bf8fe822c1978dffdc653e9c31bac",
+        "mode": "100644",
+        "path": "tests/static/test_phase8_entry_evidence.py",
+        "type": "blob"
+      },
+      {
+        "git_blob_sha": "659f8e93203f265f02d69793da8f925e4ffdaeb7",
+        "mode": "100644",
+        "path": "tests/static/test_phase7_engineering_checkpoint.py",
+        "type": "blob"
+      },
+      {
+        "git_blob_sha": "6f4a5e2f4cefacd0573ab36d776148558c23257f",
+        "mode": "100644",
+        "path": "tests/static/test_temporal_refactor_traceability.py",
+        "type": "blob"
+      }
+    ],
+    "subprocess_environment_keys": [
+      "COMSPEC",
+      "HOME",
+      "PATH",
+      "PATHEXT",
+      "PYTEST_DISABLE_PLUGIN_AUTOLOAD",
+      "PYTHONDONTWRITEBYTECODE",
+      "PYTHONHASHSEED",
+      "PYTHONIOENCODING",
+      "SYSTEMROOT",
+      "TEMP",
+      "TMP",
+      "USERPROFILE",
+      "WINDIR"
+    ],
+    "timezone": "\u4e2d\u56fd\u6807\u51c6\u65f6\u95f4"
+  },
+  "environment_file": "source-tree-environment.json",
+  "environment_sha256": "b45eaf9f6450fda4dc0dac2f3dc5b8e457c10c0816d9140e89a959ac67250fd5",
+  "git_tree_clean_after": true,
+  "git_tree_clean_before": true,
+  "implementation": "REMAINS_BLOCKED_UNTIL_A8",
+  "implementation_authorized": false,
+  "local_threat_model": "HOSTILE_LOCAL_ADMIN_OR_OPERATOR_OUT_OF_SCOPE",
+  "manifest_sha256": "311365dfb17e5006dc67278fa1a2ac5d06bcd7d055844e967442717c159f5975",
+  "p8_0_contract_gate": "REMAINS_NOT_RUN_UNTIL_A8",
+  "phase": 8,
+  "production_attestation_requirement": "EXTERNALLY_ATTESTED_CI_OIDC_KMS_OR_EQUIVALENT_SIGNED_EXECUTION_RECEIPT",
+  "production_capabilities": {
+    "canary": false,
+    "implementation_authorized": false,
+    "production_credentials": false,
+    "production_load_chaos_pitr_dr_rotation": false,
+    "production_or_external_access": false,
+    "production_scheduler_off_activation": false,
+    "production_traffic": false,
+    "production_v046_apply_or_switch": false,
+    "promotion": false,
+    "real_case_or_party_data": false,
+    "v047_or_destructive_cleanup": false
+  },
+  "quarantine_used": false,
+  "release": "phase-8-entry-20260725-74f4cb6bc2ac",
+  "report_reuse_used": false,
+  "resume_used": false,
+  "retry_count": 0,
+  "schema_version": "phase8-entry-execution-manifest.v1",
+  "self_seal_trust": "INTEGRITY_ONLY_NOT_PROVENANCE_OR_AUTHORIZATION",
+  "status": "SOURCES_GREEN_AWAITING_SOLE_PARENT_E8_ENTRY_EVIDENCE",
+  "verification_finished_at": "2026-07-25T11:58:53.330+00:00",
+  "verification_started_at": "2026-07-25T11:58:08.613+00:00"
+}

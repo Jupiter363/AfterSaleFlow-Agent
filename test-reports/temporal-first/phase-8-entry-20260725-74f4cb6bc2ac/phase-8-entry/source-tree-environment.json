@@ -1,0 +1,152 @@
+{
+  "architecture": "AMD64",
+  "candidate_sha": "74f4cb6bc2ac78f17aacdb36378e72ff650d60b6",
+  "candidate_tree_sha": "63c3e8259cd5fdc2bd0efd656a87d55f03ea87c7",
+  "captured_at": "2026-07-25T11:58:07.311+00:00",
+  "command_argv_sha256": "e911ba1f46fb67970a4e83141f0b2ffe2c239547456326b4f985b9d3cb38c055",
+  "dependency_git_blobs": [
+    {
+      "git_blob_sha": "ee1a0bcdc92c5afdc32feb1e3fde112d4aadc8cb",
+      "mode": "100644",
+      "path": "plans/temporal-langgraph-room-refactor.md",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "2d817fefad905c61f4a7c4c5f6afd6d558f46bc6",
+      "mode": "100644",
+      "path": "plans/phase-8-production-hardening-execution.md",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "3e37d778dcbca8819b12144d8e4f32d7dd54744e",
+      "mode": "100644",
+      "path": "plans/phase-8-production-hardening-test-batches.yaml",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "4526a999c6584f185fb5eef7f52a480f2967356d",
+      "mode": "100644",
+      "path": "plans/phase-8-owner-briefs.yaml",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "8c5f1eb17f00b86154cb200f8fb831a57d9a0d86",
+      "mode": "100644",
+      "path": "docs/runbooks/temporal-first/phase-8-p8.0-baseline-inventory.md",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "3c25903a46eedaaa415fa8d3c83f56a5aefe7178",
+      "mode": "100644",
+      "path": "docs/runbooks/temporal-first/phase-8-p8.0-contract-pack.md",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "a45ff9454f180dc27e045ca24bd762d824414d51",
+      "mode": "100644",
+      "path": "docs/runbooks/temporal-first/phase-8-p8.0-review-closure.md",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "694d30ab5ef7c100a9148a63d4ffd866f2e2a873",
+      "mode": "100644",
+      "path": "tests/static/test_phase8_production_hardening_plan.py",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "8da3607e68596bc30634b4908e615a2486bee1aa",
+      "mode": "100644",
+      "path": "scripts/run_phase8_entry_checkpoint.py",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "ee6130ae78d570e28dd401df20bde480d52301d4",
+      "mode": "100644",
+      "path": "scripts/generate_phase8_entry_evidence.py",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "0d5f876469b5ea62f0f44fee74724183da9e2bb1",
+      "mode": "100644",
+      "path": "tests/static/test_phase8_entry_runner.py",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "72d573bcef3bf8fe822c1978dffdc653e9c31bac",
+      "mode": "100644",
+      "path": "tests/static/test_phase8_entry_evidence.py",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "659f8e93203f265f02d69793da8f925e4ffdaeb7",
+      "mode": "100644",
+      "path": "tests/static/test_phase7_engineering_checkpoint.py",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "6f4a5e2f4cefacd0573ab36d776148558c23257f",
+      "mode": "100644",
+      "path": "tests/static/test_temporal_refactor_traceability.py",
+      "type": "blob"
+    }
+  ],
+  "environment_id": "local-phase8-batch0",
+  "environment_sha256": "a31e34078bc1de8e0aedd5410f4f69f2c990fd3f9f758c9152b3a6662d0eb8b8",
+  "git_version": "git version 2.44.0.windows.1",
+  "os": "Windows",
+  "os_release": "11",
+  "pytest_plugin_autoload_disabled": true,
+  "python_executable": "D:/miniconda/python.exe",
+  "python_implementation": "CPython",
+  "python_version": "3.12.3",
+  "schema_version": "phase8-entry-source-tree-environment.v1",
+  "snapshot_sha256": "a31e34078bc1de8e0aedd5410f4f69f2c990fd3f9f758c9152b3a6662d0eb8b8",
+  "source_git_blobs": [
+    {
+      "git_blob_sha": "694d30ab5ef7c100a9148a63d4ffd866f2e2a873",
+      "mode": "100644",
+      "path": "tests/static/test_phase8_production_hardening_plan.py",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "0d5f876469b5ea62f0f44fee74724183da9e2bb1",
+      "mode": "100644",
+      "path": "tests/static/test_phase8_entry_runner.py",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "72d573bcef3bf8fe822c1978dffdc653e9c31bac",
+      "mode": "100644",
+      "path": "tests/static/test_phase8_entry_evidence.py",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "659f8e93203f265f02d69793da8f925e4ffdaeb7",
+      "mode": "100644",
+      "path": "tests/static/test_phase7_engineering_checkpoint.py",
+      "type": "blob"
+    },
+    {
+      "git_blob_sha": "6f4a5e2f4cefacd0573ab36d776148558c23257f",
+      "mode": "100644",
+      "path": "tests/static/test_temporal_refactor_traceability.py",
+      "type": "blob"
+    }
+  ],
+  "subprocess_environment_keys": [
+    "COMSPEC",
+    "HOME",
+    "PATH",
+    "PATHEXT",
+    "PYTEST_DISABLE_PLUGIN_AUTOLOAD",
+    "PYTHONDONTWRITEBYTECODE",
+    "PYTHONHASHSEED",
+    "PYTHONIOENCODING",
+    "SYSTEMROOT",
+    "TEMP",
+    "TMP",
+    "USERPROFILE",
+    "WINDIR"
+  ],
+  "timezone": "\u4e2d\u56fd\u6807\u51c6\u65f6\u95f4"
+}

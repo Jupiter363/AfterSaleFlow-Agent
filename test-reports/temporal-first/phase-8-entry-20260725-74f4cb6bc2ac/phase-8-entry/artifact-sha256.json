@@ -1,0 +1,61 @@
+{
+  "artifacts": [
+    {
+      "bytes": 19,
+      "path": ".gitattributes",
+      "sha256": "3e5e82fc72e044ea9af807a2030b73dbb94800d2cd1775302063b2eee761ba1e"
+    },
+    {
+      "bytes": 41,
+      "path": "candidate.txt",
+      "sha256": "702a264c1ba33d16c63b3726760d8de4bc814a1f1927562cba4a87a69baf163d"
+    },
+    {
+      "bytes": 16446,
+      "path": "phase8-entry-execution-manifest.json",
+      "sha256": "7f4a939dbfb051d53b5e47266c7b567bb66dd44750eb07cdc89a71f0d8e73626"
+    },
+    {
+      "bytes": 17525,
+      "path": "static-phase8-entry.xml",
+      "sha256": "992918edf2da7c11674c7df83c10dc2a716098f55a723bb77a46ccf6114fe340"
+    },
+    {
+      "bytes": 4838,
+      "path": "source-tree-environment.json",
+      "sha256": "b45eaf9f6450fda4dc0dac2f3dc5b8e457c10c0816d9140e89a959ac67250fd5"
+    },
+    {
+      "bytes": 11699,
+      "path": "p0-review-disposition.json",
+      "sha256": "bfa6c3f72e150385efb0c9e9830e0c1888faeb0d3d58a609c8f4576230fc10a4"
+    },
+    {
+      "bytes": 1860,
+      "path": "phase8-entry-decision.json",
+      "sha256": "43f8a4eb6e11930d3282a67c365f1752ead54996c197da638622ad2332c96be3"
+    },
+    {
+      "bytes": 2581,
+      "path": "provenance-manifest.json",
+      "sha256": "201025d2bfb66abdc5f6ff5bf84951d588053bb74a82680ab4255ad10e3ce494"
+    },
+    {
+      "bytes": 279,
+      "path": "p/00-stdout.log",
+      "sha256": "ee7f59fe61df9c3dd8cb2c442811cdf5604e0b17ae3bb7d7de32d9642af8b67e"
+    },
+    {
+      "bytes": 0,
+      "path": "p/01-stderr.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 16814,
+      "path": "p/02-junit.xml",
+      "sha256": "45e1430a77cf6bf5ed58e27ecd4426b52cfdd2cf1c60e6f69aef06f94b7441aa"
+    }
+  ],
+  "candidate_commit": "74f4cb6bc2ac78f17aacdb36378e72ff650d60b6",
+  "schema_version": "phase8-entry-artifact-index.v1"
+}
