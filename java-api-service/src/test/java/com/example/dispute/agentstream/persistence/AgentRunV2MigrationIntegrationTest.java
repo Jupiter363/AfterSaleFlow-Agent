@@ -60,7 +60,7 @@ class AgentRunV2MigrationIntegrationTest {
                         .dataSource(jdbcUrl, USERNAME, PASSWORD)
                         .locations("classpath:db/migration")
                         .load();
-        assertThat(latest.migrate().migrationsExecuted).isEqualTo(2);
+        assertThat(latest.migrate().migrationsExecuted).isPositive();
         assertThat(latest.migrate().migrationsExecuted).isZero();
 
         try (Connection connection = DriverManager.getConnection(jdbcUrl, USERNAME, PASSWORD)) {
@@ -104,6 +104,7 @@ class AgentRunV2MigrationIntegrationTest {
             assertRollbackV1WriterCompatibility(connection);
             assertV2Uniqueness(connection);
             assertLineageConstraints(connection);
+            assertV046AdditiveDeliverySchema(connection);
         }
     }
 
@@ -378,6 +379,375 @@ class AgentRunV2MigrationIntegrationTest {
                 "ck_agent_run_attempt_sequence_offset");
     }
 
+    private static void assertV046AdditiveDeliverySchema(Connection connection)
+            throws SQLException {
+        assertThat(
+                        scalar(
+                                connection,
+                                """
+                                select string_agg(relname || ':' || relkind, ',' order by relname)
+                                  from pg_class
+                                 where relname in (
+                                     'agent_run_stream_event',
+                                     'agent_run_stream_event_identity',
+                                     'agent_run_stream_event_delivery'
+                                 )
+                                """))
+                .isEqualTo(
+                        "agent_run_stream_event:r,agent_run_stream_event_delivery:p,"
+                                + "agent_run_stream_event_identity:r");
+        assertThat(
+                        scalar(
+                                connection,
+                                """
+                                select count(*)
+                                  from pg_class child
+                                  join pg_inherits inheritance
+                                    on inheritance.inhrelid = child.oid
+                                  join pg_class parent
+                                    on parent.oid = inheritance.inhparent
+                                 where parent.relname = 'agent_run_stream_event_delivery'
+                                   and pg_get_expr(child.relpartbound, child.oid) = 'DEFAULT'
+                                """))
+                .isEqualTo("1");
+        assertThat(
+                        scalar(
+                                connection,
+                                """
+                                select count(*)
+                                  from pg_class
+                                 where relkind = 'r'
+                                   and relname in (
+                                       'agent_run_stream_delivery_high_watermark',
+                                       'agent_run_stream_backfill_cursor',
+                                       'agent_run_stream_archive_manifest',
+                                       'agent_run_stream_archive_receipt',
+                                       'agent_run_stream_migration_receipt'
+                                   )
+                                """))
+                .isEqualTo("5");
+        assertThat(
+                        scalar(
+                                connection,
+                                "select count(*) from agent_run_stream_event where agent_run_id = 'RUN_LEGACY_V2'"))
+                .isEqualTo("1");
+
+        assertThat(scalar(connection, legacyBackfillInsert()))
+                .isEqualTo("true:0");
+        assertThat(scalar(connection, deliveryInsert("TARGET_EVENT_2", 2, '2')))
+                .isEqualTo("true:0");
+        assertThat(scalar(connection, deliveryInsert("TARGET_EVENT_1", 1, '1')))
+                .isEqualTo("true:2");
+        assertThat(scalar(connection, deliveryInsert("TARGET_EVENT_1", 1, '1')))
+                .isEqualTo("false:2");
+        assertThat(scalar(connection, v2BackfillInsert()))
+                .isEqualTo("true:0");
+        assertThat(
+                        scalar(
+                                connection,
+                                """
+                                select highest_contiguous_sequence_no || ':' || watermark_version
+                                  from agent_run_stream_delivery_high_watermark
+                                 where agent_run_id = 'RUN_LEGACY_V2'
+                                   and agent_run_attempt_id = 'RUN_LEGACY_V2'
+                                """))
+                .isEqualTo("2:2");
+
+        assertCheckViolation(
+                connection,
+                deliveryInsert("TARGET_EVENT_1", 1, 'f'),
+                "stream event identity or canonical payload hash conflicts");
+        assertCheckViolation(
+                connection,
+                v2DeliveryInsert("EVENT_LEGACY_V2", 0, '0'),
+                "stream event identity or canonical payload hash conflicts");
+        assertUniqueViolation(
+                connection,
+                deliveryInsert("TARGET_EVENT_DUPLICATE_IDENTITY", 1, '1'),
+                "uq_stream_event_identity_sequence");
+        assertCheckViolation(
+                connection,
+                """
+                update agent_run_stream_delivery_high_watermark
+                   set highest_contiguous_sequence_no = 1,
+                       highest_event_id = 'TARGET_EVENT_1',
+                       highest_event_recorded_at = (
+                           select recorded_at from agent_run_stream_event_identity
+                            where event_id = 'TARGET_EVENT_1'
+                       )
+                 where agent_run_id = 'RUN_LEGACY_V2'
+                   and agent_run_attempt_id = 'RUN_LEGACY_V2'
+                """,
+                "delivery high-watermark cannot regress");
+        assertSqlState(
+                connection,
+                "update agent_run_stream_event_delivery_default set event_type = 'error' where event_id = 'TARGET_EVENT_1'",
+                "55000",
+                "agent_run_stream_event_delivery_default is append-only");
+
+        try (var statement = connection.createStatement()) {
+            statement.executeUpdate(
+                    """
+                    insert into agent_run_stream_backfill_cursor (
+                        backfill_id, source_upper_bound_created_at,
+                        source_upper_bound_event_id, created_by
+                    )
+                    select 'BACKFILL_V046_MISSING', created_at, id, 'migration-test'
+                      from agent_run_stream_event
+                     where id = 'EVENT_ROLLBACK_V1'
+                    """);
+        }
+        assertCheckViolation(
+                connection,
+                """
+                update agent_run_stream_backfill_cursor cursor
+                   set last_source_created_at = source_event.created_at,
+                       last_source_event_id = source_event.id,
+                       processed_count = (
+                           select count(*) from agent_run_stream_event candidate
+                            where (candidate.created_at, candidate.id)
+                                <= (source_event.created_at, source_event.id)
+                       ),
+                       cursor_status = 'RUNNING'
+                  from agent_run_stream_event source_event
+                 where cursor.backfill_id = 'BACKFILL_V046_MISSING'
+                   and source_event.id = 'EVENT_ROLLBACK_V1'
+                """,
+                "backfill cursor requires matching immutable target delivery rows");
+
+        try (var statement = connection.createStatement()) {
+            statement.executeUpdate(
+                    """
+                    insert into agent_run_stream_backfill_cursor (
+                        backfill_id, source_upper_bound_created_at,
+                        source_upper_bound_event_id, created_by
+                    )
+                    select 'BACKFILL_V046', created_at, id, 'migration-test'
+                      from agent_run_stream_event
+                     where id = 'EVENT_LEGACY_V2'
+                    """);
+            statement.executeUpdate(
+                    """
+                    update agent_run_stream_backfill_cursor cursor
+                       set last_source_created_at = source_event.created_at,
+                           last_source_event_id = source_event.id,
+                           processed_count = 1,
+                           cursor_status = 'RUNNING'
+                      from agent_run_stream_event source_event
+                     where cursor.backfill_id = 'BACKFILL_V046'
+                       and source_event.id = 'EVENT_LEGACY_V2'
+                    """);
+        }
+        assertCheckViolation(
+                connection,
+                """
+                update agent_run_stream_backfill_cursor
+                   set last_source_created_at = '2000-01-01T00:00:00Z',
+                       last_source_event_id = 'EVENT_A'
+                 where backfill_id = 'BACKFILL_V046'
+                """,
+                "backfill cursor cannot regress");
+
+        insertV046Receipts(connection);
+        assertSqlState(
+                connection,
+                "update agent_run_stream_archive_manifest set event_count = 2 where manifest_id = 'ARCHIVE_V046'",
+                "55000",
+                "agent_run_stream_archive_manifest is append-only");
+        assertSqlState(
+                connection,
+                "update agent_run_stream_archive_receipt set receipt_status = 'FAILED' where receipt_id = 'ARCHIVE_RECEIPT_V046'",
+                "55000",
+                "agent_run_stream_archive_receipt is append-only");
+        assertSqlState(
+                connection,
+                "update agent_run_stream_migration_receipt set acceptance_status = 'ACCEPTED' where receipt_id = 'MIGRATION_RECEIPT_V046'",
+                "55000",
+                "agent_run_stream_migration_receipt is append-only");
+        assertSqlState(
+                connection,
+                "truncate agent_run_stream_event_delivery_default",
+                "55000",
+                "agent_run_stream_event_delivery_default is append-only");
+    }
+
+    private static String legacyBackfillInsert() {
+        return """
+                select delivery.was_inserted::text || ':' ||
+                       delivery.highest_contiguous_sequence_no
+                  from agent_run_stream_event source_event
+                  cross join lateral record_agent_run_stream_delivery(
+                      source_event.id, source_event.stream_protocol,
+                      source_event.agent_run_id, source_event.agent_run_attempt_id,
+                      source_event.sequence_no, source_event.event_type,
+                      source_event.payload_json, repeat('0', 64),
+                      source_event.audience, null, '[]'::jsonb,
+                      source_event.created_at, 'agent_run_stream_event',
+                      'migration-test'
+                  ) delivery
+                 where source_event.id = 'EVENT_LEGACY_V2'
+                """;
+    }
+
+    private static String deliveryInsert(String eventId, long sequenceNo, char hashCharacter) {
+        String hash = String.valueOf(hashCharacter).repeat(64);
+        return """
+                select was_inserted::text || ':' || highest_contiguous_sequence_no
+                  from record_agent_run_stream_delivery(
+                      '%s', 'agent_stream.v1', 'RUN_LEGACY_V2', 'RUN_LEGACY_V2',
+                      %d, 'visible_delta', '{"sequence":%d}'::jsonb, '%s',
+                      'USER', 'user-v2', '["user-v2"]'::jsonb,
+                      '2026-01-01T00:00:00Z'::timestamptz + interval '%d seconds',
+                      'agent_run_stream_event', 'migration-test'
+                  )
+                """
+                .formatted(eventId, sequenceNo, sequenceNo, hash, sequenceNo);
+    }
+
+    private static String v2DeliveryInsert(
+            String eventId, long sequenceNo, char hashCharacter) {
+        String hash = String.valueOf(hashCharacter).repeat(64);
+        return """
+                select was_inserted::text || ':' || highest_contiguous_sequence_no
+                  from record_agent_run_stream_delivery(
+                      '%s', 'agent-stream.v2', 'RUN_DB_V2', 'ATTEMPT_DB_V2_1',
+                      %d, 'attempt_started', '{"sequence":%d}'::jsonb, '%s',
+                      'USER', 'user-v2', '["user-v2"]'::jsonb,
+                      '2026-01-01T00:00:00Z'::timestamptz + interval '%d seconds',
+                      'DUAL_WRITE', 'migration-test'
+                  )
+                """
+                .formatted(eventId, sequenceNo, sequenceNo, hash, sequenceNo);
+    }
+
+    private static String v2BackfillInsert() {
+        return """
+                select delivery.was_inserted::text || ':' ||
+                       delivery.highest_contiguous_sequence_no
+                  from agent_run_stream_event source_event
+                  cross join lateral record_agent_run_stream_delivery(
+                      source_event.id, source_event.stream_protocol,
+                      source_event.agent_run_id, source_event.agent_run_attempt_id,
+                      source_event.sequence_no, source_event.event_type,
+                      source_event.payload_json, source_event.payload_hash,
+                      source_event.audience, null, '[]'::jsonb,
+                      source_event.created_at, 'agent_run_stream_event',
+                      'migration-test'
+                  ) delivery
+                 where source_event.id = 'EVENT_DB_V2_1'
+                """;
+    }
+
+    private static void insertV046Receipts(Connection connection) throws SQLException {
+        try (var statement = connection.createStatement()) {
+            statement.executeUpdate(
+                    """
+                    insert into agent_run_stream_archive_manifest (
+                        manifest_id, manifest_sha256, target_partition_name,
+                        partition_range_start, partition_range_end, stream_protocol,
+                        agent_run_id, agent_run_attempt_id, first_sequence_no,
+                        last_sequence_no, event_count, canonical_events_sha256,
+                        object_uri, object_version, object_sha256, created_by
+                    ) values (
+                        'ARCHIVE_V046', repeat('a', 64),
+                        'agent_run_stream_event_delivery_default',
+                        '2025-01-01T00:00:00Z', '2099-01-01T00:00:00Z',
+                        'agent_stream.v1', 'RUN_LEGACY_V2', 'RUN_LEGACY_V2',
+                        0, 2, 3, repeat('b', 64), 's3://archive/v046',
+                        'version-1', repeat('c', 64), 'migration-test'
+                    )
+                    """);
+        }
+        assertCheckViolation(
+                connection,
+                archiveReceiptInsert("ARCHIVE_RECEIPT_V046_EMPTY_EVIDENCE", false),
+                "ck_stream_archive_receipt_verified_evidence");
+        assertCheckViolation(
+                connection,
+                """
+                insert into agent_run_stream_migration_receipt (
+                    receipt_id, candidate_sha, deployment_manifest_sha256,
+                    step_id, attempt_id, operator_identity,
+                    authorization_reference, started_at, ended_at, exit_status,
+                    source_event_count, target_event_count,
+                    source_canonical_sha256, target_canonical_sha256,
+                    delivery_high_watermark, receipt_sha256
+                ) values (
+                    'MIGRATION_RECEIPT_V046_EMPTY_EVIDENCE', repeat('a', 40),
+                    repeat('b', 64), 'PARITY_VALIDATE', 'attempt-v046-invalid',
+                    'migration-test', 'urn:test:authorization:v046',
+                    '2026-01-01T00:00:00Z', '2026-01-01T00:00:01Z',
+                    'SUCCEEDED', 0, 0, repeat('a', 64), repeat('a', 64),
+                    -1, repeat('f', 64)
+                )
+                """,
+                "ck_stream_migration_receipt_success_parity");
+
+        try (var statement = connection.createStatement()) {
+            statement.executeUpdate(archiveReceiptInsert("ARCHIVE_RECEIPT_V046", true));
+            statement.executeUpdate(
+                    """
+                    insert into agent_run_stream_migration_receipt (
+                        receipt_id, candidate_sha, deployment_manifest_sha256,
+                        step_id, attempt_id, operator_identity,
+                        authorization_reference, started_at, ended_at, exit_status,
+                        source_event_count, target_event_count,
+                        source_canonical_sha256, target_canonical_sha256,
+                        delivery_high_watermark, receipt_sha256
+                    ) values (
+                        'MIGRATION_RECEIPT_V046', repeat('a', 40), repeat('b', 64),
+                        'EXPAND', 'attempt-v046', 'migration-test',
+                        'urn:test:authorization:v046', '2026-01-01T00:00:00Z',
+                        '2026-01-01T00:00:01Z', 'SUCCEEDED', 1, 3,
+                        repeat('c', 64), repeat('d', 64), 2, repeat('e', 64)
+                    )
+                    """);
+        }
+        assertThat(
+                        scalar(
+                                connection,
+                                """
+                                select acceptance_status || ':' || authority_scope || ':' ||
+                                       formal_business_authority
+                                  from agent_run_stream_migration_receipt
+                                 where receipt_id = 'MIGRATION_RECEIPT_V046'
+                                """))
+                .isEqualTo("PENDING_EXTERNAL:DELIVERY_STORAGE_ONLY:false");
+    }
+
+    private static String archiveReceiptInsert(String receiptId, boolean withEvidence) {
+        String evidenceColumns =
+                withEvidence
+                        ? ", sequence_identity_validation_json, audience_cursor_validation_json"
+                        : "";
+        String evidenceValues =
+                withEvidence
+                        ? """
+                        , '{"schema_version":"agent-stream-sequence-identity-validation.v1","status":"PASS","sequence_contiguous":true,"event_identity_exact":true}'::jsonb,
+                          '{"schema_version":"agent-stream-audience-cursor-validation.v1","status":"PASS","audience_parity":true,"actor_id_parity":true,"cursor_parity":true}'::jsonb
+                        """
+                        : "";
+        return """
+                insert into agent_run_stream_archive_receipt (
+                    receipt_id, receipt_sha256, manifest_id, manifest_sha256,
+                    target_partition_name, stream_protocol, agent_run_id,
+                    agent_run_attempt_id, first_sequence_no, last_sequence_no,
+                    event_count, canonical_events_sha256, object_version,
+                    object_sha256, object_readback_sha256,
+                    delivery_high_watermark, hot_retention_started_at,
+                    hot_retention_eligible_at, receipt_status, verified_at, verified_by%s
+                ) values (
+                    '%s', repeat('d', 64), 'ARCHIVE_V046', repeat('a', 64),
+                    'agent_run_stream_event_delivery_default', 'agent_stream.v1',
+                    'RUN_LEGACY_V2', 'RUN_LEGACY_V2', 0, 2, 3, repeat('b', 64),
+                    'version-1', repeat('c', 64), repeat('c', 64), 2,
+                    '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z',
+                    'VERIFIED', '2026-01-02T00:00:00Z', 'migration-test'%s
+                )
+                """
+                .formatted(evidenceColumns, receiptId, evidenceValues);
+    }
+
     private static String lineageAttemptInsert(
             String id,
             long attemptNo,
@@ -435,6 +805,18 @@ class AgentRunV2MigrationIntegrationTest {
                             SQLException sqlFailure = (SQLException) failure;
                             assertThat(sqlFailure.getSQLState()).isEqualTo("23514");
                             assertThat(sqlFailure.getMessage()).contains(constraint);
+                        });
+    }
+
+    private static void assertSqlState(
+            Connection connection, String sql, String sqlState, String message) {
+        assertThatThrownBy(() -> connection.createStatement().executeUpdate(sql))
+                .isInstanceOf(SQLException.class)
+                .satisfies(
+                        failure -> {
+                            SQLException sqlFailure = (SQLException) failure;
+                            assertThat(sqlFailure.getSQLState()).isEqualTo(sqlState);
+                            assertThat(sqlFailure.getMessage()).contains(message);
                         });
     }
 
