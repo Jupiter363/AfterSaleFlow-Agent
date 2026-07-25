@@ -55,6 +55,8 @@ class OutcomeWireContractTest {
             Map.entry("outcome-workflow-start-operation-count-overflow.json", "outcome-workflow-start.schema.json"),
             Map.entry("outcome-reviewer-decision-unknown.json", "outcome-reviewer-decision-receipt.schema.json"),
             Map.entry("outcome-reviewer-decision-revision-gap.json", "outcome-reviewer-decision-receipt.schema.json"),
+            Map.entry("outcome-reviewer-decision-approve-snapshot-ref-mismatch.json", "outcome-reviewer-decision-receipt.schema.json"),
+            Map.entry("outcome-reviewer-decision-approve-snapshot-hash-mismatch.json", "outcome-reviewer-decision-receipt.schema.json"),
             Map.entry("outcome-reviewer-decision-reason-ref-without-hash.json", "outcome-reviewer-decision-receipt.schema.json"),
             Map.entry("outcome-sla-escalation-human-decision.json", "outcome-sla-escalation-receipt.schema.json"),
             Map.entry("outcome-sla-escalation-zero-event-sequence.json", "outcome-sla-escalation-receipt.schema.json"),
@@ -275,6 +277,40 @@ class OutcomeWireContractTest {
     }
 
     @Test
+    void approveRequiresOriginalActionSnapshotIdentityWhileModifyMayDiffer()
+            throws IOException {
+        String schemaFile = "outcome-reviewer-decision-receipt.schema.json";
+        ObjectNode approve = (ObjectNode) MAPPER.readTree(FIXTURES.resolve("valid")
+                .resolve("outcome-reviewer-decision-receipt-valid.json").toFile());
+
+        assertThat(approve.required("approved_action_snapshot_ref"))
+                .isEqualTo(approve.required("action_snapshot_ref"));
+        assertThat(approve.required("approved_action_snapshot_hash"))
+                .isEqualTo(approve.required("action_snapshot_hash"));
+        codec.validate(schemaFile, approve);
+
+        ObjectNode refMismatch = approve.deepCopy();
+        refMismatch.put("approved_action_snapshot_ref", "urn:approved-action:modified");
+        assertThatThrownBy(() -> codec.validate(schemaFile, refMismatch))
+                .hasMessageContaining("approve-action-snapshot-ref-equality.v1");
+
+        ObjectNode hashMismatch = approve.deepCopy();
+        hashMismatch.put(
+                "approved_action_snapshot_hash",
+                "6666666666666666666666666666666666666666666666666666666666666666");
+        assertThatThrownBy(() -> codec.validate(schemaFile, hashMismatch))
+                .hasMessageContaining("approve-action-snapshot-hash-equality.v1");
+
+        ObjectNode modified = approve.deepCopy();
+        modified.put("decision", "MODIFY_AND_APPROVE");
+        modified.put("approved_action_snapshot_ref", "urn:approved-action:modified");
+        modified.put(
+                "approved_action_snapshot_hash",
+                "6666666666666666666666666666666666666666666666666666666666666666");
+        codec.validate(schemaFile, modified);
+    }
+
+    @Test
     void optionalReferenceHashPairsAreBidirectionallyRequiredByRawSchemas()
             throws IOException {
         List<PairCase> pairCases = List.of(
@@ -349,6 +385,14 @@ class OutcomeWireContractTest {
                 new SemanticCase(
                         "outcome-reviewer-decision-receipt.schema.json",
                         "causal-revision-adjacency.v1"),
+                "outcome-reviewer-decision-approve-snapshot-ref-mismatch.json",
+                new SemanticCase(
+                        "outcome-reviewer-decision-receipt.schema.json",
+                        "approve-action-snapshot-ref-equality.v1"),
+                "outcome-reviewer-decision-approve-snapshot-hash-mismatch.json",
+                new SemanticCase(
+                        "outcome-reviewer-decision-receipt.schema.json",
+                        "approve-action-snapshot-hash-equality.v1"),
                 "outcome-process-projection-closed-success-count-mismatch.json",
                 new SemanticCase(
                         "outcome-process-projection.schema.json",
@@ -412,6 +456,11 @@ class OutcomeWireContractTest {
                 "outcome-process-projection.schema.json");
         assertThat(conformance.ruleIds("outcome-workflow-start.schema.json"))
                 .containsExactly("review-window-order.v1");
+        assertThat(conformance.ruleIds("outcome-reviewer-decision-receipt.schema.json"))
+                .containsExactlyInAnyOrder(
+                        "causal-revision-adjacency.v1",
+                        "approve-action-snapshot-ref-equality.v1",
+                        "approve-action-snapshot-hash-equality.v1");
         assertThat(conformance.ruleIds("outcome-operation-receipt.schema.json"))
                 .containsExactly("causal-revision-adjacency.v1");
         assertThat(conformance.ruleIds("outcome-compensation-receipt.schema.json"))
@@ -479,6 +528,29 @@ class OutcomeWireContractTest {
         assertThatThrownBy(() -> new OutcomeContractCodec(copy))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("compensation-receipt-id-equality.v1")
+                .hasMessageContaining("frozen v1 rule shape");
+    }
+
+    @Test
+    void approveSnapshotConditionDriftFailsClosedAtCodecStartup(@TempDir Path tempDir)
+            throws IOException {
+        Path copy = tempDir.resolve("outcome-v1");
+        copyContractRoot(copy);
+        Path manifestPath = copy.resolve(OutcomeSemanticConformance.MANIFEST_FILE);
+        ObjectNode manifest = (ObjectNode) MAPPER.readTree(manifestPath.toFile());
+        for (JsonNode rule : manifest.required("rules")) {
+            if (rule.required("rule_id").asText().equals(
+                    "approve-action-snapshot-ref-equality.v1")) {
+                ((com.fasterxml.jackson.databind.node.ArrayNode) rule.required("condition")
+                                .required("values"))
+                        .add("MODIFY_AND_APPROVE");
+            }
+        }
+        MAPPER.writeValue(manifestPath.toFile(), manifest);
+
+        assertThatThrownBy(() -> new OutcomeContractCodec(copy))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("approve-action-snapshot-ref-equality.v1")
                 .hasMessageContaining("frozen v1 rule shape");
     }
 

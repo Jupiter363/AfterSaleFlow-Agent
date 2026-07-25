@@ -25,6 +25,10 @@ final class OutcomeSemanticConformance {
             List.of("DRAFT_2020_12_SCHEMA", "OUTCOME_SEMANTIC_RULES_V1");
     private static final String REVIEW_WINDOW_RULE = "review-window-order.v1";
     private static final String CAUSAL_REVISION_RULE = "causal-revision-adjacency.v1";
+    private static final String APPROVE_ACTION_SNAPSHOT_REF_RULE =
+            "approve-action-snapshot-ref-equality.v1";
+    private static final String APPROVE_ACTION_SNAPSHOT_HASH_RULE =
+            "approve-action-snapshot-hash-equality.v1";
     private static final String TERMINAL_SUCCESS_COUNT_RULE =
             "terminal-success-count-equality.v1";
     private static final String COMPENSATION_RECEIPT_ID_RULE =
@@ -124,6 +128,8 @@ final class OutcomeSemanticConformance {
         if (!rulesById.keySet().equals(Set.of(
                 REVIEW_WINDOW_RULE,
                 CAUSAL_REVISION_RULE,
+                APPROVE_ACTION_SNAPSHOT_REF_RULE,
+                APPROVE_ACTION_SNAPSHOT_HASH_RULE,
                 TERMINAL_SUCCESS_COUNT_RULE,
                 COMPENSATION_RECEIPT_ID_RULE,
                 COMPENSATION_RECEIPT_HASH_RULE))) {
@@ -290,6 +296,30 @@ final class OutcomeSemanticConformance {
                 Set.of(new FixtureRef(
                         "outcome-process-projection.schema.json",
                         "fixtures/invalid/outcome-process-projection-closed-success-count-mismatch.json")));
+
+        Rule approveActionSnapshotRef = rulesById.get(APPROVE_ACTION_SNAPSHOT_REF_RULE);
+        requireRuleShape(
+                approveActionSnapshotRef,
+                Operator.TEXT_EQUALS,
+                "action_snapshot_ref",
+                "approved_action_snapshot_ref",
+                new Condition("decision", Set.of("APPROVE")),
+                Set.of("outcome-reviewer-decision-receipt.schema.json"),
+                Set.of(new FixtureRef(
+                        "outcome-reviewer-decision-receipt.schema.json",
+                        "fixtures/invalid/outcome-reviewer-decision-approve-snapshot-ref-mismatch.json")));
+
+        Rule approveActionSnapshotHash = rulesById.get(APPROVE_ACTION_SNAPSHOT_HASH_RULE);
+        requireRuleShape(
+                approveActionSnapshotHash,
+                Operator.TEXT_EQUALS,
+                "action_snapshot_hash",
+                "approved_action_snapshot_hash",
+                new Condition("decision", Set.of("APPROVE")),
+                Set.of("outcome-reviewer-decision-receipt.schema.json"),
+                Set.of(new FixtureRef(
+                        "outcome-reviewer-decision-receipt.schema.json",
+                        "fixtures/invalid/outcome-reviewer-decision-approve-snapshot-hash-mismatch.json")));
 
         Rule compensationReceiptId = rulesById.get(COMPENSATION_RECEIPT_ID_RULE);
         requireRuleShape(

@@ -43,6 +43,42 @@
       ]
     },
     {
+      "rule_id": "approve-action-snapshot-ref-equality.v1",
+      "operator": "TEXT_EQUALS",
+      "left_field": "action_snapshot_ref",
+      "right_field": "approved_action_snapshot_ref",
+      "condition": {
+        "field": "decision",
+        "operator": "IN",
+        "values": ["APPROVE"]
+      },
+      "schema_files": ["outcome-reviewer-decision-receipt.schema.json"],
+      "negative_fixtures": [
+        {
+          "schema_file": "outcome-reviewer-decision-receipt.schema.json",
+          "fixture": "fixtures/invalid/outcome-reviewer-decision-approve-snapshot-ref-mismatch.json"
+        }
+      ]
+    },
+    {
+      "rule_id": "approve-action-snapshot-hash-equality.v1",
+      "operator": "TEXT_EQUALS",
+      "left_field": "action_snapshot_hash",
+      "right_field": "approved_action_snapshot_hash",
+      "condition": {
+        "field": "decision",
+        "operator": "IN",
+        "values": ["APPROVE"]
+      },
+      "schema_files": ["outcome-reviewer-decision-receipt.schema.json"],
+      "negative_fixtures": [
+        {
+          "schema_file": "outcome-reviewer-decision-receipt.schema.json",
+          "fixture": "fixtures/invalid/outcome-reviewer-decision-approve-snapshot-hash-mismatch.json"
+        }
+      ]
+    },
+    {
       "rule_id": "terminal-success-count-equality.v1",
       "operator": "SAFE_INTEGER_EQUALS",
       "left_field": "terminal_success_receipt_count",

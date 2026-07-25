@@ -24,6 +24,15 @@ SCHEMA_PATH = (
     ROOT
     / "contracts/agent-platform/outcome/v1/outcome-synthetic-noop-receipt.schema.json"
 )
+SEMANTIC_MANIFEST_PATH = (
+    ROOT
+    / "contracts/agent-platform/outcome/v1/outcome-semantic-conformance.v1.json"
+)
+REVIEW_DECISION_SCHEMA_PATH = (
+    ROOT
+    / "contracts/agent-platform/outcome/v1/outcome-reviewer-decision-receipt.schema.json"
+)
+OUTCOME_FIXTURE_ROOT = ROOT / "contracts/agent-platform/outcome/v1/fixtures"
 ADR_PATH = ROOT / "docs/architecture/adr/0016-phase-7-outcome-engineering-exception.md"
 CHECKPOINT_PATH = (
     ROOT / "docs/runbooks/temporal-first/phase-6-engineering-checkpoint.md"
@@ -138,6 +147,83 @@ def test_java_is_the_sole_formal_authority_for_all_five_human_decisions() -> Non
     assert review["approval_binding"]["model_proposal_is_human_decision"] is False
     assert review["approval_binding"]["parent_substitution"] == "reject"
     assert review["immutability"]["committed_decision_rewrite"] == "forbidden"
+
+
+def test_approve_snapshot_identity_is_manifest_dispatched_and_frozen() -> None:
+    manifest = json.loads(SEMANTIC_MANIFEST_PATH.read_text(encoding="utf-8"))
+    rules = {rule["rule_id"]: rule for rule in manifest["rules"]}
+    assert set(rules) == {
+        "review-window-order.v1",
+        "causal-revision-adjacency.v1",
+        "approve-action-snapshot-ref-equality.v1",
+        "approve-action-snapshot-hash-equality.v1",
+        "terminal-success-count-equality.v1",
+        "compensation-receipt-id-equality.v1",
+        "compensation-receipt-hash-equality.v1",
+    }
+
+    expected = {
+        "approve-action-snapshot-ref-equality.v1": (
+            "action_snapshot_ref",
+            "approved_action_snapshot_ref",
+            "fixtures/invalid/outcome-reviewer-decision-approve-snapshot-ref-mismatch.json",
+        ),
+        "approve-action-snapshot-hash-equality.v1": (
+            "action_snapshot_hash",
+            "approved_action_snapshot_hash",
+            "fixtures/invalid/outcome-reviewer-decision-approve-snapshot-hash-mismatch.json",
+        ),
+    }
+    for rule_id, (left, right, fixture) in expected.items():
+        assert rules[rule_id] == {
+            "rule_id": rule_id,
+            "operator": "TEXT_EQUALS",
+            "left_field": left,
+            "right_field": right,
+            "condition": {
+                "field": "decision",
+                "operator": "IN",
+                "values": ["APPROVE"],
+            },
+            "schema_files": ["outcome-reviewer-decision-receipt.schema.json"],
+            "negative_fixtures": [
+                {
+                    "schema_file": "outcome-reviewer-decision-receipt.schema.json",
+                    "fixture": fixture,
+                }
+            ],
+        }
+
+    schema = json.loads(REVIEW_DECISION_SCHEMA_PATH.read_text(encoding="utf-8"))
+    declaration = schema["x-semantic-conformance"]
+    assert declaration["required_rules"] == [
+        "causal-revision-adjacency.v1",
+        "approve-action-snapshot-ref-equality.v1",
+        "approve-action-snapshot-hash-equality.v1",
+    ]
+    validator = jsonschema.validators.validator_for(schema)(schema)
+
+    valid = json.loads(
+        (OUTCOME_FIXTURE_ROOT / "valid/outcome-reviewer-decision-receipt-valid.json")
+        .read_text(encoding="utf-8")
+    )
+    assert not list(validator.iter_errors(valid))
+    assert valid["decision"] == "APPROVE"
+    assert valid["approved_action_snapshot_ref"] == valid["action_snapshot_ref"]
+    assert valid["approved_action_snapshot_hash"] == valid["action_snapshot_hash"]
+
+    for rule_id, (left, right, fixture) in expected.items():
+        invalid = json.loads(
+            (OUTCOME_FIXTURE_ROOT.parent / fixture).read_text(encoding="utf-8")
+        )
+        assert not list(validator.iter_errors(invalid))
+        assert invalid["decision"] == "APPROVE"
+        assert invalid[left] != invalid[right], rule_id
+
+    invariants = _matrix()["wire_protocol"]["invariants"]
+    assert invariants["approve_action_snapshot_identity"] == (
+        "APPROVED_REF_AND_HASH_EXACTLY_MATCH_ORIGINAL_ACTION_SNAPSHOT"
+    )
 
 
 def test_sla_expiration_is_a_distinct_system_fact_not_a_human_decision() -> None:

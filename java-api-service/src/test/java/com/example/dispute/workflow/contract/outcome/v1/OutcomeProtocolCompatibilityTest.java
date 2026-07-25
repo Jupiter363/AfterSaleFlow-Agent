@@ -61,11 +61,28 @@ class OutcomeProtocolCompatibilityTest {
         JsonNode command = read("outcome-operation-command-valid.json");
         JsonNode projection = read("outcome-process-projection-valid.json");
 
-        assertEqual(start, decision, "workflow_id", "case_id", "frozen_review_packet_ref", "frozen_review_packet_hash", "required_operation_set_ref", "required_operation_set_hash", "required_operation_count", "epoch", "fence");
+        assertEqual(
+                start,
+                decision,
+                "workflow_id",
+                "case_id",
+                "frozen_review_packet_ref",
+                "frozen_review_packet_hash",
+                "action_snapshot_ref",
+                "action_snapshot_hash",
+                "required_operation_set_ref",
+                "required_operation_set_hash",
+                "required_operation_count",
+                "epoch",
+                "fence");
         assertEqual(start, command, "workflow_id", "case_id", "epoch", "fence");
         assertEqual(decision, command, "workflow_id", "case_id", "operation_key_hash", "epoch", "fence");
         assertEqual(start, projection, "workflow_id", "case_id", "required_operation_set_ref", "required_operation_set_hash", "required_operation_count", "epoch", "fence");
         assertThat(command.required("approval_receipt_hash")).isEqualTo(decision.required("receipt_hash"));
+        assertThat(decision.required("approved_action_snapshot_ref"))
+                .isEqualTo(start.required("action_snapshot_ref"));
+        assertThat(decision.required("approved_action_snapshot_hash"))
+                .isEqualTo(start.required("action_snapshot_hash"));
         assertThat(command.required("approved_action_snapshot_ref")).isEqualTo(decision.required("approved_action_snapshot_ref"));
         assertThat(command.required("approved_action_snapshot_hash")).isEqualTo(decision.required("approved_action_snapshot_hash"));
     }
@@ -93,6 +110,9 @@ class OutcomeProtocolCompatibilityTest {
                 "EQUALS_REQUIRED_OPERATION_COUNT_WHEN_CLOSED_OR_EVALUATED");
         assertThat(invariants).containsEntry(
                 "optional_ref_hash_pairs", "BIDIRECTIONAL_DEPENDENT_REQUIRED");
+        assertThat(invariants).containsEntry(
+                "approve_action_snapshot_identity",
+                "APPROVED_REF_AND_HASH_EXACTLY_MATCH_ORIGINAL_ACTION_SNAPSHOT");
         assertThat(invariants).containsEntry(
                 "compensation_receipt_identity",
                 "RECEIPT_ID_AND_HASH_EXACTLY_MATCH_SELF_IDENTITY");
