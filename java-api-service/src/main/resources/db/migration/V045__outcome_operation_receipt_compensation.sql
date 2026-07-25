@@ -271,6 +271,7 @@ begin
         if new.process_state in (
             'READY_TO_CLOSE', 'CLOSED', 'EVALUATION_PENDING', 'EVALUATED'
         ) then
+            perform outcome_lock_required_action_records(new.projection_id);
             execute
                 'select outcome_required_action_set_is_exact($1), '
                 || 'outcome_required_action_records_succeeded($1)'
@@ -415,6 +416,42 @@ create index idx_outcome_operation_closure
 create index idx_outcome_operation_reconcile
     on outcome_operation(case_id, outcome_epoch, fencing_token, process_revision, outcome_revision);
 
+create function outcome_lock_action_record(p_action_record_id varchar(64))
+returns boolean
+language plpgsql
+volatile
+as $$
+begin
+    perform value.id
+      from action_record value
+     where value.id = p_action_record_id
+     for share;
+    return found;
+end
+$$;
+
+create function outcome_lock_required_action_records(p_projection_id varchar(64))
+returns boolean
+language plpgsql
+volatile
+as $$
+begin
+    perform action.id
+      from outcome_process_projection projection
+      join outcome_operation operation
+        on operation.projection_id = projection.projection_id
+       and operation.operation_kind = 'OPERATION'
+       and operation.required_for_closure
+      join action_record action
+        on action.id = operation.action_record_id
+     where projection.projection_id = p_projection_id
+       and projection.runtime_mode <> 'JAVA_SIGNED_SYNTHETIC_NOOP_SHADOW'
+     order by action.id
+     for share of action;
+    return true;
+end
+$$;
+
 create function outcome_required_action_record_is_authorized(
     p_projection_id varchar(64),
     p_action_record_id varchar(64)
@@ -475,9 +512,13 @@ $$;
 
 create function outcome_required_action_set_is_exact(p_projection_id varchar(64))
 returns boolean
-language sql
-stable
+language plpgsql
+volatile
 as $$
+declare
+    exact_result boolean;
+begin
+perform outcome_lock_required_action_records(p_projection_id);
 with authority as (
     select projection.projection_id,
            projection.tenant_surrogate,
@@ -564,13 +605,20 @@ select coalesce((
         end
       from authority
 ), false)
+  into exact_result;
+return exact_result;
+end
 $$;
 
 create function outcome_required_action_records_succeeded(p_projection_id varchar(64))
 returns boolean
-language sql
-stable
+language plpgsql
+volatile
 as $$
+declare
+    succeeded_result boolean;
+begin
+perform outcome_lock_required_action_records(p_projection_id);
 select coalesce((
     select case
         when projection.runtime_mode = 'JAVA_SIGNED_SYNTHETIC_NOOP_SHADOW' then true
@@ -593,6 +641,9 @@ select coalesce((
       from outcome_process_projection projection
      where projection.projection_id = p_projection_id
 ), false)
+  into succeeded_result;
+return succeeded_result;
+end
 $$;
 
 create function enforce_outcome_operation_binding()
@@ -717,6 +768,12 @@ begin
             message = 'Outcome operation execution-authorized decision receipt is invalid';
     end if;
 
+    if new.action_record_id is not null
+       and not outcome_lock_action_record(new.action_record_id) then
+        raise exception using errcode = '23514',
+            message = 'Outcome operation ActionRecord binding is invalid';
+    end if;
+
     if new.operation_kind = 'OPERATION' and new.required_for_closure then
         if projection.runtime_mode = 'JAVA_SIGNED_SYNTHETIC_NOOP_SHADOW' then
             if new.action_record_id is not null
@@ -745,7 +802,7 @@ begin
            and value.approval_record_id = new.approval_record_id
            and value.review_packet_id = new.review_packet_id
            and value.action_snapshot_hash = new.action_snapshot_hash
-         for key share;
+         for share;
         if not found then
             raise exception using errcode = '23514',
                 message = 'Outcome operation ActionRecord binding is invalid';
@@ -766,6 +823,61 @@ create trigger trg_outcome_operation_append_only
 create trigger trg_outcome_operation_delete_append_only
     before delete on outcome_operation
     for each row execute function reject_append_only_mutation();
+
+create function enforce_bound_outcome_action_record_update()
+returns trigger
+language plpgsql
+as $$
+declare
+    binding outcome_operation%rowtype;
+    bound_process_state varchar(48);
+begin
+    select operation.* into binding
+      from outcome_operation operation
+     where operation.action_record_id = old.id
+       and operation.operation_kind = 'OPERATION'
+       and operation.required_for_closure;
+    if not found then
+        return new;
+    end if;
+    if not pg_try_advisory_xact_lock(hashtextextended(
+        'outcome-compensation-order:' || binding.tenant_surrogate || ':' ||
+        binding.case_id || ':' || binding.outcome_epoch::text,
+        0
+    )) then
+        raise exception using errcode = '40001',
+            message = 'Outcome ActionRecord scope lock is busy; retry the whole update';
+    end if;
+    select projection.process_state into bound_process_state
+      from outcome_process_projection projection
+     where projection.projection_id = binding.projection_id;
+    if not found then
+        raise exception using errcode = '23514',
+            message = 'Bound Outcome ActionRecord projection authority is missing';
+    end if;
+    if bound_process_state in (
+           'READY_TO_CLOSE', 'CLOSED', 'EVALUATION_PENDING', 'EVALUATED'
+       ) and new is distinct from old then
+        raise exception using errcode = '23514',
+            message = 'Outcome terminal projection freezes the bound ActionRecord';
+    end if;
+    if (new.id, new.case_id, new.plan_id, new.approval_record_id,
+            new.action_type, new.idempotency_key, new.review_packet_id,
+            new.action_snapshot_hash, new.created_at, new.created_by)
+       is distinct from
+       (old.id, old.case_id, old.plan_id, old.approval_record_id,
+            old.action_type, old.idempotency_key, old.review_packet_id,
+            old.action_snapshot_hash, old.created_at, old.created_by) then
+        raise exception using errcode = '23514',
+            message = 'Bound Outcome ActionRecord authority identity is immutable';
+    end if;
+    return new;
+end
+$$;
+
+create trigger trg_bound_outcome_action_record_update
+    before update on action_record
+    for each row execute function enforce_bound_outcome_action_record_update();
 
 create table outcome_operation_attempt_observation (
     observation_id varchar(64) primary key,

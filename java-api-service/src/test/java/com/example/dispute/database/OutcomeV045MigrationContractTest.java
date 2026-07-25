@@ -340,6 +340,95 @@ class OutcomeV045MigrationContractTest {
     }
 
     @Test
+    void locksFormalActionRecordsBeforeReservationReadinessAndTerminalAuthorityChecks()
+            throws Exception {
+        String sql = normalizedSql();
+        String singleLock = functionSegment(
+                sql,
+                "create function outcome_lock_action_record(",
+                "create function outcome_lock_required_action_records(");
+        String orderedLocks = functionSegment(
+                sql,
+                "create function outcome_lock_required_action_records(",
+                "create function outcome_required_action_record_is_authorized(");
+        String reservation = functionSegment(
+                sql,
+                "create function enforce_outcome_operation_binding()",
+                "create trigger trg_outcome_operation_binding");
+        String terminal = functionSegment(
+                sql,
+                "create function enforce_outcome_projection_authority()",
+                "create trigger trg_outcome_projection_authority");
+
+        assertThat(singleLock)
+                .contains("where value.id = p_action_record_id for share")
+                .contains("return found");
+        assertThat(orderedLocks)
+                .contains("projection.runtime_mode <> 'java_signed_synthetic_noop_shadow'")
+                .contains("operation.operation_kind = 'operation'")
+                .contains("operation.required_for_closure")
+                .contains("order by action.id for share of action")
+                .contains("return true");
+        assertAppearsInOrder(
+                reservation,
+                "outcome_lock_action_record(new.action_record_id)",
+                "outcome_required_action_record_is_authorized(",
+                "from action_record value",
+                "for share;");
+        assertAppearsInOrder(
+                terminal,
+                "perform outcome_lock_required_action_records(new.projection_id)",
+                "execute 'select outcome_required_action_set_is_exact($1), '",
+                "select count(operation.operation_id) filter");
+        assertThat(functionSegment(
+                        sql,
+                        "create function outcome_required_action_set_is_exact(",
+                        "create function outcome_required_action_records_succeeded("))
+                .contains("perform outcome_lock_required_action_records(p_projection_id)");
+        assertThat(functionSegment(
+                        sql,
+                        "create function outcome_required_action_records_succeeded(",
+                        "create function enforce_outcome_operation_binding()"))
+                .contains("perform outcome_lock_required_action_records(p_projection_id)");
+    }
+
+    @Test
+    void serializesBoundActionRecordUpdatesWithoutInvertingTheOutcomeScopeLock()
+            throws Exception {
+        String guard = functionSegment(
+                normalizedSql(),
+                "create function enforce_bound_outcome_action_record_update()",
+                "create trigger trg_bound_outcome_action_record_update");
+
+        assertAppearsInOrder(
+                guard,
+                "where operation.action_record_id = old.id",
+                "operation.operation_kind = 'operation'",
+                "operation.required_for_closure",
+                "if not pg_try_advisory_xact_lock(hashtextextended(",
+                "'outcome-compensation-order:' || binding.tenant_surrogate || ':'",
+                "errcode = '40001'",
+                "outcome actionrecord scope lock is busy; retry the whole update",
+                "from outcome_process_projection projection");
+        assertThat(guard)
+                .doesNotContain("perform pg_advisory_xact_lock(hashtextextended(")
+                .contains("new is distinct from old")
+                .contains("outcome terminal projection freezes the bound actionrecord")
+                .contains("bound outcome actionrecord authority identity is immutable")
+                .contains("new.case_id, new.plan_id, new.approval_record_id")
+                .contains("new.action_type, new.idempotency_key, new.review_packet_id")
+                .contains("new.review_packet_id, new.action_snapshot_hash")
+                .doesNotContain("new.request_json")
+                .doesNotContain("new.result_json")
+                .doesNotContain("new.executed_by")
+                .doesNotContain("new.attempt_count")
+                .doesNotContain("new.execution_status, old.execution_status");
+        assertThat(extractInClauseValues(guard, "if bound_process_state in ("))
+                .containsExactlyInAnyOrder(
+                        "ready_to_close", "closed", "evaluation_pending", "evaluated");
+    }
+
+    @Test
     void enforcesExactCompensationParentReceiptAndClosureBlockers() throws Exception {
         String sql = normalizedSql();
 
