@@ -35,23 +35,33 @@ public final class RedisAgentRunStreamWakeupSubscriber implements MessageListene
 
     @Override
     public void onMessage(Message message, byte[] pattern) {
-        accept(new String(message.getBody(), StandardCharsets.UTF_8));
+        try {
+            accept(new String(message.getBody(), StandardCharsets.UTF_8));
+        } catch (RuntimeException failure) {
+            logIgnoredHint(failure);
+        }
     }
 
     void accept(String encoded) {
         try {
-            AgentRunStreamWakeup wakeup =
+            AgentRunStreamWakeup hint =
                     objectMapper.readValue(encoded, AgentRunStreamWakeup.class);
-            eventService.wakeUp(wakeup.runId());
+            // attemptId and high-watermark are diagnostics only. The service replays from each
+            // subscriber's PostgreSQL-backed cursor, so stale or reordered hints cannot skip data.
+            eventService.wakeUp(hint.runId());
         } catch (JsonProcessingException | RuntimeException failure) {
-            long now = System.nanoTime();
-            long next = nextWarning.get();
-            if (now >= next
-                    && nextWarning.compareAndSet(next, now + WARNING_INTERVAL_NANOS)) {
-                LOGGER.warn(
-                        "Ignoring invalid AgentRun stream wakeup: failure_type={}",
-                        failure.getClass().getName());
-            }
+            logIgnoredHint(failure);
+        }
+    }
+
+    private void logIgnoredHint(Exception failure) {
+        long now = System.nanoTime();
+        long next = nextWarning.get();
+        if (now >= next
+                && nextWarning.compareAndSet(next, now + WARNING_INTERVAL_NANOS)) {
+            LOGGER.warn(
+                    "Ignoring AgentRun stream wakeup; PostgreSQL replay remains authoritative: failure_type={}",
+                    failure.getClass().getName());
         }
     }
 }

@@ -48,26 +48,33 @@ public class RedisAgentRunStreamWakeupPublisher
 
     @Override
     public void publish(AgentRunStreamWakeup wakeup) {
-        Objects.requireNonNull(wakeup, "wakeup must not be null");
+        if (wakeup == null) {
+            logDroppedHint(new IllegalArgumentException("wakeup must not be null"));
+            return;
+        }
         try {
-            String encoded = objectMapper.writeValueAsString(wakeup);
-            deliveryExecutor.execute(() -> deliver(encoded));
-        } catch (JsonProcessingException exception) {
-            throw new IllegalStateException("agent stream wakeup encoding failed", exception);
+            deliveryExecutor.execute(() -> deliver(wakeup));
+        } catch (RuntimeException failure) {
+            logDroppedHint(failure);
         }
     }
 
-    private void deliver(String encoded) {
+    private void deliver(AgentRunStreamWakeup wakeup) {
         try {
+            String encoded = objectMapper.writeValueAsString(wakeup);
             redis.convertAndSend(CHANNEL, encoded);
-        } catch (RuntimeException failure) {
-            long now = System.nanoTime();
-            long next = nextFailureLog.get();
-            if (now >= next && nextFailureLog.compareAndSet(next, now + FAILURE_LOG_INTERVAL_NANOS)) {
-                LOGGER.warn(
-                        "Redis agent stream wakeup delivery failed; PostgreSQL replay remains authoritative",
-                        failure);
-            }
+        } catch (JsonProcessingException | RuntimeException failure) {
+            logDroppedHint(failure);
+        }
+    }
+
+    private void logDroppedHint(Exception failure) {
+        long now = System.nanoTime();
+        long next = nextFailureLog.get();
+        if (now >= next && nextFailureLog.compareAndSet(next, now + FAILURE_LOG_INTERVAL_NANOS)) {
+            LOGGER.warn(
+                    "Redis agent stream wakeup dropped; PostgreSQL replay remains authoritative",
+                    failure);
         }
     }
 
