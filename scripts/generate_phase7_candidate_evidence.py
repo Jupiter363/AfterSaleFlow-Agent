@@ -10,10 +10,12 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import xml.etree.ElementTree as ET
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Iterator, Sequence
 
 try:
     from scripts import run_phase7_candidate_checkpoint as runner
@@ -165,24 +167,112 @@ def _assert_clean_detached_candidate(
             )
 
 
-def _git_hash_object(payload: bytes, *, logical_path: str | None = None) -> str:
+def _git_filter_environment(home: Path) -> dict[str, str]:
+    environment = {
+        key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")
+    }
+    environment.update(
+        {
+            "GIT_ATTR_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "HOME": str(home),
+            "USERPROFILE": str(home),
+            "XDG_CONFIG_HOME": str(home),
+        }
+    )
+    return environment
+
+
+def _git_filter_command(
+    repository: Path,
+    environment: dict[str, str],
+    *arguments: str,
+    payload: bytes | None = None,
+) -> bytes:
+    process = subprocess.run(
+        ["git", "-c", "core.autocrlf=input", *arguments],
+        cwd=repository,
+        env=environment,
+        input=payload,
+        capture_output=True,
+        check=False,
+    )
+    if process.returncode:
+        error = process.stderr.decode("utf-8", errors="replace").strip()
+        raise runner.EvidenceError(
+            f"cannot validate Phase 7 candidate Git attributes: {error}"
+        )
+    return process.stdout
+
+
+def _git_hash_object(
+    payload: bytes,
+    *,
+    repository: Path,
+    environment: dict[str, str],
+    logical_path: str | None = None,
+) -> str:
     command = ["git", "hash-object"]
     command.append("--no-filters" if logical_path is None else f"--path={logical_path}")
     command.append("--stdin")
-    process = subprocess.run(
-        command, cwd=ROOT, input=payload, capture_output=True, check=False
+    output = _git_filter_command(
+        repository, environment, *command[1:], payload=payload
     )
-    output = process.stdout.decode("ascii", errors="replace").strip()
-    if process.returncode or not re.fullmatch(r"[0-9a-f]{40,64}", output):
-        error = process.stderr.decode("utf-8", errors="replace").strip()
+    digest = output.decode("ascii", errors="replace").strip()
+    if not re.fullmatch(r"[0-9a-f]{40,64}", digest):
         raise runner.EvidenceError(
-            f"cannot apply Git clean filter for Phase 7 candidate evidence: {error or output}"
+            f"cannot apply Git clean filter for Phase 7 candidate evidence: {digest}"
         )
-    return output
+    return digest
+
+
+@contextmanager
+def _isolated_git_filter_repository(
+    *, attributes_path: Path, logical_attributes_path: str
+) -> Iterator[tuple[Path, dict[str, str]]]:
+    if _safe_output_relative_path(logical_attributes_path) != logical_attributes_path:
+        raise runner.EvidenceError(
+            "Phase 7 candidate Git-attribute path is not canonical: "
+            f"{logical_attributes_path}"
+        )
+    if PurePosixPath(logical_attributes_path).name != ATTRIBUTES_NAME:
+        raise runner.EvidenceError(
+            "Phase 7 candidate Git-attribute path does not name .gitattributes"
+        )
+    try:
+        attributes_payload = attributes_path.read_bytes()
+    except OSError as exception:
+        raise runner.EvidenceError(
+            "cannot read Phase 7 candidate byte-preservation attributes"
+        ) from exception
+    if attributes_payload != ATTRIBUTES_BYTES:
+        raise runner.EvidenceError(
+            "Phase 7 candidate byte-preservation attribute rules drifted"
+        )
+
+    with tempfile.TemporaryDirectory(prefix="phase7-git-attributes-") as temporary:
+        repository = Path(temporary)
+        environment = _git_filter_environment(repository)
+        _git_filter_command(
+            repository, environment, "init", "--quiet", "--template="
+        )
+        isolated_attributes = repository.joinpath(
+            *PurePosixPath(logical_attributes_path).parts
+        )
+        isolated_attributes.parent.mkdir(parents=True, exist_ok=True)
+        isolated_attributes.write_bytes(attributes_payload)
+        yield repository, environment
 
 
 def _assert_git_filter_stable(
-    path: Path, *, require_lf: bool, logical_path: str
+    path: Path,
+    *,
+    repository: Path,
+    environment: dict[str, str],
+    logical_attributes_path: str,
+    require_lf: bool,
+    logical_path: str,
 ) -> None:
     payload = path.read_bytes()
     if require_lf and b"\r" in payload:
@@ -193,8 +283,34 @@ def _assert_git_filter_stable(
         raise runner.EvidenceError(
             f"Phase 7 candidate Git-filter path is not canonical: {logical_path}"
         )
-    if _git_hash_object(payload) != _git_hash_object(
-        payload, logical_path=logical_path
+    logical_root = PurePosixPath(logical_attributes_path).parent
+    try:
+        PurePosixPath(logical_path).relative_to(logical_root)
+    except ValueError as exception:
+        raise runner.EvidenceError(
+            f"Phase 7 candidate Git-filter path escapes its attribute root: {logical_path}"
+        ) from exception
+    check = _git_filter_command(
+        repository,
+        environment,
+        "check-attr",
+        "-z",
+        "text",
+        "--",
+        logical_path,
+    )
+    expected_check = f"{logical_path}\0text\0unset\0".encode("utf-8")
+    if check != expected_check:
+        raise runner.EvidenceError(
+            f"Phase 7 candidate artifact {path.name} is not protected by -text"
+        )
+    if _git_hash_object(
+        payload, repository=repository, environment=environment
+    ) != _git_hash_object(
+        payload,
+        repository=repository,
+        environment=environment,
+        logical_path=logical_path,
     ):
         raise runner.EvidenceError(
             f"Phase 7 candidate artifact {path.name} changes under Git clean filters"
@@ -1762,13 +1878,21 @@ def _validate_bundle(
         / release_id
         / "phase-7-candidate"
     )
-    for path in files:
-        relative = path.relative_to(output_dir).as_posix()
-        _assert_git_filter_stable(
-            path,
-            require_lf=relative in primary_lf,
-            logical_path=(logical_root / relative).as_posix(),
-        )
+    logical_attributes_path = (logical_root / ATTRIBUTES_NAME).as_posix()
+    with _isolated_git_filter_repository(
+        attributes_path=output_dir / ATTRIBUTES_NAME,
+        logical_attributes_path=logical_attributes_path,
+    ) as (repository, environment):
+        for path in files:
+            relative = path.relative_to(output_dir).as_posix()
+            _assert_git_filter_stable(
+                path,
+                repository=repository,
+                environment=environment,
+                logical_attributes_path=logical_attributes_path,
+                require_lf=relative in primary_lf,
+                logical_path=(logical_root / relative).as_posix(),
+            )
     blobs = {
         path.relative_to(output_dir).as_posix(): path.read_bytes() for path in files
     }

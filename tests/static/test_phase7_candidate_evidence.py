@@ -688,27 +688,86 @@ def test_rejects_normalized_junit_content_not_replayed_from_raw_provenance(
         )
 
 
-def test_git_filter_check_uses_canonical_bundle_path(
+def test_git_filter_check_preserves_nested_raw_artifact_bytes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    artifact = tmp_path / "artifact.json"
-    artifact.write_bytes(b"{}\n")
-    logical = (
-        "test-reports/temporal-first/phase-7-candidate-test/"
-        "phase-7-candidate/artifact.json"
+    for variable in (
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_DIR",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_WORK_TREE",
+    ):
+        monkeypatch.setenv(variable, str(tmp_path / f"hostile-{variable.lower()}"))
+    attributes = tmp_path / generator.ATTRIBUTES_NAME
+    attributes.write_bytes(generator.ATTRIBUTES_BYTES)
+    artifacts = {
+        "00-7700810fe172.log": b"first\r\nsecond\r\n",
+        "01-binary.bin": b"\x00\xffraw\r\nbytes\x1a",
+    }
+    artifact_root = tmp_path / "p" / "0q00" / "r"
+    artifact_root.mkdir(parents=True)
+    for name, payload in artifacts.items():
+        (artifact_root / name).write_bytes(payload)
+    logical_root = (
+        "test-reports/temporal-first/phase-7-candidate-test/phase-7-candidate"
     )
-    observed: list[str | None] = []
+    logical_attributes_path = f"{logical_root}/{generator.ATTRIBUTES_NAME}"
 
-    def fake_hash(_payload: bytes, *, logical_path: str | None = None) -> str:
-        observed.append(logical_path)
-        return "1" * 40 if logical_path is None else "2" * 40
+    with generator._isolated_git_filter_repository(
+        attributes_path=attributes,
+        logical_attributes_path=logical_attributes_path,
+    ) as (repository, environment):
+        for name in artifacts:
+            generator._assert_git_filter_stable(
+                artifact_root / name,
+                repository=repository,
+                environment=environment,
+                logical_attributes_path=logical_attributes_path,
+                require_lf=False,
+                logical_path=f"{logical_root}/p/0q00/r/{name}",
+            )
 
-    monkeypatch.setattr(generator, "_git_hash_object", fake_hash)
-    with pytest.raises(runner.EvidenceError, match="changes under Git clean filters"):
-        generator._assert_git_filter_stable(
-            artifact, require_lf=True, logical_path=logical
-        )
-    assert observed == [None, logical]
+    assert {
+        name: (artifact_root / name).read_bytes() for name in artifacts
+    } == artifacts
+
+
+@pytest.mark.parametrize("attributes_payload", [b"* -text\n", b"* text\n**/* text\n"])
+def test_git_filter_check_rejects_drifted_or_missing_attribute_rule(
+    tmp_path: Path, attributes_payload: bytes
+) -> None:
+    attributes = tmp_path / generator.ATTRIBUTES_NAME
+    attributes.write_bytes(attributes_payload)
+    artifact = tmp_path / "p" / "0q00" / "r" / "00-7700810fe172.log"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(b"first\r\nsecond\r\n")
+    logical_root = (
+        "test-reports/temporal-first/phase-7-candidate-test/phase-7-candidate"
+    )
+
+    with pytest.raises(runner.EvidenceError, match="attribute rules drifted"):
+        with generator._isolated_git_filter_repository(
+            attributes_path=attributes,
+            logical_attributes_path=f"{logical_root}/{generator.ATTRIBUTES_NAME}",
+        ):
+            pass
+
+
+def test_git_filter_check_rejects_missing_attributes_file(tmp_path: Path) -> None:
+    artifact = tmp_path / "00-7700810fe172.log"
+    artifact.write_bytes(b"first\r\nsecond\r\n")
+    logical_root = (
+        "test-reports/temporal-first/phase-7-candidate-test/phase-7-candidate"
+    )
+
+    with pytest.raises(runner.EvidenceError, match="cannot read.*attributes"):
+        with generator._isolated_git_filter_repository(
+            attributes_path=tmp_path / generator.ATTRIBUTES_NAME,
+            logical_attributes_path=f"{logical_root}/{generator.ATTRIBUTES_NAME}",
+        ):
+            pass
+
 
 def test_source_tree_environment_authenticates_candidate_git_blobs(
     monkeypatch: pytest.MonkeyPatch,
