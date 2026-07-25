@@ -159,8 +159,19 @@ public final class OutcomeWireTypes {
     static void reviewWindow(Instant reviewOpenedAt, Instant reviewDeadlineAt) {
         instant(reviewOpenedAt, "reviewOpenedAt");
         instant(reviewDeadlineAt, "reviewDeadlineAt");
+        epochMilliseconds(reviewOpenedAt, "reviewOpenedAt");
+        epochMilliseconds(reviewDeadlineAt, "reviewDeadlineAt");
         if (!reviewOpenedAt.isBefore(reviewDeadlineAt)) {
             throw new IllegalArgumentException("reviewOpenedAt must be before reviewDeadlineAt");
+        }
+    }
+
+    private static long epochMilliseconds(Instant value, String field) {
+        try {
+            return value.toEpochMilli();
+        } catch (ArithmeticException exception) {
+            throw new IllegalArgumentException(
+                    field + " must be representable as epoch milliseconds", exception);
         }
     }
 
@@ -194,6 +205,13 @@ public final class OutcomeWireTypes {
     static long operationSequence(long value) {
         if (value < 1 || value > MAX_OPERATION_SEQUENCE) {
             throw new IllegalArgumentException("operationSequence must be between 1 and 64");
+        }
+        return value;
+    }
+
+    static long requiredOperationCount(long value) {
+        if (value < 0 || value > MAX_OPERATION_SEQUENCE) {
+            throw new IllegalArgumentException("requiredOperationCount must be between 0 and 64");
         }
         return value;
     }

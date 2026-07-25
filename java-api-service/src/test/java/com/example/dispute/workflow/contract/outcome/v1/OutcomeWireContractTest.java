@@ -13,6 +13,7 @@ import com.networknt.schema.SpecVersion;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -51,6 +52,7 @@ class OutcomeWireContractTest {
     private static final Map<String, String> INVALID_CASES = Map.ofEntries(
             Map.entry("outcome-workflow-start-packet-body.json", "outcome-workflow-start.schema.json"),
             Map.entry("outcome-workflow-start-invalid-review-window.json", "outcome-workflow-start.schema.json"),
+            Map.entry("outcome-workflow-start-operation-count-overflow.json", "outcome-workflow-start.schema.json"),
             Map.entry("outcome-reviewer-decision-unknown.json", "outcome-reviewer-decision-receipt.schema.json"),
             Map.entry("outcome-reviewer-decision-revision-gap.json", "outcome-reviewer-decision-receipt.schema.json"),
             Map.entry("outcome-sla-escalation-human-decision.json", "outcome-sla-escalation-receipt.schema.json"),
@@ -162,6 +164,18 @@ class OutcomeWireContractTest {
                 "outcome-workflow-start-valid.json",
                 "outcome-workflow-start.schema.json",
                 value -> value.put("review_opened_at", value.required("review_deadline_at").asText()));
+
+        assertThatThrownBy(() -> OutcomeWireTypes.reviewWindow(
+                        Instant.MAX.minusSeconds(1L), Instant.MAX))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("epoch milliseconds");
+        ObjectNode unsafeDirectConstruction = (ObjectNode) fixture.deepCopy();
+        unsafeDirectConstruction.put("review_opened_at", Instant.MAX.minusSeconds(1L).toString());
+        unsafeDirectConstruction.put("review_deadline_at", Instant.MAX.toString());
+        assertThatThrownBy(() -> MAPPER.treeToValue(
+                        unsafeDirectConstruction, OutcomeWorkflowStart.class))
+                .isInstanceOf(IOException.class)
+                .hasMessageContaining("reviewOpenedAt must be representable as epoch milliseconds");
     }
 
     @Test
@@ -232,6 +246,29 @@ class OutcomeWireContractTest {
     }
 
     @Test
+    void workflowStartRequiredOperationCountIsNativelyBoundedFromZeroTo64()
+            throws IOException {
+        assertThat(OutcomeWireTypes.requiredOperationCount(0L)).isZero();
+        assertThat(OutcomeWireTypes.requiredOperationCount(64L)).isEqualTo(64L);
+        assertThatThrownBy(() -> OutcomeWireTypes.requiredOperationCount(-1L))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> OutcomeWireTypes.requiredOperationCount(65L))
+                .isInstanceOf(IllegalArgumentException.class);
+
+        JsonSchema rawSchema = JsonSchemaFactory.getInstance(SpecVersion.VersionFlag.V202012)
+                .getSchema(MAPPER.readTree(
+                        CONTRACT_ROOT.resolve("outcome-workflow-start.schema.json").toFile()));
+        for (long invalidCount : List.of(-1L, 65L)) {
+            ObjectNode invalid = (ObjectNode) MAPPER.readTree(FIXTURES.resolve("valid")
+                    .resolve("outcome-workflow-start-valid.json").toFile());
+            invalid.put("required_operation_count", invalidCount);
+            assertThat(rawSchema.validate(invalid)).isNotEmpty();
+            assertThatThrownBy(() -> codec.validate("outcome-workflow-start.schema.json", invalid))
+                    .isInstanceOf(IllegalArgumentException.class);
+        }
+    }
+
+    @Test
     void rawDraft202012ValidationCannotClaimFullContractValidity() throws IOException {
         JsonNode manifest = MAPPER.readTree(
                 CONTRACT_ROOT.resolve(OutcomeSemanticConformance.MANIFEST_FILE).toFile());
@@ -244,6 +281,13 @@ class OutcomeWireContractTest {
                 .map(JsonNode::asText)
                 .toList())
                 .containsExactly("DRAFT_2020_12_SCHEMA", "OUTCOME_SEMANTIC_RULES_V1");
+        JsonNode reviewWindowRule = java.util.stream.StreamSupport.stream(
+                        manifest.required("rules").spliterator(), false)
+                .filter(rule -> rule.required("rule_id").asText().equals("review-window-order.v1"))
+                .findFirst()
+                .orElseThrow();
+        assertThat(reviewWindowRule.required("operator").asText())
+                .isEqualTo("EPOCH_MILLI_REPRESENTABLE_INSTANT_STRICTLY_BEFORE");
 
         Map<String, SemanticCase> semanticCases = Map.of(
                 "outcome-workflow-start-invalid-review-window.json",
@@ -252,7 +296,11 @@ class OutcomeWireContractTest {
                 "outcome-reviewer-decision-revision-gap.json",
                 new SemanticCase(
                         "outcome-reviewer-decision-receipt.schema.json",
-                        "causal-revision-adjacency.v1"));
+                        "causal-revision-adjacency.v1"),
+                "outcome-process-projection-closed-success-count-mismatch.json",
+                new SemanticCase(
+                        "outcome-process-projection.schema.json",
+                        "terminal-success-count-equality.v1"));
         JsonSchemaFactory rawFactory =
                 JsonSchemaFactory.getInstance(SpecVersion.VersionFlag.V202012);
 
@@ -300,12 +348,14 @@ class OutcomeWireContractTest {
                 "outcome-attempt-reconciliation-receipt.schema.json",
                 "outcome-compensation-receipt.schema.json",
                 "outcome-closure-receipt.schema.json",
-                "outcome-evaluation-receipt.schema.json");
+                "outcome-evaluation-receipt.schema.json",
+                "outcome-process-projection.schema.json");
         assertThat(conformance.ruleIds("outcome-workflow-start.schema.json"))
                 .containsExactly("review-window-order.v1");
         assertThat(conformance.ruleIds("outcome-operation-receipt.schema.json"))
                 .containsExactly("causal-revision-adjacency.v1");
-        assertThat(conformance.ruleIds("outcome-process-projection.schema.json")).isEmpty();
+        assertThat(conformance.ruleIds("outcome-process-projection.schema.json"))
+                .containsExactly("terminal-success-count-equality.v1");
     }
 
     @Test
@@ -323,6 +373,28 @@ class OutcomeWireContractTest {
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining(OutcomeSemanticConformance.MANIFEST_FILE)
                 .hasMessageContaining("protocol_version");
+    }
+
+    @Test
+    void terminalProjectionConditionDriftFailsClosedAtCodecStartup(@TempDir Path tempDir)
+            throws IOException {
+        Path copy = tempDir.resolve("outcome-v1");
+        copyContractRoot(copy);
+        Path manifestPath = copy.resolve(OutcomeSemanticConformance.MANIFEST_FILE);
+        ObjectNode manifest = (ObjectNode) MAPPER.readTree(manifestPath.toFile());
+        for (JsonNode rule : manifest.required("rules")) {
+            if (rule.required("rule_id").asText().equals("terminal-success-count-equality.v1")) {
+                ((com.fasterxml.jackson.databind.node.ArrayNode) rule.required("condition")
+                                .required("values"))
+                        .remove(1);
+            }
+        }
+        MAPPER.writeValue(manifestPath.toFile(), manifest);
+
+        assertThatThrownBy(() -> new OutcomeContractCodec(copy))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("terminal-success-count-equality.v1")
+                .hasMessageContaining("frozen v1 rule shape");
     }
 
     @Test

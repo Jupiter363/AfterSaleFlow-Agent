@@ -552,6 +552,8 @@ wire_protocol:
     causal_revision: REVISION_EQUALS_SOURCE_REVISION_PLUS_ONE
     committed_event_sequence: POSITIVE
     operation_sequence: BOUNDED_1_TO_64
+    workflow_start_required_operation_count: BOUNDED_0_TO_64
+    terminal_success_count: EQUALS_REQUIRED_OPERATION_COUNT_WHEN_CLOSED_OR_EVALUATED
     authoritative_operation_terminal_statuses: [SUCCEEDED, FAILED]
     ambiguous_attempt_fact: EXECUTION_ATTEMPT_OBSERVATION
     ambiguous_is_terminal: false

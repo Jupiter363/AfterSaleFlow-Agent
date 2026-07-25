@@ -49,7 +49,7 @@ public record OutcomeWorkflowStart(
         sha256(actionSnapshotHash, "actionSnapshotHash");
         opaqueRef(requiredOperationSetRef, "requiredOperationSetRef");
         sha256(requiredOperationSetHash, "requiredOperationSetHash");
-        count(requiredOperationCount, "requiredOperationCount");
+        OutcomeWireTypes.requiredOperationCount(requiredOperationCount);
         coordinates(epoch, revision, fence);
         reviewWindow(reviewOpenedAt, reviewDeadlineAt);
         required(runtimeMode, "runtimeMode");

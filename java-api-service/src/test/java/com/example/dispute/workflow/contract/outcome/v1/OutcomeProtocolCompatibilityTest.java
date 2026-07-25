@@ -86,6 +86,11 @@ class OutcomeProtocolCompatibilityTest {
                 "causal_revision", "REVISION_EQUALS_SOURCE_REVISION_PLUS_ONE");
         assertThat(invariants).containsEntry("committed_event_sequence", "POSITIVE");
         assertThat(invariants).containsEntry("operation_sequence", "BOUNDED_1_TO_64");
+        assertThat(invariants).containsEntry(
+                "workflow_start_required_operation_count", "BOUNDED_0_TO_64");
+        assertThat(invariants).containsEntry(
+                "terminal_success_count",
+                "EQUALS_REQUIRED_OPERATION_COUNT_WHEN_CLOSED_OR_EVALUATED");
         assertThat(semantic).containsEntry(
                 "protocol_version", OutcomeSemanticConformance.PROTOCOL_VERSION);
         assertThat(semantic).containsEntry(

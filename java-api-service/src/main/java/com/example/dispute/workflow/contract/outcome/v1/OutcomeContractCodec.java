@@ -109,21 +109,6 @@ public final class OutcomeContractCodec {
             throw new IllegalArgumentException(schemaFile + " is invalid: " + detail);
         }
         semanticConformance.validate(schemaFile, instance);
-        if ("outcome-process-projection.schema.json".equals(schemaFile)) {
-            validateProjectionSemantics(instance);
-        }
-    }
-
-    private static void validateProjectionSemantics(JsonNode instance) {
-        String phase = instance.path("phase").asText();
-        boolean terminal = "CLOSED".equals(phase) || "EVALUATED".equals(phase);
-        if (terminal
-                && instance.required("terminal_success_receipt_count").longValue()
-                        != instance.required("required_operation_count").longValue()) {
-            throw new IllegalArgumentException(
-                    "outcome-process-projection.schema.json is invalid: "
-                            + "terminal_success_receipt_count must equal required_operation_count");
-        }
     }
 
     private static Class<?> registeredType(String schemaFile) {

@@ -1,0 +1,9 @@
+{
+  "schema_version": "outcome-workflow-start.v1", "workflow_id": "outcome:CASE_001:1", "case_id": "CASE_001", "review_task_id": "REVIEW_001",
+  "frozen_review_packet_ref": "urn:review-packet:001", "frozen_review_packet_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+  "adjudication_draft_ref": "urn:draft:001", "adjudication_draft_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+  "action_snapshot_ref": "urn:action-snapshot:001", "action_snapshot_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+  "required_operation_set_ref": "urn:operation-set:001", "required_operation_set_hash": "4444444444444444444444444444444444444444444444444444444444444444", "required_operation_count": 65,
+  "epoch": 1, "revision": 10, "fence": 3, "review_opened_at": "2026-07-24T08:00:00Z", "review_deadline_at": "2026-07-25T08:00:00Z", "runtime_mode": "JAVA_SIGNED_SYNTHETIC_NOOP_SHADOW",
+  "workflow_build": "outcome-workflow.v1", "policy_version": "outcome-policy.v1", "graph_version": "outcome.review.v1", "prompt_version": "outcome-review.v1", "model_profile": "review-balanced.v1", "synthetic_only": true
+}

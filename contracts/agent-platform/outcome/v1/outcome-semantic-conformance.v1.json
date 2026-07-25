@@ -8,7 +8,7 @@
   "rules": [
     {
       "rule_id": "review-window-order.v1",
-      "operator": "INSTANT_STRICTLY_BEFORE",
+      "operator": "EPOCH_MILLI_REPRESENTABLE_INSTANT_STRICTLY_BEFORE",
       "left_field": "review_opened_at",
       "right_field": "review_deadline_at",
       "schema_files": ["outcome-workflow-start.schema.json"],
@@ -39,6 +39,24 @@
         {
           "schema_file": "outcome-reviewer-decision-receipt.schema.json",
           "fixture": "fixtures/invalid/outcome-reviewer-decision-revision-gap.json"
+        }
+      ]
+    },
+    {
+      "rule_id": "terminal-success-count-equality.v1",
+      "operator": "SAFE_INTEGER_EQUALS",
+      "left_field": "terminal_success_receipt_count",
+      "right_field": "required_operation_count",
+      "condition": {
+        "field": "phase",
+        "operator": "IN",
+        "values": ["CLOSED", "EVALUATED"]
+      },
+      "schema_files": ["outcome-process-projection.schema.json"],
+      "negative_fixtures": [
+        {
+          "schema_file": "outcome-process-projection.schema.json",
+          "fixture": "fixtures/invalid/outcome-process-projection-closed-success-count-mismatch.json"
         }
       ]
     }
