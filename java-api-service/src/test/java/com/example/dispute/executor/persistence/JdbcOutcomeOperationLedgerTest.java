@@ -220,6 +220,11 @@ class JdbcOutcomeOperationLedgerTest {
         OutcomeOperation forged = operationWithAuthority(
                 projection, OperationKind.OPERATION, 1, "ACTION_FORGED", "refund-adapter", true);
         when(jdbc.queryForObject(
+                        contains("outcome_lock_action_record"),
+                        anyMap(),
+                        any(Class.class)))
+                .thenReturn(true);
+        when(jdbc.queryForObject(
                         contains("outcome_required_action_record_is_authorized"),
                         anyMap(),
                         any(Class.class)))
@@ -239,6 +244,11 @@ class JdbcOutcomeOperationLedgerTest {
                 projection, OperationKind.OPERATION, 1, "ACTION_1", "refund-adapter", true);
         stubNewReservation(projection);
         when(jdbc.queryForObject(
+                        contains("outcome_lock_action_record"),
+                        anyMap(),
+                        any(Class.class)))
+                .thenReturn(true);
+        when(jdbc.queryForObject(
                         contains("outcome_required_action_record_is_authorized"),
                         anyMap(),
                         any(Class.class)))
@@ -249,6 +259,21 @@ class JdbcOutcomeOperationLedgerTest {
                 .thenReturn(1);
 
         assertThat(ledger.reserve(operation, null)).isEqualTo(operation);
+
+        InOrder order = inOrder(jdbc);
+        order.verify(jdbc).query(
+                contains("from outcome_process_projection where projection_id"),
+                any(MapSqlParameterSource.class),
+                any(RowMapper.class));
+        order.verify(jdbc).queryForObject(
+                contains("outcome_lock_action_record"), anyMap(), any(Class.class));
+        order.verify(jdbc).queryForObject(
+                contains("outcome_required_action_record_is_authorized"),
+                anyMap(),
+                any(Class.class));
+        order.verify(jdbc).update(
+                contains("insert into outcome_operation ("),
+                any(MapSqlParameterSource.class));
     }
 
     @Test
@@ -296,6 +321,12 @@ class JdbcOutcomeOperationLedgerTest {
                     .extracting(failure -> ((OutcomeLedgerRejectedException) failure).code())
                     .isEqualTo("OUTCOME_SYNTHETIC_ACTION_AUTHORITY_INVALID");
         }
+        verify(jdbc, never()).queryForObject(
+                contains("outcome_lock_action_record"), anyMap(), any(Class.class));
+        verify(jdbc, never()).queryForObject(
+                contains("outcome_required_action_record_is_authorized"),
+                anyMap(),
+                any(Class.class));
     }
 
     @Test
@@ -325,6 +356,11 @@ class JdbcOutcomeOperationLedgerTest {
                         any(MapSqlParameterSource.class),
                         any(RowMapper.class)))
                 .thenReturn(List.of(projection(NOW)));
+        when(jdbc.queryForObject(
+                        contains("outcome_lock_required_action_records"),
+                        anyMap(),
+                        any(Class.class)))
+                .thenReturn(true);
         when(jdbc.queryForObject(
                         contains("outcome_required_action_set_is_exact"),
                         anyMap(),
@@ -473,6 +509,11 @@ class JdbcOutcomeOperationLedgerTest {
                 .thenReturn(List.of(new OutcomeClosureReadiness(
                         "PROJECTION_1", "TENANT_1", "CASE_1", 1, 7,
                         1, 1, 0, 0, 0, 0, true)));
+        when(jdbc.queryForObject(
+                        contains("outcome_lock_required_action_records"),
+                        anyMap(),
+                        any(Class.class)))
+                .thenReturn(true);
 
         assertThat(ledger.closureReadiness(expectation).closureReady()).isTrue();
 
@@ -483,6 +524,10 @@ class JdbcOutcomeOperationLedgerTest {
                 contains("from outcome_process_projection where projection_id"),
                 any(MapSqlParameterSource.class),
                 any(RowMapper.class));
+        order.verify(jdbc).queryForObject(
+                contains("outcome_lock_required_action_records"),
+                anyMap(),
+                any(Class.class));
         order.verify(jdbc).query(
                 contains("from outcome_closure_readiness"),
                 any(MapSqlParameterSource.class),

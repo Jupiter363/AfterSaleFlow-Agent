@@ -446,7 +446,8 @@ public final class JdbcOutcomeOperationLedger implements OutcomeOperationLedger 
         Objects.requireNonNull(expectation, "expectation");
         OutcomeClosureReadiness readiness = transactions.execute(ignored -> {
             lockSemantic(compensationOrderKey(expectation));
-            lockProjection(expectation);
+            OutcomeProcessProjection projection = lockProjection(expectation);
+            lockRequiredActionRecords(projection);
             return readClosureReadiness(expectation);
         });
         return Objects.requireNonNull(readiness, "closure read transaction returned no result");
@@ -783,6 +784,15 @@ public final class JdbcOutcomeOperationLedger implements OutcomeOperationLedger 
                     "OUTCOME_REQUIRED_ACTION_AUTHORITY_INVALID",
                     "Outcome required operation has no exact approved ActionRecord authority");
         }
+        Boolean locked = jdbc.queryForObject(
+                "select outcome_lock_action_record(:actionRecordId)",
+                Map.of("actionRecordId", operation.actionRecordId()),
+                Boolean.class);
+        if (!Boolean.TRUE.equals(locked)) {
+            throw rejected(
+                    "OUTCOME_REQUIRED_ACTION_AUTHORITY_INVALID",
+                    "Outcome required operation has no exact approved ActionRecord authority");
+        }
         Boolean authorized = jdbc.queryForObject(
                 "select outcome_required_action_record_is_authorized(:projectionId, :actionRecordId)",
                 Map.of(
@@ -797,6 +807,7 @@ public final class JdbcOutcomeOperationLedger implements OutcomeOperationLedger 
     }
 
     private void requireRequiredActionClosureAuthority(OutcomeProcessProjection projection) {
+        lockRequiredActionRecords(projection);
         Boolean exactSet = jdbc.queryForObject(
                 "select outcome_required_action_set_is_exact(:projectionId)",
                 Map.of("projectionId", projection.projectionId()),
@@ -814,6 +825,22 @@ public final class JdbcOutcomeOperationLedger implements OutcomeOperationLedger 
             throw rejected(
                     "OUTCOME_REQUIRED_ACTION_NOT_SUCCEEDED",
                     "Outcome closure requires every formal required ActionRecord to be SUCCEEDED");
+        }
+    }
+
+    private void lockRequiredActionRecords(OutcomeProcessProjection projection) {
+        if (projection.runtimeMode()
+                == OutcomeProcessProjection.RuntimeMode.JAVA_SIGNED_SYNTHETIC_NOOP_SHADOW) {
+            return;
+        }
+        Boolean locked = jdbc.queryForObject(
+                "select outcome_lock_required_action_records(:projectionId)",
+                Map.of("projectionId", projection.projectionId()),
+                Boolean.class);
+        if (!Boolean.TRUE.equals(locked)) {
+            throw rejected(
+                    "OUTCOME_REQUIRED_ACTION_SET_INVALID",
+                    "Outcome required ActionRecord authority could not be locked");
         }
     }
 

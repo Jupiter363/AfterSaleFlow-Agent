@@ -368,6 +368,232 @@ class OutcomeOperationLedgerIntegrationTest {
     }
 
     @Test
+    void closureAndSucceededToFailedUpdateCannotBothCommit() throws Exception {
+        Fixture fixture = terminalReadyFixture("ACTION_STATUS_RACE");
+        JdbcOutcomeOperationLedger closureConnection = ledger(dataSource);
+        JdbcTemplate actionConnection = new JdbcTemplate(dataSource);
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<Throwable> closureResult = executor.submit(() -> raceCall(
+                    ready,
+                    start,
+                    () -> closureConnection.advanceProjection(
+                            expectation(fixture),
+                            ProcessState.READY_TO_CLOSE,
+                            NOW.plusSeconds(30))));
+            Future<Throwable> updateResult = executor.submit(() -> raceCall(
+                    ready,
+                    start,
+                    () -> actionConnection.update(
+                            "update action_record set execution_status = 'FAILED' where id = ?",
+                            actionRecordId(fixture.suffix(), 1))));
+            assertThat(ready.await(5, TimeUnit.SECONDS)).isTrue();
+            start.countDown();
+
+            Throwable closureFailure = closureResult.get(10, TimeUnit.SECONDS);
+            Throwable updateFailure = updateResult.get(10, TimeUnit.SECONDS);
+            assertThat((closureFailure == null ? 0 : 1) + (updateFailure == null ? 0 : 1))
+                    .isEqualTo(1);
+            if (closureFailure == null) {
+                assertActionRecordUpdateRejected(updateFailure);
+            } else {
+                assertThat(closureFailure)
+                        .isInstanceOf(OutcomeLedgerRejectedException.class)
+                        .extracting(failure -> ((OutcomeLedgerRejectedException) failure).code())
+                        .isEqualTo("OUTCOME_REQUIRED_ACTION_NOT_SUCCEEDED");
+                assertThat(updateFailure).isNull();
+            }
+            String projectionState = jdbc.queryForObject(
+                    "select process_state from outcome_process_projection where projection_id = ?",
+                    String.class,
+                    fixture.projectionId());
+            String actionStatus = jdbc.queryForObject(
+                    "select execution_status from action_record where id = ?",
+                    String.class,
+                    actionRecordId(fixture.suffix(), 1));
+            assertThat(projectionState.equals("READY_TO_CLOSE") && actionStatus.equals("FAILED"))
+                    .isFalse();
+        } finally {
+            start.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void scopeFirstClosureMakesInverseActionRecordUpdateRetryable() throws Exception {
+        Fixture fixture = terminalReadyFixture("ACTION_STATUS_SCOPE_FIRST");
+        CountDownLatch scopeHeld = new CountDownLatch(1);
+        CountDownLatch updateFinished = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<Throwable> closureResult = executor.submit(() -> {
+                try {
+                    TransactionTemplate outer = new TransactionTemplate(
+                            new DataSourceTransactionManager(dataSource));
+                    outer.executeWithoutResult(ignored -> {
+                        new JdbcTemplate(dataSource).queryForObject(
+                                "select pg_advisory_xact_lock(hashtextextended(?, 0))",
+                                Object.class,
+                                compensationScopeKey(fixture));
+                        scopeHeld.countDown();
+                        try {
+                            if (!updateFinished.await(5, TimeUnit.SECONDS)) {
+                                throw new AssertionError("ActionRecord update did not reach the scope guard");
+                            }
+                        } catch (InterruptedException interrupted) {
+                            Thread.currentThread().interrupt();
+                            throw new AssertionError("scope-first race was interrupted", interrupted);
+                        }
+                        ledger(dataSource).advanceProjection(
+                                expectation(fixture),
+                                ProcessState.READY_TO_CLOSE,
+                                NOW.plusSeconds(30));
+                    });
+                    return null;
+                } catch (Throwable failure) {
+                    return failure;
+                }
+            });
+            assertThat(scopeHeld.await(5, TimeUnit.SECONDS)).isTrue();
+            Future<Throwable> updateResult = executor.submit(() -> {
+                try {
+                    new JdbcTemplate(dataSource).update(
+                            "update action_record set execution_status = 'FAILED' where id = ?",
+                            actionRecordId(fixture.suffix(), 1));
+                    return null;
+                } catch (Throwable failure) {
+                    return failure;
+                } finally {
+                    updateFinished.countDown();
+                }
+            });
+
+            Throwable updateFailure = updateResult.get(10, TimeUnit.SECONDS);
+            assertSqlFailure(
+                    updateFailure,
+                    "40001",
+                    "Outcome ActionRecord scope lock is busy; retry the whole update");
+            assertThat(closureResult.get(10, TimeUnit.SECONDS)).isNull();
+        } finally {
+            updateFinished.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void updateFirstCommitMakesClosureFailClosed() throws Exception {
+        Fixture fixture = terminalReadyFixture("ACTION_STATUS_UPDATE_FIRST");
+        CountDownLatch updated = new CountDownLatch(1);
+        CountDownLatch commitUpdate = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<Throwable> updateResult = executor.submit(() -> {
+                try {
+                    TransactionTemplate update = new TransactionTemplate(
+                            new DataSourceTransactionManager(dataSource));
+                    update.executeWithoutResult(ignored -> {
+                        new JdbcTemplate(dataSource).update(
+                                "update action_record set execution_status = 'FAILED' where id = ?",
+                                actionRecordId(fixture.suffix(), 1));
+                        updated.countDown();
+                        try {
+                            if (!commitUpdate.await(5, TimeUnit.SECONDS)) {
+                                throw new AssertionError("ActionRecord update commit was not released");
+                            }
+                        } catch (InterruptedException interrupted) {
+                            Thread.currentThread().interrupt();
+                            throw new AssertionError("update-first race was interrupted", interrupted);
+                        }
+                    });
+                    return null;
+                } catch (Throwable failure) {
+                    return failure;
+                }
+            });
+            assertThat(updated.await(5, TimeUnit.SECONDS)).isTrue();
+            Future<Throwable> closureResult = executor.submit(() -> {
+                try {
+                    ledger(dataSource).advanceProjection(
+                            expectation(fixture),
+                            ProcessState.READY_TO_CLOSE,
+                            NOW.plusSeconds(30));
+                    return null;
+                } catch (Throwable failure) {
+                    return failure;
+                }
+            });
+            commitUpdate.countDown();
+
+            assertThat(updateResult.get(10, TimeUnit.SECONDS)).isNull();
+            assertThat(closureResult.get(10, TimeUnit.SECONDS))
+                    .isInstanceOf(OutcomeLedgerRejectedException.class)
+                    .extracting(failure -> ((OutcomeLedgerRejectedException) failure).code())
+                    .isEqualTo("OUTCOME_REQUIRED_ACTION_NOT_SUCCEEDED");
+        } finally {
+            commitUpdate.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void boundActionIdentityIsImmutableButPreterminalSuccessTransitionRemainsLegal() {
+        Fixture immutable = insertFixture("ACTION_IDENTITY_FROZEN");
+        OutcomeOperation bound = operation(
+                immutable,
+                "identity",
+                REQUEST_HASH,
+                1,
+                OperationKind.OPERATION,
+                false);
+        ledger.reserve(bound, null);
+        assertSqlFailure(
+                catchFailure(() -> jdbc.update(
+                        "update action_record set action_type = 'UNAPPROVED' where id = ?",
+                        bound.actionRecordId())),
+                "23514",
+                "Bound Outcome ActionRecord authority identity is immutable");
+
+        Fixture progress = insertFixture("ACTION_STATUS_PROGRESS");
+        String actionId = actionRecordId(progress.suffix(), 1);
+        jdbc.update(
+                "update action_record set execution_status = 'RUNNING' where id = ?",
+                actionId);
+        OutcomeOperation operation = operation(
+                progress,
+                "progress",
+                "1".repeat(64),
+                1,
+                OperationKind.OPERATION,
+                false);
+        ledger.reserve(operation, null);
+        assertThat(jdbc.update(
+                        "update action_record set execution_status = 'SUCCEEDED' where id = ?",
+                        actionId))
+                .isEqualTo(1);
+        ledger.recordReceipt(receipt(
+                operation,
+                "RECEIPT_ACTION_STATUS_PROGRESS",
+                RECEIPT_HASH,
+                7,
+                ReceiptAuthority.DIRECT_RESPONSE));
+
+        assertThat(ledger.advanceProjection(
+                                expectation(progress),
+                                ProcessState.READY_TO_CLOSE,
+                                NOW.plusSeconds(30))
+                        .processState())
+                .isEqualTo(ProcessState.READY_TO_CLOSE);
+        assertSqlFailure(
+                catchFailure(() -> jdbc.update(
+                        "update action_record set execution_status = 'FAILED' where id = ?",
+                        actionId)),
+                "23514",
+                "Outcome terminal projection freezes the bound ActionRecord");
+    }
+
+    @Test
     void postgresTimestampPrecisionIsCanonicalAcrossPersistedExactReplays() {
         Fixture fixture = insertFixture("TIMESTAMP_REPLAY");
         Instant first = Instant.parse("2026-07-24T12:00:00.123456789Z");
@@ -1566,6 +1792,29 @@ class OutcomeOperationLedgerIntegrationTest {
                 operation.compensable(), operation.reservedAt());
     }
 
+    private static Fixture terminalReadyFixture(String suffix) {
+        Fixture fixture = insertFixture(suffix);
+        OutcomeOperation operation = operation(
+                fixture,
+                "terminal-ready",
+                REQUEST_HASH,
+                1,
+                OperationKind.OPERATION,
+                false);
+        ledger.reserve(operation, null);
+        ledger.recordReceipt(receipt(
+                operation,
+                "RECEIPT_" + suffix,
+                RECEIPT_HASH,
+                7,
+                ReceiptAuthority.DIRECT_RESPONSE));
+        return fixture;
+    }
+
+    private static String compensationScopeKey(Fixture fixture) {
+        return "outcome-compensation-order:" + TENANT + ':' + fixture.caseId() + ":1";
+    }
+
     private static void assertActionAuthorityRejected(OutcomeOperation operation) {
         assertThatThrownBy(() -> ledger.reserve(operation, null))
                 .isInstanceOf(OutcomeLedgerRejectedException.class)
@@ -1725,6 +1974,39 @@ class OutcomeOperationLedgerIntegrationTest {
                 .doesNotStartWith("08")
                 .isNotIn("40P01", "40001", "55P03")
                 .isEqualTo("23514");
+    }
+
+    private static void assertActionRecordUpdateRejected(Throwable failure) {
+        assertThat(failure).isInstanceOf(DataAccessException.class);
+        SQLException sqlFailure = findSqlFailure(failure);
+        if (sqlFailure == null) {
+            throw new AssertionError("ActionRecord race loser has no SQLState", failure);
+        }
+        assertThat(sqlFailure.getSQLState()).isIn("40001", "23514");
+        assertThat(failure.getMessage())
+                .containsAnyOf(
+                        "Outcome ActionRecord scope lock is busy; retry the whole update",
+                        "Outcome terminal projection freezes the bound ActionRecord");
+    }
+
+    private static void assertSqlFailure(
+            Throwable failure, String expectedSqlState, String expectedMessage) {
+        assertThat(failure).isInstanceOf(DataAccessException.class);
+        SQLException sqlFailure = findSqlFailure(failure);
+        if (sqlFailure == null) {
+            throw new AssertionError("database failure has no SQLState", failure);
+        }
+        assertThat(sqlFailure.getSQLState()).isEqualTo(expectedSqlState);
+        assertThat(failure.getMessage()).contains(expectedMessage);
+    }
+
+    private static Throwable catchFailure(RaceAction action) {
+        try {
+            action.run();
+            return null;
+        } catch (Throwable failure) {
+            return failure;
+        }
     }
 
     private static SQLException findSqlFailure(Throwable failure) {
