@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import copy
 import hashlib
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -116,6 +119,13 @@ class EvidenceValidationError(ValueError):
     """Raised when checkpoint evidence exceeds its authority or drifts."""
 
 
+ALLOWED_SIGNATURE_ALGORITHMS = (
+    "Ed25519",
+    "ECDSA_P256_SHA256",
+    "RSA_PSS_SHA256",
+)
+
+
 def canonical_json_bytes(value: Any) -> bytes:
     """Return the one canonical byte representation used by local integrity seals."""
 
@@ -137,6 +147,114 @@ def canonical_sha256(value: Any) -> str:
     return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
 
 
+def parse_rfc3339(value: Any, *, context: str) -> datetime:
+    if not isinstance(value, str) or not value or value.endswith("z"):
+        raise EvidenceValidationError(f"{context} must be an explicit RFC 3339 timestamp")
+    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError as exception:
+        raise EvidenceValidationError(f"{context} is not RFC 3339") from exception
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise EvidenceValidationError(f"{context} must include a timezone offset")
+    return parsed.astimezone(timezone.utc)
+
+
+def decode_signature(value: Any, *, context: str = "signature") -> bytes:
+    if not isinstance(value, str) or not value or len(value) > 16384:
+        raise EvidenceValidationError(f"{context} is not a bounded base64 signature")
+    try:
+        decoded = base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError) as exception:
+        raise EvidenceValidationError(f"{context} is not strict base64") from exception
+    if not decoded:
+        raise EvidenceValidationError(f"{context} decoded to an empty signature")
+    return decoded
+
+
+def public_key_fingerprint_sha256(public_key_pem: bytes) -> str:
+    if not isinstance(public_key_pem, bytes) or not public_key_pem:
+        raise EvidenceValidationError("public key must be non-empty PEM bytes")
+    try:
+        from cryptography.exceptions import UnsupportedAlgorithm
+        from cryptography.hazmat.primitives import serialization
+
+        public_key = serialization.load_pem_public_key(public_key_pem)
+        canonical_pem = public_key.public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        if public_key_pem != canonical_pem:
+            raise EvidenceValidationError("public key PEM is not one canonical block")
+        encoded = public_key.public_bytes(
+            encoding=serialization.Encoding.DER,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+    except EvidenceValidationError:
+        raise
+    except ImportError as exception:
+        raise EvidenceValidationError("cryptographic verifier is unavailable") from exception
+    except (TypeError, UnsupportedAlgorithm, ValueError) as exception:
+        raise EvidenceValidationError("public key is not valid PEM") from exception
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def verify_detached_signature(
+    *, algorithm: str, public_key_pem: bytes, payload: bytes, signature: bytes
+) -> None:
+    if algorithm not in ALLOWED_SIGNATURE_ALGORITHMS:
+        raise EvidenceValidationError(f"signature algorithm is not allowlisted: {algorithm!r}")
+    if not isinstance(payload, bytes) or not isinstance(signature, bytes):
+        raise EvidenceValidationError("signature payload and signature must be bytes")
+    try:
+        from cryptography.exceptions import InvalidSignature, UnsupportedAlgorithm
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import ec, ed25519, padding, rsa, utils
+
+        public_key = serialization.load_pem_public_key(public_key_pem)
+        if algorithm == "Ed25519":
+            if not isinstance(public_key, ed25519.Ed25519PublicKey):
+                raise EvidenceValidationError("Ed25519 key type does not match algorithm")
+            if len(signature) != 64:
+                raise EvidenceValidationError("Ed25519 signature must be exactly 64 bytes")
+            public_key.verify(signature, payload)
+        elif algorithm == "ECDSA_P256_SHA256":
+            if not isinstance(public_key, ec.EllipticCurvePublicKey) or not isinstance(
+                public_key.curve, ec.SECP256R1
+            ):
+                raise EvidenceValidationError("ECDSA key is not P-256")
+            if not 8 <= len(signature) <= 72:
+                raise EvidenceValidationError("P-256 ECDSA signature length is invalid")
+            if utils.encode_dss_signature(*utils.decode_dss_signature(signature)) != signature:
+                raise EvidenceValidationError("P-256 ECDSA signature is not canonical DER")
+            public_key.verify(signature, payload, ec.ECDSA(hashes.SHA256()))
+        else:
+            if (
+                not isinstance(public_key, rsa.RSAPublicKey)
+                or not 3072 <= public_key.key_size <= 8192
+            ):
+                raise EvidenceValidationError("RSA-PSS key must be between 3072 and 8192 bits")
+            if len(signature) != (public_key.key_size + 7) // 8:
+                raise EvidenceValidationError("RSA-PSS signature length does not match its key")
+            public_key.verify(
+                signature,
+                payload,
+                padding.PSS(
+                    mgf=padding.MGF1(hashes.SHA256()),
+                    salt_length=hashes.SHA256().digest_size,
+                ),
+                hashes.SHA256(),
+            )
+    except EvidenceValidationError:
+        raise
+    except ImportError as exception:
+        raise EvidenceValidationError("cryptographic verifier is unavailable") from exception
+    except InvalidSignature as exception:
+        raise EvidenceValidationError("detached signature verification failed") from exception
+    except (TypeError, UnsupportedAlgorithm, ValueError) as exception:
+        raise EvidenceValidationError("signature key or encoding is invalid") from exception
+
+
 def _reject_duplicate_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     value: dict[str, Any] = {}
     for key, item in pairs:
@@ -144,6 +262,70 @@ def _reject_duplicate_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
             raise EvidenceValidationError(f"duplicate JSON property rejected: {key}")
         value[key] = item
     return value
+
+
+def _assert_json_resource_bounds(
+    payload: bytes,
+    *,
+    context: str,
+    max_bytes: int,
+    max_depth: int,
+    max_tokens: int,
+    max_string_bytes: int,
+) -> None:
+    limits = (max_bytes, max_depth, max_tokens, max_string_bytes)
+    if any(not isinstance(limit, int) or isinstance(limit, bool) or limit < 1 for limit in limits):
+        raise EvidenceValidationError("JSON resource limits must be positive integers")
+    if type(payload) is not bytes or len(payload) > max_bytes:
+        raise EvidenceValidationError(f"{context} exceeds its immutable byte ceiling")
+
+    depth = 0
+    tokens = 0
+    string_bytes = 0
+    in_string = False
+    escaped = False
+    in_scalar = False
+    for byte in payload:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif byte == 0x5C:  # backslash
+                escaped = True
+            elif byte == 0x22:  # quote
+                in_string = False
+                string_bytes = 0
+                continue
+            string_bytes += 1
+            if string_bytes > max_string_bytes:
+                raise EvidenceValidationError(f"{context} contains an oversized JSON string")
+            continue
+
+        if byte == 0x22:
+            in_string = True
+            in_scalar = False
+            tokens += 1
+        elif byte in (0x7B, 0x5B):  # { [
+            depth += 1
+            in_scalar = False
+            tokens += 1
+            if depth > max_depth:
+                raise EvidenceValidationError(f"{context} exceeds its JSON nesting ceiling")
+        elif byte in (0x7D, 0x5D):  # } ]
+            depth -= 1
+            in_scalar = False
+            tokens += 1
+            if depth < 0:
+                raise EvidenceValidationError(f"{context} has invalid JSON nesting")
+        elif byte in (0x2C, 0x3A):  # , :
+            in_scalar = False
+            tokens += 1
+        elif byte in (0x20, 0x09, 0x0A, 0x0D):
+            in_scalar = False
+        elif not in_scalar:
+            in_scalar = True
+            tokens += 1
+        if tokens > max_tokens:
+            raise EvidenceValidationError(f"{context} exceeds its JSON token ceiling")
 
 
 def parse_json_bytes(payload: bytes, *, context: str = "evidence") -> dict[str, Any]:
@@ -155,11 +337,33 @@ def parse_json_bytes(payload: bytes, *, context: str = "evidence") -> dict[str, 
                 EvidenceValidationError(f"non-finite JSON number rejected: {item}")
             ),
         )
-    except (UnicodeDecodeError, json.JSONDecodeError) as exception:
+    except EvidenceValidationError:
+        raise
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError) as exception:
         raise EvidenceValidationError(f"{context} is not strict UTF-8 JSON") from exception
     if not isinstance(value, dict):
         raise EvidenceValidationError(f"{context} must be a JSON object")
     return value
+
+
+def parse_bounded_json_bytes(
+    payload: bytes,
+    *,
+    context: str = "evidence",
+    max_bytes: int,
+    max_depth: int,
+    max_tokens: int,
+    max_string_bytes: int,
+) -> dict[str, Any]:
+    _assert_json_resource_bounds(
+        payload,
+        context=context,
+        max_bytes=max_bytes,
+        max_depth=max_depth,
+        max_tokens=max_tokens,
+        max_string_bytes=max_string_bytes,
+    )
+    return parse_json_bytes(payload, context=context)
 
 
 def load_schema(path: Path = SCHEMA_PATH) -> dict[str, Any]:
@@ -457,6 +661,7 @@ def validate_evidence(document: Mapping[str, Any]) -> dict[str, Any]:
 
 
 __all__ = [
+    "ALLOWED_SIGNATURE_ALGORITHMS",
     "ENGINEERING_AUTHORITY_CEILING",
     "ENGINEERING_LOCAL",
     "EXTERNAL_SHAPE_AUTHORITY_CEILING",
@@ -474,9 +679,14 @@ __all__ = [
     "assert_self_seal",
     "canonical_json_bytes",
     "canonical_sha256",
+    "decode_signature",
     "load_schema",
+    "parse_bounded_json_bytes",
     "parse_json_bytes",
+    "parse_rfc3339",
+    "public_key_fingerprint_sha256",
     "seal_evidence",
     "self_seal_for",
     "validate_evidence",
+    "verify_detached_signature",
 ]
