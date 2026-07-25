@@ -1,0 +1,561 @@
+17:17:18.324 [main] INFO org.testcontainers.images.PullPolicy -- Image pull policy will be performed by: DefaultPullPolicy()
+17:17:18.354 [main] INFO org.testcontainers.utility.ImageNameSubstitutor -- Image name substitution will be performed by: DefaultImageNameSubstitutor (composite of 'ConfigurationFileImageNameSubstitutor' and 'PrefixingImageNameSubstitutor')
+17:17:18.421 [main] INFO org.testcontainers.DockerClientFactory -- Testcontainers version: 2.0.5
+17:17:18.929 [main] INFO org.testcontainers.dockerclient.DockerClientProviderStrategy -- Loaded org.testcontainers.dockerclient.NpipeSocketClientProviderStrategy from ~/.testcontainers.properties, will try it first
+17:17:19.615 [main] INFO org.testcontainers.dockerclient.DockerClientProviderStrategy -- Found Docker environment with local Npipe socket (npipe:////./pipe/docker_engine)
+17:17:19.616 [main] INFO org.testcontainers.DockerClientFactory -- Docker host IP address is localhost
+17:17:19.641 [main] INFO org.testcontainers.DockerClientFactory -- Connected to docker: 
+  Server Version: 29.2.1
+  API Version: 1.53
+  Operating System: Docker Desktop
+  Total Memory: 15926 MB
+  Labels: 
+    com.docker.desktop.address=npipe://\\.\pipe\docker_cli
+17:17:19.652 [main] WARN org.testcontainers.utility.ConfigurationFileImageNameSubstitutor -- Image name testcontainers/ryuk:0.14.0 was substituted by configuration to ghcr.io/testcontainers/ryuk:0.12.0. This approach is deprecated and will be removed in the future
+17:17:19.653 [main] INFO org.testcontainers.utility.ImageNameSubstitutor -- Using ghcr.io/testcontainers/ryuk:0.12.0 as a substitute image for testcontainers/ryuk:0.14.0 (using image substitutor: DefaultImageNameSubstitutor (composite of 'ConfigurationFileImageNameSubstitutor' and 'PrefixingImageNameSubstitutor'))
+17:17:19.898 [main] INFO tc.ghcr.io/testcontainers/ryuk:0.12.0 -- Creating container for image: ghcr.io/testcontainers/ryuk:0.12.0
+17:17:20.270 [main] INFO org.testcontainers.utility.RegistryAuthLocator -- Credential helper/store (docker-credential-desktop) does not have credentials for ghcr.io
+17:17:20.475 [main] INFO tc.ghcr.io/testcontainers/ryuk:0.12.0 -- Container ghcr.io/testcontainers/ryuk:0.12.0 is starting: cb9ae44db23c74e828a2df2465e5cef940c30358bd72ccd17c65e74739d5218a
+17:17:21.173 [main] INFO tc.ghcr.io/testcontainers/ryuk:0.12.0 -- Container ghcr.io/testcontainers/ryuk:0.12.0 started in PT1.2751116S
+17:17:21.184 [main] INFO org.testcontainers.utility.RyukResourceReaper -- Ryuk started - will monitor and terminate Testcontainers containers on JVM exit
+17:17:21.184 [main] INFO org.testcontainers.DockerClientFactory -- Checking the system...
+17:17:21.184 [main] INFO org.testcontainers.DockerClientFactory -- ?? Docker server version should be at least 1.6.0
+17:17:21.184 [main] INFO tc.public.ecr.aws/docker/library/postgres:16-alpine -- Creating container for image: public.ecr.aws/docker/library/postgres:16-alpine
+17:17:21.541 [main] INFO org.testcontainers.utility.RegistryAuthLocator -- Credential helper/store (docker-credential-desktop) does not have credentials for public.ecr.aws
+17:17:21.643 [main] INFO tc.public.ecr.aws/docker/library/postgres:16-alpine -- Container public.ecr.aws/docker/library/postgres:16-alpine is starting: 4471b8069984e3804d1e79612703fe695249efd1da48217e4494550997bfd40a
+17:17:24.462 [main] INFO tc.public.ecr.aws/docker/library/postgres:16-alpine -- Container public.ecr.aws/docker/library/postgres:16-alpine started in PT3.2778555S
+17:17:24.942 [main] INFO org.flywaydb.core.FlywayExecutor -- Database: jdbc:postgresql://localhost:65206/outcome_operation_ledger (PostgreSQL 16.14)
+17:17:25.177 [main] INFO org.flywaydb.core.internal.schemahistory.JdbcTableSchemaHistory -- Schema history table "public"."flyway_schema_history" does not exist yet
+17:17:25.188 [main] INFO org.flywaydb.core.internal.command.DbValidate -- Successfully validated 54 migrations (execution time 00:00.186s)
+17:17:25.221 [main] INFO org.flywaydb.core.internal.schemahistory.JdbcTableSchemaHistory -- Creating Schema History table "public"."flyway_schema_history" ...
+17:17:25.337 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Current version of schema "public": << Empty Schema >>
+17:17:25.368 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "001 - init case tables"
+17:17:25.525 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "002 - init evidence tables"
+17:17:25.677 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "003 - init hearing tables"
+17:17:25.783 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "004 - init review executor tables"
+17:17:25.928 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "005 - init policy audit tables"
+17:17:26.020 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "006 - init router flow tables"
+17:17:26.093 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "007 - final dispute core"
+17:17:26.166 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "008 - final agent hearing governance"
+17:17:26.392 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "009 - freeze review and execution chain"
+17:17:26.445 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "010 - case rooms and participants"
+17:17:26.572 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "011 - evidence verification and hearing settlement"
+17:17:26.692 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "012 - case events and notification outbox"
+17:17:26.780 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "013 - append only room stream"
+17:17:26.806 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "014 - hearing round party submission"
+17:17:26.854 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "015 - full hearing route and round limits"
+17:17:26.891 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "016 - room turn memory"
+17:17:26.945 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "017 - case intake dossier"
+17:17:26.989 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "018 - case initiator role"
+17:17:26.995 [main] WARN org.flywaydb.core.internal.sqlscript.DefaultSqlScriptExecutor -- DB: column "initiator_role" of relation "fulfillment_dispute_case" already exists, skipping (SQL State: 42701 - Error Code: 0)
+17:17:27.019 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "019 - access and agent sessions"
+17:17:27.142 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "020 - actor audience filters"
+17:17:27.173 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "021 - session scoped room turn memory uniqueness"
+17:17:27.207 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "022 - evidence submission batches"
+17:17:27.248 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "023 - evidence active hash unique index"
+17:17:27.276 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "024 - agent a2a messages"
+17:17:27.314 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "025 - jury review report message type"
+17:17:27.337 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "026 - unique formal jury a2a report"
+17:17:27.364 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "027 - simulated import template cursor"
+17:17:27.397 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "028 - reviewer simulated case purge"
+17:17:27.471 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "029 - dismiss inbox notifications"
+17:17:27.505 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "030 - agent run streaming"
+17:17:27.568 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "031 - expand case navigation stages"
+17:17:27.595 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "032 - case intake party completion"
+17:17:27.634 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "033 - include intake completion in demo case purge"
+17:17:27.660 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "034 - allow reviewer purge of intake created cases"
+17:17:27.696 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "035 - hearing flow v2"
+17:17:27.901 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "036 - key evidence completion by participant id"
+17:17:27.927 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "037 - key hearing party actions by participant id"
+17:17:27.969 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "038 - explicit case party assignment"
+17:17:28.013 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "039 - temporal command control plane"
+17:17:28.221 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "040 - immutable snapshot and manifest"
+17:17:28.323 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "040.1 - shadow command terminal status"
+17:17:28.350 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "040.2 - room epoch scan claims"
+17:17:28.390 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "040.3 - room epoch allocator contract"
+17:17:28.453 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "040.4 - room epoch provisioning"
+17:17:28.558 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "041 - agent run logical attempt v2"
+17:17:28.681 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "042 - agent run attempt lineage"
+17:17:28.731 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "043 - intake graph bindings"
+17:17:28.858 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "043.1 - intake authority bindings"
+17:17:29.040 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "043.2 - intake shadow comparisons"
+17:17:29.112 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "043.3 - intake signed synthetic admission"
+17:17:29.198 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "043.4 - evidence graph bindings"
+17:17:29.303 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "043.5 - evidence finalization and operational recovery"
+17:17:29.466 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "044 - hearing temporal projection"
+17:17:29.628 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Migrating schema "public" to version "045 - outcome operation receipt compensation"
+17:17:29.843 [main] INFO org.flywaydb.core.internal.command.DbMigrate -- Successfully applied 54 migrations to schema "public", now at version v045 (execution time 00:03.428s)
+17:17:51.101 [main] INFO org.springframework.test.context.support.AnnotationConfigContextLoaderUtils -- Could not detect default configuration classes for test class [com.example.dispute.outcome.CaseOutcomeControllerTest]: CaseOutcomeControllerTest does not declare any static, non-private, non-final, nested classes annotated with @Configuration.
+17:17:52.260 [main] INFO org.springframework.boot.test.context.SpringBootTestContextBootstrapper -- Found @SpringBootConfiguration com.example.dispute.DisputeApplication for test class com.example.dispute.outcome.CaseOutcomeControllerTest
+
+  .   ____          _            __ _ _
+ /\\ / ___'_ __ _ _(_)_ __  __ _ \ \ \ \
+( ( )\___ | '_ | '_| | '_ \/ _` | \ \ \ \
+ \\/  ___)| |_)| | | | | || (_| |  ) ) ) )
+  '  |____| .__|_| |_|_| |_\__, | / / / /
+ =========|_|==============|___/=/_/_/_/
+
+ :: Spring Boot ::               (v3.5.15)
+
+2026-07-25T17:17:53.043+08:00  INFO 71064 --- [java-api-service] [           main] c.e.d.outcome.CaseOutcomeControllerTest  : Starting CaseOutcomeControllerTest using Java 21.0.8 with PID 71064 (started by Jupiter in D:\ѧϰ\Project\AfterSaleFlow-Agent\.codex-run\phase7-candidate-4ddeeabb\java-api-service)
+2026-07-25T17:17:53.044+08:00  INFO 71064 --- [java-api-service] [           main] c.e.d.outcome.CaseOutcomeControllerTest  : The following 1 profile is active: "local"
+2026-07-25T17:17:57.125+08:00  WARN 71064 --- [java-api-service] [           main] .s.s.UserDetailsServiceAutoConfiguration : 
+
+Using generated security password: 43524056-b85d-4e6d-832f-8f5ba29fee08
+
+This generated password is for development use only. Your security configuration must be updated before running your application in production.
+
+2026-07-25T17:17:57.139+08:00  INFO 71064 --- [java-api-service] [           main] r$InitializeUserDetailsManagerConfigurer : Global AuthenticationManager configured with UserDetailsService bean with name inMemoryUserDetailsManager
+2026-07-25T17:17:58.600+08:00  INFO 71064 --- [java-api-service] [           main] o.s.b.t.m.w.SpringBootMockServletContext : Initializing Spring TestDispatcherServlet ''
+2026-07-25T17:17:58.600+08:00  INFO 71064 --- [java-api-service] [           main] o.s.t.web.servlet.TestDispatcherServlet  : Initializing Servlet ''
+2026-07-25T17:17:58.600+08:00  INFO 71064 --- [java-api-service] [           main] o.s.t.web.servlet.TestDispatcherServlet  : Completed initialization in 0 ms
+2026-07-25T17:17:58.627+08:00  INFO 71064 --- [java-api-service] [           main] c.e.d.outcome.CaseOutcomeControllerTest  : Started CaseOutcomeControllerTest in 6.255 seconds (process running for 50.969)
+2026-07-25T17:18:00.397+08:00  INFO 71064 --- [java-api-service] [           main] t.c.s.AnnotationConfigContextLoaderUtils : Could not detect default configuration classes for test class [com.example.dispute.review.ReviewControllerTest]: ReviewControllerTest does not declare any static, non-private, non-final, nested classes annotated with @Configuration.
+2026-07-25T17:18:00.881+08:00  INFO 71064 --- [java-api-service] [           main] .b.t.c.SpringBootTestContextBootstrapper : Found @SpringBootConfiguration com.example.dispute.DisputeApplication for test class com.example.dispute.review.ReviewControllerTest
+
+  .   ____          _            __ _ _
+ /\\ / ___'_ __ _ _(_)_ __  __ _ \ \ \ \
+( ( )\___ | '_ | '_| | '_ \/ _` | \ \ \ \
+ \\/  ___)| |_)| | | | | || (_| |  ) ) ) )
+  '  |____| .__|_| |_|_| |_\__, | / / / /
+ =========|_|==============|___/=/_/_/_/
+
+ :: Spring Boot ::               (v3.5.15)
+
+2026-07-25T17:18:00.938+08:00  INFO 71064 --- [java-api-service] [           main] c.e.dispute.review.ReviewControllerTest  : Starting ReviewControllerTest using Java 21.0.8 with PID 71064 (started by Jupiter in D:\ѧϰ\Project\AfterSaleFlow-Agent\.codex-run\phase7-candidate-4ddeeabb\java-api-service)
+2026-07-25T17:18:00.938+08:00  INFO 71064 --- [java-api-service] [           main] c.e.dispute.review.ReviewControllerTest  : The following 1 profile is active: "local"
+2026-07-25T17:18:03.831+08:00  WARN 71064 --- [java-api-service] [           main] .s.s.UserDetailsServiceAutoConfiguration : 
+
+Using generated security password: 37b2c566-d8bc-463b-a8a8-7126af130aed
+
+This generated password is for development use only. Your security configuration must be updated before running your application in production.
+
+2026-07-25T17:18:03.832+08:00  INFO 71064 --- [java-api-service] [           main] r$InitializeUserDetailsManagerConfigurer : Global AuthenticationManager configured with UserDetailsService bean with name inMemoryUserDetailsManager
+2026-07-25T17:18:04.475+08:00  INFO 71064 --- [java-api-service] [           main] o.s.b.t.m.w.SpringBootMockServletContext : Initializing Spring TestDispatcherServlet ''
+2026-07-25T17:18:04.477+08:00  INFO 71064 --- [java-api-service] [           main] o.s.t.web.servlet.TestDispatcherServlet  : Initializing Servlet ''
+2026-07-25T17:18:04.477+08:00  INFO 71064 --- [java-api-service] [           main] o.s.t.web.servlet.TestDispatcherServlet  : Completed initialization in 0 ms
+2026-07-25T17:18:04.484+08:00  INFO 71064 --- [java-api-service] [           main] c.e.dispute.review.ReviewControllerTest  : Started ReviewControllerTest in 3.6 seconds (process running for 56.828)
+2026-07-25T17:18:05.718+08:00  WARN 71064 --- [java-api-service] [           main] c.n.schema.UnknownKeywordFactory         : Unknown keyword x-max-encoded-bytes - you should define your own Meta Schema. If the keyword is irrelevant for validation, just use a NonValidationKeyword or if it should generate annotations AnnotationKeyword
+2026-07-25T17:18:05.719+08:00  WARN 71064 --- [java-api-service] [           main] c.n.schema.UnknownKeywordFactory         : Unknown keyword x-semantic-conformance - you should define your own Meta Schema. If the keyword is irrelevant for validation, just use a NonValidationKeyword or if it should generate annotations AnnotationKeyword
+2026-07-25T17:18:05.738+08:00  WARN 71064 --- [java-api-service] [           main] c.n.schema.UnknownKeywordFactory         : Unknown keyword x-canonicalization - you should define your own Meta Schema. If the keyword is irrelevant for validation, just use a NonValidationKeyword or if it should generate annotations AnnotationKeyword
+2026-07-25T17:18:05.738+08:00  WARN 71064 --- [java-api-service] [           main] c.n.schema.UnknownKeywordFactory         : Unknown keyword x-self-hash - you should define your own Meta Schema. If the keyword is irrelevant for validation, just use a NonValidationKeyword or if it should generate annotations AnnotationKeyword
+2026-07-25T17:18:05.738+08:00  WARN 71064 --- [java-api-service] [           main] c.n.schema.UnknownKeywordFactory         : Unknown keyword x-signature - you should define your own Meta Schema. If the keyword is irrelevant for validation, just use a NonValidationKeyword or if it should generate annotations AnnotationKeyword
+2026-07-25T17:18:18.888+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : Created WorkflowServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=2, target=directaddress:///5ba56dfa-d1d0-412a-8180-c10e277c3fd9}}
+2026-07-25T17:18:18.895+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : Created TestServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=2, target=directaddress:///5ba56dfa-d1d0-412a-8180-c10e277c3fd9}}
+2026-07-25T17:18:18.901+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : Created OperatorServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=2, target=directaddress:///5ba56dfa-d1d0-412a-8180-c10e277c3fd9}}
+2026-07-25T17:18:19.141+08:00  INFO 71064 --- [java-api-service] [           main] i.t.internal.worker.MultiThreadedPoller  : start: MultiThreadedPoller{name=Workflow Poller taskQueue="phase7-outcome-replay-test", namespace="default", identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:19.683+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : Created WorkflowServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=7, target=directaddress:///31900727-2585-4a03-9f2c-2161e5e86d1b}}
+2026-07-25T17:18:19.683+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : Created TestServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=7, target=directaddress:///31900727-2585-4a03-9f2c-2161e5e86d1b}}
+2026-07-25T17:18:19.683+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : Created OperatorServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=7, target=directaddress:///31900727-2585-4a03-9f2c-2161e5e86d1b}}
+2026-07-25T17:18:19.690+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : shutdownNow
+2026-07-25T17:18:19.690+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:19.690+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : shutdownNow: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:19.701+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination begin: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:19.702+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination done: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:19.702+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:19.704+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down in-process gRPC server
+2026-07-25T17:18:19.708+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down gRPC Services
+2026-07-25T17:18:19.709+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : shutdownNow
+2026-07-25T17:18:19.709+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:19.709+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : shutdownNow: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:19.709+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.internal.worker.BasePoller   : shutdown: MultiThreadedPoller{name=Workflow Poller taskQueue="phase7-outcome-replay-test", namespace="default", identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:19.712+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination begin: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:19.715+08:00  INFO 71064 --- [java-api-service] [ce="default": 2] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:19.715+08:00  INFO 71064 --- [java-api-service] [ce="default": 5] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:19.715+08:00  INFO 71064 --- [java-api-service] [ce="default": 4] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:19.715+08:00  INFO 71064 --- [java-api-service] [ce="default": 3] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:19.715+08:00  INFO 71064 --- [java-api-service] [ce="default": 1] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:20.637+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination done: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:20.637+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:20.637+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down in-process gRPC server
+2026-07-25T17:18:20.638+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down gRPC Services
+2026-07-25T17:18:20.644+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : Created WorkflowServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=12, target=directaddress:///dc8cb2b8-17d9-4282-9f2f-af833764a3ad}}
+2026-07-25T17:18:20.644+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : Created TestServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=12, target=directaddress:///dc8cb2b8-17d9-4282-9f2f-af833764a3ad}}
+2026-07-25T17:18:20.645+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : Created OperatorServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=12, target=directaddress:///dc8cb2b8-17d9-4282-9f2f-af833764a3ad}}
+2026-07-25T17:18:20.640+08:00  WARN 71064 --- [java-api-service] [artbeat-default] i.t.internal.worker.HeartbeatManager     : Failed to send worker heartbeat for namespace default
+
+io.grpc.StatusRuntimeException: UNAVAILABLE: Channel shutdown invoked
+	at io.grpc.stub.ClientCalls.toStatusRuntimeException(ClientCalls.java:368) ~[grpc-stub-1.76.0.jar:1.76.0]
+	at io.grpc.stub.ClientCalls.getUnchecked(ClientCalls.java:349) ~[grpc-stub-1.76.0.jar:1.76.0]
+	at io.grpc.stub.ClientCalls.blockingUnaryCall(ClientCalls.java:174) ~[grpc-stub-1.76.0.jar:1.76.0]
+	at io.temporal.api.workflowservice.v1.WorkflowServiceGrpc$WorkflowServiceBlockingStub.recordWorkerHeartbeat(WorkflowServiceGrpc.java:8164) ~[temporal-serviceclient-1.35.0.jar:1.35.0]
+	at io.temporal.internal.worker.HeartbeatManager$SharedNamespaceWorker.heartbeatTick(HeartbeatManager.java:185) ~[temporal-sdk-1.35.0.jar:1.35.0]
+	at java.base/java.util.concurrent.Executors$RunnableAdapter.call(Executors.java:572) ~[na:na]
+	at java.base/java.util.concurrent.FutureTask.runAndReset(FutureTask.java:358) ~[na:na]
+	at java.base/java.util.concurrent.ScheduledThreadPoolExecutor$ScheduledFutureTask.run(ScheduledThreadPoolExecutor.java:305) ~[na:na]
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1144) ~[na:na]
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:642) ~[na:na]
+	at java.base/java.lang.Thread.run(Thread.java:1583) ~[na:na]
+
+2026-07-25T17:18:20.646+08:00  INFO 71064 --- [java-api-service] [           main] i.t.internal.worker.MultiThreadedPoller  : start: MultiThreadedPoller{name=Workflow Poller taskQueue="phase7-outcome-replay-test", namespace="default", identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:20.648+08:00  WARN 71064 --- [java-api-service] [artbeat-default] i.t.internal.worker.HeartbeatManager     : Server does not support worker heartbeats for namespace default, disabling
+2026-07-25T17:18:20.649+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.internal.worker.BasePoller   : Suspend Polling: MultiThreadedPoller{name=Workflow Poller taskQueue="phase7-outcome-replay-test", namespace="default", identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:21.062+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.internal.worker.BasePoller   : Resume Polling MultiThreadedPoller{name=Workflow Poller taskQueue="phase7-outcome-replay-test", namespace="default", identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:21.208+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : Created WorkflowServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=17, target=directaddress:///e6fc1cee-62bf-4c34-a25f-7adcca203ed6}}
+2026-07-25T17:18:21.208+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : Created TestServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=17, target=directaddress:///e6fc1cee-62bf-4c34-a25f-7adcca203ed6}}
+2026-07-25T17:18:21.208+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : Created OperatorServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=17, target=directaddress:///e6fc1cee-62bf-4c34-a25f-7adcca203ed6}}
+2026-07-25T17:18:21.288+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : shutdownNow
+2026-07-25T17:18:21.288+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:21.288+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : shutdownNow: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:21.289+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination begin: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:21.289+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination done: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:21.289+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:21.289+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down in-process gRPC server
+2026-07-25T17:18:21.290+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down gRPC Services
+2026-07-25T17:18:21.290+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : shutdownNow
+2026-07-25T17:18:21.290+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:21.290+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : shutdownNow: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:21.290+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.internal.worker.BasePoller   : shutdown: MultiThreadedPoller{name=Workflow Poller taskQueue="phase7-outcome-replay-test", namespace="default", identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:21.291+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination begin: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:21.291+08:00  INFO 71064 --- [java-api-service] [ce="default": 4] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:21.291+08:00  INFO 71064 --- [java-api-service] [ce="default": 5] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:21.291+08:00  INFO 71064 --- [java-api-service] [ce="default": 2] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:21.291+08:00  INFO 71064 --- [java-api-service] [ce="default": 3] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:21.291+08:00  INFO 71064 --- [java-api-service] [ce="default": 1] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:21.292+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination done: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:21.292+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:21.292+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down in-process gRPC server
+2026-07-25T17:18:21.292+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down gRPC Services
+2026-07-25T17:18:21.296+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : Created WorkflowServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=22, target=directaddress:///5e885cc3-7eeb-481e-b06f-ca45764965d7}}
+2026-07-25T17:18:21.296+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : Created TestServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=22, target=directaddress:///5e885cc3-7eeb-481e-b06f-ca45764965d7}}
+2026-07-25T17:18:21.296+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : Created OperatorServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=22, target=directaddress:///5e885cc3-7eeb-481e-b06f-ca45764965d7}}
+2026-07-25T17:18:21.297+08:00  INFO 71064 --- [java-api-service] [           main] i.t.internal.worker.MultiThreadedPoller  : start: MultiThreadedPoller{name=Workflow Poller taskQueue="phase7-outcome-replay-test", namespace="default", identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:21.298+08:00  WARN 71064 --- [java-api-service] [artbeat-default] i.t.internal.worker.HeartbeatManager     : Server does not support worker heartbeats for namespace default, disabling
+2026-07-25T17:18:21.298+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.internal.worker.BasePoller   : Suspend Polling: MultiThreadedPoller{name=Workflow Poller taskQueue="phase7-outcome-replay-test", namespace="default", identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:21.300+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.internal.worker.BasePoller   : Resume Polling MultiThreadedPoller{name=Workflow Poller taskQueue="phase7-outcome-replay-test", namespace="default", identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:21.313+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : Created WorkflowServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=27, target=directaddress:///ced70e74-cd61-47d7-9c7f-d8cf73d570a6}}
+2026-07-25T17:18:21.313+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : Created TestServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=27, target=directaddress:///ced70e74-cd61-47d7-9c7f-d8cf73d570a6}}
+2026-07-25T17:18:21.313+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : Created OperatorServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=27, target=directaddress:///ced70e74-cd61-47d7-9c7f-d8cf73d570a6}}
+2026-07-25T17:18:21.319+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : shutdownNow
+2026-07-25T17:18:21.319+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:21.319+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : shutdownNow: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:21.319+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination begin: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:21.319+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination done: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:21.319+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:21.320+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down in-process gRPC server
+2026-07-25T17:18:21.320+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down gRPC Services
+2026-07-25T17:18:21.320+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : shutdownNow
+2026-07-25T17:18:21.320+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:21.320+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : shutdownNow: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:21.320+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.internal.worker.BasePoller   : shutdown: MultiThreadedPoller{name=Workflow Poller taskQueue="phase7-outcome-replay-test", namespace="default", identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:21.320+08:00  INFO 71064 --- [java-api-service] [ce="default": 3] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:21.320+08:00  INFO 71064 --- [java-api-service] [ce="default": 5] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:21.320+08:00  INFO 71064 --- [java-api-service] [ce="default": 2] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:21.320+08:00  INFO 71064 --- [java-api-service] [ce="default": 4] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:21.320+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination begin: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:21.320+08:00  INFO 71064 --- [java-api-service] [ce="default": 1] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:21.584+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination done: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:21.585+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:21.585+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down in-process gRPC server
+2026-07-25T17:18:21.585+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down gRPC Services
+2026-07-25T17:18:21.590+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : Created WorkflowServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=32, target=directaddress:///ddce9ca1-bcb0-4b92-8628-0815880b913f}}
+2026-07-25T17:18:21.590+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : Created TestServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=32, target=directaddress:///ddce9ca1-bcb0-4b92-8628-0815880b913f}}
+2026-07-25T17:18:21.590+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : Created OperatorServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=32, target=directaddress:///ddce9ca1-bcb0-4b92-8628-0815880b913f}}
+2026-07-25T17:18:21.592+08:00  INFO 71064 --- [java-api-service] [           main] i.t.internal.worker.MultiThreadedPoller  : start: MultiThreadedPoller{name=Workflow Poller taskQueue="phase7-outcome-replay-test", namespace="default", identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:21.594+08:00  WARN 71064 --- [java-api-service] [artbeat-default] i.t.internal.worker.HeartbeatManager     : Server does not support worker heartbeats for namespace default, disabling
+2026-07-25T17:18:21.655+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : Created WorkflowServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=37, target=directaddress:///dd3a2c85-c8e6-4621-b07a-946fd0fb2ca5}}
+2026-07-25T17:18:21.656+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : Created TestServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=37, target=directaddress:///dd3a2c85-c8e6-4621-b07a-946fd0fb2ca5}}
+2026-07-25T17:18:21.656+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : Created OperatorServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=37, target=directaddress:///dd3a2c85-c8e6-4621-b07a-946fd0fb2ca5}}
+2026-07-25T17:18:21.666+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : shutdownNow
+2026-07-25T17:18:21.666+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:21.666+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : shutdownNow: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:21.669+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination begin: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:21.670+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination done: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:21.671+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:21.671+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down in-process gRPC server
+2026-07-25T17:18:21.671+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down gRPC Services
+2026-07-25T17:18:21.671+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : shutdownNow
+2026-07-25T17:18:21.671+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:21.671+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : shutdownNow: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:21.671+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.internal.worker.BasePoller   : shutdown: MultiThreadedPoller{name=Workflow Poller taskQueue="phase7-outcome-replay-test", namespace="default", identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:21.672+08:00  INFO 71064 --- [java-api-service] [ce="default": 2] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:21.672+08:00  INFO 71064 --- [java-api-service] [ce="default": 5] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:21.672+08:00  INFO 71064 --- [java-api-service] [ce="default": 4] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:21.672+08:00  INFO 71064 --- [java-api-service] [ce="default": 3] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:21.672+08:00  INFO 71064 --- [java-api-service] [ce="default": 1] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:21.673+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination begin: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:21.676+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination done: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:21.677+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:21.677+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down in-process gRPC server
+2026-07-25T17:18:21.678+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down gRPC Services
+2026-07-25T17:18:21.687+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : Created WorkflowServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=42, target=directaddress:///561e3df3-6106-4416-8fd5-84e8a873294c}}
+2026-07-25T17:18:21.687+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : Created TestServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=42, target=directaddress:///561e3df3-6106-4416-8fd5-84e8a873294c}}
+2026-07-25T17:18:21.687+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : Created OperatorServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=42, target=directaddress:///561e3df3-6106-4416-8fd5-84e8a873294c}}
+2026-07-25T17:18:21.691+08:00  INFO 71064 --- [java-api-service] [           main] i.t.internal.worker.MultiThreadedPoller  : start: MultiThreadedPoller{name=Workflow Poller taskQueue="phase7-outcome-replay-test", namespace="default", identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:21.694+08:00  WARN 71064 --- [java-api-service] [artbeat-default] i.t.internal.worker.HeartbeatManager     : Server does not support worker heartbeats for namespace default, disabling
+2026-07-25T17:18:21.819+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : Created WorkflowServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=47, target=directaddress:///6e8af78b-fd11-402b-90e0-c2e9483cd015}}
+2026-07-25T17:18:21.821+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : Created TestServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=47, target=directaddress:///6e8af78b-fd11-402b-90e0-c2e9483cd015}}
+2026-07-25T17:18:21.828+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : Created OperatorServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=47, target=directaddress:///6e8af78b-fd11-402b-90e0-c2e9483cd015}}
+2026-07-25T17:18:21.848+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : shutdownNow
+2026-07-25T17:18:21.849+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:21.849+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : shutdownNow: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:21.850+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination begin: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:21.850+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination done: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:21.850+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:21.850+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down in-process gRPC server
+2026-07-25T17:18:21.851+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down gRPC Services
+2026-07-25T17:18:21.852+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : shutdownNow
+2026-07-25T17:18:21.852+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:21.852+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : shutdownNow: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:21.853+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.internal.worker.BasePoller   : shutdown: MultiThreadedPoller{name=Workflow Poller taskQueue="phase7-outcome-replay-test", namespace="default", identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:21.853+08:00  INFO 71064 --- [java-api-service] [ce="default": 1] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:21.853+08:00  INFO 71064 --- [java-api-service] [ce="default": 2] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:21.853+08:00  INFO 71064 --- [java-api-service] [ce="default": 3] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:21.853+08:00  INFO 71064 --- [java-api-service] [ce="default": 4] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:21.853+08:00  INFO 71064 --- [java-api-service] [ce="default": 5] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:21.854+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination begin: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:21.857+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination done: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:21.858+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:21.858+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down in-process gRPC server
+2026-07-25T17:18:21.858+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down gRPC Services
+2026-07-25T17:18:21.896+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : Created WorkflowServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=52, target=directaddress:///464d4cee-7640-4326-b833-a6d58af32832}}
+2026-07-25T17:18:21.897+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : Created TestServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=52, target=directaddress:///464d4cee-7640-4326-b833-a6d58af32832}}
+2026-07-25T17:18:21.898+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : Created OperatorServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=52, target=directaddress:///464d4cee-7640-4326-b833-a6d58af32832}}
+2026-07-25T17:18:21.900+08:00  INFO 71064 --- [java-api-service] [           main] i.t.internal.worker.MultiThreadedPoller  : start: MultiThreadedPoller{name=Workflow Poller taskQueue="phase7-outcome-timer-test", namespace="default", identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:21.904+08:00  WARN 71064 --- [java-api-service] [artbeat-default] i.t.internal.worker.HeartbeatManager     : Server does not support worker heartbeats for namespace default, disabling
+2026-07-25T17:18:21.938+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : Created WorkflowServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=57, target=directaddress:///29108a49-df24-4734-a717-112f482d1313}}
+2026-07-25T17:18:21.939+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : Created TestServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=57, target=directaddress:///29108a49-df24-4734-a717-112f482d1313}}
+2026-07-25T17:18:21.940+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : Created OperatorServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=57, target=directaddress:///29108a49-df24-4734-a717-112f482d1313}}
+2026-07-25T17:18:21.946+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : shutdownNow
+2026-07-25T17:18:21.946+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:21.946+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : shutdownNow: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:21.947+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination begin: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:21.947+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination done: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:21.947+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:21.947+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down in-process gRPC server
+2026-07-25T17:18:21.948+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down gRPC Services
+2026-07-25T17:18:21.949+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : shutdownNow
+2026-07-25T17:18:21.949+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:21.949+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : shutdownNow: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:21.949+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.internal.worker.BasePoller   : shutdown: MultiThreadedPoller{name=Workflow Poller taskQueue="phase7-outcome-timer-test", namespace="default", identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:21.950+08:00  INFO 71064 --- [java-api-service] [ce="default": 1] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:21.950+08:00  INFO 71064 --- [java-api-service] [ce="default": 5] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:21.950+08:00  INFO 71064 --- [java-api-service] [ce="default": 2] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:21.950+08:00  INFO 71064 --- [java-api-service] [ce="default": 4] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:21.950+08:00  INFO 71064 --- [java-api-service] [ce="default": 3] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:21.950+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination begin: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:21.950+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination done: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:21.950+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:21.951+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down in-process gRPC server
+2026-07-25T17:18:21.951+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down gRPC Services
+2026-07-25T17:18:21.956+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : Created WorkflowServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=62, target=directaddress:///d596c4dd-fc31-4f27-b040-c0fdf9ddc684}}
+2026-07-25T17:18:21.956+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : Created TestServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=62, target=directaddress:///d596c4dd-fc31-4f27-b040-c0fdf9ddc684}}
+2026-07-25T17:18:21.957+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : Created OperatorServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=62, target=directaddress:///d596c4dd-fc31-4f27-b040-c0fdf9ddc684}}
+2026-07-25T17:18:21.960+08:00  INFO 71064 --- [java-api-service] [           main] i.t.internal.worker.MultiThreadedPoller  : start: MultiThreadedPoller{name=Workflow Poller taskQueue="phase7-outcome-timer-test", namespace="default", identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:21.964+08:00  WARN 71064 --- [java-api-service] [artbeat-default] i.t.internal.worker.HeartbeatManager     : Server does not support worker heartbeats for namespace default, disabling
+2026-07-25T17:18:22.010+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : Created WorkflowServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=67, target=directaddress:///b64511b0-746d-4cdc-bf49-65cea99f5d57}}
+2026-07-25T17:18:22.010+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : Created TestServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=67, target=directaddress:///b64511b0-746d-4cdc-bf49-65cea99f5d57}}
+2026-07-25T17:18:22.010+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : Created OperatorServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=67, target=directaddress:///b64511b0-746d-4cdc-bf49-65cea99f5d57}}
+2026-07-25T17:18:22.016+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : shutdownNow
+2026-07-25T17:18:22.016+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:22.016+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : shutdownNow: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.017+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination begin: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.017+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination done: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.018+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:22.018+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down in-process gRPC server
+2026-07-25T17:18:22.018+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down gRPC Services
+2026-07-25T17:18:22.018+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : shutdownNow
+2026-07-25T17:18:22.018+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:22.018+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : shutdownNow: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.018+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.internal.worker.BasePoller   : shutdown: MultiThreadedPoller{name=Workflow Poller taskQueue="phase7-outcome-timer-test", namespace="default", identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.018+08:00  INFO 71064 --- [java-api-service] [ce="default": 4] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:22.018+08:00  INFO 71064 --- [java-api-service] [ce="default": 1] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:22.018+08:00  INFO 71064 --- [java-api-service] [ce="default": 2] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:22.018+08:00  INFO 71064 --- [java-api-service] [ce="default": 3] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:22.019+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination begin: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.019+08:00  INFO 71064 --- [java-api-service] [ce="default": 5] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:22.020+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination done: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.020+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:22.020+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down in-process gRPC server
+2026-07-25T17:18:22.020+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down gRPC Services
+2026-07-25T17:18:22.026+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : Created WorkflowServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=72, target=directaddress:///08a1b183-8f7b-4c27-8c75-5c5018cf6673}}
+2026-07-25T17:18:22.026+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : Created TestServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=72, target=directaddress:///08a1b183-8f7b-4c27-8c75-5c5018cf6673}}
+2026-07-25T17:18:22.026+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : Created OperatorServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=72, target=directaddress:///08a1b183-8f7b-4c27-8c75-5c5018cf6673}}
+2026-07-25T17:18:22.028+08:00  INFO 71064 --- [java-api-service] [           main] i.t.internal.worker.MultiThreadedPoller  : start: MultiThreadedPoller{name=Workflow Poller taskQueue="phase7-outcome-timer-test", namespace="default", identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.030+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : shutdownNow
+2026-07-25T17:18:22.031+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:22.031+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : shutdownNow: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.031+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.internal.worker.BasePoller   : shutdown: MultiThreadedPoller{name=Workflow Poller taskQueue="phase7-outcome-timer-test", namespace="default", identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.031+08:00  INFO 71064 --- [java-api-service] [ce="default": 4] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:22.031+08:00  INFO 71064 --- [java-api-service] [ce="default": 3] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:22.031+08:00  INFO 71064 --- [java-api-service] [ce="default": 1] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:22.032+08:00  INFO 71064 --- [java-api-service] [ce="default": 2] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:22.032+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination begin: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.032+08:00  INFO 71064 --- [java-api-service] [ce="default": 5] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:22.032+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination done: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.032+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:22.032+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down in-process gRPC server
+2026-07-25T17:18:22.032+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down gRPC Services
+2026-07-25T17:18:22.032+08:00  WARN 71064 --- [java-api-service] [artbeat-default] i.t.internal.worker.HeartbeatManager     : Failed to send worker heartbeat for namespace default
+
+io.grpc.StatusRuntimeException: CANCELLED: Thread interrupted
+	at io.grpc.Status.asRuntimeException(Status.java:524) ~[grpc-api-1.76.0.jar:1.76.0]
+	at io.grpc.stub.ClientCalls.getUnchecked(ClientCalls.java:347) ~[grpc-stub-1.76.0.jar:1.76.0]
+	at io.grpc.stub.ClientCalls.blockingUnaryCall(ClientCalls.java:174) ~[grpc-stub-1.76.0.jar:1.76.0]
+	at io.temporal.api.workflowservice.v1.WorkflowServiceGrpc$WorkflowServiceBlockingStub.recordWorkerHeartbeat(WorkflowServiceGrpc.java:8164) ~[temporal-serviceclient-1.35.0.jar:1.35.0]
+	at io.temporal.internal.worker.HeartbeatManager$SharedNamespaceWorker.heartbeatTick(HeartbeatManager.java:185) ~[temporal-sdk-1.35.0.jar:1.35.0]
+	at java.base/java.util.concurrent.Executors$RunnableAdapter.call(Executors.java:572) ~[na:na]
+	at java.base/java.util.concurrent.FutureTask.runAndReset(FutureTask.java:358) ~[na:na]
+	at java.base/java.util.concurrent.ScheduledThreadPoolExecutor$ScheduledFutureTask.run(ScheduledThreadPoolExecutor.java:305) ~[na:na]
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1144) ~[na:na]
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:642) ~[na:na]
+	at java.base/java.lang.Thread.run(Thread.java:1583) ~[na:na]
+Caused by: java.lang.InterruptedException
+	at com.google.common.util.concurrent.AbstractFutureState.blockingGet(AbstractFutureState.java:231) ~[guava-33.4.8-jre.jar:na]
+	at com.google.common.util.concurrent.Platform.get(Platform.java:54) ~[guava-33.4.8-jre.jar:na]
+	at com.google.common.util.concurrent.AbstractFuture.get(AbstractFuture.java:253) ~[guava-33.4.8-jre.jar:na]
+	at io.grpc.stub.ClientCalls.getUnchecked(ClientCalls.java:341) ~[grpc-stub-1.76.0.jar:1.76.0]
+	... 9 common frames omitted
+
+2026-07-25T17:18:22.036+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : Created WorkflowServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=77, target=directaddress:///e52a41fe-e8b2-4b0f-a75a-6b29f6d0e993}}
+2026-07-25T17:18:22.036+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : Created TestServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=77, target=directaddress:///e52a41fe-e8b2-4b0f-a75a-6b29f6d0e993}}
+2026-07-25T17:18:22.037+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : Created OperatorServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=77, target=directaddress:///e52a41fe-e8b2-4b0f-a75a-6b29f6d0e993}}
+2026-07-25T17:18:22.038+08:00  INFO 71064 --- [java-api-service] [           main] i.t.internal.worker.MultiThreadedPoller  : start: MultiThreadedPoller{name=Workflow Poller taskQueue="phase7-outcome-timer-test", namespace="default", identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.040+08:00  WARN 71064 --- [java-api-service] [artbeat-default] i.t.internal.worker.HeartbeatManager     : Server does not support worker heartbeats for namespace default, disabling
+2026-07-25T17:18:22.060+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : Created WorkflowServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=82, target=directaddress:///f97ce0d4-ba05-43e1-8814-d70beea3e896}}
+2026-07-25T17:18:22.060+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : Created TestServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=82, target=directaddress:///f97ce0d4-ba05-43e1-8814-d70beea3e896}}
+2026-07-25T17:18:22.061+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : Created OperatorServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=82, target=directaddress:///f97ce0d4-ba05-43e1-8814-d70beea3e896}}
+2026-07-25T17:18:22.065+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : shutdownNow
+2026-07-25T17:18:22.065+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:22.065+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : shutdownNow: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.066+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination begin: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.066+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination done: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.066+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:22.066+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down in-process gRPC server
+2026-07-25T17:18:22.066+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down gRPC Services
+2026-07-25T17:18:22.067+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : shutdownNow
+2026-07-25T17:18:22.067+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:22.067+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : shutdownNow: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.067+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.internal.worker.BasePoller   : shutdown: MultiThreadedPoller{name=Workflow Poller taskQueue="phase7-outcome-timer-test", namespace="default", identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.067+08:00  INFO 71064 --- [java-api-service] [ce="default": 1] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:22.067+08:00  INFO 71064 --- [java-api-service] [ce="default": 3] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:22.067+08:00  INFO 71064 --- [java-api-service] [ce="default": 4] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:22.067+08:00  INFO 71064 --- [java-api-service] [ce="default": 5] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:22.067+08:00  INFO 71064 --- [java-api-service] [ce="default": 2] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:22.067+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination begin: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.332+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination done: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.332+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:22.332+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down in-process gRPC server
+2026-07-25T17:18:22.332+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down gRPC Services
+2026-07-25T17:18:22.335+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : Created WorkflowServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=87, target=directaddress:///2086732e-5e5c-4f64-bb0a-83e8c41fa768}}
+2026-07-25T17:18:22.335+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : Created TestServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=87, target=directaddress:///2086732e-5e5c-4f64-bb0a-83e8c41fa768}}
+2026-07-25T17:18:22.335+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : Created OperatorServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=87, target=directaddress:///2086732e-5e5c-4f64-bb0a-83e8c41fa768}}
+2026-07-25T17:18:22.336+08:00  INFO 71064 --- [java-api-service] [           main] i.t.internal.worker.MultiThreadedPoller  : start: MultiThreadedPoller{name=Workflow Poller taskQueue="phase7-outcome-timer-test", namespace="default", identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.338+08:00  WARN 71064 --- [java-api-service] [artbeat-default] i.t.internal.worker.HeartbeatManager     : Server does not support worker heartbeats for namespace default, disabling
+2026-07-25T17:18:22.354+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : Created WorkflowServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=92, target=directaddress:///51b4f4b3-67a2-434b-9f79-0194b3bd53b3}}
+2026-07-25T17:18:22.354+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : Created TestServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=92, target=directaddress:///51b4f4b3-67a2-434b-9f79-0194b3bd53b3}}
+2026-07-25T17:18:22.355+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : Created OperatorServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=92, target=directaddress:///51b4f4b3-67a2-434b-9f79-0194b3bd53b3}}
+2026-07-25T17:18:22.358+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : shutdownNow
+2026-07-25T17:18:22.358+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:22.358+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : shutdownNow: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.358+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination begin: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.358+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination done: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.358+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:22.358+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down in-process gRPC server
+2026-07-25T17:18:22.358+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down gRPC Services
+2026-07-25T17:18:22.360+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : shutdownNow
+2026-07-25T17:18:22.360+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:22.360+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : shutdownNow: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.360+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.internal.worker.BasePoller   : shutdown: MultiThreadedPoller{name=Workflow Poller taskQueue="phase7-outcome-timer-test", namespace="default", identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.360+08:00  INFO 71064 --- [java-api-service] [ce="default": 3] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:22.360+08:00  INFO 71064 --- [java-api-service] [ce="default": 1] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:22.360+08:00  INFO 71064 --- [java-api-service] [ce="default": 5] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:22.360+08:00  INFO 71064 --- [java-api-service] [ce="default": 2] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:22.360+08:00  INFO 71064 --- [java-api-service] [ce="default": 4] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:22.360+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination begin: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.360+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination done: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.361+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:22.361+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down in-process gRPC server
+2026-07-25T17:18:22.361+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down gRPC Services
+2026-07-25T17:18:22.363+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : Created WorkflowServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=97, target=directaddress:///424381f6-5845-4e30-b964-8717f9119876}}
+2026-07-25T17:18:22.363+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : Created TestServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=97, target=directaddress:///424381f6-5845-4e30-b964-8717f9119876}}
+2026-07-25T17:18:22.363+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : Created OperatorServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=97, target=directaddress:///424381f6-5845-4e30-b964-8717f9119876}}
+2026-07-25T17:18:22.364+08:00  INFO 71064 --- [java-api-service] [           main] i.t.internal.worker.MultiThreadedPoller  : start: MultiThreadedPoller{name=Workflow Poller taskQueue="phase7-outcome-timer-test", namespace="default", identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.366+08:00  WARN 71064 --- [java-api-service] [artbeat-default] i.t.internal.worker.HeartbeatManager     : Server does not support worker heartbeats for namespace default, disabling
+2026-07-25T17:18:22.378+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : Created WorkflowServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=102, target=directaddress:///0b1413fb-c16b-405f-a89c-4c93a883f55d}}
+2026-07-25T17:18:22.378+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : Created TestServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=102, target=directaddress:///0b1413fb-c16b-405f-a89c-4c93a883f55d}}
+2026-07-25T17:18:22.379+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : Created OperatorServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=102, target=directaddress:///0b1413fb-c16b-405f-a89c-4c93a883f55d}}
+2026-07-25T17:18:22.383+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : shutdownNow
+2026-07-25T17:18:22.383+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:22.383+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : shutdownNow: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.383+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination begin: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.384+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination done: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.384+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:22.384+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down in-process gRPC server
+2026-07-25T17:18:22.384+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down gRPC Services
+2026-07-25T17:18:22.384+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : shutdownNow
+2026-07-25T17:18:22.384+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:22.384+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : shutdownNow: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.384+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.internal.worker.BasePoller   : shutdown: MultiThreadedPoller{name=Workflow Poller taskQueue="phase7-outcome-timer-test", namespace="default", identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.384+08:00  INFO 71064 --- [java-api-service] [ce="default": 1] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:22.384+08:00  INFO 71064 --- [java-api-service] [ce="default": 2] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:22.384+08:00  INFO 71064 --- [java-api-service] [ce="default": 4] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:22.384+08:00  INFO 71064 --- [java-api-service] [ce="default": 5] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:22.384+08:00  INFO 71064 --- [java-api-service] [ce="default": 3] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:22.384+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination begin: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.385+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination done: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.385+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:22.385+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down in-process gRPC server
+2026-07-25T17:18:22.385+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down gRPC Services
+2026-07-25T17:18:22.388+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : Created WorkflowServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=107, target=directaddress:///8c62278c-84d0-44e3-a5a3-ec061ebe8d50}}
+2026-07-25T17:18:22.389+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : Created TestServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=107, target=directaddress:///8c62278c-84d0-44e3-a5a3-ec061ebe8d50}}
+2026-07-25T17:18:22.389+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : Created OperatorServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=107, target=directaddress:///8c62278c-84d0-44e3-a5a3-ec061ebe8d50}}
+2026-07-25T17:18:22.391+08:00  INFO 71064 --- [java-api-service] [           main] i.t.internal.worker.MultiThreadedPoller  : start: MultiThreadedPoller{name=Workflow Poller taskQueue="phase7-outcome-timer-test", namespace="default", identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.392+08:00  WARN 71064 --- [java-api-service] [artbeat-default] i.t.internal.worker.HeartbeatManager     : Server does not support worker heartbeats for namespace default, disabling
+2026-07-25T17:18:22.406+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : Created WorkflowServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=112, target=directaddress:///fc99713a-d7b9-4cf0-b890-edfe1976ce06}}
+2026-07-25T17:18:22.406+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : Created TestServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=112, target=directaddress:///fc99713a-d7b9-4cf0-b890-edfe1976ce06}}
+2026-07-25T17:18:22.406+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : Created OperatorServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=112, target=directaddress:///fc99713a-d7b9-4cf0-b890-edfe1976ce06}}
+2026-07-25T17:18:22.410+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : shutdownNow
+2026-07-25T17:18:22.410+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:22.410+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : shutdownNow: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.410+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination begin: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.411+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination done: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.411+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:22.411+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down in-process gRPC server
+2026-07-25T17:18:22.411+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down gRPC Services
+2026-07-25T17:18:22.411+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : shutdownNow
+2026-07-25T17:18:22.411+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:22.411+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : shutdownNow: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.411+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.internal.worker.BasePoller   : shutdown: MultiThreadedPoller{name=Workflow Poller taskQueue="phase7-outcome-timer-test", namespace="default", identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.411+08:00  INFO 71064 --- [java-api-service] [ce="default": 4] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:22.411+08:00  INFO 71064 --- [java-api-service] [ce="default": 1] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:22.411+08:00  INFO 71064 --- [java-api-service] [ce="default": 2] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:22.411+08:00  INFO 71064 --- [java-api-service] [ce="default": 3] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:22.411+08:00  INFO 71064 --- [java-api-service] [ce="default": 5] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:22.412+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination begin: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.412+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination done: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.412+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:22.412+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down in-process gRPC server
+2026-07-25T17:18:22.412+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down gRPC Services
+2026-07-25T17:18:22.415+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : Created WorkflowServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=117, target=directaddress:///b7417448-23be-464c-95e9-7fce49f7ddb0}}
+2026-07-25T17:18:22.415+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : Created TestServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=117, target=directaddress:///b7417448-23be-464c-95e9-7fce49f7ddb0}}
+2026-07-25T17:18:22.416+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : Created OperatorServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=117, target=directaddress:///b7417448-23be-464c-95e9-7fce49f7ddb0}}
+2026-07-25T17:18:22.416+08:00  INFO 71064 --- [java-api-service] [           main] i.t.internal.worker.MultiThreadedPoller  : start: MultiThreadedPoller{name=Workflow Poller taskQueue="phase7-outcome-timer-test", namespace="default", identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.418+08:00  WARN 71064 --- [java-api-service] [artbeat-default] i.t.internal.worker.HeartbeatManager     : Server does not support worker heartbeats for namespace default, disabling
+2026-07-25T17:18:22.419+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.internal.worker.BasePoller   : Suspend Polling: MultiThreadedPoller{name=Workflow Poller taskQueue="phase7-outcome-timer-test", namespace="default", identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.425+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.internal.worker.BasePoller   : Resume Polling MultiThreadedPoller{name=Workflow Poller taskQueue="phase7-outcome-timer-test", namespace="default", identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.428+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : Created WorkflowServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=122, target=directaddress:///067bd5e4-9099-46e1-becc-234f7461729d}}
+2026-07-25T17:18:22.428+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : Created TestServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=122, target=directaddress:///067bd5e4-9099-46e1-becc-234f7461729d}}
+2026-07-25T17:18:22.428+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : Created OperatorServiceStubs for channel: ManagedChannelOrphanWrapper{delegate=ManagedChannelImpl{logId=122, target=directaddress:///067bd5e4-9099-46e1-becc-234f7461729d}}
+2026-07-25T17:18:22.431+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : shutdownNow
+2026-07-25T17:18:22.431+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:22.431+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : shutdownNow: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.431+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination begin: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.431+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination done: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.432+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:22.432+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down in-process gRPC server
+2026-07-25T17:18:22.432+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down gRPC Services
+2026-07-25T17:18:22.432+08:00  INFO 71064 --- [java-api-service] [           main] i.t.serviceclient.TestServiceStubsImpl   : shutdownNow
+2026-07-25T17:18:22.432+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.OperatorServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:22.432+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : shutdownNow: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.432+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.internal.worker.BasePoller   : shutdown: MultiThreadedPoller{name=Workflow Poller taskQueue="phase7-outcome-timer-test", namespace="default", identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.432+08:00  INFO 71064 --- [java-api-service] [ce="default": 4] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:22.432+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination begin: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.432+08:00  INFO 71064 --- [java-api-service] [ce="default": 1] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:22.432+08:00  INFO 71064 --- [java-api-service] [ce="default": 5] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:22.432+08:00  INFO 71064 --- [java-api-service] [ce="default": 2] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:22.432+08:00  INFO 71064 --- [java-api-service] [ce="default": 3] i.t.internal.worker.MultiThreadedPoller  : poll loop is terminated: WorkflowPollTask
+2026-07-25T17:18:22.692+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.worker.WorkerFactory         : awaitTermination done: WorkerFactory{identity=71064@LAPTOP-VJM9RQM6}
+2026-07-25T17:18:22.692+08:00  INFO 71064 --- [java-api-service] [           main] i.t.s.WorkflowServiceStubsImpl           : shutdownNow
+2026-07-25T17:18:22.692+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down in-process gRPC server
+2026-07-25T17:18:22.692+08:00  INFO 71064 --- [java-api-service] [           main] io.temporal.testserver.TestServer        : Shutting down gRPC Services

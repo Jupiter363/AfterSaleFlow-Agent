@@ -1,0 +1,842 @@
+{
+  "candidate_commit": "4ddeeabb39ce7b7de41ecc4f44e17ece389d2840",
+  "environment": {
+    "candidate_commit": "4ddeeabb39ce7b7de41ecc4f44e17ece389d2840",
+    "captured_at": "2026-07-25T09:13:24.916+00:00",
+    "dependency_manifests": [
+      {
+        "byte_source": "CANDIDATE_GIT_BLOB",
+        "path": "python-agent-service/pyproject.toml",
+        "sha256": "f9bd4b8f04f3fc43a9ff4171ca1679c68ee48e73a00e120051cbe301c739191c"
+      },
+      {
+        "byte_source": "CANDIDATE_GIT_BLOB",
+        "path": "python-agent-service/requirements.lock",
+        "sha256": "e09cac08b3eee71aeef1689e929a991cae8d43ed3d96db97165b6e385b749a6f"
+      },
+      {
+        "byte_source": "CANDIDATE_GIT_BLOB",
+        "path": "java-api-service/pom.xml",
+        "sha256": "f58a30f28b2a8f471b36126fa843b3353c7685139eeec19148fe85d3359a509d"
+      },
+      {
+        "byte_source": "CANDIDATE_GIT_BLOB",
+        "path": "java-api-service/.mvn/wrapper/maven-wrapper.properties",
+        "sha256": "5b43e5b1798fbf20b5db3f56ebba337f08d201b0069110091d0fed0460745bab"
+      },
+      {
+        "byte_source": "CANDIDATE_GIT_BLOB",
+        "path": "frontend/package.json",
+        "sha256": "0819cb9c250f74b07c6ded46dfcc3f6b8aa0d25ba8034be22c723b623e3925d2"
+      },
+      {
+        "byte_source": "CANDIDATE_GIT_BLOB",
+        "path": "frontend/pnpm-lock.yaml",
+        "sha256": "a7a7ef6a83eccff67d18c19c20ebeb537c6fc9e7cd0603dc54b682b0b06cc1db"
+      },
+      {
+        "byte_source": "CANDIDATE_GIT_BLOB",
+        "path": "docker-compose.yml",
+        "sha256": "014cbf196ed61ee871b3e48de73b65da6d5172ec9addaf0da41fc698ff119766"
+      }
+    ],
+    "environment_id": "local-phase7-4ddeeabb",
+    "host": {
+      "machine": "AMD64",
+      "release": "11",
+      "system": "Windows"
+    },
+    "runner": {
+      "byte_source": "CANDIDATE_GIT_BLOB",
+      "path": "scripts/run_phase7_candidate_checkpoint.py",
+      "sha256": "cda110227b932df1a792f6d98f9c640c3a42101c821708aeda879810f0bc9b74"
+    },
+    "snapshot_sha256": "2ff643d17c5b9cf5bbeabf22d70b5ddd6fc2c7777b6c3e8070e5b46e2847d40b",
+    "source_contract_sha256": "d695c17819682dfe9b818f27fbdc7e75f55fa643e6c615ca604f0a9af3e936f1",
+    "tools": {
+      "git": {
+        "available": true,
+        "exit_code": 0,
+        "version": "git version 2.44.0.windows.1"
+      },
+      "java": {
+        "available": true,
+        "exit_code": 0,
+        "version": "java version \"21.0.8\" 2025-07-15 LTS"
+      },
+      "node": {
+        "available": true,
+        "exit_code": 0,
+        "version": "v24.15.0"
+      },
+      "python": {
+        "available": true,
+        "implementation": "CPython",
+        "version": "3.12.3"
+      }
+    }
+  },
+  "schema_version": "phase7-candidate-source-tree-environment.v1",
+  "source_tree": {
+    "base_commit": "e29cefb3e028bb84f6a227e46fecdf5711eba48c",
+    "candidate_commit": "4ddeeabb39ce7b7de41ecc4f44e17ece389d2840",
+    "candidate_tree": "a618efc2567595cf60fcb5f0cd35e4b42a94c272",
+    "changed_paths": [
+      {
+        "path": "AGENTS.md",
+        "status": "M"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/compatibility-matrix.yaml",
+        "status": "M"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/fixtures/invalid/outcome-attempt-reconciliation-blind-retry.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/fixtures/invalid/outcome-closure-ambiguous.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/fixtures/invalid/outcome-compensation-credential.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/fixtures/invalid/outcome-compensation-receipt-hash-mismatch.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/fixtures/invalid/outcome-compensation-receipt-id-mismatch.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/fixtures/invalid/outcome-evaluation-reopens-case.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/fixtures/invalid/outcome-execution-attempt-observation-unblocked.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/fixtures/invalid/outcome-operation-command-prompt.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/fixtures/invalid/outcome-operation-command-sequence-overflow.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/fixtures/invalid/outcome-operation-receipt-ambiguous.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/fixtures/invalid/outcome-process-projection-closed-missing-closure.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/fixtures/invalid/outcome-process-projection-closed-success-count-mismatch.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/fixtures/invalid/outcome-process-projection-closure-ref-without-hash.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/fixtures/invalid/outcome-process-projection-evaluation-ref-without-hash.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/fixtures/invalid/outcome-process-projection-external-payload.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/fixtures/invalid/outcome-process-projection-synthetic-evaluated.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/fixtures/invalid/outcome-process-projection-terminal-review-ref-without-hash.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/fixtures/invalid/outcome-reviewer-decision-approve-snapshot-hash-mismatch.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/fixtures/invalid/outcome-reviewer-decision-approve-snapshot-ref-mismatch.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/fixtures/invalid/outcome-reviewer-decision-reason-ref-without-hash.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/fixtures/invalid/outcome-reviewer-decision-revision-gap.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/fixtures/invalid/outcome-reviewer-decision-unknown.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/fixtures/invalid/outcome-sla-escalation-human-decision.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/fixtures/invalid/outcome-sla-escalation-zero-event-sequence.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/fixtures/invalid/outcome-workflow-start-invalid-review-window.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/fixtures/invalid/outcome-workflow-start-operation-count-overflow.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/fixtures/invalid/outcome-workflow-start-packet-body.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/fixtures/valid/outcome-attempt-reconciliation-receipt-valid.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/fixtures/valid/outcome-closure-receipt-valid.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/fixtures/valid/outcome-compensation-receipt-valid.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/fixtures/valid/outcome-evaluation-receipt-valid.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/fixtures/valid/outcome-execution-attempt-observation-valid.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/fixtures/valid/outcome-operation-command-valid.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/fixtures/valid/outcome-operation-receipt-valid.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/fixtures/valid/outcome-process-projection-closed-valid.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/fixtures/valid/outcome-process-projection-evaluated-valid.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/fixtures/valid/outcome-process-projection-valid.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/fixtures/valid/outcome-reviewer-decision-receipt-valid.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/fixtures/valid/outcome-sla-escalation-receipt-valid.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/fixtures/valid/outcome-workflow-start-valid.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/outcome-attempt-reconciliation-receipt.schema.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/outcome-closure-receipt.schema.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/outcome-compensation-receipt.schema.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/outcome-evaluation-receipt.schema.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/outcome-execution-attempt-observation.schema.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/outcome-operation-command.schema.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/outcome-operation-receipt.schema.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/outcome-process-projection.schema.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/outcome-reviewer-decision-receipt.schema.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/outcome-semantic-conformance.v1.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/outcome-sla-escalation-receipt.schema.json",
+        "status": "A"
+      },
+      {
+        "path": "contracts/agent-platform/outcome/v1/outcome-workflow-start.schema.json",
+        "status": "A"
+      },
+      {
+        "path": "docs/runbooks/temporal-first/phase-7-p7.0-baseline-inventory.md",
+        "status": "M"
+      },
+      {
+        "path": "docs/runbooks/temporal-first/phase-7-p7.0-entry-checkpoint.md",
+        "status": "A"
+      },
+      {
+        "path": "frontend/src/api/review.js",
+        "status": "M"
+      },
+      {
+        "path": "frontend/src/api/review.test.js",
+        "status": "M"
+      },
+      {
+        "path": "frontend/src/stores/review.js",
+        "status": "M"
+      },
+      {
+        "path": "frontend/src/views/ReviewWorkbenchView.test.js",
+        "status": "M"
+      },
+      {
+        "path": "frontend/src/views/ReviewWorkbenchView.vue",
+        "status": "M"
+      },
+      {
+        "path": "frontend/src/views/disputes/AdjudicationDraftView.test.js",
+        "status": "M"
+      },
+      {
+        "path": "frontend/src/views/disputes/AdjudicationDraftView.vue",
+        "status": "M"
+      },
+      {
+        "path": "frontend/src/views/disputes/OutcomeView.test.js",
+        "status": "M"
+      },
+      {
+        "path": "frontend/src/views/disputes/OutcomeView.vue",
+        "status": "M"
+      },
+      {
+        "path": "frontend/src/views/reviews/ReviewQueueView.test.js",
+        "status": "M"
+      },
+      {
+        "path": "frontend/src/views/reviews/ReviewQueueView.vue",
+        "status": "M"
+      },
+      {
+        "path": "frontend/src/views/reviews/ReviewWorkbenchView.test.js",
+        "status": "M"
+      },
+      {
+        "path": "frontend/src/views/reviews/ReviewWorkbenchView.vue",
+        "status": "M"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/evaluation/application/AuthoritativeClosureReceiptReader.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/evaluation/application/AuthoritativeEvaluationReceiptReader.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/evaluation/application/OutcomeClosureEvaluationProtocolGate.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/evaluation/application/OutcomeClosurePrerequisiteService.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/evaluation/application/SyntheticClosedOutcomeSnapshot.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/evaluation/application/SyntheticOutcomeClosureEvaluationService.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/executor/application/SyntheticNoopExecutionAssembly.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/executor/application/SyntheticOutcomeLedgerAdapter.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/executor/application/SyntheticOutcomeNoopVerticalSlice.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/executor/domain/ledger/OutcomeAttemptObservation.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/executor/domain/ledger/OutcomeClosureReadiness.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/executor/domain/ledger/OutcomeCompensationParent.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/executor/domain/ledger/OutcomeLedgerRejectedException.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/executor/domain/ledger/OutcomeLedgerValues.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/executor/domain/ledger/OutcomeOperation.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/executor/domain/ledger/OutcomeOperationLedger.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/executor/domain/ledger/OutcomeOperationReceipt.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/executor/domain/ledger/OutcomeOperationState.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/executor/domain/ledger/OutcomeProcessProjection.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/executor/infrastructure/persistence/JdbcOutcomeOperationLedger.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/infrastructure/persistence/entity/ApprovalRecordEntity.java",
+        "status": "M"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/outcome/api/CaseOutcomeController.java",
+        "status": "M"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/outcome/application/SyntheticOutcomeProjection.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/review/api/ReviewController.java",
+        "status": "M"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/review/application/ReviewApplicationService.java",
+        "status": "M"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/review/application/ReviewDecisionCommand.java",
+        "status": "M"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/review/application/ReviewDecisionReceiptView.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/review/application/ReviewDecisionView.java",
+        "status": "M"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/review/application/ReviewOutcomeProtocolAdapter.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/review/application/ReviewOutcomeReceiptContext.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/review/application/ReviewPacketAuthorizationView.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/review/application/ReviewPacketView.java",
+        "status": "M"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/review/domain/FrozenReviewPacketIdentity.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/review/domain/ReviewAuthorityReceipt.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/review/domain/ReviewDecisionConflictException.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/review/domain/ReviewDecisionFactType.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/review/domain/ReviewDecisionFence.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/review/domain/ReviewPacketContentHasher.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/workflow/activity/tool/SyntheticNoopCompensationObservation.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/workflow/activity/tool/SyntheticNoopExecutionCommand.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/workflow/activity/tool/SyntheticNoopExecutionReceipt.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/workflow/activity/tool/SyntheticNoopToolActivity.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/workflow/activity/tool/SyntheticNoopToolActivityImpl.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/workflow/activity/tool/SyntheticOutcomeProtocolAdapter.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/workflow/contract/outcome/v1/OutcomeAttemptReconciliationReceipt.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/workflow/contract/outcome/v1/OutcomeClosureReceipt.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/workflow/contract/outcome/v1/OutcomeCompensationReceipt.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/workflow/contract/outcome/v1/OutcomeContractCodec.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/workflow/contract/outcome/v1/OutcomeEvaluationReceipt.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/workflow/contract/outcome/v1/OutcomeExecutionAttemptObservation.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/workflow/contract/outcome/v1/OutcomeOperationCommand.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/workflow/contract/outcome/v1/OutcomeOperationReceipt.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/workflow/contract/outcome/v1/OutcomeProjection.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/workflow/contract/outcome/v1/OutcomeReviewDecisionReceipt.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/workflow/contract/outcome/v1/OutcomeRoomProtocol.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/workflow/contract/outcome/v1/OutcomeSemanticConformance.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/workflow/contract/outcome/v1/OutcomeSlaEscalationReceipt.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/workflow/contract/outcome/v1/OutcomeSyntheticNoopReceipt.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/workflow/contract/outcome/v1/OutcomeWireTypes.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/workflow/contract/outcome/v1/OutcomeWorkflowStart.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/workflow/temporal/room/outcome/OutcomeRoomWorkflow.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/workflow/temporal/room/outcome/OutcomeRoomWorkflowImpl.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/workflow/temporal/room/outcome/OutcomeWorkflowDiagnostics.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/java/com/example/dispute/workflow/temporal/room/outcome/OutcomeWorkflowKernel.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/main/resources/db/migration/V045__outcome_operation_receipt_compensation.sql",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/test/java/com/example/dispute/database/OutcomeV045MigrationContractTest.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/test/java/com/example/dispute/evaluation/CaseClosureServiceTest.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/test/java/com/example/dispute/evaluation/OutcomeClosureEvaluationOrderingTest.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/test/java/com/example/dispute/executor/OutcomeSyntheticNoopAssemblyTest.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/test/java/com/example/dispute/executor/persistence/JdbcOutcomeOperationLedgerTest.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/test/java/com/example/dispute/executor/persistence/OutcomeOperationLedgerIntegrationTest.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/test/java/com/example/dispute/outcome/CaseOutcomeControllerTest.java",
+        "status": "M"
+      },
+      {
+        "path": "java-api-service/src/test/java/com/example/dispute/review/ReviewApplicationServiceIntegrationTest.java",
+        "status": "M"
+      },
+      {
+        "path": "java-api-service/src/test/java/com/example/dispute/review/ReviewControllerTest.java",
+        "status": "M"
+      },
+      {
+        "path": "java-api-service/src/test/java/com/example/dispute/review/ReviewDecisionCommandTest.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/test/java/com/example/dispute/review/ReviewDecisionConcurrencyTest.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/test/java/com/example/dispute/review/ReviewDecisionReceiptTestFixture.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/test/java/com/example/dispute/review/ReviewOutcomeProtocolAdapterTest.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/test/java/com/example/dispute/review/ReviewPacketContentHasherTest.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/test/java/com/example/dispute/review/ReviewTemporalCommandIntegrationTest.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/test/java/com/example/dispute/workflow/activity/tool/CompensationWorkflowTest.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/test/java/com/example/dispute/workflow/activity/tool/SyntheticNoopFixtures.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/test/java/com/example/dispute/workflow/activity/tool/ToolActivityIdempotencyTest.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/test/java/com/example/dispute/workflow/contract/outcome/v1/OutcomeProtocolCompatibilityTest.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/test/java/com/example/dispute/workflow/contract/outcome/v1/OutcomeWireContractTest.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/test/java/com/example/dispute/workflow/integration/outcome/OutcomeUnregisteredAssemblyGuardTest.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/test/java/com/example/dispute/workflow/temporal/room/outcome/OutcomeReceiptTestFactory.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/test/java/com/example/dispute/workflow/temporal/room/outcome/OutcomeReliabilityHarnessTest.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/test/java/com/example/dispute/workflow/temporal/room/outcome/OutcomeRoomWorkflowReplayTest.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/test/java/com/example/dispute/workflow/temporal/room/outcome/OutcomeRoomWorkflowTest.java",
+        "status": "A"
+      },
+      {
+        "path": "java-api-service/src/test/java/com/example/dispute/workflow/temporal/room/outcome/OutcomeRoomWorkflowTimerTest.java",
+        "status": "A"
+      },
+      {
+        "path": "plans/agent-collaboration-execution.md",
+        "status": "M"
+      },
+      {
+        "path": "plans/phase-7-outcome-pilot-execution.md",
+        "status": "M"
+      },
+      {
+        "path": "plans/phase-7-outcome-pilot-test-batches.yaml",
+        "status": "M"
+      },
+      {
+        "path": "plans/phase-7-owner-briefs.yaml",
+        "status": "M"
+      },
+      {
+        "path": "python-agent-service/app/agents/review_copilot.py",
+        "status": "M"
+      },
+      {
+        "path": "python-agent-service/app/graphs/outcome/__init__.py",
+        "status": "A"
+      },
+      {
+        "path": "python-agent-service/app/graphs/outcome/contracts.py",
+        "status": "A"
+      },
+      {
+        "path": "python-agent-service/app/graphs/outcome/errors.py",
+        "status": "A"
+      },
+      {
+        "path": "python-agent-service/app/graphs/outcome/graph.py",
+        "status": "A"
+      },
+      {
+        "path": "python-agent-service/app/graphs/outcome/lcel.py",
+        "status": "A"
+      },
+      {
+        "path": "python-agent-service/app/graphs/outcome/nodes.py",
+        "status": "A"
+      },
+      {
+        "path": "python-agent-service/app/graphs/outcome/runtime.py",
+        "status": "A"
+      },
+      {
+        "path": "python-agent-service/app/graphs/outcome/state.py",
+        "status": "A"
+      },
+      {
+        "path": "python-agent-service/tests/agents/test_review_copilot.py",
+        "status": "A"
+      },
+      {
+        "path": "python-agent-service/tests/graphs/outcome/__init__.py",
+        "status": "A"
+      },
+      {
+        "path": "python-agent-service/tests/graphs/outcome/conftest.py",
+        "status": "A"
+      },
+      {
+        "path": "python-agent-service/tests/graphs/outcome/test_graph.py",
+        "status": "A"
+      },
+      {
+        "path": "python-agent-service/tests/graphs/outcome/test_lcel.py",
+        "status": "A"
+      },
+      {
+        "path": "python-agent-service/tests/graphs/outcome/test_recovery.py",
+        "status": "A"
+      },
+      {
+        "path": "scripts/generate_phase7_candidate_evidence.py",
+        "status": "A"
+      },
+      {
+        "path": "scripts/run_phase7_candidate_checkpoint.py",
+        "status": "A"
+      },
+      {
+        "path": "tests/static/test_phase7_candidate_evidence.py",
+        "status": "A"
+      },
+      {
+        "path": "tests/static/test_phase7_candidate_runner.py",
+        "status": "A"
+      },
+      {
+        "path": "tests/static/test_phase7_entry_checkpoint.py",
+        "status": "M"
+      },
+      {
+        "path": "tests/static/test_phase7_outcome_contracts.py",
+        "status": "M"
+      },
+      {
+        "path": "tests/static/test_phase7_outcome_pilot_plan.py",
+        "status": "M"
+      },
+      {
+        "path": "tests/static/test_phase7_p7_0_entry_checkpoint.py",
+        "status": "A"
+      }
+    ],
+    "prior_migrations_unchanged": true,
+    "snapshot_sha256": "6551d6b06905c4cb9c1fcc4969a523ffef2dc2833cdfaf5d2e3f77bb8a0a8fa3",
+    "v045": {
+      "path": "java-api-service/src/main/resources/db/migration/V045__outcome_operation_receipt_compensation.sql",
+      "status": "ADDED_ONLY"
+    },
+    "worker_selector_formal_effect_authority_unchanged": true
+  }
+}
