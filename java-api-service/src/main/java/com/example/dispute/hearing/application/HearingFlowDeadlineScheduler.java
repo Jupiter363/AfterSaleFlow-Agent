@@ -7,11 +7,13 @@ import com.example.dispute.workflow.recovery.hearing.HearingSchedulerControl;
 import com.example.dispute.workflow.recovery.hearing.HearingSchedulerDetector;
 import com.example.dispute.workflow.recovery.hearing.HearingSchedulerDetector.Detection;
 import com.example.dispute.workflow.recovery.hearing.HearingSchedulerDetector.DetectionOutcome;
-import java.util.Objects;
+
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
+
+import java.util.Objects;
 
 /** Converts both missing party actions to terminal timeout rows at the shared deadline. */
 @Component
@@ -57,7 +59,8 @@ public class HearingFlowDeadlineScheduler {
             HearingSchedulerControl control,
             HearingReliabilityObservationSink observations,
             HearingSchedulerDetector detector) {
-        this.runtimeService = Objects.requireNonNull(runtimeService, "runtimeService must not be null");
+        this.runtimeService =
+                Objects.requireNonNull(runtimeService, "runtimeService must not be null");
         this.control = Objects.requireNonNull(control, "control must not be null");
         this.observations = Objects.requireNonNull(observations, "observations must not be null");
         this.detector = Objects.requireNonNull(detector, "detector must not be null");
@@ -67,14 +70,14 @@ public class HearingFlowDeadlineScheduler {
     public void expireDueStages() {
         switch (control.decision()) {
             case EXECUTE_LEGACY -> executeLegacyScan();
-            case DETECT_ONLY -> inspectTemporalProjection();
+            case DETECT_ONLY -> observeLegacyCandidateParity();
             case SKIP -> {
                 // OFF is deliberately silent.
             }
         }
     }
 
-    private void inspectTemporalProjection() {
+    private void observeLegacyCandidateParity() {
         try {
             Detection detection = detector.inspectDeadlineProjection();
             observations.record(Event.DEADLINE_SCHEDULER, detectionOutcome(detection.outcome()));

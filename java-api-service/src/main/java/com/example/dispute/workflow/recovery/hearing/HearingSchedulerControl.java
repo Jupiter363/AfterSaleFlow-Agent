@@ -1,6 +1,7 @@
 package com.example.dispute.workflow.recovery.hearing;
 
 import com.example.dispute.hearing.domain.HearingWriterMode;
+
 import java.util.Locale;
 import java.util.Objects;
 
@@ -21,9 +22,9 @@ public record HearingSchedulerControl(
             throw new IllegalArgumentException(
                     "synthetic SHADOW is not a formal scheduler writer mode");
         }
-        if (writerMode == HearingWriterMode.TEMPORAL && mode != SchedulerMode.DETECTOR) {
+        if (writerMode == HearingWriterMode.TEMPORAL && mode == SchedulerMode.EXECUTOR) {
             throw new IllegalArgumentException(
-                    "a TEMPORAL Hearing writer requires the legacy scheduler detector");
+                    "a TEMPORAL Hearing writer cannot use the legacy scheduler executor");
         }
         if (mode == SchedulerMode.DETECTOR && writerMode != HearingWriterMode.TEMPORAL) {
             throw new IllegalArgumentException(
@@ -31,6 +32,10 @@ public record HearingSchedulerControl(
         }
         if (mode == SchedulerMode.OFF && legacyWorkState != LegacyWorkState.DRAINED) {
             throw new IllegalArgumentException("OFF requires proof that legacy work is drained");
+        }
+        if (mode == SchedulerMode.OFF && writerMode != HearingWriterMode.TEMPORAL) {
+            throw new IllegalArgumentException(
+                    "OFF must preserve the drained TEMPORAL Hearing writer identity");
         }
     }
 
@@ -48,23 +53,17 @@ public record HearingSchedulerControl(
 
     public static HearingSchedulerControl legacyExecutor() {
         return new HearingSchedulerControl(
-                SchedulerMode.EXECUTOR,
-                HearingWriterMode.LEGACY,
-                LegacyWorkState.ACTIVE);
+                SchedulerMode.EXECUTOR, HearingWriterMode.LEGACY, LegacyWorkState.ACTIVE);
     }
 
     public static HearingSchedulerControl futureTemporalDetector() {
         return new HearingSchedulerControl(
-                SchedulerMode.DETECTOR,
-                HearingWriterMode.TEMPORAL,
-                LegacyWorkState.DRAINED);
+                SchedulerMode.DETECTOR, HearingWriterMode.TEMPORAL, LegacyWorkState.DRAINED);
     }
 
     public static HearingSchedulerControl drainedOff() {
         return new HearingSchedulerControl(
-                SchedulerMode.OFF,
-                HearingWriterMode.LEGACY,
-                LegacyWorkState.DRAINED);
+                SchedulerMode.OFF, HearingWriterMode.TEMPORAL, LegacyWorkState.DRAINED);
     }
 
     public Decision decision() {

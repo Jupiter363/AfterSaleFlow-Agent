@@ -12,14 +12,17 @@ import com.example.dispute.infrastructure.persistence.entity.AgentRunEntity;
 import com.example.dispute.infrastructure.persistence.repository.AgentRunRepository;
 import com.example.dispute.workflow.config.AgentRunV2Properties;
 import com.example.dispute.workflow.config.AgentRunV2Properties.SchedulerMode;
+import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunExecutorKind;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunProtocol;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
-import java.util.List;
 import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -33,12 +36,23 @@ public class AgentRunRecoveryScheduler {
 
     private static final Logger LOGGER =
             LoggerFactory.getLogger(AgentRunRecoveryScheduler.class);
+    private static final String LEGACY_DETECTION_SQL = """
+            select count(*) as candidate_count,
+                   count(*) filter (where run_status = 'PENDING') as pending_count,
+                   count(*) filter (where run_status = 'RUNNING') as running_count
+              from agent_run
+             where protocol = 'agent_stream.v1'
+               and executor_kind = 'LEGACY_WORKER'
+               and stream_operation is not null
+               and run_status in ('PENDING', 'RUNNING')
+            """;
 
     private final AgentRunRepository runRepository;
     private final AgentRunWorker worker;
     private final AgentRunLifecycleService lifecycleService;
     private final AgentRunStreamEventService eventService;
     private final PostCommitSideEffectExecutor executor;
+    private final JdbcTemplate detectorJdbcTemplate;
     private final SchedulerMode schedulerMode;
     private final long staleAfterMillis;
 
@@ -55,12 +69,14 @@ public class AgentRunRecoveryScheduler {
             AgentRunStreamEventService eventService,
             PostCommitSideEffectExecutor executor,
             AppProperties properties,
-            AgentRunV2Properties v2Properties) {
+            AgentRunV2Properties v2Properties,
+            JdbcTemplate detectorJdbcTemplate) {
         this.runRepository = runRepository;
         this.worker = worker;
         this.lifecycleService = lifecycleService;
         this.eventService = eventService;
         this.executor = executor;
+        this.detectorJdbcTemplate = detectorJdbcTemplate;
         this.schedulerMode = v2Properties.schedulerMode();
         this.staleAfterMillis = Math.max(30_000L, properties.agent().timeoutMs() + 30_000L);
     }
@@ -77,7 +93,7 @@ public class AgentRunRecoveryScheduler {
             return;
         }
         if (schedulerMode == SchedulerMode.DETECTOR) {
-            detectTemporalOwnedRuns();
+            detectLegacyOwnedRuns();
             return;
         }
 
@@ -112,23 +128,47 @@ public class AgentRunRecoveryScheduler {
                 .forEach(this::failStale);
     }
 
-    private void detectTemporalOwnedRuns() {
-        List<AgentRunEntity> pending = temporalOwned("PENDING");
-        List<AgentRunEntity> running = temporalOwned("RUNNING");
-        if (!pending.isEmpty() || !running.isEmpty()) {
-            LOGGER.info(
-                    "Legacy AgentRun scheduler detected Temporal-owned runs without executing them: pending={}, running={}",
-                    pending.size(),
-                    running.size());
-        }
+    private void detectLegacyOwnedRuns() {
+        Map<String, Object> counts = detectorJdbcTemplate.queryForMap(LEGACY_DETECTION_SQL);
+        AgentRunDetection detection = AgentRunDetection.fromCounts(counts);
+        LOGGER.info(
+                "AgentRun legacy ownership detector completed a read-only full scan: candidates={}, pending={}, running={}, evidence_hash={}",
+                detection.candidateCount(),
+                detection.pendingCount(),
+                detection.runningCount(),
+                detection.evidenceHash());
     }
 
-    private List<AgentRunEntity> temporalOwned(String status) {
-        return runRepository
-                .findTop20ByProtocolAndExecutorKindAndRunStatusAndStreamOperationIsNotNullOrderByCreatedAtAsc(
-                        AgentRunProtocol.V2.wireValue(),
-                        AgentRunExecutorKind.TEMPORAL_ACTIVITY,
-                        status);
+    private record AgentRunDetection(
+            long candidateCount, long pendingCount, long runningCount, String evidenceHash) {
+
+        private static AgentRunDetection fromCounts(Map<String, Object> counts) {
+            long candidates = count(counts, "candidate_count");
+            long pending = count(counts, "pending_count");
+            long running = count(counts, "running_count");
+            if (candidates != pending + running) {
+                throw new IllegalStateException(
+                        "AgentRun detector aggregate is incomplete or inconsistent");
+            }
+            ObjectNode evidence = JsonNodeFactory.instance.objectNode();
+            evidence.put("schema_version", "agent-run-scheduler-detection.v1");
+            evidence.put("authority", "DOMAIN_POSTGRESQL_AGENT_RUN");
+            evidence.put("candidate_scope", "V1_LEGACY_WORKER_PENDING_OR_RUNNING");
+            evidence.put("candidate_count", candidates);
+            evidence.put("pending_count", pending);
+            evidence.put("running_count", running);
+            return new AgentRunDetection(
+                    candidates, pending, running, ContractJson.sha256Hex(evidence));
+        }
+
+        private static long count(Map<String, Object> counts, String field) {
+            Object value = counts.get(field);
+            if (!(value instanceof Number number) || number.longValue() < 0) {
+                throw new IllegalStateException(
+                        "AgentRun detector returned no complete " + field);
+            }
+            return number.longValue();
+        }
     }
 
     // 所属模块：【Agent 流式运行 / 应用编排层】「AgentRunRecoveryScheduler.failStale(AgentRunEntity)」。

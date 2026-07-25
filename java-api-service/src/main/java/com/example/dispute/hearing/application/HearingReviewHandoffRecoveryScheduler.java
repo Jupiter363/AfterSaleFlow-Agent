@@ -9,13 +9,15 @@ import com.example.dispute.workflow.recovery.hearing.HearingSchedulerControl;
 import com.example.dispute.workflow.recovery.hearing.HearingSchedulerDetector;
 import com.example.dispute.workflow.recovery.hearing.HearingSchedulerDetector.Detection;
 import com.example.dispute.workflow.recovery.hearing.HearingSchedulerDetector.DetectionOutcome;
-import java.util.Objects;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
+
+import java.util.Objects;
 
 /** Retries an idempotent V2-to-review handoff if the original post-commit task failed. */
 @Component
@@ -79,7 +81,8 @@ public class HearingReviewHandoffRecoveryScheduler {
             HearingSchedulerDetector detector) {
         this.artifactRepository =
                 Objects.requireNonNull(artifactRepository, "artifactRepository must not be null");
-        this.handoffService = Objects.requireNonNull(handoffService, "handoffService must not be null");
+        this.handoffService =
+                Objects.requireNonNull(handoffService, "handoffService must not be null");
         this.control = Objects.requireNonNull(control, "control must not be null");
         this.observations = Objects.requireNonNull(observations, "observations must not be null");
         this.detector = Objects.requireNonNull(detector, "detector must not be null");
@@ -89,14 +92,14 @@ public class HearingReviewHandoffRecoveryScheduler {
     public void recover() {
         switch (control.decision()) {
             case EXECUTE_LEGACY -> recoverLegacy();
-            case DETECT_ONLY -> inspectTemporalProjection();
+            case DETECT_ONLY -> observeLegacyCandidateParity();
             case SKIP -> {
                 // OFF is deliberately silent.
             }
         }
     }
 
-    private void inspectTemporalProjection() {
+    private void observeLegacyCandidateParity() {
         try {
             Detection detection = detector.inspectHandoffProjection();
             observations.record(Event.HANDOFF_SCHEDULER, detectionOutcome(detection.outcome()));
@@ -116,8 +119,7 @@ public class HearingReviewHandoffRecoveryScheduler {
 
     private void recoverLegacy() {
         artifactRepository
-                .findTop50ByArtifactTypeOrderByCreatedAtDesc(
-                        HearingArtifactType.ADJUDICATION_DRAFT)
+                .findTop50ByArtifactTypeOrderByCreatedAtDesc(HearingArtifactType.ADJUDICATION_DRAFT)
                 .forEach(this::recoverOne);
         observations.record(Event.HANDOFF_SCHEDULER, Outcome.EXECUTED);
     }

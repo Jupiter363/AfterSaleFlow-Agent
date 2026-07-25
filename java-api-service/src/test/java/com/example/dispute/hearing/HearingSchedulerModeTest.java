@@ -24,9 +24,11 @@ import com.example.dispute.workflow.recovery.hearing.HearingSchedulerControl.Sch
 import com.example.dispute.workflow.recovery.hearing.HearingSchedulerDetector;
 import com.example.dispute.workflow.recovery.hearing.HearingSchedulerDetector.Detection;
 import com.example.dispute.workflow.recovery.hearing.HearingSchedulerDetector.DetectorKind;
+
+import org.junit.jupiter.api.Test;
+
 import java.util.ArrayList;
 import java.util.List;
-import org.junit.jupiter.api.Test;
 
 class HearingSchedulerModeTest {
 
@@ -66,9 +68,10 @@ class HearingSchedulerModeTest {
             List<String> metrics = new ArrayList<>();
             HearingReliabilityObservationSink sink =
                     (event, outcome) -> metrics.add(event.name() + ":" + outcome.name());
-            HearingSchedulerControl control = mode == SchedulerMode.DETECTOR
-                    ? HearingSchedulerControl.futureTemporalDetector()
-                    : HearingSchedulerControl.drainedOff();
+            HearingSchedulerControl control =
+                    mode == SchedulerMode.DETECTOR
+                            ? HearingSchedulerControl.futureTemporalDetector()
+                            : HearingSchedulerControl.drainedOff();
             HearingSchedulerDetector detector = mock(HearingSchedulerDetector.class);
             when(detector.inspectDeadlineProjection())
                     .thenReturn(Detection.fromCounts(DetectorKind.DEADLINE_PROJECTION, 2, 0));
@@ -100,35 +103,54 @@ class HearingSchedulerModeTest {
 
     @Test
     void activeLegacyWorkCannotBeStrandedByDetectorOrOff() {
-        assertThatThrownBy(() ->
-                        new HearingSchedulerControl(
-                                SchedulerMode.DETECTOR,
-                                HearingWriterMode.LEGACY,
-                                LegacyWorkState.ACTIVE))
+        assertThatThrownBy(
+                        () ->
+                                new HearingSchedulerControl(
+                                        SchedulerMode.DETECTOR,
+                                        HearingWriterMode.LEGACY,
+                                        LegacyWorkState.ACTIVE))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("active legacy Hearing work requires");
-        assertThatThrownBy(() ->
-                        new HearingSchedulerControl(
-                                SchedulerMode.OFF,
-                                HearingWriterMode.LEGACY,
-                                LegacyWorkState.ACTIVE))
+        assertThatThrownBy(
+                        () ->
+                                new HearingSchedulerControl(
+                                        SchedulerMode.OFF,
+                                        HearingWriterMode.LEGACY,
+                                        LegacyWorkState.ACTIVE))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("active legacy Hearing work requires");
     }
 
     @Test
     void temporalExecutorAndUnknownConfigurationFailClosed() {
-        assertThatThrownBy(() ->
-                        new HearingSchedulerControl(
-                                SchedulerMode.EXECUTOR,
-                                HearingWriterMode.TEMPORAL,
-                                LegacyWorkState.DRAINED))
+        assertThatThrownBy(
+                        () ->
+                                new HearingSchedulerControl(
+                                        SchedulerMode.EXECUTOR,
+                                        HearingWriterMode.TEMPORAL,
+                                        LegacyWorkState.DRAINED))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("requires the legacy scheduler detector");
+                .hasMessageContaining("cannot use the legacy scheduler executor");
         assertThatThrownBy(() -> HearingSchedulerControl.configured("writer", "legacy", false))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("invalid Hearing scheduler authority");
         assertThat(HearingSchedulerControl.configured("detector", "temporal", true).decision())
                 .isEqualTo(Decision.DETECT_ONLY);
+    }
+
+    @Test
+    void drainedOffPreservesTemporalWriterAndRollsBackOnlyToDetector() {
+        HearingSchedulerControl off = HearingSchedulerControl.drainedOff();
+
+        assertThat(off.mode()).isEqualTo(SchedulerMode.OFF);
+        assertThat(off.writerMode()).isEqualTo(HearingWriterMode.TEMPORAL);
+        assertThat(off.legacyWorkState()).isEqualTo(LegacyWorkState.DRAINED);
+        assertThat(off.decision()).isEqualTo(Decision.SKIP);
+        assertThat(HearingSchedulerControl.configured("off", "temporal", true)).isEqualTo(off);
+        assertThat(HearingSchedulerControl.futureTemporalDetector().writerMode())
+                .isEqualTo(off.writerMode());
+        assertThatThrownBy(() -> HearingSchedulerControl.configured("off", "legacy", true))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("invalid Hearing scheduler authority");
     }
 }
