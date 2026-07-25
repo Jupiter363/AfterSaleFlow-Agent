@@ -339,6 +339,23 @@ def test_candidate_scope_requires_additive_v045_and_rejects_prior_migration(
         runner.capture_source_tree(CANDIDATE)
 
 
+def test_candidate_scope_allows_only_exact_approval_record_entity_path() -> None:
+    approved = (
+        "java-api-service/src/main/java/com/example/dispute/infrastructure/"
+        "persistence/entity/ApprovalRecordEntity.java"
+    )
+    entity_directory = approved.rsplit("/", 1)[0] + "/"
+    sibling = entity_directory + "ApprovalAuditEntity.java"
+
+    assert approved in runner.ALLOWED_CANDIDATE_EXACT
+    assert runner._path_allowed(approved)
+    assert not any(
+        approved.startswith(prefix) for prefix in runner.ALLOWED_CANDIDATE_PREFIXES
+    )
+    assert not runner._path_allowed(entity_directory)
+    assert not runner._path_allowed(sibling)
+
+
 def test_candidate_scope_accepts_only_pinned_governance_compatibility_drift(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
