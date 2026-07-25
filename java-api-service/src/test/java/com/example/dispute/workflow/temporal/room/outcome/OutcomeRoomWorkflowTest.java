@@ -1,6 +1,7 @@
 package com.example.dispute.workflow.temporal.room.outcome;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.time.Instant;
 import java.util.Map;
@@ -104,6 +105,49 @@ class OutcomeRoomWorkflowTest {
     assertThat(rejected.phase()).isEqualTo(OutcomeWorkflowKernel.Phase.EXECUTING);
     assertThat(rejected.rejectedSignalCount()).isEqualTo(2);
     assertThat(rejected.revision()).isEqualTo(4);
+  }
+
+  @Test
+  void exactNextRevisionIsAdmittedWhenTheOutOfOrderBufferIsFull() {
+    OutcomeWorkflowKernel kernel = kernel();
+    for (long revision = 2; revision <= OutcomeWorkflowKernel.MAX_PENDING_RECEIPTS + 1L;
+        revision++) {
+      kernel.submit(decision(
+          OutcomeWorkflowKernel.Decision.REJECT,
+          revision - 1,
+          revision,
+          "FUTURE_DECISION_" + revision));
+    }
+    assertThat(kernel.snapshot().pendingRevisions())
+        .hasSize(OutcomeWorkflowKernel.MAX_PENDING_RECEIPTS);
+
+    kernel.submit(decision(
+        OutcomeWorkflowKernel.Decision.REJECT,
+        OutcomeWorkflowKernel.MAX_PENDING_RECEIPTS + 1L,
+        OutcomeWorkflowKernel.MAX_PENDING_RECEIPTS + 2L,
+        "REJECTED_FUTURE_DECISION"));
+    kernel.submit(decision(OutcomeWorkflowKernel.Decision.REJECT, 0, 1, "GAP_FILLER"));
+
+    OutcomeWorkflowKernel.Snapshot terminal = kernel.snapshot();
+    assertThat(terminal.phase()).isEqualTo(OutcomeWorkflowKernel.Phase.REJECTED);
+    assertThat(terminal.revision()).isEqualTo(1);
+    assertThat(terminal.terminalReviewReceiptId()).isEqualTo("GAP_FILLER");
+    assertThat(terminal.rejectedSignalCount()).isEqualTo(1);
+    assertThat(terminal.protocolErrorCode()).isEqualTo("OUTCOME_PENDING_RECEIPT_LIMIT");
+  }
+
+  @Test
+  void arithmeticNarrowingRejectsValuesOutsideTheKernelBoundsBeforeCasting() {
+    assertThatThrownBy(() -> OutcomeRoomWorkflowImpl.boundedOperationCount(-1))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> OutcomeRoomWorkflowImpl.boundedOperationCount(65))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> OutcomeRoomWorkflowImpl.boundedOperationSequence(0))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> OutcomeRoomWorkflowImpl.boundedOperationSequence(Long.MAX_VALUE))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThat(OutcomeRoomWorkflowImpl.boundedOperationCount(64)).isEqualTo(64);
+    assertThat(OutcomeRoomWorkflowImpl.boundedOperationSequence(64)).isEqualTo(64);
   }
 
   private static OutcomeWorkflowKernel kernel() {

@@ -31,11 +31,12 @@ class OutcomeRoomWorkflowReplayTest {
 
   private TestWorkflowEnvironment environment;
   private WorkflowClient client;
+  private Worker worker;
 
   @BeforeEach
   void setUp() {
     environment = TestWorkflowEnvironment.newInstance();
-    Worker worker = environment.newWorker(TASK_QUEUE);
+    worker = environment.newWorker(TASK_QUEUE);
     worker.registerWorkflowImplementationTypes(OutcomeRoomWorkflowImpl.class);
     environment.start();
     client = environment.getWorkflowClient();
@@ -166,6 +167,38 @@ class OutcomeRoomWorkflowReplayTest {
     assertThat(result.phase()).isEqualTo(OutcomeWireTypes.ProjectionPhase.DECISION_COMMITTED);
     assertThat(result.terminalReviewReceiptRef()).isEqualTo(committedBeforeDeadline.receiptId());
     replay(started.workflowId());
+  }
+
+  @Test
+  void persistedSignalInboxExhaustionTerminatesInManualRecoveryAndReplays() throws Exception {
+    Instant now = Instant.ofEpochMilli(environment.currentTimeMillis());
+    OutcomeWorkflowStart start = OutcomeReceiptTestFactory.start(now, Duration.ofMinutes(5), 0);
+    OutcomeReceiptTestFactory receipts = new OutcomeReceiptTestFactory(start);
+    OutcomeReviewDecisionReceipt decision = receipts.decision(
+        OutcomeWireTypes.ReviewDecision.REJECT, 0, 1, now.plusSeconds(1));
+    String workflowId = start.workflowId() + "_inbox-exhaustion";
+    OutcomeRoomWorkflow workflow = client.newWorkflowStub(
+        OutcomeRoomWorkflow.class,
+        WorkflowOptions.newBuilder()
+            .setWorkflowId(workflowId)
+            .setTaskQueue(TASK_QUEUE)
+            .build());
+
+    worker.suspendPolling();
+    try {
+      WorkflowClient.start(workflow::run, start);
+      for (int signal = 0; signal <= OutcomeRoomWorkflowImpl.MAX_INBOX_EVENTS; signal++) {
+        workflow.reviewDecisionCommitted(decision);
+      }
+    } finally {
+      worker.resumePolling();
+    }
+
+    OutcomeProjection result = WorkflowStub.fromTyped(workflow).getResult(OutcomeProjection.class);
+    assertThat(result.phase()).isEqualTo(OutcomeWireTypes.ProjectionPhase.MANUAL_RECOVERY);
+    assertThat(result.terminalReviewReceiptRef()).isNull();
+    assertThat(result.unresolvedManualRecoveryCount()).isEqualTo(1);
+    replay(workflowId);
   }
 
   private Started start(String suffix, int operationCount) {

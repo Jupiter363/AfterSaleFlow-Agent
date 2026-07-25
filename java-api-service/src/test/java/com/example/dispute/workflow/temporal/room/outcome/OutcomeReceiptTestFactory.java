@@ -55,6 +55,7 @@ final class OutcomeReceiptTestFactory {
         EPOCH,
         0,
         FENCE,
+        now,
         now.plus(reviewWindow),
         OutcomeWireTypes.RuntimeMode.TEMPORAL,
         "outcome_workflow_v1",

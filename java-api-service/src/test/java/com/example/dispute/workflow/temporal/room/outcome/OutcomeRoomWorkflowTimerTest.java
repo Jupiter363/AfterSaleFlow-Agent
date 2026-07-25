@@ -27,11 +27,12 @@ class OutcomeRoomWorkflowTimerTest {
 
   private TestWorkflowEnvironment environment;
   private WorkflowClient client;
+  private Worker worker;
 
   @BeforeEach
   void setUp() {
     environment = TestWorkflowEnvironment.newInstance();
-    Worker worker = environment.newWorker(TASK_QUEUE);
+    worker = environment.newWorker(TASK_QUEUE);
     worker.registerWorkflowImplementationTypes(OutcomeRoomWorkflowImpl.class);
     environment.start();
     client = environment.getWorkflowClient();
@@ -162,6 +163,40 @@ class OutcomeRoomWorkflowTimerTest {
     assertThat(result.phase()).isEqualTo(OutcomeWireTypes.ProjectionPhase.SLA_ESCALATED);
     assertThat(result.terminalReviewReceiptRef()).isEqualTo(firstRevisionSla.receiptId());
     replay(started.workflowId());
+  }
+
+  @Test
+  void delayedWorkerStartUsesTheDurableReviewOpenedAtAndReplays() throws Exception {
+    Instant workflowStartAt = Instant.ofEpochMilli(environment.currentTimeMillis());
+    Instant reviewOpenedAt = workflowStartAt.minusSeconds(10);
+    OutcomeWorkflowStart start = OutcomeReceiptTestFactory.start(
+        reviewOpenedAt, Duration.ofMinutes(1), 0);
+    OutcomeReceiptTestFactory receipts = new OutcomeReceiptTestFactory(start);
+    OutcomeReviewDecisionReceipt decision = receipts.decision(
+        OutcomeWireTypes.ReviewDecision.REJECT,
+        0,
+        1,
+        reviewOpenedAt.plusSeconds(1));
+    OutcomeRoomWorkflow workflow = client.newWorkflowStub(
+        OutcomeRoomWorkflow.class,
+        WorkflowOptions.newBuilder()
+            .setWorkflowId(start.workflowId())
+            .setTaskQueue(TASK_QUEUE)
+            .build());
+
+    worker.suspendPolling();
+    try {
+      WorkflowClient.start(workflow::run, start);
+      workflow.reviewDecisionCommitted(decision);
+      environment.sleep(Duration.ofSeconds(5));
+    } finally {
+      worker.resumePolling();
+    }
+
+    OutcomeProjection result = WorkflowStub.fromTyped(workflow).getResult(OutcomeProjection.class);
+    assertThat(result.phase()).isEqualTo(OutcomeWireTypes.ProjectionPhase.DECISION_COMMITTED);
+    assertThat(result.terminalReviewReceiptRef()).isEqualTo(decision.receiptId());
+    replay(start.workflowId());
   }
 
   private Started start(Duration reviewWindow, int operationCount) {

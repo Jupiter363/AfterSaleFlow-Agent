@@ -16,7 +16,6 @@ import io.temporal.workflow.CancellationScope;
 import io.temporal.workflow.Promise;
 import io.temporal.workflow.Workflow;
 import java.time.Duration;
-import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.List;
 import java.util.Objects;
@@ -24,7 +23,7 @@ import java.util.Objects;
 /** Deterministic, receipt-driven Outcome kernel with no Activities or external reads. */
 public final class OutcomeRoomWorkflowImpl implements OutcomeRoomWorkflow {
 
-  private static final int MAX_INBOX_EVENTS = 256;
+  static final int MAX_INBOX_EVENTS = OutcomeWorkflowKernel.MAX_RECEIPTS;
 
   private final ArrayDeque<WorkflowEvent> inbox = new ArrayDeque<>();
   private OutcomeWorkflowStart start;
@@ -32,6 +31,7 @@ public final class OutcomeRoomWorkflowImpl implements OutcomeRoomWorkflow {
   private CancellationScope reviewTimerScope;
   private Promise<Void> reviewTimer;
   private Promise<Void> reviewTimerCallback;
+  private boolean inboxCapacityExceeded;
 
   @Override
   public OutcomeProjection run(OutcomeWorkflowStart start) {
@@ -39,27 +39,30 @@ public final class OutcomeRoomWorkflowImpl implements OutcomeRoomWorkflow {
       throw new IllegalStateException("Outcome workflow was initialized more than once");
     }
     this.start = Objects.requireNonNull(start, "start must not be null");
-    if (start.requiredOperationCount() > OutcomeWorkflowKernel.MAX_OPERATIONS) {
-      throw new IllegalArgumentException("requiredOperationCount exceeds the workflow bound");
-    }
+    boundedOperationCount(start.requiredOperationCount());
     if (start.runtimeMode() == OutcomeWireTypes.RuntimeMode.DISABLED) {
       throw new IllegalArgumentException("DISABLED mode cannot start an Outcome workflow");
     }
-    Instant openedAt = Instant.ofEpochMilli(Workflow.currentTimeMillis());
     kernel = new OutcomeWorkflowKernel(new OutcomeWorkflowKernel.Start(
         start.workflowId(),
         start.caseId(),
         start.epoch(),
         start.fence(),
         start.revision(),
-        openedAt,
+        start.reviewOpenedAt(),
         start.reviewDeadlineAt(),
         start.runtimeMode(),
         start.syntheticOnly()));
 
+    if (inboxCapacityExceeded) {
+      kernel.failCapacity("OUTCOME_SIGNAL_INBOX_LIMIT");
+    }
     while (!kernel.snapshot().phase().terminal()) {
       synchronizeReviewTimer();
-      Workflow.await(() -> !inbox.isEmpty());
+      Workflow.await(() -> kernel.snapshot().phase().terminal() || !inbox.isEmpty());
+      if (kernel.snapshot().phase().terminal()) {
+        break;
+      }
       WorkflowEvent event = inbox.removeFirst();
       if (event.type() == EventType.REVIEW_DEADLINE) {
         clearReviewTimer();
@@ -154,7 +157,8 @@ public final class OutcomeRoomWorkflowImpl implements OutcomeRoomWorkflow {
         failed,
         inFlight,
         compensationInFlight,
-        state.phase() == OutcomeWorkflowKernel.Phase.MANUAL_RECOVERY_REQUIRED ? 1 : 0,
+        state.phase() == OutcomeWorkflowKernel.Phase.MANUAL_RECOVERY_REQUIRED
+            || state.phase() == OutcomeWorkflowKernel.Phase.FAILED ? 1 : 0,
         state.closureReceiptId(),
         state.closureReceiptHash(),
         state.evaluationReceiptId(),
@@ -257,7 +261,7 @@ public final class OutcomeRoomWorkflowImpl implements OutcomeRoomWorkflow {
         decision.authorizesExecution() ? value.approvedActionSnapshotHash() : null,
         decision.authorizesExecution() ? value.requiredOperationSetRef() : null,
         decision.authorizesExecution() ? value.requiredOperationSetHash() : null,
-        decision.authorizesExecution() ? Math.toIntExact(value.requiredOperationCount()) : 0,
+        decision.authorizesExecution() ? boundedOperationCount(value.requiredOperationCount()) : 0,
         value.committedAt(),
         value.syntheticOnly()));
   }
@@ -295,7 +299,8 @@ public final class OutcomeRoomWorkflowImpl implements OutcomeRoomWorkflow {
         value.commandId(), value.requestHash(), value.sourceRevision(), value.revision(),
         value.committedEventSequence(), value.operationId(), value.operationKeyHash(),
         value.requestHash(), value.externalIdempotencyKeyHash(),
-        Math.toIntExact(value.operationSequence()), value.requiredForClosure(), value.compensable(),
+        boundedOperationSequence(value.operationSequence()), value.requiredForClosure(),
+        value.compensable(),
         value.attemptNo(), value.runtimeMode(), value.syntheticOnly(),
         value.syntheticNoopMarker() != null));
   }
@@ -307,7 +312,8 @@ public final class OutcomeRoomWorkflowImpl implements OutcomeRoomWorkflow {
         value.receiptId(), value.receiptHash(), value.sourceRevision(), value.revision(),
         value.committedEventSequence(), value.operationId(), value.operationKeyHash(),
         value.requestHash(), value.externalIdempotencyKeyHash(),
-        Math.toIntExact(value.operationSequence()), value.requiredForClosure(), value.compensable(),
+        boundedOperationSequence(value.operationSequence()), value.requiredForClosure(),
+        value.compensable(),
         OutcomeWorkflowKernel.TerminalStatus.valueOf(value.terminalStatus().name()),
         value.resultRef(), value.resultHash(), value.runtimeMode(), value.syntheticNoop()));
   }
@@ -319,7 +325,8 @@ public final class OutcomeRoomWorkflowImpl implements OutcomeRoomWorkflow {
         value.observationId(), value.observationHash(), value.sourceRevision(), value.revision(),
         value.committedEventSequence(), value.operationId(), value.operationKeyHash(),
         value.requestHash(), value.externalIdempotencyKeyHash(),
-        Math.toIntExact(value.operationSequence()), value.requiredForClosure(), value.compensable(),
+        boundedOperationSequence(value.operationSequence()), value.requiredForClosure(),
+        value.compensable(),
         value.observationId(), value.observationHash()));
   }
 
@@ -330,7 +337,8 @@ public final class OutcomeRoomWorkflowImpl implements OutcomeRoomWorkflow {
         value.receiptId(), value.receiptHash(), value.sourceRevision(), value.revision(),
         value.committedEventSequence(), value.operationId(), value.operationKeyHash(),
         value.requestHash(), value.externalIdempotencyKeyHash(),
-        Math.toIntExact(value.operationSequence()), value.requiredForClosure(), value.compensable(),
+        boundedOperationSequence(value.operationSequence()), value.requiredForClosure(),
+        value.compensable(),
         value.observationId(),
         OutcomeWorkflowKernel.ReconciliationResolution.valueOf(value.resolution().name()),
         value.authoritativeReceiptRef(), value.authoritativeReceiptHash()));
@@ -417,7 +425,9 @@ public final class OutcomeRoomWorkflowImpl implements OutcomeRoomWorkflow {
     }
     if (inbox.size() >= MAX_INBOX_EVENTS) {
       if (kernel != null) {
-        kernel.rejectMalformed("OUTCOME_SIGNAL_INBOX_LIMIT");
+        kernel.failCapacity("OUTCOME_SIGNAL_INBOX_LIMIT");
+      } else {
+        inboxCapacityExceeded = true;
       }
       return;
     }
@@ -484,6 +494,20 @@ public final class OutcomeRoomWorkflowImpl implements OutcomeRoomWorkflow {
       case JAVA_SIGNED_SYNTHETIC_NOOP_SHADOW -> OutcomeWireTypes.WriterMode.SHADOW;
       case TEMPORAL -> OutcomeWireTypes.WriterMode.TEMPORAL;
     };
+  }
+
+  static int boundedOperationCount(long value) {
+    if (value < 0 || value > OutcomeWorkflowKernel.MAX_OPERATIONS) {
+      throw new IllegalArgumentException("requiredOperationCount must be between 0 and 64");
+    }
+    return (int) value;
+  }
+
+  static int boundedOperationSequence(long value) {
+    if (value < 1 || value > OutcomeWorkflowKernel.MAX_OPERATIONS) {
+      throw new IllegalArgumentException("operationSequence must be between 1 and 64");
+    }
+    return (int) value;
   }
 
   private enum EventType {

@@ -13,7 +13,8 @@ import java.util.TreeMap;
 /** Pure deterministic state machine behind the unregistered Outcome Workflow. */
 final class OutcomeWorkflowKernel {
 
-  static final int MAX_RECEIPTS = 256;
+  // 384 is the one-retry, 64-operation compensation maximum; retain recovery headroom.
+  static final int MAX_RECEIPTS = 512;
   static final int MAX_PENDING_RECEIPTS = 128;
   static final int MAX_OPERATIONS = 64;
 
@@ -488,7 +489,7 @@ final class OutcomeWorkflowKernel {
       return;
     }
     if (observedReceipts.size() >= MAX_RECEIPTS) {
-      reject("OUTCOME_ACCEPTED_RECEIPT_LIMIT");
+      fail("OUTCOME_ACCEPTED_RECEIPT_LIMIT");
       return;
     }
     if (!receipt.authority().matches(start)) {
@@ -514,7 +515,11 @@ final class OutcomeWorkflowKernel {
       reject("OUTCOME_RECEIPT_REVISION_CONFLICT");
       return;
     }
-    if (priorRevision == null && pendingReceipts.size() >= MAX_PENDING_RECEIPTS) {
+    boolean fillsNextGap = receipt.sourceRevision() == revision
+        && receipt.revision() == revision + 1;
+    if (priorRevision == null
+        && pendingReceipts.size() >= MAX_PENDING_RECEIPTS
+        && !fillsNextGap) {
       reject("OUTCOME_PENDING_RECEIPT_LIMIT");
       return;
     }
@@ -526,6 +531,10 @@ final class OutcomeWorkflowKernel {
 
   void rejectMalformed(String code) {
     reject(code);
+  }
+
+  void failCapacity(String code) {
+    fail(code);
   }
 
   Snapshot snapshot() {
