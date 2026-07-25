@@ -74,7 +74,9 @@ class OutcomeProtocolCompatibilityTest {
     void compatibilityMatrixFreezesTimeCausalityAndOperationBounds() throws IOException {
         Map<String, Object> matrix = new Yaml().load(
                 java.nio.file.Files.readString(CONTRACT_ROOT.resolve("compatibility-matrix.yaml")));
-        Map<String, Object> invariants = map(map(matrix.get("wire_protocol")).get("invariants"));
+        Map<String, Object> wire = map(matrix.get("wire_protocol"));
+        Map<String, Object> invariants = map(wire.get("invariants"));
+        Map<String, Object> semantic = map(wire.get("semantic_conformance"));
 
         assertThat(invariants).containsEntry(
                 "review_time_authority", "JAVA_IMMUTABLE_REVIEW_OPENED_AT");
@@ -84,6 +86,15 @@ class OutcomeProtocolCompatibilityTest {
                 "causal_revision", "REVISION_EQUALS_SOURCE_REVISION_PLUS_ONE");
         assertThat(invariants).containsEntry("committed_event_sequence", "POSITIVE");
         assertThat(invariants).containsEntry("operation_sequence", "BOUNDED_1_TO_64");
+        assertThat(semantic).containsEntry(
+                "protocol_version", OutcomeSemanticConformance.PROTOCOL_VERSION);
+        assertThat(semantic).containsEntry(
+                "manifest", OutcomeSemanticConformance.MANIFEST_FILE);
+        assertThat(semantic).containsEntry("raw_schema_only_validation", "NON_CONFORMANT");
+        assertThat(semantic).containsEntry("validity_claim_without_all_stages", "FORBIDDEN");
+        assertThat(semantic).containsEntry("unsupported_protocol_or_rule", "REJECT");
+        assertThat(semantic.get("required_stages"))
+                .isEqualTo(List.of("DRAFT_2020_12_SCHEMA", "OUTCOME_SEMANTIC_RULES_V1"));
     }
 
     @Test

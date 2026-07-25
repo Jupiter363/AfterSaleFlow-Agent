@@ -7,6 +7,9 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.networknt.schema.JsonSchema;
+import com.networknt.schema.JsonSchemaFactory;
+import com.networknt.schema.SpecVersion;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -18,6 +21,7 @@ import java.util.TreeSet;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
@@ -228,6 +232,100 @@ class OutcomeWireContractTest {
     }
 
     @Test
+    void rawDraft202012ValidationCannotClaimFullContractValidity() throws IOException {
+        JsonNode manifest = MAPPER.readTree(
+                CONTRACT_ROOT.resolve(OutcomeSemanticConformance.MANIFEST_FILE).toFile());
+        assertThat(manifest.required("raw_schema_only_validation").asText())
+                .isEqualTo("NON_CONFORMANT");
+        assertThat(manifest.required("validity_claim_without_all_stages").asText())
+                .isEqualTo("FORBIDDEN");
+        assertThat(java.util.stream.StreamSupport.stream(
+                        manifest.required("required_stages").spliterator(), false)
+                .map(JsonNode::asText)
+                .toList())
+                .containsExactly("DRAFT_2020_12_SCHEMA", "OUTCOME_SEMANTIC_RULES_V1");
+
+        Map<String, SemanticCase> semanticCases = Map.of(
+                "outcome-workflow-start-invalid-review-window.json",
+                new SemanticCase(
+                        "outcome-workflow-start.schema.json", "review-window-order.v1"),
+                "outcome-reviewer-decision-revision-gap.json",
+                new SemanticCase(
+                        "outcome-reviewer-decision-receipt.schema.json",
+                        "causal-revision-adjacency.v1"));
+        JsonSchemaFactory rawFactory =
+                JsonSchemaFactory.getInstance(SpecVersion.VersionFlag.V202012);
+
+        for (Map.Entry<String, SemanticCase> entry : semanticCases.entrySet()) {
+            JsonNode fixture = MAPPER.readTree(
+                    FIXTURES.resolve("invalid").resolve(entry.getKey()).toFile());
+            JsonSchema rawSchema = rawFactory.getSchema(MAPPER.readTree(
+                    CONTRACT_ROOT.resolve(entry.getValue().schemaFile()).toFile()));
+
+            assertThat(rawSchema.validate(fixture))
+                    .as("raw Draft 2020-12 intentionally cannot evaluate " + entry.getKey())
+                    .isEmpty();
+            assertThatThrownBy(() -> codec.validate(entry.getValue().schemaFile(), fixture))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining(entry.getValue().ruleId());
+        }
+    }
+
+    @Test
+    void semanticManifestAndSchemaDeclarationsAreClosedAndComplete() throws IOException {
+        OutcomeSemanticConformance conformance = OutcomeSemanticConformance.load(
+                CONTRACT_ROOT, MAPPER, codec.schemaFiles());
+        Set<String> annotatedSchemas = new TreeSet<>();
+        for (String schemaFile : codec.schemaFiles()) {
+            JsonNode schema = MAPPER.readTree(CONTRACT_ROOT.resolve(schemaFile).toFile());
+            JsonNode declaration = schema.get("x-semantic-conformance");
+            if (declaration != null) {
+                annotatedSchemas.add(schemaFile);
+                assertThat(declaration.required("protocol_version").asText())
+                        .isEqualTo(OutcomeSemanticConformance.PROTOCOL_VERSION);
+                assertThat(declaration.required("manifest").asText())
+                        .isEqualTo(OutcomeSemanticConformance.MANIFEST_FILE);
+                assertThat(declaration.required("raw_schema_only_validation").asText())
+                        .isEqualTo(OutcomeSemanticConformance.RAW_SCHEMA_ONLY_STATUS);
+            }
+        }
+
+        assertThat(annotatedSchemas).containsExactlyInAnyOrder(
+                "outcome-workflow-start.schema.json",
+                "outcome-reviewer-decision-receipt.schema.json",
+                "outcome-sla-escalation-receipt.schema.json",
+                "outcome-operation-command.schema.json",
+                "outcome-operation-receipt.schema.json",
+                "outcome-execution-attempt-observation.schema.json",
+                "outcome-attempt-reconciliation-receipt.schema.json",
+                "outcome-compensation-receipt.schema.json",
+                "outcome-closure-receipt.schema.json",
+                "outcome-evaluation-receipt.schema.json");
+        assertThat(conformance.ruleIds("outcome-workflow-start.schema.json"))
+                .containsExactly("review-window-order.v1");
+        assertThat(conformance.ruleIds("outcome-operation-receipt.schema.json"))
+                .containsExactly("causal-revision-adjacency.v1");
+        assertThat(conformance.ruleIds("outcome-process-projection.schema.json")).isEmpty();
+    }
+
+    @Test
+    void unsupportedOrDriftedSemanticProfileFailsClosedAtCodecStartup(@TempDir Path tempDir)
+            throws IOException {
+        Path copy = tempDir.resolve("outcome-v1");
+        copyContractRoot(copy);
+        Path workflowSchema = copy.resolve("outcome-workflow-start.schema.json");
+        ObjectNode schema = (ObjectNode) MAPPER.readTree(workflowSchema.toFile());
+        ((ObjectNode) schema.required("x-semantic-conformance"))
+                .put("protocol_version", "outcome-semantic-conformance.v2");
+        MAPPER.writeValue(workflowSchema.toFile(), schema);
+
+        assertThatThrownBy(() -> new OutcomeContractCodec(copy))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining(OutcomeSemanticConformance.MANIFEST_FILE)
+                .hasMessageContaining("protocol_version");
+    }
+
+    @Test
     void ambiguousIsObservationOnlyAndNeverAnAuthoritativeTerminalStatus() {
         assertThat(OutcomeWireTypes.TerminalStatus.values())
                 .containsExactly(OutcomeWireTypes.TerminalStatus.SUCCEEDED, OutcomeWireTypes.TerminalStatus.FAILED);
@@ -288,10 +386,25 @@ class OutcomeWireContractTest {
         }
     }
 
+    private static void copyContractRoot(Path destination) throws IOException {
+        try (Stream<Path> paths = Files.walk(CONTRACT_ROOT)) {
+            for (Path source : paths.toList()) {
+                Path target = destination.resolve(CONTRACT_ROOT.relativize(source));
+                if (Files.isDirectory(source)) {
+                    Files.createDirectories(target);
+                } else {
+                    Files.copy(source, target);
+                }
+            }
+        }
+    }
+
     private static Map.Entry<String, ContractCase> entry(
             String fixtureName, String schemaFile, Class<?> javaType) {
         return Map.entry(fixtureName, new ContractCase(schemaFile, javaType));
     }
 
     private record ContractCase(String schemaFile, Class<?> javaType) {}
+
+    private record SemanticCase(String schemaFile, String ruleId) {}
 }

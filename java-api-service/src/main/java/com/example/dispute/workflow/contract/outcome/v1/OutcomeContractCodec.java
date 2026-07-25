@@ -15,7 +15,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
@@ -41,6 +40,7 @@ public final class OutcomeContractCodec {
 
     private final ObjectMapper mapper;
     private final Map<String, JsonSchema> schemas;
+    private final OutcomeSemanticConformance semanticConformance;
 
     public OutcomeContractCodec(Path contractRoot) {
         mapper = JsonMapper.builder().findAndAddModules().build();
@@ -58,6 +58,8 @@ public final class OutcomeContractCodec {
             }
         }
         schemas = Map.copyOf(loaded);
+        semanticConformance = OutcomeSemanticConformance.load(
+                contractRoot, mapper, schemas.keySet());
     }
 
     public Set<String> schemaFiles() {
@@ -106,28 +108,9 @@ public final class OutcomeContractCodec {
                     .collect(Collectors.joining("; "));
             throw new IllegalArgumentException(schemaFile + " is invalid: " + detail);
         }
-        validateJavaSemantics(schemaFile, instance);
+        semanticConformance.validate(schemaFile, instance);
         if ("outcome-process-projection.schema.json".equals(schemaFile)) {
             validateProjectionSemantics(instance);
-        }
-    }
-
-    private static void validateJavaSemantics(String schemaFile, JsonNode instance) {
-        try {
-            if ("outcome-workflow-start.schema.json".equals(schemaFile)) {
-                OutcomeWireTypes.reviewWindow(
-                        Instant.parse(instance.required("review_opened_at").textValue()),
-                        Instant.parse(instance.required("review_deadline_at").textValue()));
-            }
-            if (instance.has("source_revision")) {
-                OutcomeWireTypes.eventOrder(
-                        instance.required("source_revision").longValue(),
-                        instance.required("revision").longValue(),
-                        instance.required("committed_event_sequence").longValue());
-            }
-        } catch (RuntimeException exception) {
-            throw new IllegalArgumentException(
-                    schemaFile + " is invalid: " + exception.getMessage(), exception);
         }
     }
 

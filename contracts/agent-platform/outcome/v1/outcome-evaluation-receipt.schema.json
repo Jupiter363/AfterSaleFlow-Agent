@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema", "$id": "https://schemas.after-sale-flow.example/agent-platform/outcome/v1/outcome-evaluation-receipt.schema.json", "title": "Outcome Evaluation Receipt v1",
   "type": "object", "additionalProperties": false, "x-max-encoded-bytes": 32768,
+  "x-semantic-conformance": {"protocol_version": "outcome-semantic-conformance.v1", "manifest": "outcome-semantic-conformance.v1.json", "raw_schema_only_validation": "NON_CONFORMANT", "required_rules": ["causal-revision-adjacency.v1"]},
   "required": ["schema_version", "workflow_id", "case_id", "receipt_id", "receipt_hash", "closed_snapshot_ref", "closed_snapshot_hash", "evaluation_ledger_ref", "evaluation_ledger_hash", "status", "evaluated_at", "epoch", "source_revision", "revision", "fence", "committed_event_sequence", "case_reopened"],
   "properties": {
     "schema_version": {"const": "outcome-evaluation-receipt.v1"}, "workflow_id": {"$ref": "#/$defs/id"}, "case_id": {"$ref": "#/$defs/id"}, "receipt_id": {"$ref": "#/$defs/id"}, "receipt_hash": {"$ref": "#/$defs/hash"}, "closed_snapshot_ref": {"$ref": "#/$defs/ref"}, "closed_snapshot_hash": {"$ref": "#/$defs/hash"}, "evaluation_ledger_ref": {"$ref": "#/$defs/ref"}, "evaluation_ledger_hash": {"$ref": "#/$defs/hash"}, "status": {"enum": ["SUCCEEDED", "FAILED", "MANUAL_RECOVERY_PENDING"]}, "evaluated_at": {"$ref": "#/$defs/timestamp"},

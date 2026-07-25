@@ -522,6 +522,14 @@ wire_protocol:
   schema_version: outcome-wire-protocol.v1
   maximum_encoded_bytes: 32768
   unknown_fields: reject
+  semantic_conformance:
+    protocol_version: outcome-semantic-conformance.v1
+    manifest: outcome-semantic-conformance.v1.json
+    raw_schema_only_validation: NON_CONFORMANT
+    required_stages: [DRAFT_2020_12_SCHEMA, OUTCOME_SEMANTIC_RULES_V1]
+    validity_rule: ALL_REQUIRED_STAGES_MUST_PASS
+    validity_claim_without_all_stages: FORBIDDEN
+    unsupported_protocol_or_rule: REJECT
   java_package: com.example.dispute.workflow.contract.outcome.v1
   contracts:
     - {schema_file: outcome-workflow-start.schema.json, schema_version: outcome-workflow-start.v1, java_type: OutcomeWorkflowStart}

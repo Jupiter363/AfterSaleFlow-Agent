@@ -5,6 +5,7 @@
   "type": "object",
   "additionalProperties": false,
   "x-max-encoded-bytes": 32768,
+  "x-semantic-conformance": {"protocol_version": "outcome-semantic-conformance.v1", "manifest": "outcome-semantic-conformance.v1.json", "raw_schema_only_validation": "NON_CONFORMANT", "required_rules": ["review-window-order.v1"]},
   "required": ["schema_version", "workflow_id", "case_id", "review_task_id", "frozen_review_packet_ref", "frozen_review_packet_hash", "adjudication_draft_ref", "adjudication_draft_hash", "action_snapshot_ref", "action_snapshot_hash", "required_operation_set_ref", "required_operation_set_hash", "required_operation_count", "epoch", "revision", "fence", "review_opened_at", "review_deadline_at", "runtime_mode", "workflow_build", "policy_version", "graph_version", "prompt_version", "model_profile", "synthetic_only"],
   "properties": {
     "schema_version": {"const": "outcome-workflow-start.v1"},

@@ -1,0 +1,46 @@
+{
+  "protocol_version": "outcome-semantic-conformance.v1",
+  "raw_schema_only_validation": "NON_CONFORMANT",
+  "validity_rule": "ALL_REQUIRED_STAGES_MUST_PASS",
+  "validity_claim_without_all_stages": "FORBIDDEN",
+  "unsupported_protocol_or_rule": "REJECT",
+  "required_stages": ["DRAFT_2020_12_SCHEMA", "OUTCOME_SEMANTIC_RULES_V1"],
+  "rules": [
+    {
+      "rule_id": "review-window-order.v1",
+      "operator": "INSTANT_STRICTLY_BEFORE",
+      "left_field": "review_opened_at",
+      "right_field": "review_deadline_at",
+      "schema_files": ["outcome-workflow-start.schema.json"],
+      "negative_fixtures": [
+        {
+          "schema_file": "outcome-workflow-start.schema.json",
+          "fixture": "fixtures/invalid/outcome-workflow-start-invalid-review-window.json"
+        }
+      ]
+    },
+    {
+      "rule_id": "causal-revision-adjacency.v1",
+      "operator": "SAFE_INTEGER_SUCCESSOR",
+      "left_field": "source_revision",
+      "right_field": "revision",
+      "schema_files": [
+        "outcome-reviewer-decision-receipt.schema.json",
+        "outcome-sla-escalation-receipt.schema.json",
+        "outcome-operation-command.schema.json",
+        "outcome-operation-receipt.schema.json",
+        "outcome-execution-attempt-observation.schema.json",
+        "outcome-attempt-reconciliation-receipt.schema.json",
+        "outcome-compensation-receipt.schema.json",
+        "outcome-closure-receipt.schema.json",
+        "outcome-evaluation-receipt.schema.json"
+      ],
+      "negative_fixtures": [
+        {
+          "schema_file": "outcome-reviewer-decision-receipt.schema.json",
+          "fixture": "fixtures/invalid/outcome-reviewer-decision-revision-gap.json"
+        }
+      ]
+    }
+  ]
+}

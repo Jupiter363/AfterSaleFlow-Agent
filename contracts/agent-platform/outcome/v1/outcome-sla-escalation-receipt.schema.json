@@ -3,6 +3,7 @@
   "$id": "https://schemas.after-sale-flow.example/agent-platform/outcome/v1/outcome-sla-escalation-receipt.schema.json",
   "title": "Outcome System SLA Escalation Receipt v1",
   "type": "object", "additionalProperties": false, "x-max-encoded-bytes": 32768,
+  "x-semantic-conformance": {"protocol_version": "outcome-semantic-conformance.v1", "manifest": "outcome-semantic-conformance.v1.json", "raw_schema_only_validation": "NON_CONFORMANT", "required_rules": ["causal-revision-adjacency.v1"]},
   "required": ["schema_version", "workflow_id", "case_id", "receipt_id", "receipt_hash", "review_task_id", "frozen_review_packet_ref", "frozen_review_packet_hash", "fact_type", "actor", "deadline_at", "committed_at", "epoch", "source_revision", "revision", "fence", "committed_event_sequence", "execution_authorized", "approval_record_created", "synthetic_only"],
   "properties": {
     "schema_version": {"const": "outcome-sla-escalation-receipt.v1"}, "workflow_id": {"$ref": "#/$defs/id"}, "case_id": {"$ref": "#/$defs/id"}, "receipt_id": {"$ref": "#/$defs/id"}, "receipt_hash": {"$ref": "#/$defs/hash"}, "review_task_id": {"$ref": "#/$defs/id"},

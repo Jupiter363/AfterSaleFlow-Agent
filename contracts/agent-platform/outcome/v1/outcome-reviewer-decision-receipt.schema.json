@@ -3,6 +3,7 @@
   "$id": "https://schemas.after-sale-flow.example/agent-platform/outcome/v1/outcome-reviewer-decision-receipt.schema.json",
   "title": "Outcome Reviewer Decision Receipt v1",
   "type": "object", "additionalProperties": false, "x-max-encoded-bytes": 32768,
+  "x-semantic-conformance": {"protocol_version": "outcome-semantic-conformance.v1", "manifest": "outcome-semantic-conformance.v1.json", "raw_schema_only_validation": "NON_CONFORMANT", "required_rules": ["causal-revision-adjacency.v1"]},
   "required": ["schema_version", "workflow_id", "case_id", "receipt_id", "receipt_hash", "review_task_id", "reviewer_authority_ref", "frozen_review_packet_ref", "frozen_review_packet_hash", "action_snapshot_ref", "action_snapshot_hash", "decision_record_ref", "decision_record_hash", "required_operation_set_ref", "required_operation_set_hash", "required_operation_count", "decision", "execution_authorized", "request_hash", "idempotency_key_hash", "policy_version", "epoch", "source_revision", "revision", "fence", "committed_event_sequence", "committed_at", "synthetic_only"],
   "properties": {
     "schema_version": {"const": "outcome-reviewer-decision-receipt.v1"},
