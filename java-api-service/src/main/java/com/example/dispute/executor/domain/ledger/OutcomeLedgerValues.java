@@ -1,6 +1,7 @@
 package com.example.dispute.executor.domain.ledger;
 
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.Objects;
 
 final class OutcomeLedgerValues {
@@ -53,6 +54,6 @@ final class OutcomeLedgerValues {
     }
 
     static Instant instant(Instant value, String field) {
-        return Objects.requireNonNull(value, field);
+        return Objects.requireNonNull(value, field).truncatedTo(ChronoUnit.MICROS);
     }
 }

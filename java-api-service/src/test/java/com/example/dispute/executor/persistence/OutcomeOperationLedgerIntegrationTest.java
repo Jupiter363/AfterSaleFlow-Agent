@@ -168,6 +168,117 @@ class OutcomeOperationLedgerIntegrationTest {
     }
 
     @Test
+    void reservationRejectsAnotherValidSameCaseApprovalOutsideProjectionAuthority() {
+        Fixture fixture = insertFixture("PROJECTION_AUTHORITY");
+        String otherApprovalId = "APPROVAL_OTHER_" + fixture.suffix();
+        String otherApprovalHash = APPROVAL_HASH + "-OTHER-" + fixture.suffix();
+        cloneApproval(fixture.approvalId(), otherApprovalId, otherApprovalHash);
+        OutcomeOperation substituted = operation(
+                fixture, "authority-substitution", REQUEST_HASH, 1,
+                OperationKind.OPERATION, true, true, RetryClass.STATUS_QUERY_REQUIRED,
+                0, 0, otherApprovalId, otherApprovalHash,
+                DECISION_REQUEST_HASH, ACTION_HASH, NOW);
+
+        assertThatThrownBy(() -> ledger.reserve(substituted, null))
+                .isInstanceOf(OutcomeLedgerRejectedException.class)
+                .extracting(failure -> ((OutcomeLedgerRejectedException) failure).code())
+                .isEqualTo("OUTCOME_OPERATION_PROJECTION_AUTHORITY_CONFLICT");
+        assertThat(number(
+                        "select count(*) from human_review_record where id = ?",
+                        otherApprovalId))
+                .isEqualTo(1);
+        assertThat(number(
+                        "select count(*) from outcome_operation where projection_id = ?",
+                        fixture.projectionId()))
+                .isZero();
+    }
+
+    @Test
+    void postgresTimestampPrecisionIsCanonicalAcrossPersistedExactReplays() {
+        Fixture fixture = insertFixture("TIMESTAMP_REPLAY");
+        Instant first = Instant.parse("2026-07-24T12:00:00.123456789Z");
+        Instant replay = Instant.parse("2026-07-24T12:00:00.123456001Z");
+        Instant canonical = Instant.parse("2026-07-24T12:00:00.123456Z");
+        OutcomeOperation original = operation(
+                fixture, "timestamp-original", REQUEST_HASH, 1,
+                OperationKind.OPERATION, true, true, RetryClass.STATUS_QUERY_REQUIRED,
+                0, 0, fixture.approvalId(), APPROVAL_HASH + '-' + fixture.suffix(),
+                DECISION_REQUEST_HASH, ACTION_HASH, first);
+        OutcomeOperation replayOperation = withReservedAt(original, replay);
+        assertThat(ledger.reserve(original, null)).isEqualTo(replayOperation);
+        assertThat(ledger.reserve(replayOperation, null)).isEqualTo(original);
+
+        OutcomeAttemptObservation attempt = observationAt(
+                original, 1, ObservationType.INVOCATION_DISPATCHED, true, false, first);
+        OutcomeAttemptObservation replayAttempt = observationAt(
+                original, 1, ObservationType.INVOCATION_DISPATCHED, true, false, replay);
+        assertThat(ledger.appendAttempt(attempt)).isEqualTo(replayAttempt);
+        assertThat(ledger.appendAttempt(replayAttempt)).isEqualTo(attempt);
+
+        OutcomeOperationReceipt terminal = receiptAt(
+                original, "RECEIPT_TIMESTAMP", RECEIPT_HASH,
+                ReceiptAuthority.DIRECT_RESPONSE, first);
+        OutcomeOperationReceipt replayTerminal = receiptAt(
+                original, "RECEIPT_TIMESTAMP", RECEIPT_HASH,
+                ReceiptAuthority.DIRECT_RESPONSE, replay);
+        assertThat(ledger.recordReceipt(terminal)).isEqualTo(replayTerminal);
+        assertThat(ledger.recordReceipt(replayTerminal)).isEqualTo(terminal);
+
+        OutcomeOperation compensation = operation(
+                fixture, "timestamp-compensation", "1".repeat(64), 2,
+                OperationKind.COMPENSATION, false, true, RetryClass.STATUS_QUERY_REQUIRED,
+                0, 0, fixture.approvalId(), APPROVAL_HASH + '-' + fixture.suffix(),
+                DECISION_REQUEST_HASH, ACTION_HASH, first);
+        OutcomeCompensationParent parent = compensationParentAt(
+                fixture, compensation, original, terminal, 1, "TIMESTAMP", first);
+        OutcomeOperation replayCompensation = withReservedAt(compensation, replay);
+        OutcomeCompensationParent replayParent = compensationParentAt(
+                fixture, replayCompensation, original, replayTerminal, 1, "TIMESTAMP", replay);
+        assertThat(ledger.reserve(compensation, parent)).isEqualTo(replayCompensation);
+        assertThat(ledger.reserve(replayCompensation, replayParent)).isEqualTo(compensation);
+
+        assertThat(original.reservedAt()).isEqualTo(canonical);
+        assertThat(attempt.observedAt()).isEqualTo(canonical);
+        assertThat(terminal.completedAt()).isEqualTo(canonical);
+        assertThat(parent.createdAt()).isEqualTo(canonical);
+        assertThat(jdbc.queryForObject(
+                                "select reserved_at from outcome_operation where operation_id = ?",
+                                OffsetDateTime.class,
+                                original.operationId())
+                        .toInstant())
+                .isEqualTo(canonical);
+    }
+
+    @Test
+    void redispatchRequiresPreviousPermissionAndCompatibleRetryClass() {
+        Fixture blindFixture = insertFixture("RETRY_BLIND");
+        OutcomeOperation blind = operation(
+                blindFixture, "blind", REQUEST_HASH, 1, OperationKind.OPERATION,
+                true, true, RetryClass.IDEMPOTENT_PROVIDER);
+        ledger.reserve(blind, null);
+        ledger.appendAttempt(observation(
+                blind, 1, ObservationType.INVOCATION_DISPATCHED, true, false));
+        assertThatThrownBy(() -> ledger.appendAttempt(observation(
+                        blind, 2, ObservationType.INVOCATION_DISPATCHED, true, false)))
+                .isInstanceOf(OutcomeLedgerRejectedException.class)
+                .extracting(failure -> ((OutcomeLedgerRejectedException) failure).code())
+                .isEqualTo("OUTCOME_RETRY_NOT_PERMITTED");
+
+        Fixture classFixture = insertFixture("RETRY_CLASS");
+        OutcomeOperation nonRetryable = operation(
+                classFixture, "non-retryable", REQUEST_HASH, 1, OperationKind.OPERATION,
+                true, true, RetryClass.NON_RETRYABLE);
+        ledger.reserve(nonRetryable, null);
+        ledger.appendAttempt(observation(
+                nonRetryable, 1, ObservationType.PRE_EFFECT_RETRYABLE_FAILURE, false, true));
+        assertThatThrownBy(() -> ledger.appendAttempt(observation(
+                        nonRetryable, 2, ObservationType.INVOCATION_DISPATCHED, true, false)))
+                .isInstanceOf(OutcomeLedgerRejectedException.class)
+                .extracting(failure -> ((OutcomeLedgerRejectedException) failure).code())
+                .isEqualTo("OUTCOME_RETRY_CLASS_FORBIDDEN");
+    }
+
+    @Test
     void ambiguousAttemptMustReconcileAndCannotBlindlyRetry() {
         Fixture fixture = insertFixture("AMBIGUOUS");
         OutcomeOperation operation = operation(
@@ -544,6 +655,90 @@ class OutcomeOperationLedgerIntegrationTest {
     }
 
     @Test
+    void closureReadinessCommitAndCompensationAdmissionShareOneAtomicScopeBarrier()
+            throws Exception {
+        Fixture fixture = insertFixture("CLOSURE_COMPENSATION_RACE");
+        OutcomeOperation original = operation(
+                fixture, "race-original", REQUEST_HASH, 1, OperationKind.OPERATION, true);
+        ledger.reserve(original, null);
+        OutcomeOperationReceipt originalReceipt = receipt(
+                original, "RECEIPT_CLOSURE_RACE", RECEIPT_HASH,
+                7, ReceiptAuthority.DIRECT_RESPONSE);
+        ledger.recordReceipt(originalReceipt);
+        OutcomeOperation compensation = operation(
+                fixture, "race-compensation", "1".repeat(64),
+                2, OperationKind.COMPENSATION, false);
+        OutcomeCompensationParent parent = compensationParent(
+                fixture, compensation, original, originalReceipt, 1, "CLOSURE_RACE");
+        JdbcOutcomeOperationLedger closureConnection = ledger(dataSource);
+        JdbcOutcomeOperationLedger compensationConnection = ledger(dataSource);
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<Throwable> closureResult = executor.submit(() -> raceCall(
+                    ready, start, () -> closureConnection.advanceProjection(
+                            expectation(fixture), ProcessState.READY_TO_CLOSE, NOW.plusSeconds(30))));
+            Future<Throwable> compensationResult = executor.submit(() -> raceCall(
+                    ready, start, () -> compensationConnection.reserve(compensation, parent)));
+            assertThat(ready.await(5, TimeUnit.SECONDS)).isTrue();
+            start.countDown();
+
+            Throwable closureFailure = closureResult.get(10, TimeUnit.SECONDS);
+            Throwable compensationFailure = compensationResult.get(10, TimeUnit.SECONDS);
+            assertThat((closureFailure == null ? 0 : 1) + (compensationFailure == null ? 0 : 1))
+                    .isEqualTo(1);
+            assertIntendedClosureCompensationRaceLoser(
+                    closureFailure == null ? compensationFailure : closureFailure);
+            String state = jdbc.queryForObject(
+                    "select process_state from outcome_process_projection where projection_id = ?",
+                    String.class,
+                    fixture.projectionId());
+            long compensationCount = number(
+                    "select count(*) from outcome_operation where operation_id = ?",
+                    compensation.operationId());
+            assertThat(state.equals(ProcessState.READY_TO_CLOSE.name()) && compensationCount == 1)
+                    .isFalse();
+            assertThat(compensationCount)
+                    .isEqualTo(state.equals(ProcessState.READY_TO_CLOSE.name()) ? 0 : 1);
+        } finally {
+            start.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void committedReadinessRejectsCompensationEvenWithTheCurrentProjectionFence() {
+        Fixture fixture = insertFixture("CLOSURE_COMMITTED");
+        OutcomeOperation original = operation(
+                fixture, "committed-original", REQUEST_HASH, 1, OperationKind.OPERATION, true);
+        ledger.reserve(original, null);
+        OutcomeOperationReceipt originalReceipt = receipt(
+                original, "RECEIPT_CLOSURE_COMMITTED", RECEIPT_HASH,
+                7, ReceiptAuthority.DIRECT_RESPONSE);
+        ledger.recordReceipt(originalReceipt);
+        ledger.advanceProjection(
+                expectation(fixture), ProcessState.READY_TO_CLOSE, NOW.plusSeconds(30));
+
+        OutcomeOperation compensation = operation(
+                fixture, "committed-compensation", "1".repeat(64), 2,
+                OperationKind.COMPENSATION, false, true, RetryClass.STATUS_QUERY_REQUIRED,
+                1, 1, fixture.approvalId(), APPROVAL_HASH + '-' + fixture.suffix(),
+                DECISION_REQUEST_HASH, ACTION_HASH, NOW.plusSeconds(31));
+        OutcomeCompensationParent parent = compensationParent(
+                fixture, compensation, original, originalReceipt, 1, "COMMITTED");
+
+        assertThatThrownBy(() -> ledger.reserve(compensation, parent))
+                .isInstanceOf(OutcomeLedgerRejectedException.class)
+                .extracting(failure -> ((OutcomeLedgerRejectedException) failure).code())
+                .isEqualTo("OUTCOME_RESERVATION_AFTER_CLOSURE_FORBIDDEN");
+        assertThat(number(
+                        "select count(*) from outcome_operation where operation_id = ?",
+                        compensation.operationId()))
+                .isZero();
+    }
+
+    @Test
     void compensationConsumesSucceededParentsOnceInExactDescendingOrderWithoutGaps() {
         Fixture fixture = insertFixture("COMPENSATION_ORDER", 2);
         OutcomeOperation lower = operation(
@@ -850,6 +1045,43 @@ class OutcomeOperationLedgerIntegrationTest {
             OperationKind kind,
             boolean compensable,
             boolean requiredForClosure) {
+        return operation(
+                fixture, keySuffix, requestHash, sequence, kind, compensable,
+                requiredForClosure, RetryClass.STATUS_QUERY_REQUIRED);
+    }
+
+    private static OutcomeOperation operation(
+            Fixture fixture,
+            String keySuffix,
+            String requestHash,
+            long sequence,
+            OperationKind kind,
+            boolean compensable,
+            boolean requiredForClosure,
+            RetryClass retryClass) {
+        return operation(
+                fixture, keySuffix, requestHash, sequence, kind, compensable,
+                requiredForClosure, retryClass, 0, 0, fixture.approvalId(),
+                APPROVAL_HASH + '-' + fixture.suffix(), DECISION_REQUEST_HASH,
+                ACTION_HASH, NOW.plusSeconds(sequence));
+    }
+
+    private static OutcomeOperation operation(
+            Fixture fixture,
+            String keySuffix,
+            String requestHash,
+            long sequence,
+            OperationKind kind,
+            boolean compensable,
+            boolean requiredForClosure,
+            RetryClass retryClass,
+            long processRevision,
+            long outcomeRevision,
+            String approvalRecordId,
+            String approvalHash,
+            String decisionRequestHash,
+            String actionSnapshotHash,
+            Instant reservedAt) {
         return new OutcomeOperation(
                 "OP_" + fixture.suffix() + '_' + sequence,
                 fixture.projectionId(),
@@ -857,8 +1089,8 @@ class OutcomeOperationLedgerIntegrationTest {
                 fixture.caseId(),
                 1,
                 7,
-                0,
-                0,
+                processRevision,
+                outcomeRevision,
                 kind,
                 sequence,
                 "outcome.effect:" + fixture.caseId() + ':' + keySuffix,
@@ -867,19 +1099,19 @@ class OutcomeOperationLedgerIntegrationTest {
                 1,
                 PACKET_CONTENT_HASH,
                 ACTION_HASH,
-                fixture.approvalId(),
-                APPROVAL_HASH + '-' + fixture.suffix(),
-                DECISION_REQUEST_HASH,
+                approvalRecordId,
+                approvalHash,
+                decisionRequestHash,
                 POLICY_VERSION,
                 null,
-                ACTION_HASH,
+                actionSnapshotHash,
                 "refund-adapter",
                 "v1",
-                RetryClass.STATUS_QUERY_REQUIRED,
+                retryClass,
                 "provider-key:" + fixture.caseId() + ':' + keySuffix,
                 requiredForClosure,
                 compensable,
-                NOW.plusSeconds(sequence));
+                reservedAt);
     }
 
     private static OutcomeAttemptObservation observation(
@@ -888,6 +1120,18 @@ class OutcomeOperationLedgerIntegrationTest {
             ObservationType type,
             boolean effectMayHaveOccurred,
             boolean retryPermitted) {
+        return observationAt(
+                operation, sequence, type, effectMayHaveOccurred, retryPermitted,
+                NOW.plusSeconds(sequence));
+    }
+
+    private static OutcomeAttemptObservation observationAt(
+            OutcomeOperation operation,
+            int sequence,
+            ObservationType type,
+            boolean effectMayHaveOccurred,
+            boolean retryPermitted,
+            Instant observedAt) {
         return new OutcomeAttemptObservation(
                 "OBS_" + operation.operationId() + '_' + sequence,
                 Integer.toHexString(sequence).repeat(64).substring(0, 64),
@@ -904,7 +1148,7 @@ class OutcomeOperationLedgerIntegrationTest {
                 RESPONSE_HASH,
                 effectMayHaveOccurred,
                 retryPermitted,
-                NOW.plusSeconds(sequence));
+                observedAt);
     }
 
     private static OutcomeCompensationParent compensationParent(
@@ -914,6 +1158,19 @@ class OutcomeOperationLedgerIntegrationTest {
             OutcomeOperationReceipt parentReceipt,
             long reverseOrder,
             String bindingSuffix) {
+        return compensationParentAt(
+                fixture, child, parent, parentReceipt, reverseOrder, bindingSuffix,
+                NOW.plusSeconds(child.operationSequence()));
+    }
+
+    private static OutcomeCompensationParent compensationParentAt(
+            Fixture fixture,
+            OutcomeOperation child,
+            OutcomeOperation parent,
+            OutcomeOperationReceipt parentReceipt,
+            long reverseOrder,
+            String bindingSuffix,
+            Instant createdAt) {
         return new OutcomeCompensationParent(
                 "COMP_PARENT_" + fixture.suffix() + '_' + bindingSuffix,
                 Integer.toHexString(bindingSuffix.hashCode()).replace("-", "a").repeat(64)
@@ -928,7 +1185,7 @@ class OutcomeOperationLedgerIntegrationTest {
                 fixture.caseId(),
                 1,
                 7,
-                NOW.plusSeconds(child.operationSequence()));
+                createdAt);
     }
 
     private static OutcomeOperationReceipt receipt(
@@ -971,6 +1228,31 @@ class OutcomeOperationLedgerIntegrationTest {
             ReceiptAuthority authority,
             ReceiptStatus status,
             ClosureDisposition disposition) {
+        return receiptAt(
+                operation, receiptId, receiptHash, fencingToken, authority,
+                status, disposition, NOW.plusSeconds(10));
+    }
+
+    private static OutcomeOperationReceipt receiptAt(
+            OutcomeOperation operation,
+            String receiptId,
+            String receiptHash,
+            ReceiptAuthority authority,
+            Instant completedAt) {
+        return receiptAt(
+                operation, receiptId, receiptHash, operation.fencingToken(), authority,
+                ReceiptStatus.SUCCEEDED, ClosureDisposition.SATISFIED, completedAt);
+    }
+
+    private static OutcomeOperationReceipt receiptAt(
+            OutcomeOperation operation,
+            String receiptId,
+            String receiptHash,
+            long fencingToken,
+            ReceiptAuthority authority,
+            ReceiptStatus status,
+            ClosureDisposition disposition,
+            Instant completedAt) {
         return new OutcomeOperationReceipt(
                 receiptId,
                 receiptHash,
@@ -986,12 +1268,50 @@ class OutcomeOperationLedgerIntegrationTest {
                 "urn:outcome:receipt:" + receiptId,
                 RESPONSE_HASH,
                 disposition,
-                NOW.plusSeconds(10));
+                completedAt);
+    }
+
+    private static OutcomeOperation withReservedAt(OutcomeOperation operation, Instant reservedAt) {
+        return new OutcomeOperation(
+                operation.operationId(), operation.projectionId(), operation.tenantSurrogate(),
+                operation.caseId(), operation.outcomeEpoch(), operation.fencingToken(),
+                operation.processRevision(), operation.outcomeRevision(), operation.operationKind(),
+                operation.operationSequence(), operation.operationKey(), operation.requestHash(),
+                operation.reviewPacketId(), operation.reviewPacketVersion(), operation.reviewPacketHash(),
+                operation.reviewPacketActionHash(), operation.approvalRecordId(), operation.approvalHash(),
+                operation.decisionRequestHash(), operation.decisionPolicyVersion(), operation.actionRecordId(),
+                operation.actionSnapshotHash(), operation.adapterId(), operation.adapterVersion(),
+                operation.retryClass(), operation.externalIdempotencyKey(), operation.requiredForClosure(),
+                operation.compensable(), reservedAt);
     }
 
     private static ProjectionExpectation expectation(Fixture fixture) {
         return new ProjectionExpectation(
                 fixture.projectionId(), TENANT, fixture.caseId(), 1, 7, 0, 0);
+    }
+
+    private static void cloneApproval(
+            String sourceApprovalId, String targetApprovalId, String targetApprovalHash) {
+        jdbc.update(
+                """
+                insert into human_review_record (
+                    id, case_id, review_task_id, plan_id, reviewer_id, reviewer_role,
+                    decision_type, original_plan_json, approved_plan_json,
+                    decision_reason, action_hash, packet_version, expires_at,
+                    review_packet_id, review_packet_version, policy_version,
+                    action_snapshot_hash, approval_expires_at, created_at, created_by
+                )
+                select ?, case_id, review_task_id, plan_id, reviewer_id, reviewer_role,
+                       decision_type, original_plan_json, approved_plan_json,
+                       decision_reason, ?, packet_version, expires_at,
+                       review_packet_id, review_packet_version, policy_version,
+                       action_snapshot_hash, approval_expires_at, created_at, created_by
+                  from human_review_record
+                 where id = ?
+                """,
+                targetApprovalId,
+                targetApprovalHash,
+                sourceApprovalId);
     }
 
     private static boolean tableExists(String table) {
@@ -1062,6 +1382,28 @@ class OutcomeOperationLedgerIntegrationTest {
                 .containsAnyOf(
                         "Terminal Outcome receipt forbids later attempts",
                         "AMBIGUOUS Outcome operation requires RECONCILING before receipt");
+    }
+
+    private static void assertIntendedClosureCompensationRaceLoser(Throwable failure) {
+        assertThat(failure).isNotNull();
+        if (failure instanceof OutcomeLedgerRejectedException rejected) {
+            assertThat(rejected.code())
+                    .isIn(
+                            "OUTCOME_CLOSURE_NOT_READY",
+                            "OUTCOME_STALE_PROJECTION",
+                            "OUTCOME_RESERVATION_AFTER_CLOSURE_FORBIDDEN");
+            return;
+        }
+        assertThat(failure).isInstanceOf(DataAccessException.class);
+        SQLException sqlFailure = findSqlFailure(failure);
+        if (sqlFailure == null) {
+            throw new AssertionError("database race loser has no SQLState", failure);
+        }
+        assertThat(sqlFailure.getSQLState())
+                .as("deadlock, serialization, and connection concurrency failures are test failures")
+                .doesNotStartWith("08")
+                .isNotIn("40P01", "40001", "55P03")
+                .isEqualTo("23514");
     }
 
     private static SQLException findSqlFailure(Throwable failure) {

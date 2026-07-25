@@ -131,7 +131,9 @@ public final class JdbcOutcomeOperationLedger implements OutcomeOperationLedger 
         Objects.requireNonNull(nextState, "nextState");
         Objects.requireNonNull(advancedAt, "advancedAt");
         OutcomeProcessProjection result = transactions.execute(ignored -> {
+            lockSemantic(compensationOrderKey(expectation));
             OutcomeProcessProjection current = lockProjection(expectation);
+            requireSafeProjectionAdvance(nextState, expectation);
             MapSqlParameterSource parameters = expectationParameters(expectation)
                     .addValue("nextProcessRevision", expectation.processRevision() + 1)
                     .addValue("nextOutcomeRevision", expectation.outcomeRevision() + 1)
@@ -216,6 +218,8 @@ public final class JdbcOutcomeOperationLedger implements OutcomeOperationLedger 
                 return committed;
             }
             OutcomeProcessProjection projection = lockProjection(expectation(operation));
+            requireOperationProjectionAuthority(projection, operation);
+            requireReservationOpen(projection);
             if (compensationParent != null) {
                 requireNextCompensationParent(projection, compensationParent);
             }
@@ -268,7 +272,7 @@ public final class JdbcOutcomeOperationLedger implements OutcomeOperationLedger 
             OutcomeOperation operation = lockOperation(observation.operationId());
             requireAttemptBinding(operation, observation);
             Optional<OutcomeAttemptObservation> latest = latestAttempt(operation.operationId());
-            requireSafeAttemptTransition(latest, observation);
+            requireSafeAttemptTransition(operation, latest, observation);
             if (findReceipt(operation.operationId()).isPresent()) {
                 throw rejected(
                         "OUTCOME_OPERATION_ALREADY_TERMINAL",
@@ -382,6 +386,7 @@ public final class JdbcOutcomeOperationLedger implements OutcomeOperationLedger 
     public List<OutcomeOperationState> readOperationStates(ProjectionExpectation expectation) {
         Objects.requireNonNull(expectation, "expectation");
         List<OutcomeOperationState> states = transactions.execute(ignored -> {
+            lockSemantic(compensationOrderKey(expectation));
             lockProjection(expectation);
             return List.copyOf(jdbc.query(
                     """
@@ -411,6 +416,7 @@ public final class JdbcOutcomeOperationLedger implements OutcomeOperationLedger 
             ProjectionExpectation expectation) {
         Objects.requireNonNull(expectation, "expectation");
         List<OutcomeCompensationParent> parents = transactions.execute(ignored -> {
+            lockSemantic(compensationOrderKey(expectation));
             lockProjection(expectation);
             return List.copyOf(jdbc.query(
                     """
@@ -432,29 +438,34 @@ public final class JdbcOutcomeOperationLedger implements OutcomeOperationLedger 
     public OutcomeClosureReadiness closureReadiness(ProjectionExpectation expectation) {
         Objects.requireNonNull(expectation, "expectation");
         OutcomeClosureReadiness readiness = transactions.execute(ignored -> {
+            lockSemantic(compensationOrderKey(expectation));
             lockProjection(expectation);
-            List<OutcomeClosureReadiness> rows = jdbc.query(
-                    """
-                    select projection_id, tenant_surrogate, case_id, outcome_epoch, fencing_token,
-                           expected_required_operation_count, required_operation_count,
-                           unresolved_operation_count,
-                           blocked_operation_count, reconciliation_operation_count,
-                           pending_compensation_count, closure_ready
-                      from outcome_closure_readiness
-                     where projection_id = :projectionId
-                       and tenant_surrogate = :tenantSurrogate
-                       and case_id = :caseId
-                       and outcome_epoch = :outcomeEpoch
-                       and fencing_token = :fencingToken
-                    """,
-                    expectationParameters(expectation),
-                    JdbcOutcomeOperationLedger::mapClosureReadiness);
-            return exactlyOneOrEmpty(rows, "multiple closure projections match one Outcome epoch")
-                    .orElseThrow(() -> rejected(
-                            "OUTCOME_CLOSURE_PROJECTION_MISSING",
-                            "closure prerequisites have no exact Outcome projection"));
+            return readClosureReadiness(expectation);
         });
         return Objects.requireNonNull(readiness, "closure read transaction returned no result");
+    }
+
+    private OutcomeClosureReadiness readClosureReadiness(ProjectionExpectation expectation) {
+        List<OutcomeClosureReadiness> rows = jdbc.query(
+                """
+                select projection_id, tenant_surrogate, case_id, outcome_epoch, fencing_token,
+                       expected_required_operation_count, required_operation_count,
+                       unresolved_operation_count,
+                       blocked_operation_count, reconciliation_operation_count,
+                       pending_compensation_count, closure_ready
+                  from outcome_closure_readiness
+                 where projection_id = :projectionId
+                   and tenant_surrogate = :tenantSurrogate
+                   and case_id = :caseId
+                   and outcome_epoch = :outcomeEpoch
+                   and fencing_token = :fencingToken
+                """,
+                expectationParameters(expectation),
+                JdbcOutcomeOperationLedger::mapClosureReadiness);
+        return exactlyOneOrEmpty(rows, "multiple closure projections match one Outcome epoch")
+                .orElseThrow(() -> rejected(
+                        "OUTCOME_CLOSURE_PROJECTION_MISSING",
+                        "closure prerequisites have no exact Outcome projection"));
     }
 
     private Optional<OutcomeProcessProjection> findProjection(
@@ -704,6 +715,44 @@ public final class JdbcOutcomeOperationLedger implements OutcomeOperationLedger 
         }
     }
 
+    private void requireSafeProjectionAdvance(
+            OutcomeProcessProjection.ProcessState nextState,
+            ProjectionExpectation expectation) {
+        if (nextState != OutcomeProcessProjection.ProcessState.READY_TO_CLOSE
+                && nextState != OutcomeProcessProjection.ProcessState.CLOSED) {
+            return;
+        }
+        OutcomeClosureReadiness readiness = readClosureReadiness(expectation);
+        if (!readiness.closureReady()) {
+            throw rejected(
+                    "OUTCOME_CLOSURE_NOT_READY",
+                    "Outcome projection cannot commit closure readiness while required operations remain unresolved");
+        }
+    }
+
+    private static void requireOperationProjectionAuthority(
+            OutcomeProcessProjection projection, OutcomeOperation operation) {
+        if (!projection.decisionAuthorityReceiptId().equals(operation.approvalRecordId())
+                || !projection.decisionRequestHash().equals(operation.decisionRequestHash())
+                || !projection.approvedOperationSetHash().equals(operation.actionSnapshotHash())) {
+            throw rejected(
+                    "OUTCOME_OPERATION_PROJECTION_AUTHORITY_CONFLICT",
+                    "operation approval, decision request, or approved action snapshot does not match the locked Outcome projection");
+        }
+    }
+
+    private static void requireReservationOpen(OutcomeProcessProjection projection) {
+        boolean readyOrCommitted = switch (projection.processState()) {
+            case READY_TO_CLOSE, CLOSED, EVALUATION_PENDING, EVALUATED -> true;
+            default -> false;
+        };
+        if (readyOrCommitted) {
+            throw rejected(
+                    "OUTCOME_RESERVATION_AFTER_CLOSURE_FORBIDDEN",
+                    "Outcome operation reservation is forbidden after closure readiness is committed");
+        }
+    }
+
     private static void requireAttemptBinding(
             OutcomeOperation operation, OutcomeAttemptObservation observation) {
         if (!operation.operationId().equals(observation.operationId())
@@ -733,6 +782,7 @@ public final class JdbcOutcomeOperationLedger implements OutcomeOperationLedger 
     }
 
     private static void requireSafeAttemptTransition(
+            OutcomeOperation operation,
             Optional<OutcomeAttemptObservation> previous,
             OutcomeAttemptObservation next) {
         if (previous.isEmpty()) {
@@ -767,6 +817,27 @@ public final class JdbcOutcomeOperationLedger implements OutcomeOperationLedger 
                     "OUTCOME_RECONCILING_INVOCATION_FORBIDDEN",
                     "RECONCILING operation cannot dispatch another effect");
         }
+        if (next.observationType()
+                == OutcomeAttemptObservation.ObservationType.INVOCATION_DISPATCHED) {
+            if (!committed.retryPermitted()) {
+                throw rejected(
+                        "OUTCOME_RETRY_NOT_PERMITTED",
+                        "later invocation requires explicit retry permission from the previous observation");
+            }
+            boolean classPermitsRetry = switch (operation.retryClass()) {
+                case NON_RETRYABLE -> false;
+                case BOUNDED_PRE_EFFECT -> committed.observationType()
+                        == OutcomeAttemptObservation.ObservationType.PRE_EFFECT_RETRYABLE_FAILURE;
+                case IDEMPOTENT_PROVIDER -> true;
+                case STATUS_QUERY_REQUIRED -> committed.observationType()
+                        == OutcomeAttemptObservation.ObservationType.NO_EFFECT_CONFIRMED;
+            };
+            if (!classPermitsRetry) {
+                throw rejected(
+                        "OUTCOME_RETRY_CLASS_FORBIDDEN",
+                        "operation retry class does not permit redispatch after the previous observation");
+            }
+        }
     }
 
     private void lockSemantic(String key) {
@@ -793,6 +864,11 @@ public final class JdbcOutcomeOperationLedger implements OutcomeOperationLedger 
     private static String compensationOrderKey(OutcomeAttemptObservation observation) {
         return compensationOrderKey(
                 observation.tenantSurrogate(), observation.caseId(), observation.outcomeEpoch());
+    }
+
+    private static String compensationOrderKey(ProjectionExpectation expectation) {
+        return compensationOrderKey(
+                expectation.tenantSurrogate(), expectation.caseId(), expectation.outcomeEpoch());
     }
 
     private static String compensationOrderKey(
