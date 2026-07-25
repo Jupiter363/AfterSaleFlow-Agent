@@ -1,0 +1,1001 @@
+{
+  "$id": "https://after-sale-flow.example/contracts/agent-platform/phase8/active-reference-report.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "candidate_sha": {
+      "pattern": "^[0-9a-f]{40}$",
+      "type": "string"
+    },
+    "candidate_version": {
+      "$ref": "#/$defs/identifier"
+    },
+    "capabilities": {
+      "additionalProperties": false,
+      "properties": {
+        "credential_loading": {
+          "const": false
+        },
+        "delete": {
+          "const": false
+        },
+        "mutation": {
+          "const": false
+        },
+        "network": {
+          "const": false
+        },
+        "off_activation": {
+          "const": false
+        },
+        "retirement": {
+          "const": false
+        },
+        "subprocess": {
+          "const": false
+        }
+      },
+      "required": [
+        "credential_loading",
+        "delete",
+        "mutation",
+        "network",
+        "off_activation",
+        "retirement",
+        "subprocess"
+      ],
+      "type": "object"
+    },
+    "credentials_class": {
+      "enum": [
+        "REPORTING_READ_ONLY",
+        "TEMPORAL_VISIBILITY_READ_ONLY",
+        "INVENTORY_METADATA_READ_ONLY"
+      ]
+    },
+    "decision": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/decision"
+        },
+        {
+          "not": {
+            "const": "ELIGIBLE"
+          }
+        }
+      ]
+    },
+    "environment": {
+      "$ref": "#/$defs/identifier"
+    },
+    "environment_manifest_hash": {
+      "$ref": "#/$defs/sha256"
+    },
+    "inventory_hash": {
+      "$ref": "#/$defs/sha256"
+    },
+    "report_hash": {
+      "$ref": "#/$defs/sha256"
+    },
+    "retirement_target": {
+      "$ref": "#/$defs/identifier"
+    },
+    "rows": {
+      "allOf": [
+        {
+          "contains": {
+            "properties": {
+              "reference_class": {
+                "const": "TEMPORAL_WORKFLOW"
+              }
+            },
+            "required": [
+              "reference_class"
+            ]
+          },
+          "maxContains": 1,
+          "minContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "reference_class": {
+                "const": "TEMPORAL_CHILD"
+              }
+            },
+            "required": [
+              "reference_class"
+            ]
+          },
+          "maxContains": 1,
+          "minContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "reference_class": {
+                "const": "TEMPORAL_CONTINUE_AS_NEW"
+              }
+            },
+            "required": [
+              "reference_class"
+            ]
+          },
+          "maxContains": 1,
+          "minContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "reference_class": {
+                "const": "TEMPORAL_SCHEDULE"
+              }
+            },
+            "required": [
+              "reference_class"
+            ]
+          },
+          "maxContains": 1,
+          "minContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "reference_class": {
+                "const": "TEMPORAL_PENDING_WORK"
+              }
+            },
+            "required": [
+              "reference_class"
+            ]
+          },
+          "maxContains": 1,
+          "minContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "reference_class": {
+                "const": "TEMPORAL_ROOM_EPOCH_BUILD_REACHABILITY"
+              }
+            },
+            "required": [
+              "reference_class"
+            ]
+          },
+          "maxContains": 1,
+          "minContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "reference_class": {
+                "const": "WORKER_BUILD_ID"
+              }
+            },
+            "required": [
+              "reference_class"
+            ]
+          },
+          "maxContains": 1,
+          "minContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "reference_class": {
+                "const": "GRAPH_THREAD"
+              }
+            },
+            "required": [
+              "reference_class"
+            ]
+          },
+          "maxContains": 1,
+          "minContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "reference_class": {
+                "const": "GRAPH_VERSION"
+              }
+            },
+            "required": [
+              "reference_class"
+            ]
+          },
+          "maxContains": 1,
+          "minContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "reference_class": {
+                "const": "GRAPH_CHECKPOINT"
+              }
+            },
+            "required": [
+              "reference_class"
+            ]
+          },
+          "maxContains": 1,
+          "minContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "reference_class": {
+                "const": "ROOM_EPOCH"
+              }
+            },
+            "required": [
+              "reference_class"
+            ]
+          },
+          "maxContains": 1,
+          "minContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "reference_class": {
+                "const": "LEGACY_V1_LOGICAL_RUN"
+              }
+            },
+            "required": [
+              "reference_class"
+            ]
+          },
+          "maxContains": 1,
+          "minContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "reference_class": {
+                "const": "LEGACY_V1_ATTEMPT"
+              }
+            },
+            "required": [
+              "reference_class"
+            ]
+          },
+          "maxContains": 1,
+          "minContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "reference_class": {
+                "const": "HOT_STREAM_READER"
+              }
+            },
+            "required": [
+              "reference_class"
+            ]
+          },
+          "maxContains": 1,
+          "minContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "reference_class": {
+                "const": "DOMAIN_CASE_COMMAND"
+              }
+            },
+            "required": [
+              "reference_class"
+            ]
+          },
+          "maxContains": 1,
+          "minContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "reference_class": {
+                "const": "DOMAIN_OPERATION"
+              }
+            },
+            "required": [
+              "reference_class"
+            ]
+          },
+          "maxContains": 1,
+          "minContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "reference_class": {
+                "const": "DOMAIN_FINALIZER"
+              }
+            },
+            "required": [
+              "reference_class"
+            ]
+          },
+          "maxContains": 1,
+          "minContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "reference_class": {
+                "const": "DEPLOYED_API_VERSION"
+              }
+            },
+            "required": [
+              "reference_class"
+            ]
+          },
+          "maxContains": 1,
+          "minContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "reference_class": {
+                "const": "DEPLOYED_WORKER_VERSION"
+              }
+            },
+            "required": [
+              "reference_class"
+            ]
+          },
+          "maxContains": 1,
+          "minContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "reference_class": {
+                "const": "DEPLOYED_GRAPH_VERSION"
+              }
+            },
+            "required": [
+              "reference_class"
+            ]
+          },
+          "maxContains": 1,
+          "minContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "reference_class": {
+                "const": "DEPLOYED_COMPATIBILITY_READER_VERSION"
+              }
+            },
+            "required": [
+              "reference_class"
+            ]
+          },
+          "maxContains": 1,
+          "minContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "reference_class": {
+                "const": "OUTBOX"
+              }
+            },
+            "required": [
+              "reference_class"
+            ]
+          },
+          "maxContains": 1,
+          "minContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "reference_class": {
+                "const": "LEASE"
+              }
+            },
+            "required": [
+              "reference_class"
+            ]
+          },
+          "maxContains": 1,
+          "minContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "reference_class": {
+                "const": "STREAM_CURSOR"
+              }
+            },
+            "required": [
+              "reference_class"
+            ]
+          },
+          "maxContains": 1,
+          "minContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "reference_class": {
+                "const": "LEGACY_READER_VERSION"
+              }
+            },
+            "required": [
+              "reference_class"
+            ]
+          },
+          "maxContains": 1,
+          "minContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "reference_class": {
+                "const": "MEMORY_FRAME_READER"
+              }
+            },
+            "required": [
+              "reference_class"
+            ]
+          },
+          "maxContains": 1,
+          "minContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "reference_class": {
+                "const": "LEGACY_ENDPOINT_CALLER"
+              }
+            },
+            "required": [
+              "reference_class"
+            ]
+          },
+          "maxContains": 1,
+          "minContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "reference_class": {
+                "const": "OBJECT_STORE_MANIFEST"
+              }
+            },
+            "required": [
+              "reference_class"
+            ]
+          },
+          "maxContains": 1,
+          "minContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "reference_class": {
+                "const": "OBJECT_STORE_CODEC"
+              }
+            },
+            "required": [
+              "reference_class"
+            ]
+          },
+          "maxContains": 1,
+          "minContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "reference_class": {
+                "const": "OBJECT_STORE_SCHEMA"
+              }
+            },
+            "required": [
+              "reference_class"
+            ]
+          },
+          "maxContains": 1,
+          "minContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "reference_class": {
+                "const": "OBJECT_STORE_PROMPT"
+              }
+            },
+            "required": [
+              "reference_class"
+            ]
+          },
+          "maxContains": 1,
+          "minContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "reference_class": {
+                "const": "OBJECT_STORE_ARTIFACT"
+              }
+            },
+            "required": [
+              "reference_class"
+            ]
+          },
+          "maxContains": 1,
+          "minContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "reference_class": {
+                "const": "RETAINED_WINDOW_FRONTEND_LEGACY_ENDPOINT"
+              }
+            },
+            "required": [
+              "reference_class"
+            ]
+          },
+          "maxContains": 1,
+          "minContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "reference_class": {
+                "const": "RETAINED_WINDOW_API_LEGACY_ENDPOINT"
+              }
+            },
+            "required": [
+              "reference_class"
+            ]
+          },
+          "maxContains": 1,
+          "minContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "reference_class": {
+                "const": "AGENT_STREAM_V1_TELEMETRY"
+              }
+            },
+            "required": [
+              "reference_class"
+            ]
+          },
+          "maxContains": 1,
+          "minContains": 1
+        }
+      ],
+      "items": {
+        "$ref": "#/$defs/referenceRow"
+      },
+      "maxItems": 35,
+      "minItems": 35,
+      "type": "array",
+      "uniqueItems": true
+    },
+    "scan_completed_at": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "scan_started_at": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "phase8-active-reference-report.v1"
+    },
+    "tool_versions": {
+      "additionalProperties": {
+        "$ref": "#/$defs/identifier"
+      },
+      "minProperties": 1,
+      "propertyNames": {
+        "$ref": "#/$defs/identifier"
+      },
+      "type": "object"
+    }
+  },
+  "required": [
+    "candidate_sha",
+    "candidate_version",
+    "capabilities",
+    "credentials_class",
+    "decision",
+    "environment",
+    "environment_manifest_hash",
+    "inventory_hash",
+    "report_hash",
+    "retirement_target",
+    "rows",
+    "scan_completed_at",
+    "scan_started_at",
+    "schema_version",
+    "tool_versions"
+  ],
+  "title": "Phase 8 immutable active-reference report",
+  "type": "object",
+  "$defs": {
+    "authority": {
+      "enum": [
+        "TEMPORAL_VISIBILITY",
+        "TEMPORAL_SCHEDULE_VISIBILITY",
+        "TEMPORAL_WORKER_BUILD_REACHABILITY",
+        "DOMAIN_LEDGER",
+        "DOMAIN_LEGACY_V1_LEDGER",
+        "DOMAIN_LEGACY_WORKER_CANDIDATE_LEDGER",
+        "DOMAIN_PROJECTION_ABSENCE_LEDGER",
+        "GRAPH_LEDGER",
+        "DEPLOYMENT_MANIFEST",
+        "IMMUTABLE_OBJECT_MANIFEST",
+        "AGENT_STREAM_TELEMETRY_LEDGER"
+      ]
+    },
+    "completenessStatus": {
+      "enum": [
+        "COMPLETE",
+        "UNKNOWN",
+        "PARTIAL",
+        "ERROR"
+      ]
+    },
+    "decision": {
+      "enum": [
+        "RETAIN",
+        "BLOCK_DELETE",
+        "ELIGIBLE"
+      ]
+    },
+    "highWatermark": {
+      "additionalProperties": false,
+      "properties": {
+        "candidate_version": {
+          "$ref": "#/$defs/identifier"
+        },
+        "durable": {
+          "type": "boolean"
+        },
+        "environment_manifest_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "ledger_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "observed_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "sequence": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "candidate_version",
+        "durable",
+        "environment_manifest_hash",
+        "ledger_id",
+        "observed_at",
+        "sequence"
+      ],
+      "type": "object"
+    },
+    "durableHighWatermark": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/highWatermark"
+        },
+        {
+          "properties": {
+            "durable": {
+              "const": true
+            }
+          }
+        }
+      ]
+    },
+    "identifier": {
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$",
+      "type": "string"
+    },
+    "referenceClass": {
+      "enum": [
+        "TEMPORAL_WORKFLOW",
+        "TEMPORAL_CHILD",
+        "TEMPORAL_CONTINUE_AS_NEW",
+        "TEMPORAL_SCHEDULE",
+        "TEMPORAL_PENDING_WORK",
+        "TEMPORAL_ROOM_EPOCH_BUILD_REACHABILITY",
+        "WORKER_BUILD_ID",
+        "GRAPH_THREAD",
+        "GRAPH_VERSION",
+        "GRAPH_CHECKPOINT",
+        "ROOM_EPOCH",
+        "LEGACY_V1_LOGICAL_RUN",
+        "LEGACY_V1_ATTEMPT",
+        "HOT_STREAM_READER",
+        "DOMAIN_CASE_COMMAND",
+        "DOMAIN_OPERATION",
+        "DOMAIN_FINALIZER",
+        "DEPLOYED_API_VERSION",
+        "DEPLOYED_WORKER_VERSION",
+        "DEPLOYED_GRAPH_VERSION",
+        "DEPLOYED_COMPATIBILITY_READER_VERSION",
+        "OUTBOX",
+        "LEASE",
+        "STREAM_CURSOR",
+        "LEGACY_READER_VERSION",
+        "MEMORY_FRAME_READER",
+        "LEGACY_ENDPOINT_CALLER",
+        "OBJECT_STORE_MANIFEST",
+        "OBJECT_STORE_CODEC",
+        "OBJECT_STORE_SCHEMA",
+        "OBJECT_STORE_PROMPT",
+        "OBJECT_STORE_ARTIFACT",
+        "RETAINED_WINDOW_FRONTEND_LEGACY_ENDPOINT",
+        "RETAINED_WINDOW_API_LEGACY_ENDPOINT",
+        "AGENT_STREAM_V1_TELEMETRY"
+      ]
+    },
+    "referenceRow": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "completeness_status": {
+                "const": "COMPLETE"
+              }
+            },
+            "required": [
+              "completeness_status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "authority_high_watermark": {
+                "$ref": "#/$defs/durableHighWatermark"
+              },
+              "observed_replica_lag_seconds": {
+                "minimum": 0,
+                "type": "number"
+              },
+              "scan_high_watermark": {
+                "$ref": "#/$defs/durableHighWatermark"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "not": {
+              "properties": {
+                "completeness_status": {
+                  "const": "COMPLETE"
+                }
+              },
+              "required": [
+                "completeness_status"
+              ]
+            }
+          },
+          "then": {
+            "properties": {
+              "decision": {
+                "const": "BLOCK_DELETE"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "decision": {
+                "const": "RETAIN"
+              }
+            },
+            "required": [
+              "decision"
+            ]
+          },
+          "then": {
+            "properties": {
+              "active_count": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "completeness_status": {
+                "const": "COMPLETE"
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "active_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "authority": {
+          "$ref": "#/$defs/authority"
+        },
+        "authority_high_watermark": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/highWatermark"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "candidate_version": {
+          "$ref": "#/$defs/identifier"
+        },
+        "completeness_status": {
+          "$ref": "#/$defs/completenessStatus"
+        },
+        "decision": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/decision"
+            },
+            {
+              "not": {
+                "const": "ELIGIBLE"
+              }
+            }
+          ]
+        },
+        "environment_manifest_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "evidence_references": {
+          "items": {
+            "$ref": "#/$defs/identifier"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "newest_reference_at": {
+          "$ref": "#/$defs/timestampOrNull"
+        },
+        "observed_replica_lag_seconds": {
+          "oneOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "oldest_reference_at": {
+          "$ref": "#/$defs/timestampOrNull"
+        },
+        "owner": {
+          "$ref": "#/$defs/identifier"
+        },
+        "page_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "query_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "query_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "reason_codes": {
+          "items": {
+            "$ref": "#/$defs/identifier"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "reference_class": {
+          "$ref": "#/$defs/referenceClass"
+        },
+        "replica_lag_bound_seconds": {
+          "minimum": 0,
+          "type": "number"
+        },
+        "retention_boundary": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "row_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "scan_high_watermark": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/highWatermark"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source_system": {
+          "enum": [
+            "TEMPORAL",
+            "DOMAIN_POSTGRESQL",
+            "GRAPH_POSTGRESQL",
+            "DEPLOYMENT_INVENTORY",
+            "OBJECT_STORAGE",
+            "TELEMETRY"
+          ]
+        },
+        "target": {
+          "$ref": "#/$defs/identifier"
+        },
+        "wave2_authorities": {
+          "items": {
+            "enum": [
+              "TEMPORAL_EPOCH",
+              "LEGACY_V1",
+              "LEGACY_WORKER",
+              "PROJECTION_ABSENCE"
+            ]
+          },
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "active_count",
+        "authority",
+        "authority_high_watermark",
+        "candidate_version",
+        "completeness_status",
+        "decision",
+        "environment_manifest_hash",
+        "evidence_references",
+        "newest_reference_at",
+        "observed_replica_lag_seconds",
+        "oldest_reference_at",
+        "owner",
+        "page_count",
+        "query_hash",
+        "query_id",
+        "reason_codes",
+        "reference_class",
+        "replica_lag_bound_seconds",
+        "retention_boundary",
+        "row_hash",
+        "scan_high_watermark",
+        "source_system",
+        "target",
+        "wave2_authorities"
+      ],
+      "type": "object"
+    },
+    "sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "timestampOrNull": {
+      "oneOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  }
+}
