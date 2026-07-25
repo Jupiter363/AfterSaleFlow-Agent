@@ -27,6 +27,10 @@ final class OutcomeSemanticConformance {
     private static final String CAUSAL_REVISION_RULE = "causal-revision-adjacency.v1";
     private static final String TERMINAL_SUCCESS_COUNT_RULE =
             "terminal-success-count-equality.v1";
+    private static final String COMPENSATION_RECEIPT_ID_RULE =
+            "compensation-receipt-id-equality.v1";
+    private static final String COMPENSATION_RECEIPT_HASH_RULE =
+            "compensation-receipt-hash-equality.v1";
     private static final Set<String> ROOT_FIELDS = Set.of(
             "protocol_version",
             "raw_schema_only_validation",
@@ -118,7 +122,11 @@ final class OutcomeSemanticConformance {
             }
         }
         if (!rulesById.keySet().equals(Set.of(
-                REVIEW_WINDOW_RULE, CAUSAL_REVISION_RULE, TERMINAL_SUCCESS_COUNT_RULE))) {
+                REVIEW_WINDOW_RULE,
+                CAUSAL_REVISION_RULE,
+                TERMINAL_SUCCESS_COUNT_RULE,
+                COMPENSATION_RECEIPT_ID_RULE,
+                COMPENSATION_RECEIPT_HASH_RULE))) {
             throw malformed("protocol v1 must publish exactly the frozen semantic rules");
         }
         verifyFrozenRuleShapes(rulesById);
@@ -154,6 +162,13 @@ final class OutcomeSemanticConformance {
                     case SAFE_INTEGER_EQUALS -> {
                         if (instance.required(rule.leftField()).longValue()
                                 != instance.required(rule.rightField()).longValue()) {
+                            throw new IllegalArgumentException(
+                                    rule.leftField() + " must equal " + rule.rightField());
+                        }
+                    }
+                    case TEXT_EQUALS -> {
+                        if (!instance.required(rule.leftField()).textValue().equals(
+                                instance.required(rule.rightField()).textValue())) {
                             throw new IllegalArgumentException(
                                     rule.leftField() + " must equal " + rule.rightField());
                         }
@@ -275,6 +290,30 @@ final class OutcomeSemanticConformance {
                 Set.of(new FixtureRef(
                         "outcome-process-projection.schema.json",
                         "fixtures/invalid/outcome-process-projection-closed-success-count-mismatch.json")));
+
+        Rule compensationReceiptId = rulesById.get(COMPENSATION_RECEIPT_ID_RULE);
+        requireRuleShape(
+                compensationReceiptId,
+                Operator.TEXT_EQUALS,
+                "receipt_id",
+                "compensation_receipt_id",
+                null,
+                Set.of("outcome-compensation-receipt.schema.json"),
+                Set.of(new FixtureRef(
+                        "outcome-compensation-receipt.schema.json",
+                        "fixtures/invalid/outcome-compensation-receipt-id-mismatch.json")));
+
+        Rule compensationReceiptHash = rulesById.get(COMPENSATION_RECEIPT_HASH_RULE);
+        requireRuleShape(
+                compensationReceiptHash,
+                Operator.TEXT_EQUALS,
+                "receipt_hash",
+                "compensation_receipt_hash",
+                null,
+                Set.of("outcome-compensation-receipt.schema.json"),
+                Set.of(new FixtureRef(
+                        "outcome-compensation-receipt.schema.json",
+                        "fixtures/invalid/outcome-compensation-receipt-hash-mismatch.json")));
     }
 
     private static void requireRuleShape(
@@ -441,7 +480,8 @@ final class OutcomeSemanticConformance {
     private enum Operator {
         EPOCH_MILLI_REPRESENTABLE_INSTANT_STRICTLY_BEFORE,
         SAFE_INTEGER_SUCCESSOR,
-        SAFE_INTEGER_EQUALS
+        SAFE_INTEGER_EQUALS,
+        TEXT_EQUALS
     }
 
     private record FixtureRef(String schemaFile, String fixture) {}

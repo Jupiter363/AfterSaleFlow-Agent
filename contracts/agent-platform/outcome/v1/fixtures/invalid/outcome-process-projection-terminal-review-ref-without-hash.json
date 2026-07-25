@@ -1,0 +1,7 @@
+{
+  "schema_version": "outcome-process-projection.v1", "workflow_id": "outcome:CASE_007:1", "case_id": "CASE_007", "phase": "CLOSURE_PENDING",
+  "terminal_review_receipt_ref": "urn:decision-receipt:007",
+  "required_operation_set_ref": "urn:operation-set:007", "required_operation_set_hash": "4141414141414141414141414141414141414141414141414141414141414141", "required_operation_count": 1, "terminal_success_receipt_count": 1,
+  "unresolved_ambiguous_count": 0, "failed_required_receipt_count": 0, "in_flight_operation_count": 0, "in_flight_compensation_count": 0, "unresolved_manual_recovery_count": 0,
+  "epoch": 1, "revision": 40, "fence": 9, "writer_mode": "TEMPORAL", "runtime_mode": "TEMPORAL", "projection_only": false
+}

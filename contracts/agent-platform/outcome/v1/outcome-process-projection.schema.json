@@ -8,6 +8,14 @@
     "terminal_review_receipt_ref": {"$ref": "#/$defs/ref"}, "terminal_review_receipt_hash": {"$ref": "#/$defs/hash"}, "required_operation_set_ref": {"$ref": "#/$defs/ref"}, "required_operation_set_hash": {"$ref": "#/$defs/hash"}, "required_operation_count": {"$ref": "#/$defs/count"}, "terminal_success_receipt_count": {"$ref": "#/$defs/count"}, "unresolved_ambiguous_count": {"$ref": "#/$defs/count"}, "failed_required_receipt_count": {"$ref": "#/$defs/count"}, "in_flight_operation_count": {"$ref": "#/$defs/count"}, "in_flight_compensation_count": {"$ref": "#/$defs/count"}, "unresolved_manual_recovery_count": {"$ref": "#/$defs/count"},
     "closure_receipt_ref": {"$ref": "#/$defs/ref"}, "closure_receipt_hash": {"$ref": "#/$defs/hash"}, "evaluation_receipt_ref": {"$ref": "#/$defs/ref"}, "evaluation_receipt_hash": {"$ref": "#/$defs/hash"}, "epoch": {"$ref": "#/$defs/positive"}, "revision": {"$ref": "#/$defs/count"}, "fence": {"$ref": "#/$defs/positive"}, "writer_mode": {"enum": ["LEGACY", "SHADOW", "TEMPORAL"]}, "runtime_mode": {"enum": ["DISABLED", "JAVA_SIGNED_SYNTHETIC_NOOP_SHADOW", "TEMPORAL"]}, "synthetic_noop_marker": {"const": "JAVA_SIGNED_SYNTHETIC_NOOP_V1"}, "projection_only": {"type": "boolean"}
   },
+  "dependentRequired": {
+    "terminal_review_receipt_ref": ["terminal_review_receipt_hash"],
+    "terminal_review_receipt_hash": ["terminal_review_receipt_ref"],
+    "closure_receipt_ref": ["closure_receipt_hash"],
+    "closure_receipt_hash": ["closure_receipt_ref"],
+    "evaluation_receipt_ref": ["evaluation_receipt_hash"],
+    "evaluation_receipt_hash": ["evaluation_receipt_ref"]
+  },
   "allOf": [
     {"if": {"properties": {"runtime_mode": {"const": "JAVA_SIGNED_SYNTHETIC_NOOP_SHADOW"}}}, "then": {"required": ["synthetic_noop_marker"], "properties": {"writer_mode": {"const": "SHADOW"}, "projection_only": {"const": true}, "phase": {"not": {"enum": ["CLOSED", "EVALUATED"]}}}, "not": {"anyOf": [{"required": ["closure_receipt_ref"]}, {"required": ["closure_receipt_hash"]}, {"required": ["evaluation_receipt_ref"]}, {"required": ["evaluation_receipt_hash"]}]}}, "else": {"not": {"required": ["synthetic_noop_marker"]}, "properties": {"projection_only": {"const": false}}}},
     {"if": {"properties": {"phase": {"enum": ["CLOSED", "EVALUATED"]}}}, "then": {"required": ["closure_receipt_ref", "closure_receipt_hash"], "properties": {"unresolved_ambiguous_count": {"const": 0}, "failed_required_receipt_count": {"const": 0}, "in_flight_operation_count": {"const": 0}, "in_flight_compensation_count": {"const": 0}, "unresolved_manual_recovery_count": {"const": 0}}}},

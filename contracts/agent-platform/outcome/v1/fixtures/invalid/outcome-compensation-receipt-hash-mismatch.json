@@ -1,0 +1,4 @@
+{
+  "schema_version": "outcome-compensation-receipt.v1", "workflow_id": "outcome:CASE_005:1", "case_id": "CASE_005", "receipt_id": "COMP_RECEIPT_001", "receipt_hash": "2020202020202020202020202020202020202020202020202020202020202020", "original_operation_id": "OP_005", "original_success_receipt_id": "OP_RECEIPT_005", "original_success_receipt_hash": "2121212121212121212121212121212121212121212121212121212121212121", "compensation_operation_id": "COMP_OP_005", "compensation_receipt_id": "COMP_RECEIPT_001", "compensation_receipt_hash": "2121212121212121212121212121212121212121212121212121212121212121",
+  "compensation_request_hash": "2222222222222222222222222222222222222222222222222222222222222222", "compensation_policy_version": "compensation.v1", "reverse_order": 2, "status": "SUCCEEDED", "observed_at": "2026-07-24T08:10:00Z", "epoch": 1, "source_revision": 30, "revision": 31, "fence": 7, "committed_event_sequence": 8
+}

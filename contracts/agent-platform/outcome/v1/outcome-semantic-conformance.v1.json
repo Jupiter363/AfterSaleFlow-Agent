@@ -59,6 +59,32 @@
           "fixture": "fixtures/invalid/outcome-process-projection-closed-success-count-mismatch.json"
         }
       ]
+    },
+    {
+      "rule_id": "compensation-receipt-id-equality.v1",
+      "operator": "TEXT_EQUALS",
+      "left_field": "receipt_id",
+      "right_field": "compensation_receipt_id",
+      "schema_files": ["outcome-compensation-receipt.schema.json"],
+      "negative_fixtures": [
+        {
+          "schema_file": "outcome-compensation-receipt.schema.json",
+          "fixture": "fixtures/invalid/outcome-compensation-receipt-id-mismatch.json"
+        }
+      ]
+    },
+    {
+      "rule_id": "compensation-receipt-hash-equality.v1",
+      "operator": "TEXT_EQUALS",
+      "left_field": "receipt_hash",
+      "right_field": "compensation_receipt_hash",
+      "schema_files": ["outcome-compensation-receipt.schema.json"],
+      "negative_fixtures": [
+        {
+          "schema_file": "outcome-compensation-receipt.schema.json",
+          "fixture": "fixtures/invalid/outcome-compensation-receipt-hash-mismatch.json"
+        }
+      ]
     }
   ]
 }

@@ -91,6 +91,11 @@ class OutcomeProtocolCompatibilityTest {
         assertThat(invariants).containsEntry(
                 "terminal_success_count",
                 "EQUALS_REQUIRED_OPERATION_COUNT_WHEN_CLOSED_OR_EVALUATED");
+        assertThat(invariants).containsEntry(
+                "optional_ref_hash_pairs", "BIDIRECTIONAL_DEPENDENT_REQUIRED");
+        assertThat(invariants).containsEntry(
+                "compensation_receipt_identity",
+                "RECEIPT_ID_AND_HASH_EXACTLY_MATCH_SELF_IDENTITY");
         assertThat(semantic).containsEntry(
                 "protocol_version", OutcomeSemanticConformance.PROTOCOL_VERSION);
         assertThat(semantic).containsEntry(

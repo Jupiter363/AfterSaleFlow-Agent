@@ -17,6 +17,10 @@
     "request_hash": {"$ref": "#/$defs/hash"}, "idempotency_key_hash": {"$ref": "#/$defs/hash"}, "policy_version": {"$ref": "#/$defs/id"},
     "epoch": {"$ref": "#/$defs/positive"}, "source_revision": {"$ref": "#/$defs/count"}, "revision": {"$ref": "#/$defs/count"}, "fence": {"$ref": "#/$defs/positive"}, "committed_event_sequence": {"$ref": "#/$defs/positive"}, "committed_at": {"$ref": "#/$defs/timestamp"}, "synthetic_only": {"type": "boolean"}
   },
+  "dependentRequired": {
+    "reason_ref": ["reason_hash"],
+    "reason_hash": ["reason_ref"]
+  },
   "allOf": [
     {"if": {"properties": {"decision": {"enum": ["APPROVE", "MODIFY_AND_APPROVE"]}}}, "then": {"required": ["approved_action_snapshot_ref", "approved_action_snapshot_hash", "operation_key_hash"], "properties": {"execution_authorized": {"const": true}}}, "else": {"properties": {"execution_authorized": {"const": false}}, "not": {"anyOf": [{"required": ["approved_action_snapshot_ref"]}, {"required": ["approved_action_snapshot_hash"]}, {"required": ["operation_key_hash"]}]}}}
   ],

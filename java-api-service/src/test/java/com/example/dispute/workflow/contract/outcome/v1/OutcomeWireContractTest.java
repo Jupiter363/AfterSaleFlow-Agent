@@ -55,6 +55,7 @@ class OutcomeWireContractTest {
             Map.entry("outcome-workflow-start-operation-count-overflow.json", "outcome-workflow-start.schema.json"),
             Map.entry("outcome-reviewer-decision-unknown.json", "outcome-reviewer-decision-receipt.schema.json"),
             Map.entry("outcome-reviewer-decision-revision-gap.json", "outcome-reviewer-decision-receipt.schema.json"),
+            Map.entry("outcome-reviewer-decision-reason-ref-without-hash.json", "outcome-reviewer-decision-receipt.schema.json"),
             Map.entry("outcome-sla-escalation-human-decision.json", "outcome-sla-escalation-receipt.schema.json"),
             Map.entry("outcome-sla-escalation-zero-event-sequence.json", "outcome-sla-escalation-receipt.schema.json"),
             Map.entry("outcome-operation-command-prompt.json", "outcome-operation-command.schema.json"),
@@ -63,11 +64,16 @@ class OutcomeWireContractTest {
             Map.entry("outcome-execution-attempt-observation-unblocked.json", "outcome-execution-attempt-observation.schema.json"),
             Map.entry("outcome-attempt-reconciliation-blind-retry.json", "outcome-attempt-reconciliation-receipt.schema.json"),
             Map.entry("outcome-compensation-credential.json", "outcome-compensation-receipt.schema.json"),
+            Map.entry("outcome-compensation-receipt-id-mismatch.json", "outcome-compensation-receipt.schema.json"),
+            Map.entry("outcome-compensation-receipt-hash-mismatch.json", "outcome-compensation-receipt.schema.json"),
             Map.entry("outcome-closure-ambiguous.json", "outcome-closure-receipt.schema.json"),
             Map.entry("outcome-evaluation-reopens-case.json", "outcome-evaluation-receipt.schema.json"),
             Map.entry("outcome-process-projection-external-payload.json", "outcome-process-projection.schema.json"),
             Map.entry("outcome-process-projection-closed-missing-closure.json", "outcome-process-projection.schema.json"),
             Map.entry("outcome-process-projection-closed-success-count-mismatch.json", "outcome-process-projection.schema.json"),
+            Map.entry("outcome-process-projection-terminal-review-ref-without-hash.json", "outcome-process-projection.schema.json"),
+            Map.entry("outcome-process-projection-closure-ref-without-hash.json", "outcome-process-projection.schema.json"),
+            Map.entry("outcome-process-projection-evaluation-ref-without-hash.json", "outcome-process-projection.schema.json"),
             Map.entry("outcome-process-projection-synthetic-evaluated.json", "outcome-process-projection.schema.json"),
             Map.entry("outcome-synthetic-noop-receipt-real-effect.json", "outcome-synthetic-noop-receipt.schema.json"),
             Map.entry("outcome-synthetic-noop-receipt-raw-url.json", "outcome-synthetic-noop-receipt.schema.json"));
@@ -269,6 +275,52 @@ class OutcomeWireContractTest {
     }
 
     @Test
+    void optionalReferenceHashPairsAreBidirectionallyRequiredByRawSchemas()
+            throws IOException {
+        List<PairCase> pairCases = List.of(
+                new PairCase(
+                        "outcome-reviewer-decision-receipt.schema.json",
+                        "reason_ref",
+                        "reason_hash",
+                        "outcome-reviewer-decision-reason-ref-without-hash.json"),
+                new PairCase(
+                        "outcome-process-projection.schema.json",
+                        "terminal_review_receipt_ref",
+                        "terminal_review_receipt_hash",
+                        "outcome-process-projection-terminal-review-ref-without-hash.json"),
+                new PairCase(
+                        "outcome-process-projection.schema.json",
+                        "closure_receipt_ref",
+                        "closure_receipt_hash",
+                        "outcome-process-projection-closure-ref-without-hash.json"),
+                new PairCase(
+                        "outcome-process-projection.schema.json",
+                        "evaluation_receipt_ref",
+                        "evaluation_receipt_hash",
+                        "outcome-process-projection-evaluation-ref-without-hash.json"));
+        JsonSchemaFactory rawFactory =
+                JsonSchemaFactory.getInstance(SpecVersion.VersionFlag.V202012);
+
+        for (PairCase pairCase : pairCases) {
+            JsonNode schemaNode = MAPPER.readTree(
+                    CONTRACT_ROOT.resolve(pairCase.schemaFile()).toFile());
+            JsonNode dependencies = schemaNode.required("dependentRequired");
+            assertThat(jsonTextList(dependencies.required(pairCase.refField())))
+                    .contains(pairCase.hashField());
+            assertThat(jsonTextList(dependencies.required(pairCase.hashField())))
+                    .contains(pairCase.refField());
+
+            JsonNode fixture = MAPPER.readTree(
+                    FIXTURES.resolve("invalid").resolve(pairCase.fixture()).toFile());
+            assertThat(rawFactory.getSchema(schemaNode).validate(fixture))
+                    .as(pairCase.fixture())
+                    .isNotEmpty();
+            assertThatThrownBy(() -> codec.validate(pairCase.schemaFile(), fixture))
+                    .isInstanceOf(IllegalArgumentException.class);
+        }
+    }
+
+    @Test
     void rawDraft202012ValidationCannotClaimFullContractValidity() throws IOException {
         JsonNode manifest = MAPPER.readTree(
                 CONTRACT_ROOT.resolve(OutcomeSemanticConformance.MANIFEST_FILE).toFile());
@@ -300,7 +352,15 @@ class OutcomeWireContractTest {
                 "outcome-process-projection-closed-success-count-mismatch.json",
                 new SemanticCase(
                         "outcome-process-projection.schema.json",
-                        "terminal-success-count-equality.v1"));
+                        "terminal-success-count-equality.v1"),
+                "outcome-compensation-receipt-id-mismatch.json",
+                new SemanticCase(
+                        "outcome-compensation-receipt.schema.json",
+                        "compensation-receipt-id-equality.v1"),
+                "outcome-compensation-receipt-hash-mismatch.json",
+                new SemanticCase(
+                        "outcome-compensation-receipt.schema.json",
+                        "compensation-receipt-hash-equality.v1"));
         JsonSchemaFactory rawFactory =
                 JsonSchemaFactory.getInstance(SpecVersion.VersionFlag.V202012);
 
@@ -354,6 +414,11 @@ class OutcomeWireContractTest {
                 .containsExactly("review-window-order.v1");
         assertThat(conformance.ruleIds("outcome-operation-receipt.schema.json"))
                 .containsExactly("causal-revision-adjacency.v1");
+        assertThat(conformance.ruleIds("outcome-compensation-receipt.schema.json"))
+                .containsExactlyInAnyOrder(
+                        "causal-revision-adjacency.v1",
+                        "compensation-receipt-id-equality.v1",
+                        "compensation-receipt-hash-equality.v1");
         assertThat(conformance.ruleIds("outcome-process-projection.schema.json"))
                 .containsExactly("terminal-success-count-equality.v1");
     }
@@ -394,6 +459,26 @@ class OutcomeWireContractTest {
         assertThatThrownBy(() -> new OutcomeContractCodec(copy))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("terminal-success-count-equality.v1")
+                .hasMessageContaining("frozen v1 rule shape");
+    }
+
+    @Test
+    void compensationIdentityRuleDriftFailsClosedAtCodecStartup(@TempDir Path tempDir)
+            throws IOException {
+        Path copy = tempDir.resolve("outcome-v1");
+        copyContractRoot(copy);
+        Path manifestPath = copy.resolve(OutcomeSemanticConformance.MANIFEST_FILE);
+        ObjectNode manifest = (ObjectNode) MAPPER.readTree(manifestPath.toFile());
+        for (JsonNode rule : manifest.required("rules")) {
+            if (rule.required("rule_id").asText().equals("compensation-receipt-id-equality.v1")) {
+                ((ObjectNode) rule).put("right_field", "receipt_id");
+            }
+        }
+        MAPPER.writeValue(manifestPath.toFile(), manifest);
+
+        assertThatThrownBy(() -> new OutcomeContractCodec(copy))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("compensation-receipt-id-equality.v1")
                 .hasMessageContaining("frozen v1 rule shape");
     }
 
@@ -471,6 +556,12 @@ class OutcomeWireContractTest {
         }
     }
 
+    private static List<String> jsonTextList(JsonNode array) {
+        return java.util.stream.StreamSupport.stream(array.spliterator(), false)
+                .map(JsonNode::asText)
+                .toList();
+    }
+
     private static Map.Entry<String, ContractCase> entry(
             String fixtureName, String schemaFile, Class<?> javaType) {
         return Map.entry(fixtureName, new ContractCase(schemaFile, javaType));
@@ -479,4 +570,7 @@ class OutcomeWireContractTest {
     private record ContractCase(String schemaFile, Class<?> javaType) {}
 
     private record SemanticCase(String schemaFile, String ruleId) {}
+
+    private record PairCase(
+            String schemaFile, String refField, String hashField, String fixture) {}
 }
