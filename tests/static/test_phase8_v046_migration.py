@@ -222,6 +222,7 @@ def test_flyway_test_runs_through_v046_and_asserts_additive_contract() -> None:
     assert "latest.migrate().migrationsExecuted).isPositive()" in java
     assert "latest.migrate().migrationsExecuted).isEqualTo(2)" not in java
     assert "assertV046AdditiveDeliverySchema(connection)" in java
+    assert "relname || ':' || relkind::text" in java
     assert "agent_run_stream_event_delivery:p" in java
     assert "pg_get_expr(child.relpartbound, child.oid) = 'DEFAULT'" in java
     assert "record_agent_run_stream_delivery" in java

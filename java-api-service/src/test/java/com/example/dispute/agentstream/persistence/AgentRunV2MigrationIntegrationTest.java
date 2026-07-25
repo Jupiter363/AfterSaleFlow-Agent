@@ -385,7 +385,10 @@ class AgentRunV2MigrationIntegrationTest {
                         scalar(
                                 connection,
                                 """
-                                select string_agg(relname || ':' || relkind, ',' order by relname)
+                                select string_agg(
+                                    relname || ':' || relkind::text,
+                                    ',' order by relname
+                                )
                                   from pg_class
                                  where relname in (
                                      'agent_run_stream_event',
