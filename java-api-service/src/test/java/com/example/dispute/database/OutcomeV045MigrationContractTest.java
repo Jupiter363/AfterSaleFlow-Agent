@@ -155,20 +155,41 @@ class OutcomeV045MigrationContractTest {
                 normalizedSql(),
                 "create function enforce_outcome_attempt_sequence()",
                 "create trigger trg_outcome_attempt_sequence");
+        String firstObservation = functionSegment(
+                function,
+                "if not found then",
+                "else if new.attempt_sequence <> previous.attempt_sequence + 1");
+        String redispatch = function.substring(function.indexOf(
+                "if new.observation_type = 'invocation_dispatched' then"));
 
         assertThat(function)
                 .contains("parent.retry_class = 'non_retryable' and new.retry_permitted")
                 .contains("non_retryable outcome operation cannot publish retry authority")
-                .contains(
-                        "new.observation_type = 'invocation_dispatched' and"
-                                + " (not previous.retry_permitted"
-                                + " or parent.retry_class = 'non_retryable')")
-                .contains("outcome operation redispatch has no retry authority")
                 .contains("previous.observation_type = 'ambiguous' and new.observation_type <> 'reconciling'")
                 .contains(
                         "previous.observation_type = 'reconciling' and"
                                 + " new.observation_type not in"
                                 + " ('reconciling', 'no_effect_confirmed')");
+        assertThat(firstObservation)
+                .contains("new.attempt_sequence <> 1")
+                .contains("new.observation_type = 'reconciling'")
+                .doesNotContain("previous.retry_permitted")
+                .doesNotContain("bounded_pre_effect")
+                .doesNotContain("status_query_required");
+        assertThat(redispatch)
+                .contains("if not previous.retry_permitted then")
+                .contains("outcome operation redispatch has no retry authority")
+                .contains("parent.retry_class = 'non_retryable'")
+                .contains(
+                        "parent.retry_class = 'bounded_pre_effect' and"
+                                + " previous.observation_type <> 'pre_effect_retryable_failure'")
+                .contains(
+                        "parent.retry_class = 'status_query_required' and"
+                                + " previous.observation_type <> 'no_effect_confirmed'")
+                .contains(
+                        "outcome operation retry class does not permit redispatch"
+                                + " after the previous observation")
+                .doesNotContain("parent.retry_class = 'idempotent_provider'");
     }
 
     @Test
@@ -390,6 +411,52 @@ class OutcomeV045MigrationContractTest {
                         "create function outcome_required_action_records_succeeded(",
                         "create function enforce_outcome_operation_binding()"))
                 .contains("perform outcome_lock_required_action_records(p_projection_id)");
+    }
+
+    @Test
+    void locksTheExactActiveEpochBeforeTheProjectionForEveryNewReservation()
+            throws Exception {
+        String sql = normalizedSql();
+        String epochLock = functionSegment(
+                sql,
+                "create function outcome_lock_active_epoch_for_reservation(",
+                "create function outcome_lock_action_record(");
+        String reservation = functionSegment(
+                sql,
+                "create function enforce_outcome_operation_binding()",
+                "create trigger trg_outcome_operation_binding");
+
+        assertThat(epochLock)
+                .contains("epoch.id = projection.epoch_id")
+                .contains("epoch.tenant_surrogate = projection.tenant_surrogate")
+                .contains("epoch.case_id = projection.case_id")
+                .contains("epoch.room_type = projection.room_type")
+                .contains("projection.room_type = 'review'")
+                .contains("epoch.room_epoch = projection.outcome_epoch")
+                .contains("epoch.writer_mode = projection.writer_mode")
+                .contains("epoch.fencing_token = projection.fencing_token")
+                .contains("epoch.process_revision = projection.process_revision")
+                .contains("epoch.room_revision = projection.outcome_revision")
+                .contains("epoch.lifecycle_status = 'active'")
+                .contains("projection.tenant_surrogate = p_tenant_surrogate")
+                .contains("projection.case_id = p_case_id")
+                .contains("projection.outcome_epoch = p_outcome_epoch")
+                .contains("projection.fencing_token = p_fencing_token")
+                .contains("projection.process_revision = p_process_revision")
+                .contains("projection.outcome_revision = p_outcome_revision")
+                .contains("for share of epoch")
+                .contains("return found");
+        assertAppearsInOrder(
+                reservation,
+                "perform pg_advisory_xact_lock(hashtextextended(",
+                "outcome_lock_active_epoch_for_reservation(",
+                "from outcome_process_projection value",
+                "for update",
+                "outcome operation reservation is forbidden after closure readiness");
+        assertThat(reservation)
+                .contains("outcome operation has no active current epoch authority")
+                .contains("new.process_revision")
+                .contains("new.outcome_revision");
     }
 
     @Test

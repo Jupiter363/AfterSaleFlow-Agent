@@ -416,6 +416,46 @@ create index idx_outcome_operation_closure
 create index idx_outcome_operation_reconcile
     on outcome_operation(case_id, outcome_epoch, fencing_token, process_revision, outcome_revision);
 
+create function outcome_lock_active_epoch_for_reservation(
+    p_projection_id varchar(64),
+    p_tenant_surrogate varchar(128),
+    p_case_id varchar(64),
+    p_outcome_epoch bigint,
+    p_fencing_token bigint,
+    p_process_revision bigint,
+    p_outcome_revision bigint
+)
+returns boolean
+language plpgsql
+volatile
+as $$
+begin
+    perform epoch.id
+      from outcome_process_projection projection
+      join case_room_epoch epoch
+        on epoch.id = projection.epoch_id
+       and epoch.tenant_surrogate = projection.tenant_surrogate
+       and epoch.case_id = projection.case_id
+       and epoch.room_type = projection.room_type
+       and epoch.room_epoch = projection.outcome_epoch
+       and epoch.writer_mode = projection.writer_mode
+       and epoch.fencing_token = projection.fencing_token
+       and epoch.process_revision = projection.process_revision
+       and epoch.room_revision = projection.outcome_revision
+       and epoch.lifecycle_status = 'ACTIVE'
+     where projection.projection_id = p_projection_id
+       and projection.tenant_surrogate = p_tenant_surrogate
+       and projection.case_id = p_case_id
+       and projection.room_type = 'REVIEW'
+       and projection.outcome_epoch = p_outcome_epoch
+       and projection.fencing_token = p_fencing_token
+       and projection.process_revision = p_process_revision
+       and projection.outcome_revision = p_outcome_revision
+     for share of epoch;
+    return found;
+end
+$$;
+
 create function outcome_lock_action_record(p_action_record_id varchar(64))
 returns boolean
 language plpgsql
@@ -664,6 +704,18 @@ begin
         new.case_id || ':' || new.outcome_epoch::text,
         0
     ));
+    if not outcome_lock_active_epoch_for_reservation(
+        new.projection_id,
+        new.tenant_surrogate,
+        new.case_id,
+        new.outcome_epoch,
+        new.fencing_token,
+        new.process_revision,
+        new.outcome_revision
+    ) then
+        raise exception using errcode = '23514',
+            message = 'Outcome operation has no active current epoch authority';
+    end if;
     select value.* into projection
       from outcome_process_projection value
      where value.projection_id = new.projection_id
@@ -1013,10 +1065,19 @@ begin
             raise exception using errcode = '23514',
                 message = 'RECONCILING Outcome operation forbids another invocation';
         end if;
-        if new.observation_type = 'INVOCATION_DISPATCHED'
-           and (not previous.retry_permitted or parent.retry_class = 'NON_RETRYABLE') then
-            raise exception using errcode = '23514',
-                message = 'Outcome operation redispatch has no retry authority';
+        if new.observation_type = 'INVOCATION_DISPATCHED' then
+            if not previous.retry_permitted then
+                raise exception using errcode = '23514',
+                    message = 'Outcome operation redispatch has no retry authority';
+            end if;
+            if parent.retry_class = 'NON_RETRYABLE'
+               or (parent.retry_class = 'BOUNDED_PRE_EFFECT'
+                   and previous.observation_type <> 'PRE_EFFECT_RETRYABLE_FAILURE')
+               or (parent.retry_class = 'STATUS_QUERY_REQUIRED'
+                   and previous.observation_type <> 'NO_EFFECT_CONFIRMED') then
+                raise exception using errcode = '23514',
+                    message = 'Outcome operation retry class does not permit redispatch after the previous observation';
+            end if;
         end if;
     end if;
     return new;
