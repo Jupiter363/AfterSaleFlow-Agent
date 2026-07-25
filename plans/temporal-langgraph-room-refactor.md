@@ -733,6 +733,21 @@ DB/Redis/worker故障；evaluation provider失败。
 
 ### 7.9 Phase 8: Cleanup and production hardening (`MIG-008`)
 
+Phase 8 engineering contract and entry sequencing is frozen by
+[`phase-8-production-hardening-execution.md`](./phase-8-production-hardening-execution.md),
+[`phase-8-production-hardening-test-batches.yaml`](./phase-8-production-hardening-test-batches.yaml),
+[`phase-8-owner-briefs.yaml`](./phase-8-owner-briefs.yaml), the
+[`P8.0 contract pack`](../docs/runbooks/temporal-first/phase-8-p8.0-contract-pack.md),
+[`P8.0 baseline inventory`](../docs/runbooks/temporal-first/phase-8-p8.0-baseline-inventory.md), and
+[`P8.0 review closure`](../docs/runbooks/temporal-first/phase-8-p8.0-review-closure.md). Accepted A7
+`e3acedc64d161f0342c8db3d5c313c2f404ea462` grants `PHASE_8_ENGINEERING_ONLY`, which permits only
+the P8.0 engineering contract and entry lane. Entry then requires sole-parent contract-only `C8`,
+Batch 0 from clean detached exact-SHA `C8`, sole-parent evidence-only `E8`, and sole-parent
+checkpoint-only `A8`; only `A8` may record P8.0 `PASS` and open engineering implementation. This
+chain does not satisfy or relax the production entry condition below: `MIG-000..007=PASS` remains
+mandatory before release-lane execution, production traffic, canary, promotion, destructive
+cleanup, or `MIG-008=PASS`.
+
 **目标**：在无活跃引用后关闭/删除旧 writer、scheduler、memory ownership和 endpoint；完成同一 release commit
 上的全量回归、负载、chaos、replay、安全、PITR/DR和 `GATE-001..010`。
 **非目标**：不在本阶段补业务功能或降低未通过门禁。

@@ -1,0 +1,769 @@
+schema_version: phase-owner-briefs.v2
+phase: 8
+name: production-hardening-adaptive-owner-briefs
+document_status: FROZEN_P8_0_CONTRACT_CANDIDATE
+
+status:
+  P8.0: NOT_RUN
+  engineering_execution: BLOCKED_PENDING_P8_0_ACCEPTANCE
+  production_checkpoint: PENDING_EXTERNAL
+  promotion_gate: PENDING
+  MIG-006: PENDING_PROMOTION
+  MIG-007: PENDING_PROMOTION
+  MIG-008: PENDING_PROMOTION
+  next_phase_permission: BLOCKED_PENDING_P8_0_PASS
+
+authority:
+  accepted_phase_7_checkpoint_A7: e3acedc64d161f0342c8db3d5c313c2f404ea462
+  current_permission: PHASE_8_ENGINEERING_ONLY
+  phase_8_contract_candidate_C8: TO_BE_RECORDED_AT_FREEZE
+  phase_8_entry_evidence_E8: NOT_CREATED
+  phase_8_entry_checkpoint_A8: NOT_CREATED
+  execution_plan: plans/phase-8-production-hardening-execution.md
+  test_schedule: plans/phase-8-production-hardening-test-batches.yaml
+  contract_pack: docs/runbooks/temporal-first/phase-8-p8.0-contract-pack.md
+  baseline_inventory: docs/runbooks/temporal-first/phase-8-p8.0-baseline-inventory.md
+  review_closure: docs/runbooks/temporal-first/phase-8-p8.0-review-closure.md
+  superseded_historical_entry_chain:
+    contract_candidate_C8: 6d4f9946ab357a7d3193ea1680473fe923322eb0
+    entry_evidence_E8: 4dc398d359806ab41ea702df54112956d17920ae
+    entry_checkpoint_A8: 7e3cbace3d206aef5eb23a03d36878a00634c9a9
+    preserved_ref: refs/tags/phase8-superseded-a8-7e3cbace
+    preserved_ref_must_not_move: true
+    authority_scope: HISTORICAL_OLD_CONTRACT_ONLY
+    authorizes_replacement_contract_or_implementation: false
+  collaboration_policy: plans/agent-collaboration-execution.md
+  quick_reference: docs/runbooks/temporal-first/phase-1-lessons-quick-reference.md
+
+entry_gate:
+  status: BLOCKED
+  entry_pass_token: P8_0_ENGINEERING_ENTRY_PASS_AT_A8
+  required_before_implementation_dispatch:
+    - A7_IS_EXACTLY_E3ACEDC64D161F0342C8DB3D5C313C2F404EA462
+    - A7_RECORDS_PHASE_8_ENGINEERING_ONLY
+    - C8_IS_SOLE_PARENT_DIRECT_CHILD_OF_A7
+    - C8_IS_CONTRACT_ONLY_AND_CANNOT_SELF_PASS
+    - BATCH_0_PASSES_FROM_EXACT_CLEAN_DETACHED_C8
+    - E8_IS_SOLE_PARENT_DIRECT_CHILD_OF_C8
+    - E8_IS_SEPARATE_EVIDENCE_ONLY_COMMIT_AND_CANNOT_RELEASE_IMPLEMENTATION
+    - A8_IS_SOLE_PARENT_DIRECT_CHILD_OF_E8
+    - A8_IS_CHECKPOINT_ONLY_AND_RECORDS_P8_0_ENGINEERING_ENTRY_PASS
+    - ONLY_A8_RELEASES_ENGINEERING_IMPLEMENTATION_OWNERS
+  invalidation_rules:
+    - Any contract change after C8 creates a new candidate and requires a fresh Batch 0.
+    - This correction must be a replacement contract-only C8 sole-parent child of exact A7, followed by fresh Batch 0, evidence-only E8, and checkpoint-only A8.
+    - Historical C8 6d4f9946ab357a7d3193ea1680473fe923322eb0, E8 4dc398d359806ab41ea702df54112956d17920ae, and A8 7e3cbace3d206aef5eb23a03d36878a00634c9a9 grant no authority over the replacement contract or its implementation.
+    - Dirty-tree, mixed-SHA, mixed-attempt, or inherited Phase 7 results cannot satisfy Batch 0.
+    - No implementation owner may edit a product, migration, runtime, deployment, harness, or operations path before accepted A8.
+
+lane_boundaries:
+  engineering_lane: LOCAL_SYNTHETIC_OR_EXPLICITLY_DISPOSABLE_ONLY_AFTER_ENTRY
+  release_lane: BLOCKED_PENDING_EXTERNAL_AUTHORIZATION_AND_EVIDENCE
+  engineering_readiness_is_production_pass: false
+  production_scheduler_off_activation_allowed: false
+  legacy_code_or_schema_deletion_allowed: false
+  production_v046_apply_or_switch_allowed: false
+  v047_authoring_allowed: false
+  v047_execution_allowed: false
+  production_traffic_allowed: false
+  real_production_load_allowed: false
+  production_chaos_allowed: false
+  production_pitr_or_dr_allowed: false
+  production_rotation_allowed: false
+  production_soak_allowed: false
+  canary_allowed: false
+  promotion_allowed: false
+  external_actions_forbidden:
+    - PRODUCTION_SCHEDULER_OFF_ACTIVATION
+    - PRODUCTION_V046_APPLY_OR_READER_WRITER_SWITCH
+    - V047_OR_DESTRUCTIVE_CLEANUP
+    - PRODUCTION_TRAFFIC_LOAD_CHAOS_FAILOVER_PITR_DR_ROTATION_OR_SOAK
+    - REAL_CASE_PARTY_OR_TENANT_DATA
+    - REAL_TOOL_CAPABILITY_OR_EFFECT
+    - CANARY_PROMOTION_OR_MIGRATION_PASS
+    - EXTERNAL_OPERATOR_OR_SIX_ROLE_SIGNOFF
+  real_case_or_party_data: FORBIDDEN
+  destructive_cleanup_authorization:
+    status: FORBIDDEN
+    MIG_000_008_PASS_REQUIRED: true
+    required_migrations: [MIG-000, MIG-001, MIG-002, MIG-003, MIG-004, MIG-005, MIG-006, MIG-007, MIG-008]
+    rule: V047 and every destructive cleanup action require all nine migrations to be externally recorded PASS plus every other release, reference, retention, restore, and signature gate.
+  inherited_runtime_ceiling:
+    formal_outcome_activation: FORBIDDEN
+    temporal_outcome_allocation: FORBIDDEN
+    permitted_phase_7_runtime: DISABLED_OR_JAVA_SIGNED_SYNTHETIC_NOOP_SHADOW
+    formal_business_authority: JAVA_AND_DOMAIN_POSTGRESQL_ONLY
+
+team_topology:
+  active_primary_agents: 1
+  active_delegated_agents: 11
+  implementation_owner_count: 5
+  p0_review_lane_count: 3
+  verification_lane_count: 2
+  lookahead_lane_count: 1
+  primary_integrator: R
+  implementation_owners: [I1, I2, I3, I4, I5]
+  machine_schedule_owner_ids: [A, B, C, D, E]
+  owner_aliases: {A: I1, B: I2, C: I3, D: I4, E: I5}
+  p0_review_lanes: [P0-TEMPORAL, P0-DATA, P0-SECURITY]
+  verification_lanes: [V-LIGHT, V-MAVEN]
+  lookahead_lane: L1
+  scheduling_policy:
+    dependency_aware: true
+    one_owner_per_path: true
+    start_10_20_seconds_apart: true
+    at_least_50_percent_p0_review_in_flight: true
+    rules:
+      - Preserve all five logical implementation owners when capacity constrains simultaneous sampling.
+      - Activate roles only when a dependency, stable reviewable diff, or testable candidate exists.
+      - Backfill released slots in the next wave; do not collapse an ownership domain into an unbounded generalist.
+      - The Phase 4-8 1 plus 11 topology may exceed the generic sampling budget when useful, but test-process and ownership limits remain mandatory.
+
+model_policy:
+  R:
+    model: inherited
+    reasoning: configured_maximum
+  implementation_and_p0_review:
+    model: gpt-5.6-sol
+    reasoning: xhigh
+  security_temporal_transaction_migration_and_runtime_configuration:
+    model: gpt-5.6-sol
+    reasoning: xhigh
+  mechanical_verification:
+    model: gpt-5.6-terra
+    reasoning: high
+  read_only_inventory_and_lookahead:
+    model: gpt-5.6-terra
+    reasoning: medium
+  fast_mode: HIGHER_THROUGHPUT_PRIORITY_TIER_ONLY
+  fast_mode_never_lowers_model_or_reasoning: true
+  service_failure_policy:
+    - On 429, 503, timeout, or usage failure, preserve partial edits, diffs, notes, and check output.
+    - Retry after bounded backoff or reassign the exact same owned and forbidden paths.
+    - Use the nearest available model class without reducing P0 review depth or acceptance criteria.
+
+write_safety:
+  one_owner_per_path: true
+  concurrent_writers_to_same_file_allowed: false
+  default_forbidden_rule: ALL_REPOSITORY_PATHS_EXCEPT_THE_ACTIVE_TASK_EXACT_OWNED_FILES
+  shared_worktree_rules:
+    - Read the current diff before editing and preserve all unrelated changes.
+    - Never reset, restore, overwrite, delete, stage, or commit a path outside the active task allowlist.
+    - Stage explicit owned paths only; git add dot and git add all are forbidden.
+    - Stop and return a collision to R when an owned file changes unexpectedly.
+  primary_contract_paths_forbidden_to_implementation_owners:
+    - plans/phase-8-production-hardening-execution.md
+    - plans/phase-8-production-hardening-test-batches.yaml
+    - plans/phase-8-owner-briefs.yaml
+    - docs/runbooks/temporal-first/phase-8-p8.0-contract-pack.md
+    - docs/runbooks/temporal-first/phase-8-p8.0-baseline-inventory.md
+    - docs/runbooks/temporal-first/phase-8-p8.0-review-closure.md
+    - tests/static/test_phase8_production_hardening_plan.py
+  always_forbidden_paths_for_delegated_writers:
+    - .env
+    - .env.example
+    - docker-compose.yml
+    - java-api-service/src/main/resources/application.yml
+    - java-api-service/src/main/resources/db/migration/V047__remove_legacy_orchestration.sql
+    - test-reports/temporal-first
+
+test_policy:
+  focused_checks_during_editing: true
+  max_concurrent_light_processes: 2
+  maven_testcontainers_process_limit: 1
+  maven_testcontainers_lane_is_serial: true
+  single_maven_testcontainers_broker: V-MAVEN
+  full_regression_deferred_to_unified_checkpoint: true
+  end_to_end_deferred_to_unified_checkpoint: true
+  implementation_owner_rule: Run only the exact light or static command in the active task unless R assigns a verification lane.
+  forbidden_engineering_commands:
+    - FULL_REPOSITORY_REGRESSION
+    - FULL_BROWSER_OR_END_TO_END_FLOW
+    - DOCKER_OR_PRODUCTION_DEPLOYMENT
+    - REAL_LOAD_SOAK_CHAOS_FAILOVER_PITR_DR_OR_ROTATION
+  failure_classification: [PRODUCT, FIXTURE, CONTRACT, INFRA, EXTERNAL_GATE]
+  failure_classification_semantics:
+    PRODUCT: Product code, runtime, migration, deployment, or test behavior changed.
+    CONTRACT: Replacement sole-parent C8 candidate from exact A7 plus a full fresh Batch 0 is mandatory.
+  classify_before_rerun: true
+
+dependency_waves:
+  P8-0:
+    status: BLOCKED_PENDING_C8_BATCH_0_SEPARATE_E8_AND_CHECKPOINT_ONLY_A8
+    active_roles: [R]
+    opens_after: ONLY_CHECKPOINT_ONLY_A8_RECORDS_P8_0_ENGINEERING_ENTRY_PASS
+  P8-WAVE-1:
+    status: BLOCKED_UNTIL_CHECKPOINT_ONLY_A8
+    implementation_tasks: [P8-I1-1, P8-I2-1, P8-I3-1, P8-I4-1, P8-I5-1]
+    review_assignments:
+      P8-I1-1: P0-TEMPORAL
+      P8-I2-1: P0-DATA
+      P8-I3-1: P0-SECURITY
+      P8-I4-1: P0-SECURITY
+      P8-I5-1: P0-SECURITY
+    verification_lanes: [V-LIGHT, V-MAVEN]
+    barrier: P8-WAVE-1-INTEGRATED
+  P8-WAVE-2:
+    status: BLOCKED_ON_P8_WAVE_1_INTEGRATED
+    implementation_tasks: [P8-I1-2, P8-I2-2, P8-I3-2, P8-I4-2, P8-I5-2]
+    review_assignments:
+      P8-I1-2: P0-TEMPORAL
+      P8-I2-2: P0-DATA
+      P8-I3-2: P0-SECURITY
+      P8-I4-2: P0-SECURITY
+      P8-I5-2: P0-SECURITY
+    verification_lanes: [V-LIGHT, V-MAVEN]
+    barrier: P8-WAVE-2-INTEGRATED
+  P8-WAVE-3:
+    status: BLOCKED_ON_P8_WAVE_2_INTEGRATED
+    implementation_tasks: [P8-I2-3, P8-I1-3, P8-I5-3]
+    ordered_dependencies:
+      - P8-I2-3_BEFORE_P8-I1-3
+      - P8-I1-3_BEFORE_P8-I5-3
+    review_assignments:
+      P8-I2-3: P0-DATA
+      P8-I1-3: P0-TEMPORAL
+      P8-I5-3: P0-SECURITY
+    verification_lanes: [V-LIGHT, V-MAVEN]
+    barrier: P8-WAVE-3-INTEGRATED
+  P8-ENGINEERING-CANDIDATE:
+    status: BLOCKED_ON_ALL_IMPLEMENTATION_REVIEW_AND_BATCH_2_RESULTS
+    active_roles: [R, P0-TEMPORAL, P0-DATA, P0-SECURITY, V-LIGHT, V-MAVEN]
+    required_result_ceiling:
+      engineering_checkpoint: PASS_OR_FAIL
+      production_checkpoint: PENDING_EXTERNAL
+      promotion_gate: PENDING
+      MIG-006: PENDING_PROMOTION
+      MIG-007: PENDING_PROMOTION
+      MIG-008: PENDING_PROMOTION
+
+same_owner_takeovers:
+  - barrier: P8-WAVE-1-INTEGRATED
+    owner: I1
+    from_task: P8-I1-1
+    to_task: P8-I1-3
+    exact_paths: [scripts/phase8/reference_audit/report.py]
+  - barrier: P8-WAVE-1-INTEGRATED
+    owner: I3
+    from_task: P8-I3-1
+    to_task: P8-I3-2
+    exact_paths: [deploy/production/phase8/capacity-policy.yaml]
+  - barrier: P8-WAVE-1-INTEGRATED
+    owner: I5
+    from_task: P8-I5-1
+    to_task: P8-I5-3
+    exact_paths: [scripts/phase8/candidate/evidence_schema.py]
+  - barrier: P8-WAVE-2-INTEGRATED
+    owner: I2
+    from_task: P8-I2-2
+    to_task: P8-I2-3
+    exact_paths: [java-api-service/src/main/java/com/example/dispute/agentstream/application/AgentRunV2StreamStore.java]
+
+implementation_owners:
+  I1:
+    slice: P8-S1
+    machine_schedule_owner: A
+    machine_schedule_tasks: [P8-A1, P8-A2, P8-A3]
+    role: Active-reference audit, scheduler lifecycle corrections, and non-destructive cleanup eligibility
+    status: BLOCKED_UNTIL_CHECKPOINT_ONLY_A8
+    model: gpt-5.6-sol
+    reasoning: xhigh
+    commit_allowed_only_after_A8_and_review: true
+    review_lane: P0-TEMPORAL
+    forbidden_rule: ALL_PATHS_EXCEPT_CURRENT_TASK_OWNED_FILES
+    exact_forbidden_paths:
+      - java-api-service/src/main/resources/db/migration/V046__stream_partition_and_retention.sql
+      - deploy/production/phase8
+      - deploy/observability/phase8
+      - infra-tests/phase8
+      - scripts/phase8/candidate
+      - scripts/phase8/recovery
+      - java-api-service/src/main/resources/db/migration/V047__remove_legacy_orchestration.sql
+    tasks:
+      P8-I1-1:
+        depends_on: [P8-0]
+        exact_owned_paths:
+          - contracts/agent-platform/phase8/active-reference-report.schema.json
+          - scripts/phase8/reference_audit/__init__.py
+          - scripts/phase8/reference_audit/model.py
+          - scripts/phase8/reference_audit/adapters.py
+          - scripts/phase8/reference_audit/report.py
+          - tests/static/test_phase8_active_reference_audit.py
+        acceptance:
+          - Cover every required reference class with complete pagination, high-watermark, candidate/environment identity, and report hashes.
+          - UNKNOWN, PARTIAL, ERROR, timeout, permission failure, query failure, lag, or missing authority returns BLOCK_DELETE.
+          - Eligibility evidence proves no-new-producer quiescence and matching authority high-watermarks before a zero can be considered.
+          - The report has no mutation, retirement, OFF activation, or delete capability.
+        exact_authority_joins:
+          TEMPORAL:
+            - Workflow, Child, Continue-As-New lineage, pending Activity and Schedule references.
+            - Visibility pagination, Worker Build ID reachability, and scan high-watermark completeness.
+          DOMAIN_POSTGRESQL:
+            - Room epoch and writer mode, V1 logical run and attempt, outbox operation, lease, and stream cursor.
+            - Archive and retention high-watermarks joined to the same candidate and environment identity.
+          GRAPH_POSTGRESQL:
+            - Registry version, thread, checkpoint, command-result, and lease references.
+          DEPLOYMENT_AND_OBJECT_STORAGE:
+            - Java, Python, API, Worker, compatibility-reader, retained frontend, API, and legacy endpoint versions.
+            - Codec, schema, prompt, artifact, and immutable object manifest versions plus agent_stream.v1 telemetry.
+        quiescence_proof:
+          no_new_producer_window_required: true
+          authority_high_watermarks_must_match: true
+          incomplete_or_advancing_high_watermark_decision: BLOCK_DELETE
+        focused_command: [D:/miniconda/python.exe, -m, pytest, tests/static/test_phase8_active_reference_audit.py, -q]
+      P8-I1-2:
+        depends_on: [P8-I1-1, P8-WAVE-1-INTEGRATED]
+        exact_owned_paths:
+          - java-api-service/src/main/java/com/example/dispute/workflow/config/AgentRunV2Properties.java
+          - java-api-service/src/main/java/com/example/dispute/agentstream/application/AgentRunRecoveryScheduler.java
+          - java-api-service/src/main/java/com/example/dispute/hearing/application/HearingFlowDeadlineScheduler.java
+          - java-api-service/src/main/java/com/example/dispute/hearing/application/HearingReviewHandoffRecoveryScheduler.java
+          - java-api-service/src/main/java/com/example/dispute/workflow/recovery/hearing/HearingSchedulerControl.java
+          - java-api-service/src/main/java/com/example/dispute/workflow/recovery/hearing/HearingSchedulerDetector.java
+          - java-api-service/src/main/java/com/example/dispute/workflow/recovery/hearing/JdbcHearingSchedulerDetector.java
+          - java-api-service/src/test/java/com/example/dispute/agentstream/AgentRunRecoverySchedulerTest.java
+          - java-api-service/src/test/java/com/example/dispute/workflow/config/AgentRunV2PropertiesTest.java
+          - java-api-service/src/test/java/com/example/dispute/hearing/HearingSchedulerModeTest.java
+          - java-api-service/src/test/java/com/example/dispute/workflow/recovery/hearing/JdbcHearingSchedulerDetectorTest.java
+          - tests/static/test_phase8_scheduler_lifecycle.py
+        a7_gap_contracts:
+          TEMPORAL_OFF_representation_and_drainedOff_writer_regression:
+            - Preserve TEMPORAL writer identity in a drained OFF representation.
+            - Add a regression proving drainedOff does not regress the writer to LEGACY.
+          AgentRun_DETECTOR_target_mismatch:
+            - DETECTOR enumerates exact V1 plus LEGACY_WORKER would-be executor candidates.
+            - V2 plus TEMPORAL_ACTIVITY rows are not the old executor candidate set.
+          projection_only_legacy_candidate_blind_spot:
+            - Hearing detection includes would-be legacy deadline and handoff candidates absent from the Temporal projection.
+            - Projection equality alone cannot establish zero legacy scheduler candidates.
+        scheduler_estate:
+          retirement_candidates_exactly:
+            - AgentRunRecoveryScheduler
+            - HearingFlowDeadlineScheduler
+            - HearingReviewHandoffRecoveryScheduler
+          retained_jobs_not_subject_to_wholesale_off:
+            - TemporalCommandOutboxRelay
+            - ControlPlaneRecoverySchedulingConfiguration
+            - CaseDomainEventRecoveryScheduler
+            - ProcessProjectionReconciliationScheduler
+            - AgentRunStreamEventService_SSE_HEARTBEAT
+            - CaseEventService_SSE_HEARTBEAT
+          relay_recovery_and_heartbeat_jobs_are_retained: true
+          wholesale_scheduler_off_allowed: false
+        acceptance:
+          - Current lifecycle modes and detectors are treated as existing A7 inputs, not claimed absent.
+          - DETECTOR is observation and proposal only with NO_MUTATION, NO_ENQUEUE, NO_FORMAL_RECONCILIATION, no phase advance, and no time ownership.
+          - TEMPORAL epochs cannot use a legacy executor; production OFF remains release-only.
+        focused_command: [D:/miniconda/python.exe, -m, pytest, tests/static/test_phase8_scheduler_lifecycle.py, -q]
+      P8-I1-3:
+        depends_on: [P8-I1-2, P8-I2-3, P8-WAVE-2-INTEGRATED]
+        exact_owned_paths:
+          - scripts/phase8/reference_audit/report.py
+          - scripts/phase8/reference_audit/eligibility.py
+          - tests/static/test_phase8_cleanup_eligibility.py
+        acceptance:
+          - Require two complete zero scans across the full visibility and retention window.
+          - Emit only RETAIN, BLOCK_DELETE, or ELIGIBLE; never delete, retire, disable, or create V047.
+        focused_command: [D:/miniconda/python.exe, -m, pytest, tests/static/test_phase8_cleanup_eligibility.py, -q]
+
+  I2:
+    slice: P8-S2
+    machine_schedule_owner: B
+    machine_schedule_tasks: [P8-B1, P8-B2, P8-B3]
+    role: V046 additive stream migration, compatible backfill, archive retention, and Redis fanout resilience
+    status: BLOCKED_UNTIL_CHECKPOINT_ONLY_A8
+    model: gpt-5.6-sol
+    reasoning: xhigh
+    commit_allowed_only_after_A8_and_review: true
+    review_lane: P0-DATA
+    forbidden_rule: ALL_PATHS_EXCEPT_CURRENT_TASK_OWNED_FILES
+    exact_forbidden_paths:
+      - scripts/phase8/reference_audit
+      - deploy/production/phase8
+      - deploy/observability/phase8
+      - infra-tests/phase8
+      - scripts/phase8/candidate
+      - scripts/phase8/recovery
+      - java-api-service/src/main/resources/db/migration/V047__remove_legacy_orchestration.sql
+    tasks:
+      P8-I2-1:
+        depends_on: [P8-0]
+        exact_owned_paths:
+          - java-api-service/src/main/resources/db/migration/V046__stream_partition_and_retention.sql
+          - java-api-service/src/test/java/com/example/dispute/agentstream/persistence/AgentRunV2MigrationIntegrationTest.java
+          - tests/static/test_phase8_v046_migration.py
+        acceptance:
+          - V046 is additive and creates partition, archive manifest, receipt, and resumable high-watermark structures.
+          - Enforce one unpartitioned global event identity across all time partitions; a partition-local uniqueness claim is insufficient.
+          - No old-table drop, blocking production rewrite, production switch default, or V047 content is allowed.
+          - Extend the Flyway/Testcontainers migration integration test through V046 and assert the additive delivery schema rather than a hard-coded pre-V046 migration count.
+        focused_command: [D:/miniconda/python.exe, -m, pytest, tests/static/test_phase8_v046_migration.py, -q]
+      P8-I2-2:
+        depends_on: [P8-I2-1, P8-WAVE-1-INTEGRATED]
+        exact_owned_paths:
+          - java-api-service/src/main/java/com/example/dispute/agentstream/application/AgentRunV2StreamStore.java
+          - java-api-service/src/main/java/com/example/dispute/agentstream/infrastructure/persistence/AgentRunStreamEventEntity.java
+          - java-api-service/src/main/java/com/example/dispute/agentstream/infrastructure/persistence/AgentRunStreamEventRepository.java
+          - java-api-service/src/main/java/com/example/dispute/agentstream/infrastructure/persistence/PostgresAgentRunV2EventStore.java
+          - java-api-service/src/main/java/com/example/dispute/agentstream/infrastructure/persistence/StreamBackfillCoordinator.java
+          - java-api-service/src/main/java/com/example/dispute/agentstream/infrastructure/persistence/StreamCompatibilityMode.java
+          - java-api-service/src/test/java/com/example/dispute/agentstream/persistence/StreamBackfillCoordinatorTest.java
+          - java-api-service/src/test/java/com/example/dispute/agentstream/persistence/AgentRunStreamReplayIntegrationTest.java
+          - tests/static/test_phase8_stream_compatibility.py
+        acceptance:
+          - Resume bounded backfill from committed ranges and fail closed on event-identity hash conflict.
+          - Commit identity and hash registration, target insert, and contiguous nonregressing delivery high-watermark atomically; keep a separate resumable backfill cursor.
+          - Validate count, canonical hash, sequence, exact V1/V2 actor-ID audience visibility, reset, terminal, reconnect, and composite cursor replay parity before any compatible switch; every mismatch fails closed.
+          - Reader and writer defaults stay old-compatible; production apply and cutover remain forbidden.
+          - Rollback cannot select old-only reads after any target-only write; it preserves a compatible path to every committed event.
+        focused_command: [D:/miniconda/python.exe, -m, pytest, tests/static/test_phase8_stream_compatibility.py, -q]
+      P8-I2-3:
+        depends_on: [P8-I2-2, P8-WAVE-2-INTEGRATED]
+        exact_owned_paths:
+          - java-api-service/src/main/java/com/example/dispute/agentstream/application/AgentRunV2StreamStore.java
+          - java-api-service/src/main/java/com/example/dispute/agentstream/infrastructure/persistence/AgentRunStreamRetentionManifest.java
+          - java-api-service/src/main/java/com/example/dispute/agentstream/infrastructure/persistence/AgentRunStreamArchiveStore.java
+          - java-api-service/src/main/java/com/example/dispute/agentstream/infrastructure/delivery/RedisAgentRunStreamWakeupPublisher.java
+          - java-api-service/src/main/java/com/example/dispute/agentstream/infrastructure/delivery/RedisAgentRunStreamWakeupSubscriber.java
+          - java-api-service/src/main/java/com/example/dispute/agentstream/infrastructure/delivery/WakeupPublishingAgentRunV2StreamStore.java
+          - java-api-service/src/test/java/com/example/dispute/agentstream/persistence/AgentRunStreamRetentionManifestTest.java
+          - java-api-service/src/test/java/com/example/dispute/agentstream/delivery/RedisAgentRunStreamFailoverTest.java
+          - tests/static/test_phase8_stream_retention.py
+        acceptance:
+          - Bind durable archive receipts to object version, hash, sequence bounds, row count, partition, and non-regressing high-watermark.
+          - Keep buffers bounded and Redis non-authoritative; PostgreSQL cursor replay remains authoritative after Redis loss.
+          - STREAM-013 requires at least 24 hours, terminality, verified compaction or archive readback, a retained terminal event, and an immutable manifest before release-only detach or drop can be considered.
+        focused_command: [D:/miniconda/python.exe, -m, pytest, tests/static/test_phase8_stream_retention.py, -q]
+
+  I3:
+    slice: P8-S3
+    machine_schedule_owner: C
+    machine_schedule_tasks: [P8-C1, P8-C2]
+    role: Render-only three-domain topology, autoscaling, pool isolation, and synthetic capacity controls
+    status: BLOCKED_UNTIL_CHECKPOINT_ONLY_A8
+    model: gpt-5.6-sol
+    reasoning: xhigh
+    commit_allowed_only_after_A8_and_review: true
+    review_lane: P0-SECURITY
+    forbidden_rule: ALL_PATHS_EXCEPT_CURRENT_TASK_OWNED_FILES
+    exact_forbidden_paths:
+      - java-api-service/src/main/java
+      - java-api-service/src/main/resources/db/migration
+      - scripts/phase8/reference_audit
+      - deploy/observability/phase8
+      - scripts/phase8/candidate
+      - scripts/phase8/recovery
+    tasks:
+      P8-I3-1:
+        depends_on: [P8-0]
+        exact_owned_paths:
+          - deploy/production/phase8/kustomization.yaml
+          - deploy/production/phase8/java-api.yaml
+          - deploy/production/phase8/java-control-worker.yaml
+          - deploy/production/phase8/java-agent-worker.yaml
+          - deploy/production/phase8/python-agent.yaml
+          - deploy/production/phase8/litellm.yaml
+          - deploy/production/phase8/pgbouncer.yaml
+          - deploy/production/phase8/postgres-read-service.yaml
+          - deploy/production/phase8/pdb.yaml
+          - deploy/production/phase8/topology-spread.yaml
+          - deploy/production/phase8/hpa.yaml
+          - deploy/production/phase8/capacity-policy.yaml
+          - deploy/production/phase8/security/workload-identities.yaml
+          - deploy/production/phase8/security/rbac.yaml
+          - deploy/production/phase8/security/network-policies.yaml
+          - deploy/production/phase8/security/mtls-policies.yaml
+          - deploy/production/phase8/security/kms-vault-policy.yaml
+          - deploy/production/phase8/security/object-store-policy.yaml
+          - docs/runbooks/temporal-first/phase-8-security-hardening.md
+          - tests/static/test_phase8_production_topology.py
+          - tests/static/test_phase8_security_manifests.py
+        acceptance:
+          - Render topology, replicas, PDB, spread, anti-affinity, non-CPU-only HPA, PgBouncer, and isolated pool contracts.
+          - Define distinct workload identities, least-privilege RBAC, default-deny NetworkPolicy, and mTLS for API, control worker, agent worker, Python, LiteLLM, and OTel boundaries.
+          - Render Istio security.istio.io/v1 PeerAuthentication and AuthorizationPolicy contracts only; CRD installation, sidecar interception, and production enforcement remain external gates.
+          - Bind the I4-owned OTel workload through part-of=after-sale-flow, name=otel-collector, service account after-sale-otel-collector, and OTLP ports 4317/4318 without referencing I4 paths from the I3 kustomization.
+          - Reference KMS and Vault authorities without secret material; define private, versioned, immutable object storage with explicit ACL and audit evidence.
+          - Keep Temporal Cloud credentials, the trusted proxy or direct-mTLS ASGI identity bridge, reporting read routing, object-store workload identity, and Langfuse redaction as explicit release blockers; render tests cannot claim they are implemented.
+          - Do not apply a cluster resource or commit a secret, credential, production endpoint, or production namespace value.
+        focused_command: [D:/miniconda/python.exe, -m, pytest, tests/static/test_phase8_production_topology.py, -q]
+      P8-I3-2:
+        depends_on: [P8-I3-1, P8-WAVE-1-INTEGRATED]
+        exact_owned_paths:
+          - deploy/production/phase8/capacity-policy.yaml
+          - infra-tests/phase8/capacity/scenario.yaml
+          - infra-tests/phase8/capacity/admission_contract.py
+          - infra-tests/phase8/capacity/run_capacity_model.py
+          - infra-tests/phase8/capacity/test_admission_contract.py
+          - tests/static/test_phase8_capacity_harness.py
+        acceptance:
+          - Model target room, SSE, control isolation, admission, queue, pool, and bounded-backpressure behavior synthetically.
+          - A 1000-room target is not evidence; model output cannot claim real load, burst recovery, three-domain, soak, or production PASS.
+        focused_command: [D:/miniconda/python.exe, -m, pytest, tests/static/test_phase8_capacity_harness.py, -q]
+
+  I4:
+    slice: P8-S4
+    machine_schedule_owner: D
+    machine_schedule_tasks: [P8-D1, P8-D2]
+    role: OTel, SLO alerts, runbooks, recovery drills, and rotation compatibility tooling
+    status: BLOCKED_UNTIL_CHECKPOINT_ONLY_A8
+    model: gpt-5.6-sol
+    reasoning: xhigh
+    commit_allowed_only_after_A8_and_review: true
+    review_lane: P0-SECURITY
+    forbidden_rule: ALL_PATHS_EXCEPT_CURRENT_TASK_OWNED_FILES
+    exact_forbidden_paths:
+      - java-api-service/src/main/java/com/example/dispute/agentstream
+      - java-api-service/src/main/java/com/example/dispute/hearing
+      - java-api-service/src/main/resources/db/migration
+      - scripts/phase8/reference_audit
+      - deploy/production/phase8
+      - scripts/phase8/candidate
+    tasks:
+      P8-I4-1:
+        depends_on: [P8-0]
+        exact_owned_paths:
+          - deploy/observability/phase8/otel-collector.yaml
+          - deploy/observability/phase8/recording-rules.yaml
+          - deploy/observability/phase8/alerts.yaml
+          - deploy/observability/phase8/dashboards/command-outbox.json
+          - deploy/observability/phase8/dashboards/temporal-queue-history.json
+          - deploy/observability/phase8/dashboards/agentrun-stream.json
+          - deploy/observability/phase8/dashboards/graph-checkpoint-lease.json
+          - deploy/observability/phase8/dashboards/model-provider.json
+          - deploy/observability/phase8/dashboards/projection-reconciliation.json
+          - deploy/observability/phase8/dashboards/security.json
+          - deploy/observability/phase8/dashboards/disaster-recovery.json
+          - docs/runbooks/temporal-first/phase-8-alert-response.md
+          - tests/static/test_phase8_observability_assets.py
+        acceptance:
+          - Provide machine-lintable low-cardinality dashboards and alerts with named owner and runbook.
+          - Do not expose case, party, run, actor, evidence, tenant, secret, or hidden reasoning in metric labels or diagnostics.
+          - Use the shared OTel identity contract part-of=after-sale-flow, name=otel-collector, service account after-sale-otel-collector, and OTLP ports 4317/4318; I3 owns the matching identity, network, and mTLS policy.
+          - Treat current Langfuse case/user/workflow metadata and raw prompt/output export as a release-blocking privacy gap until a separately owned runtime redaction change and tests close it.
+        focused_command: [D:/miniconda/python.exe, -m, pytest, tests/static/test_phase8_observability_assets.py, -q]
+      P8-I4-2:
+        depends_on: [P8-I4-1, P8-WAVE-1-INTEGRATED]
+        exact_owned_paths:
+          - scripts/phase8/recovery/domain_pitr.py
+          - scripts/phase8/recovery/temporal_regional_dr.py
+          - scripts/phase8/recovery/graph_object_restore.py
+          - scripts/phase8/recovery/rotation_compatibility.py
+          - docs/runbooks/temporal-first/phase-8-domain-pitr.md
+          - docs/runbooks/temporal-first/phase-8-temporal-regional-dr.md
+          - docs/runbooks/temporal-first/phase-8-graph-object-restore.md
+          - docs/runbooks/temporal-first/phase-8-rotation.md
+          - tests/static/test_phase8_recovery_rotation_tools.py
+        acceptance:
+          - Build fail-closed dry-run validators for restore order, receipts, authorization, rollback, and old payload readability.
+          - Never edit internal database or Temporal tables or execute a real restore, failover, regional DR, or rotation.
+        dry_run_sandbox:
+          network_access_allowed: false
+          subprocess_allowed: false
+          cloud_api_access_allowed: false
+          database_access_allowed: false
+          temporal_access_allowed: false
+          secret_environment_access_allowed: false
+          production_credentials_allowed: false
+          allowed_inputs: REPOSITORY_TRACKED_FIXTURES_AND_EXPLICIT_SYNTHETIC_ARGUMENTS_ONLY
+        focused_command: [D:/miniconda/python.exe, -m, pytest, tests/static/test_phase8_recovery_rotation_tools.py, -q]
+
+  I5:
+    slice: P8-S5
+    machine_schedule_owner: E
+    machine_schedule_tasks: [P8-E1, P8-E2, P8-E3]
+    role: Exact-candidate runner, external scenario catalog, and evidence-integrity intake
+    status: BLOCKED_UNTIL_CHECKPOINT_ONLY_A8
+    model: gpt-5.6-sol
+    reasoning: xhigh
+    commit_allowed_only_after_A8_and_review: true
+    review_lane: P0-SECURITY
+    forbidden_rule: ALL_PATHS_EXCEPT_CURRENT_TASK_OWNED_FILES
+    exact_forbidden_paths:
+      - java-api-service/src/main/java
+      - java-api-service/src/main/resources/db/migration
+      - scripts/phase8/reference_audit
+      - scripts/phase8/recovery
+      - deploy/production/phase8
+      - deploy/observability/phase8
+    tasks:
+      P8-I5-1:
+        depends_on: [P8-0]
+        exact_owned_paths:
+          - contracts/agent-platform/phase8/checkpoint-evidence.schema.json
+          - scripts/phase8/candidate/__init__.py
+          - scripts/phase8/candidate/evidence_schema.py
+          - scripts/phase8/candidate/run_checkpoint.py
+          - tests/static/test_phase8_candidate_runner.py
+        acceptance:
+          - Bind clean candidate SHA, command order, report hashes, images, config, deployment identity, and attempt lineage.
+          - Stop on failure and reject mixed candidates, deployments, attempts, substituted reports, or self-signoff.
+          - Model engineering-local evidence without allowing it to satisfy the external security preflight or production checkpoint.
+        focused_command: [D:/miniconda/python.exe, -m, pytest, tests/static/test_phase8_candidate_runner.py, -q]
+      P8-I5-2:
+        depends_on: [P8-I5-1, P8-WAVE-1-INTEGRATED]
+        exact_owned_paths:
+          - infra-tests/phase8/scenarios/unified-checkpoint.yaml
+          - infra-tests/phase8/scenarios/load-and-burst.yaml
+          - infra-tests/phase8/scenarios/chaos-and-failover.yaml
+          - infra-tests/phase8/scenarios/security-and-rotation.yaml
+          - infra-tests/phase8/scenarios/replay-and-dr.yaml
+          - infra-tests/phase8/scenarios/soak.yaml
+          - tests/static/test_phase8_scenario_catalog.py
+        acceptance:
+          - Catalog external authorization, immutable environment, ordering, stop conditions, rollback, and six-role signatures.
+          - Validate definitions only; do not execute or claim load, chaos, failover, security, replay, DR, rotation, or soak results.
+        focused_command: [D:/miniconda/python.exe, -m, pytest, tests/static/test_phase8_scenario_catalog.py, -q]
+      P8-I5-3:
+        depends_on: [P8-I5-2, P8-I1-3, P8-I3-2, P8-I4-2, P8-WAVE-2-INTEGRATED]
+        exact_owned_paths:
+          - scripts/phase8/candidate/evidence_schema.py
+          - scripts/phase8/candidate/external_gate_intake.py
+          - tests/static/test_phase8_external_gate_intake.py
+        acceptance:
+          - Accept only exact-candidate, same immutable deployment, signed, authorized, attributable external reports.
+          - Require the complete same-context external security preflight receipt set, including all five runtime blockers, actual Istio readiness and enforcement, and the exact I3/I4 OTel binding before production PASS.
+          - Missing, unknown, partial, stale, mixed-SHA, unsigned, or self-approved evidence remains EXTERNAL_GATE.
+        focused_command: [D:/miniconda/python.exe, -m, pytest, tests/static/test_phase8_external_gate_intake.py, -q]
+
+read_only_roles:
+  P0-TEMPORAL:
+    role: Scheduler authority, Temporal ownership, reference completeness, and retirement review
+    model: gpt-5.6-sol
+    reasoning: xhigh
+    write_permission: NONE
+    exact_owned_paths: []
+    forbidden_write_paths: [ALL_REPOSITORY_PATHS]
+    review_tasks: [P8-I1-1, P8-I1-2, P8-I1-3]
+    focus:
+      - TEMPORAL plus OFF representation and drainedOff writer preservation.
+      - Exact V1 plus LEGACY would-be candidate enumeration and absent-projection coverage.
+      - No mutation, enqueue, formal reconciliation, time ownership, production OFF, or delete authority.
+  P0-DATA:
+    role: Transaction, V046 migration, replay, archive, retention, and Redis-authority review
+    model: gpt-5.6-sol
+    reasoning: xhigh
+    write_permission: NONE
+    exact_owned_paths: []
+    forbidden_write_paths: [ALL_REPOSITORY_PATHS]
+    review_tasks: [P8-I2-1, P8-I2-2, P8-I2-3]
+    focus:
+      - Additive DDL, lock budget, retry, conflict, high-watermark, dual-write, and kill-switch correctness.
+      - Count, hash, sequence, exact audience, composite cursor, old-reader, and archive receipt integrity.
+      - Bounded Redis loss with PostgreSQL and Java remaining authoritative.
+  P0-SECURITY:
+    role: Runtime isolation, privacy, observability, recovery, and evidence-gate review
+    model: gpt-5.6-sol
+    reasoning: xhigh
+    write_permission: NONE
+    exact_owned_paths: []
+    forbidden_write_paths: [ALL_REPOSITORY_PATHS]
+    review_tasks: [P8-I3-1, P8-I3-2, P8-I4-1, P8-I4-2, P8-I5-1, P8-I5-2, P8-I5-3, P8-ENGINEERING-CANDIDATE]
+    focus:
+      - Render-only topology, isolation, admission, safe telemetry, redaction, recovery order, and rotation compatibility.
+      - External evidence cannot be synthesized, mixed, self-approved, or promoted by engineering.
+      - No real environment mutation, secret material, production exercise, canary, or promotion.
+  V-LIGHT:
+    role: Focused static, schema, lint, and manifest verification
+    model: gpt-5.6-terra
+    reasoning: high
+    write_permission: NONE
+    exact_owned_paths: []
+    forbidden_write_paths: [ALL_TRACKED_PATHS, ALL_STAGING, ALL_COMMITS]
+    readable_scopes: [tests/static, contracts/agent-platform/phase8, scripts/phase8, deploy/production/phase8, deploy/observability/phase8, infra-tests/phase8]
+    handoff: Return exact SHA, command, timing, exit code, result count, failures, and output hash to R.
+  V-MAVEN:
+    role: Serialized Maven, Spring, PostgreSQL, Testcontainers, and Temporal verification broker
+    model: gpt-5.6-terra
+    reasoning: high
+    write_permission: NONE
+    exact_owned_paths: []
+    forbidden_write_paths: [ALL_TRACKED_PATHS, ALL_STAGING, ALL_COMMITS, ALL_EXTERNAL_ENVIRONMENT_ACTIONS]
+    readable_scopes: [java-api-service, tests, contracts/agent-platform/phase8]
+    handoff: Return R-granted command ID, exact SHA, timing, exit code, report paths and hashes, classification, and rerun recommendation.
+  L1:
+    role: Dependency, path-conflict, risk, and next-wave lookahead
+    model: gpt-5.6-terra
+    reasoning: medium
+    write_permission: NONE
+    exact_owned_paths: []
+    forbidden_write_paths: [ALL_REPOSITORY_PATHS, ALL_EXTERNAL_STATE_MUTATIONS]
+    readable_scopes: [ALL_REPOSITORY_PATHS_EXCEPT_SECRETS]
+    handoff:
+      - Report next unblocked tasks, exact collision candidates, prerequisite gaps, and evidence needs.
+      - Label every statement observed-at-exact-SHA, plan requirement, or unresolved question.
+      - Never turn planned behavior or stale 3eebc36b observations into an A7 baseline fact or PASS.
+
+primary_integrator:
+  id: R
+  role: Contract owner, dispatcher, sole integrator, test scheduler, failure classifier, and engineering-candidate owner
+  exact_owned_paths:
+    - plans/phase-8-production-hardening-execution.md
+    - plans/phase-8-production-hardening-test-batches.yaml
+    - plans/phase-8-owner-briefs.yaml
+    - docs/runbooks/temporal-first/phase-8-p8.0-contract-pack.md
+    - docs/runbooks/temporal-first/phase-8-p8.0-baseline-inventory.md
+    - docs/runbooks/temporal-first/phase-8-p8.0-review-closure.md
+    - tests/static/test_phase8_production_hardening_plan.py
+    - scripts/run_phase8_entry_checkpoint.py
+    - scripts/generate_phase8_entry_evidence.py
+    - tests/static/test_phase8_entry_runner.py
+    - tests/static/test_phase8_entry_evidence.py
+  exact_forbidden_paths_without_external_authorization:
+    - .env
+    - java-api-service/src/main/resources/db/migration/V047__remove_legacy_orchestration.sql
+  forbidden_actions: [ALL_PRODUCTION_DESTRUCTIVE_EXTERNAL_SECRET_CANARY_AND_PROMOTION_ACTIONS]
+  batch_0_tool_sandbox:
+    allowed_local_executables: [git, python]
+    argv_policy: FIXED_ALLOWLISTED_ARGUMENT_VECTOR_ONLY
+    shell: false
+    network_access_allowed: false
+    cloud_api_access_allowed: false
+    database_access_allowed: false
+    temporal_access_allowed: false
+    secret_environment_access_allowed: false
+    production_credentials_allowed: false
+    allowed_inputs: REPOSITORY_TRACKED_CONTRACT_FILES_AND_GIT_OBJECT_METADATA_ONLY
+  rules:
+    - Authenticate the strict A7 to C8 to Batch 0 to E8 to A8 chain before dispatching implementation.
+    - Confirm E8 is evidence-only with no release and A8 is its sole-parent checkpoint-only child; only accepted A8 opens implementation.
+    - Integrate owner commits sequentially after focused checks and assigned P0 closure.
+    - Resolve shared-file conflicts alone and never permit two delegated writers to repair one file.
+    - Grant an exact-file dependency fix only after prior ownership is frozen and a new brief supersedes it.
+    - Keep Batch 0, Batch 1, Batch 2, and candidate evidence bound to exact SHAs.
+    - Post-commit review is P0-only; routine findings close before owner commit or during primary integration.
+
+handoff_and_commit_rules:
+  implementation_owner_required_handoff:
+    - role_id
+    - task_id
+    - exact_base_sha
+    - commit_sha
+    - committed_exact_owned_paths
+    - git_diff_name_status_against_base
+    - focused_command_and_result
+    - start_end_duration_and_exit_code
+    - review_finding_ids_and_dispositions
+    - residual_risks_or_none
+  commit_rules:
+    - Implementation owners may commit only after accepted A8 and after their assigned P0 lane closes blocking findings.
+    - Use one attributable task commit and stage only the task's exact_owned_paths.
+    - Same-owner takeovers occur only after the named barrier; no cross-owner takeover is allowed.
+    - Review, verification, and lookahead roles never edit, stage, or commit.
+    - R integrates sequentially and records any exact-file dependency-fix reassignment.
+  reject_handoff_when:
+    - PATH_BOUNDARY_VIOLATION
+    - MISSING_OR_MIXED_SHA_RESULT
+    - OPEN_P0_FINDING
+    - UNCLASSIFIED_FAILURE
+    - PRODUCTION_DESTRUCTIVE_EXTERNAL_SECRET_CANARY_OR_PROMOTION_ACTION
+    - FABRICATED_BASELINE_OBSERVATION_OR_PASS_CLAIM
+
+baseline_claim_policy:
+  verified_input: A7_HANDOFF_ONLY
+  stale_source: 3eebc36b1f8aa470e68b8f4b84203b0b1c13f783
+  stale_observation_status: UNKNOWN_PENDING_BATCH_0_REAUDIT
+  rules:
+    - A planned file, target, threshold, or test is not an A7 observation.
+    - Record a current baseline only with exact SHA, command or query, timestamp, exit code, raw output, and hash.
+    - Unknown, missing, partial, stale, unsigned, or mixed-SHA input fails closed and never becomes zero or PASS.
