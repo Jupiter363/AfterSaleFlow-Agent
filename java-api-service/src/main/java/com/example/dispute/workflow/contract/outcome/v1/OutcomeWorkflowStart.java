@@ -24,6 +24,7 @@ public record OutcomeWorkflowStart(
         long epoch,
         long revision,
         long fence,
+        Instant reviewOpenedAt,
         Instant reviewDeadlineAt,
         OutcomeWireTypes.RuntimeMode runtimeMode,
         String workflowBuild,
@@ -50,7 +51,7 @@ public record OutcomeWorkflowStart(
         sha256(requiredOperationSetHash, "requiredOperationSetHash");
         count(requiredOperationCount, "requiredOperationCount");
         coordinates(epoch, revision, fence);
-        instant(reviewDeadlineAt, "reviewDeadlineAt");
+        reviewWindow(reviewOpenedAt, reviewDeadlineAt);
         required(runtimeMode, "runtimeMode");
         versionPin(workflowBuild, "workflowBuild");
         versionPin(policyVersion, "policyVersion");

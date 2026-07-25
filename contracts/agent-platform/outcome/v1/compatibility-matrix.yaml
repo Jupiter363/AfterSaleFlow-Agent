@@ -539,6 +539,11 @@ wire_protocol:
   invariants:
     reviewer_decisions: [APPROVE, MODIFY_AND_APPROVE, REJECT, REQUEST_MORE_EVIDENCE, ESCALATE_MANUAL]
     sla_fact_type: SYSTEM_SLA_ESCALATION
+    review_time_authority: JAVA_IMMUTABLE_REVIEW_OPENED_AT
+    review_window_order: REVIEW_OPENED_AT_STRICTLY_BEFORE_REVIEW_DEADLINE_AT
+    causal_revision: REVISION_EQUALS_SOURCE_REVISION_PLUS_ONE
+    committed_event_sequence: POSITIVE
+    operation_sequence: BOUNDED_1_TO_64
     authoritative_operation_terminal_statuses: [SUCCEEDED, FAILED]
     ambiguous_attempt_fact: EXECUTION_ATTEMPT_OBSERVATION
     ambiguous_is_terminal: false

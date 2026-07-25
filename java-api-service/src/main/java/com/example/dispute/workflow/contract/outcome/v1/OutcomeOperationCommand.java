@@ -56,7 +56,7 @@ public record OutcomeOperationCommand(
         sha256(requestHash, "requestHash");
         sha256(externalIdempotencyKeyHash, "externalIdempotencyKeyHash");
         required(effectClass, "effectClass");
-        count(operationSequence, "operationSequence");
+        OutcomeWireTypes.operationSequence(operationSequence);
         coordinates(epoch, revision, fence);
         eventOrder(sourceRevision, revision, committedEventSequence);
         positive(attemptNo, "attemptNo");

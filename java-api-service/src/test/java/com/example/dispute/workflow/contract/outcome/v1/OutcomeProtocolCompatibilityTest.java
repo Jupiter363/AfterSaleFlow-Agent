@@ -71,6 +71,22 @@ class OutcomeProtocolCompatibilityTest {
     }
 
     @Test
+    void compatibilityMatrixFreezesTimeCausalityAndOperationBounds() throws IOException {
+        Map<String, Object> matrix = new Yaml().load(
+                java.nio.file.Files.readString(CONTRACT_ROOT.resolve("compatibility-matrix.yaml")));
+        Map<String, Object> invariants = map(map(matrix.get("wire_protocol")).get("invariants"));
+
+        assertThat(invariants).containsEntry(
+                "review_time_authority", "JAVA_IMMUTABLE_REVIEW_OPENED_AT");
+        assertThat(invariants).containsEntry(
+                "review_window_order", "REVIEW_OPENED_AT_STRICTLY_BEFORE_REVIEW_DEADLINE_AT");
+        assertThat(invariants).containsEntry(
+                "causal_revision", "REVISION_EQUALS_SOURCE_REVISION_PLUS_ONE");
+        assertThat(invariants).containsEntry("committed_event_sequence", "POSITIVE");
+        assertThat(invariants).containsEntry("operation_sequence", "BOUNDED_1_TO_64");
+    }
+
+    @Test
     void publicProtocolNamesAreStableAndDoNotRegisterRuntime() {
         assertThat(OutcomeRoomProtocol.WORKFLOW_TYPE).isEqualTo("OutcomeRoomWorkflow");
         assertThat(OutcomeRoomProtocol.OPERATION_COMMAND_SIGNAL).isEqualTo("operationCommandCommitted");

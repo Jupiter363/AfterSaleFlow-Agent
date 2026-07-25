@@ -1,0 +1,10 @@
+{
+  "schema_version": "outcome-reviewer-decision-receipt.v1", "workflow_id": "outcome:CASE_001:1", "case_id": "CASE_001", "receipt_id": "DECISION_RECEIPT_GAP", "receipt_hash": "5555555555555555555555555555555555555555555555555555555555555555", "review_task_id": "REVIEW_001",
+  "reviewer_authority_ref": "urn:reviewer-authority:001", "frozen_review_packet_ref": "urn:review-packet:001", "frozen_review_packet_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+  "action_snapshot_ref": "urn:action-snapshot:001", "action_snapshot_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+  "approved_action_snapshot_ref": "urn:approved-action:001", "approved_action_snapshot_hash": "6666666666666666666666666666666666666666666666666666666666666666",
+  "decision_record_ref": "urn:decision:001", "decision_record_hash": "7777777777777777777777777777777777777777777777777777777777777777", "reason_ref": "urn:decision-reason:001", "reason_hash": "8888888888888888888888888888888888888888888888888888888888888888",
+  "operation_key_hash": "9999999999999999999999999999999999999999999999999999999999999999", "required_operation_set_ref": "urn:operation-set:001", "required_operation_set_hash": "4444444444444444444444444444444444444444444444444444444444444444", "required_operation_count": 1,
+  "decision": "APPROVE", "execution_authorized": true, "request_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "idempotency_key_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "policy_version": "outcome-policy.v1",
+  "epoch": 1, "source_revision": 10, "revision": 12, "fence": 3, "committed_event_sequence": 1, "committed_at": "2026-07-24T08:01:00Z", "synthetic_only": true
+}

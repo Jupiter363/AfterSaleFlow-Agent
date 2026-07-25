@@ -47,7 +47,7 @@ public record OutcomeOperationReceipt(
         opaqueRef(resultRef, "resultRef");
         sha256(resultHash, "resultHash");
         required(terminalStatus, "terminalStatus");
-        count(operationSequence, "operationSequence");
+        OutcomeWireTypes.operationSequence(operationSequence);
         instant(observedAt, "observedAt");
         coordinates(epoch, revision, fence);
         eventOrder(sourceRevision, revision, committedEventSequence);

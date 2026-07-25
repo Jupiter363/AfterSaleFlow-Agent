@@ -48,7 +48,7 @@ public record OutcomeExecutionAttemptObservation(
         sha256(requestHash, "requestHash");
         sha256(externalIdempotencyKeyHash, "externalIdempotencyKeyHash");
         positive(attemptNo, "attemptNo");
-        count(operationSequence, "operationSequence");
+        OutcomeWireTypes.operationSequence(operationSequence);
         required(status, "status");
         required(externalEffectTruth, "externalEffectTruth");
         if (operationStatus != OutcomeWireTypes.OperationStatus.RECONCILING) {

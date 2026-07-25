@@ -46,9 +46,13 @@ class OutcomeWireContractTest {
 
     private static final Map<String, String> INVALID_CASES = Map.ofEntries(
             Map.entry("outcome-workflow-start-packet-body.json", "outcome-workflow-start.schema.json"),
+            Map.entry("outcome-workflow-start-invalid-review-window.json", "outcome-workflow-start.schema.json"),
             Map.entry("outcome-reviewer-decision-unknown.json", "outcome-reviewer-decision-receipt.schema.json"),
+            Map.entry("outcome-reviewer-decision-revision-gap.json", "outcome-reviewer-decision-receipt.schema.json"),
             Map.entry("outcome-sla-escalation-human-decision.json", "outcome-sla-escalation-receipt.schema.json"),
+            Map.entry("outcome-sla-escalation-zero-event-sequence.json", "outcome-sla-escalation-receipt.schema.json"),
             Map.entry("outcome-operation-command-prompt.json", "outcome-operation-command.schema.json"),
+            Map.entry("outcome-operation-command-sequence-overflow.json", "outcome-operation-command.schema.json"),
             Map.entry("outcome-operation-receipt-ambiguous.json", "outcome-operation-receipt.schema.json"),
             Map.entry("outcome-execution-attempt-observation-unblocked.json", "outcome-execution-attempt-observation.schema.json"),
             Map.entry("outcome-attempt-reconciliation-blind-retry.json", "outcome-attempt-reconciliation-receipt.schema.json"),
@@ -140,6 +144,87 @@ class OutcomeWireContractTest {
         assertRejectedMutation("outcome-workflow-start-valid.json", "outcome-workflow-start.schema.json", value -> value.put("runtime_mode", "REAL_CASE_SHADOW"));
         assertRejectedMutation("outcome-reviewer-decision-receipt-valid.json", "outcome-reviewer-decision-receipt.schema.json", value -> value.put("decision", "AUTO_APPROVE"));
         assertRejectedMutation("outcome-operation-command-valid.json", "outcome-operation-command.schema.json", value -> value.put("credentials", "secret"));
+    }
+
+    @Test
+    void workflowStartCarriesJavaAuthoritativeReviewWindow() throws IOException {
+        JsonNode fixture = MAPPER.readTree(FIXTURES.resolve("valid").resolve(
+                "outcome-workflow-start-valid.json").toFile());
+        OutcomeWorkflowStart start = codec.decode(
+                "outcome-workflow-start.schema.json", fixture, OutcomeWorkflowStart.class);
+
+        assertThat(start.reviewOpenedAt()).isBefore(start.reviewDeadlineAt());
+        assertRejectedMutation(
+                "outcome-workflow-start-valid.json",
+                "outcome-workflow-start.schema.json",
+                value -> value.put("review_opened_at", value.required("review_deadline_at").asText()));
+    }
+
+    @Test
+    void everyCausalEventRequiresOneRevisionAdvanceAndPositiveCommittedSequence()
+            throws IOException {
+        Map<String, String> eventCases = Map.ofEntries(
+                Map.entry("outcome-reviewer-decision-receipt-valid.json", "outcome-reviewer-decision-receipt.schema.json"),
+                Map.entry("outcome-sla-escalation-receipt-valid.json", "outcome-sla-escalation-receipt.schema.json"),
+                Map.entry("outcome-operation-command-valid.json", "outcome-operation-command.schema.json"),
+                Map.entry("outcome-operation-receipt-valid.json", "outcome-operation-receipt.schema.json"),
+                Map.entry("outcome-execution-attempt-observation-valid.json", "outcome-execution-attempt-observation.schema.json"),
+                Map.entry("outcome-attempt-reconciliation-receipt-valid.json", "outcome-attempt-reconciliation-receipt.schema.json"),
+                Map.entry("outcome-compensation-receipt-valid.json", "outcome-compensation-receipt.schema.json"),
+                Map.entry("outcome-closure-receipt-valid.json", "outcome-closure-receipt.schema.json"),
+                Map.entry("outcome-evaluation-receipt-valid.json", "outcome-evaluation-receipt.schema.json"));
+
+        for (Map.Entry<String, String> eventCase : eventCases.entrySet()) {
+            ObjectNode revisionGap = (ObjectNode) MAPPER.readTree(FIXTURES.resolve("valid")
+                    .resolve(eventCase.getKey()).toFile());
+            revisionGap.put(
+                    "revision", revisionGap.required("source_revision").longValue() + 2L);
+            assertThatThrownBy(() -> codec.validate(eventCase.getValue(), revisionGap))
+                    .as(eventCase.getKey() + " revision gap")
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("revision must equal sourceRevision plus one");
+
+            ObjectNode zeroSequence = (ObjectNode) MAPPER.readTree(FIXTURES.resolve("valid")
+                    .resolve(eventCase.getKey()).toFile());
+            zeroSequence.put("committed_event_sequence", 0L);
+            assertThatThrownBy(() -> codec.validate(eventCase.getValue(), zeroSequence))
+                    .as(eventCase.getKey() + " zero committed sequence")
+                    .isInstanceOf(IllegalArgumentException.class);
+        }
+
+        assertThatThrownBy(() -> OutcomeWireTypes.eventOrder(
+                        9_007_199_254_740_991L,
+                        9_007_199_254_740_991L,
+                        1L))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("revision must equal sourceRevision plus one");
+    }
+
+    @Test
+    void operationSequenceIsBoundedAtEverySharedWireBoundary() throws IOException {
+        Map<String, String> operationCases = Map.of(
+                "outcome-operation-command-valid.json", "outcome-operation-command.schema.json",
+                "outcome-operation-receipt-valid.json", "outcome-operation-receipt.schema.json",
+                "outcome-execution-attempt-observation-valid.json", "outcome-execution-attempt-observation.schema.json",
+                "outcome-attempt-reconciliation-receipt-valid.json", "outcome-attempt-reconciliation-receipt.schema.json");
+
+        for (Map.Entry<String, String> operationCase : operationCases.entrySet()) {
+            for (long invalidSequence : List.of(0L, 65L)) {
+                ObjectNode invalid = (ObjectNode) MAPPER.readTree(FIXTURES.resolve("valid")
+                        .resolve(operationCase.getKey()).toFile());
+                invalid.put("operation_sequence", invalidSequence);
+                assertThatThrownBy(() -> codec.validate(operationCase.getValue(), invalid))
+                        .as(operationCase.getKey() + " sequence " + invalidSequence)
+                        .isInstanceOf(IllegalArgumentException.class);
+            }
+        }
+
+        assertThat(OutcomeWireTypes.operationSequence(1L)).isEqualTo(1L);
+        assertThat(OutcomeWireTypes.operationSequence(64L)).isEqualTo(64L);
+        assertThatThrownBy(() -> OutcomeWireTypes.operationSequence(0L))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> OutcomeWireTypes.operationSequence(65L))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test

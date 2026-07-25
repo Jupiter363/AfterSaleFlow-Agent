@@ -50,7 +50,7 @@ public record OutcomeAttemptReconciliationReceipt(
         sha256(operationKeyHash, "operationKeyHash");
         sha256(requestHash, "requestHash");
         sha256(externalIdempotencyKeyHash, "externalIdempotencyKeyHash");
-        count(operationSequence, "operationSequence");
+        OutcomeWireTypes.operationSequence(operationSequence);
         required(resolution, "resolution");
         paired(authoritativeReceiptRef, authoritativeReceiptHash,
                 "authoritativeReceiptRef", "authoritativeReceiptHash");

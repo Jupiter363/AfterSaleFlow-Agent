@@ -7,6 +7,7 @@ import java.util.regex.Pattern;
 public final class OutcomeWireTypes {
 
     private static final long MAX_SAFE_INTEGER = 9_007_199_254_740_991L;
+    private static final long MAX_OPERATION_SEQUENCE = 64L;
     private static final Pattern IDENTIFIER =
             Pattern.compile("[A-Za-z0-9][A-Za-z0-9._:-]{0,127}");
     private static final Pattern SHA_256 = Pattern.compile("[0-9a-f]{64}");
@@ -155,6 +156,14 @@ public final class OutcomeWireTypes {
         return required(value, field);
     }
 
+    static void reviewWindow(Instant reviewOpenedAt, Instant reviewDeadlineAt) {
+        instant(reviewOpenedAt, "reviewOpenedAt");
+        instant(reviewDeadlineAt, "reviewDeadlineAt");
+        if (!reviewOpenedAt.isBefore(reviewDeadlineAt)) {
+            throw new IllegalArgumentException("reviewOpenedAt must be before reviewDeadlineAt");
+        }
+    }
+
     static void coordinates(long epoch, long revision, long fence) {
         if (epoch < 1 || epoch > MAX_SAFE_INTEGER) {
             throw new IllegalArgumentException("epoch is outside the safe range");
@@ -170,10 +179,23 @@ public final class OutcomeWireTypes {
     static void eventOrder(long sourceRevision, long revision, long committedEventSequence) {
         count(sourceRevision, "sourceRevision");
         count(revision, "revision");
-        count(committedEventSequence, "committedEventSequence");
-        if (sourceRevision > revision) {
-            throw new IllegalArgumentException("sourceRevision cannot exceed revision");
+        positive(committedEventSequence, "committedEventSequence");
+        long expectedRevision;
+        try {
+            expectedRevision = Math.addExact(sourceRevision, 1L);
+        } catch (ArithmeticException exception) {
+            throw new IllegalArgumentException("sourceRevision cannot be incremented", exception);
         }
+        if (expectedRevision > MAX_SAFE_INTEGER || revision != expectedRevision) {
+            throw new IllegalArgumentException("revision must equal sourceRevision plus one");
+        }
+    }
+
+    static long operationSequence(long value) {
+        if (value < 1 || value > MAX_OPERATION_SEQUENCE) {
+            throw new IllegalArgumentException("operationSequence must be between 1 and 64");
+        }
+        return value;
     }
 
     static long count(long value, String field) {
