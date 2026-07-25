@@ -1164,7 +1164,7 @@ def _validate_record(
         expected_paths = [attempt_dir / "raw" / f"j-{index:03d}.xml" for index in range(1, len(raw) + 1)]
         if raw_paths != expected_paths:
             raise EvidenceError(f"{command_id}: compact Surefire provenance path drifted")
-    elif raw_paths != [attempt_dir / "junit.xml"]:
+    elif raw_paths not in ([], [attempt_dir / "junit.xml"]):
         raise EvidenceError(f"{command_id}: raw JUnit path drifted")
     expected_attempt_files = {stdout.resolve(), stderr.resolve(), *(path.resolve() for path in raw_paths)}
     actual_attempt_files = {

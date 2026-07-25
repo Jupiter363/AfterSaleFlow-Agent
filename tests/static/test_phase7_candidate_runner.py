@@ -112,7 +112,11 @@ def _accepted_record(
 
 
 def _validate_record(
-    record: dict[str, object], contract: dict[str, object], tmp_path: Path
+    record: dict[str, object],
+    contract: dict[str, object],
+    tmp_path: Path,
+    *,
+    accepted: bool = True,
 ) -> None:
     runner._validate_record(
         record,
@@ -122,7 +126,7 @@ def _validate_record(
         contract=contract,
         environment_sha256="e" * 64,
         runner_blob_sha256="b" * 64,
-        accepted=True,
+        accepted=accepted,
     )
 
 
@@ -534,6 +538,43 @@ def test_accepted_record_rejects_stdout_and_junit_tampering(tmp_path: Path) -> N
     report.write_text("<testsuite tests='0'/>", encoding="utf-8")
     with pytest.raises(runner.EvidenceError, match="normalized JUnit SHA-256 drifted"):
         _validate_record(record, contract, tmp_path / "junit-case")
+
+
+def test_failed_record_allows_no_junit_but_rejects_hidden_attempt_output(
+    tmp_path: Path,
+) -> None:
+    record, contract = _accepted_record(tmp_path)
+    attempt = tmp_path / "a" / "s-01"
+    for artifact in (
+        attempt / "junit.xml",
+        tmp_path / "r" / runner.SOURCE_REPORTS["static_phase7_candidate"],
+    ):
+        artifact.chmod(artifact.stat().st_mode | stat.S_IWUSR)
+        artifact.unlink()
+    record.update(
+        accepted=False,
+        exit_code=1,
+        failure_classification="UNCLASSIFIED",
+        raw_report_count=0,
+        raw_reports=[],
+    )
+    for key in (
+        "report",
+        "report_path",
+        "report_sha256",
+        "tests",
+        "failures",
+        "errors",
+        "skipped",
+        "duration_seconds",
+    ):
+        record.pop(key, None)
+
+    _validate_record(record, contract, tmp_path, accepted=False)
+
+    (attempt / "hidden-output.txt").write_text("unexpected\n", encoding="utf-8")
+    with pytest.raises(runner.EvidenceError, match="hidden or reused output"):
+        _validate_record(record, contract, tmp_path, accepted=False)
 
 
 def test_resume_accepts_only_ordered_green_prefix(
