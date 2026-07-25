@@ -235,6 +235,31 @@ class OutcomeV045MigrationContractTest {
     }
 
     @Test
+    void rejectsNumberBooleanArrayAndObjectApprovedActionIdentityFieldsBeforeTextCoercion()
+            throws Exception {
+        String projection = functionSegment(
+                normalizedSql(),
+                "create function enforce_outcome_projection_authority()",
+                "create trigger trg_outcome_projection_authority");
+
+        assertAppearsInOrder(
+                projection,
+                "jsonb_typeof(entry.value) <> 'object'",
+                "jsonb_typeof(entry.value -> 'action_type') <> 'string'",
+                "nullif(btrim(coalesce(entry.value ->> 'action_type', '')), '') is null",
+                "jsonb_typeof(entry.value -> 'idempotency_key') <> 'string'",
+                "nullif(btrim(coalesce(entry.value ->> 'idempotency_key', '')), '') is null");
+        assertThat(occurrences(
+                        projection,
+                        "jsonb_typeof(entry.value -> 'action_type') <> 'string'"))
+                .isEqualTo(1);
+        assertThat(occurrences(
+                        projection,
+                        "jsonb_typeof(entry.value -> 'idempotency_key') <> 'string'"))
+                .isEqualTo(1);
+    }
+
+    @Test
     void requiresFormalActionsButKeepsTheSyntheticNoopNullExceptionNarrow()
             throws Exception {
         String sql = normalizedSql();

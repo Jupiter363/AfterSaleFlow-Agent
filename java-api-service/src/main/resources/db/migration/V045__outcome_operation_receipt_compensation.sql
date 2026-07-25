@@ -149,10 +149,12 @@ begin
     end if;
     if exists (
         select 1
-          from jsonb_array_elements(approval.approved_plan_json -> 'actions') entry
+         from jsonb_array_elements(approval.approved_plan_json -> 'actions') entry
          where jsonb_typeof(entry.value) <> 'object'
+            or jsonb_typeof(entry.value -> 'action_type') <> 'string'
             or nullif(btrim(coalesce(entry.value ->> 'action_type', '')), '') is null
             or length(entry.value ->> 'action_type') > 64
+            or jsonb_typeof(entry.value -> 'idempotency_key') <> 'string'
             or nullif(btrim(coalesce(entry.value ->> 'idempotency_key', '')), '') is null
             or length(entry.value ->> 'idempotency_key') > 128
     ) or exists (
