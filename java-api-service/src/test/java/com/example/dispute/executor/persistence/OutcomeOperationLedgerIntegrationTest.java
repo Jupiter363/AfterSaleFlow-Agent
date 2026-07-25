@@ -269,13 +269,29 @@ class OutcomeOperationLedgerIntegrationTest {
                 classFixture, "non-retryable", REQUEST_HASH, 1, OperationKind.OPERATION,
                 true, true, RetryClass.NON_RETRYABLE);
         ledger.reserve(nonRetryable, null);
-        ledger.appendAttempt(observation(
-                nonRetryable, 1, ObservationType.PRE_EFFECT_RETRYABLE_FAILURE, false, true));
         assertThatThrownBy(() -> ledger.appendAttempt(observation(
-                        nonRetryable, 2, ObservationType.INVOCATION_DISPATCHED, true, false)))
+                        nonRetryable, 1, ObservationType.PRE_EFFECT_RETRYABLE_FAILURE, false, true)))
                 .isInstanceOf(OutcomeLedgerRejectedException.class)
                 .extracting(failure -> ((OutcomeLedgerRejectedException) failure).code())
                 .isEqualTo("OUTCOME_RETRY_CLASS_FORBIDDEN");
+        assertThat(number(
+                        "select count(*) from outcome_operation_attempt_observation where operation_id = ?",
+                        nonRetryable.operationId()))
+                .isZero();
+
+        Fixture boundedFixture = insertFixture("RETRY_BOUNDED");
+        OutcomeOperation bounded = operation(
+                boundedFixture, "bounded", REQUEST_HASH, 1, OperationKind.OPERATION,
+                true, true, RetryClass.BOUNDED_PRE_EFFECT);
+        ledger.reserve(bounded, null);
+        ledger.appendAttempt(observation(
+                bounded, 1, ObservationType.PRE_EFFECT_RETRYABLE_FAILURE, false, true));
+        ledger.appendAttempt(observation(
+                bounded, 2, ObservationType.INVOCATION_DISPATCHED, true, false));
+        assertThat(number(
+                        "select count(*) from outcome_operation_attempt_observation where operation_id = ?",
+                        bounded.operationId()))
+                .isEqualTo(2);
     }
 
     @Test
@@ -736,6 +752,21 @@ class OutcomeOperationLedgerIntegrationTest {
                         "select count(*) from outcome_operation where operation_id = ?",
                         compensation.operationId()))
                 .isZero();
+
+        OutcomeProcessProjection closed = ledger.advanceProjection(
+                expectation(fixture, 1), ProcessState.CLOSED, NOW.plusSeconds(32));
+        assertThat(closed.processState()).isEqualTo(ProcessState.CLOSED);
+        assertThatThrownBy(() -> ledger.advanceProjection(
+                        expectation(fixture, 2), ProcessState.READY_TO_CLOSE, NOW.plusSeconds(33)))
+                .isInstanceOf(OutcomeLedgerRejectedException.class)
+                .extracting(failure -> ((OutcomeLedgerRejectedException) failure).code())
+                .isEqualTo("OUTCOME_PROJECTION_TERMINAL_TRANSITION_INVALID");
+        OutcomeProcessProjection evaluationPending = ledger.advanceProjection(
+                expectation(fixture, 2), ProcessState.EVALUATION_PENDING, NOW.plusSeconds(33));
+        OutcomeProcessProjection evaluated = ledger.advanceProjection(
+                expectation(fixture, 3), ProcessState.EVALUATED, NOW.plusSeconds(34));
+        assertThat(evaluationPending.processState()).isEqualTo(ProcessState.EVALUATION_PENDING);
+        assertThat(evaluated.processState()).isEqualTo(ProcessState.EVALUATED);
     }
 
     @Test
@@ -1286,8 +1317,12 @@ class OutcomeOperationLedgerIntegrationTest {
     }
 
     private static ProjectionExpectation expectation(Fixture fixture) {
+        return expectation(fixture, 0);
+    }
+
+    private static ProjectionExpectation expectation(Fixture fixture, long revision) {
         return new ProjectionExpectation(
-                fixture.projectionId(), TENANT, fixture.caseId(), 1, 7, 0, 0);
+                fixture.projectionId(), TENANT, fixture.caseId(), 1, 7, revision, revision);
     }
 
     private static void cloneApproval(

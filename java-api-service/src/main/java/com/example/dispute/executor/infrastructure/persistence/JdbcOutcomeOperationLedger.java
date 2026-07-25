@@ -85,6 +85,12 @@ public final class JdbcOutcomeOperationLedger implements OutcomeOperationLedger 
     @Override
     public OutcomeProcessProjection createProjection(OutcomeProcessProjection projection) {
         Objects.requireNonNull(projection, "projection");
+        if (projection.processState()
+                != OutcomeProcessProjection.ProcessState.DECISION_RECORDED) {
+            throw rejected(
+                    "OUTCOME_PROJECTION_BOOTSTRAP_STATE_INVALID",
+                    "Outcome projection must bootstrap at DECISION_RECORDED");
+        }
         OutcomeProcessProjection result = transactions.execute(ignored -> {
             lockSemantic("projection:" + projection.tenantSurrogate() + ':'
                     + projection.caseId() + ':' + projection.outcomeEpoch());
@@ -133,7 +139,7 @@ public final class JdbcOutcomeOperationLedger implements OutcomeOperationLedger 
         OutcomeProcessProjection result = transactions.execute(ignored -> {
             lockSemantic(compensationOrderKey(expectation));
             OutcomeProcessProjection current = lockProjection(expectation);
-            requireSafeProjectionAdvance(nextState, expectation);
+            requireSafeProjectionAdvance(current.processState(), nextState, expectation);
             MapSqlParameterSource parameters = expectationParameters(expectation)
                     .addValue("nextProcessRevision", expectation.processRevision() + 1)
                     .addValue("nextOutcomeRevision", expectation.outcomeRevision() + 1)
@@ -716,11 +722,30 @@ public final class JdbcOutcomeOperationLedger implements OutcomeOperationLedger 
     }
 
     private void requireSafeProjectionAdvance(
+            OutcomeProcessProjection.ProcessState currentState,
             OutcomeProcessProjection.ProcessState nextState,
             ProjectionExpectation expectation) {
-        if (nextState != OutcomeProcessProjection.ProcessState.READY_TO_CLOSE
-                && nextState != OutcomeProcessProjection.ProcessState.CLOSED) {
+        boolean terminalInvolved = isClosureState(currentState) || isClosureState(nextState);
+        if (!terminalInvolved) {
             return;
+        }
+        boolean legalTransition = switch (currentState) {
+            case DECISION_RECORDED,
+                    OPERATIONS_RESERVED,
+                    OPERATIONS_RUNNING,
+                    RECONCILING,
+                    COMPENSATING,
+                    MANUAL_RECOVERY ->
+                    nextState == OutcomeProcessProjection.ProcessState.READY_TO_CLOSE;
+            case READY_TO_CLOSE -> nextState == OutcomeProcessProjection.ProcessState.CLOSED;
+            case CLOSED -> nextState == OutcomeProcessProjection.ProcessState.EVALUATION_PENDING;
+            case EVALUATION_PENDING -> nextState == OutcomeProcessProjection.ProcessState.EVALUATED;
+            default -> false;
+        };
+        if (!legalTransition) {
+            throw rejected(
+                    "OUTCOME_PROJECTION_TERMINAL_TRANSITION_INVALID",
+                    "Outcome projection closure and evaluation states are frozen and one-way");
         }
         OutcomeClosureReadiness readiness = readClosureReadiness(expectation);
         if (!readiness.closureReady()) {
@@ -728,6 +753,13 @@ public final class JdbcOutcomeOperationLedger implements OutcomeOperationLedger 
                     "OUTCOME_CLOSURE_NOT_READY",
                     "Outcome projection cannot commit closure readiness while required operations remain unresolved");
         }
+    }
+
+    private static boolean isClosureState(OutcomeProcessProjection.ProcessState state) {
+        return switch (state) {
+            case READY_TO_CLOSE, CLOSED, EVALUATION_PENDING, EVALUATED -> true;
+            default -> false;
+        };
     }
 
     private static void requireOperationProjectionAuthority(
@@ -785,6 +817,12 @@ public final class JdbcOutcomeOperationLedger implements OutcomeOperationLedger 
             OutcomeOperation operation,
             Optional<OutcomeAttemptObservation> previous,
             OutcomeAttemptObservation next) {
+        if (operation.retryClass() == OutcomeOperation.RetryClass.NON_RETRYABLE
+                && next.retryPermitted()) {
+            throw rejected(
+                    "OUTCOME_RETRY_CLASS_FORBIDDEN",
+                    "NON_RETRYABLE operation cannot publish retry authority");
+        }
         if (previous.isEmpty()) {
             if (next.attemptSequence() != 1
                     || next.observationType()

@@ -165,6 +165,17 @@ class JdbcOutcomeOperationLedgerTest {
     }
 
     @Test
+    void projectionBootstrapAdvertisesOnlyDecisionRecorded() {
+        assertThatThrownBy(() -> ledger.createProjection(projection(ProcessState.REVIEW_WAIT, NOW)))
+                .isInstanceOf(OutcomeLedgerRejectedException.class)
+                .extracting(failure -> ((OutcomeLedgerRejectedException) failure).code())
+                .isEqualTo("OUTCOME_PROJECTION_BOOTSTRAP_STATE_INVALID");
+        verify(jdbc, never()).update(
+                contains("insert into outcome_process_projection"),
+                any(MapSqlParameterSource.class));
+    }
+
+    @Test
     void reservationRequiresTheExactLockedProjectionAuthorityTuple() {
         when(jdbc.query(
                         contains("from outcome_operation where tenant_surrogate"),
@@ -205,15 +216,42 @@ class JdbcOutcomeOperationLedgerTest {
                 .extracting(failure -> ((OutcomeLedgerRejectedException) failure).code())
                 .isEqualTo("OUTCOME_RETRY_NOT_PERMITTED");
 
-        OutcomeOperation nonRetryable = operation(HASH_A, RetryClass.NON_RETRYABLE);
+        OutcomeOperation statusQueryRequired =
+                operation(HASH_A, RetryClass.STATUS_QUERY_REQUIRED);
         stubAttemptTransition(
-                nonRetryable,
+                statusQueryRequired,
                 observation(1, ObservationType.PRE_EFFECT_RETRYABLE_FAILURE, false, true));
         assertThatThrownBy(() -> ledger.appendAttempt(
                         observation(2, ObservationType.INVOCATION_DISPATCHED, true, false)))
                 .isInstanceOf(OutcomeLedgerRejectedException.class)
                 .extracting(failure -> ((OutcomeLedgerRejectedException) failure).code())
                 .isEqualTo("OUTCOME_RETRY_CLASS_FORBIDDEN");
+    }
+
+    @Test
+    void nonRetryableOperationCannotPublishRetryAuthorityOnItsFirstObservation() {
+        OutcomeOperation operation = operation(HASH_A, RetryClass.NON_RETRYABLE);
+        when(jdbc.query(contains("where observation_id"), anyMap(), any(RowMapper.class)))
+                .thenReturn(List.of());
+        when(jdbc.query(
+                        contains("from outcome_operation where operation_id"),
+                        anyMap(),
+                        any(RowMapper.class)))
+                .thenReturn(List.of(operation));
+        when(jdbc.query(
+                        contains("order by attempt_sequence desc limit 1"),
+                        anyMap(),
+                        any(RowMapper.class)))
+                .thenReturn(List.of());
+
+        assertThatThrownBy(() -> ledger.appendAttempt(
+                        observation(1, ObservationType.PRE_EFFECT_RETRYABLE_FAILURE, false, true)))
+                .isInstanceOf(OutcomeLedgerRejectedException.class)
+                .extracting(failure -> ((OutcomeLedgerRejectedException) failure).code())
+                .isEqualTo("OUTCOME_RETRY_CLASS_FORBIDDEN");
+        verify(jdbc, never()).update(
+                contains("insert into outcome_operation_attempt_observation"),
+                any(MapSqlParameterSource.class));
     }
 
     @Test
@@ -297,6 +335,42 @@ class JdbcOutcomeOperationLedgerTest {
                 contains("from outcome_closure_readiness"),
                 any(MapSqlParameterSource.class),
                 any(RowMapper.class));
+    }
+
+    @Test
+    void terminalProjectionStatesAreFrozenToTheOneWayClosureEvaluationChain() {
+        ProjectionExpectation expectation = new ProjectionExpectation(
+                "PROJECTION_1", "TENANT_1", "CASE_1", 1, 7, 11, 5);
+        when(jdbc.query(
+                        contains("from outcome_process_projection where projection_id"),
+                        any(MapSqlParameterSource.class),
+                        any(RowMapper.class)))
+                .thenReturn(
+                        List.of(projection(ProcessState.READY_TO_CLOSE, NOW)),
+                        List.of(projection(ProcessState.READY_TO_CLOSE, NOW)),
+                        List.of(projection(ProcessState.DECISION_RECORDED, NOW)),
+                        List.of(projection(ProcessState.REVIEW_WAIT, NOW)));
+
+        for (ProcessState invalid : List.of(
+                ProcessState.DECISION_RECORDED, ProcessState.EVALUATION_PENDING)) {
+            assertThatThrownBy(() -> ledger.advanceProjection(expectation, invalid, NOW.plusSeconds(1)))
+                    .isInstanceOf(OutcomeLedgerRejectedException.class)
+                    .extracting(failure -> ((OutcomeLedgerRejectedException) failure).code())
+                    .isEqualTo("OUTCOME_PROJECTION_TERMINAL_TRANSITION_INVALID");
+        }
+        assertThatThrownBy(() -> ledger.advanceProjection(
+                        expectation, ProcessState.CLOSED, NOW.plusSeconds(1)))
+                .isInstanceOf(OutcomeLedgerRejectedException.class)
+                .extracting(failure -> ((OutcomeLedgerRejectedException) failure).code())
+                .isEqualTo("OUTCOME_PROJECTION_TERMINAL_TRANSITION_INVALID");
+        assertThatThrownBy(() -> ledger.advanceProjection(
+                        expectation, ProcessState.READY_TO_CLOSE, NOW.plusSeconds(1)))
+                .isInstanceOf(OutcomeLedgerRejectedException.class)
+                .extracting(failure -> ((OutcomeLedgerRejectedException) failure).code())
+                .isEqualTo("OUTCOME_PROJECTION_TERMINAL_TRANSITION_INVALID");
+        verify(jdbc, never()).update(
+                contains("update outcome_process_projection"),
+                any(MapSqlParameterSource.class));
     }
 
     private static OutcomeOperation operation(String requestHash) {
@@ -406,11 +480,15 @@ class JdbcOutcomeOperationLedgerTest {
     }
 
     private static OutcomeProcessProjection projection(Instant timestamp) {
+        return projection(ProcessState.DECISION_RECORDED, timestamp);
+    }
+
+    private static OutcomeProcessProjection projection(ProcessState state, Instant timestamp) {
         return new OutcomeProcessProjection(
                 "PROJECTION_1", "TENANT_1", "CASE_1", "EPOCH_1", 1,
                 WriterMode.LEGACY, RuntimeMode.DISABLED, 7, 11, 5,
                 "APPROVAL_1", HASH_B, "action-snapshot-hash-1", 1,
-                ProcessState.DECISION_RECORDED, timestamp, timestamp);
+                state, timestamp, timestamp);
     }
 
     private static OutcomeCompensationParent compensationParent(Instant createdAt) {
