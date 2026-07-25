@@ -1,0 +1,1044 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aftersaleflow.example/contracts/agent-platform/phase8/checkpoint-evidence.schema.json",
+  "title": "Phase 8 checkpoint evidence",
+  "description": "Strict evidence shape. EXTERNAL_SIGNED is untrusted input until the separate P8-I5-3 trust-root verifier accepts it.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/engineeringLocalEvidence"
+    },
+    {
+      "$ref": "#/$defs/externalSignedEvidence"
+    }
+  ],
+  "$defs": {
+    "sha1": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "imageDigest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "token": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{2,127}$"
+    },
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*[:\\\\])[ !#-'()*+,./0-9;=@A-Z\\[\\]^_`a-z{}~-]+$"
+    },
+    "pathBlob": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "git_blob_sha",
+        "mode",
+        "path",
+        "sha256",
+        "status"
+      ],
+      "properties": {
+        "git_blob_sha": {
+          "$ref": "#/$defs/sha1"
+        },
+        "mode": {
+          "enum": [
+            "100644",
+            "100755"
+          ]
+        },
+        "path": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "status": {
+          "enum": [
+            "ADDED",
+            "MODIFIED",
+            "BOUND_UNCHANGED"
+          ]
+        }
+      }
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "accepted_entry_sha",
+        "commit_sha",
+        "parent_sha",
+        "path_blobs",
+        "path_blobs_sha256",
+        "tree_sha"
+      ],
+      "properties": {
+        "accepted_entry_sha": {
+          "$ref": "#/$defs/sha1"
+        },
+        "commit_sha": {
+          "$ref": "#/$defs/sha1"
+        },
+        "parent_sha": {
+          "$ref": "#/$defs/sha1"
+        },
+        "path_blobs": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/pathBlob"
+          }
+        },
+        "path_blobs_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "tree_sha": {
+          "$ref": "#/$defs/sha1"
+        }
+      }
+    },
+    "gitBlobBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "git_blob_sha",
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "git_blob_sha": {
+          "$ref": "#/$defs/sha1"
+        },
+        "path": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "gitBlobBundle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "blobs",
+        "sha256"
+      ],
+      "properties": {
+        "blobs": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/gitBlobBinding"
+          }
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "digest",
+        "name"
+      ],
+      "properties": {
+        "digest": {
+          "$ref": "#/$defs/imageDigest"
+        },
+        "name": {
+          "$ref": "#/$defs/token"
+        }
+      }
+    },
+    "releaseContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "configuration",
+        "context_id",
+        "context_sha256",
+        "deployment_manifest",
+        "environment_identity",
+        "images"
+      ],
+      "properties": {
+        "configuration": {
+          "$ref": "#/$defs/gitBlobBundle"
+        },
+        "context_id": {
+          "$ref": "#/$defs/token"
+        },
+        "context_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "deployment_manifest": {
+          "$ref": "#/$defs/gitBlobBundle"
+        },
+        "environment_identity": {
+          "$ref": "#/$defs/token"
+        },
+        "images": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/image"
+          }
+        }
+      }
+    },
+    "attemptLineage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "attempt_id",
+        "attempt_number",
+        "checkpoint_id",
+        "previous_attempt_id"
+      ],
+      "properties": {
+        "attempt_id": {
+          "$ref": "#/$defs/token"
+        },
+        "attempt_number": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "checkpoint_id": {
+          "$ref": "#/$defs/token"
+        },
+        "previous_attempt_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/token"
+            }
+          ]
+        }
+      }
+    },
+    "reviewer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "identity",
+        "lane"
+      ],
+      "properties": {
+        "identity": {
+          "$ref": "#/$defs/token"
+        },
+        "lane": {
+          "enum": [
+            "authority",
+            "data_migration",
+            "security_privacy"
+          ]
+        }
+      }
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "producer_identity",
+        "reviewers",
+        "self_approved"
+      ],
+      "properties": {
+        "producer_identity": {
+          "$ref": "#/$defs/token"
+        },
+        "reviewers": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/reviewer"
+          },
+          "allOf": [
+            {
+              "contains": {
+                "properties": {
+                  "lane": {
+                    "const": "authority"
+                  }
+                },
+                "required": [
+                  "lane"
+                ]
+              },
+              "minContains": 1,
+              "maxContains": 1
+            },
+            {
+              "contains": {
+                "properties": {
+                  "lane": {
+                    "const": "data_migration"
+                  }
+                },
+                "required": [
+                  "lane"
+                ]
+              },
+              "minContains": 1,
+              "maxContains": 1
+            },
+            {
+              "contains": {
+                "properties": {
+                  "lane": {
+                    "const": "security_privacy"
+                  }
+                },
+                "required": [
+                  "lane"
+                ]
+              },
+              "minContains": 1,
+              "maxContains": 1
+            }
+          ]
+        },
+        "self_approved": {
+          "const": false
+        }
+      }
+    },
+    "command": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "argv",
+        "attempt_id",
+        "candidate_sha",
+        "candidate_tree_sha",
+        "configuration_sha256",
+        "context_id",
+        "cwd",
+        "deployment_manifest_sha256",
+        "exit_code",
+        "finished_at",
+        "id",
+        "order",
+        "report_path",
+        "report_sha256",
+        "shell",
+        "started_at",
+        "status"
+      ],
+      "properties": {
+        "argv": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "attempt_id": {
+          "$ref": "#/$defs/token"
+        },
+        "candidate_sha": {
+          "$ref": "#/$defs/sha1"
+        },
+        "candidate_tree_sha": {
+          "$ref": "#/$defs/sha1"
+        },
+        "configuration_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "context_id": {
+          "$ref": "#/$defs/token"
+        },
+        "cwd": {
+          "enum": [
+            ".",
+            "java-api-service"
+          ]
+        },
+        "deployment_manifest_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "exit_code": {
+          "type": "integer"
+        },
+        "finished_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "id": {
+          "$ref": "#/$defs/token"
+        },
+        "order": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "report_path": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "report_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "shell": {
+          "const": false
+        },
+        "started_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "status": {
+          "enum": [
+            "PASSED",
+            "FAILED"
+          ]
+        }
+      }
+    },
+    "report": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "attempt_id",
+        "bytes",
+        "candidate_sha",
+        "candidate_tree_sha",
+        "command_id",
+        "configuration_sha256",
+        "context_id",
+        "deployment_manifest_sha256",
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "attempt_id": {
+          "$ref": "#/$defs/token"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "candidate_sha": {
+          "$ref": "#/$defs/sha1"
+        },
+        "candidate_tree_sha": {
+          "$ref": "#/$defs/sha1"
+        },
+        "command_id": {
+          "$ref": "#/$defs/token"
+        },
+        "configuration_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "context_id": {
+          "$ref": "#/$defs/token"
+        },
+        "deployment_manifest_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "path": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "productionCapabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "canary",
+        "cloud_access",
+        "database_access",
+        "production_traffic",
+        "promotion",
+        "recovery_execution",
+        "scheduler_off_activation",
+        "secret_access",
+        "temporal_access",
+        "v046_production_apply",
+        "v046_production_switch",
+        "v047_cleanup"
+      ],
+      "properties": {
+        "canary": {
+          "const": false
+        },
+        "cloud_access": {
+          "const": false
+        },
+        "database_access": {
+          "const": false
+        },
+        "production_traffic": {
+          "const": false
+        },
+        "promotion": {
+          "const": false
+        },
+        "recovery_execution": {
+          "const": false
+        },
+        "scheduler_off_activation": {
+          "const": false
+        },
+        "secret_access": {
+          "const": false
+        },
+        "temporal_access": {
+          "const": false
+        },
+        "v046_production_apply": {
+          "const": false
+        },
+        "v046_production_switch": {
+          "const": false
+        },
+        "v047_cleanup": {
+          "const": false
+        }
+      }
+    },
+    "sensitiveData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contains_hidden_reasoning",
+        "contains_pii",
+        "contains_secrets"
+      ],
+      "properties": {
+        "contains_hidden_reasoning": {
+          "const": false
+        },
+        "contains_pii": {
+          "const": false
+        },
+        "contains_secrets": {
+          "const": false
+        }
+      }
+    },
+    "selfSeal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "algorithm",
+        "canonicalization",
+        "digest",
+        "proves_execution_authenticity",
+        "proves_operator_identity",
+        "proves_source_authenticity",
+        "purpose"
+      ],
+      "properties": {
+        "algorithm": {
+          "const": "SHA-256"
+        },
+        "canonicalization": {
+          "const": "JSON_SORT_KEYS_COMPACT_UTF8_V1"
+        },
+        "digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "proves_execution_authenticity": {
+          "const": false
+        },
+        "proves_operator_identity": {
+          "const": false
+        },
+        "proves_source_authenticity": {
+          "const": false
+        },
+        "purpose": {
+          "const": "BYTE_INTEGRITY_AND_DRIFT_DETECTION_ONLY"
+        }
+      }
+    },
+    "fixtureExecutionSandbox": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "authority",
+        "backend_kind",
+        "fixture_only",
+        "independently_verified",
+        "network_denial_verified",
+        "receipt_authenticated",
+        "receipt_id"
+      ],
+      "properties": {
+        "authority": {
+          "const": "TEST_LIFECYCLE_ONLY_NO_CHECKPOINT_PASS"
+        },
+        "backend_kind": {
+          "const": "FIXTURE_ONLY"
+        },
+        "fixture_only": {
+          "const": true
+        },
+        "independently_verified": {
+          "const": false
+        },
+        "network_denial_verified": {
+          "const": false
+        },
+        "receipt_authenticated": {
+          "const": false
+        },
+        "receipt_id": {
+          "$ref": "#/$defs/token"
+        }
+      }
+    },
+    "authenticatedExecutionSandbox": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "attempt_id",
+        "backend_id",
+        "backend_kind",
+        "candidate_sha",
+        "candidate_tree_sha",
+        "configuration_sha256",
+        "context_sha256",
+        "deployment_manifest_sha256",
+        "environment_isolated",
+        "exact_argv_sha256",
+        "executor_identity",
+        "filesystem_isolated",
+        "independently_verified",
+        "network_denied",
+        "policy_sha256",
+        "production_credentials_present",
+        "receipt_authenticated",
+        "receipt_id",
+        "verified_at"
+      ],
+      "properties": {
+        "attempt_id": {
+          "$ref": "#/$defs/token"
+        },
+        "backend_id": {
+          "$ref": "#/$defs/token"
+        },
+        "backend_kind": {
+          "const": "AUTHENTICATED_FIXED_BACKEND"
+        },
+        "candidate_sha": {
+          "$ref": "#/$defs/sha1"
+        },
+        "candidate_tree_sha": {
+          "$ref": "#/$defs/sha1"
+        },
+        "configuration_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "context_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "deployment_manifest_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "environment_isolated": {
+          "const": true
+        },
+        "exact_argv_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "executor_identity": {
+          "$ref": "#/$defs/token"
+        },
+        "filesystem_isolated": {
+          "const": true
+        },
+        "independently_verified": {
+          "const": true
+        },
+        "network_denied": {
+          "const": true
+        },
+        "policy_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "production_credentials_present": {
+          "const": false
+        },
+        "receipt_authenticated": {
+          "const": true
+        },
+        "receipt_id": {
+          "$ref": "#/$defs/token"
+        },
+        "verified_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "executionSandbox": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/fixtureExecutionSandbox"
+        },
+        {
+          "$ref": "#/$defs/authenticatedExecutionSandbox"
+        }
+      ]
+    },
+    "baseEvidence": {
+      "type": "object",
+      "required": [
+        "MIG-006",
+        "MIG-007",
+        "MIG-008",
+        "attempt_lineage",
+        "authority_ceiling",
+        "candidate",
+        "command_order",
+        "commands",
+        "engineering_checkpoint",
+        "evidence_kind",
+        "next_phase_permission",
+        "phase",
+        "production_capabilities",
+        "production_checkpoint",
+        "promotion_gate",
+        "release_context",
+        "reports",
+        "review",
+        "schema_version",
+        "self_seal",
+        "sensitive_data",
+        "trust_root_verified"
+      ],
+      "properties": {
+        "MIG-006": {
+          "const": "PENDING_PROMOTION"
+        },
+        "MIG-007": {
+          "const": "PENDING_PROMOTION"
+        },
+        "MIG-008": {
+          "const": "PENDING_PROMOTION"
+        },
+        "attempt_lineage": {
+          "$ref": "#/$defs/attemptLineage"
+        },
+        "authority_ceiling": {
+          "type": "string"
+        },
+        "candidate": {
+          "$ref": "#/$defs/candidate"
+        },
+        "command_order": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/token"
+          }
+        },
+        "commands": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/command"
+          }
+        },
+        "engineering_checkpoint": {
+          "enum": [
+            "PASS",
+            "FAIL"
+          ]
+        },
+        "evidence_kind": {
+          "enum": [
+            "ENGINEERING_LOCAL",
+            "EXTERNAL_SIGNED"
+          ]
+        },
+        "next_phase_permission": {
+          "enum": [
+            "EXTERNAL_PRODUCTION_CHECKPOINT_ONLY",
+            "BLOCKED"
+          ]
+        },
+        "phase": {
+          "const": 8
+        },
+        "production_capabilities": {
+          "$ref": "#/$defs/productionCapabilities"
+        },
+        "production_checkpoint": {
+          "enum": [
+            "PENDING_EXTERNAL",
+            "FAIL"
+          ]
+        },
+        "promotion_gate": {
+          "enum": [
+            "PENDING",
+            "FAIL"
+          ]
+        },
+        "release_context": {
+          "$ref": "#/$defs/releaseContext"
+        },
+        "reports": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/report"
+          }
+        },
+        "review": {
+          "$ref": "#/$defs/review"
+        },
+        "schema_version": {
+          "const": "phase8-checkpoint-evidence.v1"
+        },
+        "self_seal": {
+          "$ref": "#/$defs/selfSeal"
+        },
+        "sensitive_data": {
+          "$ref": "#/$defs/sensitiveData"
+        },
+        "trust_root_verified": {
+          "const": false
+        }
+      }
+    },
+    "engineeringLocalEvidence": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/baseEvidence"
+        },
+        {
+          "type": "object",
+          "required": [
+            "engineering_trust_boundary",
+            "execution_sandbox"
+          ],
+          "properties": {
+            "authority_ceiling": {
+              "const": "PHASE_8_ENGINEERING_CHECKPOINT_ONLY"
+            },
+            "engineering_trust_boundary": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "cryptographic_production_attestation",
+                "threat_model"
+              ],
+              "properties": {
+                "cryptographic_production_attestation": {
+                  "const": false
+                },
+                "threat_model": {
+                  "const": "NON_HOSTILE_LOCAL_ENGINEERING_OPERATOR"
+                }
+              }
+            },
+            "evidence_kind": {
+              "const": "ENGINEERING_LOCAL"
+            },
+            "execution_sandbox": {
+              "$ref": "#/$defs/executionSandbox"
+            }
+          }
+        },
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "engineering_checkpoint": {
+                  "const": "PASS"
+                },
+                "execution_sandbox": {
+                  "$ref": "#/$defs/authenticatedExecutionSandbox"
+                },
+                "next_phase_permission": {
+                  "const": "EXTERNAL_PRODUCTION_CHECKPOINT_ONLY"
+                },
+                "production_checkpoint": {
+                  "const": "PENDING_EXTERNAL"
+                },
+                "promotion_gate": {
+                  "const": "PENDING"
+                }
+              }
+            },
+            {
+              "properties": {
+                "engineering_checkpoint": {
+                  "const": "FAIL"
+                },
+                "next_phase_permission": {
+                  "const": "BLOCKED"
+                },
+                "promotion_gate": {
+                  "const": "FAIL"
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "algorithm",
+        "key_id",
+        "role",
+        "signature",
+        "signer_identity"
+      ],
+      "properties": {
+        "algorithm": {
+          "enum": [
+            "Ed25519",
+            "ECDSA_P256_SHA256",
+            "RSA_PSS_SHA256"
+          ]
+        },
+        "key_id": {
+          "$ref": "#/$defs/token"
+        },
+        "role": {
+          "enum": [
+            "ARCHITECTURE",
+            "JAVA",
+            "PYTHON",
+            "SRE",
+            "SECURITY",
+            "BUSINESS"
+          ]
+        },
+        "signature": {
+          "type": "string",
+          "minLength": 16,
+          "maxLength": 16384,
+          "pattern": "^[A-Za-z0-9+/=_-]+$"
+        },
+        "signer_identity": {
+          "$ref": "#/$defs/token"
+        }
+      }
+    },
+    "trustRoot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fingerprint_sha256",
+        "key_id"
+      ],
+      "properties": {
+        "fingerprint_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "key_id": {
+          "$ref": "#/$defs/token"
+        }
+      }
+    },
+    "externalEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "claimed_result",
+        "signatures",
+        "signed_payload_sha256",
+        "trust_roots",
+        "verification_status"
+      ],
+      "properties": {
+        "claimed_result": {
+          "enum": [
+            "PASS",
+            "FAIL"
+          ]
+        },
+        "signatures": {
+          "type": "array",
+          "minItems": 6,
+          "maxItems": 6,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/signature"
+          }
+        },
+        "signed_payload_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "trust_roots": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/trustRoot"
+          }
+        },
+        "verification_status": {
+          "const": "UNVERIFIED_REQUIRES_P8_I5_3_TRUST_ROOT_VALIDATION"
+        }
+      }
+    },
+    "externalSignedEvidence": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/baseEvidence"
+        },
+        {
+          "type": "object",
+          "required": [
+            "external_signature_envelope"
+          ],
+          "properties": {
+            "authority_ceiling": {
+              "const": "EXTERNAL_EVIDENCE_SHAPE_ONLY_UNVERIFIED"
+            },
+            "evidence_kind": {
+              "const": "EXTERNAL_SIGNED"
+            },
+            "external_signature_envelope": {
+              "$ref": "#/$defs/externalEnvelope"
+            },
+            "next_phase_permission": {
+              "const": "BLOCKED"
+            },
+            "production_checkpoint": {
+              "const": "PENDING_EXTERNAL"
+            },
+            "promotion_gate": {
+              "const": "PENDING"
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    }
+  }
+}
