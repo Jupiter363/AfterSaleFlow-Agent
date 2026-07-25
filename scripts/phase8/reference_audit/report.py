@@ -66,7 +66,22 @@ def verify_sealed_active_reference_report(
 
     if not isinstance(report, ActiveReferenceReport):
         raise TypeError("report must be ActiveReferenceReport")
-    sealed_rows = tuple(replace(row) for row in report.rows)
+    sealed_rows = tuple(
+        replace(
+            row,
+            scan_high_watermark=(
+                replace(row.scan_high_watermark)
+                if row.scan_high_watermark is not None
+                else None
+            ),
+            authority_high_watermark=(
+                replace(row.authority_high_watermark)
+                if row.authority_high_watermark is not None
+                else None
+            ),
+        )
+        for row in report.rows
+    )
     sealed_report = replace(report, rows=sealed_rows)
     for row in sealed_report.rows:
         expected_row_hash = canonical_sha256(row.to_dict(include_hash=False))
