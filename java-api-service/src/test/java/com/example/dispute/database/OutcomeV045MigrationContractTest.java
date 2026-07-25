@@ -4,7 +4,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.LinkedHashSet;
 import java.util.Locale;
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
 
 class OutcomeV045MigrationContractTest {
@@ -239,19 +243,91 @@ class OutcomeV045MigrationContractTest {
                 "create function enforce_outcome_compensation_parent()",
                 "create trigger trg_outcome_compensation_parent");
 
-        assertThat(projection)
-                .contains("'outcome-compensation-order:'")
-                .contains("new.case_id || ':' || new.outcome_epoch::text");
+        String lockProtocol = functionSegment(
+                projection, "scope_lock_key := hashtextextended(", "select epoch.*");
+        String updateLockBranch = functionSegment(
+                lockProtocol,
+                "if tg_op = 'update' then",
+                "else perform pg_advisory_xact_lock(scope_lock_key)");
+        String insertLockBranch = lockProtocol.substring(lockProtocol.indexOf("else perform"));
+
+        assertThat(updateLockBranch)
+                .contains("if not pg_try_advisory_xact_lock(scope_lock_key) then")
+                .contains("errcode = '40001'")
+                .contains("outcome projection scope lock is busy; retry the whole transition")
+                .doesNotContain("perform pg_advisory_xact_lock(scope_lock_key)");
+        assertThat(insertLockBranch)
+                .contains("perform pg_advisory_xact_lock(scope_lock_key)")
+                .doesNotContain("pg_try_advisory_xact_lock")
+                .doesNotContain("errcode = '40001'");
+        assertThat(occurrences(lockProtocol, "pg_try_advisory_xact_lock(scope_lock_key)"))
+                .isEqualTo(1);
+        assertThat(occurrences(lockProtocol, "perform pg_advisory_xact_lock(scope_lock_key)"))
+                .isEqualTo(1);
         assertThat(reservation)
                 .contains("'outcome-compensation-order:'")
-                .contains("projection.process_state in ('closed', 'evaluation_pending', 'evaluated')")
-                .contains("outcome operation reservation is forbidden after closure");
+                .contains("outcome operation reservation is forbidden after closure readiness");
+        assertThat(extractInClauseValues(reservation, "projection.process_state in ("))
+                .containsExactlyInAnyOrder(
+                        "ready_to_close", "closed", "evaluation_pending", "evaluated");
         assertThat(compensation)
                 .contains("'outcome-compensation-order:'")
                 .contains("from outcome_process_projection value")
                 .contains("for update")
-                .contains("projection.process_state in ('closed', 'evaluation_pending', 'evaluated')")
-                .contains("outcome compensation binding is forbidden after closure");
+                .contains("outcome compensation binding is forbidden after closure readiness");
+        assertThat(extractInClauseValues(compensation, "projection.process_state in ("))
+                .containsExactlyInAnyOrder(
+                        "ready_to_close", "closed", "evaluation_pending", "evaluated");
+    }
+
+    @Test
+    void admitsOnlyReadyAndSerializedTerminalProjectionTransitions() throws Exception {
+        String projection = functionSegment(
+                normalizedSql(),
+                "create function enforce_outcome_projection_authority()",
+                "create trigger trg_outcome_projection_authority");
+
+        String transitionRules = functionSegment(
+                projection,
+                "if old.process_state in ('closed', 'evaluation_pending', 'evaluated')",
+                "if new.process_state in ('closed', 'evaluation_pending', 'evaluated') then");
+        String readiness = projection.substring(projection.indexOf(
+                "if new.process_state in ('closed', 'evaluation_pending', 'evaluated') then"));
+
+        assertThat(extractTransitionPairs(transitionRules))
+                .containsExactlyInAnyOrder(
+                        "ready_to_close->closed",
+                        "closed->evaluation_pending",
+                        "evaluation_pending->evaluated");
+        assertThat(extractInClauseValues(readiness, "if new.process_state in ("))
+                .containsExactlyInAnyOrder("closed", "evaluation_pending", "evaluated");
+        assertThat(transitionRules)
+                .contains("outcome projection terminal transition is illegal")
+                .doesNotContain("select count(operation.operation_id)");
+        assertThat(readiness)
+                .contains(
+                        "count(operation.operation_id) filter ( where"
+                                + " operation.required_for_closure and"
+                                + " operation.operation_kind = 'operation' )")
+                .contains(
+                        "receipt.operation_id is null or"
+                                + " receipt.receipt_status <> 'succeeded' or"
+                                + " receipt.closure_disposition <> 'satisfied'")
+                .contains(
+                        "required_original_operation_count"
+                                + " <> new.expected_required_operation_count or"
+                                + " unresolved_required_operation_count <> 0")
+                .contains("outcome projection terminal transition requires closure readiness");
+        assertThat(occurrences(readiness, "select count(operation.operation_id) filter"))
+                .isEqualTo(1);
+        assertAppearsInOrder(
+                projection,
+                "if new.process_state in ('closed', 'evaluation_pending', 'evaluated') then",
+                "select count(operation.operation_id) filter",
+                "from outcome_operation operation",
+                "where operation.projection_id = new.projection_id",
+                "if required_original_operation_count",
+                "outcome projection terminal transition requires closure readiness");
     }
 
     @Test
@@ -384,6 +460,43 @@ class OutcomeV045MigrationContractTest {
         assertThat(function.indexOf(first)).isGreaterThanOrEqualTo(0);
         assertThat(function.indexOf(second)).isGreaterThan(function.indexOf(first));
         assertThat(function.indexOf(third)).isGreaterThan(function.indexOf(second));
+    }
+
+    private static void assertAppearsInOrder(String source, String... values) {
+        int previous = -1;
+        for (String value : values) {
+            int current = source.indexOf(value, previous + 1);
+            assertThat(current).as("position of %s", value).isGreaterThan(previous);
+            previous = current;
+        }
+    }
+
+    private static Set<String> extractInClauseValues(String source, String marker) {
+        int start = source.indexOf(marker);
+        assertThat(start).as("start of %s", marker).isGreaterThanOrEqualTo(0);
+        int end = source.indexOf(')', start + marker.length());
+        assertThat(end).as("end of %s", marker).isGreaterThan(start);
+        return extractQuotedValues(source.substring(start + marker.length(), end));
+    }
+
+    private static Set<String> extractTransitionPairs(String source) {
+        Matcher matcher = Pattern.compile(
+                        "old\\.process_state = '([^']+)' and new\\.process_state = '([^']+)'")
+                .matcher(source);
+        Set<String> pairs = new LinkedHashSet<>();
+        while (matcher.find()) {
+            pairs.add(matcher.group(1) + "->" + matcher.group(2));
+        }
+        return pairs;
+    }
+
+    private static Set<String> extractQuotedValues(String source) {
+        Matcher matcher = Pattern.compile("'([^']+)'").matcher(source);
+        Set<String> values = new LinkedHashSet<>();
+        while (matcher.find()) {
+            values.add(matcher.group(1));
+        }
+        return values;
     }
 
     private static String functionSegment(String source, String functionStart, String functionEnd) {

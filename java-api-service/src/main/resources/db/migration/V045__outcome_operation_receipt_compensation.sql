@@ -77,12 +77,25 @@ declare
     authority case_room_epoch%rowtype;
     approval human_review_record%rowtype;
     task review_task%rowtype;
+    scope_lock_key bigint;
+    required_original_operation_count bigint;
+    unresolved_required_operation_count bigint;
 begin
-    perform pg_advisory_xact_lock(hashtextextended(
+    scope_lock_key := hashtextextended(
         'outcome-compensation-order:' || new.tenant_surrogate || ':' ||
         new.case_id || ':' || new.outcome_epoch::text,
         0
-    ));
+    );
+    if tg_op = 'UPDATE' then
+        -- PostgreSQL has already locked the projection tuple before a BEFORE ROW UPDATE
+        -- trigger runs. Never block here against the scope-first reservation path.
+        if not pg_try_advisory_xact_lock(scope_lock_key) then
+            raise exception using errcode = '40001',
+                message = 'Outcome projection scope lock is busy; retry the whole transition';
+        end if;
+    else
+        perform pg_advisory_xact_lock(scope_lock_key);
+    end if;
     select epoch.*
       into authority
       from case_room_epoch epoch
@@ -161,6 +174,45 @@ begin
            or new.updated_at < old.updated_at then
             raise exception using errcode = '23514',
                 message = 'Outcome projection revision fence rejected';
+        end if;
+        if old.process_state in ('CLOSED', 'EVALUATION_PENDING', 'EVALUATED')
+           or new.process_state in ('CLOSED', 'EVALUATION_PENDING', 'EVALUATED') then
+            if not (
+                (old.process_state = 'READY_TO_CLOSE' and new.process_state = 'CLOSED')
+                or (old.process_state = 'CLOSED'
+                    and new.process_state = 'EVALUATION_PENDING')
+                or (old.process_state = 'EVALUATION_PENDING'
+                    and new.process_state = 'EVALUATED')
+            ) then
+                raise exception using errcode = '23514',
+                    message = 'Outcome projection terminal transition is illegal';
+            end if;
+        end if;
+        if new.process_state in ('CLOSED', 'EVALUATION_PENDING', 'EVALUATED') then
+            select count(operation.operation_id) filter (
+                       where operation.required_for_closure
+                         and operation.operation_kind = 'OPERATION'
+                   ),
+                   count(operation.operation_id) filter (
+                       where operation.required_for_closure
+                         and (
+                             receipt.operation_id is null
+                             or receipt.receipt_status <> 'SUCCEEDED'
+                             or receipt.closure_disposition <> 'SATISFIED'
+                         )
+                   )
+              into required_original_operation_count,
+                   unresolved_required_operation_count
+              from outcome_operation operation
+              left join outcome_operation_receipt receipt
+                on receipt.operation_id = operation.operation_id
+             where operation.projection_id = new.projection_id;
+            if required_original_operation_count
+                   <> new.expected_required_operation_count
+               or unresolved_required_operation_count <> 0 then
+                raise exception using errcode = '23514',
+                    message = 'Outcome projection terminal transition requires closure readiness';
+            end if;
         end if;
     end if;
     return new;
@@ -306,9 +358,11 @@ begin
         raise exception using errcode = '23514',
             message = 'Outcome operation projection fence is stale';
     end if;
-    if projection.process_state in ('CLOSED', 'EVALUATION_PENDING', 'EVALUATED') then
+    if projection.process_state in (
+        'READY_TO_CLOSE', 'CLOSED', 'EVALUATION_PENDING', 'EVALUATED'
+    ) then
         raise exception using errcode = '23514',
-            message = 'Outcome operation reservation is forbidden after closure';
+            message = 'Outcome operation reservation is forbidden after closure readiness';
     end if;
     if (new.approval_record_id, new.decision_request_hash, new.action_snapshot_hash)
        is distinct from
@@ -784,9 +838,11 @@ begin
       from outcome_process_projection value
      where value.projection_id = child_projection_id
      for update;
-    if projection.process_state in ('CLOSED', 'EVALUATION_PENDING', 'EVALUATED') then
+    if projection.process_state in (
+        'READY_TO_CLOSE', 'CLOSED', 'EVALUATION_PENDING', 'EVALUATED'
+    ) then
         raise exception using errcode = '23514',
-            message = 'Outcome compensation binding is forbidden after closure';
+            message = 'Outcome compensation binding is forbidden after closure readiness';
     end if;
     select value.* into child
       from outcome_operation value
