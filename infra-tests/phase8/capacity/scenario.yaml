@@ -1,0 +1,146 @@
+schema_version: phase8.capacity.scenario.v1
+scenario_id: synthetic-wave1-capacity
+classification: SYNTHETIC_MODEL_ONLY
+policy_contract_version: phase8.capacity.v1
+
+authority:
+  engineering_mode: RENDER_ONLY_NONDEPLOYABLE
+  evidence_class: TARGET_MODEL_NOT_MEASUREMENT
+  production_checkpoint: PENDING_EXTERNAL
+  promotion_gate: PENDING
+  observed_production: false
+  permits_production_pass_claim: false
+  permits_slo_pass_claim: false
+  permits_burst_recovery_claim: false
+  permits_three_domain_claim: false
+  permits_soak_claim: false
+
+execution:
+  clock: DETERMINISTIC_INTEGER_TICKS
+  tick_seconds: 1
+  duration_seconds: 120
+  burst_start_second: 30
+  randomness: forbidden
+  subprocess: forbidden
+  network: forbidden
+  cloud: forbidden
+  database: forbidden
+  temporal: forbidden
+  production_credentials: forbidden
+  real_case_or_party_data: forbidden
+
+workload_registry_refs:
+  - workload-ids.java_api
+  - workload-ids.java_control_worker
+  - workload-ids.java_agent_worker
+  - workload-ids.python_agent
+  - workload-ids.litellm
+  - workload-ids.otel_collector
+
+room_model:
+  target_rooms_ref: room-contract.target_active_rooms
+  minimum_wait_percent_ref: room-contract.durable_timer_wait_percent_gte
+  measurement_evidence_ref: room-contract.target_is_measurement_evidence
+  durable_timer_waiting_rooms: 700
+  non_waiting_rooms: 300
+
+queue_models:
+  case_control:
+    control_id_ref: control-ids.case_control
+    workload_id_refs:
+      - workload-ids.java_control_worker
+    pool_id_ref: pool-ids.domain_control_rw
+    queue_limit: 64
+    service_per_second: 20
+    arrivals:
+      steady_per_second: 4
+      burst_per_second: 4
+      burst_duration_seconds: 30
+      pulse_at_burst_start: 0
+  room_control:
+    control_id_ref: control-ids.room_control
+    admission_id_ref: admission-ids.room_commands.id
+    workload_id_refs:
+      - workload-ids.java_api
+      - workload-ids.java_control_worker
+    pool_id_ref: pool-ids.domain_control_rw
+    queue_limit: 320
+    service_per_second: 40
+    arrivals:
+      steady_per_second_ref: admission-ids.room_commands.steady_per_second
+      burst_per_second_ref: admission-ids.room_commands.burst_per_second
+      burst_duration_seconds_ref: admission-ids.room_commands.burst_duration_seconds
+      pulse_at_burst_start: 0
+  agent_execution:
+    control_id_ref: control-ids.agent_execution
+    admission_id_ref: admission-ids.agent_runs.id
+    workload_id_refs:
+      - workload-ids.java_agent_worker
+      - workload-ids.python_agent
+    pool_id_ref: pool-ids.domain_agent_rw
+    queue_limit: 256
+    service_per_second: 24
+    arrivals:
+      steady_per_second_ref: admission-ids.agent_runs.steady_per_second
+      burst_per_second_ref: admission-ids.agent_runs.burst_per_second
+      burst_duration_seconds_ref: admission-ids.agent_runs.burst_duration_seconds
+      pulse_at_burst_start_ref: admission-ids.agent_runs.burst_total
+  notification_and_tools:
+    control_id_ref: control-ids.notification_and_tools
+    workload_id_refs:
+      - workload-ids.java_api
+    pool_id_ref: pool-ids.domain_api_rw
+    queue_limit: 64
+    service_per_second: 16
+    arrivals:
+      steady_per_second: 3
+      burst_per_second: 3
+      burst_duration_seconds: 30
+      pulse_at_burst_start: 0
+
+model_admission:
+  admission_id_ref: admission-ids.model_calls.id
+  workload_id_refs:
+    - workload-ids.python_agent
+    - workload-ids.litellm
+  pool_id_ref: pool-ids.model_egress
+  sustained_concurrency_ref: admission-ids.model_calls.sustained_concurrency
+  burst_concurrency_ref: admission-ids.model_calls.burst_concurrency
+  active_limit: 160
+  queue_limit: 64
+  overload_probe_concurrency: 225
+
+sse_model:
+  stream_id_ref: sse-contract.id
+  target_connections_ref: sse-contract.target_clients
+  buffer_behavior_ref: sse-contract.buffer
+  overload_behavior_ref: sse-contract.overload_behavior
+  buffer_limit_per_connection: 64
+  baseline_buffered_events_per_connection: 32
+  overload_events_per_connection: 65
+
+pool_models:
+  domain_api_rw:
+    pool_id_ref: pool-ids.domain_api_rw
+    capacity_units: 130
+    peak_demand_units: 90
+  domain_control_rw:
+    pool_id_ref: pool-ids.domain_control_rw
+    capacity_units: 100
+    peak_demand_units: 75
+  domain_agent_rw:
+    pool_id_ref: pool-ids.domain_agent_rw
+    capacity_units: 160
+    peak_demand_units: 120
+  graph_agent_rw:
+    pool_id_ref: pool-ids.graph_agent_rw
+    capacity_units: 140
+    peak_demand_units: 100
+  reporting_ro:
+    pool_id_ref: pool-ids.reporting_ro
+    capacity_units: 100
+    peak_demand_units: 60
+  model_egress:
+    pool_id_ref: pool-ids.model_egress
+    capacity_units: 260
+    peak_demand_units: 200

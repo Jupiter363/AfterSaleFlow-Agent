@@ -7,6 +7,7 @@ metadata:
   annotations:
     phase8.after-sale-flow.dev/evidence-class: target-only
     phase8.after-sale-flow.dev/real-load-proof: absent
+    phase8.after-sale-flow.dev/capacity-model: synthetic-only
 immutable: true
 data:
   contract-version: phase8.capacity.v1
@@ -48,7 +49,9 @@ data:
       id: agent-run
       steady_per_second: 5
       burst_per_second: 20
+      burst_duration_seconds: 30
       burst_total: 250
+      queue_behavior: bounded
     model_calls:
       id: model-call
       sustained_concurrency: 100
@@ -69,3 +72,7 @@ data:
     capacity_measurement: REQUIRED_EXTERNAL
     hpa_metric_adapter: REQUIRED_EXTERNAL
     three_domain_placement_receipt: REQUIRED_EXTERNAL
+    burst_recovery_receipt: REQUIRED_EXTERNAL
+    slo_receipt: REQUIRED_EXTERNAL
+    production_checkpoint: PENDING_EXTERNAL
+    promotion_gate: PENDING
