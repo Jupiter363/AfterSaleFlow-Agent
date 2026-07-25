@@ -194,6 +194,180 @@ class OutcomeOperationLedgerIntegrationTest {
     }
 
     @Test
+    void formalRequiredReservationRejectsNullMissingForgedAndDuplicateActionAuthority() {
+        Fixture nullFixture = insertFixture("ACTION_NULL");
+        OutcomeOperation nullAction = withActionRecordId(
+                operation(
+                        nullFixture,
+                        "null-action",
+                        REQUEST_HASH,
+                        1,
+                        OperationKind.OPERATION,
+                        true),
+                null);
+        assertThatThrownBy(() -> ledger.reserve(nullAction, null))
+                .isInstanceOf(OutcomeLedgerRejectedException.class)
+                .extracting(failure -> ((OutcomeLedgerRejectedException) failure).code())
+                .isEqualTo("OUTCOME_REQUIRED_ACTION_AUTHORITY_INVALID");
+
+        Fixture missingFixture = insertFixture("ACTION_MISSING");
+        jdbc.update(
+                "delete from action_record where id = ?",
+                actionRecordId(missingFixture.suffix(), 1));
+        assertActionAuthorityRejected(operation(
+                missingFixture,
+                "missing-action",
+                REQUEST_HASH,
+                1,
+                OperationKind.OPERATION,
+                true));
+
+        Fixture typeFixture = insertFixture("ACTION_TYPE");
+        jdbc.update(
+                "update action_record set action_type = 'UNAPPROVED' where id = ?",
+                actionRecordId(typeFixture.suffix(), 1));
+        assertActionAuthorityRejected(operation(
+                typeFixture,
+                "forged-type",
+                REQUEST_HASH,
+                1,
+                OperationKind.OPERATION,
+                true));
+
+        Fixture keyFixture = insertFixture("ACTION_KEY");
+        jdbc.update(
+                "update action_record set idempotency_key = ? where id = ?",
+                "UNAPPROVED:" + keyFixture.caseId(),
+                actionRecordId(keyFixture.suffix(), 1));
+        assertActionAuthorityRejected(operation(
+                keyFixture,
+                "forged-key",
+                REQUEST_HASH,
+                1,
+                OperationKind.OPERATION,
+                true));
+
+        Fixture duplicateFixture = insertFixture("ACTION_DUPLICATE", 2);
+        OutcomeOperation first = operation(
+                duplicateFixture,
+                "duplicate-first",
+                REQUEST_HASH,
+                1,
+                OperationKind.OPERATION,
+                true);
+        OutcomeOperation duplicate = withActionRecordId(
+                operation(
+                        duplicateFixture,
+                        "duplicate-second",
+                        "1".repeat(64),
+                        2,
+                        OperationKind.OPERATION,
+                        true),
+                first.actionRecordId());
+        ledger.reserve(first, null);
+        assertThatThrownBy(() -> ledger.reserve(duplicate, null))
+                .isInstanceOf(DataAccessException.class);
+        assertThat(number(
+                        "select count(*) from outcome_operation where projection_id = ?",
+                        duplicateFixture.projectionId()))
+                .isEqualTo(1);
+    }
+
+    @Test
+    void notificationReservationUsesTheToolExecutorCanonicalIdentity() {
+        String notification = "EMAIL_CUSTOMER";
+        Fixture fixture = insertFixture("ACTION_NOTIFICATION", 0, List.of(notification));
+        OutcomeOperation operation = operation(
+                fixture,
+                "notification",
+                REQUEST_HASH,
+                1,
+                OperationKind.OPERATION,
+                false);
+
+        assertThat(ledger.reserve(operation, null)).isEqualTo(operation);
+        assertThat(jdbc.queryForObject(
+                        "select idempotency_key from action_record where id = ?",
+                        String.class,
+                        operation.actionRecordId()))
+                .isEqualTo(approvedNotificationKey(
+                        fixture.caseId(), 1, 0, notification));
+    }
+
+    @Test
+    void closureRejectsRunningAndFailedFormalActionRecords() {
+        for (String status : List.of("RUNNING", "FAILED")) {
+            Fixture fixture = insertFixture("ACTION_STATUS_" + status);
+            OutcomeOperation operation = operation(
+                    fixture,
+                    "status-" + status.toLowerCase(),
+                    REQUEST_HASH,
+                    1,
+                    OperationKind.OPERATION,
+                    false);
+            jdbc.update(
+                    "update action_record set execution_status = ? where id = ?",
+                    status,
+                    operation.actionRecordId());
+            ledger.reserve(operation, null);
+            ledger.recordReceipt(receipt(
+                    operation,
+                    "RECEIPT_ACTION_STATUS_" + status,
+                    RECEIPT_HASH,
+                    7,
+                    ReceiptAuthority.DIRECT_RESPONSE));
+
+            assertThatThrownBy(() -> ledger.advanceProjection(
+                            expectation(fixture),
+                            ProcessState.READY_TO_CLOSE,
+                            NOW.plusSeconds(20)))
+                    .isInstanceOf(OutcomeLedgerRejectedException.class)
+                    .extracting(failure -> ((OutcomeLedgerRejectedException) failure).code())
+                    .isEqualTo("OUTCOME_REQUIRED_ACTION_NOT_SUCCEEDED");
+        }
+    }
+
+    @Test
+    void compensationBarrierDoesNotRequireTheOriginalActionRecordToRemainSucceeded() {
+        Fixture fixture = insertFixture("COMPENSATION_ACTION_STATUS");
+        OutcomeOperation original = operation(
+                fixture,
+                "original",
+                REQUEST_HASH,
+                1,
+                OperationKind.OPERATION,
+                true);
+        ledger.reserve(original, null);
+        OutcomeOperationReceipt originalReceipt = receipt(
+                original,
+                "RECEIPT_COMPENSATION_ACTION_STATUS",
+                RECEIPT_HASH,
+                7,
+                ReceiptAuthority.DIRECT_RESPONSE);
+        ledger.recordReceipt(originalReceipt);
+        jdbc.update(
+                "update action_record set execution_status = 'FAILED' where id = ?",
+                original.actionRecordId());
+
+        OutcomeOperation compensation = operation(
+                fixture,
+                "compensation",
+                "1".repeat(64),
+                2,
+                OperationKind.COMPENSATION,
+                false);
+        OutcomeCompensationParent parent = compensationParent(
+                fixture,
+                compensation,
+                original,
+                originalReceipt,
+                1,
+                "ACTION_STATUS");
+
+        assertThat(ledger.reserve(compensation, parent)).isEqualTo(compensation);
+    }
+
+    @Test
     void postgresTimestampPrecisionIsCanonicalAcrossPersistedExactReplays() {
         Fixture fixture = insertFixture("TIMESTAMP_REPLAY");
         Instant first = Instant.parse("2026-07-24T12:00:00.123456789Z");
@@ -865,6 +1039,12 @@ class OutcomeOperationLedgerIntegrationTest {
     }
 
     private static Fixture insertFixture(String suffix, int expectedRequiredOperationCount) {
+        return insertFixture(suffix, expectedRequiredOperationCount, List.of());
+    }
+
+    private static Fixture insertFixture(
+            String suffix, int approvedActionCount, List<String> approvedNotifications) {
+        int expectedRequiredOperationCount = approvedActionCount + approvedNotifications.size();
         String caseId = "CASE_OUTCOME_" + suffix;
         String roomId = "ROOM_OUTCOME_" + suffix;
         String epochId = "EPOCH_OUTCOME_" + suffix;
@@ -873,7 +1053,10 @@ class OutcomeOperationLedgerIntegrationTest {
         String packetId = "PACKET_OUTCOME_" + suffix;
         String taskId = "TASK_OUTCOME_" + suffix;
         String approvalId = "APPROVAL_OUTCOME_" + suffix;
-        String approvedPlanJson = approvedPlanJson(expectedRequiredOperationCount);
+        String approvedActionsJson = approvedActionsJson(caseId, approvedActionCount);
+        String approvedNotificationsJson = approvedNotificationsJson(approvedNotifications);
+        String approvedPlanJson = approvedPlanJson(
+                approvedActionsJson, approvedNotificationsJson);
         OffsetDateTime now = NOW.atOffset(ZoneOffset.UTC);
 
         jdbc.update(
@@ -901,12 +1084,14 @@ class OutcomeOperationLedgerIntegrationTest {
                     actions_json, preconditions_json, notification_plan_json,
                     created_by, updated_by
                 ) values (?, ?, 1, 'FULL_HEARING', 'PENDING_APPROVAL', 'HIGH',
-                    '[{"action_type":"REFUND"}]'::jsonb,
+                    ?::jsonb,
                     '["PLATFORM_REVIEW_APPROVED"]'::jsonb,
-                    '[]'::jsonb, 'outcome-ledger-test', 'outcome-ledger-test')
+                    ?::jsonb, 'outcome-ledger-test', 'outcome-ledger-test')
                 """,
                 planId,
-                caseId);
+                caseId,
+                approvedActionsJson,
+                approvedNotificationsJson);
         jdbc.update(
                 """
                 insert into review_packet (
@@ -988,6 +1173,43 @@ class OutcomeOperationLedgerIntegrationTest {
                 ACTION_HASH,
                 now.plusDays(7),
                 now);
+        for (int sequence = 1; sequence <= expectedRequiredOperationCount; sequence++) {
+            String actionType;
+            String idempotencyKey;
+            if (sequence <= approvedActionCount) {
+                actionType = "REFUND";
+                idempotencyKey = approvedActionKey(caseId, sequence);
+            } else {
+                int notificationIndex = sequence - approvedActionCount - 1;
+                actionType = approvedNotifications.get(notificationIndex);
+                idempotencyKey = approvedNotificationKey(
+                        caseId, 1, notificationIndex, actionType);
+            }
+            jdbc.update(
+                    """
+                    insert into action_record (
+                        id, case_id, plan_id, approval_record_id, action_type,
+                        risk_level, idempotency_key, approved_by, executed_by,
+                        request_json, result_json, execution_status, attempt_count,
+                        execution_time, review_packet_id, action_snapshot_hash,
+                        evidence_refs_json, rule_refs_json, agent_run_refs_json,
+                        created_at, created_by
+                    ) values (?, ?, ?, ?, ?, 'HIGH', ?,
+                        'reviewer-outcome', 'outcome-ledger-test', '{}'::jsonb,
+                        '{}'::jsonb, 'SUCCEEDED', 1, ?, ?, ?, '[]'::jsonb,
+                        '[]'::jsonb, '[]'::jsonb, ?, 'outcome-ledger-test')
+                    """,
+                    actionRecordId(suffix, sequence),
+                    caseId,
+                    planId,
+                    approvalId,
+                    actionType,
+                    idempotencyKey,
+                    now,
+                    packetId,
+                    ACTION_HASH,
+                    now);
+        }
         jdbc.update(
                 """
                 insert into case_room (
@@ -1055,7 +1277,15 @@ class OutcomeOperationLedgerIntegrationTest {
                 NOW);
         ledger.createProjection(projection);
         return new Fixture(
-                suffix, caseId, epochId, projectionId, planId, packetId, taskId, approvalId);
+                suffix,
+                caseId,
+                epochId,
+                projectionId,
+                planId,
+                packetId,
+                taskId,
+                approvalId,
+                expectedRequiredOperationCount);
     }
 
     private static OutcomeOperation operation(
@@ -1113,6 +1343,11 @@ class OutcomeOperationLedgerIntegrationTest {
             String decisionRequestHash,
             String actionSnapshotHash,
             Instant reservedAt) {
+        String actionRecordId = kind == OperationKind.OPERATION
+                        && requiredForClosure
+                        && sequence <= fixture.expectedRequiredOperationCount()
+                ? actionRecordId(fixture.suffix(), sequence)
+                : null;
         return new OutcomeOperation(
                 "OP_" + fixture.suffix() + '_' + sequence,
                 fixture.projectionId(),
@@ -1134,7 +1369,7 @@ class OutcomeOperationLedgerIntegrationTest {
                 approvalHash,
                 decisionRequestHash,
                 POLICY_VERSION,
-                null,
+                actionRecordId,
                 actionSnapshotHash,
                 "refund-adapter",
                 "v1",
@@ -1316,6 +1551,28 @@ class OutcomeOperationLedgerIntegrationTest {
                 operation.compensable(), reservedAt);
     }
 
+    private static OutcomeOperation withActionRecordId(
+            OutcomeOperation operation, String actionRecordId) {
+        return new OutcomeOperation(
+                operation.operationId(), operation.projectionId(), operation.tenantSurrogate(),
+                operation.caseId(), operation.outcomeEpoch(), operation.fencingToken(),
+                operation.processRevision(), operation.outcomeRevision(), operation.operationKind(),
+                operation.operationSequence(), operation.operationKey(), operation.requestHash(),
+                operation.reviewPacketId(), operation.reviewPacketVersion(), operation.reviewPacketHash(),
+                operation.reviewPacketActionHash(), operation.approvalRecordId(), operation.approvalHash(),
+                operation.decisionRequestHash(), operation.decisionPolicyVersion(), actionRecordId,
+                operation.actionSnapshotHash(), operation.adapterId(), operation.adapterVersion(),
+                operation.retryClass(), operation.externalIdempotencyKey(), operation.requiredForClosure(),
+                operation.compensable(), operation.reservedAt());
+    }
+
+    private static void assertActionAuthorityRejected(OutcomeOperation operation) {
+        assertThatThrownBy(() -> ledger.reserve(operation, null))
+                .isInstanceOf(OutcomeLedgerRejectedException.class)
+                .extracting(failure -> ((OutcomeLedgerRejectedException) failure).code())
+                .isEqualTo("OUTCOME_REQUIRED_ACTION_AUTHORITY_INVALID");
+    }
+
     private static ProjectionExpectation expectation(Fixture fixture) {
         return expectation(fixture, 0);
     }
@@ -1366,11 +1623,40 @@ class OutcomeOperationLedgerIntegrationTest {
         return value == null ? 0 : value;
     }
 
-    private static String approvedPlanJson(int expectedRequiredOperationCount) {
-        return "{\"id\":\"plan\",\"actions\":["
-                + String.join(",", java.util.Collections.nCopies(
-                        expectedRequiredOperationCount, "{\"action_type\":\"REFUND\"}"))
-                + "]}";
+    private static String approvedActionsJson(
+            String caseId, int expectedRequiredOperationCount) {
+        java.util.ArrayList<String> actions = new java.util.ArrayList<>();
+        for (int sequence = 1; sequence <= expectedRequiredOperationCount; sequence++) {
+            actions.add("{\"action_type\":\"REFUND\",\"idempotency_key\":\""
+                    + approvedActionKey(caseId, sequence)
+                    + "\"}");
+        }
+        return '[' + String.join(",", actions) + ']';
+    }
+
+    private static String approvedPlanJson(String actionsJson, String notificationsJson) {
+        return "{\"id\":\"plan\",\"actions\":" + actionsJson
+                + ",\"notifications\":" + notificationsJson + '}';
+    }
+
+    private static String approvedNotificationsJson(List<String> notifications) {
+        return '[' + String.join(",", notifications.stream()
+                .map(value -> "\"" + value + "\"")
+                .toList()) + ']';
+    }
+
+    private static String approvedActionKey(String caseId, long sequence) {
+        return "OUTCOME_ACTION:" + caseId + ':' + sequence;
+    }
+
+    private static String approvedNotificationKey(
+            String caseId, int planVersion, int notificationIndex, String notification) {
+        return "REMEDY:" + caseId + ':' + planVersion + ":NOTIFICATION:"
+                + notificationIndex + ':' + notification;
+    }
+
+    private static String actionRecordId(String suffix, long sequence) {
+        return "ACTION_OUTCOME_" + suffix + '_' + sequence;
     }
 
     private static JdbcOutcomeOperationLedger ledger(DataSource source) {
@@ -1465,5 +1751,6 @@ class OutcomeOperationLedgerIntegrationTest {
             String planId,
             String packetId,
             String taskId,
-            String approvalId) {}
+            String approvalId,
+            int expectedRequiredOperationCount) {}
 }

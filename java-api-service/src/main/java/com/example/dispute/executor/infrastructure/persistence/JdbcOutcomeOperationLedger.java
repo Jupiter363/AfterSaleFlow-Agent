@@ -139,7 +139,7 @@ public final class JdbcOutcomeOperationLedger implements OutcomeOperationLedger 
         OutcomeProcessProjection result = transactions.execute(ignored -> {
             lockSemantic(compensationOrderKey(expectation));
             OutcomeProcessProjection current = lockProjection(expectation);
-            requireSafeProjectionAdvance(current.processState(), nextState, expectation);
+            requireSafeProjectionAdvance(current, nextState, expectation);
             MapSqlParameterSource parameters = expectationParameters(expectation)
                     .addValue("nextProcessRevision", expectation.processRevision() + 1)
                     .addValue("nextOutcomeRevision", expectation.outcomeRevision() + 1)
@@ -226,6 +226,7 @@ public final class JdbcOutcomeOperationLedger implements OutcomeOperationLedger 
             OutcomeProcessProjection projection = lockProjection(expectation(operation));
             requireOperationProjectionAuthority(projection, operation);
             requireReservationOpen(projection);
+            requireRequiredActionReservationAuthority(projection, operation);
             if (compensationParent != null) {
                 requireNextCompensationParent(projection, compensationParent);
             }
@@ -722,9 +723,10 @@ public final class JdbcOutcomeOperationLedger implements OutcomeOperationLedger 
     }
 
     private void requireSafeProjectionAdvance(
-            OutcomeProcessProjection.ProcessState currentState,
+            OutcomeProcessProjection current,
             OutcomeProcessProjection.ProcessState nextState,
             ProjectionExpectation expectation) {
+        OutcomeProcessProjection.ProcessState currentState = current.processState();
         boolean terminalInvolved = isClosureState(currentState) || isClosureState(nextState);
         if (!terminalInvolved) {
             return;
@@ -747,11 +749,71 @@ public final class JdbcOutcomeOperationLedger implements OutcomeOperationLedger 
                     "OUTCOME_PROJECTION_TERMINAL_TRANSITION_INVALID",
                     "Outcome projection closure and evaluation states are frozen and one-way");
         }
+        requireRequiredActionClosureAuthority(current);
         OutcomeClosureReadiness readiness = readClosureReadiness(expectation);
         if (!readiness.closureReady()) {
             throw rejected(
                     "OUTCOME_CLOSURE_NOT_READY",
                     "Outcome projection cannot commit closure readiness while required operations remain unresolved");
+        }
+    }
+
+    private void requireRequiredActionReservationAuthority(
+            OutcomeProcessProjection projection, OutcomeOperation operation) {
+        if (operation.operationKind() != OutcomeOperation.OperationKind.OPERATION
+                || !operation.requiredForClosure()) {
+            return;
+        }
+        if (projection.runtimeMode()
+                == OutcomeProcessProjection.RuntimeMode.JAVA_SIGNED_SYNTHETIC_NOOP_SHADOW) {
+            if (operation.actionRecordId() != null
+                    || !"SYNTHETIC_NOOP_ONLY".equals(operation.adapterId())
+                    || !operation.tenantSurrogate().startsWith("OUTCOME_SYNTHETIC_")
+                    || !operation.caseId().startsWith("OUTCOME_SYNTHETIC_")
+                    || operation.operationSequence()
+                            > projection.expectedRequiredOperationCount()) {
+                throw rejected(
+                        "OUTCOME_SYNTHETIC_ACTION_AUTHORITY_INVALID",
+                        "synthetic Outcome required operation authority is invalid");
+            }
+            return;
+        }
+        if (operation.actionRecordId() == null) {
+            throw rejected(
+                    "OUTCOME_REQUIRED_ACTION_AUTHORITY_INVALID",
+                    "Outcome required operation has no exact approved ActionRecord authority");
+        }
+        Boolean authorized = jdbc.queryForObject(
+                "select outcome_required_action_record_is_authorized(:projectionId, :actionRecordId)",
+                Map.of(
+                        "projectionId", projection.projectionId(),
+                        "actionRecordId", operation.actionRecordId()),
+                Boolean.class);
+        if (!Boolean.TRUE.equals(authorized)) {
+            throw rejected(
+                    "OUTCOME_REQUIRED_ACTION_AUTHORITY_INVALID",
+                    "Outcome required operation has no exact approved ActionRecord authority");
+        }
+    }
+
+    private void requireRequiredActionClosureAuthority(OutcomeProcessProjection projection) {
+        Boolean exactSet = jdbc.queryForObject(
+                "select outcome_required_action_set_is_exact(:projectionId)",
+                Map.of("projectionId", projection.projectionId()),
+                Boolean.class);
+        if (!Boolean.TRUE.equals(exactSet)) {
+            throw rejected(
+                    "OUTCOME_REQUIRED_ACTION_SET_INVALID",
+                    "Outcome required original operations do not exactly match the approved action set");
+        }
+        Boolean recordsSucceeded = jdbc.queryForObject(
+                "select outcome_required_action_records_succeeded(:projectionId)",
+                Map.of("projectionId", projection.projectionId()),
+                Boolean.class);
+        if (!Boolean.TRUE.equals(recordsSucceeded)) {
+            throw rejected(
+                    "OUTCOME_REQUIRED_ACTION_NOT_SUCCEEDED",
+                    "Outcome closure requires every formal required ActionRecord to be SUCCEEDED");
         }
     }
 

@@ -206,6 +206,158 @@ class JdbcOutcomeOperationLedgerTest {
     }
 
     @Test
+    void formalRequiredReservationRequiresAnAuthorizedActionRecord() {
+        OutcomeProcessProjection projection = projection(NOW);
+        OutcomeOperation missing = operationWithAuthority(
+                projection, OperationKind.OPERATION, 1, null, "refund-adapter", true);
+        stubNewReservation(projection);
+
+        assertThatThrownBy(() -> ledger.reserve(missing, null))
+                .isInstanceOf(OutcomeLedgerRejectedException.class)
+                .extracting(failure -> ((OutcomeLedgerRejectedException) failure).code())
+                .isEqualTo("OUTCOME_REQUIRED_ACTION_AUTHORITY_INVALID");
+
+        OutcomeOperation forged = operationWithAuthority(
+                projection, OperationKind.OPERATION, 1, "ACTION_FORGED", "refund-adapter", true);
+        when(jdbc.queryForObject(
+                        contains("outcome_required_action_record_is_authorized"),
+                        anyMap(),
+                        any(Class.class)))
+                .thenReturn(false);
+        assertThatThrownBy(() -> ledger.reserve(forged, null))
+                .isInstanceOf(OutcomeLedgerRejectedException.class)
+                .extracting(failure -> ((OutcomeLedgerRejectedException) failure).code())
+                .isEqualTo("OUTCOME_REQUIRED_ACTION_AUTHORITY_INVALID");
+        verify(jdbc, never()).update(
+                contains("insert into outcome_operation ("), any(MapSqlParameterSource.class));
+    }
+
+    @Test
+    void formalRequiredReservationAcceptsOnlyTheDatabaseNormalizedAuthority() {
+        OutcomeProcessProjection projection = projection(NOW);
+        OutcomeOperation operation = operationWithAuthority(
+                projection, OperationKind.OPERATION, 1, "ACTION_1", "refund-adapter", true);
+        stubNewReservation(projection);
+        when(jdbc.queryForObject(
+                        contains("outcome_required_action_record_is_authorized"),
+                        anyMap(),
+                        any(Class.class)))
+                .thenReturn(true);
+        when(jdbc.update(
+                        contains("insert into outcome_operation ("),
+                        any(MapSqlParameterSource.class)))
+                .thenReturn(1);
+
+        assertThat(ledger.reserve(operation, null)).isEqualTo(operation);
+    }
+
+    @Test
+    void signedSyntheticRequiredReservationEnforcesTheNoopAuthorityEnvelope() {
+        OutcomeProcessProjection projection = syntheticProjection(1);
+        OutcomeOperation valid = operationWithAuthority(
+                projection, OperationKind.OPERATION, 1, null, "SYNTHETIC_NOOP_ONLY", true);
+        stubNewReservation(projection);
+        when(jdbc.update(
+                        contains("insert into outcome_operation ("),
+                        any(MapSqlParameterSource.class)))
+                .thenReturn(1);
+
+        assertThat(ledger.reserve(valid, null)).isEqualTo(valid);
+
+        for (OutcomeOperation forged : List.of(
+                operationWithAuthority(
+                        projection, OperationKind.OPERATION, 1, "ACTION_1",
+                        "SYNTHETIC_NOOP_ONLY", true),
+                operationWithAuthority(
+                        projection, OperationKind.OPERATION, 1, null,
+                        "refund-adapter", true),
+                operationWithAuthority(
+                        projection, OperationKind.OPERATION, 2, null,
+                        "SYNTHETIC_NOOP_ONLY", true))) {
+            stubNewReservation(projection);
+            assertThatThrownBy(() -> ledger.reserve(forged, null))
+                    .isInstanceOf(OutcomeLedgerRejectedException.class)
+                    .extracting(failure -> ((OutcomeLedgerRejectedException) failure).code())
+                    .isEqualTo("OUTCOME_SYNTHETIC_ACTION_AUTHORITY_INVALID");
+        }
+        for (OutcomeProcessProjection badScope : List.of(
+                syntheticProjection(1, "TENANT_1", "OUTCOME_SYNTHETIC_CASE_1"),
+                syntheticProjection(1, "OUTCOME_SYNTHETIC_TENANT_1", "CASE_1"))) {
+            OutcomeOperation forged = operationWithAuthority(
+                    badScope,
+                    OperationKind.OPERATION,
+                    1,
+                    null,
+                    "SYNTHETIC_NOOP_ONLY",
+                    true);
+            stubNewReservation(badScope);
+            assertThatThrownBy(() -> ledger.reserve(forged, null))
+                    .isInstanceOf(OutcomeLedgerRejectedException.class)
+                    .extracting(failure -> ((OutcomeLedgerRejectedException) failure).code())
+                    .isEqualTo("OUTCOME_SYNTHETIC_ACTION_AUTHORITY_INVALID");
+        }
+    }
+
+    @Test
+    void nonRequiredOriginalPreservesTheNullableActionRecordContract() {
+        OutcomeProcessProjection projection = projection(NOW);
+        OutcomeOperation optional = operationWithAuthority(
+                projection, OperationKind.OPERATION, 1, null, "refund-adapter", false);
+        stubNewReservation(projection);
+        when(jdbc.update(
+                        contains("insert into outcome_operation ("),
+                        any(MapSqlParameterSource.class)))
+                .thenReturn(1);
+
+        assertThat(ledger.reserve(optional, null)).isEqualTo(optional);
+        verify(jdbc, never()).queryForObject(
+                contains("outcome_required_action_record_is_authorized"),
+                anyMap(),
+                any(Class.class));
+    }
+
+    @Test
+    void terminalAdvanceRequiresExactApprovedActionsAndSucceededActionRecords() {
+        ProjectionExpectation expectation = new ProjectionExpectation(
+                "PROJECTION_1", "TENANT_1", "CASE_1", 1, 7, 11, 5);
+        when(jdbc.query(
+                        contains("from outcome_process_projection where projection_id"),
+                        any(MapSqlParameterSource.class),
+                        any(RowMapper.class)))
+                .thenReturn(List.of(projection(NOW)));
+        when(jdbc.queryForObject(
+                        contains("outcome_required_action_set_is_exact"),
+                        anyMap(),
+                        any(Class.class)))
+                .thenReturn(false);
+
+        assertThatThrownBy(() -> ledger.advanceProjection(
+                        expectation, ProcessState.READY_TO_CLOSE, NOW.plusSeconds(1)))
+                .isInstanceOf(OutcomeLedgerRejectedException.class)
+                .extracting(failure -> ((OutcomeLedgerRejectedException) failure).code())
+                .isEqualTo("OUTCOME_REQUIRED_ACTION_SET_INVALID");
+
+        when(jdbc.queryForObject(
+                        contains("outcome_required_action_set_is_exact"),
+                        anyMap(),
+                        any(Class.class)))
+                .thenReturn(true);
+        when(jdbc.queryForObject(
+                        contains("outcome_required_action_records_succeeded"),
+                        anyMap(),
+                        any(Class.class)))
+                .thenReturn(false);
+        assertThatThrownBy(() -> ledger.advanceProjection(
+                        expectation, ProcessState.READY_TO_CLOSE, NOW.plusSeconds(1)))
+                .isInstanceOf(OutcomeLedgerRejectedException.class)
+                .extracting(failure -> ((OutcomeLedgerRejectedException) failure).code())
+                .isEqualTo("OUTCOME_REQUIRED_ACTION_NOT_SUCCEEDED");
+        verify(jdbc, never()).update(
+                contains("update outcome_process_projection"),
+                any(MapSqlParameterSource.class));
+    }
+
+    @Test
     void redispatchRequiresPriorPermissionAndCompatibleRetryClass() {
         OutcomeOperation idempotent = operation(HASH_A, RetryClass.IDEMPOTENT_PROVIDER);
         stubAttemptTransition(
@@ -422,6 +574,45 @@ class JdbcOutcomeOperationLedgerTest {
                 reservedAt);
     }
 
+    private static OutcomeOperation operationWithAuthority(
+            OutcomeProcessProjection projection,
+            OperationKind kind,
+            long sequence,
+            String actionRecordId,
+            String adapterId,
+            boolean requiredForClosure) {
+        return new OutcomeOperation(
+                "OPERATION_" + sequence,
+                projection.projectionId(),
+                projection.tenantSurrogate(),
+                projection.caseId(),
+                projection.outcomeEpoch(),
+                projection.fencingToken(),
+                projection.processRevision(),
+                projection.outcomeRevision(),
+                kind,
+                sequence,
+                "outcome.effect:" + projection.caseId() + ':' + sequence,
+                HASH_A,
+                "PACKET_1",
+                1,
+                HASH_C,
+                "packet-action-hash-1",
+                projection.decisionAuthorityReceiptId(),
+                "approval-hash-1",
+                projection.decisionRequestHash(),
+                "policy-v1",
+                actionRecordId,
+                projection.approvedOperationSetHash(),
+                adapterId,
+                "v1",
+                RetryClass.STATUS_QUERY_REQUIRED,
+                "provider-key-" + sequence,
+                requiredForClosure,
+                false,
+                NOW.plusSeconds(sequence));
+    }
+
     private static OutcomeAttemptObservation observation(
             int sequence,
             ObservationType type,
@@ -491,6 +682,35 @@ class JdbcOutcomeOperationLedgerTest {
                 state, timestamp, timestamp);
     }
 
+    private static OutcomeProcessProjection syntheticProjection(long expectedRequiredCount) {
+        return syntheticProjection(
+                expectedRequiredCount,
+                "OUTCOME_SYNTHETIC_TENANT_1",
+                "OUTCOME_SYNTHETIC_CASE_1");
+    }
+
+    private static OutcomeProcessProjection syntheticProjection(
+            long expectedRequiredCount, String tenantSurrogate, String caseId) {
+        return new OutcomeProcessProjection(
+                "PROJECTION_SYNTHETIC_1",
+                tenantSurrogate,
+                caseId,
+                "EPOCH_SYNTHETIC_1",
+                1,
+                WriterMode.SHADOW,
+                RuntimeMode.JAVA_SIGNED_SYNTHETIC_NOOP_SHADOW,
+                7,
+                11,
+                5,
+                "APPROVAL_1",
+                HASH_B,
+                "action-snapshot-hash-1",
+                expectedRequiredCount,
+                ProcessState.DECISION_RECORDED,
+                NOW,
+                NOW);
+    }
+
     private static OutcomeCompensationParent compensationParent(Instant createdAt) {
         return new OutcomeCompensationParent(
                 "BINDING_1", HASH_C, "COMPENSATION_1", "OPERATION_1",
@@ -512,5 +732,18 @@ class JdbcOutcomeOperationLedgerTest {
                         anyMap(),
                         any(RowMapper.class)))
                 .thenReturn(List.of(previous));
+    }
+
+    private void stubNewReservation(OutcomeProcessProjection projection) {
+        when(jdbc.query(
+                        contains("from outcome_operation where tenant_surrogate"),
+                        anyMap(),
+                        any(RowMapper.class)))
+                .thenReturn(List.of());
+        when(jdbc.query(
+                        contains("from outcome_process_projection where projection_id"),
+                        any(MapSqlParameterSource.class),
+                        any(RowMapper.class)))
+                .thenReturn(List.of(projection));
     }
 }
