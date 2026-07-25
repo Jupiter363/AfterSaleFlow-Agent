@@ -81,6 +81,25 @@ class OutcomeV045MigrationContractTest {
     }
 
     @Test
+    void rejectsAnOperationWhoseAuthorityDiffersFromTheLockedProjection() throws Exception {
+        String function = functionSegment(
+                normalizedSql(),
+                "create function enforce_outcome_operation_binding()",
+                "create trigger trg_outcome_operation_binding");
+
+        assertThat(function)
+                .contains("from outcome_process_projection value")
+                .contains("for update")
+                .contains(
+                        "(new.approval_record_id, new.decision_request_hash,"
+                                + " new.action_snapshot_hash) is distinct from"
+                                + " (projection.decision_authority_receipt_id,"
+                                + " projection.decision_request_hash,"
+                                + " projection.approved_operation_set_hash)")
+                .contains("outcome operation authority does not match the locked projection");
+    }
+
+    @Test
     void modelsAmbiguousReconciliationWithoutTreatingItAsATerminalReceipt()
             throws Exception {
         String sql = normalizedSql();
@@ -95,6 +114,29 @@ class OutcomeV045MigrationContractTest {
                 .contains("ambiguous outcome operation requires reconciling before receipt")
                 .contains("provider_status_query")
                 .contains("java_reconciliation");
+    }
+
+    @Test
+    void rejectsRedispatchWithoutBothPredecessorAndOperationRetryAuthority()
+            throws Exception {
+        String function = functionSegment(
+                normalizedSql(),
+                "create function enforce_outcome_attempt_sequence()",
+                "create trigger trg_outcome_attempt_sequence");
+
+        assertThat(function)
+                .contains("parent.retry_class = 'non_retryable' and new.retry_permitted")
+                .contains("non_retryable outcome operation cannot publish retry authority")
+                .contains(
+                        "new.observation_type = 'invocation_dispatched' and"
+                                + " (not previous.retry_permitted"
+                                + " or parent.retry_class = 'non_retryable')")
+                .contains("outcome operation redispatch has no retry authority")
+                .contains("previous.observation_type = 'ambiguous' and new.observation_type <> 'reconciling'")
+                .contains(
+                        "previous.observation_type = 'reconciling' and"
+                                + " new.observation_type not in"
+                                + " ('reconciling', 'no_effect_confirmed')");
     }
 
     @Test
@@ -178,13 +220,51 @@ class OutcomeV045MigrationContractTest {
         assertThat(occurrences(
                         sql,
                         "'outcome-compensation-order:' || new.tenant_surrogate || ':' || new.case_id || ':' || new.outcome_epoch::text"))
-                .isEqualTo(4);
+                .isEqualTo(5);
+    }
+
+    @Test
+    void serializesClosureWithReservationAndRejectsPostClosureCompensation() throws Exception {
+        String sql = normalizedSql();
+        String projection = functionSegment(
+                sql,
+                "create function enforce_outcome_projection_authority()",
+                "create trigger trg_outcome_projection_authority");
+        String reservation = functionSegment(
+                sql,
+                "create function enforce_outcome_operation_binding()",
+                "create trigger trg_outcome_operation_binding");
+        String compensation = functionSegment(
+                sql,
+                "create function enforce_outcome_compensation_parent()",
+                "create trigger trg_outcome_compensation_parent");
+
+        assertThat(projection)
+                .contains("'outcome-compensation-order:'")
+                .contains("new.case_id || ':' || new.outcome_epoch::text");
+        assertThat(reservation)
+                .contains("'outcome-compensation-order:'")
+                .contains("projection.process_state in ('closed', 'evaluation_pending', 'evaluated')")
+                .contains("outcome operation reservation is forbidden after closure");
+        assertThat(compensation)
+                .contains("'outcome-compensation-order:'")
+                .contains("from outcome_process_projection value")
+                .contains("for update")
+                .contains("projection.process_state in ('closed', 'evaluation_pending', 'evaluated')")
+                .contains("outcome compensation binding is forbidden after closure");
     }
 
     @Test
     void appliesOneGlobalLifecycleLockOrderInEveryTrigger() throws Exception {
         String sql = normalizedSql();
 
+        assertLockOrder(
+                sql,
+                "create function enforce_outcome_projection_authority()",
+                "create trigger trg_outcome_projection_authority",
+                "'outcome-compensation-order:'",
+                "from case_room_epoch epoch",
+                "for key share");
         assertLockOrder(
                 sql,
                 "create function enforce_outcome_operation_binding()",

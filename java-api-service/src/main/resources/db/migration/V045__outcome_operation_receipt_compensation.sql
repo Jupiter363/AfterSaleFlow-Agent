@@ -78,6 +78,11 @@ declare
     approval human_review_record%rowtype;
     task review_task%rowtype;
 begin
+    perform pg_advisory_xact_lock(hashtextextended(
+        'outcome-compensation-order:' || new.tenant_surrogate || ':' ||
+        new.case_id || ':' || new.outcome_epoch::text,
+        0
+    ));
     select epoch.*
       into authority
       from case_room_epoch epoch
@@ -301,6 +306,17 @@ begin
         raise exception using errcode = '23514',
             message = 'Outcome operation projection fence is stale';
     end if;
+    if projection.process_state in ('CLOSED', 'EVALUATION_PENDING', 'EVALUATED') then
+        raise exception using errcode = '23514',
+            message = 'Outcome operation reservation is forbidden after closure';
+    end if;
+    if (new.approval_record_id, new.decision_request_hash, new.action_snapshot_hash)
+       is distinct from
+       (projection.decision_authority_receipt_id, projection.decision_request_hash,
+           projection.approved_operation_set_hash) then
+        raise exception using errcode = '23514',
+            message = 'Outcome operation authority does not match the locked projection';
+    end if;
 
     select count(*) into existing_operation_count
       from outcome_operation value
@@ -505,6 +521,10 @@ begin
         raise exception using errcode = '23503',
             message = 'Outcome attempt has no parent operation';
     end if;
+    if parent.retry_class = 'NON_RETRYABLE' and new.retry_permitted then
+        raise exception using errcode = '23514',
+            message = 'NON_RETRYABLE Outcome operation cannot publish retry authority';
+    end if;
     if exists (
         select 1 from outcome_operation_receipt receipt
          where receipt.operation_id = new.operation_id
@@ -538,6 +558,11 @@ begin
            and new.observation_type not in ('RECONCILING', 'NO_EFFECT_CONFIRMED') then
             raise exception using errcode = '23514',
                 message = 'RECONCILING Outcome operation forbids another invocation';
+        end if;
+        if new.observation_type = 'INVOCATION_DISPATCHED'
+           and (not previous.retry_permitted or parent.retry_class = 'NON_RETRYABLE') then
+            raise exception using errcode = '23514',
+                message = 'Outcome operation redispatch has no retry authority';
         end if;
     end if;
     return new;
@@ -759,6 +784,10 @@ begin
       from outcome_process_projection value
      where value.projection_id = child_projection_id
      for update;
+    if projection.process_state in ('CLOSED', 'EVALUATION_PENDING', 'EVALUATED') then
+        raise exception using errcode = '23514',
+            message = 'Outcome compensation binding is forbidden after closure';
+    end if;
     select value.* into child
       from outcome_operation value
      where value.operation_id = new.child_operation_id
