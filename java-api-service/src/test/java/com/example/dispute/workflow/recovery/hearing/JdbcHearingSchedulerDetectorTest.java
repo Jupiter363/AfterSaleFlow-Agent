@@ -94,12 +94,17 @@ class JdbcHearingSchedulerDetectorTest {
 
     @Test
     void completedHandoffAcceptsItsExactHistoricalTerminalWriterEpoch() {
-        assertThat(JdbcHearingSchedulerDetector.HANDOFF_DETECTION_SQL)
+        String detectionSql = JdbcHearingSchedulerDetector.HANDOFF_DETECTION_SQL;
+        String closedBranch = detectionSql.substring(
+                detectionSql.indexOf("authoritative_stage = 'CLOSED'"));
+
+        assertThat(detectionSql).contains("'legacy-java.v1'");
+
+        assertThat(closedBranch)
                 .contains(
                         "authoritative_stage = 'CLOSED'",
                         "projection_writer_mode not in ('LEGACY', 'TEMPORAL')",
                         "authority_lifecycle_status = 'TERMINAL'",
-                        "'legacy-java.v1'",
                         "authority_process_revision = projection_process_revision",
                         "authority_room_revision = projection_room_revision",
                         "authority_process_revision = projection_process_revision + 1",
