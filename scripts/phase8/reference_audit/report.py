@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from types import MappingProxyType
 from typing import Mapping
 
@@ -24,6 +25,16 @@ from .model import (
 
 ReaderKey = ReferenceClass | SourceSystem | Authority
 
+_READ_ONLY_CAPABILITIES = {
+    "credential_loading": False,
+    "delete": False,
+    "mutation": False,
+    "network": False,
+    "off_activation": False,
+    "retirement": False,
+    "subprocess": False,
+}
+
 
 def adapter_inventory() -> tuple[dict[str, object], ...]:
     return tuple(
@@ -46,6 +57,29 @@ def adapter_inventory() -> tuple[dict[str, object], ...]:
 
 def adapter_inventory_hash() -> str:
     return canonical_sha256(list(adapter_inventory()))
+
+
+def verify_sealed_active_reference_report(
+    report: ActiveReferenceReport,
+) -> str:
+    """Recompute every immutable hash without changing single-scan decisions."""
+
+    if not isinstance(report, ActiveReferenceReport):
+        raise TypeError("report must be ActiveReferenceReport")
+    sealed_rows = tuple(replace(row) for row in report.rows)
+    sealed_report = replace(report, rows=sealed_rows)
+    for row in sealed_report.rows:
+        expected_row_hash = canonical_sha256(row.to_dict(include_hash=False))
+        if row.row_hash != expected_row_hash:
+            raise ValueError("sealed report row hash mismatch")
+    expected_report_hash = canonical_sha256(
+        sealed_report.to_dict(include_hash=False)
+    )
+    if sealed_report.report_hash != expected_report_hash:
+        raise ValueError("sealed report hash mismatch")
+    if sealed_report.to_dict()["capabilities"] != _READ_ONLY_CAPABILITIES:
+        raise ValueError("sealed report capabilities must remain read-only")
+    return expected_report_hash
 
 
 def _reader_for(
