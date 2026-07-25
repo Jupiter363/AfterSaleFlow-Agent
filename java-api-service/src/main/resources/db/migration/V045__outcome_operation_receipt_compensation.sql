@@ -146,6 +146,10 @@ begin
             message = 'Outcome projection decision request authority is invalid';
     end if;
     if tg_op = 'INSERT' then
+        if new.process_state <> 'DECISION_RECORDED' then
+            raise exception using errcode = '23514',
+                message = 'Outcome projection bootstrap state is illegal';
+        end if;
         if authority.lifecycle_status <> 'ACTIVE'
            or new.process_revision <> authority.process_revision
            or new.outcome_revision <> authority.room_revision then
@@ -175,10 +179,21 @@ begin
             raise exception using errcode = '23514',
                 message = 'Outcome projection revision fence rejected';
         end if;
-        if old.process_state in ('CLOSED', 'EVALUATION_PENDING', 'EVALUATED')
-           or new.process_state in ('CLOSED', 'EVALUATION_PENDING', 'EVALUATED') then
+        if old.process_state in (
+               'READY_TO_CLOSE', 'CLOSED', 'EVALUATION_PENDING', 'EVALUATED'
+           )
+           or new.process_state in (
+               'READY_TO_CLOSE', 'CLOSED', 'EVALUATION_PENDING', 'EVALUATED'
+           ) then
             if not (
-                (old.process_state = 'READY_TO_CLOSE' and new.process_state = 'CLOSED')
+                (new.process_state = 'READY_TO_CLOSE'
+                    and old.process_state in (
+                        'DECISION_RECORDED', 'OPERATIONS_RESERVED',
+                        'OPERATIONS_RUNNING', 'RECONCILING',
+                        'COMPENSATING', 'MANUAL_RECOVERY'
+                    ))
+                or (old.process_state = 'READY_TO_CLOSE'
+                    and new.process_state = 'CLOSED')
                 or (old.process_state = 'CLOSED'
                     and new.process_state = 'EVALUATION_PENDING')
                 or (old.process_state = 'EVALUATION_PENDING'
@@ -188,7 +203,9 @@ begin
                     message = 'Outcome projection terminal transition is illegal';
             end if;
         end if;
-        if new.process_state in ('CLOSED', 'EVALUATION_PENDING', 'EVALUATED') then
+        if new.process_state in (
+            'READY_TO_CLOSE', 'CLOSED', 'EVALUATION_PENDING', 'EVALUATED'
+        ) then
             select count(operation.operation_id) filter (
                        where operation.required_for_closure
                          and operation.operation_kind = 'OPERATION'

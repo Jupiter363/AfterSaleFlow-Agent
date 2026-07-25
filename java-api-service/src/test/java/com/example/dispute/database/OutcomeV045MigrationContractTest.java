@@ -67,6 +67,34 @@ class OutcomeV045MigrationContractTest {
     }
 
     @Test
+    void bootstrapsOnlyAtTheEstablishedDecisionRecordedState() throws Exception {
+        String projection = functionSegment(
+                normalizedSql(),
+                "create function enforce_outcome_projection_authority()",
+                "create trigger trg_outcome_projection_authority");
+        String bootstrap = functionSegment(
+                projection,
+                "if tg_op = 'insert' then",
+                "else if (new.projection_id, new.schema_version");
+
+        Matcher matcher = Pattern.compile("new\\.process_state <> '([^']+)'")
+                .matcher(bootstrap);
+        Set<String> admittedBootstrapStates = new LinkedHashSet<>();
+        while (matcher.find()) {
+            admittedBootstrapStates.add(matcher.group(1));
+        }
+        assertThat(admittedBootstrapStates).containsExactly("decision_recorded");
+        assertThat(occurrences(bootstrap, "new.process_state <> 'decision_recorded'"))
+                .isEqualTo(1);
+        assertThat(bootstrap)
+                .contains("outcome projection bootstrap state is illegal")
+                .doesNotContain("'ready_to_close'")
+                .doesNotContain("'closed'")
+                .doesNotContain("'evaluation_pending'")
+                .doesNotContain("'evaluated'");
+    }
+
+    @Test
     void bindsOperationToExecutableDecisionPacketActionAndIdempotencyIdentity()
             throws Exception {
         String sql = normalizedSql();
@@ -289,18 +317,29 @@ class OutcomeV045MigrationContractTest {
 
         String transitionRules = functionSegment(
                 projection,
-                "if old.process_state in ('closed', 'evaluation_pending', 'evaluated')",
-                "if new.process_state in ('closed', 'evaluation_pending', 'evaluated') then");
+                "if old.process_state in ( 'ready_to_close', 'closed',",
+                "if new.process_state in ( 'ready_to_close', 'closed',");
         String readiness = projection.substring(projection.indexOf(
-                "if new.process_state in ('closed', 'evaluation_pending', 'evaluated') then"));
+                "if new.process_state in ( 'ready_to_close', 'closed',"));
+        String readyEntry = transitionRules.substring(transitionRules.indexOf(
+                "new.process_state = 'ready_to_close'"));
 
         assertThat(extractTransitionPairs(transitionRules))
                 .containsExactlyInAnyOrder(
                         "ready_to_close->closed",
                         "closed->evaluation_pending",
                         "evaluation_pending->evaluated");
+        assertThat(extractInClauseValues(readyEntry, "old.process_state in ("))
+                .containsExactlyInAnyOrder(
+                        "decision_recorded",
+                        "operations_reserved",
+                        "operations_running",
+                        "reconciling",
+                        "compensating",
+                        "manual_recovery");
         assertThat(extractInClauseValues(readiness, "if new.process_state in ("))
-                .containsExactlyInAnyOrder("closed", "evaluation_pending", "evaluated");
+                .containsExactlyInAnyOrder(
+                        "ready_to_close", "closed", "evaluation_pending", "evaluated");
         assertThat(transitionRules)
                 .contains("outcome projection terminal transition is illegal")
                 .doesNotContain("select count(operation.operation_id)");
@@ -317,12 +356,13 @@ class OutcomeV045MigrationContractTest {
                         "required_original_operation_count"
                                 + " <> new.expected_required_operation_count or"
                                 + " unresolved_required_operation_count <> 0")
-                .contains("outcome projection terminal transition requires closure readiness");
+                .contains("outcome projection terminal transition requires closure readiness")
+                .doesNotContain("required_original_operation_count > 0");
         assertThat(occurrences(readiness, "select count(operation.operation_id) filter"))
                 .isEqualTo(1);
         assertAppearsInOrder(
                 projection,
-                "if new.process_state in ('closed', 'evaluation_pending', 'evaluated') then",
+                "if new.process_state in ( 'ready_to_close', 'closed',",
                 "select count(operation.operation_id) filter",
                 "from outcome_operation operation",
                 "where operation.projection_id = new.projection_id",
