@@ -1,0 +1,36 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: after-sale-phase8-kms-vault-policy
+  labels:
+    app.kubernetes.io/name: phase8-kms-vault-policy
+  annotations:
+    phase8.after-sale-flow.dev/policy-version: phase8.kms-vault.v1
+    phase8.after-sale-flow.dev/policy-mode: REFERENCE_ONLY
+    phase8.after-sale-flow.dev/kms-authority: kms://keys.invalid/after-sale-flow/REQUIRED_EXTERNAL
+    phase8.after-sale-flow.dev/vault-authority: https://vault.invalid/after-sale-flow/REQUIRED_EXTERNAL
+    phase8.after-sale-flow.dev/workload-auth-method: REQUIRED_EXTERNAL
+    phase8.after-sale-flow.dev/key-material: forbidden
+    phase8.after-sale-flow.dev/authority-contract: |
+      kms:
+        temporal_payload_codec_key_ref: kms://keys.invalid/after-sale-flow/temporal-codec/version/REQUIRED_EXTERNAL
+        object_evidence_key_ref: kms://keys.invalid/after-sale-flow/evidence/version/REQUIRED_EXTERNAL
+        object_graph_key_ref: kms://keys.invalid/after-sale-flow/graph/version/REQUIRED_EXTERNAL
+        object_audit_key_ref: kms://keys.invalid/after-sale-flow/audit/version/REQUIRED_EXTERNAL
+        invocation_signing_key_ref: kms://keys.invalid/after-sale-flow/invocation-signing/version/REQUIRED_EXTERNAL
+        rotation_and_old_key_read_receipt: REQUIRED_EXTERNAL
+      vault:
+        database_dynamic_role_refs:
+          - vault://phase8-render-only/database/domain-api-rw/REQUIRED_EXTERNAL
+          - vault://phase8-render-only/database/domain-control-rw/REQUIRED_EXTERNAL
+          - vault://phase8-render-only/database/domain-agent-rw/REQUIRED_EXTERNAL
+          - vault://phase8-render-only/database/graph-agent-rw/REQUIRED_EXTERNAL
+          - vault://phase8-render-only/database/reporting-ro/REQUIRED_EXTERNAL
+        provider_credential_ref: vault://phase8-render-only/provider/REQUIRED_EXTERNAL
+        temporal_cloud_credential_ref: vault://phase8-render-only/temporal-cloud/REQUIRED_EXTERNAL
+      controls:
+        workload_identity_provider_chain: REQUIRED_EXTERNAL
+        actual_encrypt_decrypt_authorization: REQUIRED_EXTERNAL
+        reference_is_credential: false
+        render_can_close_external_gate: false
+immutable: true

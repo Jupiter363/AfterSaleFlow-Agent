@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: after-sale-postgres-reporting-read
+  labels:
+    app.kubernetes.io/name: after-sale-postgres-reporting-read
+    phase8.after-sale-flow.dev/pool-id: reporting-ro
+    phase8.after-sale-flow.dev/control-id: reporting-read-replica-binding
+  annotations:
+    phase8.after-sale-flow.dev/access-mode: read-only
+    phase8.after-sale-flow.dev/routing-status: REQUIRED_EXTERNAL
+    phase8.after-sale-flow.dev/authority: target-contract-not-live-routing
+spec:
+  type: ExternalName
+  externalName: reporting-read-replica.invalid
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432

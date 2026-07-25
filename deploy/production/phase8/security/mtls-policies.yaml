@@ -1,0 +1,146 @@
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: phase8-strict-mtls
+  annotations:
+    phase8.after-sale-flow.dev/policy-mode: RENDER_ONLY
+    phase8.after-sale-flow.dev/crd-readiness: REQUIRED_EXTERNAL
+    phase8.after-sale-flow.dev/dataplane-interception: REQUIRED_EXTERNAL
+    phase8.after-sale-flow.dev/enforcement-receipt: REQUIRED_EXTERNAL
+spec:
+  mtls:
+    mode: STRICT
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: phase8-default-deny
+  annotations:
+    phase8.after-sale-flow.dev/policy-mode: RENDER_ONLY
+    phase8.after-sale-flow.dev/enforcement-receipt: REQUIRED_EXTERNAL
+spec: {}
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata: {name: java-api-from-trusted-gateway}
+spec:
+  selector: {matchLabels: {app.kubernetes.io/name: after-sale-java-api}}
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: [cluster.local/ns/after-sale-flow-phase8-render-only/sa/after-sale-edge-gateway]
+      to:
+        - operation: {ports: ["8080"]}
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata: {name: python-agent-from-java-agent-worker}
+spec:
+  selector: {matchLabels: {app.kubernetes.io/name: after-sale-python-agent}}
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: [cluster.local/ns/after-sale-flow-phase8-render-only/sa/after-sale-java-agent-worker]
+      to:
+        - operation: {ports: ["8000"]}
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata: {name: litellm-from-python-agent}
+spec:
+  selector: {matchLabels: {app.kubernetes.io/name: after-sale-litellm}}
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: [cluster.local/ns/after-sale-flow-phase8-render-only/sa/after-sale-python-agent]
+      to:
+        - operation: {ports: ["4000"]}
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata: {name: otel-from-phase8-workloads}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: after-sale-flow
+      app.kubernetes.io/name: otel-collector
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - cluster.local/ns/after-sale-flow-phase8-render-only/sa/after-sale-java-api
+              - cluster.local/ns/after-sale-flow-phase8-render-only/sa/after-sale-java-control-worker
+              - cluster.local/ns/after-sale-flow-phase8-render-only/sa/after-sale-java-agent-worker
+              - cluster.local/ns/after-sale-flow-phase8-render-only/sa/after-sale-python-agent
+              - cluster.local/ns/after-sale-flow-phase8-render-only/sa/after-sale-litellm
+      to:
+        - operation: {ports: ["4317", "4318"]}
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata: {name: pgbouncer-domain-api-from-java-api}
+spec:
+  selector: {matchLabels: {app.kubernetes.io/name: after-sale-pgbouncer-domain-api}}
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: [cluster.local/ns/after-sale-flow-phase8-render-only/sa/after-sale-java-api]
+      to:
+        - operation: {ports: ["6432"]}
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata: {name: pgbouncer-domain-control-from-control-worker}
+spec:
+  selector: {matchLabels: {app.kubernetes.io/name: after-sale-pgbouncer-domain-control}}
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: [cluster.local/ns/after-sale-flow-phase8-render-only/sa/after-sale-java-control-worker]
+      to:
+        - operation: {ports: ["6432"]}
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata: {name: pgbouncer-domain-agent-from-agent-worker}
+spec:
+  selector: {matchLabels: {app.kubernetes.io/name: after-sale-pgbouncer-domain-agent}}
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: [cluster.local/ns/after-sale-flow-phase8-render-only/sa/after-sale-java-agent-worker]
+      to:
+        - operation: {ports: ["6432"]}
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata: {name: pgbouncer-graph-agent-from-python-agent}
+spec:
+  selector: {matchLabels: {app.kubernetes.io/name: after-sale-pgbouncer-graph-agent}}
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: [cluster.local/ns/after-sale-flow-phase8-render-only/sa/after-sale-python-agent]
+      to:
+        - operation: {ports: ["6432"]}
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata: {name: pgbouncer-reporting-read-from-java-api}
+spec:
+  selector: {matchLabels: {app.kubernetes.io/name: after-sale-pgbouncer-reporting-read}}
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: [cluster.local/ns/after-sale-flow-phase8-render-only/sa/after-sale-java-api]
+      to:
+        - operation: {ports: ["6432"]}

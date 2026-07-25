@@ -1,0 +1,35 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: after-sale-flow-phase8-render-only
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: after-sale-flow
+      phase8.after-sale-flow.dev/render-only: "true"
+    includeSelectors: true
+    includeTemplates: true
+commonAnnotations:
+  phase8.after-sale-flow.dev/authority: engineering-target-only
+  phase8.after-sale-flow.dev/production-apply: forbidden
+resources:
+  - java-api.yaml
+  - java-control-worker.yaml
+  - java-agent-worker.yaml
+  - python-agent.yaml
+  - litellm.yaml
+  - pgbouncer.yaml
+  - postgres-read-service.yaml
+  - pdb.yaml
+  - hpa.yaml
+  - capacity-policy.yaml
+  - security/workload-identities.yaml
+  - security/rbac.yaml
+  - security/network-policies.yaml
+  - security/mtls-policies.yaml
+  - security/kms-vault-policy.yaml
+  - security/object-store-policy.yaml
+patches:
+  - path: topology-spread.yaml
+    target:
+      group: apps
+      version: v1
+      kind: Deployment

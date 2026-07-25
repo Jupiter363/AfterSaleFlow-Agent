@@ -1,0 +1,71 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: after-sale-phase8-capacity-policy
+  labels:
+    app.kubernetes.io/name: phase8-capacity-policy
+  annotations:
+    phase8.after-sale-flow.dev/evidence-class: target-only
+    phase8.after-sale-flow.dev/real-load-proof: absent
+immutable: true
+data:
+  contract-version: phase8.capacity.v1
+  engineering-mode: RENDER_ONLY_NONDEPLOYABLE
+  failure-domains.yaml: |
+    count: 3
+    topology_key: topology.kubernetes.io/zone
+    enforcement: REQUIRED_EXTERNAL
+  workload-ids.yaml: |
+    java_api: java-api
+    java_control_worker: java-control-worker
+    java_agent_worker: java-agent-worker
+    python_agent: python-agent
+    litellm: litellm
+    otel_collector: otel-collector
+  pool-ids.yaml: |
+    domain_api_rw: domain-api-rw
+    domain_control_rw: domain-control-rw
+    domain_agent_rw: domain-agent-rw
+    graph_agent_rw: graph-agent-rw
+    reporting_ro: reporting-ro
+    model_egress: model-egress
+    control_and_agent_pool_sharing: forbidden
+    graph_and_domain_pool_sharing: forbidden
+    reporting_primary_pool_sharing: forbidden
+    peak_utilization_percent_lt: 80
+  control-ids.yaml: |
+    case_control: case-control
+    room_control: room-control
+    agent_execution: agent-execution
+    notification_and_tools: notification-and-tools
+  admission-ids.yaml: |
+    room_commands:
+      id: room-command
+      steady_per_second: 20
+      burst_per_second: 50
+      burst_duration_seconds: 30
+    agent_runs:
+      id: agent-run
+      steady_per_second: 5
+      burst_per_second: 20
+      burst_total: 250
+    model_calls:
+      id: model-call
+      sustained_concurrency: 100
+      burst_concurrency: 200
+      queue_behavior: bounded
+  sse-contract.yaml: |
+    id: agent-stream-v2
+    target_clients: 2500
+    buffer: bounded
+    overload_behavior: disconnect_and_replay_from_domain_db_cursor
+  room-contract.yaml: |
+    target_active_rooms: 1000
+    durable_timer_wait_percent_gte: 70
+    target_is_measurement_evidence: false
+  external-gates.yaml: |
+    production_apply: forbidden
+    load_and_soak: REQUIRED_EXTERNAL
+    capacity_measurement: REQUIRED_EXTERNAL
+    hpa_metric_adapter: REQUIRED_EXTERNAL
+    three_domain_placement_receipt: REQUIRED_EXTERNAL

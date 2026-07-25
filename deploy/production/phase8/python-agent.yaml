@@ -1,0 +1,82 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: after-sale-python-agent
+  labels:
+    app.kubernetes.io/name: after-sale-python-agent
+    phase8.after-sale-flow.dev/workload-id: python-agent
+    phase8.after-sale-flow.dev/pool-id: graph-agent-rw
+    phase8.after-sale-flow.dev/admission-id: graph-command
+    phase8.after-sale-flow.dev/control-id: graph-execution
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: after-sale-python-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: after-sale-python-agent
+        phase8.after-sale-flow.dev/workload-id: python-agent
+        phase8.after-sale-flow.dev/pool-id: graph-agent-rw
+    spec:
+      serviceAccountName: after-sale-python-agent
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: python-agent
+          image: registry.invalid/after-sale-flow/python-agent@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: GRAPH_DATABASE_POOL_ID
+              value: graph-agent-rw
+            - name: GRAPH_DATABASE_ENDPOINT
+              value: after-sale-pgbouncer-graph-agent:6432
+            - name: LITELLM_ENDPOINT
+              value: https://after-sale-litellm:4000
+            - name: ASGI_IDENTITY_BRIDGE
+              value: REQUIRED_EXTERNAL
+            - name: LANGFUSE_REDACTION
+              value: REQUIRED_EXTERNAL
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://after-sale-otel-collector:4317
+            - name: PHASE8_PRODUCTION_ACTIVATION
+              value: FORBIDDEN
+          ports:
+            - name: https
+              containerPort: 8000
+          resources:
+            requests:
+              cpu: "4"
+              memory: 8Gi
+            limits:
+              cpu: "8"
+              memory: 12Gi
+          readinessProbe:
+            httpGet:
+              scheme: HTTPS
+              path: /health/ready
+              port: https
+            initialDelaySeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            readOnlyRootFilesystem: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: after-sale-python-agent
+  labels:
+    app.kubernetes.io/name: after-sale-python-agent
+spec:
+  selector:
+    app.kubernetes.io/name: after-sale-python-agent
+  ports:
+    - name: https
+      port: 8000
+      targetPort: https

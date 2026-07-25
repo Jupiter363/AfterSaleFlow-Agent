@@ -1,0 +1,23 @@
+- op: add
+  path: /spec/template/spec/topologySpreadConstraints
+  value:
+    - maxSkew: 1
+      minDomains: 3
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: DoNotSchedule
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/part-of: after-sale-flow
+      matchLabelKeys:
+        - phase8.after-sale-flow.dev/workload-id
+- op: add
+  path: /spec/template/spec/affinity
+  value:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            topologyKey: kubernetes.io/hostname
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/part-of: after-sale-flow

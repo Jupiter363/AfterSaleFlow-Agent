@@ -1,0 +1,76 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: after-sale-java-api}
+spec:
+  minAvailable: 2
+  selector: {matchLabels: {app.kubernetes.io/name: after-sale-java-api}}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: after-sale-java-control-worker}
+spec:
+  minAvailable: 2
+  selector: {matchLabels: {app.kubernetes.io/name: after-sale-java-control-worker}}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: after-sale-java-agent-worker}
+spec:
+  minAvailable: 2
+  selector: {matchLabels: {app.kubernetes.io/name: after-sale-java-agent-worker}}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: after-sale-python-agent}
+spec:
+  minAvailable: 3
+  selector: {matchLabels: {app.kubernetes.io/name: after-sale-python-agent}}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: after-sale-litellm}
+spec:
+  minAvailable: 2
+  selector: {matchLabels: {app.kubernetes.io/name: after-sale-litellm}}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: after-sale-otel-collector}
+spec:
+  minAvailable: 1
+  selector: {matchLabels: {app.kubernetes.io/name: otel-collector}}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: after-sale-pgbouncer-domain-api}
+spec:
+  minAvailable: 2
+  selector: {matchLabels: {app.kubernetes.io/name: after-sale-pgbouncer-domain-api}}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: after-sale-pgbouncer-domain-control}
+spec:
+  minAvailable: 2
+  selector: {matchLabels: {app.kubernetes.io/name: after-sale-pgbouncer-domain-control}}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: after-sale-pgbouncer-domain-agent}
+spec:
+  minAvailable: 2
+  selector: {matchLabels: {app.kubernetes.io/name: after-sale-pgbouncer-domain-agent}}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: after-sale-pgbouncer-graph-agent}
+spec:
+  minAvailable: 2
+  selector: {matchLabels: {app.kubernetes.io/name: after-sale-pgbouncer-graph-agent}}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: after-sale-pgbouncer-reporting-read}
+spec:
+  minAvailable: 2
+  selector: {matchLabels: {app.kubernetes.io/name: after-sale-pgbouncer-reporting-read}}

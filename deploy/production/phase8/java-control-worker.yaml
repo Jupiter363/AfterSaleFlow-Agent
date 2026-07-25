@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: after-sale-java-control-worker
+  labels:
+    app.kubernetes.io/name: after-sale-java-control-worker
+    phase8.after-sale-flow.dev/workload-id: java-control-worker
+    phase8.after-sale-flow.dev/pool-id: domain-control-rw
+    phase8.after-sale-flow.dev/admission-id: durable-control-command
+    phase8.after-sale-flow.dev/control-id: temporal-control-queues
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: after-sale-java-control-worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: after-sale-java-control-worker
+        phase8.after-sale-flow.dev/workload-id: java-control-worker
+        phase8.after-sale-flow.dev/pool-id: domain-control-rw
+    spec:
+      serviceAccountName: after-sale-java-control-worker
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: java-control-worker
+          image: registry.invalid/after-sale-flow/java-control-worker@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: SPRING_PROFILES_ACTIVE
+              value: control-worker,phase8-render-only
+            - name: DATABASE_POOL_ID
+              value: domain-control-rw
+            - name: DATABASE_ENDPOINT
+              value: after-sale-pgbouncer-domain-control:6432
+            - name: TEMPORAL_TASK_QUEUES
+              value: case-control,room-control,notification-and-tools
+            - name: TEMPORAL_CLOUD_CREDENTIAL_ADAPTER
+              value: REQUIRED_EXTERNAL
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://after-sale-otel-collector:4317
+            - name: PHASE8_PRODUCTION_ACTIVATION
+              value: FORBIDDEN
+          ports:
+            - name: management
+              containerPort: 8081
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: management
+            initialDelaySeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            readOnlyRootFilesystem: true

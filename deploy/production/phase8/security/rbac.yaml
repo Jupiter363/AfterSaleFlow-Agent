@@ -1,0 +1,68 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: phase8-capacity-policy-reader}
+rules:
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [after-sale-phase8-capacity-policy]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: phase8-capacity-policy-readers}
+subjects:
+  - {kind: ServiceAccount, name: after-sale-java-api}
+  - {kind: ServiceAccount, name: after-sale-java-control-worker}
+  - {kind: ServiceAccount, name: after-sale-java-agent-worker}
+  - {kind: ServiceAccount, name: after-sale-python-agent}
+  - {kind: ServiceAccount, name: after-sale-litellm}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: phase8-capacity-policy-reader
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: phase8-kms-vault-reference-reader}
+rules:
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [after-sale-phase8-kms-vault-policy]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: phase8-kms-vault-reference-readers}
+subjects:
+  - {kind: ServiceAccount, name: after-sale-java-api}
+  - {kind: ServiceAccount, name: after-sale-java-control-worker}
+  - {kind: ServiceAccount, name: after-sale-java-agent-worker}
+  - {kind: ServiceAccount, name: after-sale-python-agent}
+  - {kind: ServiceAccount, name: after-sale-litellm}
+  - {kind: ServiceAccount, name: after-sale-archive-writer}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: phase8-kms-vault-reference-reader
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: phase8-object-store-policy-reader}
+rules:
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [after-sale-phase8-object-store-policy]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: phase8-object-store-policy-readers}
+subjects:
+  - {kind: ServiceAccount, name: after-sale-java-api}
+  - {kind: ServiceAccount, name: after-sale-java-agent-worker}
+  - {kind: ServiceAccount, name: after-sale-python-agent}
+  - {kind: ServiceAccount, name: after-sale-archive-writer}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: phase8-object-store-policy-reader

@@ -1,0 +1,47 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: after-sale-phase8-object-store-policy
+  labels:
+    app.kubernetes.io/name: phase8-object-store-policy
+  annotations:
+    phase8.after-sale-flow.dev/policy-version: phase8.object-store.v1
+    phase8.after-sale-flow.dev/policy-mode: REFERENCE_ONLY
+    phase8.after-sale-flow.dev/provider-endpoint: https://object-store.invalid
+    phase8.after-sale-flow.dev/workload-identity-provider-chain: REQUIRED_EXTERNAL
+    phase8.after-sale-flow.dev/provisioning-status: REQUIRED_EXTERNAL
+    phase8.after-sale-flow.dev/storage-contract: |
+      defaults:
+        acl: private
+        public_access: BLOCKED
+        versioning: REQUIRED
+        immutable_versions: REQUIRED
+        object_lock: REQUIRED
+        overwrite_by_logical_key: forbidden
+        transport_tls: REQUIRED_EXTERNAL
+        access_audit_log: REQUIRED
+        access_audit_receipt: REQUIRED_EXTERNAL
+        lifecycle_and_legal_hold_approval: REQUIRED_EXTERNAL
+      scopes:
+        evidence:
+          prefix: evidence/
+          kms_key_ref: kms://keys.invalid/after-sale-flow/evidence/version/REQUIRED_EXTERNAL
+          writer_identity: after-sale-java-api
+        graph_input:
+          prefix: graph-input/
+          kms_key_ref: kms://keys.invalid/after-sale-flow/graph/version/REQUIRED_EXTERNAL
+          writer_identity: after-sale-java-agent-worker
+        graph_output:
+          prefix: graph-output/
+          kms_key_ref: kms://keys.invalid/after-sale-flow/graph/version/REQUIRED_EXTERNAL
+          writer_identity: after-sale-python-agent
+        audit:
+          prefix: audit/
+          kms_key_ref: kms://keys.invalid/after-sale-flow/audit/version/REQUIRED_EXTERNAL
+          writer_identity: after-sale-java-control-worker
+      immutable_reference:
+        required_fields: [bucket, key, version_id, sha256]
+        java_authorization_manifest: REQUIRED
+        object_readback_receipt: REQUIRED_EXTERNAL
+        private_acl_evidence: REQUIRED_EXTERNAL
+immutable: true

@@ -1,0 +1,156 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: after-sale-java-api
+  labels:
+    app.kubernetes.io/name: after-sale-java-api
+    phase8.after-sale-flow.dev/identity-id: java-api
+  annotations:
+    phase8.after-sale-flow.dev/identity-provider-chain: REQUIRED_EXTERNAL
+    phase8.after-sale-flow.dev/static-credential: forbidden
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: after-sale-java-control-worker
+  labels:
+    app.kubernetes.io/name: after-sale-java-control-worker
+    phase8.after-sale-flow.dev/identity-id: java-control-worker
+  annotations:
+    phase8.after-sale-flow.dev/identity-provider-chain: REQUIRED_EXTERNAL
+    phase8.after-sale-flow.dev/static-credential: forbidden
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: after-sale-java-agent-worker
+  labels:
+    app.kubernetes.io/name: after-sale-java-agent-worker
+    phase8.after-sale-flow.dev/identity-id: java-agent-worker
+  annotations:
+    phase8.after-sale-flow.dev/identity-provider-chain: REQUIRED_EXTERNAL
+    phase8.after-sale-flow.dev/static-credential: forbidden
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: after-sale-python-agent
+  labels:
+    app.kubernetes.io/name: after-sale-python-agent
+    phase8.after-sale-flow.dev/identity-id: python-agent
+  annotations:
+    phase8.after-sale-flow.dev/identity-provider-chain: REQUIRED_EXTERNAL
+    phase8.after-sale-flow.dev/static-credential: forbidden
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: after-sale-litellm
+  labels:
+    app.kubernetes.io/name: after-sale-litellm
+    phase8.after-sale-flow.dev/identity-id: litellm
+  annotations:
+    phase8.after-sale-flow.dev/identity-provider-chain: REQUIRED_EXTERNAL
+    phase8.after-sale-flow.dev/static-credential: forbidden
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: after-sale-otel-collector
+  labels:
+    app.kubernetes.io/part-of: after-sale-flow
+    app.kubernetes.io/name: otel-collector
+    phase8.after-sale-flow.dev/identity-id: otel-collector
+  annotations:
+    phase8.after-sale-flow.dev/identity-provider-chain: REQUIRED_EXTERNAL
+    phase8.after-sale-flow.dev/static-credential: forbidden
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: after-sale-pgbouncer-domain-api
+  labels: {phase8.after-sale-flow.dev/identity-id: pgbouncer-domain-api}
+  annotations:
+    phase8.after-sale-flow.dev/identity-provider-chain: REQUIRED_EXTERNAL
+    phase8.after-sale-flow.dev/static-credential: forbidden
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: after-sale-pgbouncer-domain-control
+  labels: {phase8.after-sale-flow.dev/identity-id: pgbouncer-domain-control}
+  annotations:
+    phase8.after-sale-flow.dev/identity-provider-chain: REQUIRED_EXTERNAL
+    phase8.after-sale-flow.dev/static-credential: forbidden
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: after-sale-pgbouncer-domain-agent
+  labels: {phase8.after-sale-flow.dev/identity-id: pgbouncer-domain-agent}
+  annotations:
+    phase8.after-sale-flow.dev/identity-provider-chain: REQUIRED_EXTERNAL
+    phase8.after-sale-flow.dev/static-credential: forbidden
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: after-sale-pgbouncer-graph-agent
+  labels: {phase8.after-sale-flow.dev/identity-id: pgbouncer-graph-agent}
+  annotations:
+    phase8.after-sale-flow.dev/identity-provider-chain: REQUIRED_EXTERNAL
+    phase8.after-sale-flow.dev/static-credential: forbidden
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: after-sale-pgbouncer-reporting-read
+  labels: {phase8.after-sale-flow.dev/identity-id: pgbouncer-reporting-read}
+  annotations:
+    phase8.after-sale-flow.dev/identity-provider-chain: REQUIRED_EXTERNAL
+    phase8.after-sale-flow.dev/static-credential: forbidden
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: after-sale-migration-runner
+  labels: {phase8.after-sale-flow.dev/identity-id: migration-runner}
+  annotations:
+    phase8.after-sale-flow.dev/identity-provider-chain: REQUIRED_EXTERNAL
+    phase8.after-sale-flow.dev/static-credential: forbidden
+    phase8.after-sale-flow.dev/implicit-production-authority: forbidden
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: after-sale-archive-writer
+  labels: {phase8.after-sale-flow.dev/identity-id: archive-writer}
+  annotations:
+    phase8.after-sale-flow.dev/identity-provider-chain: REQUIRED_EXTERNAL
+    phase8.after-sale-flow.dev/static-credential: forbidden
+    phase8.after-sale-flow.dev/implicit-production-authority: forbidden
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: after-sale-release-operator
+  labels: {phase8.after-sale-flow.dev/identity-id: release-operator}
+  annotations:
+    phase8.after-sale-flow.dev/identity-provider-chain: REQUIRED_EXTERNAL
+    phase8.after-sale-flow.dev/static-credential: forbidden
+    phase8.after-sale-flow.dev/implicit-production-authority: forbidden
+    phase8.after-sale-flow.dev/external-authorization: REQUIRED
+automountServiceAccountToken: false

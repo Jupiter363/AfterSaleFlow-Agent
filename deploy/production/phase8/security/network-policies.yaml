@@ -1,0 +1,219 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress-and-egress
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-only
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: kube-system}
+          podSelector:
+            matchLabels: {k8s-app: kube-dns}
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: java-api-ingress-from-trusted-gateway
+  annotations:
+    phase8.after-sale-flow.dev/gateway-identity: REQUIRED_EXTERNAL
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: after-sale-java-api}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/name: after-sale-trusted-gateway}
+      ports: [{protocol: TCP, port: 8080}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: java-api-database-egress}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: after-sale-java-api}}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector: {matchLabels: {app.kubernetes.io/name: after-sale-pgbouncer-domain-api}}
+      ports: [{protocol: TCP, port: 6432}]
+    - to:
+        - podSelector: {matchLabels: {app.kubernetes.io/name: after-sale-pgbouncer-reporting-read}}
+      ports: [{protocol: TCP, port: 6432}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: control-worker-database-egress}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: after-sale-java-control-worker}}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector: {matchLabels: {app.kubernetes.io/name: after-sale-pgbouncer-domain-control}}
+      ports: [{protocol: TCP, port: 6432}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: agent-worker-runtime-egress}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: after-sale-java-agent-worker}}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector: {matchLabels: {app.kubernetes.io/name: after-sale-pgbouncer-domain-agent}}
+      ports: [{protocol: TCP, port: 6432}]
+    - to:
+        - podSelector: {matchLabels: {app.kubernetes.io/name: after-sale-python-agent}}
+      ports: [{protocol: TCP, port: 8000}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: python-agent-runtime-egress}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: after-sale-python-agent}}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector: {matchLabels: {app.kubernetes.io/name: after-sale-pgbouncer-graph-agent}}
+      ports: [{protocol: TCP, port: 6432}]
+    - to:
+        - podSelector: {matchLabels: {app.kubernetes.io/name: after-sale-litellm}}
+      ports: [{protocol: TCP, port: 4000}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: python-agent-ingress-from-java-agent-worker}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: after-sale-python-agent}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {matchLabels: {app.kubernetes.io/name: after-sale-java-agent-worker}}
+      ports: [{protocol: TCP, port: 8000}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: litellm-ingress-from-python-agent}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: after-sale-litellm}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {matchLabels: {app.kubernetes.io/name: after-sale-python-agent}}
+      ports: [{protocol: TCP, port: 4000}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: workload-otel-egress}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values:
+          - after-sale-java-api
+          - after-sale-java-control-worker
+          - after-sale-java-agent-worker
+          - after-sale-python-agent
+          - after-sale-litellm
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: after-sale-flow
+              app.kubernetes.io/name: otel-collector
+      ports:
+        - {protocol: TCP, port: 4317}
+        - {protocol: TCP, port: 4318}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: otel-ingress-from-phase8-workloads}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: after-sale-flow
+      app.kubernetes.io/name: otel-collector
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - after-sale-java-api
+                  - after-sale-java-control-worker
+                  - after-sale-java-agent-worker
+                  - after-sale-python-agent
+                  - after-sale-litellm
+      ports:
+        - {protocol: TCP, port: 4317}
+        - {protocol: TCP, port: 4318}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: pgbouncer-domain-api-ingress}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: after-sale-pgbouncer-domain-api}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {matchLabels: {app.kubernetes.io/name: after-sale-java-api}}
+      ports: [{protocol: TCP, port: 6432}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: pgbouncer-domain-control-ingress}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: after-sale-pgbouncer-domain-control}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {matchLabels: {app.kubernetes.io/name: after-sale-java-control-worker}}
+      ports: [{protocol: TCP, port: 6432}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: pgbouncer-domain-agent-ingress}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: after-sale-pgbouncer-domain-agent}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {matchLabels: {app.kubernetes.io/name: after-sale-java-agent-worker}}
+      ports: [{protocol: TCP, port: 6432}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: pgbouncer-graph-agent-ingress}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: after-sale-pgbouncer-graph-agent}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {matchLabels: {app.kubernetes.io/name: after-sale-python-agent}}
+      ports: [{protocol: TCP, port: 6432}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: pgbouncer-reporting-read-ingress}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: after-sale-pgbouncer-reporting-read}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {matchLabels: {app.kubernetes.io/name: after-sale-java-api}}
+      ports: [{protocol: TCP, port: 6432}]

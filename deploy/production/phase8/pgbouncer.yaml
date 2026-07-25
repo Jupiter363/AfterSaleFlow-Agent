@@ -1,0 +1,271 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: after-sale-pgbouncer-domain-api
+  labels:
+    app.kubernetes.io/name: after-sale-pgbouncer-domain-api
+    phase8.after-sale-flow.dev/workload-id: pgbouncer-domain-api
+    phase8.after-sale-flow.dev/pool-id: domain-api-rw
+    phase8.after-sale-flow.dev/control-id: pool-domain-api-rw
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: after-sale-pgbouncer-domain-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: after-sale-pgbouncer-domain-api
+        phase8.after-sale-flow.dev/workload-id: pgbouncer-domain-api
+        phase8.after-sale-flow.dev/pool-id: domain-api-rw
+    spec:
+      serviceAccountName: after-sale-pgbouncer-domain-api
+      automountServiceAccountToken: false
+      securityContext: &podSecurity
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: pgbouncer
+          image: &image registry.invalid/after-sale-flow/pgbouncer@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          env:
+            - {name: POOL_ID, value: domain-api-rw}
+            - {name: UPSTREAM_ENDPOINT, value: domain-postgres-primary.invalid:5432}
+            - {name: AUTH_REFERENCE, value: vault://phase8-render-only/database/domain-api-rw/REQUIRED_EXTERNAL}
+            - {name: POOL_MODE, value: transaction}
+          ports: [{name: postgres, containerPort: 6432}]
+          resources: &resources
+            requests: {cpu: 250m, memory: 256Mi}
+            limits: {cpu: "1", memory: 1Gi}
+          readinessProbe: &readiness
+            tcpSocket: {port: postgres}
+            initialDelaySeconds: 5
+          securityContext: &containerSecurity
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+            readOnlyRootFilesystem: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: after-sale-pgbouncer-domain-api
+  labels: {app.kubernetes.io/name: after-sale-pgbouncer-domain-api}
+spec:
+  selector: {app.kubernetes.io/name: after-sale-pgbouncer-domain-api}
+  ports: [{name: postgres, port: 6432, targetPort: postgres}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: after-sale-pgbouncer-domain-control
+  labels:
+    app.kubernetes.io/name: after-sale-pgbouncer-domain-control
+    phase8.after-sale-flow.dev/workload-id: pgbouncer-domain-control
+    phase8.after-sale-flow.dev/pool-id: domain-control-rw
+    phase8.after-sale-flow.dev/control-id: pool-domain-control-rw
+spec:
+  replicas: 3
+  selector:
+    matchLabels: {app.kubernetes.io/name: after-sale-pgbouncer-domain-control}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: after-sale-pgbouncer-domain-control
+        phase8.after-sale-flow.dev/workload-id: pgbouncer-domain-control
+        phase8.after-sale-flow.dev/pool-id: domain-control-rw
+    spec:
+      serviceAccountName: after-sale-pgbouncer-domain-control
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: pgbouncer
+          image: registry.invalid/after-sale-flow/pgbouncer@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          env:
+            - {name: POOL_ID, value: domain-control-rw}
+            - {name: UPSTREAM_ENDPOINT, value: domain-postgres-primary.invalid:5432}
+            - {name: AUTH_REFERENCE, value: vault://phase8-render-only/database/domain-control-rw/REQUIRED_EXTERNAL}
+            - {name: POOL_MODE, value: transaction}
+          ports: [{name: postgres, containerPort: 6432}]
+          resources:
+            requests: {cpu: 250m, memory: 256Mi}
+            limits: {cpu: "1", memory: 1Gi}
+          readinessProbe:
+            tcpSocket: {port: postgres}
+            initialDelaySeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+            readOnlyRootFilesystem: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: after-sale-pgbouncer-domain-control
+  labels: {app.kubernetes.io/name: after-sale-pgbouncer-domain-control}
+spec:
+  selector: {app.kubernetes.io/name: after-sale-pgbouncer-domain-control}
+  ports: [{name: postgres, port: 6432, targetPort: postgres}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: after-sale-pgbouncer-domain-agent
+  labels:
+    app.kubernetes.io/name: after-sale-pgbouncer-domain-agent
+    phase8.after-sale-flow.dev/workload-id: pgbouncer-domain-agent
+    phase8.after-sale-flow.dev/pool-id: domain-agent-rw
+    phase8.after-sale-flow.dev/control-id: pool-domain-agent-rw
+spec:
+  replicas: 3
+  selector:
+    matchLabels: {app.kubernetes.io/name: after-sale-pgbouncer-domain-agent}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: after-sale-pgbouncer-domain-agent
+        phase8.after-sale-flow.dev/workload-id: pgbouncer-domain-agent
+        phase8.after-sale-flow.dev/pool-id: domain-agent-rw
+    spec:
+      serviceAccountName: after-sale-pgbouncer-domain-agent
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: pgbouncer
+          image: registry.invalid/after-sale-flow/pgbouncer@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          env:
+            - {name: POOL_ID, value: domain-agent-rw}
+            - {name: UPSTREAM_ENDPOINT, value: domain-postgres-primary.invalid:5432}
+            - {name: AUTH_REFERENCE, value: vault://phase8-render-only/database/domain-agent-rw/REQUIRED_EXTERNAL}
+            - {name: POOL_MODE, value: transaction}
+          ports: [{name: postgres, containerPort: 6432}]
+          resources:
+            requests: {cpu: 250m, memory: 256Mi}
+            limits: {cpu: "1", memory: 1Gi}
+          readinessProbe:
+            tcpSocket: {port: postgres}
+            initialDelaySeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+            readOnlyRootFilesystem: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: after-sale-pgbouncer-domain-agent
+  labels: {app.kubernetes.io/name: after-sale-pgbouncer-domain-agent}
+spec:
+  selector: {app.kubernetes.io/name: after-sale-pgbouncer-domain-agent}
+  ports: [{name: postgres, port: 6432, targetPort: postgres}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: after-sale-pgbouncer-graph-agent
+  labels:
+    app.kubernetes.io/name: after-sale-pgbouncer-graph-agent
+    phase8.after-sale-flow.dev/workload-id: pgbouncer-graph-agent
+    phase8.after-sale-flow.dev/pool-id: graph-agent-rw
+    phase8.after-sale-flow.dev/control-id: pool-graph-agent-rw
+spec:
+  replicas: 3
+  selector:
+    matchLabels: {app.kubernetes.io/name: after-sale-pgbouncer-graph-agent}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: after-sale-pgbouncer-graph-agent
+        phase8.after-sale-flow.dev/workload-id: pgbouncer-graph-agent
+        phase8.after-sale-flow.dev/pool-id: graph-agent-rw
+    spec:
+      serviceAccountName: after-sale-pgbouncer-graph-agent
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: pgbouncer
+          image: registry.invalid/after-sale-flow/pgbouncer@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          env:
+            - {name: POOL_ID, value: graph-agent-rw}
+            - {name: UPSTREAM_ENDPOINT, value: graph-postgres-primary.invalid:5432}
+            - {name: AUTH_REFERENCE, value: vault://phase8-render-only/database/graph-agent-rw/REQUIRED_EXTERNAL}
+            - {name: POOL_MODE, value: transaction}
+          ports: [{name: postgres, containerPort: 6432}]
+          resources:
+            requests: {cpu: 250m, memory: 256Mi}
+            limits: {cpu: "1", memory: 1Gi}
+          readinessProbe:
+            tcpSocket: {port: postgres}
+            initialDelaySeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+            readOnlyRootFilesystem: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: after-sale-pgbouncer-graph-agent
+  labels: {app.kubernetes.io/name: after-sale-pgbouncer-graph-agent}
+spec:
+  selector: {app.kubernetes.io/name: after-sale-pgbouncer-graph-agent}
+  ports: [{name: postgres, port: 6432, targetPort: postgres}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: after-sale-pgbouncer-reporting-read
+  labels:
+    app.kubernetes.io/name: after-sale-pgbouncer-reporting-read
+    phase8.after-sale-flow.dev/workload-id: pgbouncer-reporting-read
+    phase8.after-sale-flow.dev/pool-id: reporting-ro
+    phase8.after-sale-flow.dev/control-id: reporting-read-only
+spec:
+  replicas: 3
+  selector:
+    matchLabels: {app.kubernetes.io/name: after-sale-pgbouncer-reporting-read}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: after-sale-pgbouncer-reporting-read
+        phase8.after-sale-flow.dev/workload-id: pgbouncer-reporting-read
+        phase8.after-sale-flow.dev/pool-id: reporting-ro
+    spec:
+      serviceAccountName: after-sale-pgbouncer-reporting-read
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: pgbouncer
+          image: registry.invalid/after-sale-flow/pgbouncer@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          env:
+            - {name: POOL_ID, value: reporting-ro}
+            - {name: UPSTREAM_ENDPOINT, value: after-sale-postgres-reporting-read:5432}
+            - {name: AUTH_REFERENCE, value: vault://phase8-render-only/database/reporting-ro/REQUIRED_EXTERNAL}
+            - {name: POOL_MODE, value: transaction}
+            - {name: DEFAULT_TRANSACTION_READ_ONLY, value: "on"}
+          ports: [{name: postgres, containerPort: 6432}]
+          resources:
+            requests: {cpu: 250m, memory: 256Mi}
+            limits: {cpu: "1", memory: 1Gi}
+          readinessProbe:
+            tcpSocket: {port: postgres}
+            initialDelaySeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+            readOnlyRootFilesystem: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: after-sale-pgbouncer-reporting-read
+  labels: {app.kubernetes.io/name: after-sale-pgbouncer-reporting-read}
+spec:
+  selector: {app.kubernetes.io/name: after-sale-pgbouncer-reporting-read}
+  ports: [{name: postgres, port: 6432, targetPort: postgres}]
