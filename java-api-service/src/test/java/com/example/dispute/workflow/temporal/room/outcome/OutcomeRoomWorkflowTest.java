@@ -138,6 +138,10 @@ class OutcomeRoomWorkflowTest {
 
   @Test
   void arithmeticNarrowingRejectsValuesOutsideTheKernelBoundsBeforeCasting() {
+    assertThat(OutcomeWorkflowKernel.MAX_ONE_RETRY_SUCCESS_RECEIPTS).isEqualTo(387);
+    assertThat(OutcomeWorkflowKernel.MAX_ONE_RETRY_MANUAL_RECEIPTS).isEqualTo(448);
+    assertThat(OutcomeWorkflowKernel.MAX_UNIQUE_RECEIPTS).isEqualTo(768);
+    assertThat(OutcomeWorkflowKernel.MAX_CAUSAL_RECEIPTS).isEqualTo(1024);
     assertThatThrownBy(() -> OutcomeRoomWorkflowImpl.boundedOperationCount(-1))
         .isInstanceOf(IllegalArgumentException.class);
     assertThatThrownBy(() -> OutcomeRoomWorkflowImpl.boundedOperationCount(65))
@@ -148,6 +152,14 @@ class OutcomeRoomWorkflowTest {
         .isInstanceOf(IllegalArgumentException.class);
     assertThat(OutcomeRoomWorkflowImpl.boundedOperationCount(64)).isEqualTo(64);
     assertThat(OutcomeRoomWorkflowImpl.boundedOperationSequence(64)).isEqualTo(64);
+  }
+
+  @Test
+  void coalescedDuplicateObservabilitySaturatesDeterministically() {
+    OutcomeWorkflowKernel kernel = kernel();
+    kernel.recordCoalescedDuplicates(Long.MAX_VALUE);
+    kernel.recordCoalescedDuplicates(1);
+    assertThat(kernel.snapshot().duplicateSignalCount()).isEqualTo(Long.MAX_VALUE);
   }
 
   private static OutcomeWorkflowKernel kernel() {

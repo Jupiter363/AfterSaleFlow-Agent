@@ -16,16 +16,20 @@ import io.temporal.workflow.CancellationScope;
 import io.temporal.workflow.Promise;
 import io.temporal.workflow.Workflow;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayDeque;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 /** Deterministic, receipt-driven Outcome kernel with no Activities or external reads. */
 public final class OutcomeRoomWorkflowImpl implements OutcomeRoomWorkflow {
 
-  static final int MAX_INBOX_EVENTS = OutcomeWorkflowKernel.MAX_RECEIPTS;
+  static final int MAX_INBOX_EVENTS = OutcomeWorkflowKernel.MAX_UNIQUE_RECEIPTS;
 
-  private final ArrayDeque<WorkflowEvent> inbox = new ArrayDeque<>();
+  private final ArrayDeque<QueuedWorkflowEvent> inbox = new ArrayDeque<>();
+  private final Map<WorkflowEvent, QueuedWorkflowEvent> coalescedSignals = new LinkedHashMap<>();
   private OutcomeWorkflowStart start;
   private OutcomeWorkflowKernel kernel;
   private CancellationScope reviewTimerScope;
@@ -63,12 +67,15 @@ public final class OutcomeRoomWorkflowImpl implements OutcomeRoomWorkflow {
       if (kernel.snapshot().phase().terminal()) {
         break;
       }
-      WorkflowEvent event = inbox.removeFirst();
+      QueuedWorkflowEvent queued = inbox.removeFirst();
+      WorkflowEvent event = queued.event();
       if (event.type() == EventType.REVIEW_DEADLINE) {
         clearReviewTimer();
         kernel.deadlineReached();
       } else {
+        coalescedSignals.remove(event);
         adaptAndSubmit(event);
+        kernel.recordCoalescedDuplicates(queued.coalescedDuplicateCount());
       }
     }
     cancelReviewTimer();
@@ -419,11 +426,17 @@ public final class OutcomeRoomWorkflowImpl implements OutcomeRoomWorkflow {
   }
 
   private void enqueue(EventType type, Object payload) {
+    WorkflowEvent event = new WorkflowEvent(type, payload);
     if (type == EventType.REVIEW_DEADLINE) {
-      inbox.addLast(new WorkflowEvent(type, payload));
+      inbox.addLast(new QueuedWorkflowEvent(event));
       return;
     }
-    if (inbox.size() >= MAX_INBOX_EVENTS) {
+    QueuedWorkflowEvent existing = coalescedSignals.get(event);
+    if (existing != null) {
+      existing.recordDuplicate();
+      return;
+    }
+    if (coalescedSignals.size() >= MAX_INBOX_EVENTS) {
       if (kernel != null) {
         kernel.failCapacity("OUTCOME_SIGNAL_INBOX_LIMIT");
       } else {
@@ -431,7 +444,9 @@ public final class OutcomeRoomWorkflowImpl implements OutcomeRoomWorkflow {
       }
       return;
     }
-    inbox.addLast(new WorkflowEvent(type, payload));
+    QueuedWorkflowEvent queued = new QueuedWorkflowEvent(event);
+    coalescedSignals.put(event, queued);
+    inbox.addLast(queued);
   }
 
   private void synchronizeReviewTimer() {
@@ -443,8 +458,8 @@ public final class OutcomeRoomWorkflowImpl implements OutcomeRoomWorkflow {
     if (reviewTimerScope != null) {
       return;
     }
-    long delayMillis = Math.max(0,
-        start.reviewDeadlineAt().toEpochMilli() - Workflow.currentTimeMillis());
+    long delayMillis = boundedReviewDelayMillis(
+        start.reviewDeadlineAt(), Workflow.currentTimeMillis());
     reviewTimerScope = Workflow.newCancellationScope(() -> {
       reviewTimer = Workflow.newTimer(Duration.ofMillis(delayMillis));
       reviewTimerCallback = reviewTimer.handle((ignored, failure) -> {
@@ -510,6 +525,24 @@ public final class OutcomeRoomWorkflowImpl implements OutcomeRoomWorkflow {
     return (int) value;
   }
 
+  static long boundedReviewDelayMillis(Instant deadline, long currentTimeMillis) {
+    Objects.requireNonNull(deadline, "deadline must not be null");
+    long deadlineMillis;
+    try {
+      deadlineMillis = deadline.toEpochMilli();
+    } catch (ArithmeticException overflow) {
+      deadlineMillis = deadline.isAfter(Instant.EPOCH) ? Long.MAX_VALUE : Long.MIN_VALUE;
+    }
+    if (deadlineMillis <= currentTimeMillis) {
+      return 0;
+    }
+    try {
+      return Math.subtractExact(deadlineMillis, currentTimeMillis);
+    } catch (ArithmeticException overflow) {
+      return Long.MAX_VALUE;
+    }
+  }
+
   private enum EventType {
     REVIEW_DECISION,
     SLA_ESCALATION,
@@ -528,6 +561,29 @@ public final class OutcomeRoomWorkflowImpl implements OutcomeRoomWorkflow {
       Objects.requireNonNull(type, "type must not be null");
       if ((type == EventType.REVIEW_DEADLINE) != (payload == null)) {
         throw new IllegalArgumentException("only the deadline event has no payload");
+      }
+    }
+  }
+
+  private static final class QueuedWorkflowEvent {
+    private final WorkflowEvent event;
+    private long coalescedDuplicateCount;
+
+    private QueuedWorkflowEvent(WorkflowEvent event) {
+      this.event = Objects.requireNonNull(event, "event must not be null");
+    }
+
+    private WorkflowEvent event() {
+      return event;
+    }
+
+    private long coalescedDuplicateCount() {
+      return coalescedDuplicateCount;
+    }
+
+    private void recordDuplicate() {
+      if (coalescedDuplicateCount < Long.MAX_VALUE) {
+        coalescedDuplicateCount++;
       }
     }
   }

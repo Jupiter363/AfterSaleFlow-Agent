@@ -199,6 +199,19 @@ class OutcomeRoomWorkflowTimerTest {
     replay(start.workflowId());
   }
 
+  @Test
+  void reviewTimerDelaySaturatesOutsideTheEpochMilliRange() {
+    assertThat(OutcomeRoomWorkflowImpl.boundedReviewDelayMillis(Instant.MAX, 0))
+        .isEqualTo(Long.MAX_VALUE);
+    assertThat(OutcomeRoomWorkflowImpl.boundedReviewDelayMillis(Instant.MIN, 0)).isZero();
+    assertThat(OutcomeRoomWorkflowImpl.boundedReviewDelayMillis(
+        Instant.ofEpochMilli(10), -10))
+        .isEqualTo(20);
+    assertThat(OutcomeRoomWorkflowImpl.boundedReviewDelayMillis(
+        Instant.ofEpochMilli(10), 11))
+        .isZero();
+  }
+
   private Started start(Duration reviewWindow, int operationCount) {
     Instant now = Instant.ofEpochMilli(environment.currentTimeMillis());
     OutcomeWorkflowStart start = OutcomeReceiptTestFactory.start(now, reviewWindow, operationCount);

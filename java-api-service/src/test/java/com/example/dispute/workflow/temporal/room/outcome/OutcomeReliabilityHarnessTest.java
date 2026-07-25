@@ -5,8 +5,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.example.dispute.workflow.contract.outcome.v1.OutcomeWireTypes;
 import com.example.dispute.workflow.contract.outcome.v1.OutcomeWorkflowStart;
 import java.time.Instant;
-import java.util.ArrayList;
-import java.util.List;
 import org.junit.jupiter.api.Test;
 
 class OutcomeReliabilityHarnessTest {
@@ -338,8 +336,13 @@ class OutcomeReliabilityHarnessTest {
       scenario.kernel().submit(command(
           scenario, "COMMAND_" + operation + "_RETRY", operation, revision, 2));
       revision++;
-      scenario.kernel().submit(operationReceipt(
-          scenario, operation, revision, OutcomeWorkflowKernel.TerminalStatus.SUCCEEDED));
+      scenario.kernel().submit(observation(scenario, operation, revision));
+      revision++;
+      scenario.kernel().submit(reconciliation(
+          scenario,
+          operation,
+          revision,
+          OutcomeWorkflowKernel.ReconciliationResolution.CONFIRMED_SUCCESS));
       revision++;
     }
 
@@ -357,15 +360,27 @@ class OutcomeReliabilityHarnessTest {
 
     OutcomeWorkflowKernel.Snapshot terminal = scenario.kernel().snapshot();
     assertThat(terminal.phase()).isEqualTo(OutcomeWorkflowKernel.Phase.EVALUATED);
-    assertThat(terminal.revision()).isEqualTo(323);
+    assertThat(terminal.revision())
+        .isEqualTo(OutcomeWorkflowKernel.MAX_ONE_RETRY_SUCCESS_RECEIPTS);
     assertThat(terminal.revision()).isEqualTo(revision);
-    assertThat(terminal.orderedReceiptIds()).hasSize(323);
+    assertThat(terminal.orderedReceiptIds())
+        .hasSize(OutcomeWorkflowKernel.MAX_ONE_RETRY_SUCCESS_RECEIPTS);
     assertThat(terminal.rejectedSignalCount()).isZero();
   }
 
   @Test
-  void sixtyFourRetriedOperationsCanReverseCompensateToExplicitManualRecovery() {
+  void sixtyFourRetriedOperationsAndFullPendingBufferReachExplicitManualRecovery() {
     Scenario scenario = formalScenario(OutcomeWorkflowKernel.MAX_OPERATIONS);
+    long futureRevision = 10_000;
+    for (int pending = 0; pending < OutcomeWorkflowKernel.MAX_PENDING_RECEIPTS; pending++) {
+      scenario.kernel().submit(decision(
+          scenario,
+          OutcomeWorkflowKernel.MAX_OPERATIONS,
+          futureRevision - 1,
+          "FUTURE_" + futureRevision,
+          hash("future-request:" + futureRevision)));
+      futureRevision++;
+    }
     approve(scenario, OutcomeWorkflowKernel.MAX_OPERATIONS, "REVIEWER_A");
     long revision = 1;
     for (int operation = 1; operation <= OutcomeWorkflowKernel.MAX_OPERATIONS; operation++) {
@@ -374,7 +389,6 @@ class OutcomeReliabilityHarnessTest {
       revision++;
     }
 
-    List<OutcomeWorkflowKernel.OperationReceipt> successfulReceipts = new ArrayList<>();
     for (int operation = 1; operation <= OutcomeWorkflowKernel.MAX_OPERATIONS; operation++) {
       scenario.kernel().submit(observation(scenario, operation, revision));
       revision++;
@@ -387,67 +401,69 @@ class OutcomeReliabilityHarnessTest {
       scenario.kernel().submit(command(
           scenario, "COMMAND_" + operation + "_RETRY", operation, revision, 2));
       revision++;
-      OutcomeWorkflowKernel.TerminalStatus status = operation < OutcomeWorkflowKernel.MAX_OPERATIONS
-          ? OutcomeWorkflowKernel.TerminalStatus.SUCCEEDED
-          : OutcomeWorkflowKernel.TerminalStatus.FAILED;
-      OutcomeWorkflowKernel.OperationReceipt receipt = operationReceipt(
-          scenario, operation, revision, status);
-      scenario.kernel().submit(receipt);
+      scenario.kernel().submit(observation(scenario, operation, revision));
       revision++;
-      if (status == OutcomeWorkflowKernel.TerminalStatus.SUCCEEDED) {
-        successfulReceipts.add(receipt);
-      }
+      OutcomeWorkflowKernel.ReconciliationResolution resolution =
+          operation < OutcomeWorkflowKernel.MAX_OPERATIONS
+              ? OutcomeWorkflowKernel.ReconciliationResolution.CONFIRMED_SUCCESS
+              : OutcomeWorkflowKernel.ReconciliationResolution.CONFIRMED_FAILURE;
+      scenario.kernel().submit(reconciliation(scenario, operation, revision, resolution));
+      revision++;
     }
 
-    for (int index = successfulReceipts.size() - 1, reverseOrder = 1;
-        index >= 0;
-        index--, reverseOrder++) {
-      scenario.kernel().submit(compensation(
+    for (int operation = OutcomeWorkflowKernel.MAX_OPERATIONS - 1, reverseOrder = 1;
+        operation >= 1;
+        operation--, reverseOrder++) {
+      scenario.kernel().submit(compensationForReconciledSuccess(
           scenario.authority(),
-          successfulReceipts.get(index),
+          operation,
           reverseOrder,
-          revision,
-          OutcomeWorkflowKernel.TerminalStatus.SUCCEEDED));
+          revision));
       revision++;
     }
 
     OutcomeWorkflowKernel.Snapshot terminal = scenario.kernel().snapshot();
     assertThat(terminal.phase())
         .isEqualTo(OutcomeWorkflowKernel.Phase.MANUAL_RECOVERY_REQUIRED);
-    assertThat(terminal.revision()).isEqualTo(384);
+    assertThat(terminal.revision())
+        .isEqualTo(OutcomeWorkflowKernel.MAX_ONE_RETRY_MANUAL_RECEIPTS);
     assertThat(terminal.revision()).isEqualTo(revision);
-    assertThat(terminal.orderedReceiptIds()).hasSize(384);
+    assertThat(terminal.orderedReceiptIds())
+        .hasSize(OutcomeWorkflowKernel.MAX_ONE_RETRY_MANUAL_RECEIPTS);
+    assertThat(terminal.pendingRevisions()).hasSize(OutcomeWorkflowKernel.MAX_PENDING_RECEIPTS);
     assertThat(terminal.compensationCursor()).isEqualTo(63);
     assertThat(terminal.rejectedSignalCount()).isZero();
   }
 
   @Test
-  void lifetimeExhaustionTerminatesAndStillDeduplicatesAnExactReplay() {
+  void exactCausalFactsBypassTheSoftBudgetButStopAtTheHardLifetimeBound() {
     Scenario scenario = formalScenario(1);
     approve(scenario, 1, "REVIEWER_A");
     OutcomeWorkflowKernel.OperationCommandReceipt last = command(
         scenario, "COMMAND_1", 1, 1, 1);
     scenario.kernel().submit(last);
-    for (long revision = 2; revision < OutcomeWorkflowKernel.MAX_RECEIPTS; revision++) {
+    for (long revision = 2; revision < OutcomeWorkflowKernel.MAX_CAUSAL_RECEIPTS; revision++) {
       last = command(scenario, "COMMAND_REPLAY_" + revision, 1, revision, 1);
       scenario.kernel().submit(last);
     }
     assertThat(scenario.kernel().snapshot().revision())
-        .isEqualTo(OutcomeWorkflowKernel.MAX_RECEIPTS);
+        .isEqualTo(OutcomeWorkflowKernel.MAX_CAUSAL_RECEIPTS);
 
     scenario.kernel().submit(command(
         scenario,
         "COMMAND_EXCEEDS_LIFETIME_BOUND",
         1,
-        OutcomeWorkflowKernel.MAX_RECEIPTS,
+        OutcomeWorkflowKernel.MAX_CAUSAL_RECEIPTS,
         1));
     scenario.kernel().submit(last);
 
     OutcomeWorkflowKernel.Snapshot terminal = scenario.kernel().snapshot();
-    assertThat(terminal.phase()).isEqualTo(OutcomeWorkflowKernel.Phase.FAILED);
-    assertThat(terminal.protocolErrorCode()).isEqualTo("OUTCOME_ACCEPTED_RECEIPT_LIMIT");
-    assertThat(terminal.revision()).isEqualTo(OutcomeWorkflowKernel.MAX_RECEIPTS);
-    assertThat(terminal.orderedReceiptIds()).hasSize(OutcomeWorkflowKernel.MAX_RECEIPTS);
+    assertThat(terminal.phase())
+        .isEqualTo(OutcomeWorkflowKernel.Phase.MANUAL_RECOVERY_REQUIRED);
+    assertThat(terminal.protocolErrorCode()).isEqualTo("OUTCOME_CAUSAL_RECEIPT_LIMIT");
+    assertThat(terminal.revision()).isEqualTo(OutcomeWorkflowKernel.MAX_CAUSAL_RECEIPTS);
+    assertThat(terminal.orderedReceiptIds())
+        .hasSize(OutcomeWorkflowKernel.MAX_CAUSAL_RECEIPTS);
     assertThat(terminal.duplicateSignalCount()).isEqualTo(1);
   }
 
@@ -688,6 +704,30 @@ class OutcomeReliabilityHarnessTest {
         parent.receiptHash(),
         reverseOrder,
         status,
+        receiptId,
+        hash("receipt:" + receiptId));
+  }
+
+  private static OutcomeWorkflowKernel.CompensationReceipt compensationForReconciledSuccess(
+      OutcomeWorkflowKernel.Authority authority,
+      int operationSequence,
+      long reverseOrder,
+      long sourceRevision) {
+    String receiptId = "RETRY_COMPENSATION_RECEIPT_" + reverseOrder;
+    return new OutcomeWorkflowKernel.CompensationReceipt(
+        authority,
+        receiptId,
+        hash("receipt:" + receiptId),
+        sourceRevision,
+        sourceRevision + 1,
+        sourceRevision + 1,
+        "RETRY_COMPENSATION_OPERATION_" + reverseOrder,
+        hash("retry-compensation-request:" + reverseOrder),
+        operationId(operationSequence),
+        "SUCCESS_RECEIPT_" + operationSequence,
+        hash("success-receipt:" + operationSequence),
+        reverseOrder,
+        OutcomeWorkflowKernel.TerminalStatus.SUCCEEDED,
         receiptId,
         hash("receipt:" + receiptId));
   }

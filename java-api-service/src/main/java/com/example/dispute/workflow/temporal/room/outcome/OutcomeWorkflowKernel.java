@@ -13,10 +13,19 @@ import java.util.TreeMap;
 /** Pure deterministic state machine behind the unregistered Outcome Workflow. */
 final class OutcomeWorkflowKernel {
 
-  // 384 is the one-retry, 64-operation compensation maximum; retain recovery headroom.
-  static final int MAX_RECEIPTS = 512;
-  static final int MAX_PENDING_RECEIPTS = 128;
   static final int MAX_OPERATIONS = 64;
+  static final int MAX_PENDING_RECEIPTS = 128;
+  // Initial command, two observations, two reconciliations, and one authorized retry command.
+  static final int RECEIPTS_PER_ONE_RETRY_OPERATION = 6;
+  static final int MAX_ONE_RETRY_SUCCESS_RECEIPTS =
+      1 + MAX_OPERATIONS * RECEIPTS_PER_ONE_RETRY_OPERATION + 2;
+  static final int MAX_ONE_RETRY_MANUAL_RECEIPTS =
+      1 + MAX_OPERATIONS * RECEIPTS_PER_ONE_RETRY_OPERATION + MAX_OPERATIONS - 1;
+  // Retain a full future buffer plus deterministic headroom beyond the 448-receipt manual path.
+  static final int CAUSAL_RECOVERY_RESERVE = 192;
+  static final int MAX_UNIQUE_RECEIPTS =
+      MAX_ONE_RETRY_MANUAL_RECEIPTS + MAX_PENDING_RECEIPTS + CAUSAL_RECOVERY_RESERVE;
+  static final int MAX_CAUSAL_RECEIPTS = 1024;
 
   enum Phase {
     WAITING_REVIEW,
@@ -482,14 +491,10 @@ final class OutcomeWorkflowKernel {
     Receipt previous = observedReceipts.get(receipt.receiptId());
     if (previous != null) {
       if (previous.equals(receipt)) {
-        duplicateSignalCount++;
+        recordCoalescedDuplicates(1);
       } else {
         reject("OUTCOME_RECEIPT_ID_PAYLOAD_CONFLICT");
       }
-      return;
-    }
-    if (observedReceipts.size() >= MAX_RECEIPTS) {
-      fail("OUTCOME_ACCEPTED_RECEIPT_LIMIT");
       return;
     }
     if (!receipt.authority().matches(start)) {
@@ -523,6 +528,14 @@ final class OutcomeWorkflowKernel {
       reject("OUTCOME_PENDING_RECEIPT_LIMIT");
       return;
     }
+    if (observedReceipts.size() >= MAX_CAUSAL_RECEIPTS) {
+      requireManualRecovery("OUTCOME_CAUSAL_RECEIPT_LIMIT");
+      return;
+    }
+    if (observedReceipts.size() >= MAX_UNIQUE_RECEIPTS && !fillsNextGap) {
+      requireManualRecovery("OUTCOME_ACCEPTED_RECEIPT_LIMIT");
+      return;
+    }
     observedReceipts.put(receipt.receiptId(), receipt);
     observedEventSequences.put(receipt.committedEventSequence(), receipt.receiptId());
     pendingReceipts.put(receipt.revision(), receipt);
@@ -534,7 +547,18 @@ final class OutcomeWorkflowKernel {
   }
 
   void failCapacity(String code) {
-    fail(code);
+    requireManualRecovery(code);
+  }
+
+  void recordCoalescedDuplicates(long count) {
+    if (count < 1) {
+      return;
+    }
+    try {
+      duplicateSignalCount = Math.addExact(duplicateSignalCount, count);
+    } catch (ArithmeticException overflow) {
+      duplicateSignalCount = Long.MAX_VALUE;
+    }
   }
 
   Snapshot snapshot() {
@@ -1013,6 +1037,11 @@ final class OutcomeWorkflowKernel {
   private void fail(String code) {
     reject(code);
     phase = Phase.FAILED;
+  }
+
+  private void requireManualRecovery(String code) {
+    reject(code);
+    phase = Phase.MANUAL_RECOVERY_REQUIRED;
   }
 
   record Snapshot(

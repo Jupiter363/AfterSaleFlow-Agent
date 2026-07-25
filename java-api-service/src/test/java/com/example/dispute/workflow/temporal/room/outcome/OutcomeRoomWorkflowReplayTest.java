@@ -170,13 +170,13 @@ class OutcomeRoomWorkflowReplayTest {
   }
 
   @Test
-  void persistedSignalInboxExhaustionTerminatesInManualRecoveryAndReplays() throws Exception {
+  void persistedExactSignalReplaysCoalesceWithoutConsumingUniqueInboxCapacity() throws Exception {
     Instant now = Instant.ofEpochMilli(environment.currentTimeMillis());
     OutcomeWorkflowStart start = OutcomeReceiptTestFactory.start(now, Duration.ofMinutes(5), 0);
     OutcomeReceiptTestFactory receipts = new OutcomeReceiptTestFactory(start);
     OutcomeReviewDecisionReceipt decision = receipts.decision(
-        OutcomeWireTypes.ReviewDecision.REJECT, 0, 1, now.plusSeconds(1));
-    String workflowId = start.workflowId() + "_inbox-exhaustion";
+        OutcomeWireTypes.ReviewDecision.APPROVE, 0, 1, now.plusSeconds(1));
+    String workflowId = start.workflowId() + "_inbox-coalescing";
     OutcomeRoomWorkflow workflow = client.newWorkflowStub(
         OutcomeRoomWorkflow.class,
         WorkflowOptions.newBuilder()
@@ -194,10 +194,68 @@ class OutcomeRoomWorkflowReplayTest {
       worker.resumePolling();
     }
 
+    OutcomeWorkflowDiagnostics coalesced = OutcomeRoomWorkflowTimerTest.awaitDiagnostics(
+        workflow,
+        value -> value.phase().equals("CLOSURE_PENDING")
+            && value.duplicateSignalCount() == OutcomeRoomWorkflowImpl.MAX_INBOX_EVENTS);
+    assertThat(coalesced.rejectedSignalCount()).isZero();
+    assertThat(coalesced.orderedReceiptIds()).containsExactly(decision.receiptId());
+
+    OutcomeClosureReceipt closure = receipts.closure(decision, 1, 2);
+    workflow.closureReceiptCommitted(closure);
+    OutcomeRoomWorkflowTimerTest.awaitDiagnostics(
+        workflow, value -> value.phase().equals("CLOSED"));
+    OutcomeEvaluationReceipt evaluation = receipts.evaluation(
+        closure, OutcomeWireTypes.EvaluationStatus.SUCCEEDED, 2, 3);
+    workflow.evaluationReceiptCommitted(evaluation);
     OutcomeProjection result = WorkflowStub.fromTyped(workflow).getResult(OutcomeProjection.class);
-    assertThat(result.phase()).isEqualTo(OutcomeWireTypes.ProjectionPhase.MANUAL_RECOVERY);
-    assertThat(result.terminalReviewReceiptRef()).isNull();
-    assertThat(result.unresolvedManualRecoveryCount()).isEqualTo(1);
+    assertThat(result.phase()).isEqualTo(OutcomeWireTypes.ProjectionPhase.EVALUATED);
+    assertThat(result.terminalReviewReceiptRef()).isEqualTo(decision.receiptId());
+    assertThat(result.unresolvedManualRecoveryCount()).isZero();
+    replay(workflowId);
+  }
+
+  @Test
+  void sameReceiptIdWithDifferentPayloadReachesKernelConflictRejection() throws Exception {
+    Instant now = Instant.ofEpochMilli(environment.currentTimeMillis());
+    OutcomeWorkflowStart start = OutcomeReceiptTestFactory.start(now, Duration.ofMinutes(5), 0);
+    OutcomeReceiptTestFactory receipts = new OutcomeReceiptTestFactory(start);
+    OutcomeReviewDecisionReceipt approval = receipts.decision(
+        OutcomeWireTypes.ReviewDecision.APPROVE, 0, 1, now.plusSeconds(1));
+    OutcomeReviewDecisionReceipt conflicting = receipts.decision(
+        OutcomeWireTypes.ReviewDecision.MODIFY_AND_APPROVE, 0, 1, now.plusSeconds(1));
+    String workflowId = start.workflowId() + "_inbox-conflict";
+    OutcomeRoomWorkflow workflow = client.newWorkflowStub(
+        OutcomeRoomWorkflow.class,
+        WorkflowOptions.newBuilder()
+            .setWorkflowId(workflowId)
+            .setTaskQueue(TASK_QUEUE)
+            .build());
+
+    worker.suspendPolling();
+    try {
+      WorkflowClient.start(workflow::run, start);
+      workflow.reviewDecisionCommitted(approval);
+      workflow.reviewDecisionCommitted(conflicting);
+    } finally {
+      worker.resumePolling();
+    }
+
+    OutcomeWorkflowDiagnostics rejected = OutcomeRoomWorkflowTimerTest.awaitDiagnostics(
+        workflow,
+        value -> value.phase().equals("CLOSURE_PENDING") && value.rejectedSignalCount() == 1);
+    assertThat(rejected.protocolErrorCode()).isEqualTo("OUTCOME_RECEIPT_ID_PAYLOAD_CONFLICT");
+    assertThat(rejected.duplicateSignalCount()).isZero();
+
+    OutcomeClosureReceipt closure = receipts.closure(approval, 1, 2);
+    workflow.closureReceiptCommitted(closure);
+    OutcomeRoomWorkflowTimerTest.awaitDiagnostics(
+        workflow, value -> value.phase().equals("CLOSED"));
+    OutcomeEvaluationReceipt evaluation = receipts.evaluation(
+        closure, OutcomeWireTypes.EvaluationStatus.SUCCEEDED, 2, 3);
+    workflow.evaluationReceiptCommitted(evaluation);
+    OutcomeProjection result = WorkflowStub.fromTyped(workflow).getResult(OutcomeProjection.class);
+    assertThat(result.phase()).isEqualTo(OutcomeWireTypes.ProjectionPhase.EVALUATED);
     replay(workflowId);
   }
 
