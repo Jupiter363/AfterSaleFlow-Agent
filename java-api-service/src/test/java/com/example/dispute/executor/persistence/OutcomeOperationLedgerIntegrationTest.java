@@ -2368,6 +2368,7 @@ class OutcomeOperationLedgerIntegrationTest {
             assertThat(rejected.code())
                     .isIn(
                             "OUTCOME_CLOSURE_NOT_READY",
+                            "OUTCOME_STALE_EPOCH_AUTHORITY",
                             "OUTCOME_STALE_PROJECTION",
                             "OUTCOME_RESERVATION_AFTER_CLOSURE_FORBIDDEN");
             return;
