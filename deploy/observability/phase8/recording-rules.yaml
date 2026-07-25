@@ -1,0 +1,147 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: phase8-slo-recording-rules
+  labels:
+    app.kubernetes.io/part-of: after-sale-flow
+    app.kubernetes.io/name: phase8-observability
+    app.kubernetes.io/component: recording-rules
+  annotations:
+    phase8.after-sale-flow.dev/scope: render-only
+spec:
+  groups:
+    - name: phase8.command-slo
+      interval: 30s
+      rules:
+        - record: after_sale_flow:command_requests:rate5m
+          expr: sum(rate(after_sale_command_requests_total[5m]))
+        - record: after_sale_flow:command_requests:rate1h
+          expr: sum(rate(after_sale_command_requests_total[1h]))
+        - record: after_sale_flow:command_requests:rate6h
+          expr: sum(rate(after_sale_command_requests_total[6h]))
+        - record: after_sale_flow:command_requests:rate3d
+          expr: sum(rate(after_sale_command_requests_total[3d]))
+        - record: after_sale_flow:command_errors:rate5m
+          expr: sum(rate(after_sale_command_requests_total{status=~"server_error|timeout"}[5m]))
+        - record: after_sale_flow:command_errors:rate1h
+          expr: sum(rate(after_sale_command_requests_total{status=~"server_error|timeout"}[1h]))
+        - record: after_sale_flow:command_errors:rate6h
+          expr: sum(rate(after_sale_command_requests_total{status=~"server_error|timeout"}[6h]))
+        - record: after_sale_flow:command_errors:rate3d
+          expr: sum(rate(after_sale_command_requests_total{status=~"server_error|timeout"}[3d]))
+        - record: after_sale_flow:command_slo_error_ratio:rate5m
+          expr: after_sale_flow:command_errors:rate5m / clamp_min(after_sale_flow:command_requests:rate5m, 0.001)
+        - record: after_sale_flow:command_slo_error_ratio:rate1h
+          expr: after_sale_flow:command_errors:rate1h / clamp_min(after_sale_flow:command_requests:rate1h, 0.001)
+        - record: after_sale_flow:command_slo_error_ratio:rate6h
+          expr: after_sale_flow:command_errors:rate6h / clamp_min(after_sale_flow:command_requests:rate6h, 0.001)
+        - record: after_sale_flow:command_slo_error_ratio:rate3d
+          expr: after_sale_flow:command_errors:rate3d / clamp_min(after_sale_flow:command_requests:rate3d, 0.001)
+        - record: after_sale_flow:command_latency_seconds:p95_5m
+          expr: histogram_quantile(0.95, sum by (le) (rate(after_sale_command_duration_seconds_bucket[5m])))
+        - record: after_sale_flow:command_outbox_depth:max
+          expr: max(after_sale_command_outbox_items{status=~"pending|retry|claimed"})
+        - record: after_sale_flow:command_outbox_oldest_age_seconds:max
+          expr: max(after_sale_command_outbox_oldest_age_seconds)
+
+    - name: phase8.temporal-queue-history
+      interval: 30s
+      rules:
+        - record: after_sale_flow:temporal_queue_backlog:max
+          expr: max(after_sale_temporal_queue_backlog)
+        - record: after_sale_flow:temporal_schedule_to_start_seconds:p95_5m
+          expr: histogram_quantile(0.95, sum by (le) (rate(after_sale_temporal_schedule_to_start_seconds_bucket[5m])))
+        - record: after_sale_flow:temporal_history_events:max
+          expr: max(after_sale_temporal_history_events)
+        - record: after_sale_flow:temporal_workflow_failures:rate5m
+          expr: sum(rate(after_sale_temporal_workflow_failures_total[5m]))
+
+    - name: phase8.agentrun-stream
+      interval: 30s
+      rules:
+        - record: after_sale_flow:agent_active:max
+          expr: max(after_sale_agent_active)
+        - record: after_sale_flow:activity_heartbeat_age_seconds:max
+          expr: max(after_sale_activity_heartbeat_age_seconds)
+        - record: after_sale_flow:agent_stream_lag_events:max
+          expr: max(after_sale_agent_stream_lag_events)
+        - record: after_sale_flow:sse_connections:sum
+          expr: sum(after_sale_sse_connections)
+        - record: after_sale_flow:agent_stream_failures:rate5m
+          expr: sum(rate(after_sale_agent_stream_failures_total[5m]))
+
+    - name: phase8.graph-checkpoint-lease
+      interval: 30s
+      rules:
+        - record: after_sale_flow:graph_checkpoint_age_seconds:max
+          expr: max(after_sale_graph_checkpoint_age_seconds)
+        - record: after_sale_flow:graph_checkpoint_write_failures:rate5m
+          expr: sum(rate(after_sale_graph_checkpoint_write_failures_total[5m]))
+        - record: after_sale_flow:graph_lease_age_seconds:max
+          expr: max(after_sale_graph_lease_age_seconds)
+        - record: after_sale_flow:graph_lease_conflicts:rate5m
+          expr: sum(rate(after_sale_graph_lease_conflicts_total[5m]))
+
+    - name: phase8.model-provider
+      interval: 30s
+      rules:
+        - record: after_sale_flow:model_requests:rate5m
+          expr: sum(rate(after_sale_model_requests_total[5m]))
+        - record: after_sale_flow:model_error_ratio:rate5m
+          expr: sum(rate(after_sale_model_requests_total{status="error"}[5m])) / clamp_min(sum(rate(after_sale_model_requests_total[5m])), 0.001)
+        - record: after_sale_flow:model_latency_seconds:p95_5m
+          expr: histogram_quantile(0.95, sum by (le) (rate(after_sale_model_duration_seconds_bucket[5m])))
+        - record: after_sale_flow:model_concurrency:sum
+          expr: sum(after_sale_model_concurrency)
+        - record: after_sale_flow:model_admission_rejections:rate5m
+          expr: sum(rate(after_sale_model_admission_rejections_total[5m]))
+
+    - name: phase8.projection-reconciliation
+      interval: 30s
+      rules:
+        - record: after_sale_flow:projection_lag_seconds:max
+          expr: max(after_sale_projection_lag_seconds)
+        - record: after_sale_flow:projection_mismatches:sum
+          expr: sum(after_sale_projection_mismatches)
+        - record: after_sale_flow:reconciliation_proposals:sum
+          expr: sum(after_sale_reconciliation_proposals)
+        - record: after_sale_flow:reconciliation_failures:rate5m
+          expr: sum(rate(after_sale_reconciliation_failures_total[5m]))
+
+    - name: phase8.security
+      interval: 30s
+      rules:
+        - record: after_sale_flow:authorization_denials:rate5m
+          expr: sum(rate(after_sale_authorization_decisions_total{status="deny"}[5m]))
+        - record: after_sale_flow:mtls_failures:rate5m
+          expr: sum(rate(after_sale_mtls_failures_total[5m]))
+        - record: after_sale_flow:telemetry_redactions:rate5m
+          expr: sum(rate(after_sale_telemetry_redactions_total[5m]))
+        - record: after_sale_flow:audit_export_failures:rate5m
+          expr: sum(rate(after_sale_audit_export_failures_total[5m]))
+
+    - name: phase8.disaster-recovery
+      interval: 30s
+      rules:
+        - record: after_sale_flow:recovery_point_lag_seconds:max
+          expr: max(after_sale_recovery_point_lag_seconds)
+        - record: after_sale_flow:backup_age_seconds:max
+          expr: max(after_sale_backup_age_seconds)
+        - record: after_sale_flow:recovery_validation_status:min
+          expr: min(after_sale_recovery_validation_status)
+        - record: after_sale_flow:recovery_order_violations:increase1h
+          expr: sum(increase(after_sale_recovery_order_violations_total[1h]))
+
+    - name: phase8.collector-exporter
+      interval: 30s
+      rules:
+        - record: after_sale_flow:otel_export_failures:rate5m
+          expr: (sum(rate(otelcol_exporter_send_failed_spans_total[5m])) or vector(0)) + (sum(rate(otelcol_exporter_send_failed_metric_points_total[5m])) or vector(0)) + (sum(rate(otelcol_exporter_send_failed_log_records_total[5m])) or vector(0))
+        - record: after_sale_flow:otel_refused_items:rate5m
+          expr: (sum(rate(otelcol_receiver_refused_spans_total[5m])) or vector(0)) + (sum(rate(otelcol_receiver_refused_metric_points_total[5m])) or vector(0)) + (sum(rate(otelcol_receiver_refused_log_records_total[5m])) or vector(0))
+
+    - name: phase8.source-freshness
+      interval: 30s
+      rules:
+        - record: after_sale_flow:telemetry_source_age_seconds:max
+          expr: max by (service) (after_sale_telemetry_source_age_seconds)

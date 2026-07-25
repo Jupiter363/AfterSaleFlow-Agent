@@ -1,0 +1,21 @@
+{
+  "annotations": {"list": []},
+  "description": "Render-only Phase 8 projection and reconciliation view.",
+  "editable": false,
+  "id": null,
+  "links": [{"title": "Alert response", "type": "link", "url": "docs/runbooks/temporal-first/phase-8-alert-response.md"}],
+  "panels": [
+    {"datasource": "Prometheus", "fieldConfig": {"defaults": {"unit": "s"}}, "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}, "id": 1, "targets": [{"expr": "after_sale_flow:projection_lag_seconds:max", "legendFormat": "lag"}], "title": "Projection lag", "type": "timeseries"},
+    {"datasource": "Prometheus", "fieldConfig": {"defaults": {"unit": "short"}}, "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}, "id": 2, "targets": [{"expr": "after_sale_flow:projection_mismatches:sum", "legendFormat": "mismatches"}], "title": "Projection mismatches", "type": "timeseries"},
+    {"datasource": "Prometheus", "fieldConfig": {"defaults": {"unit": "short"}}, "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8}, "id": 3, "targets": [{"expr": "after_sale_flow:reconciliation_proposals:sum", "legendFormat": "proposals"}], "title": "Immutable proposals", "type": "timeseries"},
+    {"datasource": "Prometheus", "fieldConfig": {"defaults": {"unit": "ops"}}, "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8}, "id": 4, "targets": [{"expr": "after_sale_flow:reconciliation_failures:rate5m", "legendFormat": "failures"}], "title": "Reconciliation failure rate", "type": "timeseries"}
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["phase8", "after-sale-flow", "projection-reconciliation", "render-only"],
+  "templating": {"list": []},
+  "time": {"from": "now-6h", "to": "now"},
+  "title": "Phase 8 / Projection and Reconciliation",
+  "uid": "p8-projection-recon",
+  "version": 1
+}

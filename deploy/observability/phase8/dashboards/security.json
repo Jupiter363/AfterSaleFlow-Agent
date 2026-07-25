@@ -1,0 +1,21 @@
+{
+  "annotations": {"list": []},
+  "description": "Render-only Phase 8 bounded security signal view.",
+  "editable": false,
+  "id": null,
+  "links": [{"title": "Alert response", "type": "link", "url": "docs/runbooks/temporal-first/phase-8-alert-response.md"}],
+  "panels": [
+    {"datasource": "Prometheus", "fieldConfig": {"defaults": {"unit": "ops"}}, "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}, "id": 1, "targets": [{"expr": "after_sale_flow:authorization_denials:rate5m", "legendFormat": "denials"}], "title": "Authorization denial rate", "type": "timeseries"},
+    {"datasource": "Prometheus", "fieldConfig": {"defaults": {"unit": "ops"}}, "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}, "id": 2, "targets": [{"expr": "after_sale_flow:mtls_failures:rate5m", "legendFormat": "failures"}], "title": "mTLS failure rate", "type": "timeseries"},
+    {"datasource": "Prometheus", "fieldConfig": {"defaults": {"unit": "ops"}}, "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8}, "id": 3, "targets": [{"expr": "after_sale_flow:telemetry_redactions:rate5m", "legendFormat": "redactions"}], "title": "Telemetry redaction rate", "type": "timeseries"},
+    {"datasource": "Prometheus", "fieldConfig": {"defaults": {"unit": "ops"}}, "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8}, "id": 4, "targets": [{"expr": "after_sale_flow:audit_export_failures:rate5m", "legendFormat": "failures"}], "title": "Audit export failures", "type": "timeseries"}
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["phase8", "after-sale-flow", "security", "render-only"],
+  "templating": {"list": []},
+  "time": {"from": "now-6h", "to": "now"},
+  "title": "Phase 8 / Security",
+  "uid": "p8-security",
+  "version": 1
+}

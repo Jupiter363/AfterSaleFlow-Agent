@@ -1,0 +1,136 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: phase8-slo-alerts
+  labels:
+    app.kubernetes.io/part-of: after-sale-flow
+    app.kubernetes.io/name: phase8-observability
+    app.kubernetes.io/component: alerts
+  annotations:
+    phase8.after-sale-flow.dev/scope: render-only
+spec:
+  groups:
+    - name: phase8.alerts
+      rules:
+        - alert: Phase8CommandSloFastBurn
+          expr: after_sale_flow:command_slo_error_ratio:rate5m > (14.4 * 0.0005) and after_sale_flow:command_slo_error_ratio:rate1h > (14.4 * 0.0005)
+          for: 2m
+          labels: {severity: critical, owner: sre, category: burn_rate}
+          annotations:
+            summary: Command success SLO is burning rapidly
+            description: The global command error budget is above the fast multi-window threshold.
+            runbook_url: docs/runbooks/temporal-first/phase-8-alert-response.md#phase8commandslofastburn
+        - alert: Phase8CommandSloSlowBurn
+          expr: after_sale_flow:command_slo_error_ratio:rate6h > (6 * 0.0005) and after_sale_flow:command_slo_error_ratio:rate3d > (6 * 0.0005)
+          for: 30m
+          labels: {severity: warning, owner: service-platform, category: burn_rate}
+          annotations:
+            summary: Command success SLO is consuming its long-window budget
+            description: The global command error budget is above the slow multi-window threshold.
+            runbook_url: docs/runbooks/temporal-first/phase-8-alert-response.md#phase8commandsloslowburn
+        - alert: Phase8CommandOutboxStuck
+          expr: after_sale_flow:command_outbox_depth:max > 0 and after_sale_flow:command_outbox_oldest_age_seconds:max > 60
+          for: 5m
+          labels: {severity: critical, owner: java-platform, category: stuck_work}
+          annotations:
+            summary: Command outbox delivery is stuck
+            description: Deliverable command work has remained pending beyond the bounded delivery interval.
+            runbook_url: docs/runbooks/temporal-first/phase-8-alert-response.md#phase8commandoutboxstuck
+        - alert: Phase8AgentActivityHeartbeatMissing
+          expr: after_sale_flow:agent_active:max > 0 and after_sale_flow:activity_heartbeat_age_seconds:max > 10
+          for: 2m
+          labels: {severity: critical, owner: agent-platform, category: heartbeat}
+          annotations:
+            summary: Agent activity heartbeat is stale
+            description: At least one active activity is outside the bounded heartbeat window.
+            runbook_url: docs/runbooks/temporal-first/phase-8-alert-response.md#phase8agentactivityheartbeatmissing
+        - alert: Phase8TemporalQueueBacklog
+          expr: after_sale_flow:temporal_queue_backlog:max > 100 or after_sale_flow:temporal_schedule_to_start_seconds:p95_5m > 1
+          for: 10m
+          labels: {severity: warning, owner: workflow-platform, category: queue}
+          annotations:
+            summary: Temporal task queue backlog is sustained
+            description: A bounded task queue has remained above the engineering threshold.
+            runbook_url: docs/runbooks/temporal-first/phase-8-alert-response.md#phase8temporalqueuebacklog
+        - alert: Phase8TelemetryExporterFailure
+          expr: after_sale_flow:otel_export_failures:rate5m > 0 or after_sale_flow:otel_refused_items:rate5m > 0
+          for: 5m
+          labels: {severity: critical, owner: observability-platform, category: exporter}
+          annotations:
+            summary: Telemetry collector is dropping or rejecting items
+            description: The collector reports exporter failures or receiver refusal; dashboard silence is not healthy evidence.
+            runbook_url: docs/runbooks/temporal-first/phase-8-alert-response.md#phase8telemetryexporterfailure
+        - alert: Phase8TelemetryCollectorMissing
+          expr: absent(up{service="after-sale-otel-collector"} == 1)
+          for: 5m
+          labels: {severity: critical, owner: observability-platform, category: exporter}
+          annotations:
+            summary: Telemetry collector scrape target is missing
+            description: Prometheus cannot find a healthy collector target; treat dependent telemetry as unknown.
+            runbook_url: docs/runbooks/temporal-first/phase-8-alert-response.md#phase8telemetrycollectormissing
+        - alert: Phase8RequiredTelemetryMissing
+          expr: >-
+            label_replace(absent(after_sale_command_requests_total), "service", "java-api-service", "", ".*")
+            or label_replace(absent(after_sale_temporal_queue_backlog), "service", "temporal-control", "", ".*")
+            or label_replace(absent(after_sale_activity_heartbeat_age_seconds), "service", "java-agent-worker", "", ".*")
+            or label_replace(absent(after_sale_graph_checkpoint_age_seconds), "service", "python-agent", "", ".*")
+            or label_replace(absent(after_sale_model_requests_total), "service", "model-provider", "", ".*")
+            or label_replace(absent(after_sale_projection_lag_seconds), "service", "java-projection", "", ".*")
+            or label_replace(absent(after_sale_authorization_decisions_total), "service", "security-control", "", ".*")
+            or label_replace(absent(after_sale_recovery_validation_status), "service", "recovery-control", "", ".*")
+            or label_replace(absent(otelcol_exporter_send_failed_spans_total), "service", "otel-collector", "", ".*")
+            or label_replace(absent(after_sale_telemetry_source_age_seconds), "service", "telemetry-freshness", "", ".*")
+          for: 5m
+          labels: {severity: critical, owner: observability-platform, category: exporter}
+          annotations:
+            summary: Required Phase 8 telemetry source is absent
+            description: One or more mandatory bounded source series is missing; treat the associated dashboard and gate as UNKNOWN.
+            runbook_url: docs/runbooks/temporal-first/phase-8-alert-response.md#phase8requiredtelemetrymissing
+        - alert: Phase8RequiredTelemetryStale
+          expr: after_sale_flow:telemetry_source_age_seconds:max > 120
+          for: 5m
+          labels: {severity: critical, owner: observability-platform, category: exporter}
+          annotations:
+            summary: Required Phase 8 telemetry source is stale
+            description: A bounded source heartbeat is present but has not advanced within the freshness window.
+            runbook_url: docs/runbooks/temporal-first/phase-8-alert-response.md#phase8requiredtelemetrystale
+        - alert: Phase8UnauthorizedTrafficSpike
+          expr: after_sale_flow:authorization_denials:rate5m > 5 or after_sale_flow:mtls_failures:rate5m > 0
+          for: 5m
+          labels: {severity: critical, owner: security, category: security}
+          annotations:
+            summary: Authorization denials or mTLS failures are elevated
+            description: Bounded security decision metrics indicate an identity or policy failure.
+            runbook_url: docs/runbooks/temporal-first/phase-8-alert-response.md#phase8unauthorizedtrafficspike
+        - alert: Phase8AuditExportFailure
+          expr: after_sale_flow:audit_export_failures:rate5m > 0
+          for: 5m
+          labels: {severity: critical, owner: security, category: security}
+          annotations:
+            summary: Security audit export is failing
+            description: Audit delivery failures make security observability incomplete and block release evidence.
+            runbook_url: docs/runbooks/temporal-first/phase-8-alert-response.md#phase8auditexportfailure
+        - alert: Phase8ProjectionReconciliationBacklog
+          expr: after_sale_flow:projection_lag_seconds:max > 120 or after_sale_flow:reconciliation_proposals:sum > 0
+          for: 10m
+          labels: {severity: warning, owner: java-platform, category: reconciliation}
+          annotations:
+            summary: Projection reconciliation is outside its bounded window
+            description: Projection lag or immutable reconciliation proposals remain outstanding.
+            runbook_url: docs/runbooks/temporal-first/phase-8-alert-response.md#phase8projectionreconciliationbacklog
+        - alert: Phase8RecoveryPointObjectiveAtRisk
+          expr: after_sale_flow:recovery_point_lag_seconds:max > 0 or after_sale_flow:backup_age_seconds:max > 3600
+          for: 15m
+          labels: {severity: critical, owner: disaster-recovery, category: disaster_recovery}
+          annotations:
+            summary: Recovery point objective is at risk
+            description: Recovery point lag or backup freshness is outside the engineering threshold.
+            runbook_url: docs/runbooks/temporal-first/phase-8-alert-response.md#phase8recoverypointobjectiveatrisk
+        - alert: Phase8RecoveryValidationFailed
+          expr: after_sale_flow:recovery_validation_status:min < 1 or after_sale_flow:recovery_order_violations:increase1h > 0
+          for: 5m
+          labels: {severity: critical, owner: disaster-recovery, category: disaster_recovery}
+          annotations:
+            summary: Recovery validation failed closed
+            description: A synthetic validation reports failure or the required restore ordering was violated.
+            runbook_url: docs/runbooks/temporal-first/phase-8-alert-response.md#phase8recoveryvalidationfailed

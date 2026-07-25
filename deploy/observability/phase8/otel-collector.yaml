@@ -1,0 +1,275 @@
+# Render-only Phase 8 collector. I3 owns the referenced workload identity,
+# NetworkPolicy, RBAC, and mTLS policy. No remote endpoint or credential is set here.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector
+  labels:
+    app.kubernetes.io/part-of: after-sale-flow
+    app.kubernetes.io/name: otel-collector
+    app.kubernetes.io/component: observability
+    app.kubernetes.io/managed-by: phase8-engineering
+  annotations:
+    phase8.after-sale-flow.dev/status: UNOBSERVED_RENDER_ONLY
+    phase8.after-sale-flow.dev/deployable: "false"
+immutable: true
+data:
+  collector.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+
+    processors:
+      memory_limiter:
+        check_interval: 5s
+        limit_percentage: 75
+        spike_limit_percentage: 15
+      transform/drop_sensitive_attributes:
+        error_mode: ignore
+        trace_statements:
+          - context: span
+            statements: &drop-sensitive-attributes
+              - delete_key(attributes, "case.id")
+              - delete_key(attributes, "case_id")
+              - delete_key(attributes, "case")
+              - delete_key(attributes, "party.id")
+              - delete_key(attributes, "party_id")
+              - delete_key(attributes, "party")
+              - delete_key(attributes, "run.id")
+              - delete_key(attributes, "run_id")
+              - delete_key(attributes, "run")
+              - delete_key(attributes, "actor.id")
+              - delete_key(attributes, "actor_id")
+              - delete_key(attributes, "actor")
+              - delete_key(attributes, "evidence.id")
+              - delete_key(attributes, "evidence_id")
+              - delete_key(attributes, "evidence")
+              - delete_key(attributes, "tenant.id")
+              - delete_key(attributes, "tenant_id")
+              - delete_key(attributes, "tenant")
+              - delete_key(attributes, "user.id")
+              - delete_key(attributes, "user_id")
+              - delete_key(attributes, "workflow.id")
+              - delete_key(attributes, "workflow_id")
+              - delete_key(attributes, "secret")
+              - delete_key(attributes, "prompt")
+              - delete_key(attributes, "prompt.raw")
+              - delete_key(attributes, "output")
+              - delete_key(attributes, "output.raw")
+              - delete_key(attributes, "reasoning")
+              - delete_key(attributes, "reasoning.hidden")
+              - delete_key(attributes, "hidden_reasoning")
+          - context: spanevent
+            statements: *drop-sensitive-attributes
+        metric_statements:
+          - context: datapoint
+            statements: *drop-sensitive-attributes
+        log_statements:
+          - context: log
+            statements: *drop-sensitive-attributes
+      resource/drop_sensitive_attributes:
+        attributes:
+          - action: delete
+            key: case.id
+          - action: delete
+            key: case_id
+          - action: delete
+            key: case
+          - action: delete
+            key: party.id
+          - action: delete
+            key: party_id
+          - action: delete
+            key: party
+          - action: delete
+            key: run.id
+          - action: delete
+            key: run_id
+          - action: delete
+            key: run
+          - action: delete
+            key: actor.id
+          - action: delete
+            key: actor_id
+          - action: delete
+            key: actor
+          - action: delete
+            key: evidence.id
+          - action: delete
+            key: evidence_id
+          - action: delete
+            key: evidence
+          - action: delete
+            key: tenant.id
+          - action: delete
+            key: tenant_id
+          - action: delete
+            key: tenant
+          - action: delete
+            key: user.id
+          - action: delete
+            key: user_id
+          - action: delete
+            key: workflow.id
+          - action: delete
+            key: workflow_id
+          - action: delete
+            key: secret
+          - action: delete
+            key: prompt
+          - action: delete
+            key: prompt.raw
+          - action: delete
+            key: output
+          - action: delete
+            key: output.raw
+          - action: delete
+            key: reasoning
+          - action: delete
+            key: reasoning.hidden
+          - action: delete
+            key: hidden_reasoning
+      batch:
+        send_batch_size: 1024
+        timeout: 5s
+
+    exporters:
+      prometheus:
+        endpoint: 0.0.0.0:8889
+        enable_open_metrics: true
+      nop: {}
+
+    extensions:
+      health_check:
+        endpoint: 0.0.0.0:13133
+
+    service:
+      extensions: [health_check]
+      telemetry:
+        metrics:
+          address: 0.0.0.0:8888
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors:
+            [memory_limiter, transform/drop_sensitive_attributes,
+             resource/drop_sensitive_attributes, batch]
+          exporters: [nop]
+        metrics:
+          receivers: [otlp]
+          processors:
+            [memory_limiter, transform/drop_sensitive_attributes,
+             resource/drop_sensitive_attributes, batch]
+          exporters: [prometheus]
+        logs:
+          receivers: [otlp]
+          processors:
+            [memory_limiter, transform/drop_sensitive_attributes,
+             resource/drop_sensitive_attributes, batch]
+          exporters: [nop]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: after-sale-otel-collector
+  labels:
+    app.kubernetes.io/part-of: after-sale-flow
+    app.kubernetes.io/name: otel-collector
+    app.kubernetes.io/component: observability
+    app.kubernetes.io/managed-by: phase8-engineering
+  annotations:
+    phase8.after-sale-flow.dev/status: UNOBSERVED_RENDER_ONLY
+    phase8.after-sale-flow.dev/deployable: "false"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: after-sale-flow
+      app.kubernetes.io/name: otel-collector
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: after-sale-flow
+        app.kubernetes.io/name: otel-collector
+        app.kubernetes.io/component: observability
+    spec:
+      serviceAccountName: after-sale-otel-collector
+      automountServiceAccountToken: false
+      topologySpreadConstraints:
+        - maxSkew: 1
+          minDomains: 3
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: after-sale-flow
+              app.kubernetes.io/name: otel-collector
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  app.kubernetes.io/part-of: after-sale-flow
+                  app.kubernetes.io/name: otel-collector
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: otel-collector
+          image: registry.invalid/after-sale-flow/otel-collector-contrib@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          args: ["--config=/conf/collector.yaml"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          ports:
+            - {name: otlp-grpc, containerPort: 4317, protocol: TCP}
+            - {name: otlp-http, containerPort: 4318, protocol: TCP}
+            - {name: self-metrics, containerPort: 8888, protocol: TCP}
+            - {name: prometheus, containerPort: 8889, protocol: TCP}
+            - {name: health, containerPort: 13133, protocol: TCP}
+          readinessProbe:
+            httpGet: {path: /, port: health}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /, port: health}
+            periodSeconds: 20
+          resources:
+            requests: {cpu: "2", memory: 4Gi}
+            limits: {cpu: "4", memory: 8Gi}
+          volumeMounts:
+            - {name: config, mountPath: /conf, readOnly: true}
+      volumes:
+        - name: config
+          configMap:
+            name: otel-collector
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: after-sale-otel-collector
+  labels:
+    app.kubernetes.io/part-of: after-sale-flow
+    app.kubernetes.io/name: otel-collector
+    app.kubernetes.io/component: observability
+    app.kubernetes.io/managed-by: phase8-engineering
+  annotations:
+    phase8.after-sale-flow.dev/status: UNOBSERVED_RENDER_ONLY
+    phase8.after-sale-flow.dev/deployable: "false"
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/part-of: after-sale-flow
+    app.kubernetes.io/name: otel-collector
+  ports:
+    - {name: otlp-grpc, port: 4317, targetPort: otlp-grpc, protocol: TCP}
+    - {name: otlp-http, port: 4318, targetPort: otlp-http, protocol: TCP}
+    - {name: self-metrics, port: 8888, targetPort: self-metrics, protocol: TCP}
+    - {name: prometheus, port: 8889, targetPort: prometheus, protocol: TCP}

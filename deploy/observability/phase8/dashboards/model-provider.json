@@ -1,0 +1,22 @@
+{
+  "annotations": {"list": []},
+  "description": "Render-only Phase 8 bounded model-provider view.",
+  "editable": false,
+  "id": null,
+  "links": [{"title": "Alert response", "type": "link", "url": "docs/runbooks/temporal-first/phase-8-alert-response.md"}],
+  "panels": [
+    {"datasource": "Prometheus", "fieldConfig": {"defaults": {"unit": "reqps"}}, "gridPos": {"h": 8, "w": 8, "x": 0, "y": 0}, "id": 1, "targets": [{"expr": "after_sale_flow:model_requests:rate5m", "legendFormat": "requests"}], "title": "Model request rate", "type": "timeseries"},
+    {"datasource": "Prometheus", "fieldConfig": {"defaults": {"max": 1, "min": 0, "unit": "percentunit"}}, "gridPos": {"h": 8, "w": 8, "x": 8, "y": 0}, "id": 2, "targets": [{"expr": "after_sale_flow:model_error_ratio:rate5m", "legendFormat": "errors"}], "title": "Model error ratio", "type": "timeseries"},
+    {"datasource": "Prometheus", "fieldConfig": {"defaults": {"unit": "s"}}, "gridPos": {"h": 8, "w": 8, "x": 16, "y": 0}, "id": 3, "targets": [{"expr": "after_sale_flow:model_latency_seconds:p95_5m", "legendFormat": "p95"}], "title": "Model latency", "type": "timeseries"},
+    {"datasource": "Prometheus", "fieldConfig": {"defaults": {"unit": "short"}}, "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8}, "id": 4, "targets": [{"expr": "after_sale_flow:model_concurrency:sum", "legendFormat": "active"}], "title": "Model concurrency", "type": "timeseries"},
+    {"datasource": "Prometheus", "fieldConfig": {"defaults": {"unit": "ops"}}, "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8}, "id": 5, "targets": [{"expr": "after_sale_flow:model_admission_rejections:rate5m", "legendFormat": "rejections"}], "title": "Admission rejections", "type": "timeseries"}
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["phase8", "after-sale-flow", "model-provider", "render-only"],
+  "templating": {"list": []},
+  "time": {"from": "now-6h", "to": "now"},
+  "title": "Phase 8 / Model Provider",
+  "uid": "p8-model-provider",
+  "version": 1
+}

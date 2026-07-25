@@ -1,0 +1,22 @@
+{
+  "annotations": {"list": []},
+  "description": "Render-only Phase 8 agent activity and public stream view.",
+  "editable": false,
+  "id": null,
+  "links": [{"title": "Alert response", "type": "link", "url": "docs/runbooks/temporal-first/phase-8-alert-response.md"}],
+  "panels": [
+    {"datasource": "Prometheus", "fieldConfig": {"defaults": {"unit": "short"}}, "gridPos": {"h": 8, "w": 8, "x": 0, "y": 0}, "id": 1, "targets": [{"expr": "after_sale_flow:agent_active:max", "legendFormat": "active"}], "title": "Active agent activities", "type": "timeseries"},
+    {"datasource": "Prometheus", "fieldConfig": {"defaults": {"unit": "s"}}, "gridPos": {"h": 8, "w": 8, "x": 8, "y": 0}, "id": 2, "targets": [{"expr": "after_sale_flow:activity_heartbeat_age_seconds:max", "legendFormat": "age"}], "title": "Activity heartbeat age", "type": "timeseries"},
+    {"datasource": "Prometheus", "fieldConfig": {"defaults": {"unit": "short"}}, "gridPos": {"h": 8, "w": 8, "x": 16, "y": 0}, "id": 3, "targets": [{"expr": "after_sale_flow:agent_stream_lag_events:max", "legendFormat": "events"}], "title": "Public stream lag", "type": "timeseries"},
+    {"datasource": "Prometheus", "fieldConfig": {"defaults": {"unit": "short"}}, "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8}, "id": 4, "targets": [{"expr": "after_sale_flow:sse_connections:sum", "legendFormat": "connections"}], "title": "SSE connections", "type": "timeseries"},
+    {"datasource": "Prometheus", "fieldConfig": {"defaults": {"unit": "ops"}}, "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8}, "id": 5, "targets": [{"expr": "after_sale_flow:agent_stream_failures:rate5m", "legendFormat": "failures"}], "title": "Stream failure rate", "type": "timeseries"}
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["phase8", "after-sale-flow", "agent-stream", "render-only"],
+  "templating": {"list": []},
+  "time": {"from": "now-6h", "to": "now"},
+  "title": "Phase 8 / AgentRun Stream",
+  "uid": "p8-agent-stream",
+  "version": 1
+}

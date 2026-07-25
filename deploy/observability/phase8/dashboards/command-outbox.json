@@ -1,0 +1,22 @@
+{
+  "annotations": {"list": []},
+  "description": "Render-only Phase 8 command and outbox SLO view.",
+  "editable": false,
+  "id": null,
+  "links": [{"title": "Alert response", "type": "link", "url": "docs/runbooks/temporal-first/phase-8-alert-response.md"}],
+  "panels": [
+    {"datasource": "Prometheus", "fieldConfig": {"defaults": {"unit": "reqps"}}, "gridPos": {"h": 8, "w": 8, "x": 0, "y": 0}, "id": 1, "targets": [{"expr": "after_sale_flow:command_requests:rate5m", "legendFormat": "commands"}], "title": "Command throughput", "type": "timeseries"},
+    {"datasource": "Prometheus", "fieldConfig": {"defaults": {"max": 1, "min": 0, "unit": "percentunit"}}, "gridPos": {"h": 8, "w": 8, "x": 8, "y": 0}, "id": 2, "targets": [{"expr": "1 - after_sale_flow:command_slo_error_ratio:rate5m", "legendFormat": "success"}], "title": "Command success ratio", "type": "timeseries"},
+    {"datasource": "Prometheus", "fieldConfig": {"defaults": {"unit": "s"}}, "gridPos": {"h": 8, "w": 8, "x": 16, "y": 0}, "id": 3, "targets": [{"expr": "after_sale_flow:command_latency_seconds:p95_5m", "legendFormat": "p95"}], "title": "Command latency", "type": "timeseries"},
+    {"datasource": "Prometheus", "fieldConfig": {"defaults": {"unit": "short"}}, "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8}, "id": 4, "targets": [{"expr": "after_sale_flow:command_outbox_depth:max", "legendFormat": "depth"}], "title": "Deliverable outbox depth", "type": "timeseries"},
+    {"datasource": "Prometheus", "fieldConfig": {"defaults": {"unit": "s"}}, "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8}, "id": 5, "targets": [{"expr": "after_sale_flow:command_outbox_oldest_age_seconds:max", "legendFormat": "oldest"}], "title": "Oldest outbox item", "type": "timeseries"}
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["phase8", "after-sale-flow", "command-outbox", "render-only"],
+  "templating": {"list": []},
+  "time": {"from": "now-6h", "to": "now"},
+  "title": "Phase 8 / Command and Outbox",
+  "uid": "p8-command-outbox",
+  "version": 1
+}

@@ -1,0 +1,21 @@
+{
+  "annotations": {"list": []},
+  "description": "Render-only Phase 8 recovery objective and validation view; it is not proof of a real drill.",
+  "editable": false,
+  "id": null,
+  "links": [{"title": "Alert response", "type": "link", "url": "docs/runbooks/temporal-first/phase-8-alert-response.md"}],
+  "panels": [
+    {"datasource": "Prometheus", "fieldConfig": {"defaults": {"unit": "s"}}, "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}, "id": 1, "targets": [{"expr": "after_sale_flow:recovery_point_lag_seconds:max", "legendFormat": "lag"}], "title": "Recovery point lag", "type": "timeseries"},
+    {"datasource": "Prometheus", "fieldConfig": {"defaults": {"unit": "s"}}, "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}, "id": 2, "targets": [{"expr": "after_sale_flow:backup_age_seconds:max", "legendFormat": "age"}], "title": "Backup freshness", "type": "timeseries"},
+    {"datasource": "Prometheus", "fieldConfig": {"defaults": {"max": 1, "min": 0, "unit": "short"}}, "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8}, "id": 3, "targets": [{"expr": "after_sale_flow:recovery_validation_status:min", "legendFormat": "status"}], "title": "Validation status", "type": "timeseries"},
+    {"datasource": "Prometheus", "fieldConfig": {"defaults": {"unit": "short"}}, "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8}, "id": 4, "targets": [{"expr": "after_sale_flow:recovery_order_violations:increase1h", "legendFormat": "violations"}], "title": "Restore order violations", "type": "timeseries"}
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["phase8", "after-sale-flow", "disaster-recovery", "render-only"],
+  "templating": {"list": []},
+  "time": {"from": "now-24h", "to": "now"},
+  "title": "Phase 8 / Disaster Recovery",
+  "uid": "p8-disaster-recovery",
+  "version": 1
+}
