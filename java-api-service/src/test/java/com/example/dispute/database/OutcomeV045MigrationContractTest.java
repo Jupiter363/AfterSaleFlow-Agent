@@ -198,12 +198,120 @@ class OutcomeV045MigrationContractTest {
                 .contains("expected_required_operation_count bigint not null")
                 .contains("expected_required_operation_count >= 0")
                 .contains("value.action_snapshot_hash = new.approved_operation_set_hash")
-                .contains("jsonb_array_length(value.approved_plan_json -> 'actions') = new.expected_required_operation_count")
+                .contains(
+                        "jsonb_array_length(value.approved_plan_json -> 'actions')"
+                                + " + jsonb_array_length(value.approved_plan_json -> 'notifications')"
+                                + " = new.expected_required_operation_count")
                 .contains("old.expected_required_operation_count")
                 .contains("outcome projection immutable authority changed")
                 .contains("left join outcome_operation operation")
                 .contains("operation.operation_kind = 'operation' ) = projection.expected_required_operation_count")
-                .contains("receipt.closure_disposition <> 'satisfied' ) ) = 0 as closure_ready");
+                .contains("outcome_required_action_set_is_exact(projection.projection_id)")
+                .contains("outcome_required_action_records_succeeded(projection.projection_id)")
+                .doesNotContain("required_original_operation_count > 0");
+    }
+
+    @Test
+    void normalizesActionsAndNotificationsIntoOneUniqueApprovedIdentityMultiset()
+            throws Exception {
+        String projection = functionSegment(
+                normalizedSql(),
+                "create function enforce_outcome_projection_authority()",
+                "create trigger trg_outcome_projection_authority");
+
+        assertThat(projection)
+                .contains("jsonb_typeof(value.approved_plan_json -> 'actions') = 'array'")
+                .contains("jsonb_typeof(value.approved_plan_json -> 'notifications') = 'array'")
+                .contains("entry.value ->> 'action_type' as action_type")
+                .contains("entry.value ->> 'idempotency_key' as idempotency_key")
+                .contains("with ordinality notification(value, ordinal)")
+                .contains(
+                        "'remedy:' || new.case_id || ':' || approved_plan.plan_version::text"
+                                + " || ':notification:' || (notification.ordinal - 1)::text || ':'")
+                .contains("count(distinct idempotency_key)")
+                .contains("distinct_approved_identity_count <> approved_identity_count")
+                .contains("outcome projection approved action identity shape is invalid")
+                .contains("outcome projection approved action identities are not a unique exact multiset");
+    }
+
+    @Test
+    void requiresFormalActionsButKeepsTheSyntheticNoopNullExceptionNarrow()
+            throws Exception {
+        String sql = normalizedSql();
+        String reservation = functionSegment(
+                sql,
+                "create function enforce_outcome_operation_binding()",
+                "create trigger trg_outcome_operation_binding");
+
+        assertThat(sql)
+                .contains("action_record_id varchar(64),")
+                .contains("unique (action_record_id)")
+                .doesNotContain("action_record_id varchar(64) not null");
+        assertThat(reservation)
+                .contains("new.operation_kind = 'operation' and new.required_for_closure")
+                .contains("projection.runtime_mode = 'java_signed_synthetic_noop_shadow'")
+                .contains("new.action_record_id is not null")
+                .contains("new.adapter_id <> 'synthetic_noop_only'")
+                .contains("left(new.tenant_surrogate, 18) <> 'outcome_synthetic_'")
+                .contains("left(new.case_id, 18) <> 'outcome_synthetic_'")
+                .contains("new.operation_sequence > projection.expected_required_operation_count")
+                .contains("elsif new.action_record_id is null")
+                .contains("outcome_required_action_record_is_authorized(")
+                .contains("outcome required operation has no exact approved actionrecord authority")
+                .doesNotContain("new.operation_kind = 'compensation' and new.action_record_id is null");
+    }
+
+    @Test
+    void provesTheFormalApprovedMultisetInBothDirectionsAndRequiresSucceededActionsOnlyAtClosure()
+            throws Exception {
+        String sql = normalizedSql();
+        String exactSet = functionSegment(
+                sql,
+                "create function outcome_required_action_set_is_exact(",
+                "create function outcome_required_action_records_succeeded(");
+        String succeeded = functionSegment(
+                sql,
+                "create function outcome_required_action_records_succeeded(",
+                "create function enforce_outcome_operation_binding()");
+        String compensation = functionSegment(
+                sql,
+                "create function enforce_outcome_compensation_parent()",
+                "create trigger trg_outcome_compensation_parent");
+
+        assertThat(exactSet)
+                .contains("required_original as (")
+                .contains("reserved_identity as (")
+                .contains("operation.action_record_id is null")
+                .contains("outcome_required_action_record_is_authorized(")
+                .contains("select action_type, idempotency_key from approved_identity")
+                .contains("select action_type, idempotency_key from reserved_identity");
+        assertThat(occurrences(exactSet, "except all")).isEqualTo(2);
+        assertThat(succeeded)
+                .contains("action.execution_status is distinct from 'succeeded'")
+                .contains("outcome_required_action_record_is_authorized(")
+                .contains("runtime_mode = 'java_signed_synthetic_noop_shadow' then true");
+        assertThat(compensation)
+                .contains("outcome_required_action_set_is_exact(child.projection_id)")
+                .doesNotContain("outcome_required_action_records_succeeded");
+        assertThat(sql)
+                .contains("and outcome_required_action_set_is_exact(projection.projection_id)")
+                .contains("and outcome_required_action_records_succeeded(projection.projection_id) as closure_ready");
+    }
+
+    @Test
+    void rechecksExactAuthorityAtTerminalStateWithoutAnUnresolvedForwardFunctionCall()
+            throws Exception {
+        String projection = functionSegment(
+                normalizedSql(),
+                "create function enforce_outcome_projection_authority()",
+                "create trigger trg_outcome_projection_authority");
+
+        assertThat(projection)
+                .contains("execute 'select outcome_required_action_set_is_exact($1), '")
+                .contains("|| 'outcome_required_action_records_succeeded($1)'")
+                .contains("into required_action_set_exact, required_action_records_succeeded")
+                .contains("or not required_action_set_exact")
+                .contains("or not required_action_records_succeeded");
     }
 
     @Test

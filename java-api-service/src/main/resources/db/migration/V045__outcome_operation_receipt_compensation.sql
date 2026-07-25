@@ -76,10 +76,15 @@ as $$
 declare
     authority case_room_epoch%rowtype;
     approval human_review_record%rowtype;
+    approved_plan remedy_plan%rowtype;
     task review_task%rowtype;
     scope_lock_key bigint;
+    approved_identity_count bigint;
+    distinct_approved_identity_count bigint;
     required_original_operation_count bigint;
     unresolved_required_operation_count bigint;
+    required_action_set_exact boolean;
+    required_action_records_succeeded boolean;
 begin
     scope_lock_key := hashtextextended(
         'outcome-compensation-order:' || new.tenant_surrogate || ':' ||
@@ -123,12 +128,70 @@ begin
        and value.decision_type in ('APPROVE', 'MODIFY_AND_APPROVE')
        and value.action_snapshot_hash = new.approved_operation_set_hash
        and jsonb_typeof(value.approved_plan_json -> 'actions') = 'array'
+       and jsonb_typeof(value.approved_plan_json -> 'notifications') = 'array'
        and jsonb_array_length(value.approved_plan_json -> 'actions')
-           = new.expected_required_operation_count
-     for key share;
+           + jsonb_array_length(value.approved_plan_json -> 'notifications')
+            = new.expected_required_operation_count
+      for key share;
     if not found then
         raise exception using errcode = '23514',
             message = 'Outcome projection required-operation authority is invalid';
+    end if;
+
+    select value.* into approved_plan
+      from remedy_plan value
+     where value.id = approval.plan_id
+       and value.case_id = new.case_id
+     for key share;
+    if not found then
+        raise exception using errcode = '23514',
+            message = 'Outcome projection approved plan authority is invalid';
+    end if;
+    if exists (
+        select 1
+          from jsonb_array_elements(approval.approved_plan_json -> 'actions') entry
+         where jsonb_typeof(entry.value) <> 'object'
+            or nullif(btrim(coalesce(entry.value ->> 'action_type', '')), '') is null
+            or length(entry.value ->> 'action_type') > 64
+            or nullif(btrim(coalesce(entry.value ->> 'idempotency_key', '')), '') is null
+            or length(entry.value ->> 'idempotency_key') > 128
+    ) or exists (
+        select 1
+          from jsonb_array_elements(
+                   approval.approved_plan_json -> 'notifications'
+               ) with ordinality notification(value, ordinal)
+         where jsonb_typeof(notification.value) <> 'string'
+            or nullif(btrim(coalesce(notification.value #>> '{}', '')), '') is null
+            or length(notification.value #>> '{}') > 64
+            or length(
+                'REMEDY:' || new.case_id || ':' || approved_plan.plan_version::text
+                || ':NOTIFICATION:' || (notification.ordinal - 1)::text || ':'
+                || (notification.value #>> '{}')
+            ) > 128
+    ) then
+        raise exception using errcode = '23514',
+            message = 'Outcome projection approved action identity shape is invalid';
+    end if;
+    with approved_identity as (
+        select entry.value ->> 'action_type' as action_type,
+               entry.value ->> 'idempotency_key' as idempotency_key
+          from jsonb_array_elements(approval.approved_plan_json -> 'actions') entry
+        union all
+        select notification.value #>> '{}' as action_type,
+               'REMEDY:' || new.case_id || ':' || approved_plan.plan_version::text
+                   || ':NOTIFICATION:' || (notification.ordinal - 1)::text || ':'
+                   || (notification.value #>> '{}') as idempotency_key
+          from jsonb_array_elements(
+                   approval.approved_plan_json -> 'notifications'
+               ) with ordinality notification(value, ordinal)
+    )
+    select count(*), count(distinct idempotency_key)
+      into approved_identity_count, distinct_approved_identity_count
+      from approved_identity;
+    if approved_identity_count <> new.expected_required_operation_count
+       or distinct_approved_identity_count <> approved_identity_count then
+        raise exception using errcode = '23514',
+            message = 'Outcome projection approved action identities are not a unique exact multiset';
     end if;
 
     select value.* into task
@@ -206,6 +269,11 @@ begin
         if new.process_state in (
             'READY_TO_CLOSE', 'CLOSED', 'EVALUATION_PENDING', 'EVALUATED'
         ) then
+            execute
+                'select outcome_required_action_set_is_exact($1), '
+                || 'outcome_required_action_records_succeeded($1)'
+               into required_action_set_exact, required_action_records_succeeded
+              using new.projection_id;
             select count(operation.operation_id) filter (
                        where operation.required_for_closure
                          and operation.operation_kind = 'OPERATION'
@@ -226,7 +294,9 @@ begin
              where operation.projection_id = new.projection_id;
             if required_original_operation_count
                    <> new.expected_required_operation_count
-               or unresolved_required_operation_count <> 0 then
+               or unresolved_required_operation_count <> 0
+               or not required_action_set_exact
+               or not required_action_records_succeeded then
                 raise exception using errcode = '23514',
                     message = 'Outcome projection terminal transition requires closure readiness';
             end if;
@@ -342,6 +412,186 @@ create index idx_outcome_operation_closure
 
 create index idx_outcome_operation_reconcile
     on outcome_operation(case_id, outcome_epoch, fencing_token, process_revision, outcome_revision);
+
+create function outcome_required_action_record_is_authorized(
+    p_projection_id varchar(64),
+    p_action_record_id varchar(64)
+)
+returns boolean
+language sql
+stable
+as $$
+with authority as (
+    select projection.projection_id,
+           projection.case_id,
+           projection.decision_authority_receipt_id,
+           projection.approved_operation_set_hash,
+           approval.plan_id,
+           approval.review_packet_id,
+           approval.approved_plan_json,
+           plan.plan_version
+      from outcome_process_projection projection
+      join human_review_record approval
+        on approval.id = projection.decision_authority_receipt_id
+       and approval.case_id = projection.case_id
+       and approval.action_snapshot_hash = projection.approved_operation_set_hash
+       and approval.decision_type in ('APPROVE', 'MODIFY_AND_APPROVE')
+      join remedy_plan plan
+        on plan.id = approval.plan_id
+       and plan.case_id = projection.case_id
+     where projection.projection_id = p_projection_id
+), approved_identity as (
+    select entry.value ->> 'action_type' as action_type,
+           entry.value ->> 'idempotency_key' as idempotency_key
+      from authority,
+           jsonb_array_elements(authority.approved_plan_json -> 'actions') entry
+    union all
+    select notification.value #>> '{}' as action_type,
+           'REMEDY:' || authority.case_id || ':' || authority.plan_version::text
+               || ':NOTIFICATION:' || (notification.ordinal - 1)::text || ':'
+               || (notification.value #>> '{}') as idempotency_key
+      from authority,
+           jsonb_array_elements(
+               authority.approved_plan_json -> 'notifications'
+           ) with ordinality notification(value, ordinal)
+)
+select exists (
+    select 1
+      from authority
+      join action_record action
+        on action.id = p_action_record_id
+       and action.case_id = authority.case_id
+       and action.plan_id = authority.plan_id
+       and action.approval_record_id = authority.decision_authority_receipt_id
+       and action.review_packet_id = authority.review_packet_id
+       and action.action_snapshot_hash = authority.approved_operation_set_hash
+      join approved_identity identity
+        on identity.action_type = action.action_type
+       and identity.idempotency_key = action.idempotency_key
+)
+$$;
+
+create function outcome_required_action_set_is_exact(p_projection_id varchar(64))
+returns boolean
+language sql
+stable
+as $$
+with authority as (
+    select projection.projection_id,
+           projection.tenant_surrogate,
+           projection.case_id,
+           projection.runtime_mode,
+           projection.expected_required_operation_count,
+           approval.approved_plan_json,
+           plan.plan_version
+      from outcome_process_projection projection
+      join human_review_record approval
+        on approval.id = projection.decision_authority_receipt_id
+       and approval.case_id = projection.case_id
+       and approval.action_snapshot_hash = projection.approved_operation_set_hash
+       and approval.decision_type in ('APPROVE', 'MODIFY_AND_APPROVE')
+      join remedy_plan plan
+        on plan.id = approval.plan_id
+       and plan.case_id = projection.case_id
+     where projection.projection_id = p_projection_id
+), approved_identity as (
+    select entry.value ->> 'action_type' as action_type,
+           entry.value ->> 'idempotency_key' as idempotency_key
+      from authority,
+           jsonb_array_elements(authority.approved_plan_json -> 'actions') entry
+    union all
+    select notification.value #>> '{}' as action_type,
+           'REMEDY:' || authority.case_id || ':' || authority.plan_version::text
+               || ':NOTIFICATION:' || (notification.ordinal - 1)::text || ':'
+               || (notification.value #>> '{}') as idempotency_key
+      from authority,
+           jsonb_array_elements(
+               authority.approved_plan_json -> 'notifications'
+           ) with ordinality notification(value, ordinal)
+), required_original as (
+    select operation.*
+      from authority
+      join outcome_operation operation
+        on operation.projection_id = authority.projection_id
+       and operation.operation_kind = 'OPERATION'
+       and operation.required_for_closure
+), reserved_identity as (
+    select action.action_type, action.idempotency_key
+      from required_original operation
+      join action_record action
+        on action.id = operation.action_record_id
+     where outcome_required_action_record_is_authorized(
+               operation.projection_id, operation.action_record_id
+           )
+)
+select coalesce((
+    select case
+        when authority.runtime_mode = 'JAVA_SIGNED_SYNTHETIC_NOOP_SHADOW' then
+            (select count(*) from required_original)
+                = authority.expected_required_operation_count
+            and not exists (
+                select 1
+                  from required_original operation
+                 where operation.action_record_id is not null
+                    or operation.adapter_id <> 'SYNTHETIC_NOOP_ONLY'
+                    or left(operation.tenant_surrogate, 18) <> 'OUTCOME_SYNTHETIC_'
+                    or left(operation.case_id, 18) <> 'OUTCOME_SYNTHETIC_'
+                    or operation.operation_sequence < 1
+                    or operation.operation_sequence
+                        > authority.expected_required_operation_count
+            )
+        else
+            not exists (
+                select 1
+                  from required_original operation
+                 where operation.action_record_id is null
+                    or not outcome_required_action_record_is_authorized(
+                        operation.projection_id, operation.action_record_id
+                    )
+            )
+            and not exists (
+                (select action_type, idempotency_key from approved_identity)
+                except all
+                (select action_type, idempotency_key from reserved_identity)
+            )
+            and not exists (
+                (select action_type, idempotency_key from reserved_identity)
+                except all
+                (select action_type, idempotency_key from approved_identity)
+            )
+        end
+      from authority
+), false)
+$$;
+
+create function outcome_required_action_records_succeeded(p_projection_id varchar(64))
+returns boolean
+language sql
+stable
+as $$
+select coalesce((
+    select case
+        when projection.runtime_mode = 'JAVA_SIGNED_SYNTHETIC_NOOP_SHADOW' then true
+        else not exists (
+            select 1
+              from outcome_operation operation
+              left join action_record action
+                on action.id = operation.action_record_id
+             where operation.projection_id = projection.projection_id
+               and operation.operation_kind = 'OPERATION'
+               and operation.required_for_closure
+               and (
+                   action.execution_status is distinct from 'SUCCEEDED'
+                   or not outcome_required_action_record_is_authorized(
+                       operation.projection_id, operation.action_record_id
+                   )
+               )
+        )
+        end
+      from outcome_process_projection projection
+     where projection.projection_id = p_projection_id
+), false)
+$$;
 
 create function enforce_outcome_operation_binding()
 returns trigger
@@ -463,6 +713,25 @@ begin
     if not found then
         raise exception using errcode = '23514',
             message = 'Outcome operation execution-authorized decision receipt is invalid';
+    end if;
+
+    if new.operation_kind = 'OPERATION' and new.required_for_closure then
+        if projection.runtime_mode = 'JAVA_SIGNED_SYNTHETIC_NOOP_SHADOW' then
+            if new.action_record_id is not null
+               or new.adapter_id <> 'SYNTHETIC_NOOP_ONLY'
+               or left(new.tenant_surrogate, 18) <> 'OUTCOME_SYNTHETIC_'
+               or left(new.case_id, 18) <> 'OUTCOME_SYNTHETIC_'
+               or new.operation_sequence > projection.expected_required_operation_count then
+                raise exception using errcode = '23514',
+                    message = 'Synthetic Outcome required operation authority is invalid';
+            end if;
+        elsif new.action_record_id is null
+           or not outcome_required_action_record_is_authorized(
+               new.projection_id, new.action_record_id
+           ) then
+            raise exception using errcode = '23514',
+                message = 'Outcome required operation has no exact approved ActionRecord authority';
+        end if;
     end if;
 
     if new.action_record_id is not null then
@@ -897,7 +1166,8 @@ begin
      where original.projection_id = child.projection_id
        and original.operation_kind = 'OPERATION'
        and original.required_for_closure;
-    if reserved_required_operation_count <> projection.expected_required_operation_count then
+    if reserved_required_operation_count <> projection.expected_required_operation_count
+       or not outcome_required_action_set_is_exact(child.projection_id) then
         raise exception using errcode = '23514',
             message = 'Outcome compensation requires the exact approved required original operation set';
     end if;
@@ -1090,8 +1360,11 @@ select projection.projection_id,
                  receipt.operation_id is null
                  or receipt.receipt_status <> 'SUCCEEDED'
                  or receipt.closure_disposition <> 'SATISFIED'
-             )
-       ) = 0 as closure_ready
+              )
+       ) = 0
+       and outcome_required_action_set_is_exact(projection.projection_id)
+       and outcome_required_action_records_succeeded(projection.projection_id)
+       as closure_ready
   from outcome_process_projection projection
   left join outcome_operation operation
     on operation.projection_id = projection.projection_id
