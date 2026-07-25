@@ -223,6 +223,7 @@ public final class JdbcOutcomeOperationLedger implements OutcomeOperationLedger 
                 requireExactCompensationReplay(committed, compensationParent);
                 return committed;
             }
+            requireActiveEpochReservationAuthority(operation);
             OutcomeProcessProjection projection = lockProjection(expectation(operation));
             requireOperationProjectionAuthority(projection, operation);
             requireReservationOpen(projection);
@@ -262,6 +263,30 @@ public final class JdbcOutcomeOperationLedger implements OutcomeOperationLedger 
             return operation;
         });
         return Objects.requireNonNull(result, "operation transaction returned no result");
+    }
+
+    private void requireActiveEpochReservationAuthority(OutcomeOperation operation) {
+        Boolean authorized = jdbc.queryForObject(
+                """
+                select outcome_lock_active_epoch_for_reservation(
+                    :projectionId, :tenantSurrogate, :caseId, :outcomeEpoch,
+                    :fencingToken, :processRevision, :outcomeRevision
+                )
+                """,
+                new MapSqlParameterSource()
+                        .addValue("projectionId", operation.projectionId())
+                        .addValue("tenantSurrogate", operation.tenantSurrogate())
+                        .addValue("caseId", operation.caseId())
+                        .addValue("outcomeEpoch", operation.outcomeEpoch())
+                        .addValue("fencingToken", operation.fencingToken())
+                        .addValue("processRevision", operation.processRevision())
+                        .addValue("outcomeRevision", operation.outcomeRevision()),
+                Boolean.class);
+        if (!Boolean.TRUE.equals(authorized)) {
+            throw rejected(
+                    "OUTCOME_STALE_EPOCH_AUTHORITY",
+                    "Outcome operation has no active current epoch authority");
+        }
     }
 
     @Override

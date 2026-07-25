@@ -38,6 +38,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
@@ -191,6 +192,184 @@ class OutcomeOperationLedgerIntegrationTest {
                         "select count(*) from outcome_operation where projection_id = ?",
                         fixture.projectionId()))
                 .isZero();
+    }
+
+    @Test
+    void terminalEpochRejectsNewJavaAndDirectSqlReservationsButKeepsExactReplay() {
+        Fixture fixture = insertFixture("EPOCH_TERMINAL", 2);
+        OutcomeOperation committed = operation(
+                fixture,
+                "committed",
+                REQUEST_HASH,
+                1,
+                OperationKind.OPERATION,
+                false);
+        ledger.reserve(committed, null);
+        terminalizeEpoch(jdbc, fixture, NOW.plusSeconds(60));
+
+        OutcomeOperation candidate = operation(
+                fixture,
+                "candidate",
+                "1".repeat(64),
+                2,
+                OperationKind.OPERATION,
+                false);
+        assertThatThrownBy(() -> ledger.reserve(candidate, null))
+                .isInstanceOf(OutcomeLedgerRejectedException.class)
+                .extracting(failure -> ((OutcomeLedgerRejectedException) failure).code())
+                .isEqualTo("OUTCOME_STALE_EPOCH_AUTHORITY");
+        assertSqlFailure(
+                catchFailure(() -> insertOperationDirectly(candidate)),
+                "23514",
+                "Outcome operation has no active current epoch authority");
+
+        assertThat(ledger.reserve(committed, null)).isEqualTo(committed);
+        assertThat(number(
+                        "select count(*) from outcome_operation where projection_id = ?",
+                        fixture.projectionId()))
+                .isEqualTo(1);
+    }
+
+    @Test
+    void terminalEpochCommitWinsOverConcurrentNewReservation() throws Exception {
+        Fixture fixture = insertFixture("EPOCH_TERMINAL_RACE");
+        OutcomeOperation candidate = operation(
+                fixture,
+                "candidate",
+                REQUEST_HASH,
+                1,
+                OperationKind.OPERATION,
+                false);
+        CountDownLatch terminalUpdated = new CountDownLatch(1);
+        CountDownLatch commitTerminal = new CountDownLatch(1);
+        CountDownLatch reserveStarted = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<Throwable> terminalResult = executor.submit(() -> {
+                try {
+                    TransactionTemplate terminal = new TransactionTemplate(
+                            new DataSourceTransactionManager(dataSource));
+                    terminal.executeWithoutResult(ignored -> {
+                        terminalizeEpoch(
+                                new JdbcTemplate(dataSource),
+                                fixture,
+                                NOW.plusSeconds(60));
+                        terminalUpdated.countDown();
+                        try {
+                            if (!commitTerminal.await(5, TimeUnit.SECONDS)) {
+                                throw new AssertionError("epoch terminal commit was not released");
+                            }
+                        } catch (InterruptedException interrupted) {
+                            Thread.currentThread().interrupt();
+                            throw new AssertionError("terminal reservation race was interrupted", interrupted);
+                        }
+                    });
+                    return null;
+                } catch (Throwable failure) {
+                    return failure;
+                }
+            });
+            assertThat(terminalUpdated.await(5, TimeUnit.SECONDS)).isTrue();
+            Future<Throwable> reservationResult = executor.submit(() -> {
+                reserveStarted.countDown();
+                try {
+                    ledger(dataSource).reserve(candidate, null);
+                    return null;
+                } catch (Throwable failure) {
+                    return failure;
+                }
+            });
+            assertThat(reserveStarted.await(5, TimeUnit.SECONDS)).isTrue();
+            commitTerminal.countDown();
+
+            assertThat(terminalResult.get(10, TimeUnit.SECONDS)).isNull();
+            assertThat(reservationResult.get(10, TimeUnit.SECONDS))
+                    .isInstanceOf(OutcomeLedgerRejectedException.class)
+                    .extracting(failure -> ((OutcomeLedgerRejectedException) failure).code())
+                    .isEqualTo("OUTCOME_STALE_EPOCH_AUTHORITY");
+            assertThat(number(
+                            "select count(*) from outcome_operation where projection_id = ?",
+                            fixture.projectionId()))
+                    .isZero();
+            assertThat(jdbc.queryForObject(
+                            "select lifecycle_status from case_room_epoch where id = ?",
+                            String.class,
+                            fixture.epochId()))
+                    .isEqualTo("TERMINAL");
+        } finally {
+            commitTerminal.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void activeEpochReservationCanLinearizeBeforeConcurrentTerminalCommit() throws Exception {
+        Fixture fixture = insertFixture("EPOCH_RESERVATION_RACE");
+        OutcomeOperation candidate = operation(
+                fixture,
+                "candidate",
+                REQUEST_HASH,
+                1,
+                OperationKind.OPERATION,
+                false);
+        CountDownLatch reservationInserted = new CountDownLatch(1);
+        CountDownLatch commitReservation = new CountDownLatch(1);
+        CountDownLatch terminalStarted = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<Throwable> reservationResult = executor.submit(() -> {
+                try {
+                    TransactionTemplate reservation = new TransactionTemplate(
+                            new DataSourceTransactionManager(dataSource));
+                    reservation.executeWithoutResult(ignored -> {
+                        ledger(dataSource).reserve(candidate, null);
+                        reservationInserted.countDown();
+                        try {
+                            if (!commitReservation.await(5, TimeUnit.SECONDS)) {
+                                throw new AssertionError("epoch reservation commit was not released");
+                            }
+                        } catch (InterruptedException interrupted) {
+                            Thread.currentThread().interrupt();
+                            throw new AssertionError("reservation terminal race was interrupted", interrupted);
+                        }
+                    });
+                    return null;
+                } catch (Throwable failure) {
+                    return failure;
+                }
+            });
+            assertThat(reservationInserted.await(5, TimeUnit.SECONDS)).isTrue();
+            Future<Throwable> terminalResult = executor.submit(() -> {
+                terminalStarted.countDown();
+                try {
+                    terminalizeEpoch(
+                            new JdbcTemplate(dataSource),
+                            fixture,
+                            NOW.plusSeconds(60));
+                    return null;
+                } catch (Throwable failure) {
+                    return failure;
+                }
+            });
+            assertThat(terminalStarted.await(5, TimeUnit.SECONDS)).isTrue();
+            commitReservation.countDown();
+
+            assertThat(reservationResult.get(10, TimeUnit.SECONDS)).isNull();
+            assertThat(terminalResult.get(10, TimeUnit.SECONDS)).isNull();
+            assertThat(number(
+                            "select count(*) from outcome_operation where projection_id = ?",
+                            fixture.projectionId()))
+                    .isEqualTo(1);
+            assertThat(jdbc.queryForObject(
+                            "select lifecycle_status from case_room_epoch where id = ?",
+                            String.class,
+                            fixture.epochId()))
+                    .isEqualTo("TERMINAL");
+            assertThat(ledger.reserve(candidate, null)).isEqualTo(candidate);
+        } finally {
+            commitReservation.countDown();
+            executor.shutdownNow();
+        }
     }
 
     @Test
@@ -692,6 +871,128 @@ class OutcomeOperationLedgerIntegrationTest {
                         "select count(*) from outcome_operation_attempt_observation where operation_id = ?",
                         bounded.operationId()))
                 .isEqualTo(2);
+    }
+
+    @Test
+    void directSqlRedispatchEnforcesTheExactRetryClassPredecessor() {
+        Fixture boundedInvalidFixture = insertFixture("SQL_RETRY_BOUNDED_INVALID");
+        OutcomeOperation boundedInvalid = operation(
+                boundedInvalidFixture,
+                "bounded-invalid",
+                REQUEST_HASH,
+                1,
+                OperationKind.OPERATION,
+                false,
+                true,
+                RetryClass.BOUNDED_PRE_EFFECT);
+        ledger.reserve(boundedInvalid, null);
+        insertAttemptDirectly(observation(
+                boundedInvalid, 1, ObservationType.NO_EFFECT_CONFIRMED, false, true));
+        assertSqlFailure(
+                catchFailure(() -> insertAttemptDirectly(observation(
+                        boundedInvalid,
+                        2,
+                        ObservationType.INVOCATION_DISPATCHED,
+                        true,
+                        false))),
+                "23514",
+                "Outcome operation retry class does not permit redispatch after the previous observation");
+
+        Fixture boundedValidFixture = insertFixture("SQL_RETRY_BOUNDED_VALID");
+        OutcomeOperation boundedValid = operation(
+                boundedValidFixture,
+                "bounded-valid",
+                "1".repeat(64),
+                1,
+                OperationKind.OPERATION,
+                false,
+                true,
+                RetryClass.BOUNDED_PRE_EFFECT);
+        ledger.reserve(boundedValid, null);
+        insertAttemptDirectly(observation(
+                boundedValid,
+                1,
+                ObservationType.PRE_EFFECT_RETRYABLE_FAILURE,
+                false,
+                true));
+        insertAttemptDirectly(observation(
+                boundedValid, 2, ObservationType.INVOCATION_DISPATCHED, true, false));
+
+        Fixture statusInvalidFixture = insertFixture("SQL_RETRY_STATUS_INVALID");
+        OutcomeOperation statusInvalid = operation(
+                statusInvalidFixture,
+                "status-invalid",
+                "2".repeat(64),
+                1,
+                OperationKind.OPERATION,
+                false,
+                true,
+                RetryClass.STATUS_QUERY_REQUIRED);
+        ledger.reserve(statusInvalid, null);
+        insertAttemptDirectly(observation(
+                statusInvalid,
+                1,
+                ObservationType.PRE_EFFECT_RETRYABLE_FAILURE,
+                false,
+                true));
+        assertSqlFailure(
+                catchFailure(() -> insertAttemptDirectly(observation(
+                        statusInvalid,
+                        2,
+                        ObservationType.INVOCATION_DISPATCHED,
+                        true,
+                        false))),
+                "23514",
+                "Outcome operation retry class does not permit redispatch after the previous observation");
+
+        Fixture statusValidFixture = insertFixture("SQL_RETRY_STATUS_VALID");
+        OutcomeOperation statusValid = operation(
+                statusValidFixture,
+                "status-valid",
+                "3".repeat(64),
+                1,
+                OperationKind.OPERATION,
+                false,
+                true,
+                RetryClass.STATUS_QUERY_REQUIRED);
+        ledger.reserve(statusValid, null);
+        insertAttemptDirectly(observation(
+                statusValid, 1, ObservationType.NO_EFFECT_CONFIRMED, false, true));
+        insertAttemptDirectly(observation(
+                statusValid, 2, ObservationType.INVOCATION_DISPATCHED, true, false));
+
+        Fixture nonRetryableFixture = insertFixture("SQL_RETRY_NON_RETRYABLE");
+        OutcomeOperation nonRetryable = operation(
+                nonRetryableFixture,
+                "non-retryable",
+                "4".repeat(64),
+                1,
+                OperationKind.OPERATION,
+                false,
+                true,
+                RetryClass.NON_RETRYABLE);
+        ledger.reserve(nonRetryable, null);
+        assertSqlFailure(
+                catchFailure(() -> insertAttemptDirectly(observation(
+                        nonRetryable,
+                        1,
+                        ObservationType.PRE_EFFECT_RETRYABLE_FAILURE,
+                        false,
+                        true))),
+                "23514",
+                "NON_RETRYABLE Outcome operation cannot publish retry authority");
+        insertAttemptDirectly(observation(
+                nonRetryable, 1, ObservationType.INVOCATION_DISPATCHED, true, false));
+
+        assertThat(number(
+                        "select count(*) from outcome_operation_attempt_observation "
+                                + "where operation_id in (?, ?, ?, ?, ?)",
+                        boundedInvalid.operationId(),
+                        boundedValid.operationId(),
+                        statusInvalid.operationId(),
+                        statusValid.operationId(),
+                        nonRetryable.operationId()))
+                .isEqualTo(7);
     }
 
     @Test
@@ -1262,6 +1563,113 @@ class OutcomeOperationLedgerIntegrationTest {
 
     private static Fixture insertFixture(String suffix) {
         return insertFixture(suffix, 1);
+    }
+
+    private static void terminalizeEpoch(
+            JdbcTemplate connection, Fixture fixture, Instant terminalAt) {
+        int updated = connection.update(
+                """
+                update case_room_epoch
+                   set lifecycle_status = 'TERMINAL',
+                       process_revision = process_revision + 1,
+                       terminal_at = ?,
+                       updated_at = ?,
+                       version = version + 1
+                 where id = ?
+                   and lifecycle_status = 'ACTIVE'
+                """,
+                terminalAt.atOffset(ZoneOffset.UTC),
+                terminalAt.atOffset(ZoneOffset.UTC),
+                fixture.epochId());
+        if (updated != 1) {
+            throw new AssertionError("expected one ACTIVE Outcome epoch to become TERMINAL");
+        }
+    }
+
+    private static void insertOperationDirectly(OutcomeOperation value) {
+        new NamedParameterJdbcTemplate(dataSource).update(
+                """
+                insert into outcome_operation (
+                    operation_id, schema_version, projection_id, tenant_surrogate, case_id,
+                    outcome_epoch, fencing_token, process_revision, outcome_revision,
+                    operation_kind, operation_sequence, operation_key, request_hash,
+                    review_packet_id, review_packet_version, review_packet_hash,
+                    review_packet_action_hash, approval_record_id, approval_hash,
+                    decision_request_hash, decision_policy_version, action_record_id,
+                    action_snapshot_hash, adapter_id, adapter_version, retry_class,
+                    external_idempotency_key, required_for_closure, compensable, reserved_at
+                ) values (
+                    :operationId, :schemaVersion, :projectionId, :tenantSurrogate, :caseId,
+                    :outcomeEpoch, :fencingToken, :processRevision, :outcomeRevision,
+                    :operationKind, :operationSequence, :operationKey, :requestHash,
+                    :reviewPacketId, :reviewPacketVersion, :reviewPacketHash,
+                    :reviewPacketActionHash, :approvalRecordId, :approvalHash,
+                    :decisionRequestHash, :decisionPolicyVersion, :actionRecordId,
+                    :actionSnapshotHash, :adapterId, :adapterVersion, :retryClass,
+                    :externalIdempotencyKey, :requiredForClosure, :compensable, :reservedAt
+                )
+                """,
+                new MapSqlParameterSource()
+                        .addValue("operationId", value.operationId())
+                        .addValue("schemaVersion", OutcomeOperation.SCHEMA_VERSION)
+                        .addValue("projectionId", value.projectionId())
+                        .addValue("tenantSurrogate", value.tenantSurrogate())
+                        .addValue("caseId", value.caseId())
+                        .addValue("outcomeEpoch", value.outcomeEpoch())
+                        .addValue("fencingToken", value.fencingToken())
+                        .addValue("processRevision", value.processRevision())
+                        .addValue("outcomeRevision", value.outcomeRevision())
+                        .addValue("operationKind", value.operationKind().name())
+                        .addValue("operationSequence", value.operationSequence())
+                        .addValue("operationKey", value.operationKey())
+                        .addValue("requestHash", value.requestHash())
+                        .addValue("reviewPacketId", value.reviewPacketId())
+                        .addValue("reviewPacketVersion", value.reviewPacketVersion())
+                        .addValue("reviewPacketHash", value.reviewPacketHash())
+                        .addValue("reviewPacketActionHash", value.reviewPacketActionHash())
+                        .addValue("approvalRecordId", value.approvalRecordId())
+                        .addValue("approvalHash", value.approvalHash())
+                        .addValue("decisionRequestHash", value.decisionRequestHash())
+                        .addValue("decisionPolicyVersion", value.decisionPolicyVersion())
+                        .addValue("actionRecordId", value.actionRecordId())
+                        .addValue("actionSnapshotHash", value.actionSnapshotHash())
+                        .addValue("adapterId", value.adapterId())
+                        .addValue("adapterVersion", value.adapterVersion())
+                        .addValue("retryClass", value.retryClass().name())
+                        .addValue("externalIdempotencyKey", value.externalIdempotencyKey())
+                        .addValue("requiredForClosure", value.requiredForClosure())
+                        .addValue("compensable", value.compensable())
+                        .addValue("reservedAt", value.reservedAt().atOffset(ZoneOffset.UTC)));
+    }
+
+    private static void insertAttemptDirectly(OutcomeAttemptObservation value) {
+        jdbc.update(
+                """
+                insert into outcome_operation_attempt_observation (
+                    observation_id, schema_version, observation_hash, operation_id,
+                    tenant_surrogate, case_id, outcome_epoch, fencing_token, request_hash,
+                    attempt_sequence, observation_type, external_invocation_id,
+                    observation_ref, observation_payload_hash, effect_may_have_occurred,
+                    retry_permitted, observed_at
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                value.observationId(),
+                OutcomeAttemptObservation.SCHEMA_VERSION,
+                value.observationHash(),
+                value.operationId(),
+                value.tenantSurrogate(),
+                value.caseId(),
+                value.outcomeEpoch(),
+                value.fencingToken(),
+                value.requestHash(),
+                value.attemptSequence(),
+                value.observationType().name(),
+                value.externalInvocationId(),
+                value.observationRef(),
+                value.observationPayloadHash(),
+                value.effectMayHaveOccurred(),
+                value.retryPermitted(),
+                value.observedAt().atOffset(ZoneOffset.UTC));
     }
 
     private static Fixture insertFixture(String suffix, int expectedRequiredOperationCount) {

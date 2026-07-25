@@ -70,6 +70,11 @@ class JdbcOutcomeOperationLedgerTest {
         lenient().when(jdbc.queryForObject(
                         contains("pg_advisory_xact_lock"), anyMap(), any(Class.class)))
                 .thenReturn(new Object());
+        lenient().when(jdbc.queryForObject(
+                        contains("outcome_lock_active_epoch_for_reservation"),
+                        any(MapSqlParameterSource.class),
+                        any(Class.class)))
+                .thenReturn(true);
     }
 
     @Test
@@ -84,6 +89,10 @@ class JdbcOutcomeOperationLedgerTest {
                 .isEqualTo("OUTCOME_IDEMPOTENCY_CONFLICT");
         verify(jdbc, never()).update(
                 contains("insert into outcome_operation ("), any(MapSqlParameterSource.class));
+        verify(jdbc, never()).queryForObject(
+                contains("outcome_lock_active_epoch_for_reservation"),
+                any(MapSqlParameterSource.class),
+                any(Class.class));
     }
 
     @Test
@@ -206,6 +215,55 @@ class JdbcOutcomeOperationLedgerTest {
     }
 
     @Test
+    void exactReplayReturnsBeforeEpochAdmission() {
+        OutcomeOperation committed = operation(HASH_A);
+        when(jdbc.query(
+                        contains("from outcome_operation where tenant_surrogate"),
+                        anyMap(),
+                        any(RowMapper.class)))
+                .thenReturn(List.of(committed));
+
+        assertThat(ledger.reserve(committed, null)).isSameAs(committed);
+
+        verify(jdbc, never()).queryForObject(
+                contains("outcome_lock_active_epoch_for_reservation"),
+                any(MapSqlParameterSource.class),
+                any(Class.class));
+        verify(jdbc, never()).query(
+                contains("from outcome_process_projection where projection_id"),
+                any(MapSqlParameterSource.class),
+                any(RowMapper.class));
+    }
+
+    @Test
+    void newReservationFailsClosedWhenActiveEpochAuthorityIsAbsent() {
+        OutcomeOperation operation = operation(HASH_A);
+        when(jdbc.query(
+                        contains("from outcome_operation where tenant_surrogate"),
+                        anyMap(),
+                        any(RowMapper.class)))
+                .thenReturn(List.of());
+        when(jdbc.queryForObject(
+                        contains("outcome_lock_active_epoch_for_reservation"),
+                        any(MapSqlParameterSource.class),
+                        any(Class.class)))
+                .thenReturn(false, (Boolean) null);
+
+        for (int attempt = 0; attempt < 2; attempt++) {
+            assertThatThrownBy(() -> ledger.reserve(operation, null))
+                    .isInstanceOf(OutcomeLedgerRejectedException.class)
+                    .extracting(failure -> ((OutcomeLedgerRejectedException) failure).code())
+                    .isEqualTo("OUTCOME_STALE_EPOCH_AUTHORITY");
+        }
+        verify(jdbc, never()).query(
+                contains("from outcome_process_projection where projection_id"),
+                any(MapSqlParameterSource.class),
+                any(RowMapper.class));
+        verify(jdbc, never()).update(
+                contains("insert into outcome_operation ("), any(MapSqlParameterSource.class));
+    }
+
+    @Test
     void formalRequiredReservationRequiresAnAuthorizedActionRecord() {
         OutcomeProcessProjection projection = projection(NOW);
         OutcomeOperation missing = operationWithAuthority(
@@ -261,6 +319,10 @@ class JdbcOutcomeOperationLedgerTest {
         assertThat(ledger.reserve(operation, null)).isEqualTo(operation);
 
         InOrder order = inOrder(jdbc);
+        order.verify(jdbc).queryForObject(
+                contains("outcome_lock_active_epoch_for_reservation"),
+                any(MapSqlParameterSource.class),
+                any(Class.class));
         order.verify(jdbc).query(
                 contains("from outcome_process_projection where projection_id"),
                 any(MapSqlParameterSource.class),
