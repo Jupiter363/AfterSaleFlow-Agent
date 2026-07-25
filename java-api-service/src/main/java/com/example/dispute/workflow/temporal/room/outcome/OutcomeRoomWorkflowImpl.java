@@ -27,6 +27,8 @@ import java.util.Objects;
 public final class OutcomeRoomWorkflowImpl implements OutcomeRoomWorkflow {
 
   static final int MAX_INBOX_EVENTS = OutcomeWorkflowKernel.MAX_UNIQUE_RECEIPTS;
+  // Protobuf Duration's inclusive maximum whole-second value, expressed in milliseconds.
+  static final long MAX_TEMPORAL_TIMER_DELAY_MILLIS = 315_576_000_000_000L;
 
   private final ArrayDeque<QueuedWorkflowEvent> inbox = new ArrayDeque<>();
   private final Map<WorkflowEvent, QueuedWorkflowEvent> coalescedSignals = new LinkedHashMap<>();
@@ -536,11 +538,13 @@ public final class OutcomeRoomWorkflowImpl implements OutcomeRoomWorkflow {
     if (deadlineMillis <= currentTimeMillis) {
       return 0;
     }
+    long delayMillis;
     try {
-      return Math.subtractExact(deadlineMillis, currentTimeMillis);
+      delayMillis = Math.subtractExact(deadlineMillis, currentTimeMillis);
     } catch (ArithmeticException overflow) {
-      return Long.MAX_VALUE;
+      delayMillis = Long.MAX_VALUE;
     }
+    return Math.min(delayMillis, MAX_TEMPORAL_TIMER_DELAY_MILLIS);
   }
 
   private enum EventType {

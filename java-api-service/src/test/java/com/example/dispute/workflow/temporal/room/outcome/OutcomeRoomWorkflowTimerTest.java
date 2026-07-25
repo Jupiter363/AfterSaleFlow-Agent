@@ -202,14 +202,43 @@ class OutcomeRoomWorkflowTimerTest {
   @Test
   void reviewTimerDelaySaturatesOutsideTheEpochMilliRange() {
     assertThat(OutcomeRoomWorkflowImpl.boundedReviewDelayMillis(Instant.MAX, 0))
-        .isEqualTo(Long.MAX_VALUE);
+        .isEqualTo(OutcomeRoomWorkflowImpl.MAX_TEMPORAL_TIMER_DELAY_MILLIS);
     assertThat(OutcomeRoomWorkflowImpl.boundedReviewDelayMillis(Instant.MIN, 0)).isZero();
+    assertThat(OutcomeRoomWorkflowImpl.boundedReviewDelayMillis(
+        Instant.ofEpochMilli(OutcomeRoomWorkflowImpl.MAX_TEMPORAL_TIMER_DELAY_MILLIS), 0))
+        .isEqualTo(OutcomeRoomWorkflowImpl.MAX_TEMPORAL_TIMER_DELAY_MILLIS);
+    assertThat(OutcomeRoomWorkflowImpl.boundedReviewDelayMillis(
+        Instant.ofEpochMilli(OutcomeRoomWorkflowImpl.MAX_TEMPORAL_TIMER_DELAY_MILLIS + 1), 0))
+        .isEqualTo(OutcomeRoomWorkflowImpl.MAX_TEMPORAL_TIMER_DELAY_MILLIS);
     assertThat(OutcomeRoomWorkflowImpl.boundedReviewDelayMillis(
         Instant.ofEpochMilli(10), -10))
         .isEqualTo(20);
     assertThat(OutcomeRoomWorkflowImpl.boundedReviewDelayMillis(
         Instant.ofEpochMilli(10), 11))
         .isZero();
+  }
+
+  @Test
+  void farFutureDeadlineUsesARepresentableTimerAndRemainsReplayable() throws Exception {
+    Duration reviewWindow = Duration.ofMillis(
+        OutcomeRoomWorkflowImpl.MAX_TEMPORAL_TIMER_DELAY_MILLIS + 1);
+    Started started = start(reviewWindow, 0);
+    OutcomeWorkflowDiagnostics waiting = awaitDiagnostics(
+        started.workflow(), value -> value.phase().equals("WAITING_REVIEW"));
+    assertThat(waiting.rejectedSignalCount()).isZero();
+
+    OutcomeReviewDecisionReceipt decision = started.receipts().decision(
+        OutcomeWireTypes.ReviewDecision.REJECT,
+        0,
+        1,
+        started.start().reviewOpenedAt().plusSeconds(1));
+    started.workflow().reviewDecisionCommitted(decision);
+
+    OutcomeProjection result = WorkflowStub.fromTyped(started.workflow())
+        .getResult(OutcomeProjection.class);
+    assertThat(result.phase()).isEqualTo(OutcomeWireTypes.ProjectionPhase.DECISION_COMMITTED);
+    assertThat(result.terminalReviewReceiptRef()).isEqualTo(decision.receiptId());
+    replay(started.workflowId());
   }
 
   private Started start(Duration reviewWindow, int operationCount) {
