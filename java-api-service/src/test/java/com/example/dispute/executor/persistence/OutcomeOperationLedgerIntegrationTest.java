@@ -161,7 +161,7 @@ class OutcomeOperationLedgerIntegrationTest {
         assertThatThrownBy(() -> ledger.reserve(stale, null))
                 .isInstanceOf(OutcomeLedgerRejectedException.class)
                 .extracting(failure -> ((OutcomeLedgerRejectedException) failure).code())
-                .isEqualTo("OUTCOME_STALE_PROJECTION");
+                .isEqualTo("OUTCOME_STALE_EPOCH_AUTHORITY");
         assertThat(number(
                         "select count(*) from outcome_operation where projection_id = ?",
                         fixture.projectionId()))
