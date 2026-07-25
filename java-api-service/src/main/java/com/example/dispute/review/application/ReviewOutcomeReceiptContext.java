@@ -49,7 +49,7 @@ public record ReviewOutcomeReceiptContext(
         requireCount(requiredOperationCount,"requiredOperationCount");
         requireHash(idempotencyKeyHash,"idempotencyKeyHash");
         requireCount(sourceRevision,"sourceRevision");
-        requireCount(committedEventSequence,"committedEventSequence");
+        requirePositiveCount(committedEventSequence,"committedEventSequence");
         if((approvedActionSnapshotRef==null)!=(operationKeyHash==null))
             throw new IllegalArgumentException(
                     "approvedActionSnapshotRef and operationKeyHash must have the same approval semantics");
@@ -60,8 +60,10 @@ public record ReviewOutcomeReceiptContext(
         if(authorization==null)
             throw new IllegalArgumentException("server-side packet authorization is required");
         requireHash(authorization.actionHash(),"authorization.actionHash");
-        if(sourceRevision>authorization.processRevision())
-            throw new IllegalArgumentException("sourceRevision cannot exceed authorization processRevision");
+        if(sourceRevision==MAX_SAFE_INTEGER
+                || authorization.processRevision()!=sourceRevision+1)
+            throw new IllegalArgumentException(
+                    "authorization revision must be exactly sourceRevision + 1");
     }
 
     /** Canonical request-hash preimage. The requestHash itself is the digest over this binding. */
@@ -109,6 +111,7 @@ public record ReviewOutcomeReceiptContext(
         binding.put("policy_version",authorization.policyVersion());
         binding.put("process_revision",authorization.processRevision());
         binding.put("review_task_id",authorization.reviewTaskId());
+        binding.put("review_opened_at",authorization.reviewOpenedAt().toInstant().toString());
         binding.put("reviewer_authority_hash",authorization.reviewerAuthorityHash());
         binding.put("room_epoch",authorization.roomEpoch());
         binding.put("schema_version",authorization.schemaVersion());
@@ -146,5 +149,10 @@ public record ReviewOutcomeReceiptContext(
     private static void requireCount(long value,String name) {
         if(value<0||value>MAX_SAFE_INTEGER)
             throw new IllegalArgumentException(name+" is outside the safe range");
+    }
+
+    private static void requirePositiveCount(long value,String name) {
+        requireCount(value,name);
+        if(value==0) throw new IllegalArgumentException(name+" must be positive");
     }
 }

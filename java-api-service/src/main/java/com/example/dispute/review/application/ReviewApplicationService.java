@@ -53,6 +53,7 @@ import java.time.DayOfWeek;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
@@ -371,7 +372,7 @@ public class ReviewApplicationService {
                 "review-packet-authorization.v1",task.getCaseId(),task.getId(),
                 sha256("reviewer-authority:v1:"+actor.actorId()),packet.getId(),packet.getPacketVersion(),
                 packetContentHash(packet),packet.getActionHash(),task.getTaskStatus().name(),policyVersion,
-                reviewDeadline(task,packet),roomEpoch,processRevision,fencingToken,refs);
+                task.getCreatedAt(),reviewDeadline(task,packet),roomEpoch,processRevision,fencingToken,refs);
     }
 
     // 所属模块：【平台人工终审 / 应用编排层】「ReviewApplicationService.decide(String,ReviewDecisionCommand,AuthenticatedActor)」。
@@ -470,7 +471,9 @@ public class ReviewApplicationService {
         if(!isOpen(task.getTaskStatus())) throw new BusinessException(ErrorCode.CASE_STATUS_INVALID,"review task is not open",Map.of("status",task.getTaskStatus().name()));
         if(!Objects.equals(task.getAssignedReviewerId(),actor.actorId())) throw new ForbiddenException("only the assigned reviewer can submit this decision");
         OffsetDateTime deadline=reviewDeadline(task,packet);
-        if(OffsetDateTime.now(ZoneOffset.UTC).isAfter(deadline)) throw new BusinessException(
+        OffsetDateTime committedAt=OffsetDateTime.now(ZoneOffset.UTC)
+                .truncatedTo(ChronoUnit.MICROS);
+        if(committedAt.isAfter(deadline)) throw new BusinessException(
                 ErrorCode.CASE_STATUS_INVALID,"review decision deadline has expired",Map.of("deadline",deadline.toString()));
 
         JsonNode original=read(packet.getRemedyJson());
@@ -534,7 +537,7 @@ public class ReviewApplicationService {
                 "APPROVAL_"+id(),task.getCaseId(),taskId,task.getPlanId(),actor.actorId(),actor.role().name(),
                 command.decision(),original.toString(),approved.toString(),command.reason(),hash,
                 packet.getId(),packet.getPacketVersion(),policyDecision.getPolicyVersion(),
-                actionSnapshotHash,packet.getExpiresAt()));
+                actionSnapshotHash,packet.getExpiresAt(),committedAt));
         auditRecorder.record(actor,"REVIEW_DECIDED","REVIEW_TASK",taskId,task.getCaseId(),
                 Map.of("task_status",submittedTaskStatus,"plan",original),Map.of("task_status",task.getTaskStatus().name(),"approved_plan",approved));
         switch (command.decision()) {
@@ -643,6 +646,8 @@ public class ReviewApplicationService {
         request.put("policy_version",policyVersion);
         request.put("process_revision",processRevision);
         request.put("reason",command.reason());
+        if(outcomeContext!=null)
+            request.put("review_opened_at",task.getCreatedAt().toInstant().toString());
         request.put("task_id",task.getId());
         request.put("task_status",submittedTaskStatus);
         if(outcomeContext!=null)
@@ -679,6 +684,7 @@ public class ReviewApplicationService {
                 && Objects.equals(expected.actionHash(),packet.getActionHash())
                 && Objects.equals(expected.policyVersion(),policyVersion)
                 && Objects.equals(expected.taskStatus(),submittedTaskStatus)
+                && expected.reviewOpenedAt().isEqual(task.getCreatedAt())
                 && expected.deadline().isEqual(reviewDeadline(task,packet))
                 && Objects.equals(context.requestHash(),requestHash)
                 && Objects.equals(context.idempotencyKeyHash(),sha256(command.idempotencyKey()))

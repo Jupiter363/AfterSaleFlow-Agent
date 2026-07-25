@@ -34,8 +34,9 @@ class ReviewOutcomeProtocolAdapterTest {
                 "2".repeat(64),1,"3".repeat(64),2,9,true,
                 new ReviewPacketAuthorizationView(
                         "review-packet-authorization.v1","CASE_1","TASK_1",reviewerAuthorityHash(),
-                        "PACKET_1",2,"a".repeat(64),"c".repeat(64),"PENDING","policy-v1",
-                        committedAt.plusHours(1),4,3,7,java.util.Map.of("packet","PACKET_1")));
+                         "PACKET_1",2,"a".repeat(64),"c".repeat(64),"PENDING","policy-v1",
+                         committedAt.minusHours(1),committedAt.plusHours(1),4,3,7,
+                         java.util.Map.of("packet","PACKET_1")));
 
         var wire=ReviewOutcomeProtocolAdapter.humanDecision(receipt,context);
 
@@ -117,7 +118,7 @@ class ReviewOutcomeProtocolAdapterTest {
         assertThat(authorizationBinding).containsOnlyKeys(
                         "action_hash","authorized_artifact_refs","case_id","deadline",
                         "fencing_token","packet_content_hash","packet_id","packet_version",
-                        "policy_version","process_revision","review_task_id",
+                        "policy_version","process_revision","review_opened_at","review_task_id",
                         "reviewer_authority_hash","room_epoch","schema_version","task_status");
         assertThatThrownBy(() -> context.canonicalRequestBinding().put("forged","value"))
                 .isInstanceOf(UnsupportedOperationException.class);
@@ -135,11 +136,64 @@ class ReviewOutcomeProtocolAdapterTest {
                 .hasMessageContaining("requiredOperationCount");
         assertThatThrownBy(() -> context(authorization,"b".repeat(64),"1".repeat(64),1,4))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("sourceRevision");
+                .hasMessageContaining("exactly sourceRevision + 1");
+        assertThatThrownBy(() -> context(authorization,"b".repeat(64),"1".repeat(64),1,3))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("exactly sourceRevision + 1");
+        assertThatThrownBy(() -> context(authorization,"b".repeat(64),"1".repeat(64),1,1))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("exactly sourceRevision + 1");
+        assertThatThrownBy(() -> context(
+                        authorization,"b".repeat(64),"1".repeat(64),1,2,0))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("committedEventSequence must be positive");
+        long maxSafeInteger=9_007_199_254_740_991L;
+        assertThatThrownBy(() -> context(
+                        authorization("c".repeat(64),maxSafeInteger),
+                        "b".repeat(64),"1".repeat(64),1,maxSafeInteger,maxSafeInteger))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("exactly sourceRevision + 1");
         assertThatThrownBy(() -> context(
                         authorization("not-a-hash"),"b".repeat(64),"1".repeat(64),1,2))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("authorization.actionHash");
+    }
+
+    @Test
+    void preDeadlineCommitRemainsValidWhenDeliveryOccursAfterDeadline() {
+        OffsetDateTime openedAt=OffsetDateTime.of(2026,7,24,8,0,0,0,ZoneOffset.UTC);
+        OffsetDateTime deadline=openedAt.plusHours(2);
+        OffsetDateTime committedAt=deadline.minusNanos(1);
+        OffsetDateTime deliveredAt=deadline.plusHours(3);
+        ReviewPacketAuthorizationView authorization=new ReviewPacketAuthorizationView(
+                "review-packet-authorization.v1","CASE_1","TASK_1",reviewerAuthorityHash(),
+                "PACKET_1",2,"a".repeat(64),"c".repeat(64),"PENDING","policy-v1",
+                openedAt,deadline,4,3,7,Map.of("packet","PACKET_1"));
+        ReviewDecisionReceiptView receipt=ReviewDecisionReceiptTestFixture.mint(
+                "review-decision-receipt.v1","RECEIPT_1","HUMAN_DECISION","TASK_1","CASE_1",
+                "PACKET_1",2,"a".repeat(64),"APPROVE","reviewer-local","policy-v1",
+                "b".repeat(64),"c".repeat(64),"c".repeat(64),4,7,3,true,false,committedAt);
+
+        var wire=ReviewOutcomeProtocolAdapter.humanDecision(
+                receipt,context(authorization,"b".repeat(64),"1".repeat(64),1,2));
+
+        assertThat(deliveredAt).isAfter(deadline);
+        assertThat(wire.committedAt()).isEqualTo(committedAt.toInstant());
+    }
+
+    @Test
+    void commitOutsideAuthoritativeReviewWindowIsRejected() {
+        ReviewPacketAuthorizationView authorization=authorization("c".repeat(64));
+        ReviewDecisionReceiptView receipt=ReviewDecisionReceiptTestFixture.mint(
+                "review-decision-receipt.v1","RECEIPT_1","HUMAN_DECISION","TASK_1","CASE_1",
+                "PACKET_1",2,"a".repeat(64),"APPROVE","reviewer-local","policy-v1",
+                "b".repeat(64),"c".repeat(64),"c".repeat(64),4,7,3,true,false,
+                authorization.deadline().plusNanos(1));
+
+        assertThatThrownBy(() -> ReviewOutcomeProtocolAdapter.humanDecision(
+                        receipt,context(authorization,"b".repeat(64),"1".repeat(64),1,2)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("authoritative review window");
     }
 
     private static ReviewOutcomeReceiptContext context(
@@ -148,21 +202,39 @@ class ReviewOutcomeProtocolAdapterTest {
             String operationKeyHash,
             long operationCount,
             long sourceRevision) {
+        return context(
+                authorization,requestHash,operationKeyHash,operationCount,sourceRevision,9);
+    }
+
+    private static ReviewOutcomeReceiptContext context(
+            ReviewPacketAuthorizationView authorization,
+            String requestHash,
+            String operationKeyHash,
+            long operationCount,
+            long sourceRevision,
+            long committedEventSequence) {
         return new ReviewOutcomeReceiptContext(
                 "outcome:CASE_1:4","d".repeat(64),requestHash,
                 "reviewer-authority:"+reviewerAuthorityHash(),
                 "action-snapshot:original","action-snapshot:approved","e".repeat(64),
                 "reason:RECEIPT_1","f".repeat(64),operationKeyHash,"operations:RECEIPT_1",
-                "2".repeat(64),operationCount,"3".repeat(64),sourceRevision,9,true,
+                "2".repeat(64),operationCount,"3".repeat(64),sourceRevision,
+                committedEventSequence,true,
                 authorization);
     }
 
     private static ReviewPacketAuthorizationView authorization(String actionHash) {
+        return authorization(actionHash,3);
+    }
+
+    private static ReviewPacketAuthorizationView authorization(
+            String actionHash,long processRevision) {
         OffsetDateTime committedAt=OffsetDateTime.of(2026,7,24,9,0,0,0,ZoneOffset.UTC);
         return new ReviewPacketAuthorizationView(
                 "review-packet-authorization.v1","CASE_1","TASK_1",reviewerAuthorityHash(),
                 "PACKET_1",2,"a".repeat(64),actionHash,"PENDING","policy-v1",
-                committedAt.plusHours(1),4,3,7,Map.of("packet","PACKET_1"));
+                committedAt.minusHours(1),committedAt.plusHours(1),4,processRevision,7,
+                Map.of("packet","PACKET_1"));
     }
 
     private static String reviewerAuthorityHash() {

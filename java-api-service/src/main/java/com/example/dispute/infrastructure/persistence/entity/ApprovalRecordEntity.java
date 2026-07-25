@@ -96,6 +96,30 @@ public class ApprovalRecordEntity extends AbstractEntity {
             String policyVersion,
             String actionSnapshotHash,
             OffsetDateTime approvalExpiresAt) {
+        return recordFrozen(
+                id, caseId, taskId, planId, reviewerId, role, decision, original, approved,
+                reason, idempotencyHash, reviewPacketId, reviewPacketVersion, policyVersion,
+                actionSnapshotHash, approvalExpiresAt, null);
+    }
+
+    public static ApprovalRecordEntity recordFrozen(
+            String id,
+            String caseId,
+            String taskId,
+            String planId,
+            String reviewerId,
+            String role,
+            ApprovalDecisionType decision,
+            String original,
+            String approved,
+            String reason,
+            String idempotencyHash,
+            String reviewPacketId,
+            int reviewPacketVersion,
+            String policyVersion,
+            String actionSnapshotHash,
+            OffsetDateTime approvalExpiresAt,
+            OffsetDateTime committedAt) {
         ApprovalRecordEntity record =
                 record(
                         id,
@@ -114,6 +138,9 @@ public class ApprovalRecordEntity extends AbstractEntity {
         record.policyVersion = policyVersion;
         record.actionSnapshotHash = actionSnapshotHash;
         record.approvalExpiresAt = approvalExpiresAt;
+        record.createdAt = committedAt == null
+                ? null
+                : committedAt.withOffsetSameInstant(ZoneOffset.UTC);
         return record;
     }
     // 所属模块：【PostgreSQL 事实模型 / JPA 实体层】「ApprovalRecordEntity.prePersist()」。
@@ -121,7 +148,9 @@ public class ApprovalRecordEntity extends AbstractEntity {
     // 上游调用：「ApprovalRecordEntity.prePersist()」由使用「ApprovalRecordEntity」的控制器、应用服务、Workflow Activity 或测试场景触发。
     // 下游影响：「ApprovalRecordEntity.prePersist()」只产生当前对象的返回值或字段变化，不访问额外基础设施。
     // 系统意义：「ApprovalRecordEntity.prePersist()」直接影响 PostgreSQL 事实投影；实体记录是 API 查询投影和审计依据，写入必须服从上层事务与状态机
-    @PrePersist void prePersist(){createdAt=OffsetDateTime.now(ZoneOffset.UTC);}
+    @PrePersist void prePersist(){
+        if(createdAt==null) createdAt=OffsetDateTime.now(ZoneOffset.UTC);
+    }
     // 所属模块：【PostgreSQL 事实模型 / JPA 实体层】「ApprovalRecordEntity.getCaseId()」。
     // 具体功能：「ApprovalRecordEntity.getCaseId()」：读取「ApprovalRecordEntity」中的「caseId」状态，向 JPA、应用服务或序列化层返回「String」。
     // 上游调用：「ApprovalRecordEntity.getCaseId()」的上游调用点包括 「PostReviewOrchestrationService.audit」。

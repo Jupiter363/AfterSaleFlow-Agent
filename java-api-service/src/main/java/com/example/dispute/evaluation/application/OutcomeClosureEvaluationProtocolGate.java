@@ -10,21 +10,26 @@ import java.util.Optional;
 /** Read-only ordering gate over Java-committed closure and evaluation receipts. */
 public final class OutcomeClosureEvaluationProtocolGate {
 
-    private final OutcomeOperationLedger ledger;
+    private static final long MAX_SAFE_INTEGER = 9_007_199_254_740_991L;
     private final AuthoritativeClosureReceiptReader closureReceiptReader;
+    private final AuthoritativeEvaluationReceiptReader evaluationReceiptReader;
 
-    public OutcomeClosureEvaluationProtocolGate(OutcomeOperationLedger ledger) {
-        this(ledger, (ignoredExpectation, ignoredReceiptId) -> Optional.empty());
+    /** Runtime is intentionally unregistered; the default boundary therefore fails closed. */
+    public OutcomeClosureEvaluationProtocolGate() {
+        this(
+                (ignoredExpectation, ignoredReceiptId) -> Optional.empty(),
+                ignoredLookup -> Optional.empty());
     }
 
     public OutcomeClosureEvaluationProtocolGate(
-            OutcomeOperationLedger ledger,
-            AuthoritativeClosureReceiptReader closureReceiptReader) {
-        if (ledger == null || closureReceiptReader == null) {
-            throw new IllegalArgumentException("ledger and closureReceiptReader are required");
+            AuthoritativeClosureReceiptReader closureReceiptReader,
+            AuthoritativeEvaluationReceiptReader evaluationReceiptReader) {
+        if (closureReceiptReader == null || evaluationReceiptReader == null) {
+            throw new IllegalArgumentException(
+                    "closureReceiptReader and evaluationReceiptReader are required");
         }
-        this.ledger = ledger;
         this.closureReceiptReader = closureReceiptReader;
+        this.evaluationReceiptReader = evaluationReceiptReader;
     }
 
     public ClosedSnapshot acceptCommittedClosure(
@@ -33,18 +38,19 @@ public final class OutcomeClosureEvaluationProtocolGate {
         if (expectation == null || receipt == null) {
             throw new IllegalArgumentException("expectation and closure receipt are required");
         }
-        OutcomeClosureReceipt stored =
+        AuthoritativeClosureReceiptReader.CommittedClosureSnapshot committed =
                 closureReceiptReader
-                        .findCommitted(expectation, receipt.receiptId())
+                        .findCommittedWithReadiness(expectation, receipt.receiptId())
                         .orElseThrow(
                                 () ->
                                         new IllegalStateException(
-                                                "authoritative closure receipt is missing"));
+                                                "authoritative atomic closure snapshot is missing"));
+        OutcomeClosureReceipt stored = committed.receipt();
         if (!stored.equals(receipt)) {
             throw new IllegalStateException(
                     "claimed closure receipt does not exactly match the authoritative record");
         }
-        OutcomeClosureReadiness readiness = ledger.closureReadiness(expectation);
+        OutcomeClosureReadiness readiness = committed.readiness();
         if (!readiness.closureReady()
                 || readiness.unresolvedOperationCount() != 0
                 || readiness.blockedOperationCount() != 0
@@ -60,6 +66,7 @@ public final class OutcomeClosureEvaluationProtocolGate {
                 || readiness.fencingToken() != expectation.fencingToken()
                 || stored.fence() != expectation.fencingToken()
                 || stored.sourceRevision() != expectation.outcomeRevision()
+                || expectation.outcomeRevision() >= MAX_SAFE_INTEGER
                 || stored.revision() != expectation.outcomeRevision() + 1) {
             throw new IllegalStateException(
                     "Java ledger is not ready for the committed closure receipt");
@@ -79,27 +86,48 @@ public final class OutcomeClosureEvaluationProtocolGate {
 
     public EvaluationAcceptance acceptCommittedEvaluation(
             ClosedSnapshot closed, OutcomeEvaluationReceipt receipt) {
-        if (closed == null || receipt == null
-                || !closed.workflowId().equals(receipt.workflowId())
-                || !closed.caseId().equals(receipt.caseId())
-                || !closed.snapshotRef().equals(receipt.closedSnapshotRef())
-                || !closed.snapshotHash().equals(receipt.closedSnapshotHash())
-                || closed.epoch() != receipt.epoch()
-                || closed.fence() != receipt.fence()
-                || closed.revision() != receipt.sourceRevision()
-                || receipt.revision() != closed.revision() + 1
-                || receipt.status() != OutcomeWireTypes.EvaluationStatus.SUCCEEDED
-                || receipt.caseReopened()) {
+        if (closed == null || receipt == null) {
+            throw new IllegalArgumentException("closed snapshot and evaluation receipt are required");
+        }
+        OutcomeEvaluationReceipt stored =
+                evaluationReceiptReader
+                        .findCommitted(
+                                new AuthoritativeEvaluationReceiptReader.EvaluationReceiptLookup(
+                                        closed.workflowId(),
+                                        closed.caseId(),
+                                        closed.epoch(),
+                                        closed.revision(),
+                                        closed.fence(),
+                                        receipt.receiptId()))
+                        .orElseThrow(
+                                () ->
+                                        new IllegalStateException(
+                                                "authoritative evaluation receipt is missing"));
+        if (!stored.equals(receipt)) {
+            throw new IllegalStateException(
+                    "claimed evaluation receipt does not exactly match the authoritative record");
+        }
+        if (!closed.workflowId().equals(stored.workflowId())
+                || !closed.caseId().equals(stored.caseId())
+                || !closed.snapshotRef().equals(stored.closedSnapshotRef())
+                || !closed.snapshotHash().equals(stored.closedSnapshotHash())
+                || closed.epoch() != stored.epoch()
+                || closed.fence() != stored.fence()
+                || closed.revision() != stored.sourceRevision()
+                || closed.revision() >= MAX_SAFE_INTEGER
+                || stored.revision() != closed.revision() + 1
+                || stored.status() != OutcomeWireTypes.EvaluationStatus.SUCCEEDED
+                || stored.caseReopened()) {
             throw new IllegalArgumentException(
                     "evaluation does not read the exact committed CLOSED snapshot");
         }
         return new EvaluationAcceptance(
                 closed,
-                receipt.receiptId(),
-                receipt.receiptHash(),
-                receipt.evaluationLedgerRef(),
-                receipt.evaluationLedgerHash(),
-                receipt.status().name(),
+                stored.receiptId(),
+                stored.receiptHash(),
+                stored.evaluationLedgerRef(),
+                stored.evaluationLedgerHash(),
+                stored.status().name(),
                 false,
                 true);
     }

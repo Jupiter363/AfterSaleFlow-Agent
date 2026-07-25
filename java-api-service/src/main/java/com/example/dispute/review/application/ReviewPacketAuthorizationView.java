@@ -15,6 +15,7 @@ public record ReviewPacketAuthorizationView(
         String actionHash,
         String taskStatus,
         String policyVersion,
+        OffsetDateTime reviewOpenedAt,
         OffsetDateTime deadline,
         long roomEpoch,
         long processRevision,
@@ -33,7 +34,10 @@ public record ReviewPacketAuthorizationView(
         requireText(actionHash,"actionHash");
         requireText(taskStatus,"taskStatus");
         requireText(policyVersion,"policyVersion");
+        if(reviewOpenedAt==null) throw new IllegalArgumentException("reviewOpenedAt is required");
         if(deadline==null) throw new IllegalArgumentException("deadline is required");
+        if(!reviewOpenedAt.isBefore(deadline))
+            throw new IllegalArgumentException("reviewOpenedAt must be before deadline");
         if(roomEpoch<1||processRevision<0||fencingToken<1)
             throw new IllegalArgumentException("epoch, revision, and fence are invalid");
         authorizedArtifactRefs=authorizedArtifactRefs==null?Map.of():Map.copyOf(authorizedArtifactRefs);

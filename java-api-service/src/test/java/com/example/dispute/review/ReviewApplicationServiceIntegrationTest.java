@@ -293,6 +293,8 @@ class ReviewApplicationServiceIntegrationTest {
         String taskId=service.createForWorkflow("CASE_review","REMEDY_review");
         AuthenticatedActor reviewer=new AuthenticatedActor("reviewer-local",ActorRole.PLATFORM_REVIEWER);
         ReviewPacketAuthorizationView authorization=service.packetAuthorization(taskId,reviewer,4,3,7);
+        assertThat(authorization.reviewOpenedAt())
+                .isEqualTo(tasks.findById(taskId).orElseThrow().getCreatedAt());
         ReviewDecisionCommand command=new ReviewDecisionCommand(
                 ApprovalDecisionType.APPROVE,"trusted approval",null,"trusted-key");
         ReviewOutcomeReceiptContext unsignedContext=trustedContext(authorization,"0".repeat(64));
@@ -314,6 +316,9 @@ class ReviewApplicationServiceIntegrationTest {
         assertThat(result.receipt().outcomeEpoch()).isEqualTo(4);
         assertThat(result.receipt().fencingToken()).isEqualTo(7);
         assertThat(result.receipt().processRevision()).isEqualTo(3);
+        assertThat(result.receipt().recordedAt())
+                .isEqualTo(approvals.findById(result.approvalRecordId()).orElseThrow().getCreatedAt());
+        assertThat(result.receipt().recordedAt()).isBeforeOrEqualTo(authorization.deadline());
         assertThat(ReviewOutcomeProtocolAdapter.humanDecision(result.receipt(),context).executionAuthorized())
                 .isTrue();
         assertThatThrownBy(() -> service.decide(
@@ -338,7 +343,8 @@ class ReviewApplicationServiceIntegrationTest {
             "authorization.reviewTaskId","authorization.reviewerAuthorityHash",
             "authorization.packetId","authorization.packetVersion",
             "authorization.packetContentHash","authorization.actionHash",
-            "authorization.taskStatus","authorization.policyVersion","authorization.deadline",
+            "authorization.taskStatus","authorization.policyVersion",
+            "authorization.reviewOpenedAt","authorization.deadline",
             "authorization.roomEpoch","authorization.processRevision",
             "authorization.fencingToken","authorization.authorizedArtifactRefs"
     })
@@ -356,17 +362,18 @@ class ReviewApplicationServiceIntegrationTest {
                 trustedRequestHash(authorization,reviewer,command,unsignedContext));
         service.decideWithTrustedOutcomeContext(taskId,command,reviewer,context);
 
-        ReviewOutcomeReceiptContext substituted=substituteContext(context,field);
-        if(!"requestHash".equals(field)) {
-            substituted=substituted.withRequestHash(
-                    trustedRequestHash(authorization,reviewer,command,substituted));
-        }
-        ReviewOutcomeReceiptContext replayContext=substituted;
-
-        assertThatThrownBy(() -> service.decideWithTrustedOutcomeContext(
-                        taskId,command,reviewer,replayContext))
+        assertThatThrownBy(() -> {
+                    ReviewOutcomeReceiptContext substituted=substituteContext(context,field);
+                    if(!"requestHash".equals(field)) {
+                        substituted=substituted.withRequestHash(
+                                trustedRequestHash(authorization,reviewer,command,substituted));
+                    }
+                    service.decideWithTrustedOutcomeContext(
+                            taskId,command,reviewer,substituted);
+                })
                 .as("trusted context field %s",field)
-                .isInstanceOf(IdempotencyConflictException.class);
+                .isInstanceOfAny(
+                        IdempotencyConflictException.class,IllegalArgumentException.class);
     }
 
     private static ReviewOutcomeReceiptContext substituteContext(
@@ -414,6 +421,8 @@ class ReviewApplicationServiceIntegrationTest {
                 "actionHash".equals(field)?"9".repeat(64):source.actionHash(),
                 "taskStatus".equals(field)?"IN_REVIEW":source.taskStatus(),
                 "policyVersion".equals(field)?"approval-policy-v2":source.policyVersion(),
+                "reviewOpenedAt".equals(field)
+                        ?source.reviewOpenedAt().minusMinutes(1):source.reviewOpenedAt(),
                 "deadline".equals(field)?source.deadline().plusMinutes(1):source.deadline(),
                 "roomEpoch".equals(field)?source.roomEpoch()+1:source.roomEpoch(),
                 "processRevision".equals(field)?source.processRevision()+1:source.processRevision(),
@@ -455,6 +464,7 @@ class ReviewApplicationServiceIntegrationTest {
         request.put("policy_version",authorization.policyVersion());
         request.put("process_revision",authorization.processRevision());
         request.put("reason",command.reason());
+        request.put("review_opened_at",authorization.reviewOpenedAt().toInstant().toString());
         request.put("task_id",authorization.reviewTaskId());
         request.put("task_status",authorization.taskStatus());
         request.put("outcome_context",context.canonicalRequestBinding());

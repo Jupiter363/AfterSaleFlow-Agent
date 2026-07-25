@@ -121,6 +121,31 @@ class ReviewTemporalCommandIntegrationTest {
                                 .isInstanceOf(ReviewDecisionConflictException.class));
     }
 
+    @Test
+    void trustedOutcomeContextRejectsEqualGapAndZeroSequenceOrders() {
+        assertThatThrownBy(() -> context(true,3,4,3))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("exactly sourceRevision + 1");
+        assertThatThrownBy(() -> context(true,1,4,3))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("exactly sourceRevision + 1");
+        assertThatThrownBy(() -> context(true,2,0,3))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("committedEventSequence must be positive");
+    }
+
+    @Test
+    void delayedDeliveryPreservesTheDurableReviewOpenAndCommitTimes() {
+        OffsetDateTime deadline=NOW.plusHours(1);
+        OffsetDateTime deliveredAt=deadline.plusHours(4);
+
+        var wire=ReviewOutcomeProtocolAdapter.humanDecision(
+                decisionView(ApprovalDecisionType.APPROVE,true),context(true));
+
+        assertThat(deliveredAt).isAfter(deadline);
+        assertThat(wire.committedAt()).isEqualTo(NOW.toInstant());
+    }
+
     private static ReviewDecisionReceiptView decisionView(
             ApprovalDecisionType decision, boolean approval) {
         return ReviewDecisionReceiptTestFixture.mint(
@@ -147,6 +172,14 @@ class ReviewTemporalCommandIntegrationTest {
     }
 
     private static ReviewOutcomeReceiptContext context(boolean approval) {
+        return context(approval,2,4,3);
+    }
+
+    private static ReviewOutcomeReceiptContext context(
+            boolean approval,
+            long sourceRevision,
+            long committedEventSequence,
+            long processRevision) {
         return new ReviewOutcomeReceiptContext(
                 "outcome:CASE_1:4",
                 "0".repeat(64),
@@ -162,8 +195,8 @@ class ReviewTemporalCommandIntegrationTest {
                 "5".repeat(64),
                 approval ? 1 : 0,
                 "6".repeat(64),
-                2,
-                4,
+                sourceRevision,
+                committedEventSequence,
                 true,
                 new ReviewPacketAuthorizationView(
                         "review-packet-authorization.v1",
@@ -176,9 +209,10 @@ class ReviewTemporalCommandIntegrationTest {
                         FROZEN_ACTION_HASH,
                         "PENDING",
                         "policy-v1",
+                        NOW.minusHours(1),
                         NOW.plusHours(1),
                         4,
-                        3,
+                        processRevision,
                         7,
                         java.util.Map.of("packet","PACKET_1")));
     }

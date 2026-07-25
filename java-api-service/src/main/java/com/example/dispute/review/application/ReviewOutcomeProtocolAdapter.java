@@ -14,6 +14,7 @@ import java.util.regex.Pattern;
 /** Pure wire adapter. It does not start a Workflow, allocate an epoch, or invoke a tool. */
 public final class ReviewOutcomeProtocolAdapter {
 
+    private static final long MAX_SAFE_INTEGER=9_007_199_254_740_991L;
     private static final Pattern IDENTIFIER=Pattern.compile("[A-Za-z0-9][A-Za-z0-9._:-]{0,127}");
     private static final Pattern SHA_256=Pattern.compile("[0-9a-f]{64}");
 
@@ -42,6 +43,17 @@ public final class ReviewOutcomeProtocolAdapter {
         requireHash(receipt.frozenActionHash(),"frozenActionHash");
         if(receipt.recordedAt()==null)
             throw new IllegalArgumentException("receipt recordedAt is required");
+        if(receipt.recordedAt().isBefore(context.authorization().reviewOpenedAt())
+                || receipt.recordedAt().isAfter(context.authorization().deadline()))
+            throw new IllegalArgumentException(
+                    "receipt committedAt must be within the authoritative review window");
+        if(context.sourceRevision()<0
+                || context.sourceRevision()>=MAX_SAFE_INTEGER
+                || receipt.processRevision()!=context.sourceRevision()+1
+                || context.committedEventSequence()<1
+                || context.committedEventSequence()>MAX_SAFE_INTEGER)
+            throw new IllegalArgumentException(
+                    "receipt must carry the next revision and a positive committed event sequence");
         OutcomeWireTypes.ReviewDecision decision=reviewDecision(receipt.decision());
         boolean approval=decision==OutcomeWireTypes.ReviewDecision.APPROVE
                 || decision==OutcomeWireTypes.ReviewDecision.MODIFY_AND_APPROVE;

@@ -4,6 +4,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.dispute.evaluation.application.OutcomeClosureEvaluationProtocolGate;
+import com.example.dispute.evaluation.application.AuthoritativeClosureReceiptReader;
+import com.example.dispute.evaluation.application.AuthoritativeEvaluationReceiptReader;
 import com.example.dispute.evaluation.application.OutcomeClosurePrerequisiteService;
 import com.example.dispute.evaluation.application.OutcomeClosurePrerequisiteService.Kind;
 import com.example.dispute.evaluation.application.OutcomeClosurePrerequisiteService.Observation;
@@ -11,14 +13,8 @@ import com.example.dispute.evaluation.application.OutcomeClosurePrerequisiteServ
 import com.example.dispute.evaluation.application.OutcomeClosurePrerequisiteService.Status;
 import com.example.dispute.evaluation.application.SyntheticClosedOutcomeSnapshot;
 import com.example.dispute.evaluation.application.SyntheticOutcomeClosureEvaluationService;
-import com.example.dispute.executor.domain.ledger.OutcomeAttemptObservation;
 import com.example.dispute.executor.domain.ledger.OutcomeClosureReadiness;
-import com.example.dispute.executor.domain.ledger.OutcomeCompensationParent;
-import com.example.dispute.executor.domain.ledger.OutcomeOperation;
 import com.example.dispute.executor.domain.ledger.OutcomeOperationLedger;
-import com.example.dispute.executor.domain.ledger.OutcomeOperationReceipt;
-import com.example.dispute.executor.domain.ledger.OutcomeOperationState;
-import com.example.dispute.executor.domain.ledger.OutcomeProcessProjection;
 import com.example.dispute.workflow.contract.outcome.v1.OutcomeClosureReceipt;
 import com.example.dispute.workflow.contract.outcome.v1.OutcomeEvaluationReceipt;
 import com.example.dispute.workflow.contract.outcome.v1.OutcomeWireTypes;
@@ -119,28 +115,46 @@ class OutcomeClosureEvaluationOrderingTest {
 
     @Test
     void committedClosureThenEvaluationPreserveExactSnapshotOrdering() {
-        ClosureLedger ledger = new ClosureLedger(true);
         OutcomeClosureReceipt closure = closureReceipt();
+        OutcomeEvaluationReceipt evaluationReceipt = evaluationReceipt(closure);
+        int[] authoritativeClosureReads = {0};
+        OutcomeOperationLedger.ProjectionExpectation[] observedExpectation = {null};
+        AuthoritativeEvaluationReceiptReader.EvaluationReceiptLookup[] observedEvaluationLookup =
+                {null};
         OutcomeClosureEvaluationProtocolGate gate =
                 new OutcomeClosureEvaluationProtocolGate(
-                        ledger,
-                        (ignoredExpectation, receiptId) ->
-                                receiptId.equals(closure.receiptId())
-                                        ? Optional.of(closure)
-                                        : Optional.empty());
+                        (expectation, receiptId) -> {
+                            authoritativeClosureReads[0]++;
+                            observedExpectation[0] = expectation;
+                            return receiptId.equals(closure.receiptId())
+                                    ? Optional.of(committedClosure(expectation, closure, true))
+                                    : Optional.empty();
+                        },
+                        lookup -> {
+                            observedEvaluationLookup[0] = lookup;
+                            return lookup.receiptId().equals(evaluationReceipt.receiptId())
+                                    ? Optional.of(evaluationReceipt)
+                                    : Optional.empty();
+                        });
         OutcomeOperationLedger.ProjectionExpectation expectation = expectation();
 
         OutcomeClosureEvaluationProtocolGate.ClosedSnapshot closed =
                 gate.acceptCommittedClosure(expectation, closure);
         OutcomeClosureEvaluationProtocolGate.EvaluationAcceptance evaluation =
-                gate.acceptCommittedEvaluation(closed, evaluationReceipt(closure));
+                gate.acceptCommittedEvaluation(closed, evaluationReceipt);
 
         assertThat(closed.snapshotRef()).isEqualTo(closure.closedSnapshotRef());
         assertThat(closed.snapshotHash()).isEqualTo(closure.closedSnapshotHash());
         assertThat(evaluation.closedSnapshot()).isEqualTo(closed);
         assertThat(evaluation.caseReopened()).isFalse();
         assertThat(evaluation.readOnly()).isTrue();
-        assertThat(ledger.recordReceiptCalls).isZero();
+        assertThat(authoritativeClosureReads[0]).isOne();
+        assertThat(observedExpectation[0]).isEqualTo(expectation);
+        assertThat(observedEvaluationLookup[0].sourceRevision()).isEqualTo(closed.revision());
+        assertThat(observedEvaluationLookup[0].fence()).isEqualTo(closed.fence());
+        assertThat(Arrays.stream(OutcomeClosureEvaluationProtocolGate.class.getDeclaredFields())
+                        .map(Field::getType))
+                .noneMatch(OutcomeOperationLedger.class::equals);
     }
 
     @Test
@@ -148,8 +162,9 @@ class OutcomeClosureEvaluationOrderingTest {
         OutcomeClosureReceipt closure = closureReceipt();
         OutcomeClosureEvaluationProtocolGate gate =
                 new OutcomeClosureEvaluationProtocolGate(
-                        new ClosureLedger(false),
-                        (ignoredExpectation, ignoredReceiptId) -> Optional.of(closure));
+                        (expectation, ignoredReceiptId) ->
+                                Optional.of(committedClosure(expectation, closure, false)),
+                        ignoredLookup -> Optional.empty());
 
         assertThatThrownBy(() -> gate.acceptCommittedClosure(expectation(), closure))
                 .isInstanceOf(IllegalStateException.class)
@@ -159,11 +174,11 @@ class OutcomeClosureEvaluationOrderingTest {
     @Test
     void missingAuthoritativeClosureReceiptFailsClosedByDefault() {
         OutcomeClosureEvaluationProtocolGate gate =
-                new OutcomeClosureEvaluationProtocolGate(new ClosureLedger(true));
+                new OutcomeClosureEvaluationProtocolGate();
 
         assertThatThrownBy(() -> gate.acceptCommittedClosure(expectation(), closureReceipt()))
                 .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("authoritative closure receipt is missing");
+                .hasMessageContaining("authoritative atomic closure snapshot is missing");
     }
 
     @Test
@@ -173,11 +188,11 @@ class OutcomeClosureEvaluationOrderingTest {
                 closureReceiptWithClosedSnapshotHash("9".repeat(64));
         OutcomeClosureEvaluationProtocolGate gate =
                 new OutcomeClosureEvaluationProtocolGate(
-                        new ClosureLedger(true),
-                        (ignoredExpectation, receiptId) ->
+                        (expectation, receiptId) ->
                                 receiptId.equals(claimed.receiptId())
-                                        ? Optional.of(substituted)
-                                        : Optional.empty());
+                                        ? Optional.of(committedClosure(expectation, substituted, true))
+                                        : Optional.empty(),
+                        ignoredLookup -> Optional.empty());
 
         assertThat(substituted.receiptId()).isEqualTo(claimed.receiptId());
         assertThatThrownBy(() -> gate.acceptCommittedClosure(expectation(), claimed))
@@ -188,10 +203,13 @@ class OutcomeClosureEvaluationOrderingTest {
     @Test
     void evaluationMustSucceedAgainstTheExactAuthoritativeClosedSnapshot() {
         OutcomeClosureReceipt closure = closureReceipt();
+        OutcomeEvaluationReceipt failed = evaluationReceipt(
+                closure, OutcomeWireTypes.EvaluationStatus.FAILED);
         OutcomeClosureEvaluationProtocolGate gate =
                 new OutcomeClosureEvaluationProtocolGate(
-                        new ClosureLedger(true),
-                        (ignoredExpectation, ignoredReceiptId) -> Optional.of(closure));
+                        (expectation, ignoredReceiptId) ->
+                                Optional.of(committedClosure(expectation, closure, true)),
+                        ignoredLookup -> Optional.of(failed));
         OutcomeClosureEvaluationProtocolGate.ClosedSnapshot closed =
                 gate.acceptCommittedClosure(expectation(), closure);
 
@@ -199,9 +217,7 @@ class OutcomeClosureEvaluationOrderingTest {
                         () ->
                                 gate.acceptCommittedEvaluation(
                                         closed,
-                                        evaluationReceipt(
-                                                closure,
-                                                OutcomeWireTypes.EvaluationStatus.FAILED)))
+                                        failed))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("exact committed CLOSED snapshot");
         assertThat(
@@ -209,6 +225,32 @@ class OutcomeClosureEvaluationOrderingTest {
                                 OutcomeClosureEvaluationProtocolGate.ClosedSnapshot.class
                                         .getDeclaredConstructors()))
                 .allMatch(constructor -> Modifier.isPrivate(constructor.getModifiers()));
+    }
+
+    @Test
+    void missingOrSubstitutedEvaluationReceiptFailsClosed() {
+        OutcomeClosureReceipt closure = closureReceipt();
+        OutcomeEvaluationReceipt claimed = evaluationReceipt(closure);
+        OutcomeEvaluationReceipt substituted = evaluationReceiptWithLedgerHash(
+                closure, "9".repeat(64));
+        OutcomeClosureEvaluationProtocolGate missingGate = gate(
+                closure, ignoredLookup -> Optional.empty());
+        OutcomeClosureEvaluationProtocolGate.ClosedSnapshot missingClosed =
+                missingGate.acceptCommittedClosure(expectation(), closure);
+
+        assertThatThrownBy(() -> missingGate.acceptCommittedEvaluation(missingClosed, claimed))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("authoritative evaluation receipt is missing");
+
+        OutcomeClosureEvaluationProtocolGate substitutedGate = gate(
+                closure, ignoredLookup -> Optional.of(substituted));
+        OutcomeClosureEvaluationProtocolGate.ClosedSnapshot substitutedClosed =
+                substitutedGate.acceptCommittedClosure(expectation(), closure);
+        assertThat(substituted.receiptId()).isEqualTo(claimed.receiptId());
+        assertThatThrownBy(
+                        () -> substitutedGate.acceptCommittedEvaluation(substitutedClosed, claimed))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("exactly match");
     }
 
     private static Request successfulRequest() {
@@ -296,6 +338,19 @@ class OutcomeClosureEvaluationOrderingTest {
 
     private static OutcomeEvaluationReceipt evaluationReceipt(
             OutcomeClosureReceipt closure, OutcomeWireTypes.EvaluationStatus status) {
+        return evaluationReceipt(closure, status, "8".repeat(64));
+    }
+
+    private static OutcomeEvaluationReceipt evaluationReceiptWithLedgerHash(
+            OutcomeClosureReceipt closure, String evaluationLedgerHash) {
+        return evaluationReceipt(
+                closure, OutcomeWireTypes.EvaluationStatus.SUCCEEDED, evaluationLedgerHash);
+    }
+
+    private static OutcomeEvaluationReceipt evaluationReceipt(
+            OutcomeClosureReceipt closure,
+            OutcomeWireTypes.EvaluationStatus status,
+            String evaluationLedgerHash) {
         return new OutcomeEvaluationReceipt(
                 OutcomeEvaluationReceipt.SCHEMA_VERSION,
                 closure.workflowId(),
@@ -305,7 +360,7 @@ class OutcomeClosureEvaluationOrderingTest {
                 closure.closedSnapshotRef(),
                 closure.closedSnapshotHash(),
                 "fixture/evaluation/P7E2",
-                "8".repeat(64),
+                evaluationLedgerHash,
                 status,
                 Instant.parse("2026-07-24T05:01:00Z"),
                 closure.epoch(),
@@ -316,81 +371,33 @@ class OutcomeClosureEvaluationOrderingTest {
                 false);
     }
 
-    private static final class ClosureLedger implements OutcomeOperationLedger {
-        private final boolean ready;
-        private int recordReceiptCalls;
+    private static OutcomeClosureEvaluationProtocolGate gate(
+            OutcomeClosureReceipt closure,
+            AuthoritativeEvaluationReceiptReader evaluationReader) {
+        return new OutcomeClosureEvaluationProtocolGate(
+                (expectation, ignoredReceiptId) ->
+                        Optional.of(committedClosure(expectation, closure, true)),
+                evaluationReader);
+    }
 
-        private ClosureLedger(boolean ready) {
-            this.ready = ready;
-        }
-
-        @Override
-        public OutcomeProcessProjection createProjection(OutcomeProcessProjection projection) {
-            return projection;
-        }
-
-        @Override
-        public OutcomeProcessProjection advanceProjection(
-                ProjectionExpectation expectation,
-                OutcomeProcessProjection.ProcessState nextState,
-                Instant advancedAt) {
-            throw new UnsupportedOperationException();
-        }
-
-        @Override
-        public OutcomeOperation reserve(
-                OutcomeOperation operation, OutcomeCompensationParent compensationParent) {
-            throw new UnsupportedOperationException();
-        }
-
-        @Override
-        public OutcomeAttemptObservation appendAttempt(OutcomeAttemptObservation observation) {
-            throw new UnsupportedOperationException();
-        }
-
-        @Override
-        public OutcomeOperationReceipt recordReceipt(OutcomeOperationReceipt receipt) {
-            recordReceiptCalls++;
-            return receipt;
-        }
-
-        @Override
-        public Optional<OutcomeOperation> findOperation(OperationLookup lookup) {
-            return Optional.empty();
-        }
-
-        @Override
-        public Optional<OutcomeOperationReceipt> findReceipt(String operationId) {
-            return Optional.empty();
-        }
-
-        @Override
-        public List<OutcomeOperationState> readOperationStates(
-                ProjectionExpectation expectation) {
-            return List.of();
-        }
-
-        @Override
-        public List<OutcomeCompensationParent> findCompensationParents(
-                ProjectionExpectation expectation) {
-            return List.of();
-        }
-
-        @Override
-        public OutcomeClosureReadiness closureReadiness(ProjectionExpectation expectation) {
-            return new OutcomeClosureReadiness(
-                    expectation.projectionId(),
-                    expectation.tenantSurrogate(),
-                    expectation.caseId(),
-                    expectation.outcomeEpoch(),
-                    expectation.fencingToken(),
-                    1,
-                    1,
-                    ready ? 0 : 1,
-                    0,
-                    0,
-                    0,
-                    ready);
-        }
+    private static AuthoritativeClosureReceiptReader.CommittedClosureSnapshot committedClosure(
+            OutcomeOperationLedger.ProjectionExpectation expectation,
+            OutcomeClosureReceipt receipt,
+            boolean ready) {
+        return new AuthoritativeClosureReceiptReader.CommittedClosureSnapshot(
+                receipt,
+                new OutcomeClosureReadiness(
+                        expectation.projectionId(),
+                        expectation.tenantSurrogate(),
+                        expectation.caseId(),
+                        expectation.outcomeEpoch(),
+                        expectation.fencingToken(),
+                        1,
+                        1,
+                        ready ? 0 : 1,
+                        0,
+                        0,
+                        0,
+                        ready));
     }
 }
