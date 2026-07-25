@@ -444,7 +444,7 @@ describe("AdjudicationDraftView", () => {
   it.each([
     { packetStatus: "PREPARING", dueAt: "2026-08-01T10:00:00Z" },
     { packetStatus: "FROZEN", dueAt: "2026-07-23T10:00:00Z" },
-  ])("hides review entry when the structured task is not actionable", async (reviewTask) => {
+  ])("hides review entry for $packetStatus with due date $dueAt", async (reviewTask) => {
     const { wrapper } = await mountDraft(
       "PLATFORM_REVIEWER",
       vi.fn(),
