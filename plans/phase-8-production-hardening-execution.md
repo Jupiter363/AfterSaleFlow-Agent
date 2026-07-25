@@ -3,14 +3,14 @@
 ## Status
 
 ```text
-document_status: P8_0_CONTRACT_CANDIDATE
-plan_status: FROZEN_AWAITING_EXACT_SHA_BATCH_0
-P8.0: NOT_RUN
-contract_gate: P8.0 NOT_RUN
-implementation: BLOCKED
-engineering_execution: BLOCKED_PENDING_P8_0_ACCEPTANCE
-phase_8_engineering_implementation: BLOCKED
-phase_8_engineering_lane: BLOCKED_PENDING_P8_0_CHECKPOINT
+document_status: IMPLEMENTATION_INTEGRATED_AWAITING_ENGINEERING_CHECKPOINT
+plan_status: IMPLEMENTATION_INTEGRATED
+P8.0: PASS
+contract_gate: P8.0 PASS
+implementation: INTEGRATED
+engineering_execution: IMPLEMENTATION_INTEGRATED_ENGINEERING_CHECKPOINT_NOT_RUN
+phase_8_engineering_implementation: INTEGRATED
+phase_8_engineering_lane: ENGINEERING_ONLY_AWAITING_CHECKPOINT
 phase_8_external_release_lane: BLOCKED_PENDING_EXTERNAL_AUTHORIZATION_AND_EVIDENCE
 production_checkpoint: PENDING_EXTERNAL
 promotion_gate: PENDING
@@ -19,11 +19,23 @@ phase_7_engineering_evidence_E7: f1c1ca16228641f1072eb358c6df9235dc239914
 accepted_phase_7_checkpoint_A7: e3acedc64d161f0342c8db3d5c313c2f404ea462
 phase_7_engineering_checkpoint: PASS
 current_permission: PHASE_8_ENGINEERING_ONLY
-phase_8_contract_candidate_C8: TO_BE_RECORDED_AT_FREEZE
+phase_8_contract_candidate_C8: 74f4cb6bc2ac78f17aacdb36378e72ff650d60b6
 phase_8_contract_candidate_allowlist: 12_EXACT_PATHS_FROZEN
-phase_8_entry_evidence_E8: NOT_CREATED
-phase_8_entry_checkpoint_A8: NOT_CREATED
-next_phase_permission: BLOCKED_PENDING_P8_0_PASS
+phase_8_entry_evidence_E8: 3463e0cd774f80e452294fe32cf243bfa826eef0
+phase_8_entry_checkpoint_A8: 3c60bf5cc4e051a214e158cbf944fd6aba969f95
+next_phase_permission: PENDING_ENGINEERING_CHECKPOINT
+wave_1: INTEGRATED
+wave_2: INTEGRATED
+wave_3: INTEGRATED
+batch_0: PASS_113
+batch_1_static: PASS_88
+batch_1_maven_testcontainers: PASS_2
+batch_2_light: PASS_406
+batch_2_maven_unit: PASS_30
+batch_2_postgresql_testcontainers_flyway_integration: PASS_1
+implementation_p0: ALL_CLOSED
+engineering_candidate: PENDING
+engineering_checkpoint: NOT_RUN
 superseded_historical_C8: 6d4f9946ab357a7d3193ea1680473fe923322eb0
 superseded_historical_E8: 4dc398d359806ab41ea702df54112956d17920ae
 superseded_historical_A8: 7e3cbace3d206aef5eb23a03d36878a00634c9a9
@@ -54,11 +66,11 @@ light_test_process_ceiling: 2
 maven_testcontainers_lane_ceiling: 1
 ```
 
-This document is the frozen Phase 8 execution-plan component of a future P8.0 contract candidate.
-It is not an entry-evidence record and cannot attest its own candidate SHA. Phase 8 engineering
-implementation remains blocked until all P8.0 contract artifacts are frozen in one clean candidate,
-Batch 0 passes from that exact detached SHA, a later separate entry-evidence commit authenticates
-the result, and a final checkpoint-only acceptance commit validates the complete chain.
+The replacement P8.0 chain is accepted: contract-only `C8` `74f4cb6bc2ac78f17aacdb36378e72ff650d60b6`,
+evidence-only `E8` `3463e0cd774f80e452294fe32cf243bfa826eef0`, and checkpoint-only `A8`
+`3c60bf5cc4e051a214e158cbf944fd6aba969f95`. All three implementation waves and their P0 reviews
+are integrated. The engineering candidate and engineering checkpoint have not run, so this update
+records integration state only and grants no production, migration-promotion, or cleanup authority.
 
 The accepted Phase 7 chain is exact and immutable for this gate:
 
@@ -616,6 +628,8 @@ work, cross an ownership boundary, or reduce P0 review.
 
 ### P8-BATCH-0: Contract Entry
 
+`PASS`: the committed exact-C8 manifest records 113 tests, zero failures, zero errors, and zero
+skips. The frozen protocol below remains the authority for how that accepted result was produced.
 Run only after the exact P8.0 contract candidate is frozen. Verify the `C7/E7/A7` chain, contract
 status tokens, lane boundaries, ownership map, machine schedule, evidence tooling, inherited
 targets, absence of Phase 8 implementation, absence of V047, and absence of production activation.
@@ -628,11 +642,21 @@ remains blocked until the sole-parent checkpoint-only `A8` validates that eviden
 
 ### P8-BATCH-1: Foundation
 
+`PASS`: the focused static group recorded 88 passing tests and the serialized Maven/Testcontainers
+group recorded 2 passing tests. Existing per-source results remain authoritative where more
+specific than these totals.
+
 After the first reviewed implementation wave, run deduplicated focused checks for reference-query
 completeness, scheduler guards, additive V046 syntax and compatibility, deployment policy, OTel
 schema, and evidence-runner adversarial cases. This batch cannot activate a runtime or environment.
 
 ### P8-BATCH-2: Engineering Integration
+
+`PASS`: the light group recorded 406 passing tests, the seven-selector Maven unit command recorded
+30 passing tests, and the separate PostgreSQL Testcontainers/Flyway integration command recorded 1
+passing test. The integration command is
+`-Pintegration-test -Dit.test=AgentRunStreamReplayIntegrationTest verify`; the integration test is
+not a Surefire `-Dtest` selector.
 
 After all five slices integrate, run the scheduled disposable PostgreSQL migration/restart tests,
 scheduler transition and reconciliation tests, deployment rendering and policy tests, queue/pool

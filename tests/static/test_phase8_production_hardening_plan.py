@@ -904,32 +904,67 @@ def test_post_a8_engineering_batches_and_security_provider_are_frozen() -> None:
         "test",
     ]
 
-    batch_2_groups = {
-        group["id"]: group
-        for group in batches["batches"]["batch_2_integration"]["source_groups"]
-    }
-    batch_2_maven = batch_2_groups["phase8_wave_b_java_postgresql"]
-    assert batch_2_maven["cwd"] == "java-api-service"
-    assert batch_2_maven["shell"] is False
-    assert batch_2_maven["selectors"] == [
+    batch_2_source_groups = batches["batches"]["batch_2_integration"][
+        "source_groups"
+    ]
+    assert [group["id"] for group in batch_2_source_groups] == [
+        "phase8_wave_b_static_and_models",
+        "phase8_wave_b_java_unit",
+        "phase8_wave_b_postgresql_integration",
+    ]
+    batch_2_groups = {group["id"]: group for group in batch_2_source_groups}
+
+    resources = batches["resources"]
+    assert resources["maven_testcontainers_lanes"] == 1
+    assert resources["max_combined_maven_testcontainers_processes"] == 1
+
+    batch_2_unit = batch_2_groups["phase8_wave_b_java_unit"]
+    assert batch_2_unit["resource_class"] == "maven"
+    assert batch_2_unit["max_processes"] == 1
+    assert batch_2_unit["cwd"] == "java-api-service"
+    assert batch_2_unit["shell"] is False
+    assert batch_2_unit["selectors"] == [
         "AgentRunRecoverySchedulerTest",
         "AgentRunV2PropertiesTest",
         "HearingSchedulerModeTest",
         "JdbcHearingSchedulerDetectorTest",
         "StreamBackfillCoordinatorTest",
-        "AgentRunStreamReplayIntegrationTest",
         "AgentRunStreamRetentionManifestTest",
         "RedisAgentRunStreamFailoverTest",
     ]
-    assert batch_2_maven["argv"] == [
+    assert batch_2_unit["argv"] == [
         r".\mvnw.cmd",
         "-DforkCount=1",
         "-Dtest=AgentRunRecoverySchedulerTest,AgentRunV2PropertiesTest,"
         "HearingSchedulerModeTest,JdbcHearingSchedulerDetectorTest,"
-        "StreamBackfillCoordinatorTest,AgentRunStreamReplayIntegrationTest,"
-        "AgentRunStreamRetentionManifestTest,RedisAgentRunStreamFailoverTest",
+        "StreamBackfillCoordinatorTest,AgentRunStreamRetentionManifestTest,"
+        "RedisAgentRunStreamFailoverTest",
         "test",
     ]
+    unit_test_arg = next(
+        arg for arg in batch_2_unit["argv"] if arg.startswith("-Dtest=")
+    )
+    assert "IntegrationTest" not in unit_test_arg
+
+    batch_2_postgresql = batch_2_groups["phase8_wave_b_postgresql_integration"]
+    assert batch_2_postgresql["resource_class"] == "maven_testcontainers"
+    assert batch_2_postgresql["max_processes"] == 1
+    assert batch_2_postgresql["disposable_postgresql_only"] is True
+    assert batch_2_postgresql["cwd"] == "java-api-service"
+    assert batch_2_postgresql["shell"] is False
+    assert batch_2_postgresql["selectors"] == [
+        "AgentRunStreamReplayIntegrationTest"
+    ]
+    assert batch_2_postgresql["argv"] == [
+        r".\mvnw.cmd",
+        "-DforkCount=1",
+        "-Pintegration-test",
+        "-Dit.test=AgentRunStreamReplayIntegrationTest",
+        "verify",
+    ]
+    assert not any(
+        arg.startswith("-Dtest=") for arg in batch_2_postgresql["argv"]
+    )
 
     classifications = ["PRODUCT", "FIXTURE", "CONTRACT", "INFRA", "EXTERNAL_GATE"]
     assert batches["failure_classification"]["required_values"] == classifications

@@ -1,7 +1,7 @@
 schema_version: phase-test-batches.v1
 phase: 8
 name: cleanup-production-hardening
-document_status: FROZEN_CONTRACT_CANDIDATE_AWAITING_BATCH_0
+document_status: IMPLEMENTATION_INTEGRATED_AWAITING_ENGINEERING_CHECKPOINT
 
 documents:
   execution_plan: plans/phase-8-production-hardening-execution.md
@@ -16,9 +16,9 @@ documents:
 
 gate:
   contract_gate: P8.0
-  contract_gate_status: NOT_RUN
-  implementation_authorized: false
-  implementation_owners_state: BLOCKED_UNTIL_CHECKPOINT_ONLY_A8_ACCEPTS_P8_0_ENTRY
+  contract_gate_status: PASS
+  implementation_authorized: true
+  implementation_owners_state: IMPLEMENTATION_INTEGRATED_P0_CLOSED
   accepted_phase_7_candidate_C7: 4ddeeabb39ce7b7de41ecc4f44e17ece389d2840
   accepted_phase_7_evidence_E7: f1c1ca16228641f1072eb358c6df9235dc239914
   accepted_phase_7_checkpoint_A7: e3acedc64d161f0342c8db3d5c313c2f404ea462
@@ -30,10 +30,10 @@ gate:
     MIG-006: PENDING_PROMOTION
     MIG-007: PENDING_PROMOTION
   required_entry: EXACT_C7_E7_A7_PLUS_EXACT_C8_BATCH_0_PLUS_SOLE_PARENT_E8_EVIDENCE_PLUS_SOLE_PARENT_A8_CHECKPOINT
-  entry_decision: READY_FOR_EXACT_SHA_BATCH_0
-  entry_effect_status: NOT_REALIZED
+  entry_decision: ACCEPTED_AT_CHECKPOINT_ONLY_A8
+  entry_effect_status: REALIZED_ENGINEERING_ONLY
   entry_effect_after_A8_checkpoint: P8_0_ENGINEERING_ENTRY_PASS
-  current_engineering_state: CONTRACT_ONLY_IMPLEMENTATION_BLOCKED
+  current_engineering_state: IMPLEMENTATION_INTEGRATED_ENGINEERING_CHECKPOINT_NOT_RUN
   migration_state:
     MIG-006: PENDING_PROMOTION
     MIG-007: PENDING_PROMOTION
@@ -53,7 +53,7 @@ gate:
     production_cryptographic_execution_and_operator_attestation: REQUIRED_EXTERNAL
   candidate_topology:
     base_A7: e3acedc64d161f0342c8db3d5c313c2f404ea462
-    candidate_C8: TO_BE_RECORDED_AFTER_CONTRACT_ONLY_COMMIT
+    candidate_C8: 74f4cb6bc2ac78f17aacdb36378e72ff650d60b6
     C8_parent_count: 1
     C8_sole_parent_must_equal_A7: true
     C8_contract_only: true
@@ -76,7 +76,7 @@ gate:
   three_commit_gate:
     commit_1_C8: CONTRACT_ONLY_SOLE_PARENT_DIRECT_CHILD_OF_A7
     exact_sha_batch: P8_BATCH_0_RUN_ONCE_FROM_CLEAN_DETACHED_C8
-    batch_0_result: NOT_RUN
+    batch_0_result: PASS_113
     commit_2_E8: EVIDENCE_ONLY_SOLE_PARENT_DIRECT_CHILD_OF_C8
     E8_may_release_implementation: false
     E8_may_claim_P8_0_pass: false
@@ -120,6 +120,8 @@ gate:
       - tests/static/test_phase8_p8_0_entry_checkpoint.py
     A8_validator: tests/static/test_phase8_p8_0_entry_checkpoint.py
     A8_is_only_implementation_release_authority: true
+    accepted_E8: 3463e0cd774f80e452294fe32cf243bfa826eef0
+    accepted_A8: 3c60bf5cc4e051a214e158cbf944fd6aba969f95
   superseded_historical_entry_chain:
     contract_candidate_C8: 6d4f9946ab357a7d3193ea1680473fe923322eb0
     entry_evidence_E8: 4dc398d359806ab41ea702df54112956d17920ae
@@ -644,6 +646,7 @@ waves:
     roles: [R]
     tasks: [P8-0]
     batch: batch_0_entry
+    status: ACCEPTED_AT_CHECKPOINT_ONLY_A8
   wave_a:
     implementation_owners: [A, B, C, D, E]
     review_lanes: [R1, R2, R3]
@@ -651,7 +654,7 @@ waves:
     lookahead_lane: L
     tasks: [P8-A1, P8-B1, P8-C1, P8-D1, P8-E1]
     batch: batch_1_foundation
-    status: BLOCKED_UNTIL_A8_ACCEPTS_P8_0_ENTRY
+    status: INTEGRATED_P0_CLOSED
   wave_b:
     implementation_owners: [A, B, C, D, E]
     review_lanes: [R1, R2, R3]
@@ -659,12 +662,21 @@ waves:
     lookahead_lane: L
     tasks: [P8-A2, P8-A3, P8-B2, P8-B3, P8-C2, P8-D2, P8-E2, P8-E3]
     batch: batch_2_integration
-    status: BLOCKED_ON_WAVE_A
+    status: INTEGRATED_P0_CLOSED
+  implementation_wave_1:
+    status: INTEGRATED_P0_CLOSED
+    tasks: [P8-A1, P8-B1, P8-C1, P8-D1, P8-E1]
+  implementation_wave_2:
+    status: INTEGRATED_P0_CLOSED
+    tasks: [P8-A2, P8-B2, P8-C2, P8-D2, P8-E2]
+  implementation_wave_3:
+    status: INTEGRATED_P0_CLOSED
+    tasks: [P8-B3, P8-A3, P8-E3]
 
 batches:
   draft_validation:
-    status: RUNNABLE_FOR_CONTRACT_AUTHORING_ONLY
-    purpose: Parse this schedule without passing Batch 0 or P8.0.
+    status: HISTORICAL_CONTRACT_AUTHORING_CHECK
+    purpose: Preserve the frozen contract-authoring parse command; it is not the current integration status.
     commands:
       - id: yaml_phase8_schedule
         cwd: .
@@ -674,10 +686,10 @@ batches:
         argv:
           - D:/miniconda/python.exe
           - -c
-          - "import pathlib,yaml; d=yaml.safe_load(pathlib.Path('plans/phase-8-production-hardening-test-batches.yaml').read_text(encoding='utf-8')); assert d['phase']==8; assert d['document_status']=='FROZEN_CONTRACT_CANDIDATE_AWAITING_BATCH_0'"
+          - "import pathlib,yaml; d=yaml.safe_load(pathlib.Path('plans/phase-8-production-hardening-test-batches.yaml').read_text(encoding='utf-8')); assert d['phase']==8; assert d['document_status']=='IMPLEMENTATION_INTEGRATED_AWAITING_ENGINEERING_CHECKPOINT'"
 
   batch_0_entry:
-    status: NOT_RUN
+    status: PASS
     owner: R
     purpose: Verify frozen P8.0 contracts and the C7-E7-A7 handoff once from clean detached exact C8.
     exact_clean_detached_sha_required: true
@@ -829,9 +841,17 @@ batches:
       E8_effect: EVIDENCE_RECORDED_NO_IMPLEMENTATION_RELEASE
       A8_relationship: CHECKPOINT_ONLY_SOLE_PARENT_DIRECT_CHILD_OF_E8
       A8_effect: P8_0_ENGINEERING_ENTRY_PASS
+    recorded_result:
+      candidate_C8: 74f4cb6bc2ac78f17aacdb36378e72ff650d60b6
+      evidence_E8: 3463e0cd774f80e452294fe32cf243bfa826eef0
+      checkpoint_A8: 3c60bf5cc4e051a214e158cbf944fd6aba969f95
+      tests: 113
+      failures: 0
+      errors: 0
+      skipped: 0
 
   batch_1_foundation:
-    status: BLOCKED_UNTIL_A8_ACCEPTS_P8_0_ENTRY
+    status: PASS
     owner: R
     purpose: Run focused local and static checks after Wave A without production or external access.
     requires_tasks: [P8-A1, P8-B1, P8-C1, P8-D1, P8-E1]
@@ -865,9 +885,13 @@ batches:
       scheduler_off_activation: forbidden
       v046_production_apply_or_switch: forbidden
       v047: forbidden
+    recorded_result:
+      static_tests: 88
+      maven_testcontainers_tests: 2
+      failures: 0
 
   batch_2_integration:
-    status: BLOCKED_ON_BATCH_1
+    status: PASS
     owner: R
     purpose: Integrate focused scheduler detector stream capacity recovery and evidence-intake controls locally.
     requires_tasks: [P8-A2, P8-A3, P8-B2, P8-B3, P8-C2, P8-D2, P8-E2, P8-E3]
@@ -884,10 +908,9 @@ batches:
           - tests/static/test_phase8_recovery_rotation_tools.py
           - tests/static/test_phase8_scenario_catalog.py
           - tests/static/test_phase8_external_gate_intake.py
-      - id: phase8_wave_b_java_postgresql
-        resource_class: maven_testcontainers
+      - id: phase8_wave_b_java_unit
+        resource_class: maven
         max_processes: 1
-        disposable_postgresql_only: true
         cwd: java-api-service
         shell: false
         selectors:
@@ -896,22 +919,40 @@ batches:
           - HearingSchedulerModeTest
           - JdbcHearingSchedulerDetectorTest
           - StreamBackfillCoordinatorTest
-          - AgentRunStreamReplayIntegrationTest
           - AgentRunStreamRetentionManifestTest
           - RedisAgentRunStreamFailoverTest
         argv:
           - .\mvnw.cmd
           - -DforkCount=1
-          - -Dtest=AgentRunRecoverySchedulerTest,AgentRunV2PropertiesTest,HearingSchedulerModeTest,JdbcHearingSchedulerDetectorTest,StreamBackfillCoordinatorTest,AgentRunStreamReplayIntegrationTest,AgentRunStreamRetentionManifestTest,RedisAgentRunStreamFailoverTest
+          - -Dtest=AgentRunRecoverySchedulerTest,AgentRunV2PropertiesTest,HearingSchedulerModeTest,JdbcHearingSchedulerDetectorTest,StreamBackfillCoordinatorTest,AgentRunStreamRetentionManifestTest,RedisAgentRunStreamFailoverTest
           - test
+      - id: phase8_wave_b_postgresql_integration
+        resource_class: maven_testcontainers
+        max_processes: 1
+        disposable_postgresql_only: true
+        cwd: java-api-service
+        shell: false
+        selectors:
+          - AgentRunStreamReplayIntegrationTest
+        argv:
+          - .\mvnw.cmd
+          - -DforkCount=1
+          - -Pintegration-test
+          - -Dit.test=AgentRunStreamReplayIntegrationTest
+          - verify
     execution:
       deployment_render_only: true
       capacity_model_only: true
       real_load_chaos_pitr_dr_rotation: forbidden
       production_traffic_canary_or_promotion: forbidden
+    recorded_result:
+      light_tests: 406
+      maven_unit_tests: 30
+      postgresql_testcontainers_flyway_integration_tests: 1
+      failures: 0
 
   engineering_candidate_preflight:
-    status: BLOCKED_ON_BATCH_2_AND_P0_CLOSURE
+    status: PENDING_NOT_RUN
     owner: R
     purpose: Seal engineering readiness without claiming production evidence or migration promotion.
     requires:
@@ -1154,13 +1195,24 @@ failure_classification:
 
 current_contract_state:
   frozen_against_upstream_checkpoint: e3acedc64d161f0342c8db3d5c313c2f404ea462
-  p8_0_batch_0_run: false
-  p8_0_entry_evidence_commit_present: false
-  p8_0_A8_checkpoint_present: false
-  implementation_started: false
+  accepted_contract_candidate_C8: 74f4cb6bc2ac78f17aacdb36378e72ff650d60b6
+  accepted_entry_evidence_E8: 3463e0cd774f80e452294fe32cf243bfa826eef0
+  accepted_entry_checkpoint_A8: 3c60bf5cc4e051a214e158cbf944fd6aba969f95
+  p8_0_batch_0_run: true
+  p8_0_batch_0_status: PASS
+  p8_0_entry_evidence_commit_present: true
+  p8_0_A8_checkpoint_present: true
+  implementation_started: true
+  implementation_waves_integrated: [P8-WAVE-1, P8-WAVE-2, P8-WAVE-3]
+  all_implementation_p0_closed: true
+  engineering_candidate: PENDING
+  engineering_checkpoint: NOT_RUN
   production_or_external_execution_run: false
   unified_production_checkpoint: PENDING_EXTERNAL
   MIG-006: PENDING_PROMOTION
   MIG-007: PENDING_PROMOTION
   MIG-008: PENDING_PROMOTION
-  status_must_remain: FROZEN_CONTRACT_CANDIDATE_AWAITING_BATCH_0
+  V047: ABSENT
+  scheduler_OFF: NOT_ACTIVATED
+  production_V046_apply_or_switch: NOT_RUN
+  status: IMPLEMENTATION_INTEGRATED_AWAITING_ENGINEERING_CHECKPOINT

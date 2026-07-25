@@ -1,24 +1,24 @@
 schema_version: phase-owner-briefs.v2
 phase: 8
 name: production-hardening-adaptive-owner-briefs
-document_status: FROZEN_P8_0_CONTRACT_CANDIDATE
+document_status: IMPLEMENTATION_INTEGRATED_AWAITING_ENGINEERING_CHECKPOINT
 
 status:
-  P8.0: NOT_RUN
-  engineering_execution: BLOCKED_PENDING_P8_0_ACCEPTANCE
+  P8.0: PASS
+  engineering_execution: IMPLEMENTATION_INTEGRATED_ENGINEERING_CHECKPOINT_NOT_RUN
   production_checkpoint: PENDING_EXTERNAL
   promotion_gate: PENDING
   MIG-006: PENDING_PROMOTION
   MIG-007: PENDING_PROMOTION
   MIG-008: PENDING_PROMOTION
-  next_phase_permission: BLOCKED_PENDING_P8_0_PASS
+  next_phase_permission: PENDING_ENGINEERING_CHECKPOINT
 
 authority:
   accepted_phase_7_checkpoint_A7: e3acedc64d161f0342c8db3d5c313c2f404ea462
   current_permission: PHASE_8_ENGINEERING_ONLY
-  phase_8_contract_candidate_C8: TO_BE_RECORDED_AT_FREEZE
-  phase_8_entry_evidence_E8: NOT_CREATED
-  phase_8_entry_checkpoint_A8: NOT_CREATED
+  phase_8_contract_candidate_C8: 74f4cb6bc2ac78f17aacdb36378e72ff650d60b6
+  phase_8_entry_evidence_E8: 3463e0cd774f80e452294fe32cf243bfa826eef0
+  phase_8_entry_checkpoint_A8: 3c60bf5cc4e051a214e158cbf944fd6aba969f95
   execution_plan: plans/phase-8-production-hardening-execution.md
   test_schedule: plans/phase-8-production-hardening-test-batches.yaml
   contract_pack: docs/runbooks/temporal-first/phase-8-p8.0-contract-pack.md
@@ -36,7 +36,7 @@ authority:
   quick_reference: docs/runbooks/temporal-first/phase-1-lessons-quick-reference.md
 
 entry_gate:
-  status: BLOCKED
+  status: ACCEPTED_AT_A8
   entry_pass_token: P8_0_ENGINEERING_ENTRY_PASS_AT_A8
   required_before_implementation_dispatch:
     - A7_IS_EXACTLY_E3ACEDC64D161F0342C8DB3D5C313C2F404EA462
@@ -55,6 +55,33 @@ entry_gate:
     - Historical C8 6d4f9946ab357a7d3193ea1680473fe923322eb0, E8 4dc398d359806ab41ea702df54112956d17920ae, and A8 7e3cbace3d206aef5eb23a03d36878a00634c9a9 grant no authority over the replacement contract or its implementation.
     - Dirty-tree, mixed-SHA, mixed-attempt, or inherited Phase 7 results cannot satisfy Batch 0.
     - No implementation owner may edit a product, migration, runtime, deployment, harness, or operations path before accepted A8.
+
+integration_results:
+  wave_1: INTEGRATED
+  wave_2: INTEGRATED
+  wave_3: INTEGRATED
+  batch_0: {status: PASS, tests: 113}
+  batch_1:
+    status: PASS
+    static_tests: 88
+    maven_testcontainers_tests: 2
+  batch_2:
+    status: PASS
+    light_tests: 406
+    maven_unit_tests: 30
+    postgresql_testcontainers_flyway_integration_tests: 1
+  implementation_p0: ALL_CLOSED
+  engineering_candidate: PENDING
+  engineering_checkpoint: NOT_RUN
+  production_checkpoint: PENDING_EXTERNAL
+  promotion_gate: PENDING
+  MIG-006: PENDING_PROMOTION
+  MIG-007: PENDING_PROMOTION
+  MIG-008: PENDING_PROMOTION
+  safety_observations:
+    V047: ABSENT
+    scheduler_OFF: NOT_ACTIVATED
+    production_V046_apply_or_switch: NOT_RUN
 
 lane_boundaries:
   engineering_lane: LOCAL_SYNTHETIC_OR_EXPLICITLY_DISPOSABLE_ONLY_AFTER_ENTRY
@@ -189,11 +216,11 @@ test_policy:
 
 dependency_waves:
   P8-0:
-    status: BLOCKED_PENDING_C8_BATCH_0_SEPARATE_E8_AND_CHECKPOINT_ONLY_A8
+    status: ACCEPTED_AT_CHECKPOINT_ONLY_A8
     active_roles: [R]
     opens_after: ONLY_CHECKPOINT_ONLY_A8_RECORDS_P8_0_ENGINEERING_ENTRY_PASS
   P8-WAVE-1:
-    status: BLOCKED_UNTIL_CHECKPOINT_ONLY_A8
+    status: INTEGRATED_P0_CLOSED
     implementation_tasks: [P8-I1-1, P8-I2-1, P8-I3-1, P8-I4-1, P8-I5-1]
     review_assignments:
       P8-I1-1: P0-TEMPORAL
@@ -204,7 +231,7 @@ dependency_waves:
     verification_lanes: [V-LIGHT, V-MAVEN]
     barrier: P8-WAVE-1-INTEGRATED
   P8-WAVE-2:
-    status: BLOCKED_ON_P8_WAVE_1_INTEGRATED
+    status: INTEGRATED_P0_CLOSED
     implementation_tasks: [P8-I1-2, P8-I2-2, P8-I3-2, P8-I4-2, P8-I5-2]
     review_assignments:
       P8-I1-2: P0-TEMPORAL
@@ -215,7 +242,7 @@ dependency_waves:
     verification_lanes: [V-LIGHT, V-MAVEN]
     barrier: P8-WAVE-2-INTEGRATED
   P8-WAVE-3:
-    status: BLOCKED_ON_P8_WAVE_2_INTEGRATED
+    status: INTEGRATED_P0_CLOSED
     implementation_tasks: [P8-I2-3, P8-I1-3, P8-I5-3]
     ordered_dependencies:
       - P8-I2-3_BEFORE_P8-I1-3
@@ -227,7 +254,7 @@ dependency_waves:
     verification_lanes: [V-LIGHT, V-MAVEN]
     barrier: P8-WAVE-3-INTEGRATED
   P8-ENGINEERING-CANDIDATE:
-    status: BLOCKED_ON_ALL_IMPLEMENTATION_REVIEW_AND_BATCH_2_RESULTS
+    status: PENDING_NOT_RUN
     active_roles: [R, P0-TEMPORAL, P0-DATA, P0-SECURITY, V-LIGHT, V-MAVEN]
     required_result_ceiling:
       engineering_checkpoint: PASS_OR_FAIL
@@ -265,7 +292,7 @@ implementation_owners:
     machine_schedule_owner: A
     machine_schedule_tasks: [P8-A1, P8-A2, P8-A3]
     role: Active-reference audit, scheduler lifecycle corrections, and non-destructive cleanup eligibility
-    status: BLOCKED_UNTIL_CHECKPOINT_ONLY_A8
+    status: IMPLEMENTATION_INTEGRATED_P0_CLOSED
     model: gpt-5.6-sol
     reasoning: xhigh
     commit_allowed_only_after_A8_and_review: true
@@ -371,7 +398,7 @@ implementation_owners:
     machine_schedule_owner: B
     machine_schedule_tasks: [P8-B1, P8-B2, P8-B3]
     role: V046 additive stream migration, compatible backfill, archive retention, and Redis fanout resilience
-    status: BLOCKED_UNTIL_CHECKPOINT_ONLY_A8
+    status: IMPLEMENTATION_INTEGRATED_P0_CLOSED
     model: gpt-5.6-sol
     reasoning: xhigh
     commit_allowed_only_after_A8_and_review: true
@@ -394,6 +421,8 @@ implementation_owners:
           - tests/static/test_phase8_v046_migration.py
         acceptance:
           - V046 is additive and creates partition, archive manifest, receipt, and resumable high-watermark structures.
+          - V046 authority is DELIVERY_STORAGE_ONLY; stream final markers, delivery high-watermarks, and archive receipts never authorize a formal message, artifact, or business completion.
+          - The existing Java plus Domain PostgreSQL transactional finalizer remains the sole formal commit boundary.
           - Enforce one unpartitioned global event identity across all time partitions; a partition-local uniqueness claim is insufficient.
           - No old-table drop, blocking production rewrite, production switch default, or V047 content is allowed.
           - Extend the Flyway/Testcontainers migration integration test through V046 and assert the additive delivery schema rather than a hard-coded pre-V046 migration count.
@@ -440,7 +469,7 @@ implementation_owners:
     machine_schedule_owner: C
     machine_schedule_tasks: [P8-C1, P8-C2]
     role: Render-only three-domain topology, autoscaling, pool isolation, and synthetic capacity controls
-    status: BLOCKED_UNTIL_CHECKPOINT_ONLY_A8
+    status: IMPLEMENTATION_INTEGRATED_P0_CLOSED
     model: gpt-5.6-sol
     reasoning: xhigh
     commit_allowed_only_after_A8_and_review: true
@@ -506,7 +535,7 @@ implementation_owners:
     machine_schedule_owner: D
     machine_schedule_tasks: [P8-D1, P8-D2]
     role: OTel, SLO alerts, runbooks, recovery drills, and rotation compatibility tooling
-    status: BLOCKED_UNTIL_CHECKPOINT_ONLY_A8
+    status: IMPLEMENTATION_INTEGRATED_P0_CLOSED
     model: gpt-5.6-sol
     reasoning: xhigh
     commit_allowed_only_after_A8_and_review: true
@@ -573,7 +602,7 @@ implementation_owners:
     machine_schedule_owner: E
     machine_schedule_tasks: [P8-E1, P8-E2, P8-E3]
     role: Exact-candidate runner, external scenario catalog, and evidence-integrity intake
-    status: BLOCKED_UNTIL_CHECKPOINT_ONLY_A8
+    status: IMPLEMENTATION_INTEGRATED_P0_CLOSED
     model: gpt-5.6-sol
     reasoning: xhigh
     commit_allowed_only_after_A8_and_review: true
@@ -760,7 +789,7 @@ handoff_and_commit_rules:
     - FABRICATED_BASELINE_OBSERVATION_OR_PASS_CLAIM
 
 baseline_claim_policy:
-  verified_input: A7_HANDOFF_ONLY
+  verified_input: ACCEPTED_A7_C8_E8_A8_CHAIN_AND_RECORDED_INTEGRATION_RESULTS
   stale_source: 3eebc36b1f8aa470e68b8f4b84203b0b1c13f783
   stale_observation_status: UNKNOWN_PENDING_BATCH_0_REAUDIT
   rules:
