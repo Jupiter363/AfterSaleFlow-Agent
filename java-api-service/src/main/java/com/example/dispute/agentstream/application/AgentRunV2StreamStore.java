@@ -1,9 +1,11 @@
 package com.example.dispute.agentstream.application;
 
+import com.example.dispute.agentstream.infrastructure.persistence.AgentRunStreamRetentionManifest;
 import com.example.dispute.workflow.contract.v1.AgentStreamEvent;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 
 /** Durable, hash-bound append port for attempt-scoped public stream events. */
 public interface AgentRunV2StreamStore {
@@ -27,6 +29,12 @@ public interface AgentRunV2StreamStore {
             String streamProtocol, String runId, String attemptId) {
         throw new UnsupportedOperationException(
                 "this stream-store decorator cannot authorize a compatibility switch");
+    }
+
+    default Optional<AgentRunStreamRetentionManifest> retentionManifest(
+            String runId, String attemptId) {
+        throw new UnsupportedOperationException(
+                "this stream-store decorator cannot expose retention evidence");
     }
 
     record AppendReceipt(boolean inserted, long durableHighWatermark) {
