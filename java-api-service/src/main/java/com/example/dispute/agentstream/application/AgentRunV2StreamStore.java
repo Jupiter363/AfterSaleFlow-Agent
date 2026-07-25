@@ -12,6 +12,23 @@ public interface AgentRunV2StreamStore {
 
     BatchAppendReceipt appendBatch(List<AgentStreamEvent> events);
 
+    default List<AgentStreamEvent> replay(
+            String runId, String attemptId, long afterSequence, int limit) {
+        throw new UnsupportedOperationException(
+                "this stream-store decorator does not expose authoritative replay");
+    }
+
+    default long durableHighWatermark(String runId, String attemptId) {
+        throw new UnsupportedOperationException(
+                "this stream-store decorator does not expose a durable high-watermark");
+    }
+
+    default CompatibilityReport validateCompatibility(
+            String streamProtocol, String runId, String attemptId) {
+        throw new UnsupportedOperationException(
+                "this stream-store decorator cannot authorize a compatibility switch");
+    }
+
     record AppendReceipt(boolean inserted, long durableHighWatermark) {
         public AppendReceipt {
             if (durableHighWatermark < 0) {
@@ -35,6 +52,73 @@ public interface AgentRunV2StreamStore {
 
         public int insertedCount() {
             return Math.toIntExact(inserted.stream().filter(Boolean::booleanValue).count());
+        }
+    }
+
+    /** Exact old/target replay checks required before selecting a target reader. */
+    record CompatibilityReport(
+            String streamProtocol,
+            String runId,
+            String attemptId,
+            long sourceCount,
+            long targetCount,
+            boolean countParity,
+            boolean canonicalHashParity,
+            boolean sequenceParity,
+            boolean actorIdParity,
+            boolean audienceParity,
+            boolean visibilityParity,
+            boolean resetParity,
+            boolean terminalParity,
+            boolean reconnectParity,
+            boolean compositeCursorParity) {
+
+        public CompatibilityReport {
+            Objects.requireNonNull(streamProtocol, "streamProtocol");
+            Objects.requireNonNull(runId, "runId");
+            Objects.requireNonNull(attemptId, "attemptId");
+            if (sourceCount < 0 || targetCount < 0) {
+                throw new IllegalArgumentException("compatibility counts must not be negative");
+            }
+        }
+
+        public boolean compatible() {
+            return countParity
+                    && canonicalHashParity
+                    && sequenceParity
+                    && actorIdParity
+                    && audienceParity
+                    && visibilityParity
+                    && resetParity
+                    && terminalParity
+                    && reconnectParity
+                    && compositeCursorParity;
+        }
+
+        public CompatibilityReport requireCompatible() {
+            if (!compatible()) {
+                throw new CompatibilityMismatchException(this);
+            }
+            return this;
+        }
+    }
+
+    /** Fail-closed signal: no reader switch or compatibility claim may ignore this mismatch. */
+    final class CompatibilityMismatchException extends IllegalStateException {
+        private final CompatibilityReport report;
+
+        public CompatibilityMismatchException(CompatibilityReport report) {
+            super("old/target stream compatibility validation failed for "
+                    + Objects.requireNonNull(report, "report").streamProtocol()
+                    + ":"
+                    + report.runId()
+                    + ":"
+                    + report.attemptId());
+            this.report = report;
+        }
+
+        public CompatibilityReport report() {
+            return report;
         }
     }
 

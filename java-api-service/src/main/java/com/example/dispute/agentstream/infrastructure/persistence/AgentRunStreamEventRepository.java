@@ -6,12 +6,13 @@
  */
 package com.example.dispute.agentstream.infrastructure.persistence;
 
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Optional;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
-import org.springframework.data.domain.Pageable;
 
 // 所属模块：【Agent 流式运行 / 持久化适配层】类型「AgentRunStreamEventRepository」。
 // 类型职责：声明Agent运行流事件在 PostgreSQL 中的查询与写入契约；本类型显式提供 「findAllByAgentRunIdAndSequenceNoGreaterThanOrderBySequenceNoAsc」、「findByAgentRunIdAndSequenceNo」、「existsByAgentRunIdAndEventType」、「findMaxSequenceByAgentRunId」。
@@ -89,4 +90,23 @@ public interface AgentRunStreamEventRepository
     @Query("select coalesce(max(event.sequenceNo), -1) from AgentRunStreamEventEntity event where event.agentRunId = :runId and event.agentRunAttemptId = :attemptId and event.streamProtocol = 'agent-stream.v2'")
     long findMaxV2Sequence(
             @Param("runId") String runId, @Param("attemptId") String attemptId);
+
+    @Query("select event from AgentRunStreamEventEntity event order by event.createdAt desc, event.id desc")
+    List<AgentRunStreamEventEntity> findBackfillSnapshotUpperBound(Pageable pageable);
+
+    @Query("""
+            select event from AgentRunStreamEventEntity event
+             where (:afterCreatedAt is null
+                    or event.createdAt > :afterCreatedAt
+                    or (event.createdAt = :afterCreatedAt and event.id > :afterEventId))
+               and (event.createdAt < :upperCreatedAt
+                    or (event.createdAt = :upperCreatedAt and event.id <= :upperEventId))
+             order by event.createdAt asc, event.id asc
+            """)
+    List<AgentRunStreamEventEntity> findBoundedBackfillPage(
+            @Param("afterCreatedAt") OffsetDateTime afterCreatedAt,
+            @Param("afterEventId") String afterEventId,
+            @Param("upperCreatedAt") OffsetDateTime upperCreatedAt,
+            @Param("upperEventId") String upperEventId,
+            Pageable pageable);
 }

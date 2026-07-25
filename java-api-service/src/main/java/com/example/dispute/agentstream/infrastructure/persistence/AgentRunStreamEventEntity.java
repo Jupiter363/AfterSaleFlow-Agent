@@ -7,8 +7,11 @@
 package com.example.dispute.agentstream.infrastructure.persistence;
 
 import com.example.dispute.infrastructure.persistence.entity.AbstractEntity;
+import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunProtocol;
 import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
@@ -210,6 +213,40 @@ public class AgentRunStreamEventEntity extends AbstractEntity {
 
     public String getPayloadHash() {
         return payloadHash;
+    }
+
+    /** Returns the exact canonical hash used by the V046 global identity registry. */
+    public String canonicalPayloadHash(ObjectMapper objectMapper) {
+        try {
+            String canonicalHash = ContractJson.sha256Hex(
+                    java.util.Objects.requireNonNull(objectMapper, "objectMapper")
+                            .readTree(payloadJson));
+            if (AgentRunProtocol.V2.wireValue().equals(streamProtocol)
+                    && !canonicalHash.equals(payloadHash)) {
+                throw new IllegalStateException(
+                        "V2 source stream payload hash conflicts with canonical payload");
+            }
+            return canonicalHash;
+        } catch (JsonProcessingException exception) {
+            throw new IllegalStateException(
+                    "source stream payload cannot be canonicalized", exception);
+        }
+    }
+
+    /** Fail closed before this source row is copied to the V046 delivery target. */
+    public AgentRunStreamEventEntity requireCompatibilityBinding() {
+        if (agentRunAttemptId == null || agentRunAttemptId.isBlank()) {
+            throw new IllegalStateException("source stream event has no attempt identity");
+        }
+        if (!AgentRunProtocol.V1.wireValue().equals(streamProtocol)
+                && !AgentRunProtocol.V2.wireValue().equals(streamProtocol)) {
+            throw new IllegalStateException("source stream event has an unsupported protocol");
+        }
+        if (AgentRunProtocol.V2.wireValue().equals(streamProtocol)
+                && (audience == null || payloadHash == null)) {
+            throw new IllegalStateException("V2 source stream event is missing audience or hash");
+        }
+        return this;
     }
 
     // 所属模块：【Agent 流式运行 / 持久化适配层】「AgentRunStreamEventEntity.required(String,String)」。

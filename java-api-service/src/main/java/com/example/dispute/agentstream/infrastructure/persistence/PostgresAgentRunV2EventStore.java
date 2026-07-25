@@ -1,15 +1,18 @@
 package com.example.dispute.agentstream.infrastructure.persistence;
 
+import com.example.dispute.agentstream.application.AgentRunReconciledFinalStore;
+import com.example.dispute.agentstream.application.AgentRunStreamCursor;
 import com.example.dispute.agentstream.application.AgentRunV2StreamStore;
 import com.example.dispute.agentstream.application.AgentRunV2StreamStore.BatchAppendReceipt;
+import com.example.dispute.agentstream.application.AgentRunV2StreamStore.CompatibilityReport;
 import com.example.dispute.agentstream.application.AgentRunV2StreamStore.NonRunningAttemptException;
-import com.example.dispute.agentstream.application.AgentRunReconciledFinalStore;
 import com.example.dispute.workflow.contract.v1.AgentStreamEvent;
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunProtocol;
 import com.example.dispute.workflow.contract.v1.ContractTypes.StreamEventType;
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
@@ -24,7 +27,9 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.UUID;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
@@ -78,6 +83,93 @@ public class PostgresAgentRunV2EventStore {
              where agent_run_id = ?
                and agent_run_attempt_id = ?
                and stream_protocol = 'agent-stream.v2'
+            """;
+
+    private static final String TARGET_REPLAY_SQL =
+            """
+            select delivery.sequence_no, delivery.event_type, delivery.audience,
+                   delivery.canonical_payload_sha256 as payload_hash,
+                   delivery.payload_json::text
+              from agent_run_stream_event_delivery delivery
+              join agent_run_stream_delivery_high_watermark watermark
+                on watermark.stream_protocol = delivery.stream_protocol
+               and watermark.agent_run_id = delivery.agent_run_id
+               and watermark.agent_run_attempt_id = delivery.agent_run_attempt_id
+             where delivery.agent_run_id = ?
+               and delivery.agent_run_attempt_id = ?
+               and delivery.stream_protocol = 'agent-stream.v2'
+               and delivery.sequence_no > ?
+               and delivery.sequence_no <= watermark.highest_contiguous_sequence_no
+             order by delivery.sequence_no asc
+             limit ?
+            """;
+
+    private static final String TARGET_HIGH_WATERMARK_SQL =
+            """
+            select highest_contiguous_sequence_no
+              from agent_run_stream_delivery_high_watermark
+             where stream_protocol = 'agent-stream.v2'
+               and agent_run_id = ?
+               and agent_run_attempt_id = ?
+            """;
+
+    private static final String OLD_DELIVERY_SQL =
+            """
+            select event.id, event.sequence_no, event.event_type,
+                   event.payload_json::text, event.payload_hash, event.audience,
+                   event.created_at, run.created_by as actor_id,
+                   run.stream_audience_actor_ids_json::text as audience_actor_ids_json
+              from agent_run_stream_event event
+              join agent_run run on run.id = event.agent_run_id
+             where event.agent_run_id = :runId
+               and event.agent_run_attempt_id = :attemptId
+               and event.stream_protocol = 'agent-stream.v2'
+               and event.sequence_no in (:sequences)
+            """;
+
+    private static final String RECORD_TARGET_SQL =
+            """
+            select was_inserted, highest_contiguous_sequence_no
+              from record_agent_run_stream_delivery(
+                   ?, 'agent-stream.v2', ?, ?, ?, ?, cast(? as jsonb), ?, ?, ?,
+                   cast(? as jsonb), ?, 'agent_run_stream_event',
+                   'agent-stream-v2-dual-write')
+            """;
+
+    private static final String SOURCE_COMPATIBILITY_SQL =
+            """
+            select event.id as event_id, event.stream_protocol,
+                   event.agent_run_id, event.agent_run_attempt_id,
+                   event.sequence_no, event.event_type, event.payload_json::text,
+                   event.payload_hash, event.audience, event.created_at,
+                   run.created_by as actor_id,
+                   run.stream_audience_json::text as audience_roles_json,
+                   run.stream_audience_actor_ids_json::text as audience_actor_ids_json
+              from agent_run_stream_event event
+              join agent_run run on run.id = event.agent_run_id
+             where event.stream_protocol = ?
+               and event.agent_run_id = ?
+               and event.agent_run_attempt_id = ?
+             order by event.sequence_no asc
+            """;
+
+    private static final String TARGET_COMPATIBILITY_SQL =
+            """
+            select delivery.event_id, delivery.stream_protocol,
+                   delivery.agent_run_id, delivery.agent_run_attempt_id,
+                   delivery.sequence_no, delivery.event_type,
+                   delivery.payload_json::text,
+                   delivery.canonical_payload_sha256 as payload_hash,
+                   delivery.audience, delivery.source_event_created_at as created_at,
+                   delivery.actor_id,
+                   run.stream_audience_json::text as audience_roles_json,
+                   delivery.audience_actor_ids_json::text
+              from agent_run_stream_event_delivery delivery
+              join agent_run run on run.id = delivery.agent_run_id
+             where delivery.stream_protocol = ?
+               and delivery.agent_run_id = ?
+               and delivery.agent_run_attempt_id = ?
+             order by delivery.sequence_no asc
             """;
 
     private static final String LOCK_ATTEMPT_SQL =
@@ -160,11 +252,21 @@ public class PostgresAgentRunV2EventStore {
     private final NamedParameterJdbcTemplate namedJdbc;
     private final ObjectMapper objectMapper;
     private final TransactionTemplate writeTransaction;
+    private final StreamCompatibilityMode compatibilityMode;
 
+    @Autowired
     public PostgresAgentRunV2EventStore(
             JdbcTemplate jdbc,
             ObjectMapper objectMapper,
             PlatformTransactionManager transactionManager) {
+        this(jdbc, objectMapper, transactionManager, StreamCompatibilityMode.defaultMode());
+    }
+
+    public PostgresAgentRunV2EventStore(
+            JdbcTemplate jdbc,
+            ObjectMapper objectMapper,
+            PlatformTransactionManager transactionManager,
+            StreamCompatibilityMode compatibilityMode) {
         this.jdbc = Objects.requireNonNull(jdbc, "jdbc must not be null");
         this.namedJdbc = new NamedParameterJdbcTemplate(jdbc);
         this.objectMapper =
@@ -173,6 +275,7 @@ public class PostgresAgentRunV2EventStore {
         this.objectMapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
         this.writeTransaction = new TransactionTemplate(transactionManager);
         this.writeTransaction.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        this.compatibilityMode = Objects.requireNonNull(compatibilityMode, "compatibilityMode");
     }
 
     public AgentRunV2StreamStore.AppendReceipt append(AgentStreamEvent event) {
@@ -216,7 +319,7 @@ public class PostgresAgentRunV2EventStore {
         if (limit < 1 || limit > 1_000) {
             throw new IllegalArgumentException("limit must be between 1 and 1000");
         }
-        return jdbc.query(
+        List<AgentStreamEvent> oldEvents = jdbc.query(
                 REPLAY_SQL,
                 (resultSet, rowNumber) ->
                         decodeAndVerify(
@@ -231,6 +334,16 @@ public class PostgresAgentRunV2EventStore {
                 attemptId,
                 afterSequence,
                 limit);
+        if (compatibilityMode.reader() == StreamCompatibilityMode.Reader.OLD_ONLY) {
+            return oldEvents;
+        }
+        List<AgentStreamEvent> targetEvents = replayTarget(
+                runId, attemptId, afterSequence, limit);
+        if (compatibilityMode.reader() == StreamCompatibilityMode.Reader.TARGET_ONLY) {
+            validateCompatibility("agent-stream.v2", runId, attemptId).requireCompatible();
+            return targetEvents;
+        }
+        return compatibleUnion(oldEvents, targetEvents, limit);
     }
 
     /** Returns the PostgreSQL high-watermark, or {@code -1} when the attempt has no events. */
@@ -239,7 +352,112 @@ public class PostgresAgentRunV2EventStore {
         requireIdentity(attemptId, "attemptId");
         Long value =
                 jdbc.queryForObject(HIGH_WATERMARK_SQL, Long.class, runId, attemptId);
-        return value == null ? -1 : value;
+        long oldHighWatermark = value == null ? -1 : value;
+        if (compatibilityMode.reader() == StreamCompatibilityMode.Reader.OLD_ONLY) {
+            return oldHighWatermark;
+        }
+        List<Long> target = jdbc.query(
+                TARGET_HIGH_WATERMARK_SQL,
+                (resultSet, rowNumber) -> resultSet.getLong(1),
+                runId,
+                attemptId);
+        long targetHighWatermark = target.isEmpty() ? -1 : target.getFirst();
+        if (target.size() > 1) {
+            throw new IllegalStateException("target delivery high-watermark is ambiguous");
+        }
+        return compatibilityMode.reader() == StreamCompatibilityMode.Reader.TARGET_ONLY
+                ? targetHighWatermark
+                : Math.max(oldHighWatermark, targetHighWatermark);
+    }
+
+    public CompatibilityReport validateCompatibility(
+            String streamProtocol, String runId, String attemptId) {
+        requireIdentity(streamProtocol, "streamProtocol");
+        requireIdentity(runId, "runId");
+        requireIdentity(attemptId, "attemptId");
+        if (!Set.of("agent_stream.v1", "agent-stream.v2").contains(streamProtocol)) {
+            throw new IllegalArgumentException("unsupported streamProtocol");
+        }
+        CompatibilityReport report = writeTransaction.execute(status ->
+                validateCompatibilityInTransaction(streamProtocol, runId, attemptId));
+        if (report == null) {
+            throw new IllegalStateException("compatibility transaction returned no report");
+        }
+        return report;
+    }
+
+    /**
+     * Derives target-aware rollback coverage from authoritative rows. Unlike pre-switch parity,
+     * this deliberately permits target-only suffixes while requiring exact conflict-free overlap.
+     */
+    public StreamCompatibilityMode.RollbackCoverage validateRollbackCoverage(
+            String streamProtocol, String runId, String attemptId) {
+        requireIdentity(streamProtocol, "streamProtocol");
+        requireIdentity(runId, "runId");
+        requireIdentity(attemptId, "attemptId");
+        StreamCompatibilityMode.RollbackCoverage coverage = writeTransaction.execute(status -> {
+            List<CompatibilityRow> source = loadCompatibilityRows(
+                    SOURCE_COMPATIBILITY_SQL, true, streamProtocol, runId, attemptId);
+            List<CompatibilityRow> target = loadCompatibilityRows(
+                    TARGET_COMPATIBILITY_SQL, false, streamProtocol, runId, attemptId);
+            Map<String, CompatibilityRow> sourceByIdentity = new LinkedHashMap<>();
+            for (CompatibilityRow row : source) {
+                sourceByIdentity.put(row.eventId(), row);
+            }
+            Map<Long, CompatibilityRow> union = new TreeMap<>();
+            boolean overlapExact = true;
+            for (CompatibilityRow row : source) {
+                union.put(row.sequenceNo(), row);
+            }
+            for (CompatibilityRow row : target) {
+                CompatibilityRow sourceRow = sourceByIdentity.get(row.eventId());
+                if (sourceRow != null && !compatibilityEquivalent(sourceRow, row)) {
+                    overlapExact = false;
+                }
+                CompatibilityRow sequenceRow = union.putIfAbsent(row.sequenceNo(), row);
+                if (sequenceRow != null && !compatibilityEquivalent(sequenceRow, row)) {
+                    overlapExact = false;
+                }
+            }
+            boolean coversEveryOldEvent = source.stream().allMatch(old ->
+                    target.stream().anyMatch(candidate ->
+                            compatibilityEquivalent(old, candidate)));
+            boolean targetOnlyWriteObserved = target.stream()
+                    .anyMatch(row -> !sourceByIdentity.containsKey(row.eventId()));
+            long expected = 0;
+            boolean unionContiguous = true;
+            boolean terminal = false;
+            for (long sequence : union.keySet()) {
+                CompatibilityRow row = union.get(sequence);
+                if (sequence != expected++ || terminal) {
+                    unionContiguous = false;
+                    break;
+                }
+                terminal = row.terminal();
+            }
+            long unionMaximum = union.isEmpty() ? -1 : union.keySet().stream()
+                    .mapToLong(Long::longValue)
+                    .max()
+                    .orElse(-1);
+            long targetWatermark = targetHighWatermark(streamProtocol, runId, attemptId);
+            boolean cursorStable = union.values().stream()
+                            .map(CompatibilityRow::compositeCursor)
+                            .distinct()
+                            .count()
+                    == union.size();
+            return new StreamCompatibilityMode.RollbackCoverage(
+                    source.size(),
+                    target.size(),
+                    targetOnlyWriteObserved,
+                    overlapExact && coversEveryOldEvent,
+                    unionContiguous,
+                    targetWatermark == unionMaximum,
+                    cursorStable);
+        });
+        if (coverage == null) {
+            throw new IllegalStateException("rollback coverage transaction returned no report");
+        }
+        return coverage;
     }
 
     /**
@@ -295,6 +513,10 @@ public class PostgresAgentRunV2EventStore {
     }
 
     private BatchAppendReceipt appendInTransaction(List<PersistedEvent> batch) {
+        if (compatibilityMode.writer() == StreamCompatibilityMode.Writer.TARGET_ONLY) {
+            throw new IllegalStateException(
+                    "target-only stream writes require a separately authorized release switch");
+        }
         AgentStreamEvent first = batch.getFirst().event();
         AgentRunAttemptStatus attemptStatus = lockAttempt(first.runId(), first.attemptId());
         if (attemptStatus != AgentRunAttemptStatus.RUNNING) {
@@ -315,6 +537,10 @@ public class PostgresAgentRunV2EventStore {
                 throw new IllegalStateException(
                         "durable stream sequence is bound to another payload hash");
             }
+        }
+
+        if (compatibilityMode.writer() == StreamCompatibilityMode.Writer.DUAL_WRITE) {
+            mirrorBatchToTarget(batch);
         }
 
         AgentStreamEvent first = batch.getFirst().event();
@@ -376,6 +602,10 @@ public class PostgresAgentRunV2EventStore {
                 throw new IllegalStateException(
                         "durable stream sequence is bound to another payload hash");
             }
+        }
+
+        if (compatibilityMode.writer() == StreamCompatibilityMode.Writer.DUAL_WRITE) {
+            mirrorBatchToTarget(batch);
         }
 
         long highWatermark = durableHighWatermark(first.runId(), first.attemptId());
@@ -623,6 +853,323 @@ public class PostgresAgentRunV2EventStore {
         return hashes;
     }
 
+    private void mirrorBatchToTarget(List<PersistedEvent> batch) {
+        AgentStreamEvent first = batch.getFirst().event();
+        List<Long> sequences =
+                batch.stream().map(item -> item.event().sequenceNo()).distinct().toList();
+        MapSqlParameterSource parameters = new MapSqlParameterSource()
+                .addValue("runId", first.runId())
+                .addValue("attemptId", first.attemptId())
+                .addValue("sequences", sequences);
+        Map<Long, OldDelivery> oldRows = new LinkedHashMap<>();
+        namedJdbc.query(
+                OLD_DELIVERY_SQL,
+                parameters,
+                (org.springframework.jdbc.core.RowCallbackHandler) resultSet -> {
+                    OldDelivery row = new OldDelivery(
+                            resultSet.getString("id"),
+                            resultSet.getLong("sequence_no"),
+                            resultSet.getString("event_type"),
+                            resultSet.getString("payload_json"),
+                            resultSet.getString("payload_hash"),
+                            resultSet.getString("audience"),
+                            resultSet.getTimestamp("created_at").toInstant(),
+                            resultSet.getString("actor_id"),
+                            resultSet.getString("audience_actor_ids_json"));
+                    if (oldRows.put(row.sequenceNo(), row) != null) {
+                        throw new IllegalStateException(
+                                "old stream sequence is ambiguous during dual-write");
+                    }
+                });
+        if (oldRows.size() != sequences.size()) {
+            throw new IllegalStateException(
+                    "dual-write cannot resolve every old-store event identity");
+        }
+        for (PersistedEvent candidate : batch) {
+            OldDelivery source = oldRows.get(candidate.event().sequenceNo());
+            if (!candidate.payloadHash().equals(source.payloadHash())
+                    || !candidate.canonicalJson().equals(
+                            canonicalJson(source.payloadJson()))) {
+                throw new IllegalStateException(
+                        "dual-write source row conflicts with the requested canonical payload");
+            }
+            List<TargetWriteReceipt> receipts = jdbc.query(
+                    RECORD_TARGET_SQL,
+                    (resultSet, rowNumber) -> new TargetWriteReceipt(
+                            resultSet.getBoolean("was_inserted"),
+                            resultSet.getLong("highest_contiguous_sequence_no")),
+                    source.eventId(),
+                    first.runId(),
+                    first.attemptId(),
+                    source.sequenceNo(),
+                    source.eventType(),
+                    source.payloadJson(),
+                    source.payloadHash(),
+                    source.audience(),
+                    source.actorId(),
+                    source.audienceActorIdsJson(),
+                    Timestamp.from(source.createdAt()));
+            if (receipts.size() != 1) {
+                throw new IllegalStateException(
+                        "V046 dual-write function returned an invalid receipt count");
+            }
+        }
+    }
+
+    private List<AgentStreamEvent> replayTarget(
+            String runId, String attemptId, long afterSequence, int limit) {
+        return jdbc.query(
+                TARGET_REPLAY_SQL,
+                (resultSet, rowNumber) -> decodeAndVerify(
+                        runId,
+                        attemptId,
+                        resultSet.getLong("sequence_no"),
+                        resultSet.getString("event_type"),
+                        resultSet.getString("audience"),
+                        resultSet.getString("payload_hash"),
+                        resultSet.getString("payload_json")),
+                runId,
+                attemptId,
+                afterSequence,
+                limit);
+    }
+
+    private List<AgentStreamEvent> compatibleUnion(
+            List<AgentStreamEvent> oldEvents,
+            List<AgentStreamEvent> targetEvents,
+            int limit) {
+        TreeMap<Long, AgentStreamEvent> union = new TreeMap<>();
+        for (AgentStreamEvent event : oldEvents) {
+            union.put(event.sequenceNo(), event);
+        }
+        for (AgentStreamEvent event : targetEvents) {
+            AgentStreamEvent previous = union.putIfAbsent(event.sequenceNo(), event);
+            if (previous != null
+                    && !ContractJson.sha256Hex(objectMapper.valueToTree(previous))
+                            .equals(ContractJson.sha256Hex(objectMapper.valueToTree(event)))) {
+                throw new IllegalStateException(
+                        "compatible reader found conflicting old and target stream events");
+            }
+        }
+        return union.values().stream().limit(limit).toList();
+    }
+
+    private CompatibilityReport validateCompatibilityInTransaction(
+            String streamProtocol, String runId, String attemptId) {
+        List<CompatibilityRow> source = loadCompatibilityRows(
+                SOURCE_COMPATIBILITY_SQL, true, streamProtocol, runId, attemptId);
+        List<CompatibilityRow> target = loadCompatibilityRows(
+                TARGET_COMPATIBILITY_SQL, false, streamProtocol, runId, attemptId);
+        boolean countParity = source.size() == target.size();
+        boolean canonicalHashParity = paired(source, target,
+                (left, right) -> left.canonicalHash().equals(right.canonicalHash()));
+        boolean sourceContiguous = highestContiguousSequence(source) == source.size() - 1L;
+        boolean targetContiguous = highestContiguousSequence(target) == target.size() - 1L;
+        boolean sequenceParity = sourceContiguous
+                && targetContiguous
+                && paired(source, target, (left, right) ->
+                        left.eventId().equals(right.eventId())
+                                && left.streamProtocol().equals(right.streamProtocol())
+                                && left.runId().equals(right.runId())
+                                && left.attemptId().equals(right.attemptId())
+                                && left.sequenceNo() == right.sequenceNo()
+                                && left.eventType().equals(right.eventType())
+                                && left.createdAt().equals(right.createdAt()));
+        boolean actorIdParity = paired(source, target,
+                (left, right) -> Objects.equals(left.actorId(), right.actorId()));
+        boolean audienceParity = paired(source, target,
+                (left, right) -> Objects.equals(left.audience(), right.audience()));
+        boolean visibilityParity = paired(source, target, (left, right) ->
+                left.audienceRolesCanonical().equals(right.audienceRolesCanonical())
+                        && left.audienceActorIdsCanonical()
+                                .equals(right.audienceActorIdsCanonical()));
+        boolean resetParity = paired(source, target,
+                (left, right) -> Objects.equals(left.resetAttemptId(), right.resetAttemptId()));
+        boolean terminalParity = terminalOrderValid(source)
+                && terminalOrderValid(target)
+                && paired(source, target,
+                        (left, right) -> left.terminal() == right.terminal());
+        boolean compositeCursorParity = paired(source, target,
+                (left, right) -> left.compositeCursor().equals(right.compositeCursor()));
+        long expectedHighWatermark = highestContiguousSequence(source);
+        long targetHighWatermark = targetHighWatermark(
+                streamProtocol, runId, attemptId);
+        boolean reconnectParity = countParity
+                && sequenceParity
+                && terminalParity
+                && reconnectSuffixesMatch(source, target)
+                && expectedHighWatermark == targetHighWatermark;
+        return new CompatibilityReport(
+                streamProtocol,
+                runId,
+                attemptId,
+                source.size(),
+                target.size(),
+                countParity,
+                canonicalHashParity,
+                sequenceParity,
+                actorIdParity,
+                audienceParity,
+                visibilityParity,
+                resetParity,
+                terminalParity,
+                reconnectParity,
+                compositeCursorParity);
+    }
+
+    private List<CompatibilityRow> loadCompatibilityRows(
+            String sql,
+            boolean source,
+            String streamProtocol,
+            String runId,
+            String attemptId) {
+        return jdbc.query(
+                sql,
+                (resultSet, rowNumber) -> {
+                    String payloadJson = resultSet.getString("payload_json");
+                    String canonicalHash = ContractJson.sha256Hex(readJson(payloadJson));
+                    String storedHash = resultSet.getString("payload_hash");
+                    if (!source || storedHash != null) {
+                        if (!canonicalHash.equals(storedHash)) {
+                            throw new IllegalStateException(
+                                    (source ? "source" : "target")
+                                            + " stream canonical payload hash conflicts");
+                        }
+                    }
+                    return new CompatibilityRow(
+                            resultSet.getString("event_id"),
+                            resultSet.getString("stream_protocol"),
+                            resultSet.getString("agent_run_id"),
+                            resultSet.getString("agent_run_attempt_id"),
+                            resultSet.getLong("sequence_no"),
+                            resultSet.getString("event_type"),
+                            canonicalHash,
+                            resultSet.getString("audience"),
+                            resultSet.getTimestamp("created_at").toInstant(),
+                            resultSet.getString("actor_id"),
+                            canonicalJson(resultSet.getString("audience_roles_json")),
+                            canonicalJson(resultSet.getString("audience_actor_ids_json")),
+                            resetAttemptId(payloadJson));
+                },
+                streamProtocol,
+                runId,
+                attemptId);
+    }
+
+    private long targetHighWatermark(String protocol, String runId, String attemptId) {
+        List<Long> values = jdbc.query(
+                """
+                select highest_contiguous_sequence_no
+                  from agent_run_stream_delivery_high_watermark
+                 where stream_protocol = ? and agent_run_id = ?
+                   and agent_run_attempt_id = ?
+                """,
+                (resultSet, rowNumber) -> resultSet.getLong(1),
+                protocol,
+                runId,
+                attemptId);
+        if (values.size() > 1) {
+            throw new IllegalStateException("target delivery high-watermark is ambiguous");
+        }
+        return values.isEmpty() ? -1 : values.getFirst();
+    }
+
+    private static long highestContiguousSequence(List<CompatibilityRow> rows) {
+        long expected = 0;
+        for (CompatibilityRow row : rows) {
+            if (row.sequenceNo() != expected) {
+                break;
+            }
+            expected++;
+        }
+        return expected - 1;
+    }
+
+    private static boolean reconnectSuffixesMatch(
+            List<CompatibilityRow> source, List<CompatibilityRow> target) {
+        if (source.size() != target.size()) {
+            return false;
+        }
+        for (int cursor = -1; cursor < source.size(); cursor++) {
+            long afterSequence = cursor;
+            List<String> sourceSuffix = source.stream()
+                    .filter(row -> row.sequenceNo() > afterSequence)
+                    .map(CompatibilityRow::compositeCursor)
+                    .toList();
+            List<String> targetSuffix = target.stream()
+                    .filter(row -> row.sequenceNo() > afterSequence)
+                    .map(CompatibilityRow::compositeCursor)
+                    .toList();
+            if (!sourceSuffix.equals(targetSuffix)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean terminalOrderValid(List<CompatibilityRow> rows) {
+        boolean terminal = false;
+        for (CompatibilityRow row : rows) {
+            if (terminal) {
+                return false;
+            }
+            terminal = row.terminal();
+        }
+        return true;
+    }
+
+    private static boolean paired(
+            List<CompatibilityRow> source,
+            List<CompatibilityRow> target,
+            java.util.function.BiPredicate<CompatibilityRow, CompatibilityRow> predicate) {
+        if (source.size() != target.size()) {
+            return false;
+        }
+        for (int index = 0; index < source.size(); index++) {
+            if (!predicate.test(source.get(index), target.get(index))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean compatibilityEquivalent(
+            CompatibilityRow left, CompatibilityRow right) {
+        return left.eventId().equals(right.eventId())
+                && left.streamProtocol().equals(right.streamProtocol())
+                && left.runId().equals(right.runId())
+                && left.attemptId().equals(right.attemptId())
+                && left.sequenceNo() == right.sequenceNo()
+                && left.eventType().equals(right.eventType())
+                && left.canonicalHash().equals(right.canonicalHash())
+                && Objects.equals(left.audience(), right.audience())
+                && left.createdAt().equals(right.createdAt())
+                && Objects.equals(left.actorId(), right.actorId())
+                && left.audienceRolesCanonical().equals(right.audienceRolesCanonical())
+                && left.audienceActorIdsCanonical().equals(right.audienceActorIdsCanonical())
+                && Objects.equals(left.resetAttemptId(), right.resetAttemptId());
+    }
+
+    private String resetAttemptId(String payloadJson) {
+        JsonNode payload = readJson(payloadJson);
+        JsonNode nested = payload.path("payload").path("reset_attempt_id");
+        JsonNode direct = payload.path("reset_attempt_id");
+        JsonNode value = nested.isMissingNode() ? direct : nested;
+        return value.isTextual() ? value.textValue() : null;
+    }
+
+    private JsonNode readJson(String value) {
+        try {
+            return objectMapper.readTree(value);
+        } catch (JsonProcessingException exception) {
+            throw new IllegalStateException("stream compatibility JSON cannot be decoded", exception);
+        }
+    }
+
+    private String canonicalJson(String value) {
+        return ContractJson.canonicalString(readJson(value));
+    }
+
     private List<PersistedEvent> prepareBatch(List<AgentStreamEvent> events) {
         if (events == null || events.isEmpty()) {
             throw new IllegalArgumentException("events must not be empty");
@@ -701,5 +1248,49 @@ public class PostgresAgentRunV2EventStore {
 
     private record PersistedEvent(
             String id, AgentStreamEvent event, String canonicalJson, String payloadHash) {}
+
+    private record OldDelivery(
+            String eventId,
+            long sequenceNo,
+            String eventType,
+            String payloadJson,
+            String payloadHash,
+            String audience,
+            Instant createdAt,
+            String actorId,
+            String audienceActorIdsJson) {}
+
+    private record TargetWriteReceipt(boolean inserted, long highestContiguousSequence) {}
+
+    private record CompatibilityRow(
+            String eventId,
+            String streamProtocol,
+            String runId,
+            String attemptId,
+            long sequenceNo,
+            String eventType,
+            String canonicalHash,
+            String audience,
+            Instant createdAt,
+            String actorId,
+            String audienceRolesCanonical,
+            String audienceActorIdsCanonical,
+            String resetAttemptId) {
+
+        private boolean terminal() {
+            return Set.of("final", "error", "attempt_aborted").contains(eventType);
+        }
+
+        private String compositeCursor() {
+            AgentRunProtocol protocol = AgentRunProtocol.V1.wireValue().equals(streamProtocol)
+                    ? AgentRunProtocol.V1
+                    : AgentRunProtocol.V2;
+            return new AgentRunStreamCursor(
+                            protocol,
+                            protocol == AgentRunProtocol.V1 ? null : attemptId,
+                            sequenceNo)
+                    .wireValue();
+        }
+    }
 
 }
