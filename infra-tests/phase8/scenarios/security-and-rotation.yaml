@@ -1,0 +1,118 @@
+schema_version: phase8-external-scenario.v1
+kind: EXTERNAL_SCENARIO_DEFINITION
+scenario_id: SECURITY_AND_ROTATION
+gate:
+  classification: EXTERNAL_GATE
+  status: PENDING
+  operations:
+    security_preflight: PENDING
+    security_fuzz: PENDING
+    rotation: PENDING
+definition_guard:
+  mode: DEFINITION_ONLY
+  executable: false
+  records_actual_results: false
+  grants_external_authorization: false
+  verifies_external_evidence: false
+authorization_contract:
+  status: PENDING
+  separate_external_authorization_required: true
+  required_fields: [authorization_reference, operator_identity]
+  exact_release_context_binding_required: true
+  missing_invalid_expired_or_scope_mismatch_decision: EXTERNAL_GATE
+release_context_contract:
+  source: EXTERNAL_SIGNED_EVIDENCE
+  match_policy: EXACT_SINGLE_CONTEXT
+  required_fields: [candidate_sha, candidate_tree_sha, configuration_sha256, context_id, context_sha256, environment_identity, deployment_manifest_sha256, images, attempt_lineage]
+  image_item_required_fields: [name, digest]
+  image_set_policy: EXACT_NAME_AND_OCI_DIGEST_SET
+  attempt_lineage_required_fields: [attempt_id, attempt_number, checkpoint_id, previous_attempt_id]
+  mixed_or_missing_context_decision: EXTERNAL_GATE
+execution_contract:
+  ordered: true
+  checkpoint_orders: [3, 9]
+  stop_on_first_failure: true
+  preserve_every_attempt: true
+  partial_rerun_may_replace_failed_attempt: false
+  retry_requires_new_attempt_id: true
+prerequisites:
+  - prerequisite_id: EVIDENCE_TABLES_AND_PREREQUISITES
+    required_receipt_order: 1
+    unresolved_decision: EXTERNAL_GATE
+  - prerequisite_id: THREE_FAILURE_DOMAIN_DEPLOYMENT_BINDING
+    required_receipt_order: 2
+    unresolved_decision: EXTERNAL_GATE
+  - prerequisite_id: WORKFLOW_GRAPH_ROLLBACK_AND_REPLAY
+    required_receipt_order_for_rotation: 8
+    unresolved_decision: EXTERNAL_GATE
+  - prerequisite_id: SECURITY_OPERATOR_AND_ROTATION_AUTHORITY
+    required_evidence: SCOPED_EXTERNAL_AUTHORIZATION
+    unresolved_decision: EXTERNAL_GATE
+ordered_steps:
+  - order: 3
+    step_id: EXTERNAL_SECURITY_PREFLIGHT
+    gate: {classification: EXTERNAL_GATE, status: PENDING}
+    required_control_receipts:
+      - TEMPORAL_CLOUD_TLS_OR_MTLS_CREDENTIAL_ADAPTER_ACCEPTED
+      - TRUSTED_PROXY_OR_DIRECT_MTLS_ASGI_IDENTITY_BRIDGE_ACCEPTED
+      - REPORTING_READ_REPLICA_ROUTING_ACCEPTED
+      - OBJECT_STORE_WORKLOAD_IDENTITY_PROVIDER_CHAIN_ACCEPTED
+      - LANGFUSE_IDENTITY_PROMPT_OUTPUT_REDACTION_ACCEPTED
+      - ISTIO_SECURITY_IO_V1_CRD_READINESS_ACCEPTED
+      - ISTIO_DATAPLANE_INTERCEPTION_ACCEPTED
+      - ISTIO_STRICT_MTLS_ENFORCEMENT_ACCEPTED
+      - ISTIO_AUTHORIZATION_POLICY_ENFORCEMENT_ACCEPTED
+      - I3_I4_OTEL_NAMESPACE_LABEL_SERVICE_ACCOUNT_AND_PORT_BINDING_ACCEPTED
+  - order: 9
+    step_id: CROSS_SCOPE_SECURITY_AND_ROTATION
+    gate: {classification: EXTERNAL_GATE, status: PENDING}
+    target_definitions:
+      - CROSS_TENANT_CASE_ACTOR_AND_ROLE_BOUNDARY_FUZZ
+      - PII_PRIVATE_REASONING_AND_LOG_DISCLOSURE_SCAN
+      - VERSIONED_KEY_REFERENCE_ROTATION_WITH_OVERLAP
+      - CERTIFICATE_AND_WORKLOAD_CREDENTIAL_ROTATION
+      - PAYLOAD_CODEC_ROTATION_WITH_OLD_VERSION_READABILITY
+    sensitive_material_in_catalog_allowed: false
+    required_observations:
+      - IDENTITY_AND_AUTHORIZATION_BOUNDARY_SUMMARY
+      - REDACTION_AND_CARDINALITY_SUMMARY
+      - OLD_AND_NEW_VERSION_COMPATIBILITY_SUMMARY
+      - ROTATION_ROLLBACK_SUMMARY
+stop_conditions:
+  - REQUIRED_SECURITY_CONTROL_RECEIPT_UNACCEPTABLE
+  - RELEASE_CONTEXT_MISMATCH
+  - UNAUTHORIZED_IDENTITY_OR_CROSS_SCOPE_ACCESS
+  - PII_PRIVATE_REASONING_OR_CREDENTIAL_DISCLOSURE
+  - OLD_VERSION_READABILITY_LOSS
+  - ROTATION_OVERLAP_OR_ROLLBACK_PROOF_MISSING
+rollback_contract:
+  trigger: ANY_STOP_CONDITION
+  authorization_required: true
+  stop_new_traffic_before_rotation_rollback: true
+  preserve_attempt_and_receipt_hashes: true
+  preserve_old_version_readability: true
+  preserve_formal_facts_and_additive_stores: true
+  direct_internal_table_edits_allowed: false
+  rollback_evidence_required: SIGNED_SAME_CONTEXT_RECEIPT
+evidence_contract:
+  evidence_kind: EXTERNAL_SIGNED
+  authority_ceiling: EXTERNAL_EVIDENCE_SHAPE_ONLY_UNVERIFIED
+  verification_status: UNVERIFIED_REQUIRES_P8_I5_3_TRUST_ROOT_VALIDATION
+  immutable_receipt_required_fields: [schema_version, control_id, scenario_id, step_id, checkpoint_order, claimed_result, status, candidate_sha, candidate_tree_sha, configuration_sha256, context_id, context_sha256, environment_identity, deployment_manifest_sha256, images, attempt_id, attempt_number, checkpoint_id, previous_attempt_id, operator_identity, authorization_reference, signer_identity, signer_role, signature_algorithm, signing_key_id, trust_root_id, observed_at, step_evidence_sha256, stop_condition_id, stop_evidence_sha256, rollback_disposition, rollback_evidence_sha256, evidence_sha256, signed_payload_sha256, signature, receipt_sha256]
+  signed_payload_exact_fields: [schema_version, control_id, scenario_id, step_id, checkpoint_order, claimed_result, status, candidate_sha, candidate_tree_sha, configuration_sha256, context_id, context_sha256, environment_identity, deployment_manifest_sha256, images, attempt_id, attempt_number, checkpoint_id, previous_attempt_id, operator_identity, authorization_reference, signer_identity, signer_role, signature_algorithm, signing_key_id, trust_root_id, observed_at, step_evidence_sha256, stop_condition_id, stop_evidence_sha256, rollback_disposition, rollback_evidence_sha256, evidence_sha256]
+  required_hash_fields: [configuration_sha256, context_sha256, deployment_manifest_sha256, step_evidence_sha256, stop_evidence_sha256, rollback_evidence_sha256, evidence_sha256, signed_payload_sha256, receipt_sha256]
+  mismatched_substituted_or_unverified_decision: EXTERNAL_GATE
+signature_contract:
+  required_count: 6
+  required_roles: [ARCHITECTURE, JAVA, PYTHON, SRE, SECURITY, BUSINESS]
+  required_fields: [algorithm, key_id, role, signature, signer_identity]
+  distinct_roles_required: true
+  distinct_signer_identities_required: true
+  signer_independent_from_runner_generator_candidate_and_evidence_authors: true
+  independent_trust_root_required: true
+  signed_payload_exact_fields_source: evidence_contract.signed_payload_exact_fields
+  each_signature_covers_exact_signed_payload: true
+  signed_payload_role_field: signer_role
+  signature_role_must_equal_signed_payload_role: true
+  role_relabel_decision: EXTERNAL_GATE
+  trust_root_validation_deferred_to: P8-I5-3

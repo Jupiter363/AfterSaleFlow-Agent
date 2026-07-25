@@ -1,0 +1,125 @@
+schema_version: phase8-external-scenario.v1
+kind: EXTERNAL_SCENARIO_DEFINITION
+scenario_id: LOAD_AND_BURST
+gate:
+  classification: EXTERNAL_GATE
+  status: PENDING
+  operations:
+    steady_load: PENDING
+    burst: PENDING
+definition_guard:
+  mode: DEFINITION_ONLY
+  executable: false
+  records_actual_results: false
+  grants_external_authorization: false
+  verifies_external_evidence: false
+authorization_contract:
+  status: PENDING
+  separate_external_authorization_required: true
+  required_fields: [authorization_reference, operator_identity]
+  exact_release_context_binding_required: true
+  missing_invalid_expired_or_scope_mismatch_decision: EXTERNAL_GATE
+release_context_contract:
+  source: EXTERNAL_SIGNED_EVIDENCE
+  match_policy: EXACT_SINGLE_CONTEXT
+  required_fields:
+    - candidate_sha
+    - candidate_tree_sha
+    - configuration_sha256
+    - context_id
+    - context_sha256
+    - environment_identity
+    - deployment_manifest_sha256
+    - images
+    - attempt_lineage
+  image_item_required_fields: [name, digest]
+  image_set_policy: EXACT_NAME_AND_OCI_DIGEST_SET
+  attempt_lineage_required_fields: [attempt_id, attempt_number, checkpoint_id, previous_attempt_id]
+  mixed_or_missing_context_decision: EXTERNAL_GATE
+execution_contract:
+  ordered: true
+  checkpoint_orders: [5, 6]
+  stop_on_first_failure: true
+  preserve_every_attempt: true
+  partial_rerun_may_replace_failed_attempt: false
+  retry_requires_new_attempt_id: true
+prerequisites:
+  - prerequisite_id: EVIDENCE_TABLES_AND_PREREQUISITES
+    required_receipt_order: 1
+    unresolved_decision: EXTERNAL_GATE
+  - prerequisite_id: THREE_FAILURE_DOMAIN_DEPLOYMENT_BINDING
+    required_receipt_order: 2
+    unresolved_decision: EXTERNAL_GATE
+  - prerequisite_id: EXTERNAL_SECURITY_PREFLIGHT
+    required_receipt_order: 3
+    unresolved_decision: EXTERNAL_GATE
+  - prerequisite_id: MULTI_ROLE_BOUNDARY_E2E_AND_BASELINES
+    required_receipt_order: 4
+    unresolved_decision: EXTERNAL_GATE
+  - prerequisite_id: SAME_CONTEXT_CAPACITY_BASELINE
+    required_evidence: SIGNED_EXTERNAL_EVIDENCE
+    unresolved_decision: EXTERNAL_GATE
+ordered_steps:
+  - order: 5
+    step_id: STEADY_LOAD
+    gate: {classification: EXTERNAL_GATE, status: PENDING}
+    target_definition:
+      duration_minutes: 60
+      concurrent_rooms: 1000
+      concurrent_agent_runs: 250
+      concurrent_sse_connections: 2500
+      concurrent_model_requests: 100
+    required_observations:
+      - CONTROL_AND_AGENT_QUEUE_SLO_SUMMARY
+      - STREAM_CONTINUITY_AND_RECONNECT_SUMMARY
+      - MODEL_PROVIDER_AND_EXPORTER_HEALTH_SUMMARY
+  - order: 6
+    step_id: BURST_AND_BOUNDED_RECOVERY
+    gate: {classification: EXTERNAL_GATE, status: PENDING}
+    target_definition:
+      burst_duration_seconds: 30
+      commands_per_second: 50
+      agent_runs_per_second: 20
+      model_requests_per_second: 200
+      maximum_recovery_minutes: 30
+    required_observations:
+      - RECOVERY_WINDOW_SUMMARY
+      - QUEUE_BACKLOG_AND_DRAIN_SUMMARY
+      - STREAM_AND_MODEL_ERROR_BUDGET_SUMMARY
+stop_conditions:
+  - ANY_PREREQUISITE_RECEIPT_UNACCEPTABLE
+  - RELEASE_CONTEXT_MISMATCH
+  - CONTROL_QUEUE_SLO_BREACH
+  - DATA_LOSS_DUPLICATION_OR_ORDERING_VIOLATION
+  - PRIVATE_DATA_OR_HIDDEN_REASONING_DISCLOSURE
+  - RECOVERY_WINDOW_EXCEEDED
+rollback_contract:
+  trigger: ANY_STOP_CONDITION
+  authorization_required: true
+  stop_new_load_first: true
+  preserve_attempt_and_receipt_hashes: true
+  preserve_formal_facts_and_additive_stores: true
+  compatible_deployment_pinning_required: true
+  rollback_evidence_required: SIGNED_SAME_CONTEXT_RECEIPT
+evidence_contract:
+  evidence_kind: EXTERNAL_SIGNED
+  authority_ceiling: EXTERNAL_EVIDENCE_SHAPE_ONLY_UNVERIFIED
+  verification_status: UNVERIFIED_REQUIRES_P8_I5_3_TRUST_ROOT_VALIDATION
+  immutable_receipt_required_fields: [schema_version, control_id, scenario_id, step_id, checkpoint_order, claimed_result, status, candidate_sha, candidate_tree_sha, configuration_sha256, context_id, context_sha256, environment_identity, deployment_manifest_sha256, images, attempt_id, attempt_number, checkpoint_id, previous_attempt_id, operator_identity, authorization_reference, signer_identity, signer_role, signature_algorithm, signing_key_id, trust_root_id, observed_at, step_evidence_sha256, stop_condition_id, stop_evidence_sha256, rollback_disposition, rollback_evidence_sha256, evidence_sha256, signed_payload_sha256, signature, receipt_sha256]
+  signed_payload_exact_fields: [schema_version, control_id, scenario_id, step_id, checkpoint_order, claimed_result, status, candidate_sha, candidate_tree_sha, configuration_sha256, context_id, context_sha256, environment_identity, deployment_manifest_sha256, images, attempt_id, attempt_number, checkpoint_id, previous_attempt_id, operator_identity, authorization_reference, signer_identity, signer_role, signature_algorithm, signing_key_id, trust_root_id, observed_at, step_evidence_sha256, stop_condition_id, stop_evidence_sha256, rollback_disposition, rollback_evidence_sha256, evidence_sha256]
+  required_hash_fields: [configuration_sha256, context_sha256, deployment_manifest_sha256, step_evidence_sha256, stop_evidence_sha256, rollback_evidence_sha256, evidence_sha256, signed_payload_sha256, receipt_sha256]
+  mismatched_substituted_or_unverified_decision: EXTERNAL_GATE
+signature_contract:
+  required_count: 6
+  required_roles: [ARCHITECTURE, JAVA, PYTHON, SRE, SECURITY, BUSINESS]
+  required_fields: [algorithm, key_id, role, signature, signer_identity]
+  distinct_roles_required: true
+  distinct_signer_identities_required: true
+  signer_independent_from_runner_generator_candidate_and_evidence_authors: true
+  independent_trust_root_required: true
+  signed_payload_exact_fields_source: evidence_contract.signed_payload_exact_fields
+  each_signature_covers_exact_signed_payload: true
+  signed_payload_role_field: signer_role
+  signature_role_must_equal_signed_payload_role: true
+  role_relabel_decision: EXTERNAL_GATE
+  trust_root_validation_deferred_to: P8-I5-3
