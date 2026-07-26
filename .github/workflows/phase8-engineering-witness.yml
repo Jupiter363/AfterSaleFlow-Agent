@@ -1,0 +1,1172 @@
+name: Phase 8 engineering witness
+
+"on":
+  workflow_call: {}
+
+permissions: {}
+
+jobs:
+  phase8_build_runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      CI: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONHASHSEED: "0"
+      PYTHONNOUSERSITE: "1"
+    outputs:
+      archive-sha256: ${{ steps.inspect.outputs.archive-sha256 }}
+      artifact-digest: ${{ steps.upload.outputs.artifact-digest }}
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      artifact-status: ${{ steps.upload.outcome }}
+      execution-status: ${{ steps.execute.outcome }}
+    steps:
+      - id: candidate-checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          path: candidate
+          persist-credentials: false
+          fetch-depth: 0
+
+      - id: trusted-code-checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 10e69724038a5bea9cdd99f8fc2be5485860d7c9
+          path: trusted-code
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.11"
+
+      - id: execute
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_sha="${{ github.sha }}"
+          read -r observed_candidate trusted_workflow_sha extra_parent < <(
+            git -C "${GITHUB_WORKSPACE}/candidate" rev-list --parents -n 1 "$candidate_sha"
+          )
+          test "$observed_candidate" = "$candidate_sha"
+          test -n "$trusted_workflow_sha"
+          test -z "${extra_parent:-}"
+          trusted_workflow_ref="Jupiter363/AfterSaleFlow-Agent/.github/workflows/phase8-engineering-witness.yml@${trusted_workflow_sha}"
+          (
+            cd "${GITHUB_WORKSPACE}/trusted-code"
+            python -m scripts.phase8.candidate.github_command_runner build-runtime \
+              --candidate-sha "$candidate_sha" \
+              --trusted-code-sha "10e69724038a5bea9cdd99f8fc2be5485860d7c9" \
+              --trusted-workflow-sha "$trusted_workflow_sha" \
+              --trusted-workflow-ref "$trusted_workflow_ref" \
+              --trusted-workflow-repository "Jupiter363/AfterSaleFlow-Agent" \
+              --trusted-workflow-file-path ".github/workflows/phase8-engineering-witness.yml" \
+              --output-dir "/tmp/phase8-build"
+          )
+
+      - id: inspect
+        if: ${{ steps.execute.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -d '' archives < <(
+            find "/tmp/phase8-build/oci" -mindepth 1 -maxdepth 1 \
+              -type f -name 'sha256-*.tar' -print0
+          )
+          test "${#archives[@]}" = "1"
+          archive="${archives[0]}"
+          test -f "$archive"
+          test ! -L "$archive"
+          test "$(stat -c '%h' "$archive")" = "1"
+          filename="$(basename "$archive")"
+          [[ "$filename" =~ ^sha256-([0-9a-f]{64})\.tar$ ]]
+          archive_sha256="${BASH_REMATCH[1]}"
+          read -r actual _ < <(sha256sum "$archive")
+          test "$actual" = "$archive_sha256"
+          printf 'archive-sha256=%s\n' "$archive_sha256" >> "$GITHUB_OUTPUT"
+
+      - id: upload
+        if: ${{ always() && steps.execute.outcome == 'success' && steps.inspect.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: phase8-runtime-image-${{ github.run_id }}-${{ github.run_attempt }}-sha256-${{ steps.inspect.outputs.archive-sha256 }}
+          path: /tmp/phase8-build
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
+
+  phase8_observe_runtime:
+    needs: phase8_build_runtime
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      CI: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONHASHSEED: "0"
+      PYTHONNOUSERSITE: "1"
+    outputs:
+      artifact-digest: ${{ steps.upload.outputs.artifact-digest }}
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      artifact-status: ${{ steps.upload.outcome }}
+      execution-status: ${{ steps.execute.outcome }}
+    steps:
+      - id: candidate-checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          path: candidate
+          persist-credentials: false
+          fetch-depth: 0
+
+      - id: trusted-code-checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 10e69724038a5bea9cdd99f8fc2be5485860d7c9
+          path: trusted-code
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.11"
+
+      - id: download-build
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.phase8_build_runtime.outputs.artifact-id }}
+          path: ${{ runner.temp }}/phase8-observe-input
+          merge-multiple: true
+          skip-decompress: false
+          digest-mismatch: error
+
+      - id: execute
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_sha="${{ github.sha }}"
+          read -r observed_candidate trusted_workflow_sha extra_parent < <(
+            git -C "${GITHUB_WORKSPACE}/candidate" rev-list --parents -n 1 "$candidate_sha"
+          )
+          test "$observed_candidate" = "$candidate_sha"
+          test -n "$trusted_workflow_sha"
+          test -z "${extra_parent:-}"
+          trusted_workflow_ref="Jupiter363/AfterSaleFlow-Agent/.github/workflows/phase8-engineering-witness.yml@${trusted_workflow_sha}"
+          mapfile -d '' producer_oci_archives < <(
+            find "${RUNNER_TEMP}/phase8-observe-input/oci" -mindepth 1 -maxdepth 1 \
+              -type f -name 'sha256-*.tar' -print0
+          )
+          mapfile -d '' producer_docker_archives < <(
+            find "${RUNNER_TEMP}/phase8-observe-input/docker" -mindepth 1 -maxdepth 1 \
+              -type f -name 'sha256-*.tar' -print0
+          )
+          test "${#producer_oci_archives[@]}" = "1"
+          test "${#producer_docker_archives[@]}" = "1"
+          (
+            cd "${GITHUB_WORKSPACE}/trusted-code"
+            python -m scripts.phase8.candidate.github_command_runner observe-runtime \
+              --candidate-sha "$candidate_sha" \
+              --trusted-code-sha "10e69724038a5bea9cdd99f8fc2be5485860d7c9" \
+              --trusted-workflow-sha "$trusted_workflow_sha" \
+              --trusted-workflow-ref "$trusted_workflow_ref" \
+              --trusted-workflow-repository "Jupiter363/AfterSaleFlow-Agent" \
+              --trusted-workflow-file-path ".github/workflows/phase8-engineering-witness.yml" \
+              --image-archive "${producer_oci_archives[0]}" \
+              --execution-image-archive "${producer_docker_archives[0]}" \
+              --producer-receipt "${RUNNER_TEMP}/phase8-observe-input/runtime-build-receipt.json" \
+              --output-dir "/tmp/phase8-observe"
+          )
+
+      - id: upload
+        if: ${{ always() && steps.execute.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: phase8-runtime-observation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/phase8-observe
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
+
+  phase8_wave_a_static:
+    needs:
+      - phase8_build_runtime
+      - phase8_observe_runtime
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      CI: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONHASHSEED: "0"
+      PYTHONNOUSERSITE: "1"
+    outputs:
+      artifact-digest: ${{ steps.upload.outputs.artifact-digest }}
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      artifact-status: ${{ steps.upload.outcome }}
+      execution-status: ${{ steps.execute.outcome }}
+    steps:
+      - id: candidate-checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          path: candidate
+          persist-credentials: false
+          fetch-depth: 0
+
+      - id: trusted-code-checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 10e69724038a5bea9cdd99f8fc2be5485860d7c9
+          path: trusted-code
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.11"
+
+      - id: download-build
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.phase8_build_runtime.outputs.artifact-id }}
+          path: ${{ runner.temp }}/phase8-static-input/shared-runtime/producer
+          merge-multiple: true
+          skip-decompress: false
+          digest-mismatch: error
+
+      - id: download-observe
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.phase8_observe_runtime.outputs.artifact-id }}
+          path: ${{ runner.temp }}/phase8-static-input/shared-runtime/observer
+          merge-multiple: true
+          skip-decompress: false
+          digest-mismatch: error
+
+      - id: execute
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_sha="${{ github.sha }}"
+          read -r observed_candidate trusted_workflow_sha extra_parent < <(
+            git -C "${GITHUB_WORKSPACE}/candidate" rev-list --parents -n 1 "$candidate_sha"
+          )
+          test "$observed_candidate" = "$candidate_sha"
+          test -n "$trusted_workflow_sha"
+          test -z "${extra_parent:-}"
+          trusted_workflow_ref="Jupiter363/AfterSaleFlow-Agent/.github/workflows/phase8-engineering-witness.yml@${trusted_workflow_sha}"
+          producer="${RUNNER_TEMP}/phase8-static-input/shared-runtime/producer"
+          observer="${RUNNER_TEMP}/phase8-static-input/shared-runtime/observer"
+          mapfile -d '' producer_oci_archives < <(
+            find "$producer/oci" -mindepth 1 -maxdepth 1 -type f -name 'sha256-*.tar' -print0
+          )
+          mapfile -d '' producer_docker_archives < <(
+            find "$producer/docker" -mindepth 1 -maxdepth 1 -type f -name 'sha256-*.tar' -print0
+          )
+          mapfile -d '' observer_oci_archives < <(
+            find "$observer/oci" -mindepth 1 -maxdepth 1 -type f -name 'sha256-*.tar' -print0
+          )
+          mapfile -d '' observer_docker_archives < <(
+            find "$observer/docker" -mindepth 1 -maxdepth 1 -type f -name 'sha256-*.tar' -print0
+          )
+          test "${#producer_oci_archives[@]}" = "1"
+          test "${#producer_docker_archives[@]}" = "1"
+          test "${#observer_oci_archives[@]}" = "1"
+          test "${#observer_docker_archives[@]}" = "1"
+          (
+            cd "${GITHUB_WORKSPACE}/trusted-code"
+            python -m scripts.phase8.candidate.github_command_runner execute-command \
+              --command-id "wave_a_static" \
+              --candidate-sha "$candidate_sha" \
+              --trusted-code-sha "10e69724038a5bea9cdd99f8fc2be5485860d7c9" \
+              --trusted-workflow-sha "$trusted_workflow_sha" \
+              --trusted-workflow-ref "$trusted_workflow_ref" \
+              --trusted-workflow-repository "Jupiter363/AfterSaleFlow-Agent" \
+              --trusted-workflow-file-path ".github/workflows/phase8-engineering-witness.yml" \
+              --image-archive "${producer_oci_archives[0]}" \
+              --execution-image-archive "${producer_docker_archives[0]}" \
+              --observer-image-archive "${observer_oci_archives[0]}" \
+              --observer-execution-image-archive "${observer_docker_archives[0]}" \
+              --runtime-build-receipt "$producer/runtime-build-receipt.json" \
+              --build-observation-receipt "$observer/build-observation-receipt.json" \
+              --wheelhouse-root "$producer/wheelhouse" \
+              --output-dir "/tmp/phase8-command-output"
+          )
+
+      - id: upload
+        if: ${{ always() && steps.execute.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: phase8-raw-000-wave_a_static-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/phase8-command-output
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
+
+  phase8_wave_a_java:
+    needs: phase8_wave_a_static
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    env:
+      CI: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONHASHSEED: "0"
+      PYTHONNOUSERSITE: "1"
+    outputs:
+      artifact-digest: ${{ steps.upload.outputs.artifact-digest }}
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      artifact-status: ${{ steps.upload.outcome }}
+      execution-status: ${{ steps.execute.outcome }}
+    steps:
+      - id: candidate-checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          path: candidate
+          persist-credentials: false
+          fetch-depth: 0
+
+      - id: trusted-code-checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 10e69724038a5bea9cdd99f8fc2be5485860d7c9
+          path: trusted-code
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - id: enable-rootless-userns
+        shell: bash
+        run: |
+          set -euo pipefail
+          userns="$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)"
+          unconfined="$(sysctl -n kernel.apparmor_restrict_unprivileged_unconfined)"
+          [[ "$userns" =~ ^[01]$ ]]
+          [[ "$unconfined" =~ ^[01]$ ]]
+          printf 'userns=%s\n' "$userns" >> "$GITHUB_OUTPUT"
+          printf 'unconfined=%s\n' "$unconfined" >> "$GITHUB_OUTPUT"
+          sudo -n sysctl -w kernel.apparmor_restrict_unprivileged_unconfined=0
+          sudo -n sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          test "$(sysctl -n kernel.apparmor_restrict_unprivileged_unconfined)" = "0"
+          test "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)" = "0"
+
+      - id: execute
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_sha="${{ github.sha }}"
+          read -r observed_candidate trusted_workflow_sha extra_parent < <(
+            git -C "${GITHUB_WORKSPACE}/candidate" rev-list --parents -n 1 "$candidate_sha"
+          )
+          test "$observed_candidate" = "$candidate_sha"
+          test -n "$trusted_workflow_sha"
+          test -z "${extra_parent:-}"
+          trusted_workflow_ref="Jupiter363/AfterSaleFlow-Agent/.github/workflows/phase8-engineering-witness.yml@${trusted_workflow_sha}"
+          (
+            cd "${GITHUB_WORKSPACE}/trusted-code"
+            python -m scripts.phase8.candidate.github_command_runner execute-command \
+              --command-id "wave_a_java" \
+              --candidate-sha "$candidate_sha" \
+              --trusted-code-sha "10e69724038a5bea9cdd99f8fc2be5485860d7c9" \
+              --trusted-workflow-sha "$trusted_workflow_sha" \
+              --trusted-workflow-ref "$trusted_workflow_ref" \
+              --trusted-workflow-repository "Jupiter363/AfterSaleFlow-Agent" \
+              --trusted-workflow-file-path ".github/workflows/phase8-engineering-witness.yml" \
+              --output-dir "/tmp/phase8-command-output"
+          )
+
+      - id: restore-rootless-userns
+        if: ${{ always() && steps.enable-rootless-userns.outputs.userns != '' && steps.enable-rootless-userns.outputs.unconfined != '' }}
+        shell: bash
+        env:
+          ORIGINAL_USERNS: ${{ steps.enable-rootless-userns.outputs.userns }}
+          ORIGINAL_UNCONFINED: ${{ steps.enable-rootless-userns.outputs.unconfined }}
+        run: |
+          set -euo pipefail
+          [[ "$ORIGINAL_USERNS" =~ ^[01]$ ]]
+          [[ "$ORIGINAL_UNCONFINED" =~ ^[01]$ ]]
+          sudo -n sysctl -w kernel.apparmor_restrict_unprivileged_userns="$ORIGINAL_USERNS"
+          sudo -n sysctl -w kernel.apparmor_restrict_unprivileged_unconfined="$ORIGINAL_UNCONFINED"
+          test "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)" = "$ORIGINAL_USERNS"
+          test "$(sysctl -n kernel.apparmor_restrict_unprivileged_unconfined)" = "$ORIGINAL_UNCONFINED"
+
+      - id: upload
+        if: ${{ always() && steps.execute.outcome == 'success' && steps.restore-rootless-userns.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: phase8-raw-001-wave_a_java-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/phase8-command-output
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
+
+  phase8_wave_b_static_and_models:
+    needs:
+      - phase8_build_runtime
+      - phase8_observe_runtime
+      - phase8_wave_a_java
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      CI: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONHASHSEED: "0"
+      PYTHONNOUSERSITE: "1"
+    outputs:
+      artifact-digest: ${{ steps.upload.outputs.artifact-digest }}
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      artifact-status: ${{ steps.upload.outcome }}
+      execution-status: ${{ steps.execute.outcome }}
+    steps:
+      - id: candidate-checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          path: candidate
+          persist-credentials: false
+          fetch-depth: 0
+
+      - id: trusted-code-checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 10e69724038a5bea9cdd99f8fc2be5485860d7c9
+          path: trusted-code
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.11"
+
+      - id: download-build
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.phase8_build_runtime.outputs.artifact-id }}
+          path: ${{ runner.temp }}/phase8-static-input/shared-runtime/producer
+          merge-multiple: true
+          skip-decompress: false
+          digest-mismatch: error
+
+      - id: download-observe
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.phase8_observe_runtime.outputs.artifact-id }}
+          path: ${{ runner.temp }}/phase8-static-input/shared-runtime/observer
+          merge-multiple: true
+          skip-decompress: false
+          digest-mismatch: error
+
+      - id: execute
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_sha="${{ github.sha }}"
+          read -r observed_candidate trusted_workflow_sha extra_parent < <(
+            git -C "${GITHUB_WORKSPACE}/candidate" rev-list --parents -n 1 "$candidate_sha"
+          )
+          test "$observed_candidate" = "$candidate_sha"
+          test -n "$trusted_workflow_sha"
+          test -z "${extra_parent:-}"
+          trusted_workflow_ref="Jupiter363/AfterSaleFlow-Agent/.github/workflows/phase8-engineering-witness.yml@${trusted_workflow_sha}"
+          producer="${RUNNER_TEMP}/phase8-static-input/shared-runtime/producer"
+          observer="${RUNNER_TEMP}/phase8-static-input/shared-runtime/observer"
+          mapfile -d '' producer_oci_archives < <(
+            find "$producer/oci" -mindepth 1 -maxdepth 1 -type f -name 'sha256-*.tar' -print0
+          )
+          mapfile -d '' producer_docker_archives < <(
+            find "$producer/docker" -mindepth 1 -maxdepth 1 -type f -name 'sha256-*.tar' -print0
+          )
+          mapfile -d '' observer_oci_archives < <(
+            find "$observer/oci" -mindepth 1 -maxdepth 1 -type f -name 'sha256-*.tar' -print0
+          )
+          mapfile -d '' observer_docker_archives < <(
+            find "$observer/docker" -mindepth 1 -maxdepth 1 -type f -name 'sha256-*.tar' -print0
+          )
+          test "${#producer_oci_archives[@]}" = "1"
+          test "${#producer_docker_archives[@]}" = "1"
+          test "${#observer_oci_archives[@]}" = "1"
+          test "${#observer_docker_archives[@]}" = "1"
+          (
+            cd "${GITHUB_WORKSPACE}/trusted-code"
+            python -m scripts.phase8.candidate.github_command_runner execute-command \
+              --command-id "wave_b_static_and_models" \
+              --candidate-sha "$candidate_sha" \
+              --trusted-code-sha "10e69724038a5bea9cdd99f8fc2be5485860d7c9" \
+              --trusted-workflow-sha "$trusted_workflow_sha" \
+              --trusted-workflow-ref "$trusted_workflow_ref" \
+              --trusted-workflow-repository "Jupiter363/AfterSaleFlow-Agent" \
+              --trusted-workflow-file-path ".github/workflows/phase8-engineering-witness.yml" \
+              --image-archive "${producer_oci_archives[0]}" \
+              --execution-image-archive "${producer_docker_archives[0]}" \
+              --observer-image-archive "${observer_oci_archives[0]}" \
+              --observer-execution-image-archive "${observer_docker_archives[0]}" \
+              --runtime-build-receipt "$producer/runtime-build-receipt.json" \
+              --build-observation-receipt "$observer/build-observation-receipt.json" \
+              --wheelhouse-root "$producer/wheelhouse" \
+              --output-dir "/tmp/phase8-command-output"
+          )
+
+      - id: upload
+        if: ${{ always() && steps.execute.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: phase8-raw-002-wave_b_static_and_models-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/phase8-command-output
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
+
+  phase8_wave_b_java_unit:
+    needs: phase8_wave_b_static_and_models
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    env:
+      CI: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONHASHSEED: "0"
+      PYTHONNOUSERSITE: "1"
+    outputs:
+      artifact-digest: ${{ steps.upload.outputs.artifact-digest }}
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      artifact-status: ${{ steps.upload.outcome }}
+      execution-status: ${{ steps.execute.outcome }}
+    steps:
+      - id: candidate-checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          path: candidate
+          persist-credentials: false
+          fetch-depth: 0
+
+      - id: trusted-code-checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 10e69724038a5bea9cdd99f8fc2be5485860d7c9
+          path: trusted-code
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - id: enable-rootless-userns
+        shell: bash
+        run: |
+          set -euo pipefail
+          userns="$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)"
+          unconfined="$(sysctl -n kernel.apparmor_restrict_unprivileged_unconfined)"
+          [[ "$userns" =~ ^[01]$ ]]
+          [[ "$unconfined" =~ ^[01]$ ]]
+          printf 'userns=%s\n' "$userns" >> "$GITHUB_OUTPUT"
+          printf 'unconfined=%s\n' "$unconfined" >> "$GITHUB_OUTPUT"
+          sudo -n sysctl -w kernel.apparmor_restrict_unprivileged_unconfined=0
+          sudo -n sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          test "$(sysctl -n kernel.apparmor_restrict_unprivileged_unconfined)" = "0"
+          test "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)" = "0"
+
+      - id: execute
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_sha="${{ github.sha }}"
+          read -r observed_candidate trusted_workflow_sha extra_parent < <(
+            git -C "${GITHUB_WORKSPACE}/candidate" rev-list --parents -n 1 "$candidate_sha"
+          )
+          test "$observed_candidate" = "$candidate_sha"
+          test -n "$trusted_workflow_sha"
+          test -z "${extra_parent:-}"
+          trusted_workflow_ref="Jupiter363/AfterSaleFlow-Agent/.github/workflows/phase8-engineering-witness.yml@${trusted_workflow_sha}"
+          (
+            cd "${GITHUB_WORKSPACE}/trusted-code"
+            python -m scripts.phase8.candidate.github_command_runner execute-command \
+              --command-id "wave_b_java_unit" \
+              --candidate-sha "$candidate_sha" \
+              --trusted-code-sha "10e69724038a5bea9cdd99f8fc2be5485860d7c9" \
+              --trusted-workflow-sha "$trusted_workflow_sha" \
+              --trusted-workflow-ref "$trusted_workflow_ref" \
+              --trusted-workflow-repository "Jupiter363/AfterSaleFlow-Agent" \
+              --trusted-workflow-file-path ".github/workflows/phase8-engineering-witness.yml" \
+              --output-dir "/tmp/phase8-command-output"
+          )
+
+      - id: restore-rootless-userns
+        if: ${{ always() && steps.enable-rootless-userns.outputs.userns != '' && steps.enable-rootless-userns.outputs.unconfined != '' }}
+        shell: bash
+        env:
+          ORIGINAL_USERNS: ${{ steps.enable-rootless-userns.outputs.userns }}
+          ORIGINAL_UNCONFINED: ${{ steps.enable-rootless-userns.outputs.unconfined }}
+        run: |
+          set -euo pipefail
+          [[ "$ORIGINAL_USERNS" =~ ^[01]$ ]]
+          [[ "$ORIGINAL_UNCONFINED" =~ ^[01]$ ]]
+          sudo -n sysctl -w kernel.apparmor_restrict_unprivileged_userns="$ORIGINAL_USERNS"
+          sudo -n sysctl -w kernel.apparmor_restrict_unprivileged_unconfined="$ORIGINAL_UNCONFINED"
+          test "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)" = "$ORIGINAL_USERNS"
+          test "$(sysctl -n kernel.apparmor_restrict_unprivileged_unconfined)" = "$ORIGINAL_UNCONFINED"
+
+      - id: upload
+        if: ${{ always() && steps.execute.outcome == 'success' && steps.restore-rootless-userns.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: phase8-raw-003-wave_b_java_unit-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/phase8-command-output
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
+
+  phase8_wave_b_postgresql_integration:
+    needs: phase8_wave_b_java_unit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    permissions:
+      contents: read
+    env:
+      CI: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONHASHSEED: "0"
+      PYTHONNOUSERSITE: "1"
+    outputs:
+      artifact-digest: ${{ steps.upload.outputs.artifact-digest }}
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      artifact-status: ${{ steps.upload.outcome }}
+      execution-status: ${{ steps.execute.outcome }}
+    steps:
+      - id: candidate-checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          path: candidate
+          persist-credentials: false
+          fetch-depth: 0
+
+      - id: trusted-code-checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 10e69724038a5bea9cdd99f8fc2be5485860d7c9
+          path: trusted-code
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - id: enable-rootless-userns
+        shell: bash
+        run: |
+          set -euo pipefail
+          userns="$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)"
+          unconfined="$(sysctl -n kernel.apparmor_restrict_unprivileged_unconfined)"
+          [[ "$userns" =~ ^[01]$ ]]
+          [[ "$unconfined" =~ ^[01]$ ]]
+          printf 'userns=%s\n' "$userns" >> "$GITHUB_OUTPUT"
+          printf 'unconfined=%s\n' "$unconfined" >> "$GITHUB_OUTPUT"
+          sudo -n sysctl -w kernel.apparmor_restrict_unprivileged_unconfined=0
+          sudo -n sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          test "$(sysctl -n kernel.apparmor_restrict_unprivileged_unconfined)" = "0"
+          test "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)" = "0"
+
+      - id: execute
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_sha="${{ github.sha }}"
+          read -r observed_candidate trusted_workflow_sha extra_parent < <(
+            git -C "${GITHUB_WORKSPACE}/candidate" rev-list --parents -n 1 "$candidate_sha"
+          )
+          test "$observed_candidate" = "$candidate_sha"
+          test -n "$trusted_workflow_sha"
+          test -z "${extra_parent:-}"
+          trusted_workflow_ref="Jupiter363/AfterSaleFlow-Agent/.github/workflows/phase8-engineering-witness.yml@${trusted_workflow_sha}"
+          (
+            cd "${GITHUB_WORKSPACE}/trusted-code"
+            python -m scripts.phase8.candidate.github_command_runner execute-command \
+              --command-id "wave_b_postgresql_integration" \
+              --candidate-sha "$candidate_sha" \
+              --trusted-code-sha "10e69724038a5bea9cdd99f8fc2be5485860d7c9" \
+              --trusted-workflow-sha "$trusted_workflow_sha" \
+              --trusted-workflow-ref "$trusted_workflow_ref" \
+              --trusted-workflow-repository "Jupiter363/AfterSaleFlow-Agent" \
+              --trusted-workflow-file-path ".github/workflows/phase8-engineering-witness.yml" \
+              --output-dir "/tmp/phase8-command-output"
+          )
+
+      - id: restore-rootless-userns
+        if: ${{ always() && steps.enable-rootless-userns.outputs.userns != '' && steps.enable-rootless-userns.outputs.unconfined != '' }}
+        shell: bash
+        env:
+          ORIGINAL_USERNS: ${{ steps.enable-rootless-userns.outputs.userns }}
+          ORIGINAL_UNCONFINED: ${{ steps.enable-rootless-userns.outputs.unconfined }}
+        run: |
+          set -euo pipefail
+          [[ "$ORIGINAL_USERNS" =~ ^[01]$ ]]
+          [[ "$ORIGINAL_UNCONFINED" =~ ^[01]$ ]]
+          sudo -n sysctl -w kernel.apparmor_restrict_unprivileged_userns="$ORIGINAL_USERNS"
+          sudo -n sysctl -w kernel.apparmor_restrict_unprivileged_unconfined="$ORIGINAL_UNCONFINED"
+          test "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)" = "$ORIGINAL_USERNS"
+          test "$(sysctl -n kernel.apparmor_restrict_unprivileged_unconfined)" = "$ORIGINAL_UNCONFINED"
+
+      - id: upload
+        if: ${{ always() && steps.execute.outcome == 'success' && steps.restore-rootless-userns.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: phase8-raw-004-wave_b_postgresql_integration-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/phase8-command-output
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
+
+  aggregate:
+    needs:
+      - phase8_build_runtime
+      - phase8_observe_runtime
+      - phase8_wave_a_static
+      - phase8_wave_a_java
+      - phase8_wave_b_static_and_models
+      - phase8_wave_b_java_unit
+      - phase8_wave_b_postgresql_integration
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      CI: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONHASHSEED: "0"
+      PYTHONNOUSERSITE: "1"
+    outputs:
+      artifact-digest: ${{ steps.upload.outputs.artifact-digest }}
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      artifact-status: ${{ steps.upload.outcome }}
+      digest-status: ${{ steps.digest.outcome }}
+      execution-status: ${{ steps.aggregate.outcome }}
+      witness-sha256: ${{ steps.digest.outputs.witness-sha256 }}
+    steps:
+      - id: preflight
+        shell: bash
+        env:
+          BUILD_RESULT: ${{ needs.phase8_build_runtime.result }}
+          BUILD_EXECUTION: ${{ needs.phase8_build_runtime.outputs.execution-status }}
+          BUILD_ARTIFACT_STATUS: ${{ needs.phase8_build_runtime.outputs.artifact-status }}
+          BUILD_ARTIFACT_ID: ${{ needs.phase8_build_runtime.outputs.artifact-id }}
+          BUILD_ARTIFACT_DIGEST: ${{ needs.phase8_build_runtime.outputs.artifact-digest }}
+          BUILD_ARCHIVE_SHA256: ${{ needs.phase8_build_runtime.outputs.archive-sha256 }}
+          OBSERVE_RESULT: ${{ needs.phase8_observe_runtime.result }}
+          OBSERVE_EXECUTION: ${{ needs.phase8_observe_runtime.outputs.execution-status }}
+          OBSERVE_ARTIFACT_STATUS: ${{ needs.phase8_observe_runtime.outputs.artifact-status }}
+          OBSERVE_ARTIFACT_ID: ${{ needs.phase8_observe_runtime.outputs.artifact-id }}
+          OBSERVE_ARTIFACT_DIGEST: ${{ needs.phase8_observe_runtime.outputs.artifact-digest }}
+          WAVE_A_STATIC_RESULT: ${{ needs.phase8_wave_a_static.result }}
+          WAVE_A_STATIC_EXECUTION: ${{ needs.phase8_wave_a_static.outputs.execution-status }}
+          WAVE_A_STATIC_ARTIFACT_STATUS: ${{ needs.phase8_wave_a_static.outputs.artifact-status }}
+          WAVE_A_STATIC_ARTIFACT_ID: ${{ needs.phase8_wave_a_static.outputs.artifact-id }}
+          WAVE_A_STATIC_ARTIFACT_DIGEST: ${{ needs.phase8_wave_a_static.outputs.artifact-digest }}
+          WAVE_A_JAVA_RESULT: ${{ needs.phase8_wave_a_java.result }}
+          WAVE_A_JAVA_EXECUTION: ${{ needs.phase8_wave_a_java.outputs.execution-status }}
+          WAVE_A_JAVA_ARTIFACT_STATUS: ${{ needs.phase8_wave_a_java.outputs.artifact-status }}
+          WAVE_A_JAVA_ARTIFACT_ID: ${{ needs.phase8_wave_a_java.outputs.artifact-id }}
+          WAVE_A_JAVA_ARTIFACT_DIGEST: ${{ needs.phase8_wave_a_java.outputs.artifact-digest }}
+          WAVE_B_STATIC_RESULT: ${{ needs.phase8_wave_b_static_and_models.result }}
+          WAVE_B_STATIC_EXECUTION: ${{ needs.phase8_wave_b_static_and_models.outputs.execution-status }}
+          WAVE_B_STATIC_ARTIFACT_STATUS: ${{ needs.phase8_wave_b_static_and_models.outputs.artifact-status }}
+          WAVE_B_STATIC_ARTIFACT_ID: ${{ needs.phase8_wave_b_static_and_models.outputs.artifact-id }}
+          WAVE_B_STATIC_ARTIFACT_DIGEST: ${{ needs.phase8_wave_b_static_and_models.outputs.artifact-digest }}
+          WAVE_B_JAVA_RESULT: ${{ needs.phase8_wave_b_java_unit.result }}
+          WAVE_B_JAVA_EXECUTION: ${{ needs.phase8_wave_b_java_unit.outputs.execution-status }}
+          WAVE_B_JAVA_ARTIFACT_STATUS: ${{ needs.phase8_wave_b_java_unit.outputs.artifact-status }}
+          WAVE_B_JAVA_ARTIFACT_ID: ${{ needs.phase8_wave_b_java_unit.outputs.artifact-id }}
+          WAVE_B_JAVA_ARTIFACT_DIGEST: ${{ needs.phase8_wave_b_java_unit.outputs.artifact-digest }}
+          POSTGRES_RESULT: ${{ needs.phase8_wave_b_postgresql_integration.result }}
+          POSTGRES_EXECUTION: ${{ needs.phase8_wave_b_postgresql_integration.outputs.execution-status }}
+          POSTGRES_ARTIFACT_STATUS: ${{ needs.phase8_wave_b_postgresql_integration.outputs.artifact-status }}
+          POSTGRES_ARTIFACT_ID: ${{ needs.phase8_wave_b_postgresql_integration.outputs.artifact-id }}
+          POSTGRES_ARTIFACT_DIGEST: ${{ needs.phase8_wave_b_postgresql_integration.outputs.artifact-digest }}
+        run: |
+          set -euo pipefail
+          results=(
+            "$BUILD_RESULT" "$OBSERVE_RESULT" "$WAVE_A_STATIC_RESULT"
+            "$WAVE_A_JAVA_RESULT" "$WAVE_B_STATIC_RESULT" "$WAVE_B_JAVA_RESULT"
+            "$POSTGRES_RESULT"
+          )
+          executions=(
+            "$BUILD_EXECUTION" "$OBSERVE_EXECUTION" "$WAVE_A_STATIC_EXECUTION"
+            "$WAVE_A_JAVA_EXECUTION" "$WAVE_B_STATIC_EXECUTION" "$WAVE_B_JAVA_EXECUTION"
+            "$POSTGRES_EXECUTION"
+          )
+          artifact_statuses=(
+            "$BUILD_ARTIFACT_STATUS" "$OBSERVE_ARTIFACT_STATUS" "$WAVE_A_STATIC_ARTIFACT_STATUS"
+            "$WAVE_A_JAVA_ARTIFACT_STATUS" "$WAVE_B_STATIC_ARTIFACT_STATUS"
+            "$WAVE_B_JAVA_ARTIFACT_STATUS" "$POSTGRES_ARTIFACT_STATUS"
+          )
+          artifact_ids=(
+            "$BUILD_ARTIFACT_ID" "$OBSERVE_ARTIFACT_ID" "$WAVE_A_STATIC_ARTIFACT_ID"
+            "$WAVE_A_JAVA_ARTIFACT_ID" "$WAVE_B_STATIC_ARTIFACT_ID"
+            "$WAVE_B_JAVA_ARTIFACT_ID" "$POSTGRES_ARTIFACT_ID"
+          )
+          artifact_digests=(
+            "$BUILD_ARTIFACT_DIGEST" "$OBSERVE_ARTIFACT_DIGEST" "$WAVE_A_STATIC_ARTIFACT_DIGEST"
+            "$WAVE_A_JAVA_ARTIFACT_DIGEST" "$WAVE_B_STATIC_ARTIFACT_DIGEST"
+            "$WAVE_B_JAVA_ARTIFACT_DIGEST" "$POSTGRES_ARTIFACT_DIGEST"
+          )
+          for value in "${results[@]}" "${executions[@]}" "${artifact_statuses[@]}"; do
+            test "$value" = "success"
+          done
+          for value in "${artifact_ids[@]}"; do
+            [[ "$value" =~ ^[1-9][0-9]*$ ]]
+          done
+          for value in "${artifact_digests[@]}"; do
+            [[ "$value" =~ ^[0-9a-f]{64}$ ]]
+          done
+          [[ "$BUILD_ARCHIVE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          test "${#artifact_ids[@]}" = "7"
+          test "$(printf '%s\n' "${artifact_ids[@]}" | sort -u | wc -l)" = "7"
+
+      - id: candidate-checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          path: candidate
+          persist-credentials: false
+          fetch-depth: 0
+
+      - id: trusted-code-checkout
+        shell: bash
+        env:
+          TRUSTED_CODE_SHA: 10e69724038a5bea9cdd99f8fc2be5485860d7c9
+        run: |
+          set -euo pipefail
+          candidate="${GITHUB_WORKSPACE}/candidate"
+          trusted="${GITHUB_WORKSPACE}/trusted-code"
+          test ! -e "$trusted"
+          test ! -L "$trusted"
+          test "$(git -C "$candidate" rev-parse HEAD)" = "$GITHUB_SHA"
+          git -C "$candidate" cat-file -e "${TRUSTED_CODE_SHA}^{commit}"
+          git -C "$candidate" merge-base --is-ancestor "$TRUSTED_CODE_SHA" "$GITHUB_SHA"
+          git -C "$candidate" worktree add --detach "$trusted" "$TRUSTED_CODE_SHA"
+          test -f "$trusted/.git"
+          test "$(git -C "$trusted" rev-parse HEAD)" = "$TRUSTED_CODE_SHA"
+          candidate_common="$(git -C "$candidate" rev-parse --path-format=absolute --git-common-dir)"
+          trusted_common="$(git -C "$trusted" rev-parse --path-format=absolute --git-common-dir)"
+          test -d "$candidate_common"
+          test ! -L "$candidate_common"
+          test "$candidate_common" = "$trusted_common"
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.11"
+
+      - id: download-build
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.phase8_build_runtime.outputs.artifact-id }}
+          path: ${{ runner.temp }}/phase8-raw/shared-runtime/producer
+          merge-multiple: true
+          skip-decompress: false
+          digest-mismatch: error
+
+      - id: download-observe
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.phase8_observe_runtime.outputs.artifact-id }}
+          path: ${{ runner.temp }}/phase8-raw/shared-runtime/observer
+          merge-multiple: true
+          skip-decompress: false
+          digest-mismatch: error
+
+      - id: download-wave-a-static
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.phase8_wave_a_static.outputs.artifact-id }}
+          path: ${{ runner.temp }}/phase8-raw/commands/000-wave_a_static
+          merge-multiple: true
+          skip-decompress: false
+          digest-mismatch: error
+
+      - id: download-wave-a-java
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.phase8_wave_a_java.outputs.artifact-id }}
+          path: ${{ runner.temp }}/phase8-raw/commands/001-wave_a_java
+          merge-multiple: true
+          skip-decompress: false
+          digest-mismatch: error
+
+      - id: download-wave-b-static-and-models
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.phase8_wave_b_static_and_models.outputs.artifact-id }}
+          path: ${{ runner.temp }}/phase8-raw/commands/002-wave_b_static_and_models
+          merge-multiple: true
+          skip-decompress: false
+          digest-mismatch: error
+
+      - id: download-wave-b-java-unit
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.phase8_wave_b_java_unit.outputs.artifact-id }}
+          path: ${{ runner.temp }}/phase8-raw/commands/003-wave_b_java_unit
+          merge-multiple: true
+          skip-decompress: false
+          digest-mismatch: error
+
+      - id: download-wave-b-postgresql-integration
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.phase8_wave_b_postgresql_integration.outputs.artifact-id }}
+          path: ${{ runner.temp }}/phase8-raw/commands/004-wave_b_postgresql_integration
+          merge-multiple: true
+          skip-decompress: false
+          digest-mismatch: error
+
+      - id: aggregate
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_sha="${{ github.sha }}"
+          read -r observed_candidate trusted_workflow_sha extra_parent < <(
+            git -C "${GITHUB_WORKSPACE}/candidate" rev-list --parents -n 1 "$candidate_sha"
+          )
+          test "$observed_candidate" = "$candidate_sha"
+          test -n "$trusted_workflow_sha"
+          test -z "${extra_parent:-}"
+          trusted_workflow_ref="Jupiter363/AfterSaleFlow-Agent/.github/workflows/phase8-engineering-witness.yml@${trusted_workflow_sha}"
+          (
+            cd "${GITHUB_WORKSPACE}/trusted-code"
+            python -m scripts.phase8.candidate.github_witness \
+              --candidate-dir "${GITHUB_WORKSPACE}/candidate" \
+              --candidate-sha "$candidate_sha" \
+              --raw-artifacts-dir "${RUNNER_TEMP}/phase8-raw" \
+              --output-dir "/tmp/phase8-witness" \
+              --attempt-id "github-${{ github.run_id }}-${{ github.run_attempt }}" \
+              --trusted-code-sha "10e69724038a5bea9cdd99f8fc2be5485860d7c9" \
+              --trusted-workflow-sha "$trusted_workflow_sha" \
+              --trusted-workflow-ref "$trusted_workflow_ref" \
+              --trusted-workflow-repository "Jupiter363/AfterSaleFlow-Agent" \
+              --trusted-workflow-file-path ".github/workflows/phase8-engineering-witness.yml"
+          )
+
+      - id: digest
+        if: ${{ steps.aggregate.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          subject="/tmp/phase8-witness/phase8-engineering-witness.tar"
+          test -f "$subject"
+          test ! -L "$subject"
+          test "$(stat -c '%h' "$subject")" = "1"
+          read -r witness_sha256 _ < <(sha256sum "$subject")
+          [[ "$witness_sha256" =~ ^[0-9a-f]{64}$ ]]
+          printf 'witness-sha256=%s\n' "$witness_sha256" >> "$GITHUB_OUTPUT"
+
+      - id: upload
+        if: ${{ always() && steps.aggregate.outcome == 'success' && steps.digest.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: phase8-engineering-witness-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/phase8-witness/phase8-engineering-witness.tar
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
+
+  attest:
+    needs: aggregate
+    if: ${{ always() && needs.aggregate.result == 'success' && needs.aggregate.outputs.execution-status == 'success' && needs.aggregate.outputs.digest-status == 'success' && needs.aggregate.outputs.artifact-status == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    outputs:
+      attestation-status: ${{ steps.attest.outcome }}
+      download-status: ${{ steps.download.outcome }}
+      verification-status: ${{ steps.verify.outcome }}
+    steps:
+      - id: download
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.aggregate.outputs.artifact-id }}
+          path: ${{ runner.temp }}/phase8-attest
+          merge-multiple: true
+          skip-decompress: false
+          digest-mismatch: error
+
+      - id: verify
+        shell: bash
+        env:
+          EXPECTED_ARTIFACT_DIGEST: ${{ needs.aggregate.outputs.artifact-digest }}
+          EXPECTED_ARTIFACT_ID: ${{ needs.aggregate.outputs.artifact-id }}
+          EXPECTED_WITNESS_SHA256: ${{ needs.aggregate.outputs.witness-sha256 }}
+        run: |
+          set -euo pipefail
+          subject="${RUNNER_TEMP}/phase8-attest/phase8-engineering-witness.tar"
+          mapfile -d '' entries < <(
+            find "${RUNNER_TEMP}/phase8-attest" -mindepth 1 -maxdepth 1 -print0
+          )
+          test "${#entries[@]}" = "1"
+          test "${entries[0]}" = "$subject"
+          test -f "$subject"
+          test ! -L "$subject"
+          test "$(stat -c '%h' "$subject")" = "1"
+          [[ "$EXPECTED_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$EXPECTED_ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$EXPECTED_WITNESS_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          read -r actual _ < <(sha256sum "$subject")
+          test "$actual" = "$EXPECTED_WITNESS_SHA256"
+
+      - id: attest
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6
+        with:
+          subject-path: ${{ runner.temp }}/phase8-attest/phase8-engineering-witness.tar
+
+  gate:
+    needs:
+      - phase8_build_runtime
+      - phase8_observe_runtime
+      - phase8_wave_a_static
+      - phase8_wave_a_java
+      - phase8_wave_b_static_and_models
+      - phase8_wave_b_java_unit
+      - phase8_wave_b_postgresql_integration
+      - aggregate
+      - attest
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - id: enforce
+        shell: bash
+        env:
+          BUILD_RESULT: ${{ needs.phase8_build_runtime.result }}
+          BUILD_EXECUTION: ${{ needs.phase8_build_runtime.outputs.execution-status }}
+          BUILD_ARTIFACT_STATUS: ${{ needs.phase8_build_runtime.outputs.artifact-status }}
+          BUILD_ARTIFACT_ID: ${{ needs.phase8_build_runtime.outputs.artifact-id }}
+          BUILD_ARTIFACT_DIGEST: ${{ needs.phase8_build_runtime.outputs.artifact-digest }}
+          BUILD_ARCHIVE_SHA256: ${{ needs.phase8_build_runtime.outputs.archive-sha256 }}
+          OBSERVE_RESULT: ${{ needs.phase8_observe_runtime.result }}
+          OBSERVE_EXECUTION: ${{ needs.phase8_observe_runtime.outputs.execution-status }}
+          OBSERVE_ARTIFACT_STATUS: ${{ needs.phase8_observe_runtime.outputs.artifact-status }}
+          OBSERVE_ARTIFACT_ID: ${{ needs.phase8_observe_runtime.outputs.artifact-id }}
+          OBSERVE_ARTIFACT_DIGEST: ${{ needs.phase8_observe_runtime.outputs.artifact-digest }}
+          WAVE_A_STATIC_RESULT: ${{ needs.phase8_wave_a_static.result }}
+          WAVE_A_STATIC_EXECUTION: ${{ needs.phase8_wave_a_static.outputs.execution-status }}
+          WAVE_A_STATIC_ARTIFACT_STATUS: ${{ needs.phase8_wave_a_static.outputs.artifact-status }}
+          WAVE_A_STATIC_ARTIFACT_ID: ${{ needs.phase8_wave_a_static.outputs.artifact-id }}
+          WAVE_A_STATIC_ARTIFACT_DIGEST: ${{ needs.phase8_wave_a_static.outputs.artifact-digest }}
+          WAVE_A_JAVA_RESULT: ${{ needs.phase8_wave_a_java.result }}
+          WAVE_A_JAVA_EXECUTION: ${{ needs.phase8_wave_a_java.outputs.execution-status }}
+          WAVE_A_JAVA_ARTIFACT_STATUS: ${{ needs.phase8_wave_a_java.outputs.artifact-status }}
+          WAVE_A_JAVA_ARTIFACT_ID: ${{ needs.phase8_wave_a_java.outputs.artifact-id }}
+          WAVE_A_JAVA_ARTIFACT_DIGEST: ${{ needs.phase8_wave_a_java.outputs.artifact-digest }}
+          WAVE_B_STATIC_RESULT: ${{ needs.phase8_wave_b_static_and_models.result }}
+          WAVE_B_STATIC_EXECUTION: ${{ needs.phase8_wave_b_static_and_models.outputs.execution-status }}
+          WAVE_B_STATIC_ARTIFACT_STATUS: ${{ needs.phase8_wave_b_static_and_models.outputs.artifact-status }}
+          WAVE_B_STATIC_ARTIFACT_ID: ${{ needs.phase8_wave_b_static_and_models.outputs.artifact-id }}
+          WAVE_B_STATIC_ARTIFACT_DIGEST: ${{ needs.phase8_wave_b_static_and_models.outputs.artifact-digest }}
+          WAVE_B_JAVA_RESULT: ${{ needs.phase8_wave_b_java_unit.result }}
+          WAVE_B_JAVA_EXECUTION: ${{ needs.phase8_wave_b_java_unit.outputs.execution-status }}
+          WAVE_B_JAVA_ARTIFACT_STATUS: ${{ needs.phase8_wave_b_java_unit.outputs.artifact-status }}
+          WAVE_B_JAVA_ARTIFACT_ID: ${{ needs.phase8_wave_b_java_unit.outputs.artifact-id }}
+          WAVE_B_JAVA_ARTIFACT_DIGEST: ${{ needs.phase8_wave_b_java_unit.outputs.artifact-digest }}
+          POSTGRES_RESULT: ${{ needs.phase8_wave_b_postgresql_integration.result }}
+          POSTGRES_EXECUTION: ${{ needs.phase8_wave_b_postgresql_integration.outputs.execution-status }}
+          POSTGRES_ARTIFACT_STATUS: ${{ needs.phase8_wave_b_postgresql_integration.outputs.artifact-status }}
+          POSTGRES_ARTIFACT_ID: ${{ needs.phase8_wave_b_postgresql_integration.outputs.artifact-id }}
+          POSTGRES_ARTIFACT_DIGEST: ${{ needs.phase8_wave_b_postgresql_integration.outputs.artifact-digest }}
+          AGGREGATE_RESULT: ${{ needs.aggregate.result }}
+          AGGREGATE_EXECUTION: ${{ needs.aggregate.outputs.execution-status }}
+          AGGREGATE_DIGEST_STATUS: ${{ needs.aggregate.outputs.digest-status }}
+          AGGREGATE_ARTIFACT_STATUS: ${{ needs.aggregate.outputs.artifact-status }}
+          AGGREGATE_ARTIFACT_ID: ${{ needs.aggregate.outputs.artifact-id }}
+          AGGREGATE_ARTIFACT_DIGEST: ${{ needs.aggregate.outputs.artifact-digest }}
+          WITNESS_SHA256: ${{ needs.aggregate.outputs.witness-sha256 }}
+          ATTEST_RESULT: ${{ needs.attest.result }}
+          ATTEST_DOWNLOAD_STATUS: ${{ needs.attest.outputs.download-status }}
+          ATTEST_VERIFICATION_STATUS: ${{ needs.attest.outputs.verification-status }}
+          ATTESTATION_STATUS: ${{ needs.attest.outputs.attestation-status }}
+        run: |
+          set -euo pipefail
+          statuses=(
+            "$BUILD_RESULT" "$BUILD_EXECUTION" "$BUILD_ARTIFACT_STATUS"
+            "$OBSERVE_RESULT" "$OBSERVE_EXECUTION" "$OBSERVE_ARTIFACT_STATUS"
+            "$WAVE_A_STATIC_RESULT" "$WAVE_A_STATIC_EXECUTION" "$WAVE_A_STATIC_ARTIFACT_STATUS"
+            "$WAVE_A_JAVA_RESULT" "$WAVE_A_JAVA_EXECUTION" "$WAVE_A_JAVA_ARTIFACT_STATUS"
+            "$WAVE_B_STATIC_RESULT" "$WAVE_B_STATIC_EXECUTION" "$WAVE_B_STATIC_ARTIFACT_STATUS"
+            "$WAVE_B_JAVA_RESULT" "$WAVE_B_JAVA_EXECUTION" "$WAVE_B_JAVA_ARTIFACT_STATUS"
+            "$POSTGRES_RESULT" "$POSTGRES_EXECUTION" "$POSTGRES_ARTIFACT_STATUS"
+            "$AGGREGATE_RESULT" "$AGGREGATE_EXECUTION" "$AGGREGATE_DIGEST_STATUS"
+            "$AGGREGATE_ARTIFACT_STATUS" "$ATTEST_RESULT" "$ATTEST_DOWNLOAD_STATUS"
+            "$ATTEST_VERIFICATION_STATUS" "$ATTESTATION_STATUS"
+          )
+          artifact_ids=(
+            "$BUILD_ARTIFACT_ID" "$OBSERVE_ARTIFACT_ID" "$WAVE_A_STATIC_ARTIFACT_ID"
+            "$WAVE_A_JAVA_ARTIFACT_ID" "$WAVE_B_STATIC_ARTIFACT_ID"
+            "$WAVE_B_JAVA_ARTIFACT_ID" "$POSTGRES_ARTIFACT_ID" "$AGGREGATE_ARTIFACT_ID"
+          )
+          digests=(
+            "$BUILD_ARTIFACT_DIGEST" "$OBSERVE_ARTIFACT_DIGEST" "$WAVE_A_STATIC_ARTIFACT_DIGEST"
+            "$WAVE_A_JAVA_ARTIFACT_DIGEST" "$WAVE_B_STATIC_ARTIFACT_DIGEST"
+            "$WAVE_B_JAVA_ARTIFACT_DIGEST" "$POSTGRES_ARTIFACT_DIGEST"
+            "$AGGREGATE_ARTIFACT_DIGEST" "$BUILD_ARCHIVE_SHA256" "$WITNESS_SHA256"
+          )
+          for value in "${statuses[@]}"; do
+            test "$value" = "success"
+          done
+          for value in "${artifact_ids[@]}"; do
+            [[ "$value" =~ ^[1-9][0-9]*$ ]]
+          done
+          for value in "${digests[@]}"; do
+            [[ "$value" =~ ^[0-9a-f]{64}$ ]]
+          done
+          test "${#artifact_ids[@]}" = "8"
+          test "$(printf '%s\n' "${artifact_ids[@]}" | sort -u | wc -l)" = "8"
