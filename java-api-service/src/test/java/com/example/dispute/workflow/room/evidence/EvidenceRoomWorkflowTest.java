@@ -223,7 +223,7 @@ class EvidenceRoomWorkflowTest {
     StartedWorkflow started = start(suffix, Duration.ofHours(2));
     awaitTimerCount(workflowId, EVENT_TYPE_TIMER_STARTED, 1);
     stopWorkflowProcessing();
-    forceTimeSkippingAcrossPendingWorkflowTask(Duration.ofMinutes(90).plusSeconds(1));
+    forceTimeSkippingAcrossPendingWorkflowTask(Duration.ofMinutes(90));
     awaitTimerCount(workflowId, EVENT_TYPE_TIMER_FIRED, 1);
     started.workflow().partyCompleted(signal(INITIATOR, "COMPLETE_AFTER_WARNING_I", 5));
     started.workflow().partyCompleted(signal(RESPONDENT, "COMPLETE_AFTER_WARNING_R", 6));
@@ -253,7 +253,7 @@ class EvidenceRoomWorkflowTest {
     assertThat(started.workflow().state().warningSent()).isTrue();
     awaitTimerCount(workflowId, EVENT_TYPE_TIMER_STARTED, 2);
     stopWorkflowProcessing();
-    forceTimeSkippingAcrossPendingWorkflowTask(Duration.ofMinutes(30).plusSeconds(1));
+    forceTimeSkippingAcrossPendingWorkflowTask(Duration.ofMinutes(30));
     awaitTimerCount(workflowId, EVENT_TYPE_TIMER_FIRED, 2);
     started.workflow().partyCompleted(signal(INITIATOR, "COMPLETE_AFTER_DEADLINE_I", 7));
     started.workflow().partyCompleted(signal(RESPONDENT, "COMPLETE_AFTER_DEADLINE_R", 8));
