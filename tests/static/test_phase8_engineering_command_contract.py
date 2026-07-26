@@ -790,12 +790,14 @@ EXPECTED_CALL_ROOT_BINDING_SHA256 = (
 EXPECTED_INDIRECT_TARGET_SHA256 = (
     "c08fd28782e76a7bf62e41a6d74661f3679397b294e0f198d1c1c5b6842fc1d1"
 )
-EXPECTED_MODULE_CANONICAL_AST_SHA256 = (
-    "914ae95736c64f9a2c7b2b773670c02b4920af05b62839ef230c522912c2d997"
-)
-EXPECTED_DUPLICATE_PAIRS_FUNCTION_AST_SHA256 = (
-    "7bcf2fd7823544bfbff30249afe317eed67e40bc4982ebcab12668b1dd29b758"
-)
+EXPECTED_MODULE_CANONICAL_AST_SHA256_BY_PYTHON_MINOR = {
+    (3, 11): "e987267fe79cfcc8f25f6cd00d560e2d7ea6763c4918eddedea68be842759123",
+    (3, 12): "914ae95736c64f9a2c7b2b773670c02b4920af05b62839ef230c522912c2d997",
+}
+EXPECTED_DUPLICATE_PAIRS_FUNCTION_AST_SHA256_BY_PYTHON_MINOR = {
+    (3, 11): "ae3ea0af2216c528402deed02b3265ecdac125508e539575abb89fb523137bf7",
+    (3, 12): "7bcf2fd7823544bfbff30249afe317eed67e40bc4982ebcab12668b1dd29b758",
+}
 FORBIDDEN_DYNAMIC_NAMES = {
     "__import__",
     "builtins",
@@ -977,7 +979,13 @@ def _indirect_target_record(
 
 def _audit_closed_world_module(source: str) -> None:
     tree = ast.parse(source)
-    assert _canonical_ast_sha256(tree) == EXPECTED_MODULE_CANONICAL_AST_SHA256
+    python_minor = (sys.version_info.major, sys.version_info.minor)
+    assert python_minor in EXPECTED_MODULE_CANONICAL_AST_SHA256_BY_PYTHON_MINOR, (
+        f"CPython {python_minor[0]}.{python_minor[1]} canonical AST is not pinned"
+    )
+    assert _canonical_ast_sha256(tree) == (
+        EXPECTED_MODULE_CANONICAL_AST_SHA256_BY_PYTHON_MINOR[python_minor]
+    )
     duplicate_pair_functions = [
         statement
         for statement in tree.body
@@ -986,7 +994,7 @@ def _audit_closed_world_module(source: str) -> None:
     ]
     assert len(duplicate_pair_functions) == 1
     assert _canonical_ast_sha256(duplicate_pair_functions[0]) == (
-        EXPECTED_DUPLICATE_PAIRS_FUNCTION_AST_SHA256
+        EXPECTED_DUPLICATE_PAIRS_FUNCTION_AST_SHA256_BY_PYTHON_MINOR[python_minor]
     )
     parents = {
         child: parent

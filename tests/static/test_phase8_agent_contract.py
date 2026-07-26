@@ -30,6 +30,12 @@ def test_python_agent_dependencies_and_container_are_formal() -> None:
 # 系统意义：固定“跨服务契约测试 > test_phase8_agent_contract”的可观察契约，防止后续重构改变业务结果。
 def test_all_hearing_flow_v2_operations_and_prompts_exist() -> None:
     workflow = (APP / "agents" / "hearing_flow.py").read_text(encoding="utf-8")
+    hearing_graph = (APP / "graphs" / "hearing" / "graph.py").read_text(
+        encoding="utf-8"
+    )
+    hearing_nodes = (APP / "graphs" / "hearing" / "nodes.py").read_text(
+        encoding="utf-8"
+    )
     prompt_root = APP / "agents" / "prompts"
     operations = {
         "intake_questions": prompt_root / "dispute_intake_officer" / "hearing_intake_questions.md",
@@ -43,7 +49,15 @@ def test_all_hearing_flow_v2_operations_and_prompts_exist() -> None:
     for operation, prompt in operations.items():
         assert f"def {operation}(" in workflow
         assert prompt.is_file()
-    assert "ThreadPoolExecutor" in workflow
+    assert "_HEARING_GRAPH_CANDIDATES = compile_hearing_graph_candidates()" in workflow
+    assert "self._hearing_graphs[identity.identity].invoke(" in workflow
+    assert 'config={"max_concurrency": 8, "recursion_limit": 64}' in workflow
+    assert (
+        'builder.add_conditional_edges("plan_evidence_wave", dispatch_evidence_wave)'
+        in hearing_graph
+    )
+    assert 'Send("assess_evidence_item", {"work_item_key": key})' in hearing_nodes
+    assert "len(wave) > MAX_HEARING_EVIDENCE_SENDS" in hearing_nodes
     assert "hearing_flow.v2" in workflow
 
 

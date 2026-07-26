@@ -5,7 +5,7 @@ import importlib.util
 import json
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 
 import pytest
@@ -185,10 +185,19 @@ def test_command_report_contract_and_windows_wrapper_are_argv_safe(
         "phase7-wrapper-test",
         ROOT / "java-api-service",
     )
-    wrapper = Path(java_argv[0])
+    rendered_wrapper = PureWindowsPath(java_argv[0])
+    assert rendered_wrapper.name.lower() in {"mvnw", "mvnw.cmd"}
+    if not rendered_wrapper.is_absolute():
+        assert java_argv[0] == r".\mvnw.cmd"
+        java_argv[0] = str(
+            PureWindowsPath("C:/phase7-fixture/java-api-service")
+            / rendered_wrapper.name
+        )
+    wrapper = PureWindowsPath(java_argv[0])
     assert wrapper.is_absolute()
-    assert wrapper.name.lower() in {"mvnw", "mvnw.cmd"}
-    assert wrapper.is_file()
+    assert wrapper.name.lower() == "mvnw.cmd"
+    assert wrapper.parent.name == "java-api-service"
+    assert (ROOT / "java-api-service" / "mvnw.cmd").is_file()
 
 
 def test_full_four_source_contract_is_code_owned_not_candidate_owned() -> None:

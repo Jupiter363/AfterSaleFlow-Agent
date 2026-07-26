@@ -64,8 +64,59 @@ jobs:
           python -m pip install --disable-pip-version-check --no-deps --require-hashes \
             -r .github/requirements-static.lock
 
-      - name: Static repository contracts
-        run: python -m pytest tests/static -q
+      - name: Audit static quality-gate manifests
+        run: python -m pytest -q tests/static/test_quality_gate_static_manifests.py
+
+      - name: Static current repository contracts
+        shell: bash
+        run: |
+          manifest=.github/static-current-contracts.txt
+          historical_manifest=.github/static-historical-replay-only.txt
+          mapfile -t selectors < <(sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' "$manifest")
+          mapfile -t historical_nodes < <(sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' "$historical_manifest")
+          (( ${#selectors[@]} > 0 )) || { echo "empty static selector manifest: $manifest" >&2; exit 1; }
+          declare -A selected_files=()
+          for selector in "${selectors[@]}"; do
+            [[ "$selector" =~ ^tests/static/test_[A-Za-z0-9_]+\.py$ ]] || {
+              echo "unsafe static selector in $manifest: $selector" >&2
+              exit 1
+            }
+            [[ -f "$selector" ]] || { echo "missing static selector in $manifest: $selector" >&2; exit 1; }
+            selected_files["$selector"]=1
+          done
+          deselect_args=()
+          for historical_node in "${historical_nodes[@]}"; do
+            [[ "$historical_node" =~ ^tests/static/test_[A-Za-z0-9_]+\.py::test_[A-Za-z0-9_]+(\[[^][]+\])?$ ]] || {
+              echo "unsafe historical node in $historical_manifest: $historical_node" >&2
+              exit 1
+            }
+            historical_file="${historical_node%%::*}"
+            [[ -f "$historical_file" ]] || {
+              echo "missing historical node file in $historical_manifest: $historical_file" >&2
+              exit 1
+            }
+            [[ -n "${selected_files[$historical_file]:-}" ]] || {
+              echo "historical node file is not a current selector: $historical_file" >&2
+              exit 1
+            }
+            deselect_args+=("--deselect=$historical_node")
+          done
+          python -m pytest -q "${deselect_args[@]}" "${selectors[@]}"
+
+      - name: Static frozen evidence verifiers
+        shell: bash
+        run: |
+          manifest=.github/static-frozen-evidence-verifiers.txt
+          mapfile -t selectors < <(sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' "$manifest")
+          (( ${#selectors[@]} > 0 )) || { echo "empty static selector manifest: $manifest" >&2; exit 1; }
+          for selector in "${selectors[@]}"; do
+            [[ "$selector" =~ ^tests/static/test_[A-Za-z0-9_]+\.py$ ]] || {
+              echo "unsafe static selector in $manifest: $selector" >&2
+              exit 1
+            }
+            [[ -f "$selector" ]] || { echo "missing static selector in $manifest: $selector" >&2; exit 1; }
+          done
+          python -m pytest -q "${selectors[@]}"
 
       - name: Java tests
         working-directory: java-api-service

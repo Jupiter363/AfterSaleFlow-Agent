@@ -4,7 +4,7 @@ import importlib.util
 import json
 import stat
 import sys
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 
 import pytest
@@ -22,6 +22,9 @@ runner = generator.runner
 CANDIDATE = "a" * 40
 EVIDENCE = "e" * 40
 BASE = "d18a1f130a925429e8c2dfd11352cea4ca8673a0"
+WINDOWS_MAVEN_WRAPPER = PureWindowsPath(
+    "C:/phase7-fixture/java-api-service/mvnw.cmd"
+)
 
 
 def _symlink_or_mock_lstat(
@@ -237,6 +240,26 @@ def _with_long_java_surefire_source(
         destination
     ) <= target_units
     return persisted, long_relative, destination.read_bytes()
+
+
+def _with_canonical_committed_windows_wrapper(
+    manifest_path: Path, manifest: dict[str, object]
+) -> dict[str, object]:
+    java_record = next(
+        item
+        for item in manifest["commands"]
+        if item["id"] == "java_phase7_entry"
+    )
+    executed_argv = list(java_record["executed_argv"])
+    executed_argv[0] = str(WINDOWS_MAVEN_WRAPPER)
+    executed_command = runner.render_command_argv(executed_argv)
+    java_record["executed_argv"] = executed_argv
+    java_record["executed_command"] = executed_command
+    java_record["executed_command_sha256"] = runner.hashlib.sha256(
+        executed_command.encode("utf-8")
+    ).hexdigest()
+    runner._write_manifest(manifest_path, manifest)
+    return json.loads(manifest_path.read_text(encoding="utf-8"))
 
 
 def test_provenance_copy_rejects_lexical_file_symlink_to_in_root_regular_file(
@@ -648,6 +671,7 @@ def test_post_commit_verifier_accepts_direct_child_with_nested_java_raw_provenan
     manifest, long_source_path, long_source_bytes = _with_long_java_surefire_source(
         manifest_path, manifest
     )
+    manifest = _with_canonical_committed_windows_wrapper(manifest_path, manifest)
     release_id = "r" + "x" * 79
     output = (
         tmp_path_factory.mktemp("p7e")
@@ -821,6 +845,7 @@ def test_post_commit_verifier_rejects_fake_minima_metrics_and_contradictory_gran
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     manifest_path, manifest = _green_run(tmp_path)
+    manifest = _with_canonical_committed_windows_wrapper(manifest_path, manifest)
     release_id = "phase-7-entry-negative-test"
     output = tmp_path / "negative-evidence"
     generator.assemble_entry_evidence(

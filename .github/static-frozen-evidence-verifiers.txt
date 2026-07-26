@@ -1,0 +1,8 @@
+# Final-HEAD-valid verifiers for immutable phase evidence/checkpoint commits.
+tests/static/test_phase5_engineering_checkpoint.py
+tests/static/test_phase5_p5_0_entry_checkpoint.py
+tests/static/test_phase6_engineering_checkpoint.py
+tests/static/test_phase6_p6_0_entry_checkpoint.py
+tests/static/test_phase7_engineering_checkpoint.py
+tests/static/test_phase7_p7_0_entry_checkpoint.py
+tests/static/test_phase8_engineering_checkpoint.py

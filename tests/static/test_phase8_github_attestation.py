@@ -852,9 +852,16 @@ def test_token_process_rejects_state_ancestor_replacement_during_spawn(
         return verifier.subprocess.CompletedProcess(args[0], 0, b"{}", b"")
 
     monkeypatch.setattr(verifier.subprocess, "run", replace_ancestor)
-    result = verifier._execute_gh(("run", "list"), executable=trusted)
-    assert result.returncode == 0
-    assert replacement_blocked is True
+    if os.name == "nt":
+        result = verifier._execute_gh(("run", "list"), executable=trusted)
+        assert result.returncode == 0
+        assert replacement_blocked is True
+    else:
+        with pytest.raises(
+            verifier.GitHubAttestationError, match="DIRECTORY_CHAIN_CHANGED"
+        ):
+            verifier._execute_gh(("run", "list"), executable=trusted)
+        assert replacement_blocked is False
 
 
 def test_authenticode_publisher_is_exact_and_fail_closed(

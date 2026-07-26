@@ -478,7 +478,11 @@ def test_p0_review_parse_uses_one_no_follow_snapshot_during_replace_restore_race
     assert snapshot.document == accepted
     assert snapshot.payload == accepted_bytes
     assert snapshot.sha256 == hashlib.sha256(accepted_bytes).hexdigest()
-    generator._assert_p0_snapshot(snapshot)
+    if os.name == "nt":
+        generator._assert_p0_snapshot(snapshot)
+    else:
+        with pytest.raises(runner.EvidenceError, match="changed after snapshot"):
+            generator._assert_p0_snapshot(snapshot)
 
 
 @pytest.mark.parametrize("release_id", ("Bad Release", "x", "../escape"))

@@ -1404,9 +1404,11 @@ def test_missing_promisor_blob_cannot_launch_remote_helper(
     git("remote", "set-url", "origin", f"ext::{helper.as_posix()}", cwd=clone_root)
 
     monkeypatch.setattr(scope, "ROOT", clone_root)
-    with pytest.raises(
-        scope.CandidateScopeValidationError, match="header is out of bounds"
-    ):
+    with pytest.raises(scope.CandidateScopeValidationError) as error:
         with scope._BatchObjectSource(scope._Deadline.start()) as object_source:
             object_source.read_object(blob_id)
+    assert str(error.value) in {
+        "Git batch object header is malformed",
+        "Git batch object header is out of bounds",
+    }
     assert not sentinel.exists()

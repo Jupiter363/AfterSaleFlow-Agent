@@ -1,12 +1,52 @@
 from __future__ import annotations
 
 import copy
+import functools
+import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from scripts import run_phase8_entry_checkpoint as runner
+
+
+_FROZEN_C8 = "74f4cb6bc2ac78f17aacdb36378e72ff650d60b6"
+_FROZEN_MATRIX_BLOB = "3e37d778dcbca8819b12144d8e4f32d7dd54744e"
+_FROZEN_MATRIX_PATH = "plans/phase-8-production-hardening-test-batches.yaml"
+
+
+@functools.lru_cache(maxsize=1)
+def _frozen_batch0_matrix() -> dict[str, object]:
+    """Load the immutable accepted C8 matrix without reviving the live plan."""
+    if runner._git("cat-file", "-t", _FROZEN_C8) != "commit":
+        raise AssertionError("accepted C8 is not an available Git commit")
+    tree_entry = runner._git("ls-tree", _FROZEN_C8, "--", _FROZEN_MATRIX_PATH)
+    expected_entry = (
+        f"100644 blob {_FROZEN_MATRIX_BLOB}\t{_FROZEN_MATRIX_PATH}"
+    )
+    if tree_entry != expected_entry:
+        raise AssertionError("accepted C8 matrix blob identity drifted")
+    raw = runner._git_bytes("show", f"{_FROZEN_C8}:{_FROZEN_MATRIX_PATH}")
+    header = f"blob {len(raw)}\0".encode("ascii")
+    if hashlib.sha1(header + raw).hexdigest() != _FROZEN_MATRIX_BLOB:
+        raise AssertionError("accepted C8 matrix blob content failed Git SHA-1")
+    matrix = yaml.safe_load(raw)
+    if (
+        not isinstance(matrix, dict)
+        or matrix.get("phase") != 8
+        or matrix.get("document_status")
+        != "FROZEN_CONTRACT_CANDIDATE_AWAITING_BATCH_0"
+    ):
+        raise AssertionError("accepted C8 matrix is not the frozen Batch 0 contract")
+    return matrix
+
+
+@pytest.fixture(autouse=True)
+def _use_frozen_batch0_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    matrix = _frozen_batch0_matrix()
+    monkeypatch.setattr(runner, "load_matrix", lambda: copy.deepcopy(matrix))
 
 
 def _fake_candidate_git(*arguments: str, check: bool = True) -> str:
