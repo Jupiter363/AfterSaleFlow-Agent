@@ -1,0 +1,111 @@
+{
+  "additional_fields": "DENY",
+  "artifact": {
+    "archive_days": 90,
+    "count": 8,
+    "max_bytes": 536870912,
+    "name_template": "phase8-engineering-witness-{run_id}-{run_attempt}",
+    "observation_name_template": "phase8-runtime-observation-{run_id}-{run_attempt}",
+    "raw_name_templates": [
+      "phase8-raw-000-wave_a_static-{run_id}-{run_attempt}",
+      "phase8-raw-001-wave_a_java-{run_id}-{run_attempt}",
+      "phase8-raw-002-wave_b_static_and_models-{run_id}-{run_attempt}",
+      "phase8-raw-003-wave_b_java_unit-{run_id}-{run_attempt}",
+      "phase8-raw-004-wave_b_postgresql_integration-{run_id}-{run_attempt}"
+    ],
+    "runtime_image_name_template": "phase8-runtime-image-{run_id}-{run_attempt}-sha256-{archive_sha256}",
+    "subject_filename": "phase8-engineering-witness.tar"
+  },
+  "attestation": {
+    "count": 1,
+    "oidc_issuer": "https://token.actions.githubusercontent.com",
+    "predicate_type": "https://slsa.dev/provenance/v1",
+    "sigstore_instance": "public-good"
+  },
+  "authority": {
+    "MIG-006": "PENDING_PROMOTION",
+    "MIG-007": "PENDING_PROMOTION",
+    "MIG-008": "PENDING_PROMOTION",
+    "authority_ceiling": "PHASE_8_ENGINEERING_CHECKPOINT_ONLY",
+    "production_authority": false,
+    "production_promotion": "FORBIDDEN"
+  },
+  "branch": "refs/heads/codex/p8-production-hardening",
+  "caller_workflow": ".github/workflows/phase8-engineering-caller.yml",
+  "event": "push",
+  "freshness_days": 90,
+  "github_cli": {
+    "authenticode_inspector": {
+      "executable": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+      "sha256": "7600ffe12da441fe89d035b13801e8e91d064bc544a27b19a5cf49f6ab8b18f5"
+    },
+    "capability_gates": [
+      {
+        "argv": ["api", "--help"],
+        "required_tokens": ["--method", "--raw-field"]
+      },
+      {
+        "argv": ["run", "list", "--help"],
+        "required_tokens": ["--branch", "--commit", "--event", "--json", "--status", "--workflow"]
+      },
+      {
+        "argv": ["run", "view", "--help"],
+        "required_tokens": ["--attempt", "--json"]
+      },
+      {
+        "argv": ["attestation", "download", "--help"],
+        "required_tokens": ["--limit", "--predicate-type", "--repo"]
+      },
+      {
+        "argv": ["attestation", "trusted-root", "--help"],
+        "required_tokens": ["--verify-only"]
+      },
+      {
+        "argv": ["attestation", "verify", "--help"],
+        "required_tokens": ["--bundle", "--custom-trusted-root", "--deny-self-hosted-runners", "--format", "--limit", "--predicate-type", "--repo", "--signer-digest", "--signer-workflow", "--source-digest", "--source-ref"]
+      }
+    ],
+    "platforms": {
+      "win32": {
+        "authenticode_publisher": "CN=\"GitHub, Inc.\", O=\"GitHub, Inc.\", L=San Francisco, S=California, C=US",
+        "executable": "C:\\Program Files\\GitHub CLI\\gh.exe",
+        "sha256": "4cb5ff2afa351c890ae55b2f1fbf4f4a43f6a1e0ab20dfb0567a593bf9cee9ff",
+        "system_root": "C:\\Windows"
+      }
+    },
+    "version": "2.93.0"
+  },
+  "repository": "Jupiter363/AfterSaleFlow-Agent",
+  "repository_identity": {
+    "id": "1282437633",
+    "name": "Jupiter363/AfterSaleFlow-Agent",
+    "node_id": "R_kgDOTHByAQ",
+    "visibility": "public"
+  },
+  "run": {
+    "artifact_count": 8,
+    "attempt": 1,
+    "job_names": [
+      "witness / phase8_build_runtime",
+      "witness / phase8_observe_runtime",
+      "witness / phase8_wave_a_static",
+      "witness / phase8_wave_a_java",
+      "witness / phase8_wave_b_static_and_models",
+      "witness / phase8_wave_b_java_unit",
+      "witness / phase8_wave_b_postgresql_integration",
+      "witness / aggregate",
+      "witness / attest",
+      "witness / gate"
+    ],
+    "successful_run_count": 1,
+    "total_run_count": 1
+  },
+  "runner_environment": "github-hosted",
+  "schema_version": "phase8-github-attestation-policy.v1",
+  "signer_workflow": ".github/workflows/phase8-engineering-witness.yml",
+  "trusted_sha_roles": {
+    "candidate_sha": "SIGSTORE_SOURCE_DIGEST_AND_CALLER_WORKFLOW_BLOB",
+    "trusted_code_sha": "WITNESS_MANIFEST_EXACT_BINDING",
+    "trusted_workflow_sha": "SIGSTORE_SIGNER_DIGEST"
+  }
+}

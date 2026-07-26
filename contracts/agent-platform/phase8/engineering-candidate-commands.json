@@ -1,0 +1,327 @@
+{
+  "additional_fields": "DENY",
+  "authority": {
+    "MIG-006": "PENDING_PROMOTION",
+    "MIG-007": "PENDING_PROMOTION",
+    "MIG-008": "PENDING_PROMOTION",
+    "authority_ceiling": "PHASE_8_ENGINEERING_CHECKPOINT_ONLY",
+    "cloud_authority": "FORBIDDEN",
+    "id_token_present": false,
+    "maven_external_egress_denied": false,
+    "maven_network_profile": "GITHUB_HOSTED_EPHEMERAL_DEPENDENCY_AND_DISPOSABLE_TEST_NETWORK",
+    "model_authority": "FORBIDDEN",
+    "production_access": "FORBIDDEN",
+    "production_actions": "FORBIDDEN",
+    "production_authority": "FORBIDDEN",
+    "production_credentials_present": false,
+    "production_secrets_present": false,
+    "production_traffic": "FORBIDDEN",
+    "static_egress": "DENIED",
+    "temporal_authority": "FORBIDDEN"
+  },
+  "command_order": [
+    "wave_a_static",
+    "wave_a_java",
+    "wave_b_static_and_models",
+    "wave_b_java_unit",
+    "wave_b_postgresql_integration"
+  ],
+  "commands": [
+    {
+      "argv": [
+        "/usr/local/bin/python",
+        "-m",
+        "pytest",
+        "tests/static/test_phase8_active_reference_audit.py",
+        "tests/static/test_phase8_v046_migration.py",
+        "tests/static/test_phase8_production_topology.py",
+        "tests/static/test_phase8_security_manifests.py",
+        "tests/static/test_phase8_observability_assets.py",
+        "tests/static/test_phase8_candidate_runner.py",
+        "-p",
+        "no:cacheprovider",
+        "--tb=short",
+        "-q",
+        "--junitxml=/tmp/phase8-artifacts/wave_a_static.xml"
+      ],
+      "backend_kind": "PINNED_TEST_CONTAINER",
+      "credential_profile": "NO_CREDENTIALS_SECRETS_OR_ID_TOKEN",
+      "cwd": ".",
+      "environment": {
+        "CI": "1",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONHASHSEED": "0",
+        "PYTHONNOUSERSITE": "1",
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"
+      },
+      "external_egress_denied": true,
+      "fresh_materialization": true,
+      "fresh_runner": true,
+      "id": "wave_a_static",
+      "network_profile": "STATIC_EGRESS_DENIED",
+      "report": {
+        "archive_prefix": "p/000-wave_a_static",
+        "artifact_set_policy": "EXACT_NO_MISSING_EXTRA_OR_DUPLICATE",
+        "expected_artifacts": [
+          {
+            "archive_path": "p/000-wave_a_static-junit.xml",
+            "filename": "wave_a_static.xml",
+            "format": "JUNIT_XML",
+            "suite_name": "pytest",
+            "test_count": 88
+          }
+        ],
+        "glob": "/tmp/phase8-artifacts/wave_a_static.xml",
+        "source_root": "/tmp/phase8-artifacts"
+      },
+      "shell": false,
+      "stop_first": true,
+      "timeout_seconds": 900
+    },
+    {
+      "argv": [
+        "./mvnw",
+        "-B",
+        "-ntp",
+        "-DforkCount=1",
+        "-Dtest=AgentRunV2MigrationIntegrationTest,AgentRunStreamReplayIntegrationTest",
+        "test"
+      ],
+      "backend_kind": "GITHUB_HOSTED_MAVEN",
+      "credential_profile": "NO_PRODUCTION_CREDENTIALS_SECRETS_OR_ID_TOKEN",
+      "cwd": "java-api-service",
+      "environment": {
+        "CI": "1",
+        "MAVEN_OPTS": "-Djava.awt.headless=true"
+      },
+      "executable_mode": "100755",
+      "executable_path": "java-api-service/mvnw",
+      "external_egress_denied": false,
+      "fresh_materialization": true,
+      "fresh_runner": true,
+      "id": "wave_a_java",
+      "network_profile": "GITHUB_HOSTED_EPHEMERAL_DEPENDENCY_AND_DISPOSABLE_TEST_NETWORK",
+      "report": {
+        "archive_prefix": "p/001-wave_a_java",
+        "artifact_set_policy": "EXACT_NO_MISSING_EXTRA_OR_DUPLICATE",
+        "expected_artifacts": [
+          {
+            "archive_path": "p/001-wave_a_java-TEST-com.example.dispute.agentstream.persistence.AgentRunV2MigrationIntegrationTest.xml",
+            "filename": "TEST-com.example.dispute.agentstream.persistence.AgentRunV2MigrationIntegrationTest.xml",
+            "format": "JUNIT_XML",
+            "suite_name": "com.example.dispute.agentstream.persistence.AgentRunV2MigrationIntegrationTest",
+            "test_count": 1
+          },
+          {
+            "archive_path": "p/001-wave_a_java-TEST-com.example.dispute.agentstream.persistence.AgentRunStreamReplayIntegrationTest.xml",
+            "filename": "TEST-com.example.dispute.agentstream.persistence.AgentRunStreamReplayIntegrationTest.xml",
+            "format": "JUNIT_XML",
+            "suite_name": "com.example.dispute.agentstream.persistence.AgentRunStreamReplayIntegrationTest",
+            "test_count": 1
+          }
+        ],
+        "glob": "target/surefire-reports/TEST-*.xml",
+        "source_root": "target/surefire-reports"
+      },
+      "shell": false,
+      "stop_first": true,
+      "timeout_seconds": 1800
+    },
+    {
+      "argv": [
+        "/usr/local/bin/python",
+        "-m",
+        "pytest",
+        "tests/static/test_phase8_scheduler_lifecycle.py",
+        "tests/static/test_phase8_cleanup_eligibility.py",
+        "tests/static/test_phase8_stream_compatibility.py",
+        "tests/static/test_phase8_stream_retention.py",
+        "tests/static/test_phase8_capacity_harness.py",
+        "tests/static/test_phase8_recovery_rotation_tools.py",
+        "tests/static/test_phase8_scenario_catalog.py",
+        "tests/static/test_phase8_external_gate_intake.py",
+        "-p",
+        "no:cacheprovider",
+        "--tb=short",
+        "-q",
+        "--junitxml=/tmp/phase8-artifacts/wave_b_static_and_models.xml"
+      ],
+      "backend_kind": "PINNED_TEST_CONTAINER",
+      "credential_profile": "NO_CREDENTIALS_SECRETS_OR_ID_TOKEN",
+      "cwd": ".",
+      "environment": {
+        "CI": "1",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONHASHSEED": "0",
+        "PYTHONNOUSERSITE": "1",
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"
+      },
+      "external_egress_denied": true,
+      "fresh_materialization": true,
+      "fresh_runner": true,
+      "id": "wave_b_static_and_models",
+      "network_profile": "STATIC_EGRESS_DENIED",
+      "report": {
+        "archive_prefix": "p/002-wave_b_static_and_models",
+        "artifact_set_policy": "EXACT_NO_MISSING_EXTRA_OR_DUPLICATE",
+        "expected_artifacts": [
+          {
+            "archive_path": "p/002-wave_b_static_and_models-junit.xml",
+            "filename": "wave_b_static_and_models.xml",
+            "format": "JUNIT_XML",
+            "suite_name": "pytest",
+            "test_count": 406
+          }
+        ],
+        "glob": "/tmp/phase8-artifacts/wave_b_static_and_models.xml",
+        "source_root": "/tmp/phase8-artifacts"
+      },
+      "shell": false,
+      "stop_first": true,
+      "timeout_seconds": 1200
+    },
+    {
+      "argv": [
+        "./mvnw",
+        "-B",
+        "-ntp",
+        "-DforkCount=1",
+        "-Dtest=AgentRunRecoverySchedulerTest,AgentRunV2PropertiesTest,HearingSchedulerModeTest,JdbcHearingSchedulerDetectorTest,StreamBackfillCoordinatorTest,AgentRunStreamRetentionManifestTest,RedisAgentRunStreamFailoverTest",
+        "test"
+      ],
+      "backend_kind": "GITHUB_HOSTED_MAVEN",
+      "credential_profile": "NO_PRODUCTION_CREDENTIALS_SECRETS_OR_ID_TOKEN",
+      "cwd": "java-api-service",
+      "environment": {
+        "CI": "1",
+        "MAVEN_OPTS": "-Djava.awt.headless=true"
+      },
+      "executable_mode": "100755",
+      "executable_path": "java-api-service/mvnw",
+      "external_egress_denied": false,
+      "fresh_materialization": true,
+      "fresh_runner": true,
+      "id": "wave_b_java_unit",
+      "network_profile": "GITHUB_HOSTED_EPHEMERAL_DEPENDENCY_AND_DISPOSABLE_TEST_NETWORK",
+      "report": {
+        "archive_prefix": "p/003-wave_b_java_unit",
+        "artifact_set_policy": "EXACT_NO_MISSING_EXTRA_OR_DUPLICATE",
+        "expected_artifacts": [
+          {
+            "archive_path": "p/003-wave_b_java_unit-TEST-com.example.dispute.agentstream.AgentRunRecoverySchedulerTest.xml",
+            "filename": "TEST-com.example.dispute.agentstream.AgentRunRecoverySchedulerTest.xml",
+            "format": "JUNIT_XML",
+            "suite_name": "com.example.dispute.agentstream.AgentRunRecoverySchedulerTest",
+            "test_count": 4
+          },
+          {
+            "archive_path": "p/003-wave_b_java_unit-TEST-com.example.dispute.workflow.config.AgentRunV2PropertiesTest.xml",
+            "filename": "TEST-com.example.dispute.workflow.config.AgentRunV2PropertiesTest.xml",
+            "format": "JUNIT_XML",
+            "suite_name": "com.example.dispute.workflow.config.AgentRunV2PropertiesTest",
+            "test_count": 3
+          },
+          {
+            "archive_path": "p/003-wave_b_java_unit-TEST-com.example.dispute.hearing.HearingSchedulerModeTest.xml",
+            "filename": "TEST-com.example.dispute.hearing.HearingSchedulerModeTest.xml",
+            "format": "JUNIT_XML",
+            "suite_name": "com.example.dispute.hearing.HearingSchedulerModeTest",
+            "test_count": 5
+          },
+          {
+            "archive_path": "p/003-wave_b_java_unit-TEST-com.example.dispute.workflow.recovery.hearing.JdbcHearingSchedulerDetectorTest.xml",
+            "filename": "TEST-com.example.dispute.workflow.recovery.hearing.JdbcHearingSchedulerDetectorTest.xml",
+            "format": "JUNIT_XML",
+            "suite_name": "com.example.dispute.workflow.recovery.hearing.JdbcHearingSchedulerDetectorTest",
+            "test_count": 5
+          },
+          {
+            "archive_path": "p/003-wave_b_java_unit-TEST-com.example.dispute.agentstream.persistence.StreamBackfillCoordinatorTest.xml",
+            "filename": "TEST-com.example.dispute.agentstream.persistence.StreamBackfillCoordinatorTest.xml",
+            "format": "JUNIT_XML",
+            "suite_name": "com.example.dispute.agentstream.persistence.StreamBackfillCoordinatorTest",
+            "test_count": 3
+          },
+          {
+            "archive_path": "p/003-wave_b_java_unit-TEST-com.example.dispute.agentstream.infrastructure.persistence.AgentRunStreamRetentionManifestTest.xml",
+            "filename": "TEST-com.example.dispute.agentstream.infrastructure.persistence.AgentRunStreamRetentionManifestTest.xml",
+            "format": "JUNIT_XML",
+            "suite_name": "com.example.dispute.agentstream.infrastructure.persistence.AgentRunStreamRetentionManifestTest",
+            "test_count": 5
+          },
+          {
+            "archive_path": "p/003-wave_b_java_unit-TEST-com.example.dispute.agentstream.infrastructure.delivery.RedisAgentRunStreamFailoverTest.xml",
+            "filename": "TEST-com.example.dispute.agentstream.infrastructure.delivery.RedisAgentRunStreamFailoverTest.xml",
+            "format": "JUNIT_XML",
+            "suite_name": "com.example.dispute.agentstream.infrastructure.delivery.RedisAgentRunStreamFailoverTest",
+            "test_count": 5
+          }
+        ],
+        "glob": "target/surefire-reports/TEST-*.xml",
+        "source_root": "target/surefire-reports"
+      },
+      "shell": false,
+      "stop_first": true,
+      "timeout_seconds": 1800
+    },
+    {
+      "argv": [
+        "./mvnw",
+        "-B",
+        "-ntp",
+        "-DforkCount=1",
+        "-Pintegration-test",
+        "-Dit.test=AgentRunStreamReplayIntegrationTest",
+        "verify"
+      ],
+      "backend_kind": "GITHUB_HOSTED_MAVEN",
+      "credential_profile": "NO_PRODUCTION_CREDENTIALS_SECRETS_OR_ID_TOKEN",
+      "cwd": "java-api-service",
+      "environment": {
+        "CI": "1",
+        "MAVEN_OPTS": "-Djava.awt.headless=true"
+      },
+      "executable_mode": "100755",
+      "executable_path": "java-api-service/mvnw",
+      "external_egress_denied": false,
+      "fresh_materialization": true,
+      "fresh_runner": true,
+      "id": "wave_b_postgresql_integration",
+      "network_profile": "GITHUB_HOSTED_EPHEMERAL_DEPENDENCY_AND_DISPOSABLE_TEST_NETWORK",
+      "report": {
+        "archive_prefix": "p/004-wave_b_postgresql_integration",
+        "artifact_set_policy": "EXACT_NO_MISSING_EXTRA_OR_DUPLICATE",
+        "expected_artifacts": [
+          {
+            "archive_path": "p/004-wave_b_postgresql_integration-TEST-com.example.dispute.agentstream.persistence.AgentRunStreamReplayIntegrationTest.xml",
+            "filename": "TEST-com.example.dispute.agentstream.persistence.AgentRunStreamReplayIntegrationTest.xml",
+            "format": "JUNIT_XML",
+            "suite_name": "com.example.dispute.agentstream.persistence.AgentRunStreamReplayIntegrationTest",
+            "test_count": 1
+          }
+        ],
+        "glob": "target/failsafe-reports/TEST-*.xml",
+        "source_root": "target/failsafe-reports"
+      },
+      "shell": false,
+      "stop_first": true,
+      "timeout_seconds": 2400
+    }
+  ],
+  "contract_kind": "ENGINEERING_CANDIDATE_COMMANDS_ONLY",
+  "phase": 8,
+  "required_blob_binding": {
+    "file_sha256": "edf2b91ae7a9dd15dff3b6b8e4f8a46710fa88a484cda6fc739fa9c30c75becd",
+    "git_blob_sha1": "b16d4289a525cdeb0e602a3797d359943328427a",
+    "marker": "PHASE8_COMMAND_CONTRACT_VALIDATOR_REQUIRED_FOR_SCOPE_AND_WITNESS_V1",
+    "mode": "100644",
+    "path": "scripts/phase8/candidate/command_contract.py"
+  },
+  "schema_version": "phase8-engineering-command-contract.v1",
+  "self_seal": {
+    "algorithm": "SHA-256",
+    "canonicalization": "JSON_SORT_KEYS_COMPACT_UTF8_V1",
+    "payload_sha256": "dcc2f4e3a5550b7c2ab0ca90034fa939292f9a17ec8f41989a462db13bf52bc3"
+  },
+  "stop_policy": "STOP_ON_FIRST_FAILURE"
+}

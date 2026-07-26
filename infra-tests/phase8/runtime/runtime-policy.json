@@ -1,0 +1,160 @@
+{
+  "authority": "ENGINEERING_TEST_EXECUTION_ONLY",
+  "base_image": "docker.io/library/python@sha256:cdbd05fb6f457ca275ff51ce00d93d865ca0b6a25f5ffb08262d94f6835771e5",
+  "build": {
+    "base_image_acquisition_network_profile": "DIGEST_PINNED_PUBLIC_REGISTRY_EGRESS_NO_CREDENTIALS",
+    "build_parameters": {
+      "builder_driver": "docker-container",
+      "builder_image": "docker.io/moby/buildkit@sha256:2f5adac4ecd194d9f8c10b7b5d7bceb5186853db1b26e5abd3a657af0b7e26ec",
+      "compression": "uncompressed",
+      "docker_build_run_network": "none",
+      "export_formats": [
+        "oci",
+        "docker"
+      ],
+      "oci_mediatypes": true,
+      "platform": "linux/amd64",
+      "provenance": false,
+      "pull": false,
+      "rewrite_timestamp": true,
+      "source_date_epoch": "0"
+    },
+    "docker_build_run_network": "none",
+    "requirements_lock": "infra-tests/phase8/runtime/requirements.lock",
+    "wheelhouse_acquisition_network_profile": "HASH_LOCKED_PUBLIC_PYPI_EGRESS_NO_CREDENTIALS",
+    "wheelhouse_context": "external-read-only-linux-amd64-wheels"
+  },
+  "execution_scope": {
+    "forbidden_command_ids": [
+      "wave_a_java",
+      "wave_b_java_unit",
+      "wave_b_postgresql_integration"
+    ],
+    "forbidden_execution_claims": [
+      "HOST_EXECUTION",
+      "JDK",
+      "MAVEN",
+      "TESTCONTAINERS"
+    ],
+    "supported_backend_kind": "PINNED_TEST_CONTAINER",
+    "supported_command_ids": [
+      "wave_a_static",
+      "wave_b_static_and_models"
+    ]
+  },
+  "runtime": {
+    "cap_drop": [
+      "ALL"
+    ],
+    "candidate_source": {
+      "archive_format": "USTAR_DETERMINISTIC_V1",
+      "method": "VERIFIED_STDIN_TO_TRUSTED_EXTRACTOR_ON_TMPFS",
+      "source_kind": "validated-content-addressed-candidate-archive-fd",
+      "target": "/workspace"
+    },
+    "credentials": {
+      "forbidden_environment_patterns": [
+        "(?i).*authorization.*",
+        "(?i).*cookie.*",
+        "(?i).*credential.*",
+        "(?i).*password.*",
+        "(?i).*secret.*",
+        "(?i).*token.*"
+      ],
+      "host_environment_inherited": false,
+      "host_credentials_allowed": false,
+      "secrets": []
+    },
+    "fixed_environment": {
+      "CI": "1",
+      "HOME": "/tmp",
+      "LANG": "C.UTF-8",
+      "LC_ALL": "C.UTF-8",
+      "PIP_CONFIG_FILE": "/dev/null",
+      "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+      "PIP_NO_CACHE_DIR": "1",
+      "PIP_NO_INDEX": "1",
+      "PIP_ONLY_BINARY": ":all:",
+      "PYTHONDONTWRITEBYTECODE": "1",
+      "PYTHONHASHSEED": "0",
+      "PYTHONNOUSERSITE": "1",
+      "PYTHONPATH": "/opt/phase8/site-packages",
+      "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+      "TMPDIR": "/tmp",
+      "TZ": "UTC"
+    },
+    "host_namespace_sharing": {
+      "cgroup": false,
+      "ipc": false,
+      "network": false,
+      "pid": false,
+      "user": false,
+      "uts": false
+    },
+    "mounts": {
+      "allowed": [],
+      "forbidden_source_kinds": [
+        "container-runtime-socket",
+        "credential-store",
+        "git-checkout",
+        "git-worktree",
+        "host-root",
+        "user-home"
+      ],
+      "forbidden_targets": [
+        "/.git",
+        "/home",
+        "/root",
+        "/run/containerd/containerd.sock",
+        "/run/secrets",
+        "/var/run/docker.sock",
+        "/workspace/.git"
+      ],
+      "maximum_count": 0
+    },
+    "network": "none",
+    "platform": "linux/amd64",
+    "privileged": false,
+    "pull": "never",
+    "read_only_rootfs": true,
+    "required_flags": [
+      "--pull=never",
+      "--platform=linux/amd64",
+      "--network=none",
+      "--read-only",
+      "--cap-drop=ALL",
+      "--security-opt=no-new-privileges:true",
+      "--user=65532:65532",
+      "--workdir=/workspace",
+      "--pids-limit=256",
+      "--memory=2147483648",
+      "--memory-swap=2147483648",
+      "--cpus=2.0",
+      "--tmpfs=/tmp:rw,nosuid,nodev,noexec,size=268435456,mode=1777",
+      "--tmpfs=/workspace:rw,nosuid,nodev,noexec,size=536870912,mode=0755",
+      "--ipc=private",
+      "--cgroupns=private"
+    ],
+    "resources": {
+      "cpus": "2.0",
+      "memory_bytes": 2147483648,
+      "memory_swap_bytes": 2147483648,
+      "pids_limit": 256,
+      "timeout_seconds": 1800,
+      "tmpfs": [
+        "/tmp:rw,nosuid,nodev,noexec,size=268435456,mode=1777",
+        "/workspace:rw,nosuid,nodev,noexec,size=536870912,mode=0755"
+      ]
+    },
+    "security_opt": [
+      "no-new-privileges:true"
+    ],
+    "user": "65532:65532",
+    "workdir": "/workspace"
+  },
+  "runtime_image_identity": {
+    "accepted_form": "sha256:<64-lowercase-hex-image-id>",
+    "tag_reference_allowed": false
+  },
+  "schema_version": "phase8-test-runtime-policy.v1"
+}

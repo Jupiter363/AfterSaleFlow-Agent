@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://after-sale-flow.invalid/contracts/agent-platform/phase8/engineering-candidate-scope.schema.json",
+  "title": "Phase 8 engineering candidate exact scope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "phase",
+    "accepted_entry_sha",
+    "self_path",
+    "authority",
+    "allowed_changes"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "phase8-engineering-candidate-scope.v1"
+    },
+    "phase": {
+      "const": 8
+    },
+    "accepted_entry_sha": {
+      "const": "3c60bf5cc4e051a214e158cbf944fd6aba969f95"
+    },
+    "self_path": {
+      "const": "contracts/agent-platform/phase8/engineering-candidate-scope.json"
+    },
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "authority_ceiling",
+        "engineering_checkpoint_granted",
+        "production_access",
+        "production_actions",
+        "production_checkpoint_granted",
+        "production_credentials",
+        "production_traffic",
+        "promotion_granted"
+      ],
+      "properties": {
+        "authority_ceiling": {
+          "const": "PHASE_8_ENGINEERING_CANDIDATE_SCOPE_ONLY"
+        },
+        "engineering_checkpoint_granted": {
+          "const": false
+        },
+        "production_access": {
+          "const": false
+        },
+        "production_actions": {
+          "const": false
+        },
+        "production_checkpoint_granted": {
+          "const": false
+        },
+        "production_credentials": {
+          "const": false
+        },
+        "production_traffic": {
+          "const": false
+        },
+        "promotion_granted": {
+          "const": false
+        }
+      }
+    },
+    "allowed_changes": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 512,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "status"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "status": {
+            "enum": [
+              "A",
+              "M"
+            ]
+          }
+        }
+      }
+    }
+  }
+}
