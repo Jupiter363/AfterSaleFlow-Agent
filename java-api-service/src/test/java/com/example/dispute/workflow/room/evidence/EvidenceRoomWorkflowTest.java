@@ -38,7 +38,11 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.function.Predicate;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -52,6 +56,7 @@ class EvidenceRoomWorkflowTest {
   private static final String INITIATOR = "PARTICIPANT_P5_INITIATOR";
   private static final String RESPONDENT = "PARTICIPANT_P5_RESPONDENT";
   private static final String KEEP_ALIVE_TASK_QUEUE = TASK_QUEUE + "-time-skipping-keepalive";
+  private static final long INFRASTRUCTURE_TIMEOUT_SECONDS = 30;
   private static final WorkerOptions IMMEDIATE_STICKY_FALLBACK_WORKER_OPTIONS =
       WorkerOptions.newBuilder().setStickyQueueScheduleToStartTimeout(Duration.ZERO).build();
 
@@ -73,10 +78,13 @@ class EvidenceRoomWorkflowTest {
 
   @AfterEach
   void tearDown() {
-    if (targetWorkerFactory != null) {
-      shutdownAndAwait(targetWorkerFactory);
+    try {
+      if (targetWorkerFactory != null) {
+        shutdownAndAwait(targetWorkerFactory);
+      }
+    } finally {
+      environment.close();
     }
-    environment.close();
   }
 
   @Test
@@ -223,7 +231,7 @@ class EvidenceRoomWorkflowTest {
     StartedWorkflow started = start(suffix, Duration.ofHours(2));
     awaitTimerCount(workflowId, EVENT_TYPE_TIMER_STARTED, 1);
     stopWorkflowProcessing();
-    forceTimeSkippingAcrossPendingWorkflowTask(Duration.ofMinutes(90));
+    forceTimeSkippingToTimerBoundary(workflowId, 1, Duration.ofMinutes(90));
     awaitTimerCount(workflowId, EVENT_TYPE_TIMER_FIRED, 1);
     started.workflow().partyCompleted(signal(INITIATOR, "COMPLETE_AFTER_WARNING_I", 5));
     started.workflow().partyCompleted(signal(RESPONDENT, "COMPLETE_AFTER_WARNING_R", 6));
@@ -253,7 +261,7 @@ class EvidenceRoomWorkflowTest {
     assertThat(started.workflow().state().warningSent()).isTrue();
     awaitTimerCount(workflowId, EVENT_TYPE_TIMER_STARTED, 2);
     stopWorkflowProcessing();
-    forceTimeSkippingAcrossPendingWorkflowTask(Duration.ofMinutes(30));
+    forceTimeSkippingToTimerBoundary(workflowId, 2, Duration.ofMinutes(30));
     awaitTimerCount(workflowId, EVENT_TYPE_TIMER_FIRED, 2);
     started.workflow().partyCompleted(signal(INITIATOR, "COMPLETE_AFTER_DEADLINE_I", 7));
     started.workflow().partyCompleted(signal(RESPONDENT, "COMPLETE_AFTER_DEADLINE_R", 8));
@@ -448,8 +456,8 @@ class EvidenceRoomWorkflowTest {
   }
 
   private static void shutdownAndAwait(WorkerFactory factory) {
-    factory.shutdown();
-    factory.awaitTermination(5, TimeUnit.SECONDS);
+    factory.shutdownNow();
+    factory.awaitTermination(INFRASTRUCTURE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
     assertThat(factory.isTerminated()).as("worker factory terminated").isTrue();
   }
 
@@ -583,17 +591,77 @@ class EvidenceRoomWorkflowTest {
     forceTimeSkippingAcrossPendingWorkflowTask(environment, duration);
   }
 
+  private void forceTimeSkippingToTimerBoundary(
+      String workflowId, long expectedTimerCount, Duration duration) {
+    var testService =
+        TestServiceGrpc.newBlockingStub(environment.getWorkflowService().getRawChannel());
+    CountDownLatch timeAdvanceCompleted = new CountDownLatch(1);
+    CompletableFuture<Void> workflowTaskLockRelease =
+        CompletableFuture.runAsync(
+            () -> {
+              awaitTimerCount(client, workflowId, EVENT_TYPE_TIMER_FIRED, expectedTimerCount);
+              testService
+                  .withDeadlineAfter(INFRASTRUCTURE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                  .unlockTimeSkipping(UnlockTimeSkippingRequest.getDefaultInstance());
+              try {
+                if (!timeAdvanceCompleted.await(
+                    INFRASTRUCTURE_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+                  throw new AssertionError("Temporal test time advance did not complete");
+                }
+              } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                throw new AssertionError("test interrupted", exception);
+              } finally {
+                testService
+                    .withDeadlineAfter(INFRASTRUCTURE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                    .lockTimeSkipping(LockTimeSkippingRequest.getDefaultInstance());
+              }
+            });
+
+    Throwable advanceFailure = null;
+    try {
+      forceTimeSkippingAcrossPendingWorkflowTask(environment, duration);
+    } catch (RuntimeException | Error exception) {
+      advanceFailure = exception;
+      throw exception;
+    } finally {
+      timeAdvanceCompleted.countDown();
+      try {
+        awaitBackgroundTimeLockRelease(workflowTaskLockRelease);
+      } catch (RuntimeException | Error releaseFailure) {
+        if (advanceFailure != null) {
+          advanceFailure.addSuppressed(releaseFailure);
+        } else {
+          throw releaseFailure;
+        }
+      }
+    }
+  }
+
+  private static void awaitBackgroundTimeLockRelease(CompletableFuture<Void> release) {
+    try {
+      release.get(INFRASTRUCTURE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+    } catch (InterruptedException exception) {
+      Thread.currentThread().interrupt();
+      throw new AssertionError("test interrupted", exception);
+    } catch (ExecutionException exception) {
+      throw new AssertionError("failed to restore Temporal test time lock", exception.getCause());
+    } catch (TimeoutException exception) {
+      throw new AssertionError("timed out restoring Temporal test time lock", exception);
+    }
+  }
+
   private static void forceTimeSkippingAcrossPendingWorkflowTask(
       TestWorkflowEnvironment testEnvironment, Duration duration) {
     var testService =
         TestServiceGrpc.newBlockingStub(testEnvironment.getWorkflowService().getRawChannel());
     testService
-        .withDeadlineAfter(10, TimeUnit.SECONDS)
+        .withDeadlineAfter(INFRASTRUCTURE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
         .unlockTimeSkipping(UnlockTimeSkippingRequest.getDefaultInstance());
     try {
       try {
         testService
-            .withDeadlineAfter(10, TimeUnit.SECONDS)
+            .withDeadlineAfter(INFRASTRUCTURE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             .unlockTimeSkippingWithSleep(
                 SleepRequest.newBuilder()
                     .setDuration(
@@ -609,7 +677,7 @@ class EvidenceRoomWorkflowTest {
       }
     } finally {
       testService
-          .withDeadlineAfter(10, TimeUnit.SECONDS)
+          .withDeadlineAfter(INFRASTRUCTURE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
           .lockTimeSkipping(LockTimeSkippingRequest.getDefaultInstance());
     }
   }
