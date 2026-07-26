@@ -26,5 +26,8 @@ export default defineConfig({
       },
     },
   },
-  test: { environment: "jsdom" },
+  test: {
+    environment: "jsdom",
+    env: { TZ: "Asia/Shanghai" },
+  },
 });

@@ -28,6 +28,7 @@ export default defineConfig({
   use: {
     baseURL,
     locale: "zh-CN",
+    timezoneId: "Asia/Shanghai",
     colorScheme: "light",
     reducedMotion: "reduce",
     trace: "retain-on-failure",
