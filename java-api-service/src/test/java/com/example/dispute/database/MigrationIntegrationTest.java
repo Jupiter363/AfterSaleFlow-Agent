@@ -70,7 +70,7 @@ class MigrationIntegrationTest {
         MigrateResult first = flyway.migrate();
         MigrateResult second = flyway.migrate();
 
-        assertThat(first.migrationsExecuted).isEqualTo(50);
+        assertThat(first.migrationsExecuted).isEqualTo(55);
         assertThat(second.migrationsExecuted).isZero();
 
         try (Connection connection =
@@ -155,7 +155,31 @@ class MigrationIntegrationTest {
                             "domain_operation",
                             "process_reconciliation_issue",
                             "immutable_payload_snapshot",
-                            "agent_execution_manifest");
+                            "agent_execution_manifest",
+                            "case_evidence_graph_binding",
+                            "case_evidence_asset_load_receipt",
+                            "case_evidence_current_authority_snapshot",
+                            "case_evidence_finalization_receipt",
+                            "case_evidence_finalization_receipt_load_binding",
+                            "case_evidence_terminal_summary",
+                            "case_evidence_operational_recovery",
+                            "hearing_temporal_projection",
+                            "hearing_domain_receipt",
+                            "hearing_review_handoff_fact",
+                            "hearing_closure_fact",
+                            "outcome_process_projection",
+                            "outcome_operation",
+                            "outcome_operation_attempt_observation",
+                            "outcome_operation_receipt",
+                            "outcome_compensation_parent_binding",
+                            "agent_run_stream_event_identity",
+                            "agent_run_stream_event_delivery",
+                            "agent_run_stream_event_delivery_default",
+                            "agent_run_stream_delivery_high_watermark",
+                            "agent_run_stream_backfill_cursor",
+                            "agent_run_stream_archive_manifest",
+                            "agent_run_stream_archive_receipt",
+                            "agent_run_stream_migration_receipt");
             assertThat(
                             countRows(
                                     connection,

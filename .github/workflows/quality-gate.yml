@@ -7,11 +7,17 @@ on:
       - main
       - "codex/**"
 
+permissions:
+  contents: read
+
 jobs:
   static-and-unit:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
 
       - uses: actions/setup-java@v4
         with:
@@ -50,6 +56,13 @@ jobs:
             printf '%s\n' "$unexpected"
             exit 1
           fi
+
+      - name: Install static test dependencies
+        run: |
+          python -m pip install --disable-pip-version-check --require-hashes \
+            -r infra-tests/phase8/runtime/requirements.lock
+          python -m pip install --disable-pip-version-check --no-deps --require-hashes \
+            -r .github/requirements-static.lock
 
       - name: Static repository contracts
         run: python -m pytest tests/static -q
@@ -104,6 +117,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-java@v4
         with:
@@ -134,6 +149,8 @@ jobs:
       - phase-1-postgresql-integration
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-java@v4
         with:
           distribution: temurin

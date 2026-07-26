@@ -643,6 +643,8 @@ class CaseProcessLedgerActivitiesIntegrationTest {
 
     private void insertRoutingFixture(String writerMode, long roomEpoch) {
         insertCaseProjectionAndRoom();
+        long processRevision = roomEpoch == 7 ? 3 : 4;
+        long fencingToken = roomEpoch == 7 ? 11 : 12;
         String temporalWorkflowId =
                 "LEGACY".equals(writerMode) ? null : workflowId(TENANT);
         String temporalRunId = "LEGACY".equals(writerMode) ? null : "run-ledger-routing";
@@ -663,11 +665,14 @@ class CaseProcessLedgerActivitiesIntegrationTest {
                 """
                 update case_process_projection
                 set writer_mode = ?, writer_activation_status = 'READY', room_epoch = ?,
+                    process_revision = ?, fencing_token = ?,
                     temporal_workflow_id = ?, temporal_run_id = ?, temporal_build_id = ?
                 where case_id = ?
                 """,
                 writerMode,
                 roomEpoch,
+                processRevision,
+                fencingToken,
                 temporalWorkflowId,
                 temporalRunId,
                 temporalBuildId,
@@ -685,7 +690,7 @@ class CaseProcessLedgerActivitiesIntegrationTest {
                     activated_at, provisioned_at, created_at, updated_at
                 ) values (
                     'EPOCH_LEDGER_ROUTING', ?, ?, ?, 'EVIDENCE', ?, ?, 'ACTIVE', ?,
-                    3, 0, 11, ?, ?, ?, ?, ?, 'evidence.v2', '1.0.0', 'checkpoint.v1',
+                    ?, 0, ?, ?, ?, ?, ?, ?, 'evidence.v2', '1.0.0', 'checkpoint.v1',
                     'agent_stream.v1', 'room-epoch-selection.v1',
                     'case-process-contract.v1', ?,
                     '2026-07-17T09:00:00Z',
@@ -700,6 +705,8 @@ class CaseProcessLedgerActivitiesIntegrationTest {
                 roomEpoch,
                 writerMode,
                 provisioningStatus,
+                processRevision,
+                fencingToken,
                 temporalWorkflowId,
                 temporalRunId,
                 roomWorkflowId,

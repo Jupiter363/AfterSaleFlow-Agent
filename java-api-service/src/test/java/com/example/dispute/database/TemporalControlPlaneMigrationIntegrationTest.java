@@ -69,7 +69,7 @@ class TemporalControlPlaneMigrationIntegrationTest {
                         .locations("classpath:db/migration")
                         .load()
                         .migrate();
-        assertThat(result.migrationsExecuted).isEqualTo(4);
+        assertThat(result.migrationsExecuted).isEqualTo(15);
 
         try (Connection connection =
                 DriverManager.getConnection(jdbcUrl, USERNAME, PASSWORD)) {

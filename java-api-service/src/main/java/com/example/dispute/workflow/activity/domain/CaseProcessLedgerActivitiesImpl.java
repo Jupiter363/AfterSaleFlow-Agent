@@ -341,6 +341,7 @@ public class CaseProcessLedgerActivitiesImpl
                                                 "CASE_COMMAND_ROUTING_PROJECTION_MISSING",
                                                 "case process projection is unavailable"));
         if (epoch.getWriterMode() != WriterMode.LEGACY
+                && epoch.getLifecycleStatus() != EpochLifecycleStatus.TERMINAL
                 && !RoomEpochReadiness.isTemporalReady(epoch, projection)) {
             throw permanentFailure(
                     "CASE_COMMAND_ROUTING_EPOCH_NOT_READY",
