@@ -85,7 +85,7 @@ async function installReviewQueueFixture(page, scenario = "normal") {
         {
           id: "REVIEW_QUEUE_LAYOUT_2",
           case_id: "CASE_QUEUE_LAYOUT_2",
-          status: "IN_PROGRESS",
+          status: "IN_REVIEW",
           priority: "MEDIUM",
           required_role: "PLATFORM_REVIEWER",
           due_at: null,

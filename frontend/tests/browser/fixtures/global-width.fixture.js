@@ -338,6 +338,23 @@ export async function installGlobalWidthFixture(page, options = {}) {
     localStorage.setItem("dispute-actor", JSON.stringify(value));
   }, actor);
 
+  await page.route(
+    /^https?:\/\/[^/]+\/agent-api\/health\/model$/,
+    async (route) => {
+      const request = route.request();
+      if (request.method() !== "GET") {
+        throw new Error(
+          `Unhandled global-width model health request: ${request.method()}`,
+        );
+      }
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ status: "UP", model_status: "CONNECTED" }),
+      });
+    },
+  );
+
   await page.route(/^https?:\/\/[^/]+\/api\//, async (route) => {
     const request = route.request();
     const url = new URL(request.url());
@@ -419,6 +436,14 @@ export async function installGlobalWidthFixture(page, options = {}) {
       path === `/api/disputes/${GLOBAL_CASE_IDS.evidence}/evidence`
     ) {
       return fulfillJson(route, evidenceCatalog(GLOBAL_CASE_IDS.evidence));
+    }
+    if (
+      method === "GET" &&
+      path ===
+        `/api/disputes/${GLOBAL_CASE_IDS.evidence}/evidence/process-projection` &&
+      url.searchParams.get("view") === "active"
+    ) {
+      return fulfillJson(route, null);
     }
     if (
       method === "GET" &&

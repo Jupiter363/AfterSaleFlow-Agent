@@ -118,7 +118,7 @@ const supplementDeclarationForm = reactive({
 });
 const submittingAnswers = ref(false);
 const eventState = reactive(createRoomState());
-const eventAbortController = new AbortController();
+let eventAbortController = new AbortController();
 const EVIDENCE_DRAWER_BREAKPOINT = 1220;
 const LONG_TRANSCRIPT_THRESHOLD = 1500;
 const LONG_TRANSCRIPT_PREVIEW_LENGTH = 900;

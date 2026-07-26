@@ -145,6 +145,23 @@ export async function installIntakeRoomFixture(page, options = {}) {
     localStorage.setItem("dispute-actor", JSON.stringify(value));
   }, actor);
 
+  await page.route(
+    /^https?:\/\/[^/]+\/agent-api\/health\/model$/,
+    async (route) => {
+      const request = route.request();
+      if (request.method() !== "GET") {
+        throw new Error(
+          `Unhandled browser-test model health request: ${request.method()}`,
+        );
+      }
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ status: "UP", model_status: "CONNECTED" }),
+      });
+    },
+  );
+
   await page.route(/^https?:\/\/[^/]+\/api\//, async (route) => {
     const request = route.request();
     const url = new URL(request.url());
