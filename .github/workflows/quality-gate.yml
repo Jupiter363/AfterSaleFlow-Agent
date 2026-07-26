@@ -35,8 +35,21 @@ jobs:
 
       - name: Secret scan / secret scanning
         run: |
-          ! grep -RInE 'sk-(phase[0-9]+|live|prod)|BEGIN PRIVATE KEY|(DEEPSEEK|DASHSCOPE)_API_KEY=sk-' \
-            --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=target --exclude-dir=dist .
+          secret_pattern='sk-(''phase[0-9]+|live|prod)|BEGIN PRIVATE'" KEY"'|(DEEPSEEK|DASHSCOPE)_API_KEY=''sk-'
+          matches="$(
+            git grep -nE "$secret_pattern" -- . || true
+          )"
+          unexpected="$(
+            printf '%s\n' "$matches" \
+              | sed -E 's/^([^:]+):[0-9]+:/\1:/' \
+              | grep -vFx 'tests/static/test_phase8_entry_evidence.py:        b"-----BEGIN PRIVATE'" KEY"'-----",' \
+              | grep -vFx 'java-api-service/src/test/java/com/example/dispute/workflow/agentrun/MountedPemGraphEnvelopeKeySetTest.java:                "-----BEGIN PRIVATE'" KEY"'-----\nnot-base64\n-----END PRIVATE KEY-----\n",' \
+              || true
+          )"
+          if [[ -n "$unexpected" ]]; then
+            printf '%s\n' "$unexpected"
+            exit 1
+          fi
 
       - name: Static repository contracts
         run: python -m pytest tests/static -q
