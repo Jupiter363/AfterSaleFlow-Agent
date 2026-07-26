@@ -458,6 +458,12 @@ class EvidenceRoomWorkflowTest {
   private static void shutdownAndAwait(WorkerFactory factory) {
     factory.shutdownNow();
     factory.awaitTermination(INFRASTRUCTURE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+    long publicationDeadline =
+        System.nanoTime()
+            + TimeUnit.SECONDS.toNanos(INFRASTRUCTURE_TIMEOUT_SECONDS);
+    while (!factory.isTerminated() && System.nanoTime() < publicationDeadline) {
+      sleepBriefly();
+    }
     assertThat(factory.isTerminated()).as("worker factory terminated").isTrue();
   }
 
