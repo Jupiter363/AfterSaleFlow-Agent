@@ -12,7 +12,7 @@ import java.util.Objects;
 
 /** Aggregated V035/V044 comparison. Queries return counts only and never load private payloads. */
 @Component
-public final class JdbcHearingSchedulerDetector implements HearingSchedulerDetector {
+public class JdbcHearingSchedulerDetector implements HearingSchedulerDetector {
 
     static final String DEADLINE_DETECTION_SQL =
             """

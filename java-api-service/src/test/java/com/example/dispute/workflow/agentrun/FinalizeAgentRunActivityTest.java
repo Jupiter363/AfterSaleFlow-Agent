@@ -70,8 +70,8 @@ class FinalizeAgentRunActivityTest {
     }
 
     @Test
-    void infrastructureFailureEscapesForTemporalFinalizerOnlyRetry() throws Exception {
-        ExecuteAgentRunRequest request = request();
+    void nonIntakeInfrastructureFailureEscapesForTemporalFinalizerOnlyRetry() throws Exception {
+        ExecuteAgentRunRequest request = nonIntakeRequest(request());
         ExecuteAgentRunResult result = result(request);
         RuntimeException databaseFailure = new RuntimeException("database unavailable");
         AgentRunFinalizationGateway gateway = mock(AgentRunFinalizationGateway.class);
@@ -137,7 +137,7 @@ class FinalizeAgentRunActivityTest {
 
     @Test
     void unknownNonIntakeRuntimeKeepsTheExistingEscapeSemantics() throws Exception {
-        ExecuteAgentRunRequest request = request();
+        ExecuteAgentRunRequest request = nonIntakeRequest(request());
         ExecuteAgentRunResult result = result(request);
         RuntimeException unknown = new RuntimeException("unclassified Evidence failure");
         AgentRunFinalizationGateway gateway = mock(AgentRunFinalizationGateway.class);
@@ -226,17 +226,26 @@ class FinalizeAgentRunActivityTest {
     }
 
     private static ExecuteAgentRunRequest intakeRequest(ExecuteAgentRunRequest source) {
+        return roomRequest(source, RoomType.INTAKE, "intake.v2");
+    }
+
+    private static ExecuteAgentRunRequest nonIntakeRequest(ExecuteAgentRunRequest source) {
+        return roomRequest(source, RoomType.EVIDENCE, "evidence.v2");
+    }
+
+    private static ExecuteAgentRunRequest roomRequest(
+            ExecuteAgentRunRequest source, RoomType roomType, String graphKey) {
         RoomGraphCommand command = source.command();
-        RoomGraphCommand intake = new RoomGraphCommand(
+        RoomGraphCommand roomCommand = new RoomGraphCommand(
                 command.schemaVersion(),
                 command.commandId(),
                 command.logicalRunId(),
                 command.attemptId(),
                 command.tenantSurrogate(),
                 command.caseId(),
-                RoomType.INTAKE,
+                roomType,
                 command.roomEpoch(),
-                "intake.v2",
+                graphKey,
                 command.graphVersion(),
                 command.checkpointSchemaVersion(),
                 command.threadId(),
@@ -261,7 +270,7 @@ class FinalizeAgentRunActivityTest {
                 source.previousAttemptId(),
                 source.resetRequired(),
                 source.publicSequenceOffset(),
-                intake);
+                roomCommand);
     }
 
     private static <T> T fixture(String file, Class<T> type) throws Exception {

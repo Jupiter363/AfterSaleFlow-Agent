@@ -9,10 +9,27 @@ import com.example.dispute.workflow.recovery.hearing.HearingSchedulerDetector.De
 
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.transaction.annotation.Transactional;
 
+import java.lang.reflect.Modifier;
 import java.util.Map;
 
 class JdbcHearingSchedulerDetectorTest {
+
+    @Test
+    void transactionalDetectorRemainsSubclassProxyable() throws NoSuchMethodException {
+        assertThat(Modifier.isFinal(JdbcHearingSchedulerDetector.class.getModifiers())).isFalse();
+        assertThat(
+                        JdbcHearingSchedulerDetector.class
+                                .getMethod("inspectDeadlineProjection")
+                                .getAnnotation(Transactional.class))
+                .isNotNull();
+        assertThat(
+                        JdbcHearingSchedulerDetector.class
+                                .getMethod("inspectHandoffProjection")
+                                .getAnnotation(Transactional.class))
+                .isNotNull();
+    }
 
     @Test
     void deadlineDetectorDistinguishesNoCandidateMatchAndMismatch() {
