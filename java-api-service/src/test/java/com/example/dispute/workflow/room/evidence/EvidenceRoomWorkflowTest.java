@@ -15,7 +15,9 @@ import com.example.dispute.workflow.temporal.room.evidence.EvidenceRoomStart;
 import com.example.dispute.workflow.temporal.room.evidence.EvidenceRoomWorkflow;
 import com.example.dispute.workflow.temporal.room.evidence.EvidenceRoomWorkflowImpl;
 import com.example.dispute.workflow.temporal.room.evidence.EvidenceTimerPlan;
+import io.grpc.StatusRuntimeException;
 import io.temporal.api.testservice.v1.LockTimeSkippingRequest;
+import io.temporal.api.testservice.v1.SleepRequest;
 import io.temporal.api.testservice.v1.TestServiceGrpc;
 import io.temporal.api.testservice.v1.UnlockTimeSkippingRequest;
 import io.temporal.client.WorkflowClient;
@@ -25,6 +27,8 @@ import io.temporal.common.WorkflowExecutionHistory;
 import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.testing.WorkflowReplayer;
 import io.temporal.worker.Worker;
+import io.temporal.worker.WorkerFactory;
+import io.temporal.worker.WorkerOptions;
 import io.temporal.workflow.Workflow;
 import java.time.Duration;
 import java.time.Instant;
@@ -34,6 +38,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Predicate;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -46,22 +51,31 @@ class EvidenceRoomWorkflowTest {
   private static final long EPOCH = 5;
   private static final String INITIATOR = "PARTICIPANT_P5_INITIATOR";
   private static final String RESPONDENT = "PARTICIPANT_P5_RESPONDENT";
+  private static final String KEEP_ALIVE_TASK_QUEUE = TASK_QUEUE + "-time-skipping-keepalive";
+  private static final WorkerOptions IMMEDIATE_STICKY_FALLBACK_WORKER_OPTIONS =
+      WorkerOptions.newBuilder().setStickyQueueScheduleToStartTimeout(Duration.ZERO).build();
 
   private TestWorkflowEnvironment environment;
   private WorkflowClient client;
-  private Worker worker;
+  private WorkerFactory targetWorkerFactory;
 
   @BeforeEach
   void setUp() {
     environment = TestWorkflowEnvironment.newInstance();
-    worker = environment.newWorker(TASK_QUEUE);
-    worker.registerWorkflowImplementationTypes(EvidenceRoomWorkflowImpl.class);
+    Worker keepAliveWorker =
+        environment.newWorker(KEEP_ALIVE_TASK_QUEUE, IMMEDIATE_STICKY_FALLBACK_WORKER_OPTIONS);
+    keepAliveWorker.registerWorkflowImplementationTypes(EvidenceRoomWorkflowImpl.class);
     environment.start();
     client = environment.getWorkflowClient();
+    targetWorkerFactory =
+        startWorkerFactory(client, TASK_QUEUE, EvidenceRoomWorkflowImpl.class);
   }
 
   @AfterEach
   void tearDown() {
+    if (targetWorkerFactory != null) {
+      shutdownAndAwait(targetWorkerFactory);
+    }
     environment.close();
   }
 
@@ -153,16 +167,13 @@ class EvidenceRoomWorkflowTest {
     String workflowId = workflowId(suffix);
     StartedWorkflow started = start(suffix, Duration.ofHours(2));
     awaitTimerCount(workflowId, EVENT_TYPE_TIMER_STARTED, 1);
-    worker.suspendPolling();
-    try {
-      started.workflow().partyCompleted(signal(INITIATOR, "COMPLETE_BATCHED_WARNING_I", 1));
-      started.workflow().partyCompleted(signal(RESPONDENT, "COMPLETE_BATCHED_WARNING_R", 2));
-      forceTimeSkippingAcrossPendingWorkflowTask(Duration.ofMinutes(90).plusSeconds(1));
-      awaitTimerCount(workflowId, EVENT_TYPE_TIMER_FIRED, 1);
-      assertSignalsPrecedeLastTimerFired(workflowId);
-    } finally {
-      worker.resumePolling();
-    }
+    stopWorkflowProcessing();
+    started.workflow().partyCompleted(signal(INITIATOR, "COMPLETE_BATCHED_WARNING_I", 1));
+    started.workflow().partyCompleted(signal(RESPONDENT, "COMPLETE_BATCHED_WARNING_R", 2));
+    forceTimeSkippingAcrossPendingWorkflowTask(Duration.ofMinutes(90).plusSeconds(1));
+    awaitTimerCount(workflowId, EVENT_TYPE_TIMER_FIRED, 1);
+    assertSignalsPrecedeLastTimerFired(workflowId);
+    restartWorkflowProcessing();
 
     EvidenceRoomSnapshot result = result(started.workflow());
     assertThat(result.terminalReason()).isEqualTo("BOTH_PARTIES_COMPLETED");
@@ -184,16 +195,13 @@ class EvidenceRoomWorkflowTest {
     environment.sleep(Duration.ofMinutes(90).plusSeconds(1));
     assertThat(started.workflow().state().warningSent()).isTrue();
     awaitTimerCount(workflowId, EVENT_TYPE_TIMER_STARTED, 2);
-    worker.suspendPolling();
-    try {
-      started.workflow().partyCompleted(signal(INITIATOR, "COMPLETE_BATCHED_DEADLINE_I", 3));
-      started.workflow().partyCompleted(signal(RESPONDENT, "COMPLETE_BATCHED_DEADLINE_R", 4));
-      forceTimeSkippingAcrossPendingWorkflowTask(Duration.ofMinutes(30).plusSeconds(1));
-      awaitTimerCount(workflowId, EVENT_TYPE_TIMER_FIRED, 2);
-      assertSignalsPrecedeLastTimerFired(workflowId);
-    } finally {
-      worker.resumePolling();
-    }
+    stopWorkflowProcessing();
+    started.workflow().partyCompleted(signal(INITIATOR, "COMPLETE_BATCHED_DEADLINE_I", 3));
+    started.workflow().partyCompleted(signal(RESPONDENT, "COMPLETE_BATCHED_DEADLINE_R", 4));
+    forceTimeSkippingAcrossPendingWorkflowTask(Duration.ofMinutes(30).plusSeconds(1));
+    awaitTimerCount(workflowId, EVENT_TYPE_TIMER_FIRED, 2);
+    assertSignalsPrecedeLastTimerFired(workflowId);
+    restartWorkflowProcessing();
 
     EvidenceRoomSnapshot result = result(started.workflow());
     assertThat(result.terminalReason()).isEqualTo("BOTH_PARTIES_COMPLETED");
@@ -214,17 +222,14 @@ class EvidenceRoomWorkflowTest {
     String workflowId = workflowId(suffix);
     StartedWorkflow started = start(suffix, Duration.ofHours(2));
     awaitTimerCount(workflowId, EVENT_TYPE_TIMER_STARTED, 1);
-    worker.suspendPolling();
-    try {
-      forceTimeSkippingAcrossPendingWorkflowTask(Duration.ofMinutes(90).plusSeconds(1));
-      awaitTimerCount(workflowId, EVENT_TYPE_TIMER_FIRED, 1);
-      started.workflow().partyCompleted(signal(INITIATOR, "COMPLETE_AFTER_WARNING_I", 5));
-      started.workflow().partyCompleted(signal(RESPONDENT, "COMPLETE_AFTER_WARNING_R", 6));
-      awaitTimerCount(workflowId, EVENT_TYPE_WORKFLOW_EXECUTION_SIGNALED, 2);
-      assertLastTimerFiredPrecedesSignals(workflowId);
-    } finally {
-      worker.resumePolling();
-    }
+    stopWorkflowProcessing();
+    forceTimeSkippingAcrossPendingWorkflowTask(Duration.ofMinutes(90).plusSeconds(1));
+    awaitTimerCount(workflowId, EVENT_TYPE_TIMER_FIRED, 1);
+    started.workflow().partyCompleted(signal(INITIATOR, "COMPLETE_AFTER_WARNING_I", 5));
+    started.workflow().partyCompleted(signal(RESPONDENT, "COMPLETE_AFTER_WARNING_R", 6));
+    awaitTimerCount(workflowId, EVENT_TYPE_WORKFLOW_EXECUTION_SIGNALED, 2);
+    assertLastTimerFiredPrecedesSignals(workflowId);
+    restartWorkflowProcessing();
 
     EvidenceRoomSnapshot result = result(started.workflow());
     assertThat(result.terminalReason()).isEqualTo("BOTH_PARTIES_COMPLETED");
@@ -247,17 +252,14 @@ class EvidenceRoomWorkflowTest {
     environment.sleep(Duration.ofMinutes(90).plusSeconds(1));
     assertThat(started.workflow().state().warningSent()).isTrue();
     awaitTimerCount(workflowId, EVENT_TYPE_TIMER_STARTED, 2);
-    worker.suspendPolling();
-    try {
-      forceTimeSkippingAcrossPendingWorkflowTask(Duration.ofMinutes(30).plusSeconds(1));
-      awaitTimerCount(workflowId, EVENT_TYPE_TIMER_FIRED, 2);
-      started.workflow().partyCompleted(signal(INITIATOR, "COMPLETE_AFTER_DEADLINE_I", 7));
-      started.workflow().partyCompleted(signal(RESPONDENT, "COMPLETE_AFTER_DEADLINE_R", 8));
-      awaitTimerCount(workflowId, EVENT_TYPE_WORKFLOW_EXECUTION_SIGNALED, 2);
-      assertLastTimerFiredPrecedesSignals(workflowId);
-    } finally {
-      worker.resumePolling();
-    }
+    stopWorkflowProcessing();
+    forceTimeSkippingAcrossPendingWorkflowTask(Duration.ofMinutes(30).plusSeconds(1));
+    awaitTimerCount(workflowId, EVENT_TYPE_TIMER_FIRED, 2);
+    started.workflow().partyCompleted(signal(INITIATOR, "COMPLETE_AFTER_DEADLINE_I", 7));
+    started.workflow().partyCompleted(signal(RESPONDENT, "COMPLETE_AFTER_DEADLINE_R", 8));
+    awaitTimerCount(workflowId, EVENT_TYPE_WORKFLOW_EXECUTION_SIGNALED, 2);
+    assertLastTimerFiredPrecedesSignals(workflowId);
+    restartWorkflowProcessing();
 
     EvidenceRoomSnapshot result = result(started.workflow());
     assertThat(result.terminalReason()).isEqualTo("DEADLINE_EXPIRED");
@@ -278,47 +280,59 @@ class EvidenceRoomWorkflowTest {
     WorkflowExecutionHistory history;
 
     try (TestWorkflowEnvironment legacyEnvironment = TestWorkflowEnvironment.newInstance()) {
-      Worker legacyWorker = legacyEnvironment.newWorker(taskQueue);
-      legacyWorker.registerWorkflowImplementationTypes(LegacyEvidenceRoomWorkflowImpl.class);
+      Worker legacyKeepAliveWorker =
+          legacyEnvironment.newWorker(
+              taskQueue + "-time-skipping-keepalive", IMMEDIATE_STICKY_FALLBACK_WORKER_OPTIONS);
+      legacyKeepAliveWorker.registerWorkflowImplementationTypes(
+          LegacyEvidenceRoomWorkflowImpl.class);
       legacyEnvironment.start();
       WorkflowClient legacyClient = legacyEnvironment.getWorkflowClient();
-      EvidenceRoomWorkflow legacyWorkflow =
-          legacyClient.newWorkflowStub(
-              EvidenceRoomWorkflow.class,
-              WorkflowOptions.newBuilder()
-                  .setWorkflowId(workflowId)
-                  .setTaskQueue(taskQueue)
-                  .build());
-      Instant openedAt = Instant.ofEpochMilli(legacyEnvironment.currentTimeMillis());
-      WorkflowClient.start(
-          legacyWorkflow::run, startAt(openedAt, openedAt.plus(Duration.ofHours(2))));
-      awaitTimerCount(legacyClient, workflowId, EVENT_TYPE_TIMER_STARTED, 1);
-
-      legacyWorker.suspendPolling();
+      WorkerFactory legacyTargetWorkerFactory = null;
       try {
+        legacyTargetWorkerFactory =
+            startWorkerFactory(legacyClient, taskQueue, LegacyEvidenceRoomWorkflowImpl.class);
+        EvidenceRoomWorkflow legacyWorkflow =
+            legacyClient.newWorkflowStub(
+                EvidenceRoomWorkflow.class,
+                WorkflowOptions.newBuilder()
+                    .setWorkflowId(workflowId)
+                    .setTaskQueue(taskQueue)
+                    .build());
+        Instant openedAt = Instant.ofEpochMilli(legacyEnvironment.currentTimeMillis());
+        WorkflowClient.start(
+            legacyWorkflow::run, startAt(openedAt, openedAt.plus(Duration.ofHours(2))));
+        awaitTimerCount(legacyClient, workflowId, EVENT_TYPE_TIMER_STARTED, 1);
+
+        shutdownAndAwait(legacyTargetWorkerFactory);
+        legacyTargetWorkerFactory = null;
         legacyWorkflow.partyCompleted(signal(INITIATOR, "LEGACY_COMPLETE_I", 9));
         legacyWorkflow.partyCompleted(signal(RESPONDENT, "LEGACY_COMPLETE_R", 0));
         forceTimeSkippingAcrossPendingWorkflowTask(
             legacyEnvironment, Duration.ofMinutes(90).plusSeconds(1));
         awaitTimerCount(legacyClient, workflowId, EVENT_TYPE_TIMER_FIRED, 1);
         assertSignalsPrecedeLastTimerFired(legacyClient, workflowId);
-      } finally {
-        legacyWorker.resumePolling();
-      }
+        legacyTargetWorkerFactory =
+            startWorkerFactory(legacyClient, taskQueue, LegacyEvidenceRoomWorkflowImpl.class);
 
-      EvidenceRoomSnapshot legacyResult = result(legacyWorkflow);
-      assertThat(legacyResult.terminalReason()).isEqualTo("BOTH_PARTIES_COMPLETED");
-      assertThat(legacyResult.orderedOperationKeys())
-          .contains(
-              EvidenceOperationKeys.partyComplete(CASE_ID, EPOCH, INITIATOR, "LEGACY_COMPLETE_I"),
-              EvidenceOperationKeys.partyComplete(
-                  CASE_ID, EPOCH, RESPONDENT, "LEGACY_COMPLETE_R"));
-      assertThat(
-              legacyResult.orderedOperationKeys().stream()
-                  .filter(EvidenceOperationKeys.deadlineWarn(CASE_ID, EPOCH, 1)::equals)
-                  .count())
-          .isEqualTo(legacyResult.warningSent() ? 1 : 0);
-      history = legacyClient.fetchHistory(workflowId);
+        EvidenceRoomSnapshot legacyResult = result(legacyWorkflow);
+        assertThat(legacyResult.terminalReason()).isEqualTo("BOTH_PARTIES_COMPLETED");
+        assertThat(legacyResult.orderedOperationKeys())
+            .contains(
+                EvidenceOperationKeys.partyComplete(
+                    CASE_ID, EPOCH, INITIATOR, "LEGACY_COMPLETE_I"),
+                EvidenceOperationKeys.partyComplete(
+                    CASE_ID, EPOCH, RESPONDENT, "LEGACY_COMPLETE_R"));
+        assertThat(
+                legacyResult.orderedOperationKeys().stream()
+                    .filter(EvidenceOperationKeys.deadlineWarn(CASE_ID, EPOCH, 1)::equals)
+                    .count())
+            .isEqualTo(legacyResult.warningSent() ? 1 : 0);
+        history = legacyClient.fetchHistory(workflowId);
+      } finally {
+        if (legacyTargetWorkerFactory != null) {
+          shutdownAndAwait(legacyTargetWorkerFactory);
+        }
+      }
     }
 
     assertThat(history.getEvents())
@@ -412,6 +426,31 @@ class EvidenceRoomWorkflowTest {
                 .build());
     WorkflowClient.start(workflow::run, start);
     return new StartedWorkflow(workflow, start);
+  }
+
+  private void stopWorkflowProcessing() {
+    shutdownAndAwait(targetWorkerFactory);
+    targetWorkerFactory = null;
+  }
+
+  private void restartWorkflowProcessing() {
+    targetWorkerFactory = startWorkerFactory(client, TASK_QUEUE, EvidenceRoomWorkflowImpl.class);
+  }
+
+  private static WorkerFactory startWorkerFactory(
+      WorkflowClient workflowClient, String taskQueue, Class<?> workflowImplementation) {
+    WorkerFactory factory = WorkerFactory.newInstance(workflowClient);
+    Worker replacementWorker =
+        factory.newWorker(taskQueue, IMMEDIATE_STICKY_FALLBACK_WORKER_OPTIONS);
+    replacementWorker.registerWorkflowImplementationTypes(workflowImplementation);
+    factory.start();
+    return factory;
+  }
+
+  private static void shutdownAndAwait(WorkerFactory factory) {
+    factory.shutdown();
+    factory.awaitTermination(5, TimeUnit.SECONDS);
+    assertThat(factory.isTerminated()).as("worker factory terminated").isTrue();
   }
 
   private static EvidenceRoomStart startAt(Instant openedAt, Instant deadlineAt) {
@@ -548,11 +587,30 @@ class EvidenceRoomWorkflowTest {
       TestWorkflowEnvironment testEnvironment, Duration duration) {
     var testService =
         TestServiceGrpc.newBlockingStub(testEnvironment.getWorkflowService().getRawChannel());
-    testService.unlockTimeSkipping(UnlockTimeSkippingRequest.getDefaultInstance());
+    testService
+        .withDeadlineAfter(10, TimeUnit.SECONDS)
+        .unlockTimeSkipping(UnlockTimeSkippingRequest.getDefaultInstance());
     try {
-      testEnvironment.sleep(duration);
+      try {
+        testService
+            .withDeadlineAfter(10, TimeUnit.SECONDS)
+            .unlockTimeSkippingWithSleep(
+                SleepRequest.newBuilder()
+                    .setDuration(
+                        com.google.protobuf.Duration.newBuilder()
+                            .setSeconds(duration.getSeconds())
+                            .setNanos(duration.getNano())
+                            .build())
+                    .build());
+      } catch (StatusRuntimeException exception) {
+        throw new AssertionError(
+            "timed out advancing Temporal test time\n" + testEnvironment.getDiagnostics(),
+            exception);
+      }
     } finally {
-      testService.lockTimeSkipping(LockTimeSkippingRequest.getDefaultInstance());
+      testService
+          .withDeadlineAfter(10, TimeUnit.SECONDS)
+          .lockTimeSkipping(LockTimeSkippingRequest.getDefaultInstance());
     }
   }
 
