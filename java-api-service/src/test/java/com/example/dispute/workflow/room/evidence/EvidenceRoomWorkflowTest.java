@@ -16,10 +16,8 @@ import com.example.dispute.workflow.temporal.room.evidence.EvidenceRoomWorkflow;
 import com.example.dispute.workflow.temporal.room.evidence.EvidenceRoomWorkflowImpl;
 import com.example.dispute.workflow.temporal.room.evidence.EvidenceTimerPlan;
 import io.grpc.StatusRuntimeException;
-import io.temporal.api.testservice.v1.LockTimeSkippingRequest;
 import io.temporal.api.testservice.v1.SleepRequest;
 import io.temporal.api.testservice.v1.TestServiceGrpc;
-import io.temporal.api.testservice.v1.UnlockTimeSkippingRequest;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowOptions;
 import io.temporal.client.WorkflowStub;
@@ -38,11 +36,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.function.Predicate;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -57,6 +51,8 @@ class EvidenceRoomWorkflowTest {
   private static final String RESPONDENT = "PARTICIPANT_P5_RESPONDENT";
   private static final String KEEP_ALIVE_TASK_QUEUE = TASK_QUEUE + "-time-skipping-keepalive";
   private static final long INFRASTRUCTURE_TIMEOUT_SECONDS = 30;
+  private static final Duration TIMER_BOUNDARY_GUARD = Duration.ofSeconds(5);
+  private static final Duration TIMER_BOUNDARY_SETTLE = Duration.ofSeconds(1);
   private static final WorkerOptions IMMEDIATE_STICKY_FALLBACK_WORKER_OPTIONS =
       WorkerOptions.newBuilder().setStickyQueueScheduleToStartTimeout(Duration.ZERO).build();
 
@@ -174,11 +170,13 @@ class EvidenceRoomWorkflowTest {
     String suffix = "same-task-warning";
     String workflowId = workflowId(suffix);
     StartedWorkflow started = start(suffix, Duration.ofHours(2));
+    EvidenceTimerPlan timerPlan = EvidenceTimerPlan.from(started.start());
     awaitTimerCount(workflowId, EVENT_TYPE_TIMER_STARTED, 1);
+    advanceTimeTo(timerPlan.warningAt().minus(TIMER_BOUNDARY_GUARD));
     stopWorkflowProcessing();
     started.workflow().partyCompleted(signal(INITIATOR, "COMPLETE_BATCHED_WARNING_I", 1));
     started.workflow().partyCompleted(signal(RESPONDENT, "COMPLETE_BATCHED_WARNING_R", 2));
-    forceTimeSkippingAcrossPendingWorkflowTask(Duration.ofMinutes(90).plusSeconds(1));
+    advanceTimeTo(timerPlan.warningAt().plus(TIMER_BOUNDARY_SETTLE));
     awaitTimerCount(workflowId, EVENT_TYPE_TIMER_FIRED, 1);
     assertSignalsPrecedeLastTimerFired(workflowId);
     restartWorkflowProcessing();
@@ -200,13 +198,15 @@ class EvidenceRoomWorkflowTest {
     String suffix = "same-task-deadline";
     String workflowId = workflowId(suffix);
     StartedWorkflow started = start(suffix, Duration.ofHours(2));
-    environment.sleep(Duration.ofMinutes(90).plusSeconds(1));
+    EvidenceTimerPlan timerPlan = EvidenceTimerPlan.from(started.start());
+    advanceTimeTo(timerPlan.warningAt().plus(TIMER_BOUNDARY_SETTLE));
     assertThat(started.workflow().state().warningSent()).isTrue();
     awaitTimerCount(workflowId, EVENT_TYPE_TIMER_STARTED, 2);
+    advanceTimeTo(timerPlan.deadlineAt().minus(TIMER_BOUNDARY_GUARD));
     stopWorkflowProcessing();
     started.workflow().partyCompleted(signal(INITIATOR, "COMPLETE_BATCHED_DEADLINE_I", 3));
     started.workflow().partyCompleted(signal(RESPONDENT, "COMPLETE_BATCHED_DEADLINE_R", 4));
-    forceTimeSkippingAcrossPendingWorkflowTask(Duration.ofMinutes(30).plusSeconds(1));
+    advanceTimeTo(timerPlan.deadlineAt().plus(TIMER_BOUNDARY_SETTLE));
     awaitTimerCount(workflowId, EVENT_TYPE_TIMER_FIRED, 2);
     assertSignalsPrecedeLastTimerFired(workflowId);
     restartWorkflowProcessing();
@@ -229,9 +229,10 @@ class EvidenceRoomWorkflowTest {
     String suffix = "same-task-warning-first";
     String workflowId = workflowId(suffix);
     StartedWorkflow started = start(suffix, Duration.ofHours(2));
+    EvidenceTimerPlan timerPlan = EvidenceTimerPlan.from(started.start());
     awaitTimerCount(workflowId, EVENT_TYPE_TIMER_STARTED, 1);
     stopWorkflowProcessing();
-    forceTimeSkippingToTimerBoundary(workflowId, 1, Duration.ofMinutes(90));
+    advanceTimeTo(timerPlan.warningAt().plus(TIMER_BOUNDARY_SETTLE));
     awaitTimerCount(workflowId, EVENT_TYPE_TIMER_FIRED, 1);
     started.workflow().partyCompleted(signal(INITIATOR, "COMPLETE_AFTER_WARNING_I", 5));
     started.workflow().partyCompleted(signal(RESPONDENT, "COMPLETE_AFTER_WARNING_R", 6));
@@ -257,11 +258,12 @@ class EvidenceRoomWorkflowTest {
     String suffix = "same-task-deadline-first";
     String workflowId = workflowId(suffix);
     StartedWorkflow started = start(suffix, Duration.ofHours(2));
-    environment.sleep(Duration.ofMinutes(90).plusSeconds(1));
+    EvidenceTimerPlan timerPlan = EvidenceTimerPlan.from(started.start());
+    advanceTimeTo(timerPlan.warningAt().plus(TIMER_BOUNDARY_SETTLE));
     assertThat(started.workflow().state().warningSent()).isTrue();
     awaitTimerCount(workflowId, EVENT_TYPE_TIMER_STARTED, 2);
     stopWorkflowProcessing();
-    forceTimeSkippingToTimerBoundary(workflowId, 2, Duration.ofMinutes(30));
+    advanceTimeTo(timerPlan.deadlineAt().plus(TIMER_BOUNDARY_SETTLE));
     awaitTimerCount(workflowId, EVENT_TYPE_TIMER_FIRED, 2);
     started.workflow().partyCompleted(signal(INITIATOR, "COMPLETE_AFTER_DEADLINE_I", 7));
     started.workflow().partyCompleted(signal(RESPONDENT, "COMPLETE_AFTER_DEADLINE_R", 8));
@@ -307,16 +309,21 @@ class EvidenceRoomWorkflowTest {
                     .setTaskQueue(taskQueue)
                     .build());
         Instant openedAt = Instant.ofEpochMilli(legacyEnvironment.currentTimeMillis());
-        WorkflowClient.start(
-            legacyWorkflow::run, startAt(openedAt, openedAt.plus(Duration.ofHours(2))));
+        EvidenceRoomStart legacyStart = startAt(openedAt, openedAt.plus(Duration.ofHours(2)));
+        EvidenceTimerPlan legacyTimerPlan = EvidenceTimerPlan.from(legacyStart);
+        WorkflowClient.start(legacyWorkflow::run, legacyStart);
         awaitTimerCount(legacyClient, workflowId, EVENT_TYPE_TIMER_STARTED, 1);
+        advanceTimeTo(
+            legacyEnvironment,
+            legacyTimerPlan.warningAt().minus(TIMER_BOUNDARY_GUARD));
 
         shutdownAndAwait(legacyTargetWorkerFactory);
         legacyTargetWorkerFactory = null;
         legacyWorkflow.partyCompleted(signal(INITIATOR, "LEGACY_COMPLETE_I", 9));
         legacyWorkflow.partyCompleted(signal(RESPONDENT, "LEGACY_COMPLETE_R", 0));
-        forceTimeSkippingAcrossPendingWorkflowTask(
-            legacyEnvironment, Duration.ofMinutes(90).plusSeconds(1));
+        advanceTimeTo(
+            legacyEnvironment,
+            legacyTimerPlan.warningAt().plus(TIMER_BOUNDARY_SETTLE));
         awaitTimerCount(legacyClient, workflowId, EVENT_TYPE_TIMER_FIRED, 1);
         assertSignalsPrecedeLastTimerFired(legacyClient, workflowId);
         legacyTargetWorkerFactory =
@@ -593,98 +600,35 @@ class EvidenceRoomWorkflowTest {
     assertThat(lastTimerFiredEventId).isLessThan(firstSignalEventId);
   }
 
-  private void forceTimeSkippingAcrossPendingWorkflowTask(Duration duration) {
-    forceTimeSkippingAcrossPendingWorkflowTask(environment, duration);
+  private void advanceTimeTo(Instant target) {
+    advanceTimeTo(environment, target);
   }
 
-  private void forceTimeSkippingToTimerBoundary(
-      String workflowId, long expectedTimerCount, Duration duration) {
-    var testService =
-        TestServiceGrpc.newBlockingStub(environment.getWorkflowService().getRawChannel());
-    CountDownLatch timeAdvanceCompleted = new CountDownLatch(1);
-    CompletableFuture<Void> workflowTaskLockRelease =
-        CompletableFuture.runAsync(
-            () -> {
-              awaitTimerCount(client, workflowId, EVENT_TYPE_TIMER_FIRED, expectedTimerCount);
-              testService
-                  .withDeadlineAfter(INFRASTRUCTURE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-                  .unlockTimeSkipping(UnlockTimeSkippingRequest.getDefaultInstance());
-              try {
-                if (!timeAdvanceCompleted.await(
-                    INFRASTRUCTURE_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
-                  throw new AssertionError("Temporal test time advance did not complete");
-                }
-              } catch (InterruptedException exception) {
-                Thread.currentThread().interrupt();
-                throw new AssertionError("test interrupted", exception);
-              } finally {
-                testService
-                    .withDeadlineAfter(INFRASTRUCTURE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-                    .lockTimeSkipping(LockTimeSkippingRequest.getDefaultInstance());
-              }
-            });
-
-    Throwable advanceFailure = null;
-    try {
-      forceTimeSkippingAcrossPendingWorkflowTask(environment, duration);
-    } catch (RuntimeException | Error exception) {
-      advanceFailure = exception;
-      throw exception;
-    } finally {
-      timeAdvanceCompleted.countDown();
-      try {
-        awaitBackgroundTimeLockRelease(workflowTaskLockRelease);
-      } catch (RuntimeException | Error releaseFailure) {
-        if (advanceFailure != null) {
-          advanceFailure.addSuppressed(releaseFailure);
-        } else {
-          throw releaseFailure;
-        }
-      }
-    }
+  private static void advanceTimeTo(TestWorkflowEnvironment testEnvironment, Instant target) {
+    Instant current = Instant.ofEpochMilli(testEnvironment.currentTimeMillis());
+    Duration delay = Duration.between(current, target);
+    assertThat(delay).as("Temporal test-time delay to %s", target).isPositive();
+    advanceTestTime(testEnvironment, delay);
   }
 
-  private static void awaitBackgroundTimeLockRelease(CompletableFuture<Void> release) {
-    try {
-      release.get(INFRASTRUCTURE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-    } catch (InterruptedException exception) {
-      Thread.currentThread().interrupt();
-      throw new AssertionError("test interrupted", exception);
-    } catch (ExecutionException exception) {
-      throw new AssertionError("failed to restore Temporal test time lock", exception.getCause());
-    } catch (TimeoutException exception) {
-      throw new AssertionError("timed out restoring Temporal test time lock", exception);
-    }
-  }
-
-  private static void forceTimeSkippingAcrossPendingWorkflowTask(
+  private static void advanceTestTime(
       TestWorkflowEnvironment testEnvironment, Duration duration) {
     var testService =
         TestServiceGrpc.newBlockingStub(testEnvironment.getWorkflowService().getRawChannel());
-    testService
-        .withDeadlineAfter(INFRASTRUCTURE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-        .unlockTimeSkipping(UnlockTimeSkippingRequest.getDefaultInstance());
     try {
-      try {
-        testService
-            .withDeadlineAfter(INFRASTRUCTURE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-            .unlockTimeSkippingWithSleep(
-                SleepRequest.newBuilder()
-                    .setDuration(
-                        com.google.protobuf.Duration.newBuilder()
-                            .setSeconds(duration.getSeconds())
-                            .setNanos(duration.getNano())
-                            .build())
-                    .build());
-      } catch (StatusRuntimeException exception) {
-        throw new AssertionError(
-            "timed out advancing Temporal test time\n" + testEnvironment.getDiagnostics(),
-            exception);
-      }
-    } finally {
       testService
           .withDeadlineAfter(INFRASTRUCTURE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-          .lockTimeSkipping(LockTimeSkippingRequest.getDefaultInstance());
+          .unlockTimeSkippingWithSleep(
+              SleepRequest.newBuilder()
+                  .setDuration(
+                      com.google.protobuf.Duration.newBuilder()
+                          .setSeconds(duration.getSeconds())
+                          .setNanos(duration.getNano())
+                          .build())
+                  .build());
+    } catch (StatusRuntimeException exception) {
+      throw new AssertionError(
+          "failed advancing Temporal test time\n" + testEnvironment.getDiagnostics(), exception);
     }
   }
 
