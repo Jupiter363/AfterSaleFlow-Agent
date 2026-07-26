@@ -4,6 +4,7 @@ import copy
 import functools
 import hashlib
 from pathlib import Path
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -45,7 +46,20 @@ def _frozen_batch0_matrix() -> dict[str, object]:
 
 @pytest.fixture(autouse=True)
 def _use_frozen_batch0_contract(monkeypatch: pytest.MonkeyPatch) -> None:
-    matrix = _frozen_batch0_matrix()
+    frozen_matrix = _frozen_batch0_matrix()
+    frozen_argv = frozen_matrix["batches"]["batch_0_entry"]["source_commands"][0][
+        "argv"
+    ]
+    assert runner.ARGV_TEMPLATE[0] == "D:/miniconda/python.exe"
+    assert tuple(frozen_argv) == runner.ARGV_TEMPLATE
+
+    matrix = copy.deepcopy(frozen_matrix)
+    normalized_template = list(runner.ARGV_TEMPLATE)
+    normalized_template[0] = str(Path(sys.executable).resolve(strict=True))
+    matrix["batches"]["batch_0_entry"]["source_commands"][0]["argv"][0] = (
+        normalized_template[0]
+    )
+    monkeypatch.setattr(runner, "ARGV_TEMPLATE", tuple(normalized_template))
     monkeypatch.setattr(runner, "load_matrix", lambda: copy.deepcopy(matrix))
 
 
@@ -142,7 +156,7 @@ def _green_bundle(tmp_path: Path) -> tuple[Path, dict[str, object]]:
         "architecture": "test",
         "python_version": "3.13",
         "python_implementation": "CPython",
-        "python_executable": "D:/miniconda/python.exe",
+        "python_executable": runner.ARGV_TEMPLATE[0],
         "git_version": "git version test",
         "timezone": "UTC",
         "dependency_git_blobs": [],
