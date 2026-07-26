@@ -214,10 +214,11 @@ def _headers() -> dict[str, str]:
 def test_all_final_internal_agent_routes_are_authenticated() -> None:
     client = _client()
     paths = {
-        route.path
+        path
         for route in client.app.routes
-        if route.path.startswith("/internal/agents/")
-        and "/legacy/" not in route.path
+        if (path := getattr(route, "path", None)) is not None
+        and path.startswith("/internal/agents/")
+        and "/legacy/" not in path
     }
     assert {
         "/internal/agents/intake/analyze",

@@ -1652,7 +1652,11 @@ def test_api_exposes_only_explicit_hearing_flow_runtime_routes() -> None:
             hearing_flow_workflows=HearingFlowWorkflows(runner),
         )
     )
-    paths = {route.path for route in client.app.routes}
+    paths = {
+        path
+        for route in client.app.routes
+        if (path := getattr(route, "path", None)) is not None
+    }
 
     assert "/internal/agents/hearing/round-turn" not in paths
     assert "/internal/agents/hearing/run-stage" not in paths
