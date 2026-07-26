@@ -207,11 +207,31 @@ jobs:
           distribution: temurin
           java-version: "21"
           cache: maven
+      - name: Pull Compose images with bounded backoff
+        env:
+          COMPOSE_PARALLEL_LIMIT: "1"
+          DASHSCOPE_API_KEY: ci-placeholder-not-a-real-key
+          DEFAULT_LLM_API_BASE: http://127.0.0.1:9
+        run: |
+          set -euo pipefail
+          max_attempts=5
+          for attempt in $(seq 1 "$max_attempts"); do
+            if docker compose pull --ignore-buildable --policy missing; then
+              exit 0
+            fi
+            if [ "$attempt" -eq "$max_attempts" ]; then
+              echo "::error::Compose image pull failed after ${max_attempts} attempts"
+              exit 1
+            fi
+            delay=$((15 * 2 ** (attempt - 1)))
+            echo "::warning::Compose image pull attempt ${attempt} failed; retrying in ${delay}s"
+            sleep "$delay"
+          done
       - name: Build and start Compose stack
         env:
           DASHSCOPE_API_KEY: ci-placeholder-not-a-real-key
           DEFAULT_LLM_API_BASE: http://127.0.0.1:9
-        run: docker compose up -d --build --wait --wait-timeout 360
+        run: docker compose up -d --build --pull never --wait --wait-timeout 360
       - name: Temporal worker restart recovery
         working-directory: java-api-service
         run: >
