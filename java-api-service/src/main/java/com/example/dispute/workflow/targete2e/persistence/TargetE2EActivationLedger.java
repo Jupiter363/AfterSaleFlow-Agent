@@ -14,6 +14,7 @@ import java.util.Comparator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import javax.sql.DataSource;
@@ -98,6 +99,7 @@ public final class TargetE2EActivationLedger {
                     insertExplicitCases(connection, registration);
                 }
                 PersistedGrant persisted = exactPersistedGrant(connection, registration);
+                requireCurrentGeneration(connection, persisted);
                 verifyExplicitCases(connection, registration);
                 if (inserted == 0
                         && persisted.lifecycleStatus() == ActivationLifecycle.ACTIVE
@@ -119,7 +121,7 @@ public final class TargetE2EActivationLedger {
                 if (failure instanceof TargetE2EPersistenceException persistenceFailure) {
                     throw persistenceFailure;
                 }
-                throw sqlFailure("ACTIVATION_REGISTRATION_FAILED", failure);
+                throw registrationFailure(failure);
             }
         } catch (SQLException failure) {
             throw sqlFailure("ACTIVATION_CONNECTION_FAILED", failure);
@@ -188,49 +190,9 @@ public final class TargetE2EActivationLedger {
         try (Connection connection = dataSource.getConnection()) {
             connection.setAutoCommit(false);
             try {
-                try (PreparedStatement lock = connection.prepareStatement(
-                        "select pg_advisory_xact_lock(hashtextextended(?, 0))")) {
-                    lock.setString(1, command.activationId() + ':' + command.commandId());
-                    lock.executeQuery().close();
-                }
-                PersistedCommand existing = findCommand(connection, command);
-                if (existing != null) {
-                    requireSameCommand(command, existing);
-                    connection.commit();
-                    return new CommandAdmissionResult(
-                            CommandAdmissionDisposition.ALREADY_ADMITTED_DRAIN_ONLY,
-                            existing.admissionId(),
-                            existing.admittedAt());
-                }
-                String admissionId = "p9cmd.v1." + compactUuid();
-                try (PreparedStatement statement = connection.prepareStatement("""
-                        insert into target_e2e_command_admission (
-                            admission_id, activation_id, activation_manifest_hash,
-                            execution_lane, isolated_domain_db_binding_hash,
-                            tenant_surrogate, case_id, command_id, command_hash,
-                            command_envelope_hash, room_epoch, room_fencing_token
-                        ) values (?, ?, ?, 'TARGET_E2E_CANDIDATE', ?, ?, ?, ?, ?, ?, ?, ?)
-                        """)) {
-                    int index = 1;
-                    statement.setString(index++, admissionId);
-                    statement.setString(index++, command.activationId());
-                    statement.setString(index++, command.manifestHash());
-                    statement.setString(index++, command.isolatedDomainDbBindingHash());
-                    statement.setString(index++, command.tenantSurrogate());
-                    statement.setString(index++, command.caseId());
-                    statement.setString(index++, command.commandId());
-                    statement.setString(index++, command.commandHash());
-                    statement.setString(index++, command.commandEnvelopeHash());
-                    statement.setLong(index++, command.roomEpoch());
-                    statement.setLong(index, command.roomFencingToken());
-                    statement.executeUpdate();
-                }
-                PersistedCommand admitted = findCommand(connection, command);
+                CommandAdmissionResult admitted = admitCommand(connection, command);
                 connection.commit();
-                return new CommandAdmissionResult(
-                        CommandAdmissionDisposition.ADMITTED,
-                        admitted.admissionId(),
-                        admitted.admittedAt());
+                return admitted;
             } catch (RuntimeException | SQLException failure) {
                 rollback(connection, failure);
                 if (failure instanceof TargetE2EPersistenceException persistenceFailure) {
@@ -240,6 +202,108 @@ public final class TargetE2EActivationLedger {
             }
         } catch (SQLException failure) {
             throw sqlFailure("COMMAND_ADMISSION_CONNECTION_FAILED", failure);
+        }
+    }
+
+    /**
+     * Admits a command on the caller-owned transaction. This method never commits or rolls back.
+     */
+    public CommandAdmissionResult admitCommand(Connection transaction, CommandAdmission command) {
+        Objects.requireNonNull(transaction, "transaction must not be null");
+        Objects.requireNonNull(command, "command must not be null");
+        try {
+            requireCallerTransaction(transaction, "command admission");
+            advisoryLock(transaction, command.activationId() + ':' + command.commandId());
+            CommandActivation activation = lockCommandActivation(transaction, command.activationId());
+            if (activation.lifecycle() == ActivationLifecycle.DRAINED
+                    || activation.lifecycle() == ActivationLifecycle.REVOKED_TERMINAL) {
+                throw new TargetE2EPersistenceException(
+                        "COMMAND_ADMISSION_TERMINAL",
+                        "terminal activation command evidence is query-only");
+            }
+
+            PersistedCommand existing = findCommand(
+                    transaction, command.activationId(), command.commandId());
+            if (existing != null) {
+                requireSameCommand(command, existing);
+                if (existing.completed()) {
+                    throw new TargetE2EPersistenceException(
+                            "COMMAND_ALREADY_COMPLETED",
+                            "completed command evidence is query-only");
+                }
+                if (activation.lifecycle() == ActivationLifecycle.DRAIN_ONLY) {
+                    if (!existing.admittedAt().isBefore(activation.expiresAt())) {
+                        throw new TargetE2EPersistenceException(
+                                "COMMAND_ADMISSION_AFTER_CUTOFF",
+                                "DRAIN_ONLY permits only unfinished work admitted before cutoff");
+                    }
+                    return new CommandAdmissionResult(
+                            CommandAdmissionDisposition.ALREADY_ADMITTED_DRAIN_ONLY,
+                            existing.admissionId(),
+                            existing.admittedAt());
+                }
+                requireActiveBeforeCutoff(activation);
+                return new CommandAdmissionResult(
+                        CommandAdmissionDisposition.ALREADY_ADMITTED_ACTIVE,
+                        existing.admissionId(),
+                        existing.admittedAt());
+            }
+
+            requireActiveBeforeCutoff(activation);
+            String admissionId = "p9cmd.v1." + compactUuid();
+            insertCommand(transaction, admissionId, command);
+            PersistedCommand admitted = findCommand(
+                    transaction, command.activationId(), command.commandId());
+            return new CommandAdmissionResult(
+                    CommandAdmissionDisposition.ADMITTED,
+                    admitted.admissionId(),
+                    admitted.admittedAt());
+        } catch (SQLException failure) {
+            throw sqlFailure("COMMAND_ADMISSION_FAILED", failure);
+        }
+    }
+
+    /** Reads durable command evidence without granting execution authority. */
+    public Optional<CommandAdmissionSnapshot> queryCommandAdmission(
+            String activationId, String commandId) {
+        requireText(activationId, "activationId");
+        requireText(commandId, "commandId");
+        try (Connection connection = dataSource.getConnection()) {
+            return queryCommandAdmission(connection, activationId, commandId);
+        } catch (SQLException failure) {
+            throw sqlFailure("COMMAND_ADMISSION_QUERY_FAILED", failure);
+        }
+    }
+
+    /** Reads durable command evidence on a caller-owned connection without authorizing execution. */
+    public Optional<CommandAdmissionSnapshot> queryCommandAdmission(
+            Connection connection, String activationId, String commandId) {
+        Objects.requireNonNull(connection, "connection must not be null");
+        requireText(activationId, "activationId");
+        requireText(commandId, "commandId");
+        try {
+            PersistedCommand command = findCommand(connection, activationId, commandId);
+            if (command == null) {
+                return Optional.empty();
+            }
+            return Optional.of(new CommandAdmissionSnapshot(
+                    command.admissionId(),
+                    command.activationId(),
+                    command.activationManifestHash(),
+                    command.isolatedDomainDbBindingHash(),
+                    command.tenantSurrogate(),
+                    command.caseId(),
+                    command.commandId(),
+                    command.commandHash(),
+                    command.commandEnvelopeHash(),
+                    command.roomEpoch(),
+                    command.roomFencingToken(),
+                    command.admittedAt(),
+                    command.completed(),
+                    command.completionHash(),
+                    command.completedAt()));
+        } catch (SQLException failure) {
+            throw sqlFailure("COMMAND_ADMISSION_QUERY_FAILED", failure);
         }
     }
 
@@ -314,26 +378,7 @@ public final class TargetE2EActivationLedger {
         try (Connection connection = dataSource.getConnection()) {
             connection.setAutoCommit(false);
             try {
-                try (PreparedStatement lock = connection.prepareStatement(
-                        "select pg_advisory_xact_lock(hashtextextended(?, 0))")) {
-                    lock.setString(1, completion.admissionId());
-                    lock.executeQuery().close();
-                }
-                try (PreparedStatement statement = connection.prepareStatement("""
-                        insert into target_e2e_command_completion (
-                            admission_id, activation_id, command_id, command_hash,
-                            command_envelope_hash, completion_hash
-                        ) values (?, ?, ?, ?, ?, ?) on conflict do nothing
-                        """)) {
-                    statement.setString(1, completion.admissionId());
-                    statement.setString(2, completion.activationId());
-                    statement.setString(3, completion.commandId());
-                    statement.setString(4, completion.commandHash());
-                    statement.setString(5, completion.commandEnvelopeHash());
-                    statement.setString(6, completion.completionHash());
-                    statement.executeUpdate();
-                }
-                CompletionResult result = findCompletion(connection, completion);
+                CompletionResult result = completeCommand(connection, completion);
                 connection.commit();
                 return result;
             } catch (RuntimeException | SQLException failure) {
@@ -345,6 +390,37 @@ public final class TargetE2EActivationLedger {
             }
         } catch (SQLException failure) {
             throw sqlFailure("COMMAND_COMPLETION_CONNECTION_FAILED", failure);
+        }
+    }
+
+    /**
+     * Completes an admitted command on the caller-owned domain transaction. This method never
+     * commits or rolls back.
+     */
+    public CompletionResult completeCommand(
+            Connection transaction, CommandCompletion completion) {
+        Objects.requireNonNull(transaction, "transaction must not be null");
+        Objects.requireNonNull(completion, "completion must not be null");
+        try {
+            requireCallerTransaction(transaction, "command completion");
+            advisoryLock(transaction, completion.admissionId());
+            try (PreparedStatement statement = transaction.prepareStatement("""
+                    insert into target_e2e_command_completion (
+                        admission_id, activation_id, command_id, command_hash,
+                        command_envelope_hash, completion_hash
+                    ) values (?, ?, ?, ?, ?, ?) on conflict do nothing
+                    """)) {
+                statement.setString(1, completion.admissionId());
+                statement.setString(2, completion.activationId());
+                statement.setString(3, completion.commandId());
+                statement.setString(4, completion.commandHash());
+                statement.setString(5, completion.commandEnvelopeHash());
+                statement.setString(6, completion.completionHash());
+                statement.executeUpdate();
+            }
+            return findCompletion(transaction, completion);
+        } catch (SQLException failure) {
+            throw sqlFailure("COMMAND_COMPLETION_FAILED", failure);
         }
     }
 
@@ -524,6 +600,28 @@ public final class TargetE2EActivationLedger {
         return actual;
     }
 
+    private static void requireCurrentGeneration(
+            Connection connection, PersistedGrant activation) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                select highest_generation, highest_activation_id
+                  from target_e2e_environment_generation_watermark
+                 where environment_id = ?
+                 for share
+                """)) {
+            statement.setString(1, activation.environmentId());
+            try (ResultSet result = statement.executeQuery()) {
+                if (!result.next()
+                        || result.getLong("highest_generation") != activation.environmentGeneration()
+                        || !activation.activationId().equals(
+                                result.getString("highest_activation_id"))) {
+                    throw new TargetE2EPersistenceException(
+                            "ACTIVATION_STALE_GENERATION",
+                            "activation is below the durable environment generation high-water mark");
+                }
+            }
+        }
+    }
+
     private static void verifyExplicitCases(
             Connection connection, ActivationRegistration registration) throws SQLException {
         if (!(registration.caseScope() instanceof ExplicitCaseScope explicit)) {
@@ -647,23 +745,33 @@ public final class TargetE2EActivationLedger {
     }
 
     private static PersistedCommand findCommand(
-            Connection connection, CommandAdmission command) throws SQLException {
+            Connection connection, String activationId, String commandId) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement("""
-                select admission_id, activation_id, tenant_surrogate, case_id,
-                       command_id, command_hash, command_envelope_hash,
-                       room_epoch, room_fencing_token, admitted_at
-                  from target_e2e_command_admission
-                 where activation_id = ? and command_id = ?
+                select admission.admission_id, admission.activation_id,
+                       admission.activation_manifest_hash,
+                       admission.isolated_domain_db_binding_hash,
+                       admission.tenant_surrogate, admission.case_id,
+                       admission.command_id, admission.command_hash,
+                       admission.command_envelope_hash, admission.room_epoch,
+                       admission.room_fencing_token, admission.admitted_at,
+                       completion.completion_hash, completion.completed_at
+                  from target_e2e_command_admission admission
+                  left join target_e2e_command_completion completion
+                    on completion.admission_id = admission.admission_id
+                 where admission.activation_id = ? and admission.command_id = ?
                 """)) {
-            statement.setString(1, command.activationId());
-            statement.setString(2, command.commandId());
+            statement.setString(1, activationId);
+            statement.setString(2, commandId);
             try (ResultSet result = statement.executeQuery()) {
                 if (!result.next()) {
                     return null;
                 }
+                Timestamp completedAt = result.getTimestamp("completed_at");
                 return new PersistedCommand(
                         result.getString("admission_id"),
                         result.getString("activation_id"),
+                        result.getString("activation_manifest_hash"),
+                        result.getString("isolated_domain_db_binding_hash"),
                         result.getString("tenant_surrogate"),
                         result.getString("case_id"),
                         result.getString("command_id"),
@@ -671,13 +779,92 @@ public final class TargetE2EActivationLedger {
                         result.getString("command_envelope_hash"),
                         result.getLong("room_epoch"),
                         result.getLong("room_fencing_token"),
-                        result.getTimestamp("admitted_at").toInstant());
+                        result.getTimestamp("admitted_at").toInstant(),
+                        completedAt != null,
+                        result.getString("completion_hash"),
+                        completedAt == null ? null : completedAt.toInstant());
             }
+        }
+    }
+
+    private static void insertCommand(
+            Connection connection, String admissionId, CommandAdmission command)
+            throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                insert into target_e2e_command_admission (
+                    admission_id, activation_id, activation_manifest_hash,
+                    execution_lane, isolated_domain_db_binding_hash,
+                    tenant_surrogate, case_id, command_id, command_hash,
+                    command_envelope_hash, room_epoch, room_fencing_token
+                ) values (?, ?, ?, 'TARGET_E2E_CANDIDATE', ?, ?, ?, ?, ?, ?, ?, ?)
+                """)) {
+            int index = 1;
+            statement.setString(index++, admissionId);
+            statement.setString(index++, command.activationId());
+            statement.setString(index++, command.manifestHash());
+            statement.setString(index++, command.isolatedDomainDbBindingHash());
+            statement.setString(index++, command.tenantSurrogate());
+            statement.setString(index++, command.caseId());
+            statement.setString(index++, command.commandId());
+            statement.setString(index++, command.commandHash());
+            statement.setString(index++, command.commandEnvelopeHash());
+            statement.setLong(index++, command.roomEpoch());
+            statement.setLong(index, command.roomFencingToken());
+            statement.executeUpdate();
+        }
+    }
+
+    private static CommandActivation lockCommandActivation(
+            Connection connection, String activationId) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                select lifecycle_status, expires_at,
+                       expires_at > clock_timestamp() as before_cutoff
+                  from target_e2e_activation
+                 where activation_id = ?
+                 for update
+                """)) {
+            statement.setString(1, activationId);
+            try (ResultSet result = statement.executeQuery()) {
+                if (!result.next()) {
+                    throw new TargetE2EPersistenceException(
+                            "ACTIVATION_NOT_FOUND", "activation is not registered");
+                }
+                return new CommandActivation(
+                        ActivationLifecycle.valueOf(result.getString("lifecycle_status")),
+                        result.getTimestamp("expires_at").toInstant(),
+                        result.getBoolean("before_cutoff"));
+            }
+        }
+    }
+
+    private static void requireActiveBeforeCutoff(CommandActivation activation) {
+        if (activation.lifecycle() != ActivationLifecycle.ACTIVE || !activation.beforeCutoff()) {
+            throw new TargetE2EPersistenceException(
+                    "COMMAND_ADMISSION_CLOSED",
+                    "new or ACTIVE command admission requires a pre-cutoff ACTIVE activation");
+        }
+    }
+
+    private static void advisoryLock(Connection connection, String key) throws SQLException {
+        try (PreparedStatement lock = connection.prepareStatement(
+                "select pg_advisory_xact_lock(hashtextextended(?, 0))")) {
+            lock.setString(1, key);
+            lock.executeQuery().close();
+        }
+    }
+
+    private static void requireCallerTransaction(Connection connection, String operation)
+            throws SQLException {
+        if (connection.isClosed() || connection.getAutoCommit()) {
+            throw new IllegalArgumentException(operation + " requires a caller-owned transaction");
         }
     }
 
     private static void requireSameCommand(CommandAdmission expected, PersistedCommand actual) {
         if (!expected.activationId().equals(actual.activationId())
+                || !expected.manifestHash().equals(actual.activationManifestHash())
+                || !expected.isolatedDomainDbBindingHash()
+                        .equals(actual.isolatedDomainDbBindingHash())
                 || !expected.tenantSurrogate().equals(actual.tenantSurrogate())
                 || !expected.caseId().equals(actual.caseId())
                 || !expected.commandId().equals(actual.commandId())
@@ -764,6 +951,15 @@ public final class TargetE2EActivationLedger {
         return new TargetE2EPersistenceException(code, failure.getMessage(), failure);
     }
 
+    private static TargetE2EPersistenceException registrationFailure(Throwable failure) {
+        String message = failure.getMessage();
+        if (message != null && message.contains("stale below the durable environment generation")) {
+            return new TargetE2EPersistenceException(
+                    "ACTIVATION_STALE_GENERATION", message, failure);
+        }
+        return sqlFailure("ACTIVATION_REGISTRATION_FAILED", failure);
+    }
+
     private static String compactUuid() {
         return UUID.randomUUID().toString().replace("-", "");
     }
@@ -792,6 +988,7 @@ public final class TargetE2EActivationLedger {
 
     public enum CommandAdmissionDisposition {
         ADMITTED,
+        ALREADY_ADMITTED_ACTIVE,
         ALREADY_ADMITTED_DRAIN_ONLY
     }
 
@@ -994,6 +1191,23 @@ public final class TargetE2EActivationLedger {
     public record CommandAdmissionResult(
             CommandAdmissionDisposition disposition, String admissionId, Instant admittedAt) {}
 
+    public record CommandAdmissionSnapshot(
+            String admissionId,
+            String activationId,
+            String activationManifestHash,
+            String isolatedDomainDbBindingHash,
+            String tenantSurrogate,
+            String caseId,
+            String commandId,
+            String commandHash,
+            String commandEnvelopeHash,
+            long roomEpoch,
+            long roomFencingToken,
+            Instant admittedAt,
+            boolean completed,
+            String completionHash,
+            Instant completedAt) {}
+
     public record CommandCompletion(
             String admissionId,
             String activationId,
@@ -1049,6 +1263,8 @@ public final class TargetE2EActivationLedger {
     private record PersistedCommand(
             String admissionId,
             String activationId,
+            String activationManifestHash,
+            String isolatedDomainDbBindingHash,
             String tenantSurrogate,
             String caseId,
             String commandId,
@@ -1056,5 +1272,11 @@ public final class TargetE2EActivationLedger {
             String commandEnvelopeHash,
             long roomEpoch,
             long roomFencingToken,
-            Instant admittedAt) {}
+            Instant admittedAt,
+            boolean completed,
+            String completionHash,
+            Instant completedAt) {}
+
+    private record CommandActivation(
+            ActivationLifecycle lifecycle, Instant expiresAt, boolean beforeCutoff) {}
 }

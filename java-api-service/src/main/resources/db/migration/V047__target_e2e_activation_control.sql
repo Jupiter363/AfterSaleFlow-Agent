@@ -159,7 +159,7 @@ create table target_e2e_activation (
         length(btrim(case_build_id)) between 1 and 128
         and length(btrim(control_build_id)) between 1 and 128
         and length(btrim(agent_build_id)) between 1 and 128
-        and graph_key = 'all-rooms/target-e2e.v1'
+        and graph_key = 'all-rooms.target-e2e.v1'
         and length(btrim(graph_version)) between 1 and 128
         and length(btrim(graph_checkpoint_schema_version)) between 1 and 128
         and graph_binding_hash ~ '^[0-9a-f]{64}$'
@@ -219,10 +219,16 @@ as $$
 declare
     existing_activation target_e2e_activation%rowtype;
     watermark_row target_e2e_environment_generation_watermark%rowtype;
+    watermark_found boolean;
 begin
     -- Activation registration is infrequent. One transaction-scoped lock makes the
     -- activationId/nonce checks and environment watermark one linearization point.
     perform pg_advisory_xact_lock(9047);
+    select * into watermark_row
+      from target_e2e_environment_generation_watermark
+     where environment_id = new.environment_id
+     for update;
+    watermark_found := found;
     select * into existing_activation
       from target_e2e_activation
      where activation_id = new.activation_id or nonce = new.nonce
@@ -232,7 +238,17 @@ begin
            and existing_activation.nonce = new.nonce
            and existing_activation.environment_id = new.environment_id
            and existing_activation.environment_generation = new.environment_generation
-           and existing_activation.manifest_hash = new.manifest_hash then
+           and existing_activation.manifest_hash = new.manifest_hash
+           and existing_activation.candidate_sha = new.candidate_sha
+           and existing_activation.tenant_surrogate = new.tenant_surrogate
+           and existing_activation.case_scope_hash = new.case_scope_hash
+           and existing_activation.binding_set_hash = new.binding_set_hash then
+            if not watermark_found
+               or watermark_row.highest_generation is distinct from new.environment_generation
+               or watermark_row.highest_activation_id is distinct from new.activation_id then
+                raise exception using errcode = '23514',
+                    message = 'target E2E exact attach is stale below the durable environment generation high-water mark';
+            end if;
             return new;
         end if;
         raise exception using errcode = '23505',
@@ -243,11 +259,7 @@ begin
             message = 'new target E2E activation must be current at registration';
     end if;
 
-    select * into watermark_row
-      from target_e2e_environment_generation_watermark
-     where environment_id = new.environment_id
-     for update;
-    if not found then
+    if not watermark_found then
         insert into target_e2e_environment_generation_watermark (
             environment_id, highest_generation, highest_activation_id
         ) values (new.environment_id, new.environment_generation, new.activation_id);
@@ -288,6 +300,24 @@ $$;
 create trigger trg_target_e2e_environment_watermark_guard
 before update on target_e2e_environment_generation_watermark
 for each row execute function guard_target_e2e_environment_watermark();
+
+-- A single unique claim is the cross-activation linearization point for every case ID.
+-- Unlike a read after an advisory-lock wait, the unique index resolves concurrent
+-- inserts against the winning transaction even under READ COMMITTED snapshots.
+create table target_e2e_case_id_claim (
+    case_id varchar(128) primary key,
+    reservation_id varchar(64) not null unique,
+    activation_id varchar(64) not null,
+    reservation_kind varchar(32) not null,
+    claimed_at timestamptz not null,
+    constraint fk_target_e2e_case_claim_activation
+        foreign key (activation_id) references target_e2e_activation(activation_id),
+    constraint ck_target_e2e_case_claim check (
+        case_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+        and reservation_id ~ '^p9case[.]v1[.][0-9a-f]{32}$'
+        and reservation_kind in ('EXPLICIT_CASE_ID', 'ISOLATED_SYNTHETIC_NEW_CASE')
+    )
+);
 
 create table target_e2e_case_reservation (
     reservation_id varchar(64) not null,
@@ -349,6 +379,16 @@ as $$
 declare
     activation_row target_e2e_activation%rowtype;
 begin
+    insert into target_e2e_case_id_claim (
+        case_id, reservation_id, activation_id, reservation_kind, claimed_at
+    ) values (
+        new.case_id, new.reservation_id, new.activation_id,
+        new.reservation_kind, new.reserved_at
+    ) on conflict do nothing;
+    if not found then
+        raise exception using errcode = '23505',
+            message = 'target E2E case ID is already claimed by another reservation';
+    end if;
     select * into activation_row
       from target_e2e_activation
      where activation_id = new.activation_id
@@ -431,6 +471,12 @@ for each row execute function reject_target_e2e_append_only_mutation();
 create trigger trg_target_e2e_case_reservation_no_truncate
 before truncate on target_e2e_case_reservation
 for each statement execute function reject_target_e2e_append_only_mutation();
+create trigger trg_target_e2e_case_claim_immutable
+before update or delete on target_e2e_case_id_claim
+for each row execute function reject_target_e2e_append_only_mutation();
+create trigger trg_target_e2e_case_claim_no_truncate
+before truncate on target_e2e_case_id_claim
+for each statement execute function reject_target_e2e_append_only_mutation();
 
 create table target_e2e_generated_case_tombstone (
     generated_case_id varchar(128) primary key,
@@ -506,6 +552,104 @@ create constraint trigger trg_target_e2e_explicit_scope_complete
 after insert on target_e2e_activation
 deferrable initially deferred
 for each row execute function assert_target_e2e_explicit_scope_complete();
+
+-- Exact activation authority for every target room epoch. Intake keeps its richer
+-- selection record as well; Evidence, Hearing, and Review bind through this common row.
+create table target_e2e_room_epoch_binding (
+    epoch_id varchar(64) primary key,
+    activation_id varchar(64) not null,
+    activation_manifest_hash varchar(64) not null,
+    execution_lane varchar(32) not null,
+    isolated_domain_db_binding_hash varchar(64) not null,
+    tenant_surrogate varchar(128) not null,
+    case_id varchar(64) not null,
+    room_type varchar(32) not null,
+    room_epoch bigint not null,
+    room_fencing_token bigint not null,
+    bound_at timestamptz not null default current_timestamp,
+    constraint fk_target_e2e_room_epoch
+        foreign key (epoch_id) references case_room_epoch(id),
+    constraint fk_target_e2e_room_epoch_activation
+        foreign key (
+            activation_id, activation_manifest_hash, execution_lane,
+            isolated_domain_db_binding_hash
+        ) references target_e2e_activation(
+            activation_id, manifest_hash, execution_lane,
+            isolated_domain_db_binding_hash
+        ),
+    constraint fk_target_e2e_room_epoch_case
+        foreign key (activation_id, tenant_surrogate, case_id)
+        references target_e2e_case_reservation(activation_id, tenant_surrogate, case_id),
+    constraint uq_target_e2e_room_epoch_route unique (
+        activation_id, tenant_surrogate, case_id, room_type, room_epoch
+    ),
+    constraint ck_target_e2e_room_epoch_binding check (
+        execution_lane = 'TARGET_E2E_CANDIDATE'
+        and activation_manifest_hash ~ '^[0-9a-f]{64}$'
+        and isolated_domain_db_binding_hash ~ '^[0-9a-f]{64}$'
+        and room_type in ('INTAKE', 'EVIDENCE', 'HEARING', 'REVIEW')
+        and room_epoch between 0 and 9007199254740991
+        and room_fencing_token between 1 and 9007199254740991
+    )
+);
+
+create or replace function enforce_target_e2e_room_epoch_binding()
+returns trigger
+language plpgsql
+as $$
+declare
+    epoch_row case_room_epoch%rowtype;
+    activation_row target_e2e_activation%rowtype;
+begin
+    select * into epoch_row from case_room_epoch
+     where id = new.epoch_id for share;
+    if not found then
+        raise exception using errcode = '23503',
+            message = 'target E2E room binding requires a durable room epoch';
+    end if;
+    select * into activation_row from target_e2e_activation
+     where activation_id = new.activation_id
+       and manifest_hash = new.activation_manifest_hash
+       and execution_lane = new.execution_lane
+       and isolated_domain_db_binding_hash = new.isolated_domain_db_binding_hash
+     for share;
+    if not found
+       or activation_row.lifecycle_status <> 'ACTIVE'
+       or activation_row.expires_at <= clock_timestamp() then
+        raise exception using errcode = '23514',
+            message = 'target E2E room binding requires a live ACTIVE activation';
+    end if;
+    if epoch_row.tenant_surrogate is distinct from new.tenant_surrogate
+       or epoch_row.case_id is distinct from new.case_id
+       or epoch_row.room_type is distinct from new.room_type
+       or epoch_row.room_epoch is distinct from new.room_epoch
+       or epoch_row.fencing_token is distinct from new.room_fencing_token
+       or epoch_row.writer_mode <> 'TEMPORAL'
+       or epoch_row.graph_key is distinct from activation_row.graph_key
+       or epoch_row.graph_version is distinct from activation_row.graph_version
+       or epoch_row.checkpoint_schema_version is distinct from
+            activation_row.graph_checkpoint_schema_version
+       or epoch_row.temporal_build_id is distinct from activation_row.case_build_id
+       or epoch_row.room_workflow_build_id is distinct from activation_row.control_build_id
+       or epoch_row.stream_protocol <> 'agent-stream.v2'
+       or activation_row.tenant_surrogate is distinct from new.tenant_surrogate
+       or not (new.room_type = any(activation_row.allowed_room_types)) then
+        raise exception using errcode = '23514',
+            message = 'target E2E room epoch binding does not match activation authority';
+    end if;
+    return new;
+end
+$$;
+
+create trigger trg_target_e2e_room_epoch_binding_guard
+before insert on target_e2e_room_epoch_binding
+for each row execute function enforce_target_e2e_room_epoch_binding();
+create trigger trg_target_e2e_room_epoch_binding_immutable
+before update or delete on target_e2e_room_epoch_binding
+for each row execute function reject_target_e2e_append_only_mutation();
+create trigger trg_target_e2e_room_epoch_binding_no_truncate
+before truncate on target_e2e_room_epoch_binding
+for each statement execute function reject_target_e2e_append_only_mutation();
 
 create or replace function guard_target_e2e_activation_mutation()
 returns trigger
@@ -796,7 +940,7 @@ alter table case_intake_epoch_selection_binding
             and room_type = 'INTAKE'
             and case_workflow_type = 'CaseProcessWorkflow'
             and room_workflow_type = 'IntakeRoomWorkflow'
-            and graph_key = 'all-rooms/target-e2e.v1'
+            and graph_key = 'all-rooms.target-e2e.v1'
             and stream_protocol = 'agent-stream.v2'
             and agent_key = 'DISPUTE_INTAKE_OFFICER'
         )
@@ -986,8 +1130,10 @@ for each statement execute function reject_target_e2e_append_only_mutation();
 -- Deployment-owned Java roles receive only the table operations they need outside Flyway.
 revoke all on target_e2e_activation from public;
 revoke all on target_e2e_environment_generation_watermark from public;
+revoke all on target_e2e_case_id_claim from public;
 revoke all on target_e2e_case_reservation from public;
 revoke all on target_e2e_generated_case_tombstone from public;
+revoke all on target_e2e_room_epoch_binding from public;
 revoke all on target_e2e_command_admission from public;
 revoke all on target_e2e_command_completion from public;
 revoke all on target_e2e_finalization_receipt from public;

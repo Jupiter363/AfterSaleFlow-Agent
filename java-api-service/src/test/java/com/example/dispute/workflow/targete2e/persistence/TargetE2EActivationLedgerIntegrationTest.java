@@ -21,6 +21,9 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -76,8 +79,11 @@ class TargetE2EActivationLedgerIntegrationTest {
                 .isEqualTo(RegistrationDisposition.REGISTERED);
         assertThat(ledger.registerOrAttach(synthetic).disposition())
                 .isEqualTo(RegistrationDisposition.ATTACHED_EXISTING);
-        assertThat(count("select count(*) from target_e2e_activation")).isEqualTo(1);
-        assertThat(count("select count(*) from target_e2e_environment_generation_watermark"))
+        assertThat(count("select count(*) from target_e2e_activation where activation_id = '"
+                        + synthetic.activationId() + "'"))
+                .isEqualTo(1);
+        assertThat(count("select count(*) from target_e2e_environment_generation_watermark "
+                        + "where environment_id = '" + synthetic.environmentId() + "'"))
                 .isEqualTo(1);
         assertThat(ledger.transition(
                         synthetic.activationId(),
@@ -105,7 +111,8 @@ class TargetE2EActivationLedgerIntegrationTest {
                 .isEqualTo(first);
         assertThat(ledger.reserveCase(synthetic.activationId(), "CASE_P9_SYNTHETIC_0002").slotNumber())
                 .isEqualTo(2);
-        assertThat(count("select count(*) from target_e2e_generated_case_tombstone"))
+        assertThat(count("select count(*) from target_e2e_generated_case_tombstone "
+                        + "where activation_id = '" + synthetic.activationId() + "'"))
                 .isEqualTo(2);
         assertCode(
                 () -> ledger.reserveCase(synthetic.activationId(), "CASE_P9_SYNTHETIC_0003"),
@@ -146,6 +153,12 @@ class TargetE2EActivationLedgerIntegrationTest {
                  where epoch_id = 'EPOCH_TARGET_P9'
                 """))
                 .isEqualTo("TEMPORAL:TARGET_E2E_CANDIDATE");
+        assertThat(text("""
+                select execution_lane || ':' || room_type
+                  from target_e2e_room_epoch_binding
+                 where epoch_id = 'EPOCH_TARGET_P9'
+                """))
+                .isEqualTo("TARGET_E2E_CANDIDATE:INTAKE");
 
         CommandAdmission accepted = new CommandAdmission(
                 expiring.activationId(),
@@ -178,7 +191,7 @@ class TargetE2EActivationLedgerIntegrationTest {
                         "8".repeat(64),
                         0,
                         1)),
-                "COMMAND_ADMISSION_FAILED");
+                "COMMAND_ADMISSION_CLOSED");
 
         assertThat(text("""
                 select lifecycle_status from target_e2e_activation
@@ -197,16 +210,24 @@ class TargetE2EActivationLedgerIntegrationTest {
                 accepted.commandHash(),
                 accepted.commandEnvelopeHash(),
                 "7".repeat(64)));
+        assertCode(() -> ledger.admitCommand(accepted), "COMMAND_ALREADY_COMPLETED");
+        var completedEvidence = ledger.queryCommandAdmission(
+                        accepted.activationId(), accepted.commandId())
+                .orElseThrow();
+        assertThat(completedEvidence.completed()).isTrue();
+        assertThat(completedEvidence.completionHash()).isEqualTo("7".repeat(64));
         assertThat(ledger.transition(
                         expiring.activationId(),
                         ActivationLifecycle.DRAIN_ONLY,
                         ActivationLifecycle.DRAINED))
                 .isEqualTo(ActivationLifecycle.DRAINED);
+        assertCode(() -> ledger.admitCommand(accepted), "COMMAND_ADMISSION_TERMINAL");
         assertCode(
                 () -> ledger.revokeTerminal(expiring.activationId(), true, false),
                 "ACTIVATION_REVOKE_PRECONDITION");
         assertThat(ledger.revokeTerminal(expiring.activationId(), true, true))
                 .isEqualTo(ActivationLifecycle.REVOKED_TERMINAL);
+        assertCode(() -> ledger.admitCommand(accepted), "COMMAND_ADMISSION_TERMINAL");
         assertCode(
                 () -> ledger.transition(
                         expiring.activationId(),
@@ -220,6 +241,181 @@ class TargetE2EActivationLedgerIntegrationTest {
         assertSqlFails(
                 "delete from target_e2e_case_reservation where case_id = 'CASE_P9_SYNTHETIC_0001'",
                 "append-only");
+    }
+
+    @Test
+    void exactAttachCannotFallBelowEnvironmentGenerationHighWater() {
+        Instant now = Instant.now();
+        ActivationRegistration generationOne = registrationForEnvironment(
+                "p9act.v1." + "5".repeat(32),
+                "nonce-" + "5".repeat(32),
+                1,
+                "environment-p9-stale",
+                now.minusSeconds(5),
+                now.plusSeconds(90),
+                new SyntheticCaseScope(
+                        "5".repeat(64), "CASE_P9_STALE_", 1, "fixture-p9-stale",
+                        "6".repeat(64), "6".repeat(64)));
+        ActivationRegistration generationTwo = registrationForEnvironment(
+                "p9act.v1." + "6".repeat(32),
+                "nonce-" + "6".repeat(32),
+                2,
+                "environment-p9-stale",
+                now.minusSeconds(5),
+                now.plusSeconds(90),
+                new SyntheticCaseScope(
+                        "7".repeat(64), "CASE_P9_STALE_", 1, "fixture-p9-stale",
+                        "8".repeat(64), "8".repeat(64)));
+
+        assertThat(ledger.registerOrAttach(generationOne).disposition())
+                .isEqualTo(RegistrationDisposition.REGISTERED);
+        assertThat(ledger.registerOrAttach(generationTwo).disposition())
+                .isEqualTo(RegistrationDisposition.REGISTERED);
+        assertCode(
+                () -> ledger.registerOrAttach(generationOne),
+                "ACTIVATION_STALE_GENERATION");
+    }
+
+    @Test
+    void explicitAndSyntheticCaseClaimsHaveExactlyOneConcurrentWinner() throws Exception {
+        Instant now = Instant.now();
+        String caseId = "CASE_P9_RACE_001";
+        ActivationRegistration synthetic = registrationForEnvironment(
+                "p9act.v1." + "7".repeat(32),
+                "nonce-" + "7".repeat(32),
+                1,
+                "environment-p9-race-synthetic",
+                now.minusSeconds(5),
+                now.plusSeconds(90),
+                new SyntheticCaseScope(
+                        "9".repeat(64), "CASE_P9_RACE_", 1, "fixture-p9-race",
+                        "a".repeat(64), "a".repeat(64)));
+        ActivationRegistration explicit = registrationForEnvironment(
+                "p9act.v1." + "8".repeat(32),
+                "nonce-" + "8".repeat(32),
+                1,
+                "environment-p9-race-explicit",
+                now.minusSeconds(5),
+                now.plusSeconds(90),
+                new ExplicitCaseScope("b".repeat(64), List.of(caseId)));
+        ledger.registerOrAttach(synthetic);
+        ledger.transition(
+                synthetic.activationId(),
+                ActivationLifecycle.REGISTERED,
+                ActivationLifecycle.ACTIVE);
+
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch start = new CountDownLatch(1);
+        try (var executor = Executors.newFixedThreadPool(2)) {
+            var explicitAttempt = executor.submit(() -> {
+                ready.countDown();
+                start.await();
+                try {
+                    ledger.registerOrAttach(explicit);
+                    return "SUCCESS_EXPLICIT";
+                } catch (TargetE2EPersistenceException failure) {
+                    return "FAILED_EXPLICIT:" + failure.code();
+                }
+            });
+            var syntheticAttempt = executor.submit(() -> {
+                ready.countDown();
+                start.await();
+                try {
+                    ledger.reserveCase(synthetic.activationId(), caseId);
+                    return "SUCCESS_SYNTHETIC";
+                } catch (TargetE2EPersistenceException failure) {
+                    return "FAILED_SYNTHETIC:" + failure.code();
+                }
+            });
+            assertThat(ready.await(5, TimeUnit.SECONDS)).isTrue();
+            start.countDown();
+            List<String> outcomes = List.of(
+                    explicitAttempt.get(15, TimeUnit.SECONDS),
+                    syntheticAttempt.get(15, TimeUnit.SECONDS));
+            assertThat(outcomes.stream().filter(value -> value.startsWith("SUCCESS_")).count())
+                    .isEqualTo(1);
+        }
+
+        assertThat(count("select count(*) from target_e2e_case_id_claim where case_id = '"
+                        + caseId + "'"))
+                .isEqualTo(1);
+        assertThat(count("select count(*) from target_e2e_case_reservation where case_id = '"
+                        + caseId + "'"))
+                .isEqualTo(1);
+    }
+
+    @Test
+    void callerOwnedAdmissionParticipatesInTheDomainTransaction() throws Exception {
+        Instant now = Instant.now();
+        String caseId = "CASE_P9_TX_001";
+        ActivationRegistration activation = registrationForEnvironment(
+                "p9act.v1." + "9".repeat(32),
+                "nonce-" + "9".repeat(32),
+                1,
+                "environment-p9-transaction",
+                now.minusSeconds(5),
+                now.plusSeconds(90),
+                new ExplicitCaseScope("c".repeat(64), List.of(caseId)));
+        ledger.registerOrAttach(activation);
+        ledger.transition(
+                activation.activationId(),
+                ActivationLifecycle.REGISTERED,
+                ActivationLifecycle.ACTIVE);
+        CommandAdmission command = new CommandAdmission(
+                activation.activationId(),
+                activation.manifestHash(),
+                activation.domainDatabase().bindingHash(),
+                activation.tenantSurrogate(),
+                caseId,
+                "command-transaction-rollback",
+                "d".repeat(64),
+                "e".repeat(64),
+                0,
+                1);
+
+        try (Connection transaction = dataSource.getConnection()) {
+            transaction.setAutoCommit(false);
+            assertThat(ledger.admitCommand(transaction, command).disposition())
+                    .isEqualTo(TargetE2EActivationLedger.CommandAdmissionDisposition.ADMITTED);
+            assertThat(ledger.queryCommandAdmission(
+                            transaction, command.activationId(), command.commandId()))
+                    .isPresent();
+            transaction.rollback();
+        }
+        assertThat(ledger.queryCommandAdmission(command.activationId(), command.commandId()))
+                .isEmpty();
+
+        var admitted = ledger.admitCommand(command);
+        CommandCompletion completion = new CommandCompletion(
+                admitted.admissionId(),
+                command.activationId(),
+                command.commandId(),
+                command.commandHash(),
+                command.commandEnvelopeHash(),
+                "f".repeat(64));
+        try (Connection transaction = dataSource.getConnection()) {
+            transaction.setAutoCommit(false);
+            ledger.completeCommand(transaction, completion);
+            assertThat(ledger.queryCommandAdmission(
+                                    transaction, command.activationId(), command.commandId())
+                            .orElseThrow()
+                            .completed())
+                    .isTrue();
+            transaction.rollback();
+        }
+        assertThat(ledger.queryCommandAdmission(command.activationId(), command.commandId())
+                        .orElseThrow()
+                        .completed())
+                .isFalse();
+
+        try (Connection autoCommit = dataSource.getConnection()) {
+            assertThatThrownBy(() -> ledger.admitCommand(autoCommit, command))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("caller-owned transaction");
+            assertThatThrownBy(() -> ledger.completeCommand(autoCommit, completion))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("caller-owned transaction");
+        }
     }
 
     private static void seedShadowSelection() throws SQLException {
@@ -272,6 +468,19 @@ class TargetE2EActivationLedgerIntegrationTest {
                     registration.graph().key(), registration.graph().version(),
                     registration.graph().checkpointSchemaVersion(),
                     registration.builds().caseBuildId(), registration.builds().controlBuildId()));
+            statement.executeUpdate("""
+                    insert into target_e2e_room_epoch_binding (
+                        epoch_id, activation_id, activation_manifest_hash, execution_lane,
+                        isolated_domain_db_binding_hash, tenant_surrogate, case_id,
+                        room_type, room_epoch, room_fencing_token
+                    ) values (
+                        'EPOCH_TARGET_P9', '%s', '%s', 'TARGET_E2E_CANDIDATE',
+                        '%s', 'tenant-p9', 'CASE_P9_EXPLICIT_001', 'INTAKE', 0, 1
+                    )
+                    """.formatted(
+                    registration.activationId(),
+                    registration.manifestHash(),
+                    registration.domainDatabase().bindingHash()));
             String base = """
                     insert into case_intake_epoch_selection_binding (
                         epoch_id, tenant_surrogate, case_id, room_type, room_epoch, fencing_token,
@@ -286,7 +495,7 @@ class TargetE2EActivationLedgerIntegrationTest {
                         'EPOCH_TARGET_P9', 'tenant-p9', 'CASE_P9_EXPLICIT_001', 'INTAKE', 0, 1,
                         repeat('2', 64), 'TEMPORAL', 'CaseProcessWorkflow', 'case-build',
                         'IntakeRoomWorkflow', 'control-build', 'case-process-contract.v1',
-                        'all-rooms/target-e2e.v1', 'target-graph-v1', 'target-checkpoint-v1',
+                        'all-rooms.target-e2e.v1', 'target-graph-v1', 'target-checkpoint-v1',
                         'target-e2e-graph-state.v1', 'agent-stream.v2', 'target-prompt-v1',
                         'target-model-v1', 'target-room-proposal.v1', 'target-policy-v1',
                         'target-guardrail-v1', 'no-tools.v1', 'target-cohort-v1',
@@ -394,10 +603,28 @@ class TargetE2EActivationLedgerIntegrationTest {
             Instant issuedAt,
             Instant expiresAt,
             TargetE2EActivationLedger.CaseScope scope) {
+        return registrationForEnvironment(
+                activationId,
+                nonce,
+                generation,
+                "environment-p9",
+                issuedAt,
+                expiresAt,
+                scope);
+    }
+
+    private static ActivationRegistration registrationForEnvironment(
+            String activationId,
+            String nonce,
+            long generation,
+            String environmentId,
+            Instant issuedAt,
+            Instant expiresAt,
+            TargetE2EActivationLedger.CaseScope scope) {
         return new ActivationRegistration(
                 activationId,
                 "a".repeat(64),
-                "environment-p9",
+                environmentId,
                 generation,
                 "b".repeat(40),
                 nonce,
@@ -408,7 +635,7 @@ class TargetE2EActivationLedgerIntegrationTest {
                 List.of("INTAKE", "EVIDENCE", "HEARING", "REVIEW"),
                 new BuildBindings("case-build", "control-build", "agent-build"),
                 new GraphBinding(
-                        "all-rooms/target-e2e.v1", "target-graph-v1",
+                        "all-rooms.target-e2e.v1", "target-graph-v1",
                         "target-checkpoint-v1", "f".repeat(64), "graph-code-build"),
                 new ImageDigests(
                         "sha256:" + "1".repeat(64),
