@@ -1171,6 +1171,26 @@ describe("EvidenceRoomView", () => {
     expect(wrapper.text()).toContain("请根据接待室案情先补充质检视频");
   });
 
+  it("establishes the actor-scoped room session before loading its process projection", async () => {
+    roomApi.messages.mockResolvedValueOnce([
+      {
+        id: "EXISTING_EVIDENCE_TURN",
+        sequence_no: 1,
+        sender_role: "EVIDENCE_CLERK",
+        message_type: "AGENT_MESSAGE",
+        message_text: "Existing actor-scoped evidence turn.",
+      },
+    ]);
+
+    await mountView({ initialMessages: null });
+
+    expect(roomApi.messages).toHaveBeenCalled();
+    expect(evidenceApi.processProjection).toHaveBeenCalled();
+    expect(roomApi.messages.mock.invocationCallOrder[0]).toBeLessThan(
+      evidenceApi.processProjection.mock.invocationCallOrder[0],
+    );
+  });
+
   it("opens an independent first evidence turn for the merchant actor", async () => {
     roomApi.messages
       .mockResolvedValueOnce([])

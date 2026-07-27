@@ -1143,13 +1143,6 @@ async function load() {
       if (!isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) return;
       completion.value = nextCompletion;
     }
-    if (processProjection.value === null) {
-      const nextProjection = await evidenceApi.processProjection(actorSnapshot, caseSnapshot, {
-        historyMode: historyMode.value,
-      });
-      if (!isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) return;
-      processProjection.value = nextProjection;
-    }
     if (!historyMode.value && !intakeFactRows.value.length) {
       const nextFactRows = await loadIntakeFactRows(actorSnapshot, caseSnapshot);
       if (!isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) return;
@@ -1167,6 +1160,13 @@ async function load() {
       if (shouldDiscoverActiveEvidenceRuns.value) {
         await resumeActiveEvidenceRuns(actorSnapshot, caseSnapshot, generation);
       }
+    }
+    if (processProjection.value === null) {
+      const nextProjection = await evidenceApi.processProjection(actorSnapshot, caseSnapshot, {
+        historyMode: historyMode.value,
+      });
+      if (!isCurrentWorkspace(generation, actorSnapshot, caseSnapshot)) return;
+      processProjection.value = nextProjection;
     }
     if (!evidenceCatalogReady.value) {
       const nextCatalog = await loadCatalogOrEmpty(actorSnapshot, caseSnapshot);
