@@ -33,7 +33,15 @@ final class TargetE2EGraphTransportPolicy {
       throw new IllegalArgumentException(
           "target Graph transport must be one factory-issued TLSv1.3 mutual-TLS bundle");
     }
-    return new VerifiedBundle(command, reconciliation, proof);
+    URI boundBaseUri =
+        proof
+            .boundBaseUri()
+            .orElseThrow(
+                () ->
+                    new IllegalArgumentException(
+                        "target Graph transport proof is not bound to an HTTPS base URI"));
+    return new VerifiedBundle(
+        command, reconciliation, proof, requireTrustedBaseUri(boundBaseUri));
   }
 
   static URI requireTrustedBaseUri(URI candidate) {
@@ -63,5 +71,6 @@ final class TargetE2EGraphTransportPolicy {
   record VerifiedBundle(
       GraphCommandHttpTransport commandTransport,
       GraphReconciliationHttpTransport reconciliationTransport,
-      GraphTransportSecurityProof proof) {}
+      GraphTransportSecurityProof proof,
+      URI boundBaseUri) {}
 }

@@ -1,5 +1,8 @@
 package com.example.dispute.workflow.infrastructure.agent;
 
+import java.net.URI;
+import java.util.Optional;
+
 /**
  * Unforgeable transport provenance produced by one of the bounded Graph transport factories.
  *
@@ -17,6 +20,10 @@ public sealed interface GraphTransportSecurityProof
     String protocol();
 
     String bundleId();
+
+    default Optional<URI> boundBaseUri() {
+        return Optional.empty();
+    }
 
     default boolean trustedMutualTls() {
         return mode() == Mode.MUTUAL_TLS && "TLSv1.3".equals(protocol());

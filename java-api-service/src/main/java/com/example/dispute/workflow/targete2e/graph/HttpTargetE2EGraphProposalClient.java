@@ -45,6 +45,10 @@ public final class HttpTargetE2EGraphProposalClient implements TargetE2EGraphPro
     this.reconciliationClient =
         Objects.requireNonNull(reconciliationClient, "reconciliationClient");
     URI trustedBaseUri = TargetE2EGraphTransportPolicy.requireTrustedBaseUri(baseUri);
+    if (!trustedBaseUri.equals(verified.boundBaseUri())) {
+      throw new IllegalArgumentException(
+          "target Graph base URI does not match the factory-bound mTLS endpoint");
+    }
     if (reconciliationClient.transportBundle() != transportBundle
         || reconciliationClient.transportProof() != verified.proof()) {
       throw new IllegalArgumentException(

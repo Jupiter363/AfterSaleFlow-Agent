@@ -51,7 +51,8 @@ public class GraphTransportConfiguration {
                 keyPassword,
                 tls.trustStorePath(),
                 trustPassword)) {
-            return TrustedGraphTransportFactory.create(material, tls.connectTimeout());
+            return TrustedGraphTransportFactory.createForEndpoint(
+                    material, tls.connectTimeout(), client.baseUri());
         } finally {
             Arrays.fill(keyPassword, '\0');
             Arrays.fill(trustPassword, '\0');

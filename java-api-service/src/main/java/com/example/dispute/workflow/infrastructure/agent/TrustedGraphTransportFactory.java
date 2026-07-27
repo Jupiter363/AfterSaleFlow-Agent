@@ -2,6 +2,7 @@ package com.example.dispute.workflow.infrastructure.agent;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.net.URI;
 import java.net.http.HttpClient;
 import java.nio.ByteBuffer;
 import java.nio.channels.SeekableByteChannel;
@@ -20,7 +21,9 @@ import java.security.cert.X509Certificate;
 import java.time.Duration;
 import java.util.Arrays;
 import java.util.Enumeration;
+import java.util.Locale;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
@@ -41,6 +44,17 @@ public final class TrustedGraphTransportFactory {
 
     public static GraphTransportBundle create(
             GraphTlsClientMaterial material, Duration connectTimeout) {
+        return create(material, connectTimeout, null);
+    }
+
+    /** Creates a transport whose proof is usable only for one canonical HTTPS base URI. */
+    public static GraphTransportBundle createForEndpoint(
+            GraphTlsClientMaterial material, Duration connectTimeout, URI baseUri) {
+        return create(material, connectTimeout, requireTargetBaseUri(baseUri));
+    }
+
+    private static GraphTransportBundle create(
+            GraphTlsClientMaterial material, Duration connectTimeout, URI boundBaseUri) {
         Objects.requireNonNull(material, "material");
         Duration boundedTimeout = requireConnectTimeout(connectTimeout);
         char[] keyPassword = material.copyKeyStorePassword();
@@ -73,7 +87,8 @@ public final class TrustedGraphTransportFactory {
                     .version(HttpClient.Version.HTTP_1_1)
                     .build();
 
-            MutualTlsProof proof = new MutualTlsProof(UUID.randomUUID().toString());
+            MutualTlsProof proof =
+                    new MutualTlsProof(UUID.randomUUID().toString(), boundBaseUri);
             return new GraphTransportBundle(
                     new JdkGraphCommandHttpTransport(httpClient, proof),
                     new JdkGraphReconciliationHttpTransport(httpClient, proof),
@@ -86,6 +101,30 @@ public final class TrustedGraphTransportFactory {
                 Arrays.fill(trustPassword, '\0');
             }
         }
+    }
+
+    private static URI requireTargetBaseUri(URI candidate) {
+        URI baseUri = Objects.requireNonNull(candidate, "baseUri");
+        String rawPath = baseUri.getRawPath();
+        String lowerPath = rawPath == null ? "" : rawPath.toLowerCase(Locale.ROOT);
+        if (!baseUri.isAbsolute()
+                || baseUri.isOpaque()
+                || baseUri.getHost() == null
+                || baseUri.getHost().isBlank()
+                || baseUri.getUserInfo() != null
+                || baseUri.getQuery() != null
+                || baseUri.getFragment() != null
+                || (baseUri.getPort() != -1
+                        && (baseUri.getPort() < 1 || baseUri.getPort() > 65_535))
+                || !"https".equalsIgnoreCase(baseUri.getScheme())
+                || !baseUri.normalize().equals(baseUri)
+                || lowerPath.contains("%2e")
+                || lowerPath.contains("%2f")
+                || lowerPath.contains("%5c")) {
+            throw new IllegalArgumentException("Graph target base URI is not trusted");
+        }
+        String ascii = baseUri.toASCIIString();
+        return URI.create(ascii.endsWith("/") ? ascii : ascii + "/");
     }
 
     private static Duration requireConnectTimeout(Duration value) {
@@ -248,9 +287,11 @@ public final class TrustedGraphTransportFactory {
     static final class MutualTlsProof implements GraphTransportSecurityProof {
 
         private final String bundleId;
+        private final URI boundBaseUri;
 
-        private MutualTlsProof(String bundleId) {
+        private MutualTlsProof(String bundleId, URI boundBaseUri) {
             this.bundleId = bundleId;
+            this.boundBaseUri = boundBaseUri;
         }
 
         @Override
@@ -266,6 +307,11 @@ public final class TrustedGraphTransportFactory {
         @Override
         public String bundleId() {
             return bundleId;
+        }
+
+        @Override
+        public Optional<URI> boundBaseUri() {
+            return Optional.ofNullable(boundBaseUri);
         }
     }
 }

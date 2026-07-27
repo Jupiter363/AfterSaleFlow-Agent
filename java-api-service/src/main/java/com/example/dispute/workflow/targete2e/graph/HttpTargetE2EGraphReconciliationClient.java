@@ -66,6 +66,10 @@ public final class HttpTargetE2EGraphReconciliationClient
     this.mapper.enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
     this.timeout = requireTimeout(timeout);
     this.baseUri = TargetE2EGraphTransportPolicy.requireTrustedBaseUri(baseUri);
+    if (!this.baseUri.equals(verified.boundBaseUri())) {
+      throw new IllegalArgumentException(
+          "target Graph base URI does not match the factory-bound mTLS endpoint");
+    }
     this.endpoint = this.baseUri.resolve(PATH);
   }
 

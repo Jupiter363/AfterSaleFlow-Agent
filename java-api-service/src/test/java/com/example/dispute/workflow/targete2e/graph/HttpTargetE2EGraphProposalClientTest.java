@@ -318,6 +318,26 @@ class HttpTargetE2EGraphProposalClientTest {
         .hasMessageContaining("TLSv1.3 mutual-TLS");
     assertThat(proposalLoaded).isFalse();
 
+    GraphTransportSecurityProof unboundProof = mutualTlsProof(null);
+    GraphTransportBundle unboundBundle =
+        bundle(
+            new FakeCommandTransport("0".repeat(64), unboundProof),
+            new FakeReconciliationTransport(
+                "{}".getBytes(StandardCharsets.UTF_8), unboundProof),
+            unboundProof);
+    assertThatThrownBy(
+            () ->
+                new HttpTargetE2EGraphReconciliationClient(
+                    unboundBundle,
+                    TargetE2EGraphTestFixtures.codec(),
+                    (resultRef, proposalHash) ->
+                        TargetE2EGraphTestFixtures.proposalSourceBytes(),
+                    MAPPER,
+                    URI.create("https://python-agent.internal/base/"),
+                    Duration.ofSeconds(8)))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("not bound to an HTTPS base URI");
+
     GraphTransportSecurityProof proof = mutualTlsProof();
     FakeCommandTransport unusedCommand = new FakeCommandTransport("0".repeat(64), proof);
     FakeReconciliationTransport unusedReconciliation =
@@ -407,7 +427,7 @@ class HttpTargetE2EGraphProposalClientTest {
                     URI.create("https://other-python-agent.internal/base/"),
                     Duration.ofSeconds(8)))
         .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining("share one trusted base URI");
+        .hasMessageContaining("factory-bound mTLS endpoint");
     assertThat(secondCommand.requests).isEmpty();
     assertThat(sameProofCommand.requests).isEmpty();
     assertThat(firstReconciliation.requests).isEmpty();
@@ -472,14 +492,19 @@ class HttpTargetE2EGraphProposalClientTest {
   }
 
   private static GraphTransportSecurityProof mutualTlsProof() {
+    return mutualTlsProof(URI.create("https://python-agent.internal/base/"));
+  }
+
+  private static GraphTransportSecurityProof mutualTlsProof(URI boundBaseUri) {
     try {
       Class<?> type =
           Class.forName(
               "com.example.dispute.workflow.infrastructure.agent."
                   + "TrustedGraphTransportFactory$MutualTlsProof");
-      Constructor<?> constructor = type.getDeclaredConstructor(String.class);
+      Constructor<?> constructor = type.getDeclaredConstructor(String.class, URI.class);
       constructor.setAccessible(true);
-      return (GraphTransportSecurityProof) constructor.newInstance("target-test-bundle");
+      return (GraphTransportSecurityProof)
+          constructor.newInstance("target-test-bundle", boundBaseUri);
     } catch (ReflectiveOperationException exception) {
       throw new IllegalStateException(exception);
     }
