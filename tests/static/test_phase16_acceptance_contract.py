@@ -54,6 +54,7 @@ def test_phase16_ci_quality_gate_exists() -> None:
     assert secret_generation < compose_pull < compose_up
     assert "max_attempts=5" in text
     assert "delay=$((15 * 2 ** (attempt - 1)))" in text
+    assert 'SEED_DEMO_DISPUTES: "true"' in text
 
 
 # 所属模块：跨服务契约测试 > test_phase16_acceptance_contract；函数角色：回归测试用例。

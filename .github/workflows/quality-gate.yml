@@ -233,6 +233,7 @@ jobs:
         env:
           DASHSCOPE_API_KEY: ci-placeholder-not-a-real-key
           DEFAULT_LLM_API_BASE: http://127.0.0.1:9
+          SEED_DEMO_DISPUTES: "true"
         run: docker compose up -d --build --pull never --wait --wait-timeout 360
       - name: Temporal worker restart recovery
         working-directory: java-api-service

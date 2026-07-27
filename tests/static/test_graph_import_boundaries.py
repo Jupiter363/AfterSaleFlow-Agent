@@ -242,6 +242,21 @@ def test_temporal_setup_does_not_create_bootstrapped_databases() -> None:
     ] == "true"
 
 
+def test_demo_dispute_seeding_is_scoped_to_the_api_process() -> None:
+    compose = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
+    services = compose["services"]
+
+    assert services["java-api-service"]["environment"]["SEED_DEMO_DISPUTES"] == (
+        "${SEED_DEMO_DISPUTES:-false}"
+    )
+    assert services["java-control-worker"]["environment"]["SEED_DEMO_DISPUTES"] == (
+        "false"
+    )
+    assert services["java-agent-worker"]["environment"]["SEED_DEMO_DISPUTES"] == (
+        "false"
+    )
+
+
 def test_graph_database_bootstrap_and_image_are_least_privilege_and_locked() -> None:
     bootstrap = POSTGRES_INIT.read_text(encoding="utf-8")
     dockerfile = PYTHON_DOCKERFILE.read_text(encoding="utf-8")
