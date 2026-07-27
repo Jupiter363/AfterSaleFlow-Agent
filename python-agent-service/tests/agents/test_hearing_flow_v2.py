@@ -16,6 +16,7 @@ from app.main import create_app
 from app.schemas import (
     CaseFactMatrixV2,
     FactEvidenceMatrixV2,
+    HearingCaseFactMatrixDelta,
     HearingEvidenceFileAssessmentLlmOutput,
     HearingEvidenceRequestsRequest,
     HearingEvidenceSynthesisRequest,
@@ -421,6 +422,103 @@ class ParallelEvidenceRunner(QueueRunner):
         return super().invoke_structured(**kwargs)
 
 
+def test_hearing_fact_delta_summary_refs_only_accept_existing_fact_ids() -> None:
+    existing_only = HearingCaseFactMatrixDelta.model_validate(
+        {
+            "neutral_summary": "既有物流事实仍是摘要依据。",
+            "core_conflict": "包裹是否实际交付。",
+            "fact_rows": [],
+            "summary_source_fact_keys": ["FACT_DELIVERY"],
+        }
+    )
+    assert existing_only.summary_source_fact_keys == ["FACT_DELIVERY"]
+
+    valid_new_payload = {
+        "neutral_summary": "双方补充了签收人身份陈述。",
+        "core_conflict": "签收人是否有权代收。",
+        "fact_rows": [
+            {
+                "fact_key": "NEW_RECIPIENT_DETAIL",
+                "category": "LOGISTICS",
+                "fact_target": "庭审陈述首次提出签收人身份",
+                "materiality": "CORE",
+                "positions": {
+                    "USER": {
+                        "stance": "DENY",
+                        "position_summary": "用户否认本人签收。",
+                    }
+                },
+            }
+        ],
+        "summary_source_fact_keys": ["FACT_DELIVERY"],
+    }
+    valid_new = HearingCaseFactMatrixDelta.model_validate(valid_new_payload)
+    assert valid_new.fact_rows[0].fact_key == "NEW_RECIPIENT_DETAIL"
+    assert valid_new.summary_source_fact_keys == ["FACT_DELIVERY"]
+
+    invalid_payload = dict(valid_new_payload)
+    invalid_payload["summary_source_fact_keys"] = ["NEW_RECIPIENT_DETAIL"]
+    with pytest.raises(ValueError, match="String should match pattern"):
+        HearingCaseFactMatrixDelta.model_validate(invalid_payload)
+
+
+def test_intake_synthesis_payload_catalogs_existing_fact_keys_in_sorted_order() -> None:
+    matrix_payload = _case_matrix().model_dump(mode="json")
+    matrix_payload["fact_rows"] = list(reversed(matrix_payload["fact_rows"]))
+    matrix_payload["content_hash"] = _hash_payload(matrix_payload)
+    matrix = CaseFactMatrixV2.model_validate(matrix_payload)
+    assert [row.fact_id for row in matrix.fact_rows] == [
+        "FACT_RECIPIENT",
+        "FACT_DELIVERY",
+    ]
+
+    runner = QueueRunner(
+        {
+            "hearing_intake_synthesis": {
+                "case_fact_matrix_delta": {
+                    "neutral_summary": "既有物流事实仍是摘要依据。",
+                    "core_conflict": "包裹是否实际交付。",
+                    "fact_rows": [],
+                    "summary_source_fact_keys": ["FACT_DELIVERY"],
+                },
+                "issue_mappings": [],
+                "public_message": "双方仍对包裹是否实际交付存在争议。",
+            }
+        }
+    )
+    request = HearingIntakeSynthesisRequest.model_validate(
+        {
+            **_base("INTAKE_SYNTHESIS", 2),
+            "party_submissions": [
+                {
+                    "participant_id": "user-local",
+                    "participant_role": "USER",
+                    "terminal_status": "COMPLETED",
+                    "submission_source": "PARTY_ACTION",
+                    "source_refs": ["ACTION_USER_ANSWER"],
+                    "statement_text": "我本人没有收到包裹。",
+                },
+                {
+                    "participant_id": "merchant-local",
+                    "participant_role": "MERCHANT",
+                    "terminal_status": "COMPLETED",
+                    "submission_source": "PARTY_ACTION",
+                    "source_refs": ["ACTION_MERCHANT_ANSWER"],
+                    "statement_text": "物流记录显示包裹已签收。",
+                },
+            ],
+            "case_fact_matrix": matrix,
+        }
+    )
+
+    HearingFlowWorkflows(runner).intake_synthesis(request)
+
+    assert runner.calls[-1]["case_data"]["existing_fact_keys"] == [
+        "FACT_DELIVERY",
+        "FACT_RECIPIENT",
+    ]
+
+
 def test_case_matrix_supports_hearing_clarification_coverage() -> None:
     matrix = _case_matrix()
 
@@ -617,10 +715,7 @@ def test_intake_synthesis_deterministically_merges_a_bounded_fact_delta() -> Non
                             "conflict_summary": "双方对代收是否构成实际交付存在争议。",
                         }
                     ],
-                    "summary_source_fact_keys": [
-                        "FACT_DELIVERY",
-                        "NEW_RECIPIENT",
-                    ],
+                    "summary_source_fact_keys": ["FACT_DELIVERY"],
                 },
                 "issue_mappings": [],
                 "public_message": "综合庭前矩阵与双方回答，包裹交付记录存在，但双方仍对实际签收人及代收效力存在争议。",
@@ -697,7 +792,10 @@ def test_intake_synthesis_deterministically_merges_a_bounded_fact_delta() -> Non
     )
     assert new_row.fact_id.startswith("FACT_HEARING_")
     assert new_row.evidence_coverage_status == "NOT_COVERED_BY_FROZEN_DOSSIER"
-    assert new_row.fact_id in matrix.case_overview.summary_source_fact_ids
+    assert matrix.case_overview.summary_source_fact_ids == [
+        "FACT_DELIVERY",
+        new_row.fact_id,
+    ]
     assert new_row.fact_id in matrix.fact_indexes.requires_resolution_fact_ids
     assert synthesis.public_message == (
         "综合庭前矩阵与双方回答，包裹交付记录存在，但双方仍对实际签收人及代收效力存在争议。"

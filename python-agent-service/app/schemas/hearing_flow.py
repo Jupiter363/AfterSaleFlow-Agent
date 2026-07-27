@@ -175,12 +175,6 @@ class HearingCaseFactDeltaRow(StrictModel):
     conflict_summary: LongText | None = None
 
 
-HearingFactKey = Annotated[
-    str,
-    Field(pattern=r"^(?:FACT_[A-Za-z0-9_:-]{1,123}|NEW_[A-Za-z0-9_:-]{1,123})$"),
-]
-
-
 class HearingCaseFactMatrixDelta(StrictModel):
     schema_version: Literal["hearing_case_fact_matrix.delta.v1"] = (
         "hearing_case_fact_matrix.delta.v1"
@@ -190,7 +184,7 @@ class HearingCaseFactMatrixDelta(StrictModel):
     fact_rows: Annotated[list[HearingCaseFactDeltaRow], Field(max_length=200)] = Field(
         default_factory=list
     )
-    summary_source_fact_keys: Annotated[list[HearingFactKey], Field(min_length=1, max_length=200)]
+    summary_source_fact_keys: Annotated[list[FactId], Field(min_length=1, max_length=200)]
 
     @model_validator(mode="after")
     def unique_keys(self) -> "HearingCaseFactMatrixDelta":

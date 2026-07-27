@@ -147,12 +147,14 @@ class HearingFlowWorkflows:
         )
         issue_contexts = _intake_issue_contexts(request)
         party_statements = _party_statement_contexts(request)
+        existing_fact_keys = sorted(row.fact_id for row in request.case_fact_matrix.fact_rows)
         output = self._invoke_payload(
             "hearing_intake_synthesis",
             {
                 "request": request.model_dump(mode="json"),
                 "intake_issues": issue_contexts,
                 "party_statements": party_statements,
+                "existing_fact_keys": existing_fact_keys,
             },
             HearingIntakeSynthesisLlmOutput,
         )
@@ -718,7 +720,8 @@ def _merge_hearing_case_matrix(
         _fact_fingerprint(row.category, row.fact_target): row.fact_id for row in previous.fact_rows
     }
     resolved_keys = {fact_id: fact_id for fact_id in rows_by_id}
-    resolved_delta_ids: set[str] = set()
+    resolved_delta_ids: list[str] = []
+    resolved_delta_id_set: set[str] = set()
     submissions_by_role = {item.participant_role: item for item in request.party_submissions}
     role_source_refs: dict[str, list[str]] = {}
     for role in ("USER", "MERCHANT"):
@@ -785,12 +788,13 @@ def _merge_hearing_case_matrix(
             )
             previous_row = rows_by_id.get(fact_id)
 
-        if fact_id in resolved_delta_ids:
+        if fact_id in resolved_delta_id_set:
             _schema_error(
                 "hearing_intake_synthesis",
                 f"delta resolves duplicate fact {fact_id}",
             )
-        resolved_delta_ids.add(fact_id)
+        resolved_delta_id_set.add(fact_id)
+        resolved_delta_ids.append(fact_id)
         resolved_keys[item.fact_key] = fact_id
 
         if previous_row is not None:
@@ -855,7 +859,14 @@ def _merge_hearing_case_matrix(
             "hearing_intake_synthesis",
             f"summary references unknown fact keys: {sorted(unknown_summary_keys)}",
         )
-    summary_ids = list(dict.fromkeys(resolved_keys[key] for key in delta.summary_source_fact_keys))
+    summary_ids = list(
+        dict.fromkeys(
+            [
+                *(resolved_keys[key] for key in delta.summary_source_fact_keys),
+                *resolved_delta_ids,
+            ]
+        )
+    )
     if not summary_ids:
         _schema_error("hearing_intake_synthesis", "case overview requires fact refs")
 

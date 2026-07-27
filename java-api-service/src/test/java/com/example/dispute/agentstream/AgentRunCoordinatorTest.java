@@ -290,6 +290,63 @@ class AgentRunCoordinatorTest {
     }
 
     @Test
+    void hearingIntakeSynthesisSchemaFailureCreatesANewAuditedAttempt() {
+        AtomicReference<AgentRunEntity> saved = prepareNewRun();
+        AgentRunStartCommand command =
+                command(
+                        "HEARING_INTAKE_SYNTHESIS",
+                        request("retry invalid hearing intake synthesis"),
+                        "IDEMPOTENCY_HEARING_INTAKE_RETRY");
+        coordinator.start(command);
+        AgentRunEntity original = saved.get();
+        original.markRunning();
+        original.markFailed(
+                "AGENT_OUTPUT_SCHEMA_INVALID",
+                "hearing intake synthesis omitted a required field",
+                false,
+                500L);
+        when(runRepository
+                        .findAllByCaseIdAndStreamIdempotencyKeyStartingWithOrderByCreatedAtAsc(
+                                CASE_ID, "IDEMPOTENCY_HEARING_INTAKE_RETRY"))
+                .thenReturn(List.of(original));
+
+        var retry = coordinator.retryInfrastructureFailure(command);
+
+        assertThat(original.getRunStatus()).isEqualTo("FAILED");
+        assertThat(saved.get()).isNotSameAs(original);
+        assertThat(saved.get().getRunStatus()).isEqualTo("PENDING");
+        assertThat(saved.get().getStreamOperation()).isEqualTo("HEARING_INTAKE_SYNTHESIS");
+        assertThat(saved.get().getStreamRequestHash()).isEqualTo(original.getStreamRequestHash());
+        assertThat(saved.get().getStreamIdempotencyKey())
+                .isEqualTo("IDEMPOTENCY_HEARING_INTAKE_RETRY:attempt-2");
+        assertThat(saved.get().getStreamRequestId()).isEqualTo("REQUEST_1_ATTEMPT_2");
+        assertThat(retry.runId()).isEqualTo(saved.get().getId());
+    }
+
+    @Test
+    void unrelatedSchemaFailureRemainsNonRetryable() {
+        AtomicReference<AgentRunEntity> saved = prepareNewRun();
+        AgentRunStartCommand command =
+                command(request("do not retry unrelated schema failure"), "IDEMPOTENCY_SCHEMA_INVALID");
+        coordinator.start(command);
+        AgentRunEntity original = saved.get();
+        original.markRunning();
+        original.markFailed(
+                "AGENT_OUTPUT_SCHEMA_INVALID", "intake response is invalid", false, 500L);
+        when(runRepository
+                        .findAllByCaseIdAndStreamIdempotencyKeyStartingWithOrderByCreatedAtAsc(
+                                CASE_ID, "IDEMPOTENCY_SCHEMA_INVALID"))
+                .thenReturn(List.of(original));
+
+        var unchanged = coordinator.retryInfrastructureFailure(command);
+
+        assertThat(unchanged.runId()).isEqualTo(original.getId());
+        assertThat(original.getRunStatus()).isEqualTo("FAILED");
+        assertThat(saved.get()).isSameAs(original);
+        verify(runRepository, times(1)).save(any(AgentRunEntity.class));
+    }
+
+    @Test
     void failureWithVisibleOutputIsNeverRetried() {
         AtomicReference<AgentRunEntity> saved = prepareNewRun();
         AgentRunStartCommand command = command(request("visible"), "IDEMPOTENCY_VISIBLE");

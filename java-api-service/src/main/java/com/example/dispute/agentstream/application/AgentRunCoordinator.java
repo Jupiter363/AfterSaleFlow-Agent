@@ -177,8 +177,8 @@ public class AgentRunCoordinator {
      * Creates a new audited attempt for an automatically recoverable failed run.
      *
      * <p>The original terminal run is never rewritten. Ordinary operations require an explicitly
-     * retryable transport failure with no visible output. Final hearing convergence may also retry
-     * a schema-invalid model response because no adjudication draft was committed. Repeated callers
+     * retryable transport failure with no visible output. Selected hearing convergence operations may
+     * also retry a schema-invalid model response because no hearing artifact was committed. Repeated callers
      * reuse the newest attempt, so Temporal Activity retries and the hearing recovery scheduler
      * cannot fan out duplicate model calls.
      */
@@ -267,7 +267,11 @@ public class AgentRunCoordinator {
             return false;
         }
         return switch (run.getStreamOperation()) {
-            case "HEARING_JUDGE_V1", "HEARING_JURY_REVIEW", "HEARING_JUDGE_V2" -> true;
+            case "HEARING_INTAKE_SYNTHESIS",
+                            "HEARING_JUDGE_V1",
+                            "HEARING_JURY_REVIEW",
+                            "HEARING_JUDGE_V2" ->
+                    true;
             default -> false;
         };
     }

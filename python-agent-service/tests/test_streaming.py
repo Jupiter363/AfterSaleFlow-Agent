@@ -18,6 +18,7 @@ from app.llm import (
     StructuredStreamCompleted,
     StructuredStreamDelta,
 )
+from app.model_runtime.transports import ModelTransportOutputError
 from app.streaming import (
     AgentStreamLimitExceeded,
     AgentStreamObserver,
@@ -277,6 +278,48 @@ def test_ndjson_endpoint_uses_one_versioned_terminal_contract() -> None:
     assert [event["sequence"] for event in events] == [0, 1]
     assert all(event["schema_version"] == "agent_stream.v1" for event in events)
     assert events[-1]["response"] == {"answer": "完成"}
+
+
+def test_ndjson_maps_transport_output_error_to_public_schema_contract() -> None:
+    app = FastAPI()
+
+    def fail_with_wrapped_schema_error() -> None:
+        try:
+            raise AgentOutputSchemaError(
+                "hearing_intake_synthesis",
+                "private schema validation details",
+            )
+        except AgentOutputSchemaError as error:
+            raise ModelTransportOutputError("private transport details") from error
+
+    @app.post("/stream")
+    async def stream():
+        return workflow_ndjson_response(
+            operation="hearing_intake_synthesis",
+            run_id="AGENT_RUN_transport_output_error",
+            invoke=fail_with_wrapped_schema_error,
+        )
+
+    with TestClient(app) as client:
+        response = client.post("/stream")
+
+    events = [json.loads(line) for line in response.text.splitlines() if line]
+    assert [event["type"] for event in events] == ["start", "error"]
+    assert events[-1] == {
+        "schema_version": "agent_stream.v1",
+        "type": "error",
+        "run_id": "AGENT_RUN_transport_output_error",
+        "sequence": 1,
+        "timestamp": events[-1]["timestamp"],
+        "code": "AGENT_OUTPUT_SCHEMA_INVALID",
+        "message": "agent returned invalid structured output",
+        "retryable": False,
+        "visible_output_emitted": False,
+        "node_name": "hearing_intake_synthesis",
+    }
+    assert "private schema validation details" not in response.text
+    assert "private transport details" not in response.text
+    assert "INTERNAL_ERROR" not in response.text
 
 
 # 所属模块：Python 支撑模块 > test_streaming；函数角色：回归测试用例。

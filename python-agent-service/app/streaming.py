@@ -862,13 +862,24 @@ def _public_stream_error(
 ) -> tuple[str, str, bool, str | None]:
     # 局部 import 避免循环依赖：llm.py 顶层本身会导入本文件的 observer。
     from app.llm import AgentOutputSchemaError, AgentServiceUnavailable
+    from app.model_runtime.transports import ModelTransportOutputError
 
-    if isinstance(exception, AgentOutputSchemaError):
+    if isinstance(exception, (AgentOutputSchemaError, ModelTransportOutputError)):
+        schema_error = (
+            exception
+            if isinstance(exception, AgentOutputSchemaError)
+            else exception.__cause__
+        )
+        node_name = (
+            schema_error.node_name
+            if isinstance(schema_error, AgentOutputSchemaError)
+            else None
+        )
         return (
             "AGENT_OUTPUT_SCHEMA_INVALID",
             "agent returned invalid structured output",
             False,
-            exception.node_name,
+            node_name,
         )
     if isinstance(exception, AgentServiceUnavailable):
         return (
