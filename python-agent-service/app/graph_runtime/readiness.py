@@ -282,7 +282,10 @@ class GraphPersistenceReadinessProbe:
     async def check(self) -> GraphReadinessReport:
         if self._config.mode is GraphGatewayMode.DISABLED:
             return GraphReadinessReport.disabled()
-        if self._config.mode is not GraphGatewayMode.SHADOW:
+        if self._config.mode not in {
+            GraphGatewayMode.SHADOW,
+            GraphGatewayMode.TARGET_E2E_CANDIDATE,
+        }:
             return self._failed("GRAPH_MODE_FORBIDDEN", {})
         if self._pool is None:
             return self._failed("GRAPH_POOL_MISSING", {"pool_available": False})

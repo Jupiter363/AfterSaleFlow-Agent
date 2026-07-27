@@ -10,5 +10,5 @@ esac
 if tctl --address temporal-server:7233 --namespace "$namespace" namespace describe >/dev/null 2>&1; then
   exit 0
 fi
-tctl --address temporal-server:7233 namespace register \
-  --namespace "$namespace" --retention 1
+tctl --address temporal-server:7233 --namespace "$namespace" namespace register \
+  --retention 1
