@@ -147,7 +147,7 @@ def _run_context(now: dt.datetime) -> dict[str, Any]:
                         "database": "target_graph",
                         "schema": "graph_runtime",
                         "runtimeUser": "graph_runtime",
-                        "environmentGeneration": "p9-generation-7",
+                        "environmentGeneration": 7,
                         "restoreVerificationHash": "e" * 64,
                     },
                 },

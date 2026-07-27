@@ -637,8 +637,9 @@ def ledger_context_from_run_context(run_context: dict[str, Any]) -> dict[str, An
         )
     ):
         raise TargetE2EError("runtime projection Graph identity drifted")
-    if not isinstance(graph["environmentGeneration"], str) or not TOKEN.fullmatch(
-        graph["environmentGeneration"]
+    if (
+        type(graph["environmentGeneration"]) is not int
+        or graph["environmentGeneration"] != projection["environmentGeneration"]
     ):
         raise TargetE2EError("runtime projection Graph generation is invalid")
     if not isinstance(graph["restoreVerificationHash"], str) or not SHA256.fullmatch(
