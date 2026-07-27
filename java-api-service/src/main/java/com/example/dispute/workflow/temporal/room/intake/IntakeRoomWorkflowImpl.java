@@ -1,5 +1,9 @@
 package com.example.dispute.workflow.temporal.room.intake;
 
+import static com.example.dispute.workflow.contract.v1.TemporalTaskQueues.AGENT_EXECUTION;
+import static io.temporal.api.enums.v1.ParentClosePolicy.PARENT_CLOSE_POLICY_REQUEST_CANCEL;
+import static io.temporal.api.enums.v1.WorkflowIdReusePolicy.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE;
+
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.ActivityEnvelope;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.ActivityInvocation;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.ActivityInvocationMode;
@@ -15,10 +19,14 @@ import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.SnapshotPublicationRequest;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.TurnFinalizationReceipt;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.TurnFinalizationRequest;
+import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
+import com.example.dispute.workflow.temporal.agentrun.AgentRunWorkflow;
 import io.temporal.failure.ActivityFailure;
 import io.temporal.failure.CanceledFailure;
 import io.temporal.workflow.Async;
 import io.temporal.workflow.CancellationScope;
+import io.temporal.workflow.ChildWorkflowCancellationType;
+import io.temporal.workflow.ChildWorkflowOptions;
 import io.temporal.workflow.ContinueAsNewOptions;
 import io.temporal.workflow.Promise;
 import io.temporal.workflow.Workflow;
@@ -39,6 +47,7 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
   private static final String ROLLOVER_CHANGE_ID = "intake-room-rollover-v1";
   private static final String CANCELLATION_RECONCILIATION_CHANGE_ID =
       "intake-room-cancellation-reconciliation-v1";
+  private static final String AGENT_RUN_CHILD_CHANGE_ID = "intake-room-agent-run-v2-child-v1";
   private static final long HISTORY_EVENT_LIMIT = 2_000;
   private static final Duration RUN_MAX_AGE = Duration.ofHours(24);
 
@@ -71,6 +80,7 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
   private String protocolErrorCode;
   private IntakeCommandDecision lastDecision;
   private IntakeActivityExecutionState activityExecution;
+  private IntakeAgentRunChildState targetAgentRunChild;
   private int sharedActivityRetriesRemaining;
   private boolean activityExecutionAuthorized;
   private int runGeneration;
@@ -286,6 +296,10 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
         rejectCommand(command, "COMMAND_THREAD_BINDING_MISMATCH", true);
         return;
       }
+      if (!matchesTargetAgentRunAuthority(command)) {
+        rejectCommand(command, "COMMAND_TARGET_AGENT_RUN_AUTHORITY_MISMATCH", true);
+        return;
+      }
     }
     if (preemptsActivityCommand(command) && deferCancellation(command)) {
       return;
@@ -381,7 +395,16 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
             && activityExecution.stageOperationKey().equals(event.operationKey())
             && (expectedActivityOperationKey == null
                 || expectedActivityOperationKey.equals(activityExecution.stageOperationKey()));
-    if (!rootOperation && !stageOperation) {
+    boolean targetAgentRunOperation =
+        targetAgentRunChild != null
+            && targetAgentRunChild.status()
+                == IntakeAgentRunChildState.Status.RECEIPT_COMMITTED
+            && targetAgentRunChild.commandId().equals(pendingCommand.commandId())
+            && targetAgentRunChild.finalizationOperationKey().equals(event.operationKey())
+            && (expectedActivityOperationKey == null
+                || expectedActivityOperationKey.equals(
+                    targetAgentRunChild.finalizationOperationKey()));
+    if (!rootOperation && !stageOperation && !targetAgentRunOperation) {
       protocolErrorCode = "EVENT_OPERATION_KEY_MISMATCH";
       return;
     }
@@ -475,6 +498,10 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
     try {
       if (command.commandType() == IntakeCommandType.INTAKE_MESSAGE) {
         ensureSnapshot(command, context);
+        if (targetAgentRunChildEnabled(context)) {
+          orchestrateTargetAgentRun(command, context);
+          return;
+        }
         GraphExecutionReceipt graph = completedGraphFor(command, context);
         if (graph == null) {
           graph = executeGraph(command, context);
@@ -503,6 +530,142 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
       // Receipt validation failures are fail-closed and leave the command pending for recovery.
       protocolErrorCode = "INTAKE_ACTIVITY_RECEIPT_INVALID";
     }
+  }
+
+  private void orchestrateTargetAgentRun(
+      IntakeWorkflowCommand command, IntakeCommandExecutionContext context) {
+    IntakeTargetAgentRunContext target = context.targetAgentRun();
+    target.requireMatches(start, command, processRevision, roomRevision);
+    String childWorkflowId = IntakeAgentRunChildIds.forCommand(command);
+    boolean newlyStarted = targetAgentRunChild == null;
+    if (newlyStarted) {
+      targetAgentRunChild = IntakeAgentRunChildState.pending(childWorkflowId, target);
+      activityExecution = null;
+    } else {
+      targetAgentRunChild.requireMatches(command, target);
+    }
+
+    if (!newlyStarted && targetAgentRunChild.status() == IntakeAgentRunChildState.Status.PENDING) {
+      IntakeAgentRunFinalizationReadResult recovery =
+          readTargetFinalization(
+              command,
+              IntakeAgentRunFinalizationReadRequest.Mode.CANCELLATION_RECONCILIATION);
+      if (settleTargetFinalization(command, recovery)) {
+        return;
+      }
+      protocolErrorCode = "TARGET_AGENT_RUN_CHILD_UNRESOLVED";
+      return;
+    }
+
+    if (newlyStarted) {
+      Duration remaining = remainingTargetDeadline(context);
+      AgentRunWorkflow child =
+          Workflow.newChildWorkflowStub(
+              AgentRunWorkflow.class,
+              ChildWorkflowOptions.newBuilder()
+                  .setWorkflowId(childWorkflowId)
+                  .setTaskQueue(AGENT_EXECUTION)
+                  .setWorkflowExecutionTimeout(remaining)
+                  .setWorkflowRunTimeout(remaining)
+                  .setWorkflowIdReusePolicy(WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE)
+                  .setParentClosePolicy(PARENT_CLOSE_POLICY_REQUEST_CANCEL)
+                  .setCancellationType(ChildWorkflowCancellationType.WAIT_CANCELLATION_COMPLETED)
+                  .build());
+      Promise<ExecuteAgentRunResult> childResult = Async.function(child::run, target.request());
+      ExecuteAgentRunResult result = childResult.get();
+      requireTargetChildResult(command, target, result);
+      if (result.outcome() != ExecuteAgentRunResult.Outcome.COMPLETED) {
+        targetAgentRunChild = targetAgentRunChild.terminalNoCommit();
+        protocolErrorCode = "TARGET_AGENT_RUN_" + result.outcome().name();
+        return;
+      }
+      targetAgentRunChild = targetAgentRunChild.resultReady(result.resultHash());
+    }
+
+    if (targetAgentRunChild.status() == IntakeAgentRunChildState.Status.RESULT_READY) {
+      IntakeAgentRunFinalizationReadResult finalization =
+          readTargetFinalization(
+              command,
+              IntakeAgentRunFinalizationReadRequest.Mode.AFTER_CHILD_COMPLETION);
+      if (!settleTargetFinalization(command, finalization)) {
+        protocolErrorCode = "TARGET_AGENT_RUN_FINALIZATION_UNRESOLVED";
+      }
+    }
+  }
+
+  private IntakeAgentRunFinalizationReadResult readTargetFinalization(
+      IntakeWorkflowCommand command, IntakeAgentRunFinalizationReadRequest.Mode mode) {
+    IntakeAgentRunFinalizationReadRequest request =
+        new IntakeAgentRunFinalizationReadRequest(
+            "intake-agent-run-finalization-read-request.v1",
+            mode,
+            command,
+            targetAgentRunChild);
+    IntakeAgentRunFinalizationReadResult result =
+        Workflow.newActivityStub(
+                IntakeAgentRunFinalizationReadActivities.class,
+                IntakeAgentRunFinalizationReadPolicy.options(
+                    remainingTargetDeadline(command.executionContext())))
+            .readFinalization(request);
+    if (result == null) {
+      throw new IllegalArgumentException("target finalization lookup returned no resolution");
+    }
+    result.requireMatches(request);
+    return result;
+  }
+
+  private boolean settleTargetFinalization(
+      IntakeWorkflowCommand command,
+      IntakeAgentRunFinalizationReadResult result) {
+    return switch (result.resolution()) {
+      case COMMITTED -> {
+        if (targetAgentRunChild.resultHash() == null) {
+          targetAgentRunChild =
+              targetAgentRunChild.resultReady(result.locator().resultHash());
+        }
+        targetAgentRunChild = targetAgentRunChild.committed(result);
+        processEvent(
+            result.receipt().committedEvent(), result.receipt().operation().operationKey());
+        yield true;
+      }
+      case ABSENT_TERMINAL -> false;
+      case PENDING -> false;
+    };
+  }
+
+  private static void requireTargetChildResult(
+      IntakeWorkflowCommand command,
+      IntakeTargetAgentRunContext target,
+      ExecuteAgentRunResult result) {
+    if (result == null
+        || !target.request().agentRunId().equals(result.agentRunId())
+        || !target.request().logicalRunId().equals(result.logicalRunId())
+        || !target.request().attemptId().equals(result.attemptId())
+        || target.request().attemptNo() != result.attemptNo()) {
+      throw new IllegalArgumentException("AgentRun child result identity does not match the request");
+    }
+    if (result.outcome() == ExecuteAgentRunResult.Outcome.COMPLETED
+        && (!command.commandId().equals(result.graphResult().commandId())
+            || !target.request().logicalRunId().equals(result.graphResult().logicalRunId())
+            || !target.request().attemptId().equals(result.graphResult().attemptId())
+            || !target.request().command().graphKey().equals(result.graphResult().graphKey())
+            || !target.request().command().graphVersion().equals(result.graphResult().graphVersion())
+            || !result.resultHash().equals(result.graphResult().outputHash()))) {
+      throw new IllegalArgumentException("completed AgentRun result does not match its Graph command");
+    }
+  }
+
+  private static Duration remainingTargetDeadline(IntakeCommandExecutionContext context) {
+    long remainingMillis = context.deadlineEpochMillis() - Workflow.currentTimeMillis();
+    if (remainingMillis <= 0) {
+      throw new IntakeActivityDeadlineExceeded();
+    }
+    return Duration.ofMillis(remainingMillis);
+  }
+
+  private static boolean targetAgentRunChildEnabled(IntakeCommandExecutionContext context) {
+    return context.isTargetAgentRun()
+        && Workflow.getVersion(AGENT_RUN_CHILD_CHANGE_ID, Workflow.DEFAULT_VERSION, 1) == 1;
   }
 
   private void startOrchestration(IntakeWorkflowCommand command) {
@@ -625,6 +788,11 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
 
   private CancellationReconciliation reconcileCanceledStage(
       IntakeWorkflowCommand command) {
+    if (targetAgentRunChild != null
+        && targetAgentRunChild.commandId().equals(command.commandId())
+        && targetAgentRunChild.unresolved()) {
+      return reconcileCanceledTargetAgentRun(command);
+    }
     IntakeActivityExecutionState canceledStage = activityExecution;
     if (canceledStage == null
         || !canceledStage.commandId().equals(command.commandId())) {
@@ -652,6 +820,50 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
           failure instanceof IllegalArgumentException
               ? "INTAKE_ACTIVITY_RECEIPT_INVALID"
               : "INTAKE_ACTIVITY_RECONCILIATION_UNRESOLVED";
+    }
+    return CancellationReconciliation.unresolved();
+  }
+
+  private CancellationReconciliation reconcileCanceledTargetAgentRun(
+      IntakeWorkflowCommand command) {
+    CancellationReconciliation[] reconciliation = new CancellationReconciliation[1];
+    CancellationScope reconciliationScope =
+        Workflow.newDetachedCancellationScope(
+            () -> {
+              IntakeAgentRunFinalizationReadResult result =
+                  readTargetFinalization(
+                      command,
+                      IntakeAgentRunFinalizationReadRequest.Mode.CANCELLATION_RECONCILIATION);
+              reconciliation[0] =
+                  switch (result.resolution()) {
+                    case COMMITTED -> {
+                      if (targetAgentRunChild.resultHash() == null) {
+                        targetAgentRunChild =
+                            targetAgentRunChild.resultReady(result.locator().resultHash());
+                      }
+                      targetAgentRunChild = targetAgentRunChild.committed(result);
+                      yield CancellationReconciliation.committed(
+                          result.receipt().operation().operationKey(),
+                          result.receipt().committedEvent());
+                    }
+                    case ABSENT_TERMINAL -> {
+                      targetAgentRunChild = targetAgentRunChild.terminalNoCommit();
+                      yield CancellationReconciliation.absent(command.operationKey());
+                    }
+                    case PENDING -> CancellationReconciliation.unresolved();
+                  };
+            });
+    try {
+      reconciliationScope.run();
+      return reconciliation[0] == null
+          ? CancellationReconciliation.unresolved()
+          : reconciliation[0];
+    } catch (IntakeActivityDeadlineExceeded failure) {
+      protocolErrorCode = "INTAKE_ACTIVITY_DEADLINE_EXPIRED";
+    } catch (ActivityFailure failure) {
+      protocolErrorCode = activityFailureCode(failure);
+    } catch (RuntimeException failure) {
+      protocolErrorCode = "INTAKE_ACTIVITY_RECONCILIATION_UNRESOLVED";
     }
     return CancellationReconciliation.unresolved();
   }
@@ -818,6 +1030,11 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
     }
     pendingCommand = null;
     activityExecution = null;
+    if (targetAgentRunChild != null
+        && targetAgentRunChild.commandId().equals(commandId)
+        && targetAgentRunChild.unresolved()) {
+      targetAgentRunChild = targetAgentRunChild.terminalNoCommit();
+    }
     sharedActivityRetriesRemaining = 0;
     activityExecutionAuthorized = false;
   }
@@ -831,12 +1048,20 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
   private boolean consumeQueuedCommittedEvent(String commandId) {
     if (commandId == null
         || pendingCommand == null
-        || !pendingCommand.commandId().equals(commandId)
-        || activityExecution == null
-        || !activityExecution.commandId().equals(commandId)) {
+        || !pendingCommand.commandId().equals(commandId)) {
       return false;
     }
-    String expectedOperationKey = activityExecution.stageOperationKey();
+    String expectedOperationKey =
+        activityExecution != null && activityExecution.commandId().equals(commandId)
+            ? activityExecution.stageOperationKey()
+            : targetAgentRunChild != null
+                    && targetAgentRunChild.commandId().equals(commandId)
+                    && targetAgentRunChild.finalizationOperationKey() != null
+                ? targetAgentRunChild.finalizationOperationKey()
+                : null;
+    if (expectedOperationKey == null) {
+      return false;
+    }
     Iterator<InboxItem> iterator = inbox.iterator();
     while (iterator.hasNext()) {
       InboxItem item = iterator.next();
@@ -859,10 +1084,16 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
   }
 
   private boolean hasUnresolvedQueuedActivityEvent(String commandId) {
-    if (!hasPendingActivityCommand(commandId) || activityExecution == null) {
+    if (!hasPendingActivityCommand(commandId)) {
       return false;
     }
-    String operationKey = activityExecution.stageOperationKey();
+    String operationKey =
+        activityExecution != null
+            ? activityExecution.stageOperationKey()
+            : targetAgentRunChild == null ? null : targetAgentRunChild.finalizationOperationKey();
+    if (operationKey == null) {
+      return false;
+    }
     return eventObservations.values().stream()
         .anyMatch(
             observation ->
@@ -1268,6 +1499,22 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
     return true;
   }
 
+  private boolean matchesTargetAgentRunAuthority(IntakeWorkflowCommand command) {
+    IntakeCommandExecutionContext context = command.executionContext();
+    if (!context.isTargetAgentRun()) {
+      return true;
+    }
+    try {
+      context.targetAgentRun().requireMatches(start, command, processRevision, roomRevision);
+      if (targetAgentRunChild != null) {
+        targetAgentRunChild.requireMatches(command, context.targetAgentRun());
+      }
+      return true;
+    } catch (IllegalArgumentException mismatch) {
+      return false;
+    }
+  }
+
   private static void requireThreadBinding(
       IntakeThreadInitialization existing,
       IntakeWorkflowCommand command,
@@ -1487,6 +1734,7 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
     protocolErrorCode = carry.protocolErrorCode();
     runGeneration = carry.runGeneration();
     lastDecision = carry.lastDecision();
+    targetAgentRunChild = carry.targetAgentRunChild();
     carry.observedCommands()
         .forEach(
             observed ->
@@ -1515,6 +1763,7 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
         && inbox.isEmpty()
         && pendingCommand == null
         && activityExecution == null
+        && (targetAgentRunChild == null || !targetAgentRunChild.unresolved())
         && activeOrchestration == null
         && deferredCancellation == null
         && Workflow.isEveryHandlerFinished();
@@ -1524,7 +1773,9 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
     Workflow.await(Workflow::isEveryHandlerFinished);
     IntakeRoomCarryState carry =
         new IntakeRoomCarryState(
-            "intake-room-carry-state.v1",
+            targetAgentRunChild == null
+                ? "intake-room-carry-state.v1"
+                : "intake-room-carry-state.v2",
             roomPhase,
             activeParty,
             nextCommandSequence,
@@ -1558,7 +1809,8 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
                         new IntakeRoomCarryState.ObservedEvent(
                             "intake-observed-event.v1", observed.event(), observed.applied()))
                 .toList(),
-            new ArrayList<>(threadInitializations.values()));
+            new ArrayList<>(threadInitializations.values()),
+            targetAgentRunChild);
     ContinueAsNewOptions options =
         ContinueAsNewOptions.newBuilder().setMemo(Map.of(CARRY_STATE_MEMO_KEY, carry)).build();
     Workflow.continueAsNew(options, start.withCarryState(carry));

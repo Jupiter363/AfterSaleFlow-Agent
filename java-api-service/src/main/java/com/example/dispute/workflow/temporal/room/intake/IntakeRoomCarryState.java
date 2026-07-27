@@ -28,14 +28,77 @@ public record IntakeRoomCarryState(
     IntakeCommandDecision lastDecision,
     List<ObservedCommand> observedCommands,
     List<ObservedEvent> observedEvents,
-    List<IntakeThreadInitialization> threadInitializations) {
+    List<IntakeThreadInitialization> threadInitializations,
+    IntakeAgentRunChildState targetAgentRunChild) {
 
   public static final int MAX_OBSERVED = 256;
   public static final int MAX_THREAD_INITIALIZATIONS = 2;
 
+  public IntakeRoomCarryState(
+      String schemaVersion,
+      IntakeRoomPhase roomPhase,
+      IntakeParty activeParty,
+      long nextCommandSequence,
+      long nextEventSequence,
+      long processedCommandCount,
+      long processedEventCount,
+      boolean initiatorComplete,
+      boolean respondentUnlocked,
+      boolean respondentComplete,
+      IntakeParty readinessParty,
+      String lastEventId,
+      String lastEventRef,
+      String lastEventHash,
+      IntakeAgentRunRef lastAgentRunRef,
+      IntakeGraphExecutionRef lastGraphExecutionRef,
+      IntakeTerminalReason terminalReason,
+      long processRevision,
+      long roomRevision,
+      String protocolErrorCode,
+      int runGeneration,
+      IntakeCommandDecision lastDecision,
+      List<ObservedCommand> observedCommands,
+      List<ObservedEvent> observedEvents,
+      List<IntakeThreadInitialization> threadInitializations) {
+    this(
+        schemaVersion,
+        roomPhase,
+        activeParty,
+        nextCommandSequence,
+        nextEventSequence,
+        processedCommandCount,
+        processedEventCount,
+        initiatorComplete,
+        respondentUnlocked,
+        respondentComplete,
+        readinessParty,
+        lastEventId,
+        lastEventRef,
+        lastEventHash,
+        lastAgentRunRef,
+        lastGraphExecutionRef,
+        terminalReason,
+        processRevision,
+        roomRevision,
+        protocolErrorCode,
+        runGeneration,
+        lastDecision,
+        observedCommands,
+        observedEvents,
+        threadInitializations,
+        null);
+  }
+
   public IntakeRoomCarryState {
-    if (!"intake-room-carry-state.v1".equals(schemaVersion)) {
-      throw new IllegalArgumentException("schemaVersion must be intake-room-carry-state.v1");
+    if (!"intake-room-carry-state.v1".equals(schemaVersion)
+        && !"intake-room-carry-state.v2".equals(schemaVersion)) {
+      throw new IllegalArgumentException("schemaVersion must be intake-room-carry-state.v1 or v2");
+    }
+    if ("intake-room-carry-state.v1".equals(schemaVersion) && targetAgentRunChild != null) {
+      throw new IllegalArgumentException("v1 carry state cannot contain target child identity");
+    }
+    if (targetAgentRunChild != null && targetAgentRunChild.unresolved()) {
+      throw new IllegalArgumentException("unresolved target child cannot cross continue-as-new");
     }
     if (roomPhase == null || activeParty == null) {
       throw new IllegalArgumentException("room phase and active party must not be null");

@@ -14,12 +14,31 @@ public record IntakeCommandExecutionContext(
     String agentSessionId,
     long deadlineEpochMillis,
     RetryBudget retryBudget,
-    BranchOperation branchOperation) {
+    BranchOperation branchOperation,
+    IntakeTargetAgentRunContext targetAgentRun) {
+
+  public IntakeCommandExecutionContext(
+      String schemaVersion,
+      String threadId,
+      String agentSessionId,
+      long deadlineEpochMillis,
+      RetryBudget retryBudget,
+      BranchOperation branchOperation) {
+    this(
+        schemaVersion,
+        threadId,
+        agentSessionId,
+        deadlineEpochMillis,
+        retryBudget,
+        branchOperation,
+        null);
+  }
 
   public IntakeCommandExecutionContext {
-    if (!"intake-command-execution-context.v1".equals(schemaVersion)) {
+    if (!"intake-command-execution-context.v1".equals(schemaVersion)
+        && !"intake-command-execution-context.v2".equals(schemaVersion)) {
       throw new IllegalArgumentException(
-          "schemaVersion must be intake-command-execution-context.v1");
+          "schemaVersion must be intake-command-execution-context.v1 or v2");
     }
     requireThreadId(threadId, "threadId");
     requireIdentifier(agentSessionId, "agentSessionId");
@@ -27,9 +46,22 @@ public record IntakeCommandExecutionContext(
       throw new IllegalArgumentException("deadlineEpochMillis must be positive");
     }
     Objects.requireNonNull(retryBudget, "retryBudget must not be null");
+    if ("intake-command-execution-context.v1".equals(schemaVersion) && targetAgentRun != null) {
+      throw new IllegalArgumentException("v1 execution context cannot carry target AgentRun state");
+    }
+    if ("intake-command-execution-context.v2".equals(schemaVersion) && targetAgentRun == null) {
+      throw new IllegalArgumentException("v2 execution context requires target AgentRun state");
+    }
+  }
+
+  public boolean isTargetAgentRun() {
+    return targetAgentRun != null;
   }
 
   void requireCompatible(IntakeCommandType commandType, IntakeParty party) {
+    if (targetAgentRun != null && commandType != IntakeCommandType.INTAKE_MESSAGE) {
+      throw new IllegalArgumentException("target AgentRun context is valid only for Intake messages");
+    }
     BranchOperation expected =
         switch (commandType) {
           case INTAKE_MESSAGE -> null;
