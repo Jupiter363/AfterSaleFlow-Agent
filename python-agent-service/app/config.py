@@ -1,8 +1,9 @@
 # 文件作用：Python Agent 服务代码文件，承载售后争议智能体的 API、配置、模型调用或业务流程。
 
 from functools import lru_cache
+from datetime import datetime
 import re
-from typing import ClassVar, Literal, Self
+from typing import Annotated, ClassVar, Literal, Self
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from pydantic import (
@@ -65,6 +66,159 @@ class GraphShadowBindingSettings(BaseModel):
         expected = "no-tools.v1" if self.graph_key == "intake.v2" else "tools.none.v1"
         if self.tool_policy_version != expected:
             raise ValueError(f"{self.graph_key} requires the exact {expected} tool policy")
+        return self
+
+
+class GraphTargetE2EBindingSettings(GraphShadowBindingSettings):
+    """Deployment-owned exact binding for an isolated target-E2E candidate."""
+
+
+class GraphTargetE2EExplicitCaseScope(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    mode: Literal["EXPLICIT_CASE_IDS"]
+    allowedCaseIds: tuple[str, ...] = Field(min_length=1, max_length=100, strict=False)
+
+    @field_validator("allowedCaseIds")
+    @classmethod
+    def validate_case_ids(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        pattern = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+        if len(values) != len(set(values)) or any(
+            pattern.fullmatch(value) is None for value in values
+        ):
+            raise ValueError("target-E2E explicit case IDs are invalid")
+        return values
+
+
+class GraphTargetE2ESyntheticCaseScope(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    mode: Literal["ISOLATED_SYNTHETIC_NEW_CASES"]
+    caseIdPrefix: str = Field(pattern=r"^[A-Z][A-Z0-9_]{2,31}$")
+    maxCases: int = Field(ge=1, le=16)
+    fixtureSetId: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
+    fixtureSetHash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    containsRealCaseOrPartyData: Literal[False]
+    externalEffectsAllowed: Literal[False]
+
+
+GraphTargetE2ECaseScope = Annotated[
+    GraphTargetE2EExplicitCaseScope | GraphTargetE2ESyntheticCaseScope,
+    Field(discriminator="mode"),
+]
+
+
+class GraphTargetE2EBuildBindings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    caseBuildId: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
+    controlBuildId: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
+    agentBuildId: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
+
+
+class GraphTargetE2EImageDigests(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    javaApi: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    temporalControlWorker: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    temporalAgentWorker: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    pythonAgent: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    frontend: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+
+
+class GraphTargetE2EDomainDatabaseIdentity(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    service: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,62}$")
+    database: str = Field(pattern=r"^[a-z][a-z0-9_]{0,62}$")
+    schema_name: str = Field(
+        alias="schema",
+        serialization_alias="schema",
+        pattern=r"^[a-z][a-z0-9_]{0,62}$",
+    )
+    expectedUser: str = Field(pattern=r"^[a-z][a-z0-9_]{0,62}$")
+
+
+class GraphTargetE2EGraphDatabaseIdentity(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    service: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,62}$")
+    database: str = Field(pattern=r"^[a-z][a-z0-9_]{0,62}$")
+    schema_name: str = Field(
+        alias="schema",
+        serialization_alias="schema",
+        pattern=r"^[a-z][a-z0-9_]{0,62}$",
+    )
+    runtimeUser: str = Field(pattern=r"^[a-z][a-z0-9_]{0,62}$")
+    environmentGeneration: int = Field(ge=1, le=9_007_199_254_740_991)
+    restoreVerificationHash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class GraphTargetE2EDatabaseIdentities(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    domain: GraphTargetE2EDomainDatabaseIdentity
+    graph: GraphTargetE2EGraphDatabaseIdentity
+
+    @model_validator(mode="after")
+    def validate_physical_isolation(self) -> Self:
+        if (
+            self.domain.service == self.graph.service
+            or self.domain.database == self.graph.database
+        ):
+            raise ValueError("target-E2E Domain and Graph databases are not physically isolated")
+        return self
+
+
+class GraphTargetE2ERuntimeContextSettings(BaseModel):
+    """Strict non-secret projection produced by the Java deployment control plane."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    schemaVersion: Literal["graph-target-e2e-runtime-context.v1"]
+    executionLane: Literal["TARGET_E2E_CANDIDATE"]
+    activationId: str = Field(pattern=r"^p9act\.v1\.[0-9a-f]{32}$")
+    environmentId: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
+    environmentGeneration: int = Field(ge=1, le=9_007_199_254_740_991)
+    candidateSha: str = Field(pattern=r"^[0-9a-f]{40}$")
+    issuedAt: datetime = Field(strict=False)
+    expiresAt: datetime = Field(strict=False)
+    runNonce: str = Field(
+        min_length=32,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{31,127}$",
+    )
+    tenantSurrogate: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
+    caseScope: GraphTargetE2ECaseScope
+    allowedRoomTypes: tuple[
+        Literal["INTAKE", "EVIDENCE", "HEARING", "REVIEW"], ...
+    ] = Field(min_length=1, max_length=4, strict=False)
+    composeProject: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]{0,62}$")
+    temporalNamespace: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
+    buildBindings: GraphTargetE2EBuildBindings
+    imageDigests: GraphTargetE2EImageDigests
+    databaseIdentities: GraphTargetE2EDatabaseIdentities
+    trustedSigningKeyIds: tuple[str, ...] = Field(min_length=1, max_length=16, strict=False)
+    perCommandManifestAllowed: Literal[False]
+
+    @model_validator(mode="after")
+    def validate_runtime_context(self) -> Self:
+        if (
+            self.issuedAt.tzinfo is None
+            or self.expiresAt.tzinfo is None
+            or self.expiresAt <= self.issuedAt
+            or (self.expiresAt - self.issuedAt).total_seconds() > 7200
+        ):
+            raise ValueError("target-E2E runtime context time window is invalid")
+        if len(set(self.allowedRoomTypes)) != len(self.allowedRoomTypes):
+            raise ValueError("target-E2E allowed rooms must be unique")
+        key_pattern = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
+        if len(set(self.trustedSigningKeyIds)) != len(self.trustedSigningKeyIds) or any(
+            key_pattern.fullmatch(value) is None for value in self.trustedSigningKeyIds
+        ):
+            raise ValueError("target-E2E trusted signing key IDs are invalid")
+        if self.databaseIdentities.graph.environmentGeneration != self.environmentGeneration:
+            raise ValueError("target-E2E Graph database generation differs from the run")
         return self
 
 
@@ -207,7 +361,9 @@ class Settings(BaseSettings):
     prompt_version: str = "hearing-v1"
     evaluation_prompt_version: str = "evaluation-v1"
     enable_sensitive_log_masking: bool = True
-    graph_gateway_mode: Literal["DISABLED", "SHADOW"] = "DISABLED"
+    graph_gateway_mode: Literal[
+        "DISABLED", "SHADOW", "TARGET_E2E_CANDIDATE"
+    ] = "DISABLED"
     graph_database_dsn: SecretStr | None = None
     graph_database_name: str = "dispute_graph"
     graph_database_user: str = "graph_runtime"
@@ -240,6 +396,12 @@ class Settings(BaseSettings):
         default=(),
         max_length=64,
     )
+    graph_target_e2e_isolated: bool = False
+    graph_target_e2e_runtime_context: GraphTargetE2ERuntimeContextSettings | None = None
+    graph_target_e2e_bindings: tuple[GraphTargetE2EBindingSettings, ...] = Field(
+        default=(),
+        max_length=4,
+    )
 
     @model_validator(mode="after")
     def validate_graph_runtime(self) -> Self:
@@ -257,18 +419,73 @@ class Settings(BaseSettings):
             raise ValueError("production graph pool min size must be positive")
         if not self.graph_expected_spiffe_id.startswith("spiffe://"):
             raise ValueError("graph_expected_spiffe_id must be a SPIFFE URI")
-        if self.graph_gateway_mode == "SHADOW":
+        if self.graph_gateway_mode in {"SHADOW", "TARGET_E2E_CANDIDATE"}:
             if self.graph_database_dsn is None:
-                raise ValueError("SHADOW graph mode requires graph_database_dsn")
+                raise ValueError("active graph mode requires graph_database_dsn")
             if self.graph_jwks_url is None:
-                raise ValueError("SHADOW graph mode requires graph_jwks_url")
+                raise ValueError("active graph mode requires graph_jwks_url")
             if self.graph_expected_environment_generation is None:
-                raise ValueError("SHADOW graph mode requires graph_expected_environment_generation")
+                raise ValueError(
+                    "active graph mode requires graph_expected_environment_generation"
+                )
             if self.graph_expected_restore_verification_hash is None:
                 raise ValueError(
-                    "SHADOW graph mode requires graph_expected_restore_verification_hash"
+                    "active graph mode requires graph_expected_restore_verification_hash"
                 )
             self._validate_graph_runtime_dsn(self.graph_database_dsn.get_secret_value())
+        if self.graph_gateway_mode == "TARGET_E2E_CANDIDATE":
+            if self.app_env.lower() not in {"local", "test", "target-e2e"}:
+                raise ValueError(
+                    "TARGET_E2E_CANDIDATE is restricted to local/test/target-e2e"
+                )
+            context = self.graph_target_e2e_runtime_context
+            if not self.graph_target_e2e_isolated or context is None:
+                raise ValueError(
+                    "TARGET_E2E_CANDIDATE requires an isolated non-secret runtime context"
+                )
+            if not self.graph_target_e2e_bindings:
+                raise ValueError("TARGET_E2E_CANDIDATE requires exact target-E2E bindings")
+            if self.graph_shadow_bindings or self.graph_shadow_threads:
+                raise ValueError(
+                    "TARGET_E2E_CANDIDATE cannot relabel SHADOW bindings or threads"
+                )
+            graph_database = context.databaseIdentities.graph
+            expected_graph_database = (
+                self.graph_database_name,
+                self.graph_database_schema,
+                self.graph_database_user,
+                self.graph_expected_environment_generation,
+                self.graph_expected_restore_verification_hash,
+            )
+            projected_graph_database = (
+                graph_database.database,
+                graph_database.schema_name,
+                graph_database.runtimeUser,
+                str(graph_database.environmentGeneration),
+                graph_database.restoreVerificationHash,
+            )
+            if projected_graph_database != expected_graph_database:
+                raise ValueError("target-E2E runtime context differs from Graph DB settings")
+            configured_rooms = {
+                room
+                for binding in self.graph_target_e2e_bindings
+                for room in binding.allowed_room_types
+            }
+            if not set(context.allowedRoomTypes).issubset(configured_rooms):
+                raise ValueError("target-E2E runtime room scope exceeds executor bindings")
+            if len(self.graph_target_e2e_bindings) != 1:
+                raise ValueError("target-E2E requires one shared all-room executor binding")
+            composite = self.graph_target_e2e_bindings[0]
+            if (
+                composite.graph_key != "all-rooms/target-e2e.v1"
+                or composite.graph_version != "target-e2e-graph.2026-07-27.1"
+                or composite.checkpoint_schema_version != "target-e2e-checkpoint.v1"
+                or composite.output_schema_version
+                != "target-e2e-room-proposal-source.v1"
+                or frozenset(composite.allowed_room_types)
+                != frozenset({"INTAKE", "EVIDENCE", "HEARING", "REVIEW"})
+            ):
+                raise ValueError("target-E2E shared executor differs from the frozen binding")
         binding_keys = {
             (
                 binding.graph_key,
@@ -320,6 +537,16 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "graph_shadow_threads must reference an allowed exact graph binding"
                 )
+        target_binding_keys = {
+            (
+                binding.graph_key,
+                binding.graph_version,
+                binding.checkpoint_schema_version,
+            )
+            for binding in self.graph_target_e2e_bindings
+        }
+        if len(target_binding_keys) != len(self.graph_target_e2e_bindings):
+            raise ValueError("graph_target_e2e_bindings contains a duplicate exact version")
         return self
 
     def _validate_graph_runtime_dsn(self, value: str) -> None:

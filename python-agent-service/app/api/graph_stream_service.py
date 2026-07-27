@@ -25,7 +25,7 @@ from app.graph_runtime.identity import ThreadIdentity
 from app.graph_runtime.ledger import AttemptStatus, ResultRecord
 from app.graph_runtime.provider_intent import GatewayProviderCallIntentRecorder
 from app.graph_runtime.recovery import RecoveryAction, RecoveryDecision
-from app.graph_runtime.registry import RegistryRecord, VersionBinding
+from app.graph_runtime.registry import RegistryRecord, RegistryState, VersionBinding
 from app.llm import bind_provider_call_intent_recorder
 from app.security.invocation_envelope import VerifiedInvocation
 
@@ -147,7 +147,12 @@ class ExactShadowExecutorRegistry:
         self,
         record: RegistryRecord,
     ) -> ShadowExecutorRegistration:
-        record.require_new_shadow_command()
+        if record.state is RegistryState.SHADOW:
+            record.require_new_shadow_command()
+        elif record.state is RegistryState.ACTIVE_CANDIDATE:
+            record.require_new_candidate_command()
+        else:
+            raise GraphVersionUnavailableError()
         registration = self._entries.get(self._key(record.binding))
         if registration is None or registration.binding != record.binding:
             raise GraphVersionUnavailableError("GRAPH_EXECUTOR_BINDING_UNAVAILABLE")

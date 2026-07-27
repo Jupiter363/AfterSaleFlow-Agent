@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 import hmac
 import json
+import re
 from typing import Any, Final
 
 from app.contracts.v1.codec import canonical_sha256_omitting, canonicalize
@@ -23,8 +24,12 @@ from app.graph_runtime.errors import (
     GraphTerminalBindingError,
 )
 from app.graph_runtime.identity import THREAD_ID_PATTERN, _identifier, _sha256
-from app.graph_runtime.persistence_models import GraphFenceContext
+from app.graph_runtime.persistence_models import GraphFenceContext, GraphGatewayMode
 from app.graph_runtime.registry import CommandProfileBinding
+from app.graph_runtime.target_e2e import (
+    TargetE2EGraphResultEnvelope,
+    TargetE2ERoomProposalSource,
+)
 
 
 NONCE_RETENTION: Final = timedelta(hours=24)
@@ -91,6 +96,11 @@ class CommandBinding:
     checkpoint_schema_version: str
     profile: CommandProfileBinding
     deadline_at: datetime
+    execution_lane: GraphGatewayMode = GraphGatewayMode.SHADOW
+    activation_id: str | None = None
+    room_fencing_token: int | None = None
+    command_hash: str | None = None
+    command_envelope_hash: str | None = None
 
     def __post_init__(self) -> None:
         if THREAD_ID_PATTERN.fullmatch(self.thread_id) is None:
@@ -119,6 +129,30 @@ class CommandBinding:
         if canonical_sha256_omitting(self.request_json, "request_hash") != self.request_hash:
             raise GraphCommandHashConflictError("request self-hash is invalid")
         _aware(self.deadline_at, "deadline_at")
+        if not isinstance(self.execution_lane, GraphGatewayMode) or self.execution_lane is (
+            GraphGatewayMode.DISABLED
+        ):
+            raise GraphContractError("command execution lane is invalid")
+        if self.execution_lane is GraphGatewayMode.TARGET_E2E_CANDIDATE:
+            if self.activation_id is None or re.fullmatch(
+                r"p9act\.v1\.[0-9a-f]{32}", self.activation_id
+            ) is None:
+                raise GraphContractError("candidate command activation ID is invalid")
+            _sha256(self.command_envelope_hash, "command_envelope_hash")
+            _sha256(self.command_hash, "command_hash")
+            if (
+                not isinstance(self.room_fencing_token, int)
+                or isinstance(self.room_fencing_token, bool)
+                or self.room_fencing_token < 1
+            ):
+                raise GraphContractError("candidate command room fence is invalid")
+        elif (
+            self.activation_id is not None
+            or self.room_fencing_token is not None
+            or self.command_hash is not None
+            or self.command_envelope_hash is not None
+        ):
+            raise GraphContractError("SHADOW command cannot carry candidate activation")
 
     @classmethod
     def from_command(
@@ -126,6 +160,11 @@ class CommandBinding:
         command: RoomGraphCommand,
         *,
         tool_policy_version: str,
+        execution_lane: GraphGatewayMode = GraphGatewayMode.SHADOW,
+        activation_id: str | None = None,
+        room_fencing_token: int | None = None,
+        command_hash: str | None = None,
+        command_envelope_hash: str | None = None,
     ) -> CommandBinding:
         invocation = command.invocation_context
         return cls(
@@ -148,6 +187,11 @@ class CommandBinding:
                 tool_policy_version=tool_policy_version,
             ),
             deadline_at=command.deadline_at,
+            execution_lane=execution_lane,
+            activation_id=activation_id,
+            room_fencing_token=room_fencing_token,
+            command_hash=command_hash,
+            command_envelope_hash=command_envelope_hash,
         )
 
 
@@ -246,6 +290,15 @@ class ResultRecord:
     result_ref: str
     result_hash: str
     usage_json: Mapping[str, Any]
+    execution_lane: GraphGatewayMode = GraphGatewayMode.SHADOW
+    activation_id: str | None = None
+    room_fencing_token: int | None = None
+    command_hash: str | None = None
+    command_envelope_hash: str | None = None
+    proposal_hash: str | None = None
+    result_envelope_hash: str | None = None
+    proposal_source_json: Mapping[str, Any] | None = None
+    result_envelope_json: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,7 +313,9 @@ class RecoveryBudget:
 
 COMMAND_COLUMNS: Final[str] = """
 thread_id, command_id, request_schema_version, request_json, request_hash,
-room_epoch, graph_key, graph_version, checkpoint_schema_version,
+execution_mode, activation_id, room_fencing_token, command_hash, command_envelope_hash, room_epoch,
+graph_key, graph_version,
+checkpoint_schema_version,
 prompt_version, model_profile_id, output_schema_version, policy_version,
 guardrail_version, tool_policy_version, deadline_at, status, attempt_count,
 fencing_token, start_checkpoint_ns, start_checkpoint_id,
@@ -271,14 +326,31 @@ error_code, error_classification, command_revision
 INSERT_COMMAND_SQL: Final[str] = f"""
 insert into agent_graph_command (
     thread_id, command_id, request_schema_version, request_json, request_hash,
-    execution_mode, room_epoch, graph_key, graph_version,
+    execution_mode, activation_id, room_fencing_token, command_hash, command_envelope_hash, room_epoch,
+    graph_key, graph_version,
     checkpoint_schema_version, prompt_version, model_profile_id,
     output_schema_version, policy_version, guardrail_version,
     tool_policy_version, deadline_at, status
 )
-select %s, %s, %s, %s::jsonb, %s, 'SHADOW', %s, %s, %s, %s, %s, %s, %s,
-       %s, %s, %s, %s, 'REGISTERED'
+select %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+       %s, %s, %s, %s, %s, %s, %s, %s, %s, 'REGISTERED'
  where %s > clock_timestamp()
+   and (
+       %s <> 'TARGET_E2E_CANDIDATE'
+       or exists (
+           select 1
+             from agent_graph_target_e2e_activation activation
+             join agent_graph_target_e2e_activation_lifecycle lifecycle
+               on lifecycle.activation_id = activation.activation_id
+             join agent_graph_target_e2e_environment_generation generation
+               on generation.environment_id = activation.environment_id
+            where activation.activation_id = %s
+              and lifecycle.lifecycle_state = 'ACTIVE'
+              and activation.expires_at > clock_timestamp()
+              and generation.activation_id = activation.activation_id
+              and generation.environment_generation = activation.environment_generation
+       )
+   )
 on conflict (thread_id, command_id) do nothing
 returning {COMMAND_COLUMNS}
 """
@@ -288,6 +360,33 @@ select {COMMAND_COLUMNS}
   from agent_graph_command
  where thread_id = %s and command_id = %s
  for update
+"""
+
+LOAD_CANDIDATE_TERMINAL_PROOF_SQL: Final[str] = f"""
+select {', '.join(f'command.{column.strip()}' for column in COMMAND_COLUMNS.split(','))}
+  from agent_graph_command command
+  join agent_graph_target_e2e_activation activation
+    on activation.activation_id = command.activation_id
+  join agent_graph_invocation_nonce nonce
+    on nonce.thread_id = command.thread_id
+   and nonce.command_id = command.command_id
+   and nonce.request_hash = command.request_hash
+ where command.thread_id = %s
+   and command.command_id = %s
+   and command.request_hash = %s
+   and command.execution_mode = 'TARGET_E2E_CANDIDATE'
+   and command.activation_id = %s
+   and command.room_fencing_token = %s
+   and command.command_hash = %s
+   and command.command_envelope_hash = %s
+   and nonce.issuer = %s
+   and nonce.key_id = %s
+   and nonce.jti = %s
+   and nonce.issued_at = %s
+   and nonce.token_expires_at = %s
+   and command.registered_at <= nonce.token_expires_at
+   and command.registered_at < activation.expires_at
+   and command.status in ('RESULT_CHECKPOINTED', 'COMPLETED')
 """
 
 INSERT_NONCE_SQL: Final[str] = """
@@ -424,7 +523,11 @@ returning {COMMAND_COLUMNS}
 """
 
 RESULT_COLUMNS: Final[str] = """
-result_id, thread_id, command_id, request_hash, result_schema_version,
+result_id, thread_id, command_id, request_hash, execution_mode, activation_id,
+room_fencing_token,
+command_hash, command_envelope_hash, proposal_hash, result_envelope_hash,
+proposal_source_json, result_envelope_json,
+result_schema_version,
 checkpoint_ns, checkpoint_id, cognitive_revision, terminal_status,
 result_json, result_ref, result_hash, usage_json
 """
@@ -437,12 +540,15 @@ select {RESULT_COLUMNS}
 
 INSERT_RESULT_SQL: Final[str] = f"""
 insert into agent_graph_result (
-    result_id, thread_id, command_id, request_hash, execution_mode,
+    result_id, thread_id, command_id, request_hash, execution_mode, activation_id,
+    room_fencing_token,
+    command_hash, command_envelope_hash, proposal_hash, result_envelope_hash,
+    proposal_source_json, result_envelope_json,
     result_schema_version, checkpoint_ns, checkpoint_id, cognitive_revision,
     terminal_status, result_json, result_ref, result_hash, usage_json
 )
-select %s, %s, %s, %s, 'SHADOW', %s, %s, %s, %s, %s,
-       %s::jsonb, %s, %s, %s::jsonb
+select %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+       %s, %s::jsonb, %s::jsonb, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s::jsonb
  where exists (
        select 1 from agent_graph_lease lease
         where lease.thread_id = %s and lease.command_id = %s
@@ -455,7 +561,11 @@ select %s, %s, %s, %s, 'SHADOW', %s, %s, %s, %s, %s,
         where command.thread_id = %s and command.command_id = %s
           and command.request_hash = %s and command.room_epoch = %s
           and command.graph_key = %s and command.graph_version = %s
-          and command.checkpoint_schema_version = %s
+           and command.checkpoint_schema_version = %s
+           and command.execution_mode = %s and command.activation_id is not distinct from %s
+           and command.room_fencing_token is not distinct from %s
+           and command.command_hash is not distinct from %s
+           and command.command_envelope_hash is not distinct from %s
           and command.status = 'RESULT_CHECKPOINTED'
           and command.fencing_token = %s
           and command.committed_checkpoint_ns is not distinct from %s
@@ -787,6 +897,52 @@ class PostgresCommandLedger:
             raise GraphTerminalBindingError("terminal result row is missing")
         return self._result_from_row(row)
 
+    async def load_candidate_terminal_proof(
+        self,
+        connection: Any,
+        *,
+        binding: CommandBinding,
+        issuer: str,
+        key_id: str,
+        jti: str,
+        issued_at: datetime,
+        token_expires_at: datetime,
+    ) -> tuple[CommandRecord, ResultRecord]:
+        """Read an immutable pre-cutoff admission/result proof without recovery mutation."""
+
+        row = await (
+            await connection.execute(
+                LOAD_CANDIDATE_TERMINAL_PROOF_SQL,
+                (
+                    binding.thread_id,
+                    binding.command_id,
+                    binding.request_hash,
+                    binding.activation_id,
+                    binding.room_fencing_token,
+                    binding.command_hash,
+                    binding.command_envelope_hash,
+                    issuer,
+                    key_id,
+                    jti,
+                    issued_at,
+                    token_expires_at,
+                ),
+            )
+        ).fetchone()
+        if row is None:
+            raise GraphTerminalBindingError(
+                "candidate command has no exact pre-cutoff terminal admission proof"
+            )
+        command = self._command_from_row(row)
+        self.require_same_binding(command.binding, binding)
+        result = await self.load_result(
+            connection,
+            thread_id=binding.thread_id,
+            command_id=binding.command_id,
+        )
+        self.require_result_matches_command(command, result)
+        return command, result
+
     async def store_terminal_result(
         self,
         connection: Any,
@@ -848,6 +1004,31 @@ class PostgresCommandLedger:
                     result.thread_id,
                     result.command_id,
                     result.request_hash,
+                    result.execution_lane.value,
+                    result.activation_id,
+                    result.room_fencing_token,
+                    result.command_hash,
+                    result.command_envelope_hash,
+                    result.proposal_hash,
+                    result.result_envelope_hash,
+                    (
+                        json.dumps(
+                            dict(result.proposal_source_json),
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        )
+                        if result.proposal_source_json is not None
+                        else None
+                    ),
+                    (
+                        json.dumps(
+                            dict(result.result_envelope_json),
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        )
+                        if result.result_envelope_json is not None
+                        else None
+                    ),
                     result.result_schema_version,
                     result.checkpoint_ns,
                     result.checkpoint_id,
@@ -876,6 +1057,11 @@ class PostgresCommandLedger:
                     fence.graph_key,
                     fence.graph_version,
                     fence.checkpoint_schema_version,
+                    fence.execution_lane.value,
+                    fence.activation_id,
+                    fence.room_fencing_token,
+                    fence.command_hash,
+                    fence.command_envelope_hash,
                     fence.fencing_token,
                     result.checkpoint_ns,
                     result.checkpoint_id,
@@ -974,6 +1160,11 @@ class PostgresCommandLedger:
                 separators=(",", ":"),
             ),
             binding.request_hash,
+            binding.execution_lane.value,
+            binding.activation_id,
+            binding.room_fencing_token,
+            binding.command_hash,
+            binding.command_envelope_hash,
             binding.room_epoch,
             binding.graph_key,
             binding.graph_version,
@@ -986,6 +1177,8 @@ class PostgresCommandLedger:
             profile.tool_policy_version,
             binding.deadline_at,
             binding.deadline_at,
+            binding.execution_lane.value,
+            binding.activation_id,
         )
 
     @staticmethod
@@ -1015,6 +1208,11 @@ class PostgresCommandLedger:
             request.get("attempt_id"),
             command.binding.graph_key,
             command.binding.graph_version,
+            command.binding.execution_lane,
+            command.binding.activation_id,
+            command.binding.room_fencing_token,
+            command.binding.command_hash,
+            command.binding.command_envelope_hash,
         )
         actual_identity = (
             result.thread_id,
@@ -1024,6 +1222,11 @@ class PostgresCommandLedger:
             contract_result.attempt_id,
             contract_result.graph_key,
             contract_result.graph_version,
+            result.execution_lane,
+            result.activation_id,
+            result.room_fencing_token,
+            result.command_hash,
+            result.command_envelope_hash,
         )
         if expected_identity != actual_identity:
             raise GraphTerminalBindingError(
@@ -1051,6 +1254,11 @@ class PostgresCommandLedger:
                 request_schema_version=row["request_schema_version"],
                 request_json=row["request_json"],
                 request_hash=row["request_hash"],
+                execution_lane=GraphGatewayMode(row["execution_mode"]),
+                activation_id=row["activation_id"],
+                room_fencing_token=row["room_fencing_token"],
+                command_hash=row["command_hash"],
+                command_envelope_hash=row["command_envelope_hash"],
                 room_epoch=row["room_epoch"],
                 graph_key=row["graph_key"],
                 graph_version=row["graph_version"],
@@ -1116,6 +1324,15 @@ class PostgresCommandLedger:
                 thread_id=row["thread_id"],
                 command_id=row["command_id"],
                 request_hash=row["request_hash"],
+                execution_lane=GraphGatewayMode(row["execution_mode"]),
+                activation_id=row["activation_id"],
+                room_fencing_token=row["room_fencing_token"],
+                command_hash=row["command_hash"],
+                command_envelope_hash=row["command_envelope_hash"],
+                proposal_hash=row["proposal_hash"],
+                result_envelope_hash=row["result_envelope_hash"],
+                proposal_source_json=row["proposal_source_json"],
+                result_envelope_json=row["result_envelope_json"],
                 result_schema_version=row["result_schema_version"],
                 checkpoint_ns=row["checkpoint_ns"],
                 checkpoint_id=row["checkpoint_id"],
@@ -1140,6 +1357,71 @@ class PostgresCommandLedger:
             raise GraphTerminalBindingError("result thread ID is invalid")
         _identifier(result.command_id, "command_id")
         _sha256(result.request_hash, "request_hash")
+        if not isinstance(result.execution_lane, GraphGatewayMode) or result.execution_lane is (
+            GraphGatewayMode.DISABLED
+        ):
+            raise GraphTerminalBindingError("result execution lane is invalid")
+        if result.execution_lane is GraphGatewayMode.TARGET_E2E_CANDIDATE:
+            if result.activation_id is None or re.fullmatch(
+                r"p9act\.v1\.[0-9a-f]{32}", result.activation_id
+            ) is None:
+                raise GraphTerminalBindingError("candidate result activation ID is invalid")
+            try:
+                _sha256(result.command_envelope_hash, "command_envelope_hash")
+                _sha256(result.command_hash, "command_hash")
+                _sha256(result.proposal_hash, "proposal_hash")
+                _sha256(result.result_envelope_hash, "result_envelope_hash")
+            except GraphContractError as error:
+                raise GraphTerminalBindingError(
+                    "candidate result command envelope hash is invalid"
+                ) from error
+            if (
+                not isinstance(result.room_fencing_token, int)
+                or isinstance(result.room_fencing_token, bool)
+                or result.room_fencing_token < 1
+            ):
+                raise GraphTerminalBindingError("candidate result room fence is invalid")
+            try:
+                proposal_source = TargetE2ERoomProposalSource.model_validate(
+                    result.proposal_source_json
+                )
+                envelope = TargetE2EGraphResultEnvelope.model_validate(
+                    result.result_envelope_json
+                )
+                nested = RoomGraphResult.model_validate(result.result_json)
+                proposal_source.require_result_binding(nested)
+                envelope.require_proposal_hash(
+                    proposal_source.proposal.model_dump(mode="json")
+                )
+            except (TypeError, ValueError) as error:
+                raise GraphTerminalBindingError(
+                    "candidate result proposal or envelope is invalid"
+                ) from error
+            if (
+                envelope.activation_id != result.activation_id
+                or envelope.room_fencing_token != result.room_fencing_token
+                or envelope.command_hash != result.command_hash
+                or envelope.command_envelope_hash != result.command_envelope_hash
+                or envelope.result_hash != result.result_hash
+                or envelope.proposal_hash != result.proposal_hash
+                or envelope.result_envelope_hash != result.result_envelope_hash
+                or envelope.result.model_dump(mode="json", exclude_none=True)
+                != dict(result.result_json)
+            ):
+                raise GraphTerminalBindingError(
+                    "candidate result envelope differs from durable columns"
+                )
+        elif (
+            result.activation_id is not None
+            or result.room_fencing_token is not None
+            or result.command_hash is not None
+            or result.command_envelope_hash is not None
+            or result.proposal_hash is not None
+            or result.result_envelope_hash is not None
+            or result.proposal_source_json is not None
+            or result.result_envelope_json is not None
+        ):
+            raise GraphTerminalBindingError("SHADOW result cannot carry candidate activation")
         _identifier(result.result_schema_version, "result_schema_version")
         if (
             len(result.checkpoint_ns) > 128

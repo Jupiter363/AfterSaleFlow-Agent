@@ -21,6 +21,7 @@ class RegistryState(StrEnum):
 
     DISABLED = "DISABLED"
     SHADOW = "SHADOW"
+    ACTIVE_CANDIDATE = "ACTIVE_CANDIDATE"
     RETIRED = "RETIRED"
 
 
@@ -111,13 +112,19 @@ class RegistryRecord:
 
     def __post_init__(self) -> None:
         if not isinstance(self.state, RegistryState):
-            raise GraphContractError("registry state must be DISABLED, SHADOW, or RETIRED")
+            raise GraphContractError(
+                "registry state must be DISABLED, SHADOW, ACTIVE_CANDIDATE, or RETIRED"
+            )
         if not isinstance(self.loadable, bool):
             raise GraphContractError("registry loadable flag must be boolean")
         if isinstance(self.revision, bool) or self.revision < 0:
             raise GraphContractError("registry revision must be non-negative")
-        if self.state in {RegistryState.SHADOW, RegistryState.RETIRED} and not self.loadable:
-            raise GraphVersionBindingError("SHADOW and RETIRED registry rows must remain loadable")
+        if self.state in {
+            RegistryState.SHADOW,
+            RegistryState.ACTIVE_CANDIDATE,
+            RegistryState.RETIRED,
+        } and not self.loadable:
+            raise GraphVersionBindingError("active and retired registry rows must remain loadable")
 
     def require_new_shadow_command(self) -> VersionBinding:
         if self.state is not RegistryState.SHADOW or not self.loadable:
@@ -125,7 +132,16 @@ class RegistryRecord:
         return self.binding
 
     def require_thread_restore(self) -> VersionBinding:
-        if self.state not in {RegistryState.SHADOW, RegistryState.RETIRED} or not self.loadable:
+        if self.state not in {
+            RegistryState.SHADOW,
+            RegistryState.ACTIVE_CANDIDATE,
+            RegistryState.RETIRED,
+        } or not self.loadable:
+            raise GraphVersionUnavailableError()
+        return self.binding
+
+    def require_new_candidate_command(self) -> VersionBinding:
+        if self.state is not RegistryState.ACTIVE_CANDIDATE or not self.loadable:
             raise GraphVersionUnavailableError()
         return self.binding
 

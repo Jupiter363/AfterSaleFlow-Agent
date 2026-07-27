@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import json
 from typing import Any
@@ -24,7 +25,7 @@ from app.graph_runtime.ledger import (
     ResultRecord,
     require_transition,
 )
-from app.graph_runtime.persistence_models import GraphFenceContext
+from app.graph_runtime.persistence_models import GraphFenceContext, GraphGatewayMode
 from app.graph_runtime.registry import CommandProfileBinding
 
 
@@ -91,6 +92,11 @@ def _command_row(binding: CommandBinding, status: str = "REGISTERED") -> dict[st
         "request_schema_version": binding.request_schema_version,
         "request_json": dict(binding.request_json),
         "request_hash": binding.request_hash,
+        "execution_mode": binding.execution_lane.value,
+        "activation_id": binding.activation_id,
+        "room_fencing_token": binding.room_fencing_token,
+        "command_hash": binding.command_hash,
+        "command_envelope_hash": binding.command_envelope_hash,
         "room_epoch": binding.room_epoch,
         "graph_key": binding.graph_key,
         "graph_version": binding.graph_version,
@@ -236,6 +242,36 @@ async def test_existing_only_nonce_consumption_has_no_side_effect_for_missing_co
 
 
 @pytest.mark.asyncio
+async def test_candidate_reconcile_requires_read_only_pre_cutoff_jws_admission_proof() -> None:
+    binding = replace(
+        _binding(),
+        execution_lane=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+        activation_id=f"p9act.v1.{'a' * 32}",
+        room_fencing_token=11,
+        command_hash="b" * 64,
+        command_envelope_hash="c" * 64,
+    )
+    connection = _Connection([None])
+
+    with pytest.raises(GraphTerminalBindingError, match="pre-cutoff"):
+        await PostgresCommandLedger().load_candidate_terminal_proof(
+            connection,
+            binding=binding,
+            issuer="java-api-service",
+            key_id="java-key-1",
+            jti="jti-1",
+            issued_at=NOW,
+            token_expires_at=NOW + timedelta(seconds=60),
+        )
+
+    query = connection.calls[0][0]
+    assert "join agent_graph_invocation_nonce nonce" in query
+    assert "command.registered_at <= nonce.token_expires_at" in query
+    assert "command.registered_at < activation.expires_at" in query
+    assert "insert " not in query and "update " not in query and "delete " not in query
+
+
+@pytest.mark.asyncio
 async def test_repeated_identical_infrastructure_termination_is_idempotent() -> None:
     binding = _binding()
     terminal = _command_row(binding, status="ABORTED")
@@ -320,6 +356,15 @@ async def test_terminal_result_insert_is_fence_and_checkpoint_guarded() -> None:
         "thread_id": result.thread_id,
         "command_id": result.command_id,
         "request_hash": result.request_hash,
+        "execution_mode": result.execution_lane.value,
+        "activation_id": result.activation_id,
+        "room_fencing_token": result.room_fencing_token,
+        "command_hash": result.command_hash,
+        "command_envelope_hash": result.command_envelope_hash,
+        "proposal_hash": result.proposal_hash,
+        "result_envelope_hash": result.result_envelope_hash,
+        "proposal_source_json": result.proposal_source_json,
+        "result_envelope_json": result.result_envelope_json,
         "result_schema_version": result.result_schema_version,
         "checkpoint_ns": result.checkpoint_ns,
         "checkpoint_id": result.checkpoint_id,

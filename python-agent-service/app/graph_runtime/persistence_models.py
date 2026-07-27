@@ -9,6 +9,7 @@ from typing import Any, Mapping
 
 
 LOWER_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+TARGET_E2E_ACTIVATION_ID = re.compile(r"^p9act\.v1\.[0-9a-f]{32}$")
 THREAD_ID = re.compile(r"^grt\.v1\.[0-9a-f]{32}$")
 SQL_IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 
@@ -40,6 +41,7 @@ class GraphReadinessError(GraphPersistenceError):
 class GraphGatewayMode(StrEnum):
     DISABLED = "DISABLED"
     SHADOW = "SHADOW"
+    TARGET_E2E_CANDIDATE = "TARGET_E2E_CANDIDATE"
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +108,20 @@ class GraphFenceContext:
     graph_key: str
     graph_version: str
     checkpoint_schema_version: str
+    execution_lane: GraphGatewayMode = GraphGatewayMode.SHADOW
+    activation_id: str | None = None
+    room_fencing_token: int | None = None
+    command_hash: str | None = None
+    command_envelope_hash: str | None = None
+    environment_id: str | None = None
+    environment_generation: int | None = None
+    tenant_surrogate: str | None = None
+    case_id: str | None = None
+    room_type: str | None = None
+    binding_hash: str | None = None
+    code_build_id: str | None = None
+    proposal_hash: str | None = None
+    result_envelope_hash: str | None = None
     result_hash: str | None = None
     result_ref: str | None = None
 
@@ -122,12 +138,73 @@ class GraphFenceContext:
         require_bounded_text(self.graph_key, "graph_key", 128)
         require_bounded_text(self.graph_version, "graph_version", 128)
         require_bounded_text(self.checkpoint_schema_version, "checkpoint_schema_version", 128)
+        if not isinstance(self.execution_lane, GraphGatewayMode) or self.execution_lane is (
+            GraphGatewayMode.DISABLED
+        ):
+            raise GraphPersistenceConfigurationError("execution_lane must be an active Graph lane")
+        candidate_values = (
+            self.activation_id,
+            self.command_envelope_hash,
+            self.command_hash,
+            self.environment_id,
+            self.environment_generation,
+            self.tenant_surrogate,
+            self.case_id,
+            self.room_type,
+            self.binding_hash,
+            self.code_build_id,
+        )
+        if self.execution_lane is GraphGatewayMode.TARGET_E2E_CANDIDATE:
+            if any(value is None for value in candidate_values):
+                raise GraphPersistenceConfigurationError(
+                    "candidate fence requires complete activation and authority bindings"
+                )
+            if self.activation_id is None or TARGET_E2E_ACTIVATION_ID.fullmatch(
+                self.activation_id
+            ) is None:
+                raise GraphPersistenceConfigurationError("activation_id is invalid")
+            require_sha256(self.binding_hash, "binding_hash")
+            require_sha256(self.command_envelope_hash, "command_envelope_hash")
+            require_sha256(self.command_hash, "command_hash")
+            if (
+                not isinstance(self.environment_generation, int)
+                or isinstance(self.environment_generation, bool)
+                or self.environment_generation < 1
+            ):
+                raise GraphPersistenceConfigurationError("environment_generation is invalid")
+            if (
+                not isinstance(self.room_fencing_token, int)
+                or isinstance(self.room_fencing_token, bool)
+                or self.room_fencing_token < 1
+            ):
+                raise GraphPersistenceConfigurationError("room_fencing_token is invalid")
+            for name in (
+                "environment_id",
+                "tenant_surrogate",
+                "case_id",
+                "room_type",
+                "code_build_id",
+            ):
+                require_bounded_text(getattr(self, name), name, 128)
+        elif self.room_fencing_token is not None or any(
+            value is not None for value in candidate_values
+        ):
+            raise GraphPersistenceConfigurationError(
+                "SHADOW fence cannot carry candidate activation authority"
+            )
         if self.result_hash is not None:
             require_sha256(self.result_hash, "result_hash")
             require_bounded_text(self.result_ref, "result_ref", 512)
+            if self.execution_lane is GraphGatewayMode.TARGET_E2E_CANDIDATE:
+                require_sha256(self.proposal_hash, "proposal_hash")
+                require_sha256(self.result_envelope_hash, "result_envelope_hash")
         elif self.result_ref is not None:
             raise GraphPersistenceConfigurationError(
                 "result_ref cannot be present without result_hash"
+            )
+        elif self.proposal_hash is not None or self.result_envelope_hash is not None:
+            raise GraphPersistenceConfigurationError(
+                "proposal/result envelope hashes require a terminal result"
             )
 
     def checkpoint_metadata(self) -> dict[str, Any]:
@@ -139,6 +216,20 @@ class GraphFenceContext:
             "graph_key": self.graph_key,
             "graph_version": self.graph_version,
             "graph_checkpoint_schema_version": self.checkpoint_schema_version,
+            "graph_execution_lane": self.execution_lane.value,
+            "graph_activation_id": self.activation_id,
+            "graph_room_fencing_token": self.room_fencing_token,
+            "graph_command_hash": self.command_hash,
+            "graph_command_envelope_hash": self.command_envelope_hash,
+            "graph_environment_id": self.environment_id,
+            "graph_environment_generation": self.environment_generation,
+            "graph_tenant_surrogate": self.tenant_surrogate,
+            "graph_case_id": self.case_id,
+            "graph_room_type": self.room_type,
+            "graph_binding_hash": self.binding_hash,
+            "graph_code_build_id": self.code_build_id,
+            "graph_proposal_hash": self.proposal_hash,
+            "graph_result_envelope_hash": self.result_envelope_hash,
             "graph_fencing_token": self.fencing_token,
             "graph_result_hash": self.result_hash,
             "graph_result_ref": self.result_ref,
@@ -157,7 +248,9 @@ class GraphReadinessConfig:
 
     def __post_init__(self) -> None:
         if not isinstance(self.mode, GraphGatewayMode):
-            raise GraphPersistenceConfigurationError("readiness mode must be DISABLED or SHADOW")
+            raise GraphPersistenceConfigurationError(
+                "readiness mode must be DISABLED, SHADOW, or TARGET_E2E_CANDIDATE"
+            )
         if self.mode is GraphGatewayMode.DISABLED:
             return
         require_bounded_text(self.expected_database, "expected_database", 63)

@@ -16,6 +16,10 @@ from app.graph_runtime.gateway import (
 from app.graph_runtime.identity import ThreadIdentity
 from app.graph_runtime.ledger import CommandBinding, CommandRecord, CommandStatus, ResultRecord
 from app.graph_runtime.registry import RegistryRecord
+from app.graph_runtime.target_e2e import (
+    TargetE2EGraphResultEnvelope,
+    VerifiedTargetE2EInvocation,
+)
 from app.security.invocation_envelope import VerifiedReconciliation
 
 
@@ -29,6 +33,14 @@ class GraphReconciliationGatewayPort(Protocol):
         owner_id: str,
     ) -> GraphReconciliation: ...
 
+    async def reconcile_candidate_only(
+        self,
+        *,
+        command: RoomGraphCommand,
+        verified_invocation: VerifiedTargetE2EInvocation,
+        expected_thread: ThreadIdentity,
+    ) -> ResultRecord: ...
+
 
 class GraphReconciliationService(Protocol):
     async def reconcile(
@@ -38,6 +50,14 @@ class GraphReconciliationService(Protocol):
         verified_reconciliation: VerifiedReconciliation,
         expected_thread: ThreadIdentity,
     ) -> GraphReconcileResponse: ...
+
+    async def reconcile_target_e2e(
+        self,
+        *,
+        command: RoomGraphCommand,
+        verified_invocation: VerifiedTargetE2EInvocation,
+        expected_thread: ThreadIdentity,
+    ) -> TargetE2EGraphResultEnvelope: ...
 
 
 class GatewayBackedGraphReconciliationService:
@@ -77,6 +97,45 @@ class GatewayBackedGraphReconciliationService:
                 owner_id=self._owner_id,
             )
             return self._materialize_response(command, reconciliation)
+        finally:
+            await self._gate.leave(token)
+
+    async def reconcile_target_e2e(
+        self,
+        *,
+        command: RoomGraphCommand,
+        verified_invocation: VerifiedTargetE2EInvocation,
+        expected_thread: ThreadIdentity,
+    ) -> TargetE2EGraphResultEnvelope:
+        token = await self._gate.enter()
+        try:
+            result = await self._gateway.reconcile_candidate_only(
+                command=command,
+                verified_invocation=verified_invocation,
+                expected_thread=expected_thread,
+            )
+            try:
+                envelope = TargetE2EGraphResultEnvelope.model_validate(
+                    result.result_envelope_json
+                )
+            except (TypeError, ValueError) as error:
+                raise GraphTerminalBindingError(
+                    "candidate result envelope is missing or invalid"
+                ) from error
+            if (
+                envelope.activation_id != verified_invocation.authority.activation_id
+                or envelope.room_fencing_token != verified_invocation.room_fencing_token
+                or envelope.command_hash != verified_invocation.command_hash
+                or envelope.command_envelope_hash
+                != verified_invocation.command_envelope_hash
+                or envelope.result_hash != result.result_hash
+                or envelope.proposal_hash != result.proposal_hash
+                or envelope.result_envelope_hash != result.result_envelope_hash
+            ):
+                raise GraphTerminalBindingError(
+                    "candidate result envelope differs from the sealed command"
+                )
+            return envelope
         finally:
             await self._gate.leave(token)
 

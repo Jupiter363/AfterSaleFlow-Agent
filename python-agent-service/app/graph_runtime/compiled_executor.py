@@ -25,6 +25,7 @@ from app.graph_runtime.ledger import ResultRecord
 from app.graph_runtime.persistence_models import GraphFenceContext
 from app.graph_runtime.result import TERMINAL_DRAFT_ADAPTER, ResultBindings, TerminalDraft
 from app.graph_runtime.state import validate_graph_state
+from app.graph_runtime.target_e2e import TargetE2ERoomProposalSource
 
 
 class CompiledStateGraphPort(Protocol):
@@ -88,6 +89,7 @@ class GraphPublicUpdate:
 class TerminalResultPlan:
     draft: TerminalDraft | dict[str, object]
     bindings: ResultBindings
+    target_proposal_source: TargetE2ERoomProposalSource | None = None
 
     def materialize(
         self,
@@ -95,7 +97,11 @@ class TerminalResultPlan:
         checkpoint_ns: str,
         checkpoint_id: str,
     ) -> ResultRecord:
-        return self.to_materializer(execution).materialize(checkpoint_ns, checkpoint_id)
+        return self.to_materializer(execution).materialize(
+            checkpoint_ns,
+            checkpoint_id,
+            fence=execution.fence,
+        )
 
     def to_materializer(
         self,
@@ -132,6 +138,7 @@ class TerminalResultPlan:
             request_hash=command.request_hash,
             draft=draft,
             bindings=bindings,
+            target_proposal_source=self.target_proposal_source,
         )
 
 
@@ -246,12 +253,18 @@ class CompiledGraphShadowExecutor:
         configurable = final_config.get("configurable") or {}
         checkpoint_ns = str(configurable.get("checkpoint_ns") or "")
         checkpoint_id = str(configurable.get("checkpoint_id") or "")
-        expected = materializer.materialize(checkpoint_ns, checkpoint_id)
+        expected = materializer.materialize(
+            checkpoint_ns,
+            checkpoint_id,
+            fence=execution.fence,
+        )
         final_fence = configurable.get(FENCE_CONTEXT_KEY)
         if (
             not isinstance(final_fence, GraphFenceContext)
             or final_fence.result_hash != expected.result_hash
             or final_fence.result_ref != expected.result_ref
+            or final_fence.proposal_hash != expected.proposal_hash
+            or final_fence.result_envelope_hash != expected.result_envelope_hash
             or dict(result_json) != dict(expected.result_json)
         ):
             raise GraphTerminalBindingError(
@@ -420,6 +433,7 @@ class CompiledGraphShadowExecutor:
             bindings=plan.bindings.model_copy(
                 update={"cognitive_revision": revision + 1}
             ),
+            target_proposal_source=plan.target_proposal_source,
         )
 
     @staticmethod

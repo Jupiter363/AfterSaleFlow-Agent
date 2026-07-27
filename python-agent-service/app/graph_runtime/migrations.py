@@ -1,7 +1,7 @@
 """Controlled Graph PostgreSQL migration job.
 
 Application replicas call readiness only. This module is the sole owner of checkpointer setup and
-G001-G005 DDL under a session advisory lock.
+G001-G006 DDL under a session advisory lock.
 """
 
 from __future__ import annotations
@@ -34,6 +34,7 @@ MIGRATION_FILENAMES: Final[tuple[str, ...]] = (
     "G003_shadow_comparison.sql",
     "G004_graph_fanout_bulkhead.sql",
     "G005_graph_fanout_fairness_and_cancellation.sql",
+    "G006_target_e2e_candidate.sql",
 )
 MIGRATIONS_DIRECTORY: Final[Path] = Path(__file__).resolve().parents[2] / "migrations" / "graph"
 CONTROL_KEY: Final[str] = "primary"
@@ -60,6 +61,11 @@ REQUIRED_MIGRATION_RELATIONS: Final[tuple[str, ...]] = (
     "agent_graph_fanout_tenant_turn",
     "agent_graph_fanout_permit",
     "agent_graph_fanout_permit_owner_generation",
+    "agent_graph_target_e2e_activation",
+    "agent_graph_target_e2e_environment_generation",
+    "agent_graph_target_e2e_activation_lifecycle",
+    "agent_graph_target_e2e_synthetic_case_reservation",
+    "agent_graph_target_e2e_room_authority",
 )
 PINNED_PACKAGE_VERSIONS: Final[dict[str, str]] = {
     "langgraph": "1.2.6",
@@ -606,6 +612,9 @@ class GraphMigrationRunner:
             "agent_graph_command",
             "agent_graph_command_attempt",
             "agent_graph_lease",
+            "agent_graph_target_e2e_room_authority",
+            "agent_graph_target_e2e_environment_generation",
+            "agent_graph_target_e2e_activation_lifecycle",
         )
         runtime_read_only = (
             "checkpoint_migrations",
@@ -667,6 +676,16 @@ class GraphMigrationRunner:
                 sql.SQL("grant select, insert on {}.agent_graph_invocation_nonce to {}").format(
                     schema, runtime
                 )
+            )
+            await connection.execute(
+                sql.SQL(
+                    "grant select, insert on {}.agent_graph_target_e2e_activation to {}"
+                ).format(schema, runtime)
+            )
+            await connection.execute(
+                sql.SQL(
+                    "grant select, insert on {}.agent_graph_target_e2e_synthetic_case_reservation to {}"
+                ).format(schema, runtime)
             )
             await connection.execute(
                 sql.SQL("grant select, insert on {}.agent_graph_shadow_comparison to {}").format(

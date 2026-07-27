@@ -23,9 +23,14 @@ from app.graph_runtime.persistence_models import (
     GraphBindingError,
     GraphFenceContext,
     GraphFenceError,
+    GraphGatewayMode,
     GraphPoolConfig,
 )
 from app.graph_runtime.ledger import PostgresCommandLedger, ResultRecord
+from app.graph_runtime.target_e2e import (
+    TargetE2ERoomProposalSource,
+    build_target_e2e_result_envelope,
+)
 from app.graph_runtime.result import (
     TERMINAL_DRAFT_ADAPTER,
     ResultBindings,
@@ -49,6 +54,44 @@ select fencing_token
    and released_at is null
    and lease_expires_at > clock_timestamp()
  for update
+"""
+
+TARGET_E2E_ROOM_FENCE_SQL: Final[str] = """
+select room.room_fencing_token
+  from agent_graph_target_e2e_room_authority room
+  join agent_graph_target_e2e_activation activation
+    on activation.activation_id = room.activation_id
+  join agent_graph_target_e2e_activation_lifecycle lifecycle
+    on lifecycle.activation_id = activation.activation_id
+  join agent_graph_command command
+    on command.thread_id = %s
+   and command.command_id = %s
+   and command.activation_id = activation.activation_id
+ where room.tenant_surrogate = %s
+   and room.case_id = %s
+   and room.room_type = %s
+   and room.activation_id = %s
+   and room.room_epoch = %s
+   and room.room_fencing_token = %s
+   and command.execution_mode = 'TARGET_E2E_CANDIDATE'
+   and command.room_fencing_token = room.room_fencing_token
+   and command.command_hash = %s
+   and command.command_envelope_hash = %s
+   and command.registered_at < activation.expires_at
+   and lifecycle.lifecycle_state in ('ACTIVE', 'DRAIN_ONLY')
+ for share
+"""
+
+DRAIN_EXPIRED_TARGET_E2E_SQL: Final[str] = """
+update agent_graph_target_e2e_activation_lifecycle lifecycle
+   set lifecycle_state = 'DRAIN_ONLY',
+       drain_only_at = coalesce(drain_only_at, activation.expires_at),
+       updated_at = clock_timestamp()
+  from agent_graph_target_e2e_activation activation
+ where lifecycle.activation_id = activation.activation_id
+   and lifecycle.activation_id = %s
+   and lifecycle.lifecycle_state = 'ACTIVE'
+   and activation.expires_at <= clock_timestamp()
 """
 
 BIND_CHECKPOINT_SQL: Final[str] = """
@@ -223,6 +266,7 @@ class TerminalResultMaterializer:
     request_hash: str
     draft: TerminalDraft
     bindings: ResultBindings
+    target_proposal_source: TargetE2ERoomProposalSource | None = None
 
     def __post_init__(self) -> None:
         try:
@@ -231,16 +275,27 @@ class TerminalResultMaterializer:
             raise TypeError("terminal result materializer draft is invalid") from error
         if not isinstance(self.bindings, ResultBindings):
             raise TypeError("terminal result materializer bindings are invalid")
+        if self.target_proposal_source is not None and not isinstance(
+            self.target_proposal_source,
+            TargetE2ERoomProposalSource,
+        ):
+            raise TypeError("target-E2E proposal source is invalid")
         object.__setattr__(self, "draft", draft)
 
-    def materialize(self, checkpoint_ns: str, checkpoint_id: str) -> ResultRecord:
+    def materialize(
+        self,
+        checkpoint_ns: str,
+        checkpoint_id: str,
+        *,
+        fence: GraphFenceContext | None = None,
+    ) -> ResultRecord:
         if len(checkpoint_ns) > 128 or not checkpoint_id or len(checkpoint_id) > 128:
             raise GraphBindingError("terminal checkpoint identity is invalid")
         bindings = self.bindings.model_copy(update={"checkpoint_id": checkpoint_id})
         result = project_room_graph_result(self.draft, bindings)
         result_json = result.model_dump(mode="json", exclude_none=True)
         result_ref = f"urn:after-sale-flow:graph-result:{result.output_hash}"
-        return ResultRecord(
+        record = ResultRecord(
             result_id=f"result.{result.output_hash[:32]}",
             thread_id=self.thread_id,
             command_id=bindings.command_id,
@@ -254,6 +309,42 @@ class TerminalResultMaterializer:
             result_ref=result_ref,
             result_hash=result.output_hash,
             usage_json=result.usage.model_dump(mode="json"),
+        )
+        if fence is None or fence.execution_lane is GraphGatewayMode.SHADOW:
+            if self.target_proposal_source is not None:
+                raise GraphBindingError("SHADOW terminal result cannot carry target proposal")
+            return record
+        if fence.execution_lane is not GraphGatewayMode.TARGET_E2E_CANDIDATE:
+            raise GraphBindingError("terminal result has an invalid execution lane")
+        proposal_source = self.target_proposal_source
+        if proposal_source is None:
+            raise GraphBindingError("candidate terminal result requires a proposal source")
+        try:
+            proposal_source.require_result_binding(result)
+            envelope = build_target_e2e_result_envelope(
+                result,
+                activation_id=fence.activation_id or "",
+                room_fencing_token=fence.room_fencing_token or 0,
+                command_hash=fence.command_hash or "",
+                command_envelope_hash=fence.command_envelope_hash or "",
+                proposal_hash=proposal_source.proposal_hash,
+            )
+            envelope.require_proposal_hash(
+                proposal_source.proposal.model_dump(mode="json")
+            )
+        except ValueError as error:
+            raise GraphBindingError("candidate terminal result binding is invalid") from error
+        return replace(
+            record,
+            execution_lane=fence.execution_lane,
+            activation_id=fence.activation_id,
+            room_fencing_token=fence.room_fencing_token,
+            command_hash=fence.command_hash,
+            command_envelope_hash=fence.command_envelope_hash,
+            proposal_hash=envelope.proposal_hash,
+            result_envelope_hash=envelope.result_envelope_hash,
+            proposal_source_json=proposal_source.model_dump(mode="json"),
+            result_envelope_json=envelope.model_dump(mode="json", exclude_none=True),
         )
 
 
@@ -546,6 +637,9 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
         if materializer is None:
             return None, checkpoint
         configurable = config.get("configurable") or {}
+        fence = configurable.get(FENCE_CONTEXT_KEY)
+        if not isinstance(fence, GraphFenceContext):
+            raise GraphBindingError("terminal result has no trusted Graph fence")
         checkpoint_ns = str(configurable.get("checkpoint_ns") or "")
         checkpoint_id = str(checkpoint.get("id") or "")
         channel_values = checkpoint.get("channel_values")
@@ -563,7 +657,11 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
             raise GraphBindingError(
                 "terminal materialization requires a versioned result_json checkpoint value"
             )
-        result = materializer.materialize(checkpoint_ns, checkpoint_id)
+        result = materializer.materialize(
+            checkpoint_ns,
+            checkpoint_id,
+            fence=fence,
+        )
         if result.checkpoint_ns != checkpoint_ns or result.checkpoint_id != checkpoint_id:
             raise GraphBindingError("terminal materializer returned another checkpoint identity")
         FencedPostgresSaver._require_terminal_state_matches_result(channel_values, result)
@@ -653,9 +751,35 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
             fence,
             result_hash=result.result_hash,
             result_ref=result.result_ref,
+            proposal_hash=result.proposal_hash,
+            result_envelope_hash=result.result_envelope_hash,
         )
 
     async def _lock_fence(self, connection: Any, fence: GraphFenceContext) -> None:
+        if fence.execution_lane is GraphGatewayMode.TARGET_E2E_CANDIDATE:
+            await connection.execute(
+                DRAIN_EXPIRED_TARGET_E2E_SQL,
+                (fence.activation_id,),
+            )
+            room_row = await (
+                await connection.execute(
+                    TARGET_E2E_ROOM_FENCE_SQL,
+                    (
+                        fence.thread_id,
+                        fence.command_id,
+                        fence.tenant_surrogate,
+                        fence.case_id,
+                        fence.room_type,
+                        fence.activation_id,
+                        fence.room_epoch,
+                        fence.room_fencing_token,
+                        fence.command_hash,
+                        fence.command_envelope_hash,
+                    ),
+                )
+            ).fetchone()
+            if room_row is None:
+                raise GraphFenceError("Java room authority fence is stale")
         cursor = await connection.execute(
             FENCE_LOCK_SQL,
             (
@@ -866,16 +990,40 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
     ) -> None:
         if not isinstance(metadata, dict):
             raise GraphBindingError("checkpoint metadata is not an object")
-        expected = {
+        base_expected = {
             "graph_thread_id": fence.thread_id,
             "graph_room_epoch": fence.room_epoch,
             "graph_key": fence.graph_key,
             "graph_version": fence.graph_version,
             "graph_checkpoint_schema_version": fence.checkpoint_schema_version,
         }
-        for key, value in expected.items():
+        candidate_expected = {
+            "graph_execution_lane": fence.execution_lane.value,
+            "graph_activation_id": fence.activation_id,
+            "graph_room_fencing_token": fence.room_fencing_token,
+            "graph_command_hash": fence.command_hash,
+            "graph_command_envelope_hash": fence.command_envelope_hash,
+            "graph_environment_id": fence.environment_id,
+            "graph_environment_generation": fence.environment_generation,
+            "graph_tenant_surrogate": fence.tenant_surrogate,
+            "graph_case_id": fence.case_id,
+            "graph_room_type": fence.room_type,
+            "graph_binding_hash": fence.binding_hash,
+            "graph_code_build_id": fence.code_build_id,
+            "graph_proposal_hash": fence.proposal_hash,
+            "graph_result_envelope_hash": fence.result_envelope_hash,
+        }
+        for key, value in base_expected.items():
             if metadata.get(key) != value:
                 raise GraphBindingError(f"checkpoint metadata conflicts at {key}")
+        if fence.execution_lane is GraphGatewayMode.TARGET_E2E_CANDIDATE:
+            for key, value in candidate_expected.items():
+                if metadata.get(key) != value:
+                    raise GraphBindingError(f"checkpoint metadata conflicts at {key}")
+        else:
+            for key, value in candidate_expected.items():
+                if key in metadata and metadata[key] != value:
+                    raise GraphBindingError(f"checkpoint metadata conflicts at {key}")
         command_id = metadata.get("graph_command_id")
         request_hash = metadata.get("graph_request_hash")
         fencing_token = metadata.get("graph_fencing_token")

@@ -13,8 +13,16 @@ from app.api.graph_commands import (
     GraphReconciliationEndpointDependencies,
     create_graph_reconciliation_router,
 )
-from app.contracts.v1.codec import ContractCodec
-from app.contracts.v1.models import GraphReconcileResponse, RoomGraphCommand
+from app.config import (
+    GraphTargetE2EBindingSettings,
+    GraphTargetE2ERuntimeContextSettings,
+)
+from app.contracts.v1.codec import (
+    ContractCodec,
+    canonical_sha256,
+    canonical_sha256_omitting,
+)
+from app.contracts.v1.models import GraphReconcileResponse, RoomGraphCommand, RoomGraphResult
 from app.graph_runtime.errors import (
     GraphCommandAbortedError,
     GraphCommandCancelledError,
@@ -30,6 +38,14 @@ from app.graph_runtime.errors import (
     GraphTerminalBindingError,
 )
 from app.graph_runtime.identity import ActorScopeBinding, RoomType, ThreadIdentity
+from app.graph_runtime.target_e2e import (
+    TargetE2EGraphCommandEnvelope,
+    TargetE2EGraphResultEnvelope,
+    TargetE2EInvocationClaims,
+    TargetE2ERuntimeAuthority,
+    VerifiedTargetE2EInvocation,
+    target_e2e_command_hash,
+)
 from app.security.invocation_envelope import (
     InvocationClaims,
     ReconciliationClaims,
@@ -49,11 +65,30 @@ RESPONSE_FIXTURE = (
     CONTRACT_ROOT / "fixtures/valid/graph-reconcile-response-valid.json"
 )
 PATH = "/internal/graphs/commands/reconcile"
+TARGET_PATH = "/internal/graphs/target-e2e/commands/reconcile"
 
 
 def _command() -> tuple[RoomGraphCommand, dict[str, Any]]:
     instance = json.loads(COMMAND_FIXTURE.read_text(encoding="utf-8"))["instance"]
     return RoomGraphCommand.model_validate(instance), instance
+
+
+def _target_command() -> RoomGraphCommand:
+    command, _ = _command()
+    values = command.model_dump(mode="json", exclude_none=True)
+    values.update(
+        {
+            "graph_key": "all-rooms/target-e2e.v1",
+            "graph_version": "target-e2e-graph.2026-07-27.1",
+            "checkpoint_schema_version": "target-e2e-checkpoint.v1",
+            "invocation_context": {
+                **values["invocation_context"],
+                "output_schema_version": "target-e2e-room-proposal-source.v1",
+            },
+        }
+    )
+    values["request_hash"] = canonical_sha256_omitting(values, "request_hash")
+    return RoomGraphCommand.model_validate(values)
 
 
 def _response(command: RoomGraphCommand) -> GraphReconcileResponse:
@@ -489,3 +524,191 @@ def test_unclassified_service_failure_is_not_automatically_retried() -> None:
     }
     assert "private programming error" not in response.text
     assert len(service.calls) == 1
+
+
+def test_target_reconciliation_returns_exact_result_envelope_without_proposal_bytes() -> None:
+    command = _target_command()
+    activation_id = f"p9act.v1.{'a' * 32}"
+    command_hash = target_e2e_command_hash(command)
+    envelope_values = {
+        "schema_version": "target-e2e-graph-command-envelope.v1",
+        "execution_lane": "TARGET_E2E_CANDIDATE",
+        "activation_id": activation_id,
+        "room_fencing_token": 19,
+        "command_hash": command_hash,
+        "command": command.model_dump(mode="json", exclude_none=True),
+    }
+    command_envelope = TargetE2EGraphCommandEnvelope.model_validate(
+        {
+            **envelope_values,
+            "command_envelope_hash": canonical_sha256(envelope_values),
+        }
+    )
+    binding = GraphTargetE2EBindingSettings(
+        graph_key=command.graph_key,
+        graph_version=command.graph_version,
+        checkpoint_schema_version=command.checkpoint_schema_version,
+        state_schema_version="target-state.v1",
+        state_schema_hash="1" * 64,
+        command_schema_version="room-graph-command.v1",
+        result_schema_version="room-graph-result.v1",
+        agent_profile_id=command.invocation_context.agent_profile_id,
+        prompt_version=command.invocation_context.prompt_profile_id,
+        model_profile_id=command.invocation_context.model_profile_id,
+        output_schema_version=command.invocation_context.output_schema_version,
+        policy_version=command.invocation_context.policy_version,
+        guardrail_version=command.invocation_context.guardrail_version,
+        tool_policy_version=(
+            "no-tools.v1" if command.graph_key == "intake.v2" else "tools.none.v1"
+        ),
+        binding_hash="2" * 64,
+        code_build_id="target-build-1",
+        allowed_room_types=(command.room_type,),
+        allowed_stage_codes=(command.stage_code,),
+    )
+    context = GraphTargetE2ERuntimeContextSettings.model_validate(
+        {
+            "schemaVersion": "graph-target-e2e-runtime-context.v1",
+            "executionLane": "TARGET_E2E_CANDIDATE",
+            "activationId": activation_id,
+            "environmentId": "target-e2e-test",
+            "environmentGeneration": 7,
+            "candidateSha": "3" * 40,
+            "issuedAt": "2026-07-27T10:00:00Z",
+            "expiresAt": "2026-07-27T11:00:00Z",
+            "runNonce": "runtime-projection-nonce-0123456789abcdef",
+            "tenantSurrogate": command.tenant_surrogate,
+            "caseScope": {
+                "mode": "EXPLICIT_CASE_IDS",
+                "allowedCaseIds": [command.case_id],
+            },
+            "allowedRoomTypes": [command.room_type],
+            "composeProject": "p9_target_e2e",
+            "temporalNamespace": "target-e2e-test",
+            "buildBindings": {
+                "caseBuildId": "case-build-1",
+                "controlBuildId": "control-build-1",
+                "agentBuildId": "agent-build-1",
+            },
+            "imageDigests": {
+                "javaApi": f"sha256:{'1' * 64}",
+                "temporalControlWorker": f"sha256:{'2' * 64}",
+                "temporalAgentWorker": f"sha256:{'3' * 64}",
+                "pythonAgent": f"sha256:{'4' * 64}",
+                "frontend": f"sha256:{'5' * 64}",
+            },
+            "databaseIdentities": {
+                "domain": {
+                    "service": "domain-db",
+                    "database": "target_domain",
+                    "schema": "domain_runtime",
+                    "expectedUser": "java_domain_runtime",
+                },
+                "graph": {
+                    "service": "graph-db",
+                    "database": "target_graph",
+                    "schema": "graph_runtime",
+                    "runtimeUser": "graph_runtime",
+                    "environmentGeneration": 7,
+                    "restoreVerificationHash": "6" * 64,
+                },
+            },
+            "trustedSigningKeyIds": [command.invocation_context.envelope_key_id],
+            "perCommandManifestAllowed": False,
+        }
+    )
+    authority = TargetE2ERuntimeAuthority.from_context(context, (binding,))
+    claims = TargetE2EInvocationClaims(
+        iss="java-api-service",
+        aud="python-agent-service",
+        sub="graph-command",
+        iat=1_752_739_200,
+        nbf=1_752_739_200,
+        exp=1_752_739_260,
+        jti="target-reconcile-jti-001",
+        **invocation_binding_claims(command),
+        execution_lane="TARGET_E2E_CANDIDATE",
+        activation_id=activation_id,
+        room_fencing_token=19,
+        command_hash=command_hash,
+        command_envelope_hash=command_envelope.command_envelope_hash,
+    )
+    verified = VerifiedTargetE2EInvocation(
+        claims=claims,
+        key_id=command.invocation_context.envelope_key_id,
+        request_hash=command.request_hash,
+        transport_certificate_sha256="c" * 64,
+        authority=authority,
+        command_hash=command_hash,
+        command_envelope_hash=command_envelope.command_envelope_hash,
+        room_fencing_token=19,
+    )
+    nested_values = _response(command).result.model_dump(mode="json", exclude_none=True)
+    nested_values["output_hash"] = canonical_sha256_omitting(
+        nested_values,
+        "output_hash",
+    )
+    nested = RoomGraphResult.model_validate(nested_values)
+    result_values = {
+        "schema_version": "target-e2e-graph-result-envelope.v1",
+        "execution_lane": "TARGET_E2E_CANDIDATE",
+        "activation_id": activation_id,
+        "room_fencing_token": 19,
+        "command_hash": command_hash,
+        "command_envelope_hash": command_envelope.command_envelope_hash,
+        "result_hash": nested.output_hash,
+        "proposal_hash": "7" * 64,
+        "graph_output_authority": "PROPOSAL_ONLY",
+        "result": nested.model_dump(mode="json", exclude_none=True),
+    }
+    result_envelope = TargetE2EGraphResultEnvelope.model_validate(
+        {
+            **result_values,
+            "result_envelope_hash": canonical_sha256(result_values),
+        }
+    )
+
+    class TargetVerifier:
+        def verify_envelope(self, **_: Any) -> VerifiedTargetE2EInvocation:
+            return verified
+
+        def verify_envelope_for_reconciliation(
+            self,
+            **_: Any,
+        ) -> VerifiedTargetE2EInvocation:
+            return verified
+
+    class TargetThreadResolver:
+        async def resolve(self, **_: Any) -> ThreadIdentity:
+            return _thread(command)
+
+    class TargetService(ReconciliationService):
+        async def reconcile_target_e2e(self, **_: Any) -> TargetE2EGraphResultEnvelope:
+            return result_envelope
+
+    service = TargetService(_response(command))
+    app = FastAPI()
+    app.include_router(
+        create_graph_reconciliation_router(
+            GraphReconciliationEndpointDependencies(
+                mode="TARGET_E2E_CANDIDATE",
+                codec=ContractCodec(CONTRACT_ROOT),
+                transport_identity_resolver=IdentityResolver(),
+                envelope_verifier=Verifier(_verified_reconciliation(command)),
+                thread_identity_resolver=ThreadResolver(),
+                reconciliation_service=service,
+                ready=lambda: True,
+                target_e2e_envelope_verifier=TargetVerifier(),
+                target_e2e_thread_identity_resolver=TargetThreadResolver(),
+            )
+        )
+    )
+    response = TestClient(app).post(
+        TARGET_PATH,
+        content=json.dumps(command_envelope.model_dump(mode="json")),
+        headers=_headers(),
+    )
+
+    assert response.status_code == 200
+    assert response.json() == result_envelope.model_dump(mode="json", exclude_none=True)
+    assert "proposal" not in response.json()

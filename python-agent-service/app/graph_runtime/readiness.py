@@ -42,6 +42,11 @@ REQUIRED_RELATIONS: Final[tuple[str, ...]] = (
     "agent_graph_fanout_tenant_turn",
     "agent_graph_fanout_permit",
     "agent_graph_fanout_permit_owner_generation",
+    "agent_graph_target_e2e_activation",
+    "agent_graph_target_e2e_environment_generation",
+    "agent_graph_target_e2e_activation_lifecycle",
+    "agent_graph_target_e2e_synthetic_case_reservation",
+    "agent_graph_target_e2e_room_authority",
 )
 RUNTIME_DELETE_FORBIDDEN_RELATIONS: Final[tuple[str, ...]] = REQUIRED_RELATIONS
 RUNTIME_APPEND_ONLY_RELATIONS: Final[tuple[str, ...]] = (
@@ -49,6 +54,8 @@ RUNTIME_APPEND_ONLY_RELATIONS: Final[tuple[str, ...]] = (
     "agent_graph_invocation_nonce",
     "agent_graph_shadow_comparison",
     "agent_graph_shadow_cleanup_receipt",
+    "agent_graph_target_e2e_activation",
+    "agent_graph_target_e2e_synthetic_case_reservation",
 )
 
 CONSISTENCY_QUERIES: Final[tuple[tuple[str, str], ...]] = (

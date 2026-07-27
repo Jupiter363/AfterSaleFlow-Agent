@@ -263,6 +263,27 @@ def test_signed_command_streams_only_validated_agent_stream_v2_events() -> None:
     assert service.calls[0][2].agent_session_id == "trusted-agent-session-1"
 
 
+def test_graph_command_endpoint_rejects_bootstrap_activation_header() -> None:
+    command, instance = _command()
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    service = FakeStreamService(())
+    client = _client(command=command, private_key=private_key, service=service)
+
+    response = client.post(
+        "/internal/graphs/commands/stream",
+        content=json.dumps(instance, separators=(",", ":")),
+        headers={
+            "Authorization": f"Bearer {_token(command, private_key)}",
+            "Content-Type": "application/json; charset=utf-8",
+            "X-AfterSaleFlow-Target-E2E-Activation": "forbidden",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "TARGET_E2E_ACTIVATION_HEADER_FORBIDDEN"
+    assert service.calls == []
+
+
 def test_duplicate_json_member_is_rejected_before_security_or_gateway_dispatch() -> None:
     command, instance = _command()
     private_key = ec.generate_private_key(ec.SECP256R1())

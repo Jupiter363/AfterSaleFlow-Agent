@@ -1,8 +1,8 @@
-"""Deployment-owned bindings for signed-synthetic SHADOW runtimes."""
+"""Deployment-owned bindings for SHADOW and isolated target-E2E runtimes."""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Iterable, Mapping
 import hmac
 import re
 from typing import Any, cast
@@ -49,6 +49,19 @@ from app.graph_runtime.postgres_bulkhead import PostgresGraphFanoutBulkhead
 from app.graph_runtime.registry import VersionBinding
 from app.graph_runtime.result import ResultBindings, TERMINAL_DRAFT_ADAPTER
 from app.graph_runtime.state import CommonGraphState, validate_graph_state
+from app.graph_runtime.target_e2e import (
+    TargetE2EInputAuthorizer,
+    TargetE2EThreadIdentityResolver,
+)
+from app.graph_runtime.target_e2e_composite import (
+    TARGET_E2E_CHECKPOINT_SCHEMA_VERSION,
+    TARGET_E2E_GRAPH_KEY,
+    TARGET_E2E_GRAPH_VERSION,
+    TARGET_E2E_OUTPUT_SCHEMA_VERSION,
+    TARGET_E2E_ROOM_TYPES,
+    TargetE2ECompositeExecutor,
+    TargetE2ERoomProvider,
+)
 from app.graph_runtime.topology import build_shadow_kernel_graph
 from app.security.invocation_envelope import (
     InvocationClaims,
@@ -198,18 +211,32 @@ class DeploymentManifestInputAuthorizer:
                 )
 
 
-def build_graph_runtime_bindings(settings: Settings) -> GraphRuntimeBindings:
-    """Build non-overridable Phase 3 bindings from validated deployment settings."""
+def build_graph_runtime_bindings(
+    settings: Settings,
+    *,
+    target_e2e_provider_factory: (
+        Callable[[GraphExecutorKernel], Iterable[TargetE2ERoomProvider]] | None
+    ) = None,
+) -> GraphRuntimeBindings:
+    """Build non-overridable exact bindings from validated deployment settings."""
 
-    if settings.graph_gateway_mode != "SHADOW":
-        raise ValueError("production Graph bindings are available only in SHADOW mode")
-    bindings = tuple(settings.graph_shadow_bindings)
-    threads = tuple(settings.graph_shadow_threads)
-    if not bindings or not threads:
-        raise ValueError("signed-synthetic SHADOW bindings are incomplete")
-
-    resolver = DeploymentManifestThreadResolver(bindings, threads)
-    authorizer = DeploymentManifestInputAuthorizer(bindings, threads)
+    if settings.graph_gateway_mode == "SHADOW":
+        bindings = tuple(settings.graph_shadow_bindings)
+        threads = tuple(settings.graph_shadow_threads)
+        if not bindings or not threads:
+            raise ValueError("signed-synthetic SHADOW bindings are incomplete")
+        resolver = DeploymentManifestThreadResolver(bindings, threads)
+        authorizer = DeploymentManifestInputAuthorizer(bindings, threads)
+    elif settings.graph_gateway_mode == "TARGET_E2E_CANDIDATE":
+        bindings = tuple(settings.graph_target_e2e_bindings)
+        if not bindings:
+            raise ValueError("target-E2E runtime requires exact candidate bindings")
+        resolver = TargetE2EThreadIdentityResolver()
+        authorizer = TargetE2EInputAuthorizer()
+    else:
+        raise ValueError(
+            "production Graph bindings are available only in SHADOW or TARGET_E2E_CANDIDATE"
+        )
     structured_client: LiteLlmProxyClient | None = None
     intake_transport: StructuredClientTransport | None = None
     intake_exchange: JavaIntakeExchangeClient | None = None
@@ -229,6 +256,20 @@ def build_graph_runtime_bindings(settings: Settings) -> GraphRuntimeBindings:
     def executor_registry_factory(
         kernel: GraphExecutorKernel,
     ) -> ExactShadowExecutorRegistry:
+        if settings.graph_gateway_mode == "TARGET_E2E_CANDIDATE":
+            if target_e2e_provider_factory is None:
+                raise GraphContractError(
+                    "target-E2E all-room provider assembly is unavailable"
+                )
+            return ExactShadowExecutorRegistry(
+                (
+                    _target_e2e_executor_registration(
+                        bindings[0],
+                        kernel,
+                        providers=target_e2e_provider_factory(kernel),
+                    ),
+                )
+            )
         registrations = [
             _executor_registration(
                 binding,
@@ -250,6 +291,34 @@ def build_graph_runtime_bindings(settings: Settings) -> GraphRuntimeBindings:
         thread_identity_resolver=resolver,
         input_authorizer=authorizer,
         executor_registry_factory=executor_registry_factory,
+    )
+
+
+def _target_e2e_executor_registration(
+    configured: GraphShadowBindingSettings,
+    kernel: GraphExecutorKernel,
+    *,
+    providers: Iterable[TargetE2ERoomProvider],
+) -> ShadowExecutorRegistration:
+    del kernel
+    if (
+        configured.graph_key != TARGET_E2E_GRAPH_KEY
+        or configured.graph_version != TARGET_E2E_GRAPH_VERSION
+        or configured.checkpoint_schema_version != TARGET_E2E_CHECKPOINT_SCHEMA_VERSION
+        or configured.output_schema_version != TARGET_E2E_OUTPUT_SCHEMA_VERSION
+        or frozenset(configured.allowed_room_types) != {room.value for room in TARGET_E2E_ROOM_TYPES}
+    ):
+        raise GraphContractError("target-E2E executor differs from the frozen composite binding")
+    binding = _version_binding(configured)
+    return ShadowExecutorRegistration(
+        binding=binding,
+        executor=TargetE2ECompositeExecutor(providers),
+        provider_binding=ProviderRuntimeBinding(
+            model_profile_id=binding.model_profile_id,
+            provider="target-e2e-composite",
+            model="room-provider-dispatch",
+            allowed_nodes=frozenset(room.value for room in TARGET_E2E_ROOM_TYPES),
+        ),
     )
 
 

@@ -22,6 +22,7 @@ from app.api.graph_commands import (
     TransportIdentityResolver,
     TrustedReconciliationThreadIdentityResolver,
     TrustedThreadIdentityResolver,
+    TargetE2EInvocationEnvelopeVerifierPort,
 )
 from app.api.graph_reconciliation_service import (
     GatewayBackedGraphReconciliationService,
@@ -49,6 +50,15 @@ from app.graph_runtime.postgres_bulkhead import (
     PostgresGraphFanoutBulkhead,
 )
 from app.graph_runtime.readiness import GraphPersistenceReadinessProbe
+from app.graph_runtime.registry import PostgresGraphVersionRegistry
+from app.graph_runtime.target_e2e import (
+    PostgresTargetE2EActivationRepository,
+    TargetE2EGraphCommandEnvelope,
+    TargetE2EGraphResultEnvelope,
+    TargetE2EInvocationVerifier,
+    TargetE2ERuntimeAuthority,
+    VerifiedTargetE2EInvocation,
+)
 from app.security.graph_runtime import (
     GraphSecurityRuntime,
     _open_for_lifecycle as _open_graph_security_runtime_for_lifecycle,
@@ -148,6 +158,7 @@ class GraphRuntimeInstance(Protocol):
     reconciliation_verifier: ReconciliationEnvelopeVerifier
     stream_service: GraphCommandStreamService
     reconciliation_service: GraphReconciliationService
+    target_e2e_verifier: TargetE2EInvocationEnvelopeVerifierPort | None
 
     @property
     def ready(self) -> bool: ...
@@ -179,6 +190,8 @@ class GraphApplicationRuntime:
         admission_gate: GraphStreamAdmissionGate,
         execution_verifier: InvocationEnvelopeVerifier,
         reconciliation_verifier: ReconciliationEnvelopeVerifier,
+        target_e2e_verifier: TargetE2EInvocationVerifier | None = None,
+        mode: GraphGatewayMode = GraphGatewayMode.SHADOW,
     ) -> None:
         self._checkpoint_runtime = checkpoint_runtime
         self._persistence_probe = persistence_probe
@@ -190,6 +203,8 @@ class GraphApplicationRuntime:
         self._admission_gate = admission_gate
         self.execution_verifier = execution_verifier
         self.reconciliation_verifier = reconciliation_verifier
+        self.target_e2e_verifier = target_e2e_verifier
+        self._mode = mode
         self._persistence_ready = True
         self._bulkhead_ready = True
         self._closed = False
@@ -204,12 +219,12 @@ class GraphApplicationRuntime:
         bindings: GraphRuntimeBindings,
     ) -> GraphApplicationRuntime:
         mode = GraphGatewayMode(settings.graph_gateway_mode)
-        if mode is not GraphGatewayMode.SHADOW:
-            raise ValueError("Graph application runtime opens only in SHADOW mode")
+        if mode is GraphGatewayMode.DISABLED:
+            raise ValueError("Graph application runtime opens only in an active mode")
         if settings.graph_database_dsn is None or settings.graph_jwks_url is None:
-            raise ValueError("SHADOW Graph dependencies are incomplete")
+            raise ValueError("active Graph dependencies are incomplete")
         if not callable(bindings.executor_registry_factory):
-            raise ValueError("SHADOW Graph runtime requires an executor registry factory")
+            raise ValueError("active Graph runtime requires an executor registry factory")
 
         pool_config = GraphPoolConfig(
             schema=settings.graph_database_schema,
@@ -263,6 +278,46 @@ class GraphApplicationRuntime:
                 refresh_interval_seconds=settings.graph_jwks_refresh_seconds,
                 referenced_key_ids=gateway.referenced_verification_key_ids,
             )
+            target_e2e_verifier: TargetE2EInvocationVerifier | None = None
+            if mode is GraphGatewayMode.TARGET_E2E_CANDIDATE:
+                context = settings.graph_target_e2e_runtime_context
+                if context is None or not settings.graph_target_e2e_bindings:
+                    raise ValueError("target-E2E runtime projection is incomplete")
+                authority = TargetE2ERuntimeAuthority.from_context(
+                    context,
+                    settings.graph_target_e2e_bindings,
+                )
+                async with checkpoint_runtime.pool.connection(
+                    timeout=settings.graph_pool_acquire_timeout_seconds
+                ) as connection:
+                    async with connection.transaction():
+                        for configured in settings.graph_target_e2e_bindings:
+                            registered_binding = await PostgresGraphVersionRegistry().load(
+                                connection,
+                                graph_key=configured.graph_key,
+                                graph_version=configured.graph_version,
+                                checkpoint_schema_version=(
+                                    configured.checkpoint_schema_version
+                                ),
+                            )
+                            registered_binding.require_new_candidate_command()
+                            if (
+                                registered_binding.binding.binding_hash
+                                != configured.binding_hash
+                                or registered_binding.binding.code_build_id
+                                != configured.code_build_id
+                            ):
+                                raise ValueError(
+                                    "target-E2E executor differs from candidate registry"
+                                )
+                        await PostgresTargetE2EActivationRepository().register(
+                            connection,
+                            authority,
+                        )
+                target_e2e_verifier = TargetE2EInvocationVerifier(
+                    key_resolver=security_runtime.resolver,
+                    authority=authority,
+                )
             executors = bindings.executor_registry_factory(
                 GraphExecutorKernel(
                     saver=checkpoint_runtime.saver,
@@ -304,6 +359,8 @@ class GraphApplicationRuntime:
                 reconciliation_verifier=ReconciliationEnvelopeVerifier(
                     key_resolver=security_runtime.resolver,
                 ),
+                target_e2e_verifier=target_e2e_verifier,
+                mode=mode,
             )
             await gate.start()
             return runtime
@@ -337,7 +394,7 @@ class GraphApplicationRuntime:
         if self._closed:
             return GraphRuntimeReadiness(
                 ready=False,
-                mode=GraphGatewayMode.SHADOW,
+                mode=self._mode,
                 code="GRAPH_RUNTIME_CLOSED",
                 accepting=False,
                 persistence_code="GRAPH_PERSISTENCE_CLOSED",
@@ -385,7 +442,7 @@ class GraphApplicationRuntime:
             code = "GRAPH_READY"
         return GraphRuntimeReadiness(
             ready=ready,
-            mode=GraphGatewayMode.SHADOW,
+            mode=self._mode,
             code=code,
             accepting=self._admission_gate.accepting,
             persistence_code=(
@@ -445,6 +502,7 @@ class GraphRuntimeHandle:
         )
         self._runtime: GraphRuntimeInstance | None = None
         self._execution_verifier = _RuntimeExecutionVerifier(self)
+        self._target_e2e_verifier = _RuntimeTargetE2EVerifier(self)
         self._reconciliation_verifier = _RuntimeReconciliationVerifier(self)
         self._stream_service = _RuntimeStreamService(self)
         self._reconciliation_service = _RuntimeReconciliationService(self)
@@ -474,6 +532,7 @@ class GraphRuntimeHandle:
             thread_identity_resolver=self._thread_resolver,
             stream_service=self._stream_service,
             ready=lambda: self.ready,
+            target_e2e_envelope_verifier=self._target_e2e_verifier,
         )
 
     def reconciliation_endpoint_dependencies(
@@ -490,6 +549,11 @@ class GraphRuntimeHandle:
             ),
             reconciliation_service=self._reconciliation_service,
             ready=lambda: self.ready,
+            target_e2e_envelope_verifier=self._target_e2e_verifier,
+            target_e2e_thread_identity_resolver=cast(
+                TrustedThreadIdentityResolver,
+                self._thread_resolver,
+            ),
         )
 
     @asynccontextmanager
@@ -497,12 +561,17 @@ class GraphRuntimeHandle:
         if self._mode is GraphGatewayMode.DISABLED:
             yield
             return
-        if self._bindings is None:
-            raise RuntimeError("SHADOW Graph mode requires trusted runtime bindings")
-        runtime = await self._runtime_factory(self._settings, self._bindings)
+        bindings = self._bindings
+        if bindings is None and self._mode is GraphGatewayMode.TARGET_E2E_CANDIDATE:
+            from app.graph_runtime.production_bindings import build_graph_runtime_bindings
+
+            bindings = build_graph_runtime_bindings(self._settings)
+        if bindings is None:
+            raise RuntimeError("active Graph mode requires trusted runtime bindings")
+        runtime = await self._runtime_factory(self._settings, bindings)
         try:
             if not runtime.ready:
-                raise RuntimeError("SHADOW Graph runtime did not become ready during startup")
+                raise RuntimeError("active Graph runtime did not become ready during startup")
             self._runtime = runtime
             try:
                 yield
@@ -579,6 +648,49 @@ class _RuntimeExecutionVerifier:
         return verified
 
 
+class _RuntimeTargetE2EVerifier:
+    def __init__(self, handle: GraphRuntimeHandle) -> None:
+        self._handle = handle
+
+    def verify_envelope(
+        self,
+        *,
+        token: str,
+        envelope: TargetE2EGraphCommandEnvelope,
+        transport_identity: TransportIdentity,
+    ) -> VerifiedTargetE2EInvocation:
+        verifier = self._handle.require_runtime().target_e2e_verifier
+        if verifier is None:
+            raise InvocationEnvelopeError("TARGET_E2E_VERIFIER_NOT_CONFIGURED")
+        verified = verifier.verify_envelope(
+            token=token,
+            envelope=envelope,
+            transport_identity=transport_identity,
+        )
+        if not isinstance(verified, VerifiedTargetE2EInvocation):
+            raise InvocationEnvelopeError("TARGET_E2E_CREDENTIAL_TYPE_REJECTED")
+        return verified
+
+    def verify_envelope_for_reconciliation(
+        self,
+        *,
+        token: str,
+        envelope: TargetE2EGraphCommandEnvelope,
+        transport_identity: TransportIdentity,
+    ) -> VerifiedTargetE2EInvocation:
+        verifier = self._handle.require_runtime().target_e2e_verifier
+        if verifier is None:
+            raise InvocationEnvelopeError("TARGET_E2E_VERIFIER_NOT_CONFIGURED")
+        verified = verifier.verify_envelope_for_reconciliation(
+            token=token,
+            envelope=envelope,
+            transport_identity=transport_identity,
+        )
+        if not isinstance(verified, VerifiedTargetE2EInvocation):
+            raise InvocationEnvelopeError("TARGET_E2E_CREDENTIAL_TYPE_REJECTED")
+        return verified
+
+
 class _RuntimeReconciliationVerifier:
     def __init__(self, handle: GraphRuntimeHandle) -> None:
         self._handle = handle
@@ -633,6 +745,21 @@ class _RuntimeReconciliationService:
             command=command,
             verified_reconciliation=verified_reconciliation,
             expected_thread=expected_thread,
+        )
+
+    async def reconcile_target_e2e(
+        self,
+        *,
+        command: RoomGraphCommand,
+        verified_invocation: VerifiedTargetE2EInvocation,
+        expected_thread: ThreadIdentity,
+    ) -> TargetE2EGraphResultEnvelope:
+        return await (
+            self._handle.require_runtime().reconciliation_service.reconcile_target_e2e(
+                command=command,
+                verified_invocation=verified_invocation,
+                expected_thread=expected_thread,
+            )
         )
 
 

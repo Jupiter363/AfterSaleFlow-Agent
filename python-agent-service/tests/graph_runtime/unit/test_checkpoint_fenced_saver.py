@@ -20,6 +20,7 @@ from app.graph_runtime.persistence_models import (
     GraphBindingError,
     GraphFenceContext,
     GraphFenceError,
+    GraphGatewayMode,
 )
 from app.graph_runtime.result import CompletedDraft, ResultBindings
 from langgraph.checkpoint.base import CheckpointTuple
@@ -40,6 +41,32 @@ def _fence() -> GraphFenceContext:
         graph_key="hearing_flow",
         graph_version="hearing_flow.v2",
         checkpoint_schema_version="hearing_checkpoint.v2",
+    )
+
+
+def _candidate_fence() -> GraphFenceContext:
+    return GraphFenceContext(
+        thread_id=f"grt.v1.{'2' * 32}",
+        command_id="command-candidate-1",
+        owner_id="worker-1",
+        fencing_token=4,
+        request_hash=SHA_A,
+        room_epoch=3,
+        graph_key="intake.v2",
+        graph_version="intake.v2.1",
+        checkpoint_schema_version="intake-checkpoint.v2",
+        execution_lane=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+        activation_id=f"p9act.v1.{'3' * 32}",
+        room_fencing_token=11,
+        command_hash="4" * 64,
+        command_envelope_hash="5" * 64,
+        environment_id="target-e2e-test",
+        environment_generation=7,
+        tenant_surrogate="tenant-test",
+        case_id="case-test",
+        room_type="INTAKE",
+        binding_hash="6" * 64,
+        code_build_id="candidate-build-1",
     )
 
 
@@ -235,6 +262,25 @@ class _StatefulThreadPointerConnection:
         )
 
 
+class _CandidateFenceConnection:
+    def __init__(self, *, room_current: bool = True) -> None:
+        self.events: list[str] = []
+        self.room_current = room_current
+
+    async def execute(self, query: str, params: Any = None) -> _Cursor:
+        normalized = " ".join(query.split()).lower()
+        if "update agent_graph_target_e2e_activation_lifecycle" in normalized:
+            self.events.append("sql:drain-expired")
+            return _Cursor()
+        if "from agent_graph_target_e2e_room_authority" in normalized:
+            self.events.append("sql:room-fence")
+            return _Cursor({"room_fencing_token": 11} if self.room_current else None)
+        if "from agent_graph_lease" in normalized:
+            self.events.append("sql:graph-lease-fence")
+            return _Cursor({"fencing_token": 4})
+        raise AssertionError(f"unexpected SQL: {normalized}")
+
+
 class _ConnectionContext:
     def __init__(self, connection: _Connection) -> None:
         self._connection = connection
@@ -366,6 +412,31 @@ async def test_checkpoint_write_locks_fence_and_uses_one_connection() -> None:
     assert direct_savers[0].connection is connection
     assert direct_savers[0].put_calls == [_metadata()]
     assert saved["configurable"][FENCE_CONTEXT_KEY] == _fence()
+
+
+@pytest.mark.asyncio
+async def test_candidate_checkpoint_validates_java_room_fence_before_graph_lease() -> None:
+    connection = _CandidateFenceConnection()
+    saver, _ = _saver(connection)  # type: ignore[arg-type]
+
+    await saver._lock_fence(connection, _candidate_fence())  # noqa: SLF001
+
+    assert connection.events == [
+        "sql:drain-expired",
+        "sql:room-fence",
+        "sql:graph-lease-fence",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_stale_java_room_fence_rejects_before_graph_lease_lock() -> None:
+    connection = _CandidateFenceConnection(room_current=False)
+    saver, _ = _saver(connection)  # type: ignore[arg-type]
+
+    with pytest.raises(GraphFenceError, match="Java room authority fence is stale"):
+        await saver._lock_fence(connection, _candidate_fence())  # noqa: SLF001
+
+    assert connection.events == ["sql:drain-expired", "sql:room-fence"]
 
 
 @pytest.mark.asyncio
@@ -562,10 +633,17 @@ async def test_terminal_materializer_uses_langgraph_checkpoint_id_after_fence_lo
         materializer: TerminalResultMaterializer,
         checkpoint_ns: str,
         checkpoint_id: str,
+        *,
+        fence: GraphFenceContext | None = None,
     ) -> ResultRecord:
         connection.events.append("terminal:materialize")
         calls.append((checkpoint_ns, checkpoint_id))
-        return original(materializer, checkpoint_ns, checkpoint_id)
+        return original(
+            materializer,
+            checkpoint_ns,
+            checkpoint_id,
+            fence=fence,
+        )
 
     monkeypatch.setattr(TerminalResultMaterializer, "materialize", materialize)
     config = _terminal_config()
@@ -631,6 +709,8 @@ async def test_terminal_materializer_failure_rolls_back_after_fence_before_write
         materializer: TerminalResultMaterializer,
         checkpoint_ns: str,
         checkpoint_id: str,
+        *,
+        fence: GraphFenceContext | None = None,
     ) -> ResultRecord:
         connection.events.append("terminal:materialize")
         raise GraphBindingError("terminal projection failed")

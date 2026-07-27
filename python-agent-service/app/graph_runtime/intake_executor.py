@@ -30,14 +30,19 @@ from app.graph_runtime.gateway import GatewayExecution
 from app.graph_runtime.intake_binding import (
     IntakeInputLoader,
     IntakeProposalStore,
+    StoredIntakeProposal,
     build_governed_intake_runtime,
     build_intake_command_patch,
     build_intake_execution_state,
     canonical_intake_proposal,
     decode_authorized_intake_ingress,
 )
-from app.graph_runtime.persistence_models import GraphFenceContext
+from app.graph_runtime.persistence_models import GraphFenceContext, GraphGatewayMode
 from app.graph_runtime.result import CompletedDraft, ResultBindings
+from app.graph_runtime.target_e2e import (
+    TargetE2ERoomProposal,
+    TargetE2ERoomProposalSource,
+)
 from app.graphs.intake.runtime import IntakeRuntimeBundle
 from app.graphs.intake.state import IntakeGraphStateV2, IntakeTurnContext
 from app.graphs.intake.validators import validate_state
@@ -188,7 +193,8 @@ class CompiledIntakeGraphShadowExecutor:
                 uri=stored.uri,
                 sha256=stored.sha256,
             ),
-        ).materialize(checkpoint_ns, checkpoint_id)
+            target_proposal_source=self._target_proposal_source(execution, stored),
+        ).materialize(checkpoint_ns, checkpoint_id, fence=execution.fence)
         saved = await self._saver.acommit_external_terminal(
             final_config,
             ExternalTerminalCommit(result=result, cognitive_revision=revision),
@@ -198,6 +204,8 @@ class CompiledIntakeGraphShadowExecutor:
             not isinstance(saved_fence, GraphFenceContext)
             or saved_fence.result_ref != result.result_ref
             or saved_fence.result_hash != result.result_hash
+            or saved_fence.proposal_hash != result.proposal_hash
+            or saved_fence.result_envelope_hash != result.result_envelope_hash
         ):
             raise GraphTerminalBindingError(
                 "Intake generic result was not bound to the terminal fence"
@@ -379,6 +387,7 @@ class CompiledIntakeGraphShadowExecutor:
         cognitive_revision: int,
         usage: Usage,
         artifact: ArtifactPointer,
+        target_proposal_source: TargetE2ERoomProposalSource | None,
     ) -> TerminalResultMaterializer:
         command = execution.admission.command
         invocation = command.invocation_context
@@ -406,6 +415,32 @@ class CompiledIntakeGraphShadowExecutor:
                     policy_version=invocation.policy_version,
                     guardrail_version=invocation.guardrail_version,
                 ),
+            ),
+            target_proposal_source=target_proposal_source,
+        )
+
+    @staticmethod
+    def _target_proposal_source(
+        execution: GatewayExecution,
+        stored: StoredIntakeProposal,
+    ) -> TargetE2ERoomProposalSource | None:
+        if execution.fence.execution_lane is GraphGatewayMode.SHADOW:
+            return None
+        command = execution.admission.command
+        return TargetE2ERoomProposalSource(
+            schema_version="target-e2e-room-proposal-source.v1",
+            room_type="INTAKE",
+            proposal=TargetE2ERoomProposal(
+                schema_version="target-e2e-intake-proposal.v1",
+                proposal_id=f"target-proposal.{stored.sha256[:32]}",
+                command_id=command.command_id,
+                logical_run_id=command.logical_run_id,
+                attempt_id=command.attempt_id,
+                payload_schema_version=stored.schema_version,
+                payload_ref=f"urn:target-e2e:proposal:intake:{stored.sha256}",
+                payload_hash=stored.sha256,
+                terminal_class="COMPLETED",
+                formal_authority=False,
             ),
         )
 

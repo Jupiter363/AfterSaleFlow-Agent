@@ -192,8 +192,14 @@ async def test_inactive_thread_binding_is_readable_but_cannot_grant_execution() 
         await repository.require_exact(_Connection(row), identity)
 
 
-def test_registry_exposes_only_disabled_shadow_and_retired() -> None:
-    assert {state.value for state in RegistryState} == {"DISABLED", "SHADOW", "RETIRED"}
+def test_registry_exposes_candidate_without_formal_writer_authority() -> None:
+    assert {state.value for state in RegistryState} == {
+        "DISABLED",
+        "SHADOW",
+        "ACTIVE_CANDIDATE",
+        "RETIRED",
+    }
+    assert "FORMAL" not in {state.value for state in RegistryState}
     with pytest.raises(ValueError):
         RegistryState("FORMAL_WRITER")
 
@@ -241,6 +247,20 @@ async def test_disabled_rejects_execution_and_retired_allows_only_restore() -> N
     with pytest.raises(GraphVersionUnavailableError):
         retired.require_new_shadow_command()
     assert retired.require_thread_restore() == retired.binding
+
+
+@pytest.mark.asyncio
+async def test_candidate_registry_is_loadable_but_never_shadow_relabelled() -> None:
+    candidate = await PostgresGraphVersionRegistry().load(
+        _Connection(_registry_row("ACTIVE_CANDIDATE")),
+        graph_key="intake.flow",
+        graph_version="intake.v2",
+        checkpoint_schema_version="intake.checkpoint.v2",
+    )
+
+    assert candidate.require_new_candidate_command() == candidate.binding
+    with pytest.raises(GraphVersionUnavailableError):
+        candidate.require_new_shadow_command()
 
 
 def test_migration_safety_requires_every_quiescence_predicate() -> None:

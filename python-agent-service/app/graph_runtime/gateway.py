@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from enum import StrEnum
 import hmac
 from typing import Any, Final, Protocol
@@ -49,6 +50,12 @@ from app.graph_runtime.registry import (
     PostgresGraphVersionRegistry,
     RegistryRecord,
 )
+from app.graph_runtime.target_e2e import (
+    PostgresTargetE2ERoomAuthorityRepository,
+    PostgresTargetE2ESyntheticCaseRepository,
+    TargetE2ERuntimeAuthority,
+    VerifiedTargetE2EInvocation,
+)
 from app.security.invocation_envelope import (
     ReconciliationClaims,
     VerifiedInvocation,
@@ -91,6 +98,7 @@ class GatewayAdmission:
     record: CommandRecord
     action: AdmissionAction
     created: bool
+    candidate_authority: TargetE2ERuntimeAuthority | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,19 +185,23 @@ class GraphCommandGateway:
         acquire_timeout_seconds: float = 3.0,
     ) -> None:
         if not isinstance(mode, GraphGatewayMode):
-            raise GraphContractError("gateway mode must be DISABLED or SHADOW")
+            raise GraphContractError(
+                "gateway mode must be DISABLED, SHADOW, or TARGET_E2E_CANDIDATE"
+            )
         if acquire_timeout_seconds <= 0:
             raise GraphContractError("pool acquire timeout must be positive")
-        if mode is GraphGatewayMode.SHADOW and pool is None:
-            raise GraphContractError("SHADOW gateway requires Graph PostgreSQL")
-        if mode is GraphGatewayMode.SHADOW and input_authorizer is None:
-            raise GraphContractError("SHADOW gateway requires an immutable input authorizer")
+        if mode is not GraphGatewayMode.DISABLED and pool is None:
+            raise GraphContractError("active gateway requires Graph PostgreSQL")
+        if mode is not GraphGatewayMode.DISABLED and input_authorizer is None:
+            raise GraphContractError("active gateway requires an immutable input authorizer")
         self._mode = mode
         self._pool = pool
         self._threads = threads or PostgresThreadIdentityRepository()
         self._registry = registry or PostgresGraphVersionRegistry()
         self._ledger = ledger or PostgresCommandLedger()
         self._leases = leases or PostgresLeaseRepository()
+        self._target_room_authority = PostgresTargetE2ERoomAuthorityRepository()
+        self._target_synthetic_cases = PostgresTargetE2ESyntheticCaseRepository()
         self._recovery = PostgresRecoveryCoordinator(
             ledger=self._ledger,
             leases=self._leases,
@@ -209,6 +221,9 @@ class GraphCommandGateway:
 
         try:
             self._require_shadow()
+            execution_lane, activation_id, candidate_authority = (
+                self._require_invocation_lane(verified_invocation)
+            )
             self._require_invocation_binding(command, verified_invocation)
             self._require_command_thread(command, expected_thread)
             await self._input_authorizer.authorize(command=command, thread=expected_thread)
@@ -228,8 +243,46 @@ class GraphCommandGateway:
                     binding = CommandBinding.from_command(
                         command,
                         tool_policy_version=version.tool_policy_version,
+                        execution_lane=execution_lane,
+                        activation_id=activation_id,
+                        room_fencing_token=(
+                            verified_invocation.room_fencing_token
+                            if isinstance(verified_invocation, VerifiedTargetE2EInvocation)
+                            else None
+                        ),
+                        command_hash=(
+                            verified_invocation.command_hash
+                            if isinstance(verified_invocation, VerifiedTargetE2EInvocation)
+                            else None
+                        ),
+                        command_envelope_hash=(
+                            verified_invocation.command_envelope_hash
+                            if isinstance(verified_invocation, VerifiedTargetE2EInvocation)
+                            else None
+                        ),
                     )
                     version.require_profile(binding.profile)
+                    if candidate_authority is not None:
+                        if not isinstance(
+                            verified_invocation,
+                            VerifiedTargetE2EInvocation,
+                        ):
+                            raise GraphThreadBindingError("TARGET_E2E_CREDENTIAL_REQUIRED")
+                        await self._target_room_authority.advance(
+                            connection,
+                            authority=candidate_authority,
+                            command=command,
+                            room_fencing_token=verified_invocation.room_fencing_token,
+                            command_hash=verified_invocation.command_hash,
+                            command_envelope_hash=(
+                                verified_invocation.command_envelope_hash
+                            ),
+                        )
+                        await self._target_synthetic_cases.reserve(
+                            connection,
+                            authority=candidate_authority,
+                            case_id=command.case_id,
+                        )
                     thread = await self._threads.ensure_registered(connection, expected_thread)
                     registration = await self._ledger.register_with_nonce(
                         connection,
@@ -237,7 +290,10 @@ class GraphCommandGateway:
                         nonce=nonce,
                     )
                     if registration.created:
-                        registry.require_new_shadow_command()
+                        if execution_lane is GraphGatewayMode.SHADOW:
+                            registry.require_new_shadow_command()
+                        else:
+                            registry.require_new_candidate_command()
                     else:
                         registry.require_thread_restore()
                     if (
@@ -258,6 +314,7 @@ class GraphCommandGateway:
                 record=registration.command,
                 action=action,
                 created=registration.created,
+                candidate_authority=candidate_authority,
             )
             await self._emit(admission, event_type="graph.command.admitted", code=action.value)
             return admission
@@ -347,6 +404,44 @@ class GraphCommandGateway:
             graph_key=admission.binding.graph_key,
             graph_version=admission.binding.graph_version,
             checkpoint_schema_version=admission.binding.checkpoint_schema_version,
+            execution_lane=admission.binding.execution_lane,
+            activation_id=admission.binding.activation_id,
+            room_fencing_token=admission.binding.room_fencing_token,
+            command_hash=admission.binding.command_hash,
+            command_envelope_hash=admission.binding.command_envelope_hash,
+            environment_id=(
+                admission.candidate_authority.context.environmentId
+                if admission.candidate_authority is not None
+                else None
+            ),
+            environment_generation=(
+                admission.candidate_authority.context.environmentGeneration
+                if admission.candidate_authority is not None
+                else None
+            ),
+            tenant_surrogate=(
+                admission.thread.tenant_surrogate
+                if admission.candidate_authority is not None
+                else None
+            ),
+            case_id=(
+                admission.thread.case_id if admission.candidate_authority is not None else None
+            ),
+            room_type=(
+                admission.thread.room_type.value
+                if admission.candidate_authority is not None
+                else None
+            ),
+            binding_hash=(
+                admission.registry.binding.binding_hash
+                if admission.candidate_authority is not None
+                else None
+            ),
+            code_build_id=(
+                admission.registry.binding.code_build_id
+                if admission.candidate_authority is not None
+                else None
+            ),
         )
         updated_admission = GatewayAdmission(
             command=admission.command,
@@ -356,6 +451,7 @@ class GraphCommandGateway:
             record=current,
             action=admission.action,
             created=admission.created,
+            candidate_authority=admission.candidate_authority,
         )
         execution = GatewayExecution(
             updated_admission,
@@ -512,6 +608,66 @@ class GraphCommandGateway:
                 )
             )
             raise
+
+    async def reconcile_candidate_only(
+        self,
+        *,
+        command: RoomGraphCommand,
+        verified_invocation: VerifiedTargetE2EInvocation,
+        expected_thread: ThreadIdentity,
+    ) -> ResultRecord:
+        """Reconcile one already-admitted candidate command to its exact result envelope."""
+
+        self._require_shadow()
+        if self._mode is not GraphGatewayMode.TARGET_E2E_CANDIDATE:
+            raise GraphGatewayDisabledError()
+        lane, activation_id, authority = self._require_invocation_lane(
+            verified_invocation
+        )
+        if authority is None:
+            raise GraphThreadBindingError("TARGET_E2E_CREDENTIAL_REQUIRED")
+        self._require_invocation_binding(command, verified_invocation)
+        self._require_command_thread(command, expected_thread)
+        async with self._pool.connection(timeout=self._acquire_timeout_seconds) as connection:
+            async with connection.transaction():
+                await self._threads.require_binding(connection, expected_thread)
+                registry = await self._registry.require_thread_restore(
+                    connection,
+                    graph_key=command.graph_key,
+                    graph_version=command.graph_version,
+                    checkpoint_schema_version=command.checkpoint_schema_version,
+                )
+                self._require_registry_profile_binding(
+                    command,
+                    verified_invocation,
+                    registry,
+                )
+                binding = CommandBinding.from_command(
+                    command,
+                    tool_policy_version=registry.binding.tool_policy_version,
+                    execution_lane=lane,
+                    activation_id=activation_id,
+                    room_fencing_token=verified_invocation.room_fencing_token,
+                    command_hash=verified_invocation.command_hash,
+                    command_envelope_hash=verified_invocation.command_envelope_hash,
+                )
+                registry.binding.require_profile(binding.profile)
+                _, result = await self._ledger.load_candidate_terminal_proof(
+                    connection,
+                    binding=binding,
+                    issuer=verified_invocation.claims.iss,
+                    key_id=verified_invocation.key_id,
+                    jti=verified_invocation.claims.jti,
+                    issued_at=datetime.fromtimestamp(
+                        verified_invocation.claims.iat,
+                        tz=timezone.utc,
+                    ),
+                    token_expires_at=datetime.fromtimestamp(
+                        verified_invocation.claims.exp,
+                        tz=timezone.utc,
+                    ),
+                )
+        return result
 
     async def renew_execution(self, execution: GatewayExecution) -> LeaseRecord:
         self._require_shadow()
@@ -694,8 +850,22 @@ class GraphCommandGateway:
             raise GraphContractError("stream ended without final, attempt_aborted, or error")
 
     def _require_shadow(self) -> None:
-        if self._mode is not GraphGatewayMode.SHADOW or self._pool is None:
+        if self._mode is GraphGatewayMode.DISABLED or self._pool is None:
             raise GraphGatewayDisabledError()
+
+    def _require_invocation_lane(
+        self,
+        invocation: VerifiedInvocation,
+    ) -> tuple[GraphGatewayMode, str | None, TargetE2ERuntimeAuthority | None]:
+        if self._mode is GraphGatewayMode.SHADOW:
+            if isinstance(invocation, VerifiedTargetE2EInvocation):
+                raise GraphThreadBindingError("SHADOW_CANDIDATE_CREDENTIAL_REJECTED")
+            return GraphGatewayMode.SHADOW, None, None
+        if self._mode is GraphGatewayMode.TARGET_E2E_CANDIDATE:
+            if not isinstance(invocation, VerifiedTargetE2EInvocation):
+                raise GraphThreadBindingError("TARGET_E2E_CREDENTIAL_REQUIRED")
+            return self._mode, invocation.authority.activation_id, invocation.authority
+        raise GraphGatewayDisabledError()
 
     @staticmethod
     def _require_invocation_binding(
