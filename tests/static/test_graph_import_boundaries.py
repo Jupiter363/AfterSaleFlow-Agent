@@ -12,6 +12,7 @@ GRAPH_RUNTIME = PYTHON_APP / "graph_runtime"
 COMPOSE = ROOT / "docker-compose.yml"
 POSTGRES_INIT = ROOT / "deploy/postgresql/init-multiple-databases.sh"
 PYTHON_DOCKERFILE = ROOT / "python-agent-service/Dockerfile"
+TEMPORAL_DYNAMIC_CONFIG = ROOT / "deploy/temporal/dynamicconfig/development-sql.yaml"
 
 RAW_SAVER_OWNERS = {
     GRAPH_RUNTIME / "checkpoint.py",
@@ -240,6 +241,30 @@ def test_temporal_setup_does_not_create_bootstrapped_databases() -> None:
     assert compose["services"]["temporal-server"]["environment"][
         "SKIP_DB_CREATE"
     ] == "true"
+
+
+def test_temporal_server_enables_versioning_for_the_control_worker() -> None:
+    compose = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
+    services = compose["services"]
+    temporal = services["temporal-server"]
+    control_worker = services["java-control-worker"]
+    dynamic_config = yaml.safe_load(TEMPORAL_DYNAMIC_CONFIG.read_text(encoding="utf-8"))
+
+    assert (
+        "./deploy/temporal/dynamicconfig:/etc/temporal/config/dynamicconfig:ro"
+        in temporal["volumes"]
+    )
+    assert temporal["environment"]["DYNAMIC_CONFIG_FILE_PATH"] == (
+        "config/dynamicconfig/development-sql.yaml"
+    )
+    for setting in (
+        "frontend.workerVersioningDataAPIs",
+        "frontend.workerVersioningWorkflowAPIs",
+    ):
+        assert dynamic_config[setting] == [{"value": True, "constraints": {}}]
+    assert control_worker["environment"]["TEMPORAL_WORKER_VERSIONING_MODE"] == (
+        "${TEMPORAL_CONTROL_WORKER_VERSIONING_MODE:-BUILD_ID}"
+    )
 
 
 def test_demo_dispute_seeding_is_scoped_to_the_api_process() -> None:
