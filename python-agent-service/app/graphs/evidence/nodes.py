@@ -25,6 +25,7 @@ from app.graphs.evidence.contracts import (
     EvidenceGraphContext,
     EvidenceGraphContractError,
     JsonObject,
+    evidence_execution_scope,
     manifest_items_by_key,
     validate_verified_admission,
 )
@@ -209,6 +210,7 @@ class AssessEvidenceItemNode:
             raise EvidenceGraphContractError("EVIDENCE_SEND_KEY_NOT_IN_MANIFEST")
         work_item: JsonObject = {
             "schema_version": "evidence-assessment-work-item.v1",
+            "execution_scope": evidence_execution_scope(runtime.context.admission),
             "command_binding": {
                 "command_id": cast(str, command["command_id"]),
                 "logical_run_id": cast(str, command["logical_run_id"]),
@@ -426,7 +428,7 @@ def project_evidence_batch_proposal(
     ordered = state["ordered_item_keys"]
     proposal: JsonObject = {
         "schema_version": TERMINAL_OUTPUT_SCHEMA_VERSION,
-        "execution_scope": "SIGNED_SYNTHETIC_ONLY",
+        "execution_scope": evidence_execution_scope(runtime.context.admission),
         "writer_mode": "PROPOSAL_ONLY",
         "formal_sink_eligible": False,
         "command_id": cast(str, command_binding["command_id"]),
@@ -505,7 +507,7 @@ def _validate_assessment(
         raise EvidenceGraphContractError("EVIDENCE_ASSESSMENT_FIELDS_INVALID")
     if (
         assessment.get("schema_version") != ASSESSMENT_OUTPUT_SCHEMA_VERSION
-        or assessment.get("execution_scope") != "SIGNED_SYNTHETIC_ONLY"
+        or assessment.get("execution_scope") != manifest.get("execution_scope")
         or assessment.get("formal_sink_eligible") is not False
         or assessment.get("assessment_status") not in {"COMPLETED", "NEEDS_REVIEW"}
     ):

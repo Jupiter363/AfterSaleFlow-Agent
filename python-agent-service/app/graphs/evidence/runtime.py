@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Any, Literal, cast
 
 from langchain_core.runnables import Runnable
+from langchain_core.runnables.config import RunnableConfig
 
 from app.contracts.v1.codec import canonical_sha256, canonicalize
 from app.graph_runtime.checkpoint import FencedPostgresSaver, bind_fence_context
@@ -21,6 +22,7 @@ from app.graphs.evidence.contracts import (
     EvidenceGraphContractError,
     JsonObject,
     VerifiedEvidenceAdmission,
+    evidence_execution_scope,
     manifest_items_by_key,
     validate_verified_admission,
 )
@@ -34,8 +36,13 @@ from app.graphs.evidence.reducers import (
 from app.graphs.evidence.state import EvidenceGraphStateV2, new_evidence_graph_state
 
 
-EvidenceRuntimeMode = Literal["DISABLED", "SIGNED_SYNTHETIC_SHADOW"]
+EvidenceRuntimeMode = Literal[
+    "DISABLED",
+    "SIGNED_SYNTHETIC_SHADOW",
+    "TARGET_E2E_CANDIDATE",
+]
 _RUNTIME_BINDING_METADATA_KEY = "evidence_runtime_binding_sha256"
+_RUNTIME_COMPLETED_AT_METADATA_KEY = "evidence_runtime_completed_at"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _FACT_ID = re.compile(r"^FACT_[A-Za-z0-9_:-]{1,123}$")
@@ -91,12 +98,12 @@ _PROPOSAL_FIELDS = frozenset(
 
 @dataclass(frozen=True, slots=True)
 class EvidenceRuntimeBundle:
-    """Checkpointed synthetic-only runtime with no formal projection or sink."""
+    """Checkpointed proposal-only runtime with no formal projection or sink."""
 
     graph: Any
     admission: VerifiedEvidenceAdmission
     completed_at: str
-    runtime_mode: Literal["SIGNED_SYNTHETIC_SHADOW"]
+    runtime_mode: Literal["SIGNED_SYNTHETIC_SHADOW", "TARGET_E2E_CANDIDATE"]
     thread_id: str
     recursion_limit: int
     runtime_binding_sha256: str
@@ -142,6 +149,25 @@ class EvidenceRuntimeBundle:
             completed_at=self.completed_at,
         )
 
+    async def aterminal_checkpoint(
+        self,
+    ) -> tuple[Mapping[str, Any], RunnableConfig]:
+        snapshot = await self.graph.aget_state(self._config())
+        values = getattr(snapshot, "values", None)
+        config = getattr(snapshot, "config", None)
+        if not isinstance(values, Mapping) or not isinstance(config, Mapping):
+            raise EvidenceGraphContractError("EVIDENCE_RUNTIME_CHECKPOINT_INVALID")
+        self._validate_runtime_state(values)
+        configurable = config.get("configurable")
+        if (
+            not isinstance(configurable, Mapping)
+            or configurable.get("thread_id") != self.thread_id
+            or not isinstance(configurable.get("checkpoint_id"), str)
+            or not configurable.get("checkpoint_id")
+        ):
+            raise EvidenceGraphContractError("EVIDENCE_RUNTIME_CHECKPOINT_INVALID")
+        return cast(Mapping[str, Any], values), cast(RunnableConfig, dict(config))
+
     def _context(self) -> EvidenceGraphContext:
         return EvidenceGraphContext(
             admission=self.admission,
@@ -165,6 +191,7 @@ class EvidenceRuntimeBundle:
             "configurable": {"thread_id": self.thread_id},
             "metadata": {
                 _RUNTIME_BINDING_METADATA_KEY: self.runtime_binding_sha256,
+                _RUNTIME_COMPLETED_AT_METADATA_KEY: self.completed_at,
             },
             "recursion_limit": self.recursion_limit,
         }
@@ -201,10 +228,15 @@ def build_evidence_runtime_bundle(
 ) -> EvidenceRuntimeBundle:
     if runtime_mode == "DISABLED":
         raise EvidenceGraphContractError("EVIDENCE_RUNTIME_DISABLED")
-    if runtime_mode != "SIGNED_SYNTHETIC_SHADOW":
+    if runtime_mode not in {"SIGNED_SYNTHETIC_SHADOW", "TARGET_E2E_CANDIDATE"}:
         raise EvidenceGraphContractError("EVIDENCE_RUNTIME_MODE_FORBIDDEN")
     command, manifest = validate_verified_admission(admission)
-    if admission.runtime_mode != "SHADOW":
+    expected_admission_mode = (
+        "TARGET_E2E_CANDIDATE"
+        if runtime_mode == "TARGET_E2E_CANDIDATE"
+        else "SHADOW"
+    )
+    if admission.runtime_mode != expected_admission_mode:
         raise EvidenceGraphContractError("EVIDENCE_RUNTIME_MODE_FORBIDDEN")
     if not isinstance(checkpointer, FencedPostgresSaver):
         raise EvidenceGraphContractError("EVIDENCE_RUNTIME_FENCED_CHECKPOINTER_REQUIRED")
@@ -255,12 +287,33 @@ def build_evidence_runtime_bundle(
         graph=graph,
         admission=admission,
         completed_at=completed_at,
-        runtime_mode="SIGNED_SYNTHETIC_SHADOW",
+        runtime_mode=runtime_mode,
         thread_id=cast(str, manifest["thread_id"]),
         recursion_limit=recursion_limit,
         runtime_binding_sha256=binding_hash,
         fence=fence,
     )
+
+
+async def recover_evidence_runtime_completed_at(
+    *,
+    checkpointer: FencedPostgresSaver,
+    fence: GraphFenceContext,
+) -> str | None:
+    config = bind_fence_context(
+        {"configurable": {"thread_id": fence.thread_id}},
+        fence,
+    )
+    checkpoint = await checkpointer.aget_tuple(config)
+    if checkpoint is None:
+        return None
+    metadata = getattr(checkpoint, "metadata", None)
+    if not isinstance(metadata, Mapping):
+        raise EvidenceGraphContractError("EVIDENCE_RECOVERY_RUNTIME_BINDING_MISMATCH")
+    completed_at = metadata.get(_RUNTIME_COMPLETED_AT_METADATA_KEY)
+    if not _is_rfc3339_instant(completed_at):
+        raise EvidenceGraphContractError("EVIDENCE_RECOVERY_RUNTIME_BINDING_MISMATCH")
+    return cast(str, completed_at)
 
 
 def validate_evidence_recovery_state(
@@ -381,7 +434,7 @@ def _validate_proposal_document(
     )
     exact = {
         "schema_version": TERMINAL_OUTPUT_SCHEMA_VERSION,
-        "execution_scope": "SIGNED_SYNTHETIC_ONLY",
+        "execution_scope": evidence_execution_scope(admission),
         "writer_mode": "PROPOSAL_ONLY",
         "formal_sink_eligible": False,
         "command_id": command_binding["command_id"],
@@ -668,5 +721,6 @@ __all__ = [
     "EvidenceRuntimeMode",
     "build_evidence_runtime_bundle",
     "extract_evidence_terminal_proposal",
+    "recover_evidence_runtime_completed_at",
     "validate_evidence_recovery_state",
 ]

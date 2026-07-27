@@ -17,7 +17,6 @@ from app.graph_runtime.state import (
 from app.graphs.evidence.contracts import (
     ASSESSMENT_OUTPUT_SCHEMA_VERSION,
     EVIDENCE_STATE_SCHEMA_VERSION,
-    TERMINAL_OUTPUT_SCHEMA_VERSION,
     EvidenceGraphContractError,
     JsonObject,
     JsonValue as _JsonValue,
@@ -147,7 +146,12 @@ def new_evidence_graph_state(
         "state_schema_version": cast(str, profiles["state_schema_version"]),
         "prompt_version": cast(str, profiles["prompt_version"]),
         "model_profile_id": cast(str, profiles["model_profile_id"]),
-        "output_schema_version": TERMINAL_OUTPUT_SCHEMA_VERSION,
+        "output_schema_version": cast(
+            str,
+            cast(dict[str, object], command["invocation_context"])[
+                "output_schema_version"
+            ],
+        ),
         "policy_version": cast(str, profiles["policy_version"]),
         "guardrail_version": cast(str, profiles["guardrail_version"]),
         "tool_policy_version": cast(str, profiles["tool_policy_version"]),

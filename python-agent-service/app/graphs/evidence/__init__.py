@@ -12,6 +12,7 @@ from app.graphs.evidence.contracts import (
     EvidenceGraphContext,
     EvidenceGraphContractError,
     VerifiedEvidenceAdmission,
+    evidence_execution_scope,
     validate_verified_admission,
 )
 from app.graphs.evidence.graph import build_evidence_v2_graph, compile_evidence_v2_graph
@@ -40,5 +41,6 @@ __all__ = [
     "compile_evidence_v2_graph",
     "merge_evidence_assessments",
     "new_evidence_graph_state",
+    "evidence_execution_scope",
     "validate_verified_admission",
 ]

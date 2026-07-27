@@ -32,12 +32,21 @@ from app.security.invocation_envelope import ResolvedVerificationKey
 JsonScalar: TypeAlias = str | int | float | bool | None
 JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
 JsonObject: TypeAlias = dict[str, JsonValue]
+EvidenceExecutionScope: TypeAlias = Literal[
+    "SIGNED_SYNTHETIC_ONLY",
+    "TARGET_E2E_CANDIDATE",
+]
+EvidenceAdmissionMode: TypeAlias = Literal["SHADOW", "TARGET_E2E_CANDIDATE"]
 
 ASSESSMENT_OUTPUT_SCHEMA_VERSION = "evidence-item-assessment.v1"
 TERMINAL_OUTPUT_SCHEMA_VERSION = "evidence-batch-proposal.v1"
 EVIDENCE_GRAPH_KEY = "evidence.v2"
 EVIDENCE_GRAPH_VERSION = "evidence.v2.0.0"
 EVIDENCE_STATE_SCHEMA_VERSION = "evidence-graph-state.v2"
+TARGET_E2E_GRAPH_KEY = "all-rooms/target-e2e.v1"
+TARGET_E2E_GRAPH_VERSION = "target-e2e-graph.2026-07-27.1"
+TARGET_E2E_CHECKPOINT_SCHEMA_VERSION = "target-e2e-checkpoint.v1"
+TARGET_E2E_OUTPUT_SCHEMA_VERSION = "target-e2e-room-proposal-source.v1"
 MAX_MANIFEST_ITEMS = 100
 MAX_ACTIVE_ITEMS = 8
 
@@ -256,7 +265,7 @@ class VerifiedEvidenceAdmission:
     def __init__(
         self,
         *,
-        runtime_mode: Literal["SHADOW"],
+        runtime_mode: EvidenceAdmissionMode,
         room_graph_command: JsonObject,
         manifest: JsonObject,
         registry_output_schema_version: str,
@@ -304,7 +313,7 @@ class VerifiedEvidenceAdmission:
         raise EvidenceGraphContractError("EVIDENCE_VERIFIED_ADMISSION_PICKLE_FORBIDDEN")
 
     @property
-    def runtime_mode(self) -> Literal["SHADOW"]:
+    def runtime_mode(self) -> EvidenceAdmissionMode:
         return self._runtime_mode
 
     @property
@@ -398,6 +407,22 @@ class EvidenceAdmissionVerifier:
         )
 
     def verify(self, request: EvidenceAdmissionRequest) -> VerifiedEvidenceAdmission:
+        return self._verify(request, target_candidate=False)
+
+    def _verify_target_candidate(
+        self,
+        request: EvidenceAdmissionRequest,
+    ) -> VerifiedEvidenceAdmission:
+        """Package-private entry used after the shared target gateway has admitted a command."""
+
+        return self._verify(request, target_candidate=True)
+
+    def _verify(
+        self,
+        request: EvidenceAdmissionRequest,
+        *,
+        target_candidate: bool,
+    ) -> VerifiedEvidenceAdmission:
         security_runtime, trust_snapshot = _validate_evidence_verifier(self)
         if type(request) is not EvidenceAdmissionRequest:
             raise EvidenceGraphContractError("EVIDENCE_ADMISSION_REQUEST_REQUIRED")
@@ -406,7 +431,7 @@ class EvidenceAdmissionVerifier:
         command = _json_object(request.room_graph_command, "EVIDENCE_COMMAND_INVALID")
         if _contains_forbidden_authority(command):
             raise EvidenceGraphContractError("EVIDENCE_FORMAL_AUTHORITY_FORBIDDEN")
-        _verify_room_graph_command(command)
+        _verify_room_graph_command(command, target_candidate=target_candidate)
         snapshot_ref = _required_mapping(command, "domain_snapshot_ref")
         payload = bytes(request.signed_manifest_payload)
         payload_hash = _verify_raw_snapshot_reference(snapshot_ref, payload)
@@ -414,7 +439,7 @@ class EvidenceAdmissionVerifier:
         _verify_snapshot_identity(snapshot_ref, manifest)
         if _contains_forbidden_authority(manifest):
             raise EvidenceGraphContractError("EVIDENCE_FORMAL_AUTHORITY_FORBIDDEN")
-        _verify_manifest_schema_shape(manifest)
+        _verify_manifest_schema_shape(manifest, target_candidate=target_candidate)
         _verify_internal_manifest_hash(manifest)
         _verify_direct_java_signature(
             manifest,
@@ -426,16 +451,20 @@ class EvidenceAdmissionVerifier:
             request.registry_output_schema_version,
             command,
             manifest,
+            target_candidate=target_candidate,
         )
         _verify_distinct_fence_authorities(
             request.graph_lease_fencing_token,
             manifest,
         )
         _verify_command_manifest_bindings(command, manifest, actor_scope_hash)
-        _verify_synthetic_shadow_scope(manifest)
+        if target_candidate:
+            _verify_target_candidate_scope(manifest)
+        else:
+            _verify_synthetic_shadow_scope(manifest)
         _verify_manifest_membership(manifest)
         admission = VerifiedEvidenceAdmission(
-            runtime_mode=request.runtime_mode,
+            runtime_mode=("TARGET_E2E_CANDIDATE" if target_candidate else "SHADOW"),
             room_graph_command=command,
             manifest=manifest,
             registry_output_schema_version=request.registry_output_schema_version,
@@ -484,7 +513,20 @@ def manifest_items_by_key(manifest: Mapping[str, Any]) -> dict[str, JsonObject]:
     }
 
 
-def _verify_room_graph_command(command: JsonObject) -> None:
+def evidence_execution_scope(
+    admission: VerifiedEvidenceAdmission,
+) -> EvidenceExecutionScope:
+    validate_verified_admission(admission)
+    if admission.runtime_mode == "TARGET_E2E_CANDIDATE":
+        return "TARGET_E2E_CANDIDATE"
+    return "SIGNED_SYNTHETIC_ONLY"
+
+
+def _verify_room_graph_command(
+    command: JsonObject,
+    *,
+    target_candidate: bool,
+) -> None:
     _require_exact_fields(
         command,
         allowed=_COMMAND_FIELDS,
@@ -495,10 +537,21 @@ def _verify_room_graph_command(command: JsonObject) -> None:
         raise EvidenceGraphContractError("EVIDENCE_COMMAND_SCHEMA_INVALID")
     if command.get("room_type") != "EVIDENCE":
         raise EvidenceGraphContractError("EVIDENCE_COMMAND_ROOM_TYPE_INVALID")
-    if command.get("graph_key") != EVIDENCE_GRAPH_KEY:
+    expected_graph_key = TARGET_E2E_GRAPH_KEY if target_candidate else EVIDENCE_GRAPH_KEY
+    expected_graph_version = (
+        TARGET_E2E_GRAPH_VERSION if target_candidate else EVIDENCE_GRAPH_VERSION
+    )
+    expected_checkpoint = (
+        TARGET_E2E_CHECKPOINT_SCHEMA_VERSION if target_candidate else None
+    )
+    if command.get("graph_key") != expected_graph_key:
         raise EvidenceGraphContractError("EVIDENCE_COMMAND_GRAPH_KEY_INVALID")
-    if command.get("graph_version") != EVIDENCE_GRAPH_VERSION:
+    if command.get("graph_version") != expected_graph_version:
         raise EvidenceGraphContractError("EVIDENCE_COMMAND_GRAPH_VERSION_INVALID")
+    if expected_checkpoint is not None and command.get("checkpoint_schema_version") != (
+        expected_checkpoint
+    ):
+        raise EvidenceGraphContractError("EVIDENCE_COMMAND_CHECKPOINT_VERSION_INVALID")
     if "fencing_token" in command:
         raise EvidenceGraphContractError("EVIDENCE_COMMAND_ROOM_FENCE_FORBIDDEN")
     for name in (
@@ -507,7 +560,6 @@ def _verify_room_graph_command(command: JsonObject) -> None:
         "attempt_id",
         "tenant_surrogate",
         "case_id",
-        "graph_key",
         "graph_version",
         "checkpoint_schema_version",
         "stage_code",
@@ -623,7 +675,11 @@ def _verify_snapshot_identity(snapshot: Mapping[str, Any], manifest: JsonObject)
         raise EvidenceGraphContractError("EVIDENCE_SNAPSHOT_IDENTITY_MISMATCH")
 
 
-def _verify_manifest_schema_shape(manifest: JsonObject) -> None:
+def _verify_manifest_schema_shape(
+    manifest: JsonObject,
+    *,
+    target_candidate: bool,
+) -> None:
     _require_exact_fields(
         manifest,
         allowed=_MANIFEST_FIELDS,
@@ -718,7 +774,8 @@ def _verify_manifest_schema_shape(manifest: JsonObject) -> None:
     for name in _PROFILE_FIELDS:
         _require_identifier(profiles.get(name), "EVIDENCE_PROFILE_INVALID")
     if (
-        profiles.get("graph_version") != EVIDENCE_GRAPH_VERSION
+        profiles.get("graph_version")
+        != (TARGET_E2E_GRAPH_VERSION if target_candidate else EVIDENCE_GRAPH_VERSION)
         or profiles.get("state_schema_version") != EVIDENCE_STATE_SCHEMA_VERSION
     ):
         raise EvidenceGraphContractError("EVIDENCE_PROFILE_INVALID")
@@ -814,15 +871,22 @@ def _verify_output_pins(
     registry_output_schema_version: str,
     command: JsonObject,
     manifest: JsonObject,
+    *,
+    target_candidate: bool,
 ) -> None:
     invocation = _required_mapping(command, "invocation_context")
     profiles = _required_mapping(manifest, "profile_versions")
     terminal_pin = profiles.get("terminal_output_schema_version")
     assessment_pin = profiles.get("assessment_output_schema_version")
+    transport_output = (
+        TARGET_E2E_OUTPUT_SCHEMA_VERSION
+        if target_candidate
+        else TERMINAL_OUTPUT_SCHEMA_VERSION
+    )
     if (
         terminal_pin != TERMINAL_OUTPUT_SCHEMA_VERSION
-        or invocation.get("output_schema_version") != TERMINAL_OUTPUT_SCHEMA_VERSION
-        or registry_output_schema_version != TERMINAL_OUTPUT_SCHEMA_VERSION
+        or invocation.get("output_schema_version") != transport_output
+        or registry_output_schema_version != transport_output
     ):
         raise EvidenceGraphContractError("EVIDENCE_TERMINAL_OUTPUT_PIN_MISMATCH")
     if assessment_pin != ASSESSMENT_OUTPUT_SCHEMA_VERSION:
@@ -886,6 +950,16 @@ def _verify_synthetic_shadow_scope(manifest: JsonObject) -> None:
         or not isinstance(manifest.get("synthetic_fixture_id"), str)
     ):
         raise EvidenceGraphContractError("EVIDENCE_SYNTHETIC_SHADOW_SCOPE_REQUIRED")
+
+
+def _verify_target_candidate_scope(manifest: JsonObject) -> None:
+    if (
+        manifest.get("execution_scope") != "TARGET_E2E_CANDIDATE"
+        or manifest.get("writer_mode") != "PROPOSAL_ONLY"
+        or manifest.get("formal_sink_eligible") is not False
+        or manifest.get("graph_execution_allowed") is not True
+    ):
+        raise EvidenceGraphContractError("EVIDENCE_TARGET_E2E_SCOPE_REQUIRED")
 
 
 def _verify_manifest_membership(manifest: JsonObject) -> None:
