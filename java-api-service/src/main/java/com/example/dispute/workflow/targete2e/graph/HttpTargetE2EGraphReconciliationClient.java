@@ -3,6 +3,8 @@ package com.example.dispute.workflow.targete2e.graph;
 import com.example.dispute.workflow.activity.agent.AgentRunCancellationToken;
 import com.example.dispute.workflow.infrastructure.agent.GraphReconciliationHttpTransport;
 import com.example.dispute.workflow.infrastructure.agent.GraphReconciliationTransportException;
+import com.example.dispute.workflow.infrastructure.agent.GraphTransportBundle;
+import com.example.dispute.workflow.infrastructure.agent.GraphTransportSecurityProof;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.DeserializationFeature;
@@ -33,32 +35,28 @@ public final class HttpTargetE2EGraphReconciliationClient
   private static final Set<String> ERROR_FIELDS = Set.of("code", "retryable");
   private static final Set<Integer> RETRYABLE_STATUSES = Set.of(409, 429, 503);
 
+  private final GraphTransportBundle transportBundle;
   private final GraphReconciliationHttpTransport transport;
+  private final GraphTransportSecurityProof transportProof;
   private final TargetE2EGraphEnvelopeCodec codec;
   private final TargetE2EGraphProposalPayloadSource proposalSource;
   private final ObjectMapper mapper;
+  private final URI baseUri;
   private final URI endpoint;
   private final Duration timeout;
 
   public HttpTargetE2EGraphReconciliationClient(
-      GraphReconciliationHttpTransport transport,
+      GraphTransportBundle transportBundle,
       TargetE2EGraphEnvelopeCodec codec,
       TargetE2EGraphProposalPayloadSource proposalSource,
       ObjectMapper objectMapper,
       URI baseUri,
       Duration timeout) {
-    this(transport, codec, proposalSource, objectMapper, baseUri, timeout, false);
-  }
-
-  public HttpTargetE2EGraphReconciliationClient(
-      GraphReconciliationHttpTransport transport,
-      TargetE2EGraphEnvelopeCodec codec,
-      TargetE2EGraphProposalPayloadSource proposalSource,
-      ObjectMapper objectMapper,
-      URI baseUri,
-      Duration timeout,
-      boolean allowPlaintextTransport) {
-    this.transport = Objects.requireNonNull(transport, "transport");
+    TargetE2EGraphTransportPolicy.VerifiedBundle verified =
+        TargetE2EGraphTransportPolicy.requireVerified(transportBundle);
+    this.transportBundle = transportBundle;
+    this.transport = verified.reconciliationTransport();
+    this.transportProof = verified.proof();
     this.codec = Objects.requireNonNull(codec, "codec");
     this.proposalSource = Objects.requireNonNull(proposalSource, "proposalSource");
     this.mapper = Objects.requireNonNull(objectMapper, "objectMapper").copy();
@@ -67,7 +65,8 @@ public final class HttpTargetE2EGraphReconciliationClient
     this.mapper.enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION);
     this.mapper.enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
     this.timeout = requireTimeout(timeout);
-    this.endpoint = endpoint(baseUri, allowPlaintextTransport);
+    this.baseUri = TargetE2EGraphTransportPolicy.requireTrustedBaseUri(baseUri);
+    this.endpoint = this.baseUri.resolve(PATH);
   }
 
   @Override
@@ -251,18 +250,15 @@ public final class HttpTargetE2EGraphReconciliationClient
     return value;
   }
 
-  static URI endpoint(URI baseUri, boolean allowPlaintextTransport) {
-    Objects.requireNonNull(baseUri, "baseUri");
-    String scheme = baseUri.getScheme();
-    if (baseUri.getHost() == null
-        || baseUri.getUserInfo() != null
-        || baseUri.getQuery() != null
-        || baseUri.getFragment() != null
-        || (!("https".equalsIgnoreCase(scheme))
-            && !(allowPlaintextTransport && "http".equalsIgnoreCase(scheme)))) {
-      throw new IllegalArgumentException("target Graph base URI is not trusted");
-    }
-    String normalized = baseUri.toString().endsWith("/") ? baseUri.toString() : baseUri + "/";
-    return URI.create(normalized).resolve(PATH);
+  GraphTransportSecurityProof transportProof() {
+    return transportProof;
+  }
+
+  GraphTransportBundle transportBundle() {
+    return transportBundle;
+  }
+
+  URI baseUri() {
+    return baseUri;
   }
 }

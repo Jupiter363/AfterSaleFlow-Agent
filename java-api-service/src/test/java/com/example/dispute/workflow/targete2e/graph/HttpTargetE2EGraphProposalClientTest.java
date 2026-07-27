@@ -10,6 +10,10 @@ import com.example.dispute.workflow.activity.agent.AgentRunCancellationToken;
 import com.example.dispute.workflow.contract.v1.AgentStreamEvent;
 import com.example.dispute.workflow.infrastructure.agent.GraphCommandHttpTransport;
 import com.example.dispute.workflow.infrastructure.agent.GraphReconciliationHttpTransport;
+import com.example.dispute.workflow.infrastructure.agent.GraphTransportBundle;
+import com.example.dispute.workflow.infrastructure.agent.GraphTransportSecurityProof;
+import com.example.dispute.workflow.infrastructure.agent.LocalGraphTransportFactory;
+import java.lang.reflect.Constructor;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -18,6 +22,7 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 
@@ -54,20 +59,23 @@ class HttpTargetE2EGraphProposalClientTest {
     byte[] resultBody =
         codec.encodeResult(
             resultEnvelope, sealed.envelope(), TargetE2EGraphTestFixtures.proposalSource());
+    GraphTransportSecurityProof proof = mutualTlsProof();
     FakeReconciliationTransport reconciliationTransport =
-        new FakeReconciliationTransport(resultBody);
+        new FakeReconciliationTransport(resultBody, proof);
+    FakeCommandTransport commandTransport =
+        new FakeCommandTransport(resultEnvelope.resultHash(), proof);
+    GraphTransportBundle transportBundle = bundle(commandTransport, reconciliationTransport, proof);
     var reconciliationClient =
         new HttpTargetE2EGraphReconciliationClient(
-            reconciliationTransport,
+            transportBundle,
             codec,
             (resultRef, expectedProposalHash) -> TargetE2EGraphTestFixtures.proposalSourceBytes(),
             MAPPER,
             URI.create("https://python-agent.internal/base/"),
             Duration.ofSeconds(8));
-    FakeCommandTransport commandTransport = new FakeCommandTransport(resultEnvelope.resultHash());
     var client =
         new HttpTargetE2EGraphProposalClient(
-            commandTransport,
+            transportBundle,
             reconciliationClient,
             MAPPER,
             URI.create("https://python-agent.internal/base/"),
@@ -116,26 +124,19 @@ class HttpTargetE2EGraphProposalClientTest {
             TargetE2EGraphTestFixtures.command(),
             REGISTRY_BINDING,
             (envelope, binding) -> credential());
-    TargetE2EGraphReconciliationClient noReconciliation =
-        (command, ref, hash, token) -> {
-          throw new AssertionError("must not reconcile");
-        };
     List<AgentStreamEvent> events = new ArrayList<>();
+    GraphTransportSecurityProof redirectProof = mutualTlsProof();
     GraphCommandHttpTransport redirect =
-        new FakeCommandTransport("0".repeat(64)) {
+        new FakeCommandTransport("0".repeat(64), redirectProof) {
           @Override
           public void stream(
               Request request, AgentRunCancellationToken cancellationToken, Listener listener) {
             listener.onResponse(new ResponseHead(307, request.uri(), Map.of()));
           }
         };
-    var redirectClient =
-        new HttpTargetE2EGraphProposalClient(
-            redirect,
-            noReconciliation,
-            MAPPER,
-            URI.create("https://python-agent.internal/base/"),
-            Duration.ofSeconds(8));
+    FakeReconciliationTransport redirectReconciliation =
+        new FakeReconciliationTransport("{}".getBytes(StandardCharsets.UTF_8), redirectProof);
+    var redirectClient = proposalClient(redirect, redirectReconciliation, redirectProof, codec);
 
     assertThatThrownBy(
             () ->
@@ -145,28 +146,28 @@ class HttpTargetE2EGraphProposalClientTest {
         .extracting(exception -> ((TargetE2EGraphClientException) exception).recoveryAction())
         .isEqualTo(TargetE2EGraphClientException.RecoveryAction.FAIL_LOGICAL_RUN);
     assertThat(events).isEmpty();
+    assertThat(redirectReconciliation.requests).isEmpty();
 
+    GraphTransportSecurityProof wrongBindingProof = mutualTlsProof();
     GraphCommandHttpTransport wrongBinding =
-        new FakeCommandTransport("0".repeat(64)) {
+        new FakeCommandTransport("0".repeat(64), wrongBindingProof) {
           @Override
           public void stream(
               Request request, AgentRunCancellationToken cancellationToken, Listener listener) {
             listener.onResponse(successHead(request.uri(), sealed, "p9act.v1." + "b".repeat(32)));
           }
         };
+    FakeReconciliationTransport wrongBindingReconciliation =
+        new FakeReconciliationTransport("{}".getBytes(StandardCharsets.UTF_8), wrongBindingProof);
     var wrongBindingClient =
-        new HttpTargetE2EGraphProposalClient(
-            wrongBinding,
-            noReconciliation,
-            MAPPER,
-            URI.create("https://python-agent.internal/base/"),
-            Duration.ofSeconds(8));
+        proposalClient(wrongBinding, wrongBindingReconciliation, wrongBindingProof, codec);
     assertThatThrownBy(
             () ->
                 wrongBindingClient.execute(
                     sealed, Map.of(), events::add, new AgentRunCancellationToken()))
         .isInstanceOf(TargetE2EGraphClientException.class);
     assertThat(events).isEmpty();
+    assertThat(wrongBindingReconciliation.requests).isEmpty();
   }
 
   @Test
@@ -180,17 +181,29 @@ class HttpTargetE2EGraphProposalClientTest {
             REGISTRY_BINDING,
             (envelope, binding) -> credential());
     AtomicInteger proposalLoads = new AtomicInteger();
+    GraphTransportSecurityProof proof = mutualTlsProof();
+    FakeCommandTransport unusedCommand = new FakeCommandTransport("0".repeat(64), proof);
     GraphReconciliationHttpTransport redirect =
-        (request, cancellationToken) ->
-            new GraphReconciliationHttpTransport.Response(
+        new GraphReconciliationHttpTransport() {
+          @Override
+          public GraphTransportSecurityProof transportProof() {
+            return proof;
+          }
+
+          @Override
+          public Response exchange(Request request, AgentRunCancellationToken cancellationToken) {
+            return new Response(
                 302,
                 Map.of(
                     "Content-Type", List.of("application/json"),
                     "Cache-Control", List.of("no-store")),
                 "{}".getBytes(StandardCharsets.UTF_8));
+          }
+        };
+    GraphTransportBundle transportBundle = bundle(unusedCommand, redirect, proof);
     var client =
         new HttpTargetE2EGraphReconciliationClient(
-            redirect,
+            transportBundle,
             codec,
             (resultRef, proposalHash) -> {
               proposalLoads.incrementAndGet();
@@ -213,6 +226,193 @@ class HttpTargetE2EGraphProposalClientTest {
     assertThat(proposalLoads).hasValue(0);
   }
 
+  @Test
+  void reconciliationSendsTheExpiredOriginalCredentialWithoutResigning() throws Exception {
+    var codec = TargetE2EGraphTestFixtures.codec();
+    TargetE2EGraphCommandEnvelope envelope =
+        codec.wrapCommand(ACTIVATION_ID, 7L, TargetE2EGraphTestFixtures.command());
+    TargetE2ESealedGraphCommand sealed =
+        new TargetE2ESealedGraphCommand(
+            envelope, codec.encodeCommand(envelope), expiredCredential());
+    TargetE2EGraphResultEnvelope result =
+        codec.wrapResult(
+            envelope,
+            TargetE2EGraphTestFixtures.result(),
+            TargetE2EGraphTestFixtures.proposalSource());
+    byte[] resultBody =
+        codec.encodeResult(result, envelope, TargetE2EGraphTestFixtures.proposalSource());
+    GraphTransportSecurityProof proof = mutualTlsProof();
+    FakeCommandTransport command = new FakeCommandTransport(result.resultHash(), proof);
+    FakeReconciliationTransport reconciliation = new FakeReconciliationTransport(resultBody, proof);
+    GraphTransportBundle transportBundle = bundle(command, reconciliation, proof);
+    var client =
+        new HttpTargetE2EGraphReconciliationClient(
+            transportBundle,
+            codec,
+            (resultRef, proposalHash) -> TargetE2EGraphTestFixtures.proposalSourceBytes(),
+            MAPPER,
+            URI.create("https://python-agent.internal/base/"),
+            Duration.ofSeconds(8));
+
+    assertThat(
+            client.reconcile(
+                sealed, "urn:graph-result:1", result.resultHash(), new AgentRunCancellationToken()))
+        .isEqualTo(result);
+
+    assertThat(sealed.credential().expiresAt()).isBefore(Instant.now());
+    assertThat(reconciliation.requests)
+        .singleElement()
+        .satisfies(
+            request -> {
+              assertThat(request.body()).isEqualTo(sealed.body());
+              assertThat(request.headers())
+                  .containsEntry("Authorization", "Bearer " + sealed.credential().compactJws());
+            });
+  }
+
+  @Test
+  void rejectsUnverifiedOrPlaintextTransportsBeforeAnyRequestOrBearerLeavesJava() {
+    assertThat(TargetE2EGraphTransportPolicy.class.getDeclaredMethods())
+        .filteredOn(method -> method.getName().equals("requireVerified"))
+        .singleElement()
+        .satisfies(
+            method ->
+                assertThat(method.getParameterTypes())
+                    .containsExactly(GraphTransportBundle.class));
+    assertThat(HttpTargetE2EGraphProposalClient.class.getConstructors())
+        .singleElement()
+        .satisfies(
+            constructor ->
+                assertThat(constructor.getParameterTypes())
+                    .contains(GraphTransportBundle.class)
+                    .doesNotContain(
+                        GraphCommandHttpTransport.class,
+                        GraphReconciliationHttpTransport.class));
+    assertThat(HttpTargetE2EGraphReconciliationClient.class.getConstructors())
+        .singleElement()
+        .satisfies(
+            constructor ->
+                assertThat(constructor.getParameterTypes())
+                    .contains(GraphTransportBundle.class)
+                    .doesNotContain(
+                        GraphCommandHttpTransport.class,
+                        GraphReconciliationHttpTransport.class));
+
+    AtomicBoolean proposalLoaded = new AtomicBoolean();
+    GraphTransportBundle plaintext =
+        LocalGraphTransportFactory.create(
+            LocalGraphTransportFactory.Profile.TEST, Duration.ofMillis(100));
+    assertThatThrownBy(
+            () ->
+                new HttpTargetE2EGraphReconciliationClient(
+                    plaintext,
+                    TargetE2EGraphTestFixtures.codec(),
+                    (resultRef, proposalHash) -> {
+                      proposalLoaded.set(true);
+                      return TargetE2EGraphTestFixtures.proposalSourceBytes();
+                    },
+                    MAPPER,
+                    URI.create("https://python-agent.internal/"),
+                    Duration.ofSeconds(8)))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("TLSv1.3 mutual-TLS");
+    assertThat(proposalLoaded).isFalse();
+
+    GraphTransportSecurityProof proof = mutualTlsProof();
+    FakeCommandTransport unusedCommand = new FakeCommandTransport("0".repeat(64), proof);
+    FakeReconciliationTransport unusedReconciliation =
+        new FakeReconciliationTransport("{}".getBytes(StandardCharsets.UTF_8), proof);
+    GraphTransportBundle trustedBundle = bundle(unusedCommand, unusedReconciliation, proof);
+    for (URI rejectedUri :
+        List.of(
+            URI.create("http://python-agent.internal/"),
+            URI.create("https://user@python-agent.internal/"),
+            URI.create("https://python-agent.internal/?target=elsewhere"),
+            URI.create("https://python-agent.internal/#elsewhere"),
+            URI.create("https://python-agent.internal/base/../elsewhere/"),
+            URI.create("https://python-agent.internal/base/%2e%2e/elsewhere/"))) {
+      assertThatThrownBy(
+              () ->
+                  new HttpTargetE2EGraphReconciliationClient(
+                      trustedBundle,
+                      TargetE2EGraphTestFixtures.codec(),
+                      (resultRef, proposalHash) ->
+                          TargetE2EGraphTestFixtures.proposalSourceBytes(),
+                      MAPPER,
+                      rejectedUri,
+                      Duration.ofSeconds(8)))
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessageContaining("base URI is not trusted");
+    }
+    assertThat(unusedCommand.requests).isEmpty();
+    assertThat(unusedReconciliation.requests).isEmpty();
+  }
+
+  @Test
+  void rejectsDifferentBundlesProofsOrBaseUrisBeforeCommandDelivery() throws Exception {
+    GraphTransportSecurityProof firstProof = mutualTlsProof();
+    FakeCommandTransport firstCommand = new FakeCommandTransport("0".repeat(64), firstProof);
+    FakeReconciliationTransport firstReconciliation =
+        new FakeReconciliationTransport("{}".getBytes(StandardCharsets.UTF_8), firstProof);
+    GraphTransportBundle firstBundle = bundle(firstCommand, firstReconciliation, firstProof);
+    var reconciliationClient =
+        new HttpTargetE2EGraphReconciliationClient(
+            firstBundle,
+            TargetE2EGraphTestFixtures.codec(),
+            (resultRef, proposalHash) -> TargetE2EGraphTestFixtures.proposalSourceBytes(),
+            MAPPER,
+            URI.create("https://python-agent.internal/base/"),
+            Duration.ofSeconds(8));
+
+    GraphTransportSecurityProof secondProof = mutualTlsProof();
+    FakeCommandTransport secondCommand = new FakeCommandTransport("0".repeat(64), secondProof);
+    FakeReconciliationTransport secondReconciliation =
+        new FakeReconciliationTransport("{}".getBytes(StandardCharsets.UTF_8), secondProof);
+    GraphTransportBundle secondBundle = bundle(secondCommand, secondReconciliation, secondProof);
+
+    assertThatThrownBy(
+            () ->
+                new HttpTargetE2EGraphProposalClient(
+                    secondBundle,
+                    reconciliationClient,
+                    MAPPER,
+                    URI.create("https://python-agent.internal/base/"),
+                    Duration.ofSeconds(8)))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("share one factory-issued transport bundle");
+
+    FakeCommandTransport sameProofCommand =
+        new FakeCommandTransport("0".repeat(64), firstProof);
+    FakeReconciliationTransport sameProofReconciliation =
+        new FakeReconciliationTransport("{}".getBytes(StandardCharsets.UTF_8), firstProof);
+    GraphTransportBundle differentBundleWithSameProof =
+        bundle(sameProofCommand, sameProofReconciliation, firstProof);
+    assertThatThrownBy(
+            () ->
+                new HttpTargetE2EGraphProposalClient(
+                    differentBundleWithSameProof,
+                    reconciliationClient,
+                    MAPPER,
+                    URI.create("https://python-agent.internal/base/"),
+                    Duration.ofSeconds(8)))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("share one factory-issued transport bundle");
+
+    assertThatThrownBy(
+            () ->
+                new HttpTargetE2EGraphProposalClient(
+                    firstBundle,
+                    reconciliationClient,
+                    MAPPER,
+                    URI.create("https://other-python-agent.internal/base/"),
+                    Duration.ofSeconds(8)))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("share one trusted base URI");
+    assertThat(secondCommand.requests).isEmpty();
+    assertThat(sameProofCommand.requests).isEmpty();
+    assertThat(firstReconciliation.requests).isEmpty();
+  }
+
   private static void assertSealedRequest(
       URI uri,
       Map<String, String> headers,
@@ -231,12 +431,75 @@ class HttpTargetE2EGraphProposalClientTest {
   }
 
   private static TargetE2EGraphEnvelopeSigner.SignedEnvelope credential() {
+    Instant issuedAt = Instant.now().minusSeconds(1);
     return new TargetE2EGraphEnvelopeSigner.SignedEnvelope(
         COMPACT_JWS,
         "java-invocation-es256-1",
         "target-command-jti-001",
-        Instant.parse("2026-07-27T08:00:00Z"),
-        Instant.parse("2026-07-27T08:00:45Z"));
+        issuedAt,
+        issuedAt.plusSeconds(45));
+  }
+
+  private static TargetE2EGraphEnvelopeSigner.SignedEnvelope expiredCredential() {
+    return new TargetE2EGraphEnvelopeSigner.SignedEnvelope(
+        COMPACT_JWS,
+        "java-invocation-es256-1",
+        "expired-target-command-jti-001",
+        Instant.parse("2000-01-01T00:00:00Z"),
+        Instant.parse("2000-01-01T00:00:45Z"));
+  }
+
+  private static HttpTargetE2EGraphProposalClient proposalClient(
+      GraphCommandHttpTransport command,
+      GraphReconciliationHttpTransport reconciliation,
+      GraphTransportSecurityProof proof,
+      TargetE2EGraphEnvelopeCodec codec) {
+    GraphTransportBundle transportBundle = bundle(command, reconciliation, proof);
+    var reconciliationClient =
+        new HttpTargetE2EGraphReconciliationClient(
+            transportBundle,
+            codec,
+            (resultRef, proposalHash) -> TargetE2EGraphTestFixtures.proposalSourceBytes(),
+            MAPPER,
+            URI.create("https://python-agent.internal/base/"),
+            Duration.ofSeconds(8));
+    return new HttpTargetE2EGraphProposalClient(
+        transportBundle,
+        reconciliationClient,
+        MAPPER,
+        URI.create("https://python-agent.internal/base/"),
+        Duration.ofSeconds(8));
+  }
+
+  private static GraphTransportSecurityProof mutualTlsProof() {
+    try {
+      Class<?> type =
+          Class.forName(
+              "com.example.dispute.workflow.infrastructure.agent."
+                  + "TrustedGraphTransportFactory$MutualTlsProof");
+      Constructor<?> constructor = type.getDeclaredConstructor(String.class);
+      constructor.setAccessible(true);
+      return (GraphTransportSecurityProof) constructor.newInstance("target-test-bundle");
+    } catch (ReflectiveOperationException exception) {
+      throw new IllegalStateException(exception);
+    }
+  }
+
+  private static GraphTransportBundle bundle(
+      GraphCommandHttpTransport command,
+      GraphReconciliationHttpTransport reconciliation,
+      GraphTransportSecurityProof proof) {
+    try {
+      Constructor<GraphTransportBundle> constructor =
+          GraphTransportBundle.class.getDeclaredConstructor(
+              GraphCommandHttpTransport.class,
+              GraphReconciliationHttpTransport.class,
+              GraphTransportSecurityProof.class);
+      constructor.setAccessible(true);
+      return constructor.newInstance(command, reconciliation, proof);
+    } catch (ReflectiveOperationException exception) {
+      throw new IllegalStateException(exception);
+    }
   }
 
   private static GraphCommandHttpTransport.ResponseHead successHead(
@@ -278,10 +541,17 @@ class HttpTargetE2EGraphProposalClientTest {
   private static class FakeCommandTransport implements GraphCommandHttpTransport {
 
     private final String resultHash;
+    private final GraphTransportSecurityProof proof;
     private final List<Request> requests = new ArrayList<>();
 
-    private FakeCommandTransport(String resultHash) {
+    private FakeCommandTransport(String resultHash, GraphTransportSecurityProof proof) {
       this.resultHash = resultHash;
+      this.proof = proof;
+    }
+
+    @Override
+    public GraphTransportSecurityProof transportProof() {
+      return proof;
     }
 
     @Override
@@ -310,10 +580,17 @@ class HttpTargetE2EGraphProposalClientTest {
       implements GraphReconciliationHttpTransport {
 
     private final byte[] resultBody;
+    private final GraphTransportSecurityProof proof;
     private final List<Request> requests = new ArrayList<>();
 
-    private FakeReconciliationTransport(byte[] resultBody) {
+    private FakeReconciliationTransport(byte[] resultBody, GraphTransportSecurityProof proof) {
       this.resultBody = resultBody.clone();
+      this.proof = proof;
+    }
+
+    @Override
+    public GraphTransportSecurityProof transportProof() {
+      return proof;
     }
 
     @Override

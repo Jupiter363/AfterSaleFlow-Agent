@@ -7,6 +7,7 @@ import com.example.dispute.workflow.contract.v1.AgentStreamEvent;
 import com.example.dispute.workflow.contract.v1.ContractTypes.StreamEventType;
 import com.example.dispute.workflow.infrastructure.agent.GraphCommandHttpTransport;
 import com.example.dispute.workflow.infrastructure.agent.GraphCommandTransportException;
+import com.example.dispute.workflow.infrastructure.agent.GraphTransportBundle;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
@@ -27,34 +28,36 @@ public final class HttpTargetE2EGraphProposalClient implements TargetE2EGraphPro
   public static final String PATH = "internal/graphs/target-e2e/commands/stream";
 
   private final GraphCommandHttpTransport transport;
-  private final TargetE2EGraphReconciliationClient reconciliationClient;
+  private final HttpTargetE2EGraphReconciliationClient reconciliationClient;
   private final ObjectMapper mapper;
   private final URI endpoint;
   private final Duration timeout;
 
   public HttpTargetE2EGraphProposalClient(
-      GraphCommandHttpTransport transport,
-      TargetE2EGraphReconciliationClient reconciliationClient,
+      GraphTransportBundle transportBundle,
+      HttpTargetE2EGraphReconciliationClient reconciliationClient,
       ObjectMapper objectMapper,
       URI baseUri,
       Duration timeout) {
-    this(transport, reconciliationClient, objectMapper, baseUri, timeout, false);
-  }
-
-  public HttpTargetE2EGraphProposalClient(
-      GraphCommandHttpTransport transport,
-      TargetE2EGraphReconciliationClient reconciliationClient,
-      ObjectMapper objectMapper,
-      URI baseUri,
-      Duration timeout,
-      boolean allowPlaintextTransport) {
-    this.transport = Objects.requireNonNull(transport, "transport");
+    TargetE2EGraphTransportPolicy.VerifiedBundle verified =
+        TargetE2EGraphTransportPolicy.requireVerified(transportBundle);
+    this.transport = verified.commandTransport();
     this.reconciliationClient =
         Objects.requireNonNull(reconciliationClient, "reconciliationClient");
+    URI trustedBaseUri = TargetE2EGraphTransportPolicy.requireTrustedBaseUri(baseUri);
+    if (reconciliationClient.transportBundle() != transportBundle
+        || reconciliationClient.transportProof() != verified.proof()) {
+      throw new IllegalArgumentException(
+          "target Graph clients must share one factory-issued transport bundle and TLS identity");
+    }
+    if (!reconciliationClient.baseUri().equals(trustedBaseUri)) {
+      throw new IllegalArgumentException(
+          "target Graph command and reconciliation clients must share one trusted base URI");
+    }
     this.mapper = Objects.requireNonNull(objectMapper, "objectMapper").copy();
     this.mapper.setSerializationInclusion(JsonInclude.Include.NON_NULL);
     this.mapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
-    this.endpoint = endpoint(baseUri, allowPlaintextTransport);
+    this.endpoint = trustedBaseUri.resolve(PATH);
     this.timeout = HttpTargetE2EGraphReconciliationClient.requireTimeout(timeout);
   }
 
@@ -146,21 +149,6 @@ public final class HttpTargetE2EGraphProposalClient implements TargetE2EGraphPro
       throw new IllegalStateException("activation JWS header must never reach Graph");
     }
     return headers;
-  }
-
-  private static URI endpoint(URI baseUri, boolean allowPlaintextTransport) {
-    Objects.requireNonNull(baseUri, "baseUri");
-    String scheme = baseUri.getScheme();
-    if (baseUri.getHost() == null
-        || baseUri.getUserInfo() != null
-        || baseUri.getQuery() != null
-        || baseUri.getFragment() != null
-        || (!("https".equalsIgnoreCase(scheme))
-            && !(allowPlaintextTransport && "http".equalsIgnoreCase(scheme)))) {
-      throw new IllegalArgumentException("target Graph base URI is not trusted");
-    }
-    String normalized = baseUri.toString().endsWith("/") ? baseUri.toString() : baseUri + "/";
-    return URI.create(normalized).resolve(PATH);
   }
 
   private final class StreamSession implements GraphCommandHttpTransport.Listener {
