@@ -1,0 +1,5 @@
+{
+  "schema_version": "target-e2e-room-proposal-source.v1",
+  "room_type": "REVIEW",
+  "proposal": {"schema_version": "target-e2e-review-proposal.v1", "proposal_id": "proposal-review-001", "command_id": "command-review-001", "logical_run_id": "run-review-001", "attempt_id": "attempt-review-001", "payload_schema_version": "outcome-review-proposal.v1", "payload_ref": "urn:target-e2e:proposal:review:001", "payload_hash": "4444444444444444444444444444444444444444444444444444444444444444", "terminal_class": "NEEDS_REVIEW", "formal_authority": false}
+}

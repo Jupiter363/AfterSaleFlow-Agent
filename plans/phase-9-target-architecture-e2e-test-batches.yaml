@@ -13,6 +13,9 @@ documents:
   command_envelope_schema: contracts/agent-platform/target-e2e/v1/target-e2e-graph-command-envelope.schema.json
   result_envelope_schema: contracts/agent-platform/target-e2e/v1/target-e2e-graph-result-envelope.schema.json
   finalization_receipt_schema: contracts/agent-platform/target-e2e/v1/target-e2e-finalization-receipt.schema.json
+  synthetic_fixture_schema: contracts/agent-platform/target-e2e/v1/target-e2e-synthetic-fixture-set.schema.json
+  isolated_domain_db_binding_schema: contracts/agent-platform/target-e2e/v1/target-e2e-isolated-domain-db-binding.schema.json
+  room_proposal_source_schema: contracts/agent-platform/target-e2e/v1/target-e2e-room-proposal-source.schema.json
   static_contract_test: tests/static/test_phase9_target_e2e_contract.py
 
 gate:
@@ -78,6 +81,21 @@ activation:
     maximum_cases: 16
     wildcard_allowed: false
     reservation: ATOMIC_BEFORE_FIRST_EPOCH_SELECTION
+    fixture_hash: SHA256_RFC8785_FULL_CONFIGURED_READ_ONLY_SCHEMA_VALIDATED_BYTES
+    generated_case_id_unique_scope: GLOBAL
+    tombstone: DURABLE_NEVER_REASSIGN
+    cross_activation_or_concurrent_slot_reuse: REJECT
+  environment_generation:
+    durable_high_water_scope: PER_ENVIRONMENT_ID
+    first_registration: STRICTLY_GREATER_THAN_HIGH_WATER
+    update: ATOMIC_WITH_ACTIVATION_REGISTRATION
+    identical_replica_at_high_water: ALLOW
+    same_generation_different_grant: REJECT_CONFLICT
+    lower_generation: REJECT_STALE
+  physical_database_isolation:
+    cluster_identity_must_differ: true
+    database_identity_must_differ: true
+    principal_difference_alone_sufficient: false
   preferred_transport: READ_ONLY_MOUNTED_FILE
   bootstrap_header: X-AfterSaleFlow-Target-E2E-Activation
   graph_endpoint_header_allowed: false
@@ -99,22 +117,36 @@ activation:
     - WRONG_IMAGE_DIGEST
     - WRONG_TEMPORAL_NAMESPACE
     - WRONG_DOMAIN_OR_GRAPH_DATABASE_IDENTITY
+    - DOMAIN_GRAPH_CLUSTER_OR_DATABASE_COLLISION
+    - WRONG_SYNTHETIC_FIXTURE_BYTES_OR_HASH
+    - GENERATED_CASE_ID_GLOBAL_TOMBSTONE_CONFLICT
+    - ENVIRONMENT_GENERATION_NOT_ABOVE_HIGH_WATER
     - WRONG_TENANT_ROOM_CASE_OR_SYNTHETIC_SCOPE
 
 graph_command:
   embedded_contract: room-graph-command.v1
   wrapper_contract: target-e2e-graph-command-envelope.v1
-  wrapper_members: [schema_version, execution_lane, activation_id, command_hash, command_envelope_hash, command]
+  wrapper_members: [schema_version, execution_lane, activation_id, room_fencing_token, command_hash, command_envelope_hash, command]
   embedded_contract_mutation_allowed: false
   command_hash: SHA256_RFC8785_FULL_COMMAND_INCLUDING_VERIFIED_REQUEST_HASH
   command_envelope_hash: SHA256_RFC8785_WRAPPER_OMITTING_ONLY_COMMAND_ENVELOPE_HASH
   compact_jws_typ: target-e2e-graph-command+jwt
-  additional_signed_claims: [execution_lane, activation_id, command_hash, command_envelope_hash]
+  additional_signed_claims: [execution_lane, activation_id, room_fencing_token, command_hash, command_envelope_hash]
+  room_fence_authority: JAVA_SIGNED_DOMAIN_ROOM_FENCE
+  graph_lease_fence_authority: GRAPH_RUNTIME_LOCAL_CHECKPOINT_LEASE
+  room_fence_is_graph_lease_fence: false
+  both_fences_verified_before_checkpoint_mutation: true
   activation_jws_as_bearer: FORBIDDEN
   result_hash: EQUALS_NESTED_OUTPUT_HASH_SHA256_RFC8785_RESULT_OMITTING_ONLY_OUTPUT_HASH
   proposal_hash: SHA256_RFC8785_EXACT_ROOM_SPECIFIC_PROPOSAL
   result_envelope_hash: SHA256_RFC8785_WRAPPER_OMITTING_ONLY_RESULT_ENVELOPE_HASH
   finalization_receipt_hash: SHA256_RFC8785_RECEIPT_OMITTING_ONLY_RECEIPT_HASH
+  finalization_receipt_status: COMMITTED
+  immutable_replay: RETURN_ORIGINAL_RECEIPT_EXACT_BYTES_AND_HASH
+  hash_sources:
+    agent_run_manifest_hash: AGENT_EXECUTION_MANIFEST_V1_POINTER_ROOT_FULL_RFC8785
+    isolated_domain_db_binding_hash: TARGET_E2E_DB_BINDING_POINTER_ROOT_OMIT_ONLY_BINDING_HASH
+    proposal_hash: TARGET_E2E_ROOM_PROPOSAL_SOURCE_POINTER_PROPOSAL_FULL_RFC8785
 
 resources:
   maximum_light_processes: 2
@@ -136,15 +168,15 @@ slices:
   P9-S3:
     name: PROPOSAL_ONLY_GRAPH_EXECUTION
     requires: [P9-S1_ACTIVATION_ID_AVAILABLE, P9-S2_COMMAND_WRAPPER_AVAILABLE]
-    exit: [FOUR_EXACT_GRAPH_BINDINGS, CHECKPOINT_RECOVERY_GREEN, NO_DOMAIN_CREDENTIAL_OR_FORMAL_SINK]
+    exit: [FOUR_EXACT_GRAPH_BINDINGS, ROOM_AND_LEASE_FENCE_VERIFIED_BEFORE_CHECKPOINT, CHECKPOINT_RECOVERY_GREEN, NO_DOMAIN_CREDENTIAL_OR_FORMAL_SINK]
   P9-S4:
     name: JAVA_FINALIZATION_AND_BROWSER_FLOW
     requires: [P9-S2_HANDOFF_STABLE, P9-S3_RESULT_ENVELOPE_STABLE]
-    exit: [JAVA_TRANSACTION_ONLY, REPLAY_IDENTICAL_RECEIPT, DIFFERENT_HASH_CONFLICT, BROWSER_READS_JAVA_PROJECTION]
+    exit: [TARGET_ONLY_OUTER_RECEIPT_ADAPTER_NOT_DEFAULT_DISCOVERABLE, JAVA_TRANSACTION_ONLY, REPLAY_ORIGINAL_RECEIPT_EXACT_BYTES_AND_HASH, DIFFERENT_HASH_CONFLICT, BROWSER_READS_JAVA_PROJECTION]
   P9-S5:
     name: RECOVERY_DRAIN_AND_UNIFIED_EVIDENCE
     requires: [P9-S1_PASS, P9-S2_PASS, P9-S3_PASS, P9-S4_PASS, ALL_P0_CLOSED]
-    exit: [UNIFIED_BATCH_4_PASS, ACTIVATION_DRAINED, ZERO_UNRESOLVED_LEDGER_ROWS]
+    exit: [UNIFIED_BATCH_4_PASS, ACTIVATION_REVOKED_TERMINAL_AFTER_DRAINED, ZERO_UNRESOLVED_LEDGER_ROWS]
 
 batches:
   batch_0_contract:
@@ -247,7 +279,7 @@ batches:
       - EXECUTE_THREE_COMMIT_RECOVERY_WINDOWS
       - RECONNECT_SSE_AND_RELOAD_FROM_JAVA_PROJECTIONS
       - RUN_DATABASE_TEMPORAL_GRAPH_SECURITY_ASSERTIONS
-      - DRAIN_REVOKE_AND_REJECT_NEW_COMMAND
+      - EXPIRE_TO_DRAIN_ONLY_CONTINUE_ONLY_PREEXPIRY_COMMANDS_DRAIN_THEN_REVOKE_TERMINAL
     required_result:
       engineering_checkpoint: TARGET_ARCHITECTURE_PREPRODUCTION_E2E_PASS
       production_checkpoint: PENDING_EXTERNAL
@@ -258,10 +290,14 @@ database_assertions:
   activation_control:
     - EXACTLY_ONE_ROW_PER_ENVIRONMENT_GENERATION_ACTIVATION_NONCE_IDENTITY
     - EXACT_MANIFEST_HASH_CANDIDATE_BUILD_IMAGE_GRAPH_NAMESPACE_AND_DATABASE_BINDINGS
-    - TERMINAL_LIFECYCLE_DRAINED
+    - DURABLE_ENVIRONMENT_GENERATION_HIGH_WATER_EQUALS_CANDIDATE_GENERATION
+    - LIFECYCLE_REGISTERED_ACTIVE_DRAIN_ONLY_DRAINED_REVOKED_TERMINAL_IN_ORDER
     - EXACTLY_ONE_REGISTRATION_ROW_AND_ZERO_DUPLICATE_CONSUMPTION_ROWS
     - SYNTHETIC_GENERATED_CASE_IDS_EXACT_PREFIX_AND_ATOMIC_SLOT_BEFORE_FIRST_EPOCH
     - SYNTHETIC_CASE_SLOT_COUNT_AT_MOST_SIGNED_MAXIMUM_16
+    - SYNTHETIC_FIXTURE_CANONICAL_BYTES_HASH_EQUALS_MANIFEST_AND_MEASURED_CONTEXT
+    - GENERATED_CASE_ID_GLOBAL_TOMBSTONE_SURVIVES_REVOKE
+    - ZERO_CROSS_ACTIVATION_OR_CONCURRENT_DIFFERENT_SLOT_CASE_ID_REUSE
   domain:
     - CASE_ROOM_EPOCH_EXACT_SET_INTAKE_EVIDENCE_HEARING_REVIEW
     - ALL_TARGET_EPOCHS_TEMPORAL_READY_OR_TERMINAL_WITH_NON_NULL_WORKFLOW_RUN_AND_BUILD_IDS
@@ -272,13 +308,20 @@ database_assertions:
     - ONE_TERMINAL_RESULT_MANIFEST_AND_JAVA_FINALIZATION_PER_LOGICAL_RUN
     - ZERO_LEGACY_WORKER_RUNS_FOR_TARGET_CASE
     - INTAKE_EVIDENCE_HEARING_REVIEW_OUTCOME_RECEIPT_CHAIN_HASHES_MATCH
+    - RECEIPT_AGENT_RUN_MANIFEST_DB_BINDING_AND_FOUR_ROOM_PROPOSAL_HASH_SOURCES_MATCH
+    - RECEIPT_REPLAY_RETURNS_ORIGINAL_COMMITTED_BYTES_AND_HASH
     - ZERO_DUPLICATE_FORMAL_MESSAGE_ARTIFACT_DECISION_OPERATION_RECEIPT_CLOSURE_OR_EVALUATION
   graph:
     - EXACT_REGISTRY_KEY_VERSION_CHECKPOINT_BINDING_HASH_AND_CODE_BUILD_ID
     - COMMAND_ATTEMPT_RESULT_AND_CHECKPOINT_CAUSAL_HASHES_MATCH
     - EVERY_ROW_BINDS_TARGET_E2E_LANE_AND_ACTIVATION_ID
+    - EVERY_COMMAND_RESULT_AND_RECEIPT_BINDS_CURRENT_JAVA_ROOM_FENCING_TOKEN
+    - ROOM_FENCE_AND_DISTINCT_GRAPH_LEASE_FENCE_VERIFIED_BEFORE_CHECKPOINT_MUTATION
     - ZERO_UNRESOLVED_COMMAND_ACTIVE_LEASE_HASH_CONFLICT_OR_CROSS_SCOPE_THREAD
   privileges:
+    - DOMAIN_AND_GRAPH_CLUSTER_IDENTITIES_PHYSICALLY_DIFFERENT
+    - DOMAIN_AND_GRAPH_DATABASE_IDENTITIES_PHYSICALLY_DIFFERENT
+    - PRINCIPAL_DIFFERENCE_ALONE_NOT_ACCEPTED_AS_ISOLATION
     - GRAPH_PRINCIPAL_ZERO_DOMAIN_CONNECT_SCHEMA_TABLE_SEQUENCE_OR_FUNCTION_PRIVILEGE
     - JAVA_DOMAIN_PRINCIPAL_ZERO_GRAPH_CHECKPOINT_OR_LEDGER_WRITE_PRIVILEGE
   temporal:
@@ -294,8 +337,14 @@ retry_policy:
   mix_candidate_environment_activation_build_image_namespace_database_or_attempt: false
 
 drain_policy:
-  lifecycle: [REGISTERED, ACTIVE, DRAINING, DRAINED]
-  new_admission_in_draining: false
+  lifecycle: [REGISTERED, ACTIVE, DRAIN_ONLY, DRAINED, REVOKED_TERMINAL]
+  expiry_transition: ACTIVE_TO_DRAIN_ONLY
+  new_admission_in_drain_only: false
+  replica_attach_in_drain_only: PREEXPIRY_DURABLY_ADMITTED_COMMAND_ONLY
+  drained_accepts_or_executes_work: false
+  revoke_preconditions: [ZERO_UNRESOLVED_ACCEPTED_WORK, ALL_REPLICAS_DETACHED, EVIDENCE_SEALED, DRAINED_AT_RECORDED]
+  terminal_state: REVOKED_TERMINAL
+  timestamp_order: EXPIRES_AT_LE_DRAIN_ONLY_AT_LE_DRAINED_AT_LT_REVOKED_AT
   legacy_fallback_inside_active_epoch: false
   in_place_manifest_renewal: false
   failed_drain: SUSPEND_AT_SAFE_BOUNDARY_AND_REQUIRE_MANUAL_RECONCILIATION

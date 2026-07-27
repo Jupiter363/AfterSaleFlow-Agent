@@ -50,8 +50,9 @@ def _set_pointer(document: dict[str, Any], pointer: str, value: object) -> None:
     parts = [part.replace("~1", "/").replace("~0", "~") for part in pointer.split("/")[1:]]
     target: Any = document
     for part in parts[:-1]:
-        target = target[part]
-    target[parts[-1]] = value
+        target = target[int(part)] if isinstance(target, list) else target[part]
+    final = int(parts[-1]) if isinstance(target, list) else parts[-1]
+    target[final] = value
 
 
 def _semantic_errors(manifest: dict[str, Any], context: dict[str, Any]) -> set[str]:
@@ -68,6 +69,7 @@ def _semantic_errors(manifest: dict[str, Any], context: dict[str, Any]) -> set[s
         errors.add("MANIFEST_LIFETIME_EXCEEDED")
     if expires_at <= now:
         errors.add("MANIFEST_EXPIRED")
+    exact_registered_attach = False
     for grant in context["registeredGrants"]:
         same_activation = grant["activationId"] == manifest["activationId"]
         same_nonce = grant["nonce"] == manifest["nonce"]
@@ -81,6 +83,13 @@ def _semantic_errors(manifest: dict[str, Any], context: dict[str, Any]) -> set[s
             }
             if not exact_attach:
                 errors.add("NONCE_REPLAY")
+            else:
+                exact_registered_attach = True
+    if (
+        not exact_registered_attach
+        and manifest["environmentGeneration"] <= context["environmentGenerationHighWater"]
+    ):
+        errors.add("ENVIRONMENT_GENERATION_NOT_MONOTONIC")
 
     scalar_bindings = {
         "contractVersion": ("expectedContractVersion", "CONTRACT_VERSION_MISMATCH"),
@@ -123,6 +132,27 @@ def _semantic_errors(manifest: dict[str, Any], context: dict[str, Any]) -> set[s
             errors.add("CASE_SCOPE_MISMATCH")
         if context["reservedSyntheticCaseCount"] >= scope["maxCases"]:
             errors.add("CASE_SCOPE_MISMATCH")
+        fixture_context = context["syntheticFixtureSet"]
+        fixture_document = context.get("syntheticFixtureDocument")
+        if fixture_document is None:
+            fixture_document = _json(CONTRACT_ROOT / fixture_context["path"])
+        fixture_hash = _canonical_hash(fixture_document)
+        if not (
+            fixture_hash == fixture_context["canonicalHash"] == scope["fixtureSetHash"]
+            and fixture_document["fixtureSetId"] == scope["fixtureSetId"]
+            and fixture_document["caseIdPrefix"] == scope["caseIdPrefix"]
+            and fixture_document["maximumCases"] == scope["maxCases"]
+            and fixture_document["roomTypes"] == manifest["allowedRoomTypes"]
+        ):
+            errors.add("SYNTHETIC_FIXTURE_HASH_MISMATCH")
+        for reservation in context["registeredGeneratedCases"]:
+            if reservation["generatedCaseId"] == context["requestedSyntheticCaseId"]:
+                exact_reservation = (
+                    reservation["activationId"] == manifest["activationId"]
+                    and reservation["slotNumber"] == context["requestedSyntheticSlot"]
+                )
+                if not exact_reservation:
+                    errors.add("GENERATED_CASE_ID_GLOBAL_CONFLICT")
 
     graph_without_hash = _without(manifest["graphBinding"], "bindingHash")
     if _canonical_hash(graph_without_hash) != manifest["graphBinding"]["bindingHash"]:
@@ -132,8 +162,11 @@ def _semantic_errors(manifest: dict[str, Any], context: dict[str, Any]) -> set[s
 
     domain = manifest["databaseIdentities"]["domain"]
     graph = manifest["databaseIdentities"]["graph"]
-    if domain == graph:
-        errors.add("DATABASE_IDENTITY_COLLISION")
+    if (
+        domain["clusterIdentity"] == graph["clusterIdentity"]
+        or domain["databaseIdentity"] == graph["databaseIdentity"]
+    ):
+        errors.add("DATABASE_PHYSICAL_ISOLATION_VIOLATION")
 
     if manifest["authority"] != {
         "environmentClass": "ISOLATED_PREPRODUCTION",
@@ -178,6 +211,17 @@ def test_activation_schema_and_both_scope_examples_are_valid() -> None:
     assert synthetic["mode"] == "ISOLATED_SYNTHETIC_NEW_CASES"
     assert synthetic["caseIdPrefix"] == "CASE_P9_SYNTHETIC_"
     assert 1 <= synthetic["maxCases"] <= 16
+
+    synthetic_manifest = _json(fixtures[1])
+    idempotent_context = copy.deepcopy(context)
+    idempotent_context["registeredGeneratedCases"] = [
+        {
+            "generatedCaseId": idempotent_context["requestedSyntheticCaseId"],
+            "activationId": synthetic_manifest["activationId"],
+            "slotNumber": idempotent_context["requestedSyntheticSlot"],
+        }
+    ]
+    assert not _semantic_errors(synthetic_manifest, idempotent_context)
 
 
 def test_canonical_hashes_and_non_secret_jws_golden_are_frozen() -> None:
@@ -225,6 +269,19 @@ def test_invalid_fixture_matrix_rejects_every_required_failure_mode() -> None:
             )
         if "reservedSyntheticCaseCount" in case:
             context["reservedSyntheticCaseCount"] = case["reservedSyntheticCaseCount"]
+        if "syntheticFixtureDocumentMutation" in case:
+            fixture_document = _json(
+                CONTRACT_ROOT / context["syntheticFixtureSet"]["path"]
+            )
+            mutation = case["syntheticFixtureDocumentMutation"]
+            _set_pointer(fixture_document, mutation["pointer"], mutation["value"])
+            context["syntheticFixtureDocument"] = fixture_document
+        if "registeredGeneratedCase" in case:
+            context["registeredGeneratedCases"].append(case["registeredGeneratedCase"])
+        if "environmentGenerationHighWater" in case:
+            context["environmentGenerationHighWater"] = case[
+                "environmentGenerationHighWater"
+            ]
         errors = _semantic_errors(fixture, context)
         assert case["expectedRejection"] in errors, (case["id"], errors)
         observed_ids.add(case["id"])
@@ -253,6 +310,13 @@ def test_invalid_fixture_matrix_rejects_every_required_failure_mode() -> None:
         "wrong-graph-code-build",
         "wrong-synthetic-case-prefix",
         "synthetic-case-capacity-exhausted",
+        "wrong-synthetic-fixture-hash",
+        "wrong-synthetic-fixture-bytes",
+        "cross-activation-generated-case-reuse",
+        "concurrent-generated-case-slot-conflict",
+        "domain-graph-cluster-collision",
+        "domain-graph-database-collision",
+        "stale-environment-generation-high-water",
     } <= observed_ids
     assert {
         "MANIFEST_EXPIRED",
@@ -272,6 +336,10 @@ def test_invalid_fixture_matrix_rejects_every_required_failure_mode() -> None:
         "GRAPH_BINDING_MISMATCH",
         "TEMPORAL_NAMESPACE_MISMATCH",
         "DATABASE_IDENTITY_MISMATCH",
+        "SYNTHETIC_FIXTURE_HASH_MISMATCH",
+        "GENERATED_CASE_ID_GLOBAL_CONFLICT",
+        "DATABASE_PHYSICAL_ISOLATION_VIOLATION",
+        "ENVIRONMENT_GENERATION_NOT_MONOTONIC",
     } <= observed_rejections
 
 
@@ -286,6 +354,7 @@ def test_identical_ha_replica_attach_is_idempotent_but_rebinding_is_replay() -> 
         "manifestHash": manifest["manifestHash"],
     }
     context["registeredGrants"] = [registered]
+    context["environmentGenerationHighWater"] = manifest["environmentGeneration"]
     assert not _semantic_errors(manifest, context)
 
     conflicting = copy.deepcopy(context)
@@ -317,16 +386,15 @@ def test_policy_freezes_transport_replay_authority_and_exact_bindings() -> None:
     assert policy["newCaseReservationPolicy"] == {
         "mode": "ISOLATED_SYNTHETIC_NEW_CASES",
         "operation": "ATOMIC_RESERVE_CASE_SLOT_BEFORE_FIRST_EPOCH_SELECTION",
-        "identity": [
-            "environmentId",
-            "environmentGeneration",
-            "activationId",
-            "generatedCaseId",
-        ],
+        "reservationPrimaryKey": ["activationId", "slotNumber"],
+        "generatedCaseIdUniqueScope": "GLOBAL_NOT_PARTITIONED_BY_ACTIVATION_OR_ENVIRONMENT",
+        "generatedCaseIdTombstone": "DURABLE_NEVER_REASSIGN",
+        "tombstoneRetention": "THROUGH_ENVIRONMENT_DECOMMISSION_AUDIT",
         "maximumCases": 16,
         "prefixWildcardAllowed": False,
         "existingCaseIdReservationResult": "IDEMPOTENT_ONLY_FOR_SAME_ACTIVATION_SLOT",
-        "wrongPrefixOrExhaustedCapacityResult": "REJECT",
+        "crossActivationOrConcurrentDifferentSlotSameIdResult": "REJECT_GENERATED_CASE_ID_GLOBAL_CONFLICT",
+        "wrongPrefixFixtureHashOrExhaustedCapacityResult": "REJECT",
     }
     transport = policy["transport"]
     assert transport["scope"] == "DEPLOYMENT_STARTUP_ONLY"
@@ -364,9 +432,14 @@ def test_policy_freezes_transport_replay_authority_and_exact_bindings() -> None:
     assert command["jwsClaimAdditions"] == [
         "execution_lane",
         "activation_id",
+        "room_fencing_token",
         "command_hash",
         "command_envelope_hash",
     ]
+    assert command["roomFenceIsGraphLeaseFence"] is False
+    assert command["beforeCheckpointMutation"].startswith(
+        "VERIFY_CURRENT_ROOM_FENCING_TOKEN"
+    )
     finalization = policy["resultAndFinalizationBinding"]
     assert finalization["resultHash"].startswith("EQUALS_ROOM_GRAPH_RESULT_OUTPUT_HASH")
     assert finalization["receiptHash"] == (
@@ -385,6 +458,9 @@ def test_additive_graph_envelopes_preserve_v1_and_bind_lane_activation_hash() ->
         "target-e2e-finalization-receipt.schema.json",
         "target-e2e-graph-command-envelope.schema.json",
         "target-e2e-graph-result-envelope.schema.json",
+        "target-e2e-isolated-domain-db-binding.schema.json",
+        "target-e2e-room-proposal-source.schema.json",
+        "target-e2e-synthetic-fixture-set.schema.json",
     }
     for schema in schemas.values():
         jsonschema.validators.validator_for(schema).check_schema(schema)
@@ -394,6 +470,7 @@ def test_additive_graph_envelopes_preserve_v1_and_bind_lane_activation_hash() ->
         "schema_version",
         "execution_lane",
         "activation_id",
+        "room_fencing_token",
         "command_hash",
         "command_envelope_hash",
         "command",
@@ -407,6 +484,7 @@ def test_additive_graph_envelopes_preserve_v1_and_bind_lane_activation_hash() ->
     assert command["x-jws"]["requiredClaims"] == [
         "execution_lane",
         "activation_id",
+        "room_fencing_token",
         "command_hash",
         "command_envelope_hash",
     ]
@@ -427,6 +505,7 @@ def test_additive_graph_envelopes_preserve_v1_and_bind_lane_activation_hash() ->
     assert {
         "command_hash",
         "command_envelope_hash",
+        "room_fencing_token",
         "result_hash",
         "proposal_hash",
         "result_envelope_hash",
@@ -440,7 +519,7 @@ def test_additive_graph_envelopes_preserve_v1_and_bind_lane_activation_hash() ->
         "case_id",
         "room_type",
         "room_epoch",
-        "fencing_token",
+        "room_fencing_token",
         "process_revision",
         "stage_sequence",
         "logical_run_id",
@@ -460,6 +539,115 @@ def test_additive_graph_envelopes_preserve_v1_and_bind_lane_activation_hash() ->
         "committed_at",
         "receipt_hash",
     } <= set(receipt["required"])
+    assert receipt["properties"]["domain_commit_status"] == {"const": "COMMITTED"}
+    assert receipt["x-replay"]["sameIdentitySameHashes"] == (
+        "RETURN_ORIGINAL_COMMITTED_RECEIPT_EXACT_BYTES_AND_HASH"
+    )
+    assert set(receipt["x-hash-source-bindings"]) == {
+        "agent_run_manifest_hash",
+        "isolated_domain_db_binding_hash",
+        "proposal_hash",
+    }
+
+
+def test_fixture_database_manifest_and_all_room_proposal_hash_sources_are_exact() -> None:
+    activation = _json(VALID_ROOT / "target-e2e-activation-synthetic-valid.json")
+    context = _json(CONTEXT_PATH)
+
+    fixture_schema = _json(CONTRACT_ROOT / "target-e2e-synthetic-fixture-set.schema.json")
+    fixture_document = _json(
+        CONTRACT_ROOT / "fixtures/synthetic/p9-synthetic-all-rooms-001.json"
+    )
+    fixture_validator = jsonschema.Draft202012Validator(fixture_schema)
+    assert not list(fixture_validator.iter_errors(fixture_document))
+    fixture_hash = _canonical_hash(fixture_document)
+    assert fixture_hash == activation["caseScope"]["fixtureSetHash"]
+    assert fixture_hash == context["syntheticFixtureSet"]["canonicalHash"]
+    assert fixture_document["fixtureSetId"] == activation["caseScope"]["fixtureSetId"]
+    assert fixture_document["caseIdPrefix"] == activation["caseScope"]["caseIdPrefix"]
+    assert fixture_document["maximumCases"] == activation["caseScope"]["maxCases"]
+    assert set(fixture_document["roomTypes"]) == {
+        "INTAKE",
+        "EVIDENCE",
+        "HEARING",
+        "REVIEW",
+    }
+
+    db_schema = _json(CONTRACT_ROOT / "target-e2e-isolated-domain-db-binding.schema.json")
+    db_binding = _json(VALID_ROOT / "target-e2e-isolated-domain-db-binding-valid.json")
+    assert not list(jsonschema.Draft202012Validator(db_schema).iter_errors(db_binding))
+    assert _canonical_hash(_without(db_binding, "binding_hash")) == db_binding["binding_hash"]
+    domain = activation["databaseIdentities"]["domain"]
+    assert db_binding["cluster_identity"] == domain["clusterIdentity"]
+    assert db_binding["database_identity"] == domain["databaseIdentity"]
+    assert db_binding["runtime_principal_identity"] == domain["runtimePrincipalIdentity"]
+    graph = activation["databaseIdentities"]["graph"]
+    assert domain["clusterIdentity"] != graph["clusterIdentity"]
+    assert domain["databaseIdentity"] != graph["databaseIdentity"]
+
+    proposal_schema = _json(CONTRACT_ROOT / "target-e2e-room-proposal-source.schema.json")
+    proposal_validator = jsonschema.Draft202012Validator(proposal_schema)
+    proposals = sorted(VALID_ROOT.glob("target-e2e-*-proposal-source-valid.json"))
+    assert len(proposals) == 4
+    proposal_hashes: dict[str, str] = {}
+    for path in proposals:
+        source = _json(path)
+        assert not list(proposal_validator.iter_errors(source)), path.name
+        proposal_hashes[source["room_type"]] = _canonical_hash(source["proposal"])
+        assert source["proposal"]["formal_authority"] is False
+    assert set(proposal_hashes) == {"INTAKE", "EVIDENCE", "HEARING", "REVIEW"}
+    assert len(set(proposal_hashes.values())) == 4
+
+    manifest_schema = _json(
+        ROOT / "contracts/agent-platform/v1/agent-execution-manifest.schema.json"
+    )
+    manifest_fixture = _json(
+        ROOT
+        / "contracts/agent-platform/v1/fixtures/valid/agent-execution-manifest-valid.json"
+    )["instance"]
+    assert not list(
+        jsonschema.Draft202012Validator(manifest_schema).iter_errors(manifest_fixture)
+    )
+    assert len(_canonical_hash(manifest_fixture)) == 64
+
+
+def test_generation_high_water_expiry_drain_and_terminal_order_are_frozen() -> None:
+    policy = _json(POLICY_PATH)
+    generation = policy["environmentGenerationPolicy"]
+    assert generation == {
+        "scope": "DURABLE_HIGH_WATER_PER_ENVIRONMENT_ID",
+        "newRegistrationRule": "environmentGeneration > durableHighWater",
+        "update": "ATOMIC_WITH_FIRST_ACTIVATION_REGISTRATION",
+        "identicalReplicaAttachAtHighWater": "ALLOWED",
+        "sameGenerationDifferentGrant": "REJECT_ENVIRONMENT_GENERATION_CONFLICT",
+        "lowerGeneration": "REJECT_ENVIRONMENT_GENERATION_STALE",
+        "reuseAfterDrainOrRevoke": "FORBIDDEN",
+    }
+    drain = policy["expiryAndDrainPolicy"]
+    assert drain["lifecycleOrder"] == [
+        "REGISTERED",
+        "ACTIVE",
+        "DRAIN_ONLY",
+        "DRAINED",
+        "REVOKED_TERMINAL",
+    ]
+    assert drain["expiryTransition"] == "ACTIVE_TO_DRAIN_ONLY"
+    assert drain["newCaseAdmissionAfterExpiry"] is False
+    assert drain["newCommandAdmissionAfterExpiry"] is False
+    assert drain["identicalReplicaAttachAfterExpiry"] == "DRAIN_ACCEPTED_COMMAND_ONLY"
+    assert drain["continuedCommandProof"] == [
+        "command_id",
+        "command_hash",
+        "command_envelope_hash",
+        "room_epoch",
+        "room_fencing_token",
+        "admitted_at_before_expires_at",
+    ]
+    assert drain["drainedAcceptsOrExecutesWork"] is False
+    assert drain["terminalState"] == "REVOKED_TERMINAL"
+    assert drain["timestampOrder"] == (
+        "expires_at <= drain_only_at <= drained_at < revoked_at"
+    )
 
 
 def test_plan_has_exactly_five_slices_gates_drain_and_unified_db_assertions() -> None:
@@ -502,18 +690,40 @@ def test_plan_has_exactly_five_slices_gates_drain_and_unified_db_assertions() ->
     assert "ALL_TARGET_EPOCHS_TEMPORAL_READY_OR_TERMINAL_WITH_NON_NULL_WORKFLOW_RUN_AND_BUILD_IDS" in assertions["domain"]
     assert "ZERO_LEGACY_WORKER_RUNS_FOR_TARGET_CASE" in assertions["domain"]
     assert "EVERY_ROW_BINDS_TARGET_E2E_LANE_AND_ACTIVATION_ID" in assertions["graph"]
+    assert batches["graph_command"]["room_fence_is_graph_lease_fence"] is False
+    assert batches["graph_command"]["finalization_receipt_status"] == "COMMITTED"
+    assert batches["drain_policy"]["lifecycle"] == [
+        "REGISTERED",
+        "ACTIVE",
+        "DRAIN_ONLY",
+        "DRAINED",
+        "REVOKED_TERMINAL",
+    ]
+    assert "DOMAIN_AND_GRAPH_CLUSTER_IDENTITIES_PHYSICALLY_DIFFERENT" in assertions[
+        "privileges"
+    ]
 
 
 def test_adr_and_contract_pack_separate_engineering_from_production() -> None:
     adr = ADR_PATH.read_text(encoding="utf-8")
     pack = PACK_PATH.read_text(encoding="utf-8")
-    for text in (adr, pack):
+    plan = PLAN_PATH.read_text(encoding="utf-8")
+    for text in (adr, pack, plan):
         assert "Graph" in text and "proposal" in text.lower()
         assert "Java Finalizer" in text
         assert "LEGACY" in text and "DISABLED" in text
         assert "PENDING_EXTERNAL" in text
         assert "PENDING_PROMOTION" in text
         assert "production" in text.lower()
+        for marker in (
+            "room_fencing_token",
+            "REVOKED_TERMINAL",
+            "agent_run_manifest_hash",
+            "isolated_domain_db_binding_hash",
+            "proposal_hash",
+            "ALREADY_COMMITTED",
+        ):
+            assert marker in text
     assert "Production authorization: NONE" in adr
     assert "P9.0: NOT_RUN" in pack
     assert "runtime_activation: BLOCKED" in pack

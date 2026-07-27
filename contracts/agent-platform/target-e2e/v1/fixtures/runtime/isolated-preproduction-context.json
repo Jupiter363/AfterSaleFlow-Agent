@@ -4,12 +4,20 @@
   "expectedExecutionLane": "TARGET_E2E_CANDIDATE",
   "environmentId": "p9-isolated-preprod-01",
   "environmentGeneration": 7,
+  "environmentGenerationHighWater": 6,
   "candidateSha": "8a322ec205e6720ec7ac922cc41b5f79b31815af",
   "tenantSurrogate": "tenant-p9-isolated-01",
   "requestedCaseId": "CASE_P9_ISOLATED_001",
   "requestedSyntheticFixtureSetId": "p9-synthetic-all-rooms-001",
   "requestedSyntheticCaseId": "CASE_P9_SYNTHETIC_0001",
+  "requestedSyntheticSlot": 1,
   "reservedSyntheticCaseCount": 0,
+  "registeredGeneratedCases": [],
+  "syntheticFixtureSet": {
+    "path": "fixtures/synthetic/p9-synthetic-all-rooms-001.json",
+    "schema": "target-e2e-synthetic-fixture-set.v1",
+    "canonicalHash": "ca73ad73f54d19354e593f544db67dd658397661e893b2401d726dc32a37d1aa"
+  },
   "requestedRoomType": "HEARING",
   "buildBindings": {
     "caseBuildId": "p9-case-8a322ec2",

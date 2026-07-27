@@ -1,7 +1,7 @@
 {
   "contractVersion": "target-e2e-activation.v1",
   "activationId": "p9act.v1.fedcba9876543210fedcba9876543210",
-  "manifestHash": "e55f94ad58c9f638d8f0435e919a0c91e58b1a0683dfcd8cb600df7d9f007f98",
+  "manifestHash": "a83c2eb4dfeb3d06a17ad9557b3b1e2d022c026bf71c1718801ab6f6f26010e4",
   "executionLane": "TARGET_E2E_CANDIDATE",
   "environmentId": "p9-isolated-preprod-01",
   "environmentGeneration": 7,
@@ -15,7 +15,7 @@
     "caseIdPrefix": "CASE_P9_SYNTHETIC_",
     "maxCases": 4,
     "fixtureSetId": "p9-synthetic-all-rooms-001",
-    "fixtureSetHash": "6666666666666666666666666666666666666666666666666666666666666666",
+    "fixtureSetHash": "ca73ad73f54d19354e593f544db67dd658397661e893b2401d726dc32a37d1aa",
     "containsRealCaseOrPartyData": false,
     "externalEffectsAllowed": false
   },

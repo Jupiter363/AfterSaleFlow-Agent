@@ -14,11 +14,12 @@
   },
   "x-proposal-hash": {"field": "proposal_hash", "preimage": "RFC8785_EXACT_ROOM_SPECIFIC_PROPOSAL_PAYLOAD_VALIDATED_BY_ITS_SCHEMA"},
   "x-self-hash": {"algorithm": "SHA-256", "field": "result_envelope_hash", "preimage": "RFC8785_OMIT_TOP_LEVEL_FIELD", "omitFields": ["result_envelope_hash"]},
-  "required": ["schema_version", "execution_lane", "activation_id", "command_hash", "command_envelope_hash", "result_hash", "proposal_hash", "result_envelope_hash", "graph_output_authority", "result"],
+  "required": ["schema_version", "execution_lane", "activation_id", "room_fencing_token", "command_hash", "command_envelope_hash", "result_hash", "proposal_hash", "result_envelope_hash", "graph_output_authority", "result"],
   "properties": {
     "schema_version": {"const": "target-e2e-graph-result-envelope.v1"},
     "execution_lane": {"const": "TARGET_E2E_CANDIDATE"},
     "activation_id": {"type": "string", "pattern": "^p9act\\.v1\\.[0-9a-f]{32}$"},
+    "room_fencing_token": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
     "command_hash": {"$ref": "#/$defs/sha256"},
     "command_envelope_hash": {"$ref": "#/$defs/sha256"},
     "result_hash": {"$ref": "#/$defs/sha256"},

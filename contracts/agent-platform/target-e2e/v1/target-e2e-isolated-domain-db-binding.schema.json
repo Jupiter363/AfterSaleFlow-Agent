@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.after-sale-flow.example/agent-platform/target-e2e/v1/target-e2e-isolated-domain-db-binding.schema.json",
+  "title": "Target E2E Isolated Domain Database Binding v1",
+  "type": "object",
+  "additionalProperties": false,
+  "x-self-hash": {"algorithm": "SHA-256", "field": "binding_hash", "preimage": "RFC8785_VALIDATED_DOCUMENT_OMITTING_ONLY_BINDING_HASH", "omitFields": ["binding_hash"]},
+  "required": ["schema_version", "environment_id", "environment_generation", "activation_id", "binding_kind", "cluster_identity", "database_identity", "runtime_principal_identity", "binding_hash"],
+  "properties": {
+    "schema_version": {"const": "target-e2e-isolated-domain-db-binding.v1"},
+    "environment_id": {"$ref": "#/$defs/identifier"},
+    "environment_generation": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "activation_id": {"type": "string", "pattern": "^p9act\\.v1\\.[0-9a-f]{32}$"},
+    "binding_kind": {"const": "ISOLATED_DOMAIN_POSTGRESQL"},
+    "cluster_identity": {"$ref": "#/$defs/identifier"},
+    "database_identity": {"$ref": "#/$defs/identifier"},
+    "runtime_principal_identity": {"$ref": "#/$defs/identifier"},
+    "binding_hash": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "identifier": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

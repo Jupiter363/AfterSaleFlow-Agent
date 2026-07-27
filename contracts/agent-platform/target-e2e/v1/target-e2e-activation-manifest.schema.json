@@ -187,6 +187,11 @@
     "databaseIdentities": {
       "type": "object",
       "additionalProperties": false,
+      "x-semantic-constraints": [
+        "domain.clusterIdentity MUST_NOT_EQUAL graph.clusterIdentity",
+        "domain.databaseIdentity MUST_NOT_EQUAL graph.databaseIdentity",
+        "Different runtimePrincipalIdentity values do not prove physical isolation"
+      ],
       "required": ["domain", "graph"],
       "properties": {
         "domain": {"$ref": "#/$defs/databaseIdentity"},

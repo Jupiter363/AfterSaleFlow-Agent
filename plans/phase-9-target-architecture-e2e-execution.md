@@ -88,8 +88,11 @@ The authoritative files are:
 - `contracts/agent-platform/target-e2e/v1/target-e2e-activation-manifest.schema.json`;
 - `contracts/agent-platform/target-e2e/v1/activation-validation-policy.v1.json`;
 - `contracts/agent-platform/target-e2e/v1/target-e2e-graph-command-envelope.schema.json`;
-- `contracts/agent-platform/target-e2e/v1/target-e2e-graph-result-envelope.schema.json`; and
-- `contracts/agent-platform/target-e2e/v1/target-e2e-finalization-receipt.schema.json`.
+- `contracts/agent-platform/target-e2e/v1/target-e2e-graph-result-envelope.schema.json`;
+- `contracts/agent-platform/target-e2e/v1/target-e2e-finalization-receipt.schema.json`;
+- `contracts/agent-platform/target-e2e/v1/target-e2e-synthetic-fixture-set.schema.json`;
+- `contracts/agent-platform/target-e2e/v1/target-e2e-isolated-domain-db-binding.schema.json`; and
+- `contracts/agent-platform/target-e2e/v1/target-e2e-room-proposal-source.schema.json`.
 
 Activation is loaded once at deployment startup and atomically registered in the shared Java
 control ledger. Preferred transport is a read-only mounted file. The optional bootstrap header is
@@ -98,19 +101,35 @@ at most two hours, future `issuedAt` is rejected, and conflicting nonce reuse fa
 admission. Exact replicas may attach idempotently to the one existing registration.
 
 Case scope is either exact `EXPLICIT_CASE_IDS` or bounded `ISOLATED_SYNTHETIC_NEW_CASES`. The
-latter has an exact uppercase prefix and `maxCases <= 16`; Java atomically consumes one activation
-slot and persists the generated case ID before its first epoch selection. There is no wildcard.
+latter has an exact uppercase prefix and `maxCases <= 16`. Java validates configured read-only
+fixture bytes, RFC 8785 canonicalizes the full schema-valid document, and requires its SHA-256 to
+match manifest and measured context. It then atomically consumes one activation slot and persists
+the generated case ID before first epoch selection. A global durable `generatedCaseId` tombstone
+prevents cross-activation and concurrent different-slot reuse. There is no wildcard.
 Java Domain commit is allowed only for that isolated bound scope; Graph Domain writes,
 external/production effects, and production traffic remain forbidden.
 
+New activation registration must advance the durable `environmentId` generation high-water.
+Exact replicas may attach at the current generation; same-generation different grants and lower
+generations fail. Domain and Graph must use different physical cluster identities and different
+database identities; distinct principals on the same physical database do not pass isolation.
+
 `room-graph-command.v1` remains frozen. `target-e2e-graph-command-envelope.v1` embeds it and binds
-the lane, activation, SHA-256/RFC-8785 full-command hash, and canonical wrapper self-hash. The
+the lane, activation, Java-signed `room_fencing_token`, SHA-256/RFC-8785 full-command hash, and canonical wrapper self-hash. The
 per-command Java JWS uses
-`typ=target-e2e-graph-command+jwt` and signs matching `execution_lane`, `activation_id`, and
-`command_hash` plus `command_envelope_hash` claims. Result and finalization receipt repeat the same
-causal binding. Result hash equals the nested v1 `output_hash` after its omit-only-output-hash rule;
+`typ=target-e2e-graph-command+jwt` and signs matching `execution_lane`, `activation_id`,
+`room_fencing_token`, `command_hash`, and `command_envelope_hash` claims. The Domain room fence is
+distinct from the Graph checkpoint lease fence; both are verified before checkpoint mutation.
+Result and finalization receipt repeat the same causal binding. Result hash equals the nested v1 `output_hash` after its omit-only-output-hash rule;
 the receipt additionally binds tenant/case/room/epoch/fence/revision/stage, Graph checkpoint,
 AgentRun manifest, isolated Domain database, proposal, result envelope, and commit time.
+
+Hash sources are frozen: `agent_run_manifest_hash` is SHA-256/RFC-8785 of the full validated
+`agent-execution-manifest.v1` at JSON pointer `""`; `isolated_domain_db_binding_hash` equals the
+validated target DB source `binding_hash` computed with only that field omitted; each room's
+`proposal_hash` is SHA-256/RFC-8785 of `/proposal` in a validated
+`target-e2e-room-proposal-source.v1`. Same identity/hash replay returns the original `COMMITTED`
+receipt bytes and hash; `ALREADY_COMMITTED` is not a receipt state.
 
 ## Five Implementation Slices
 
@@ -153,8 +172,9 @@ proposal result wrapper; restart/reconciliation behavior; explicit empty tool/fo
 **Entry:** S1 activation identity and S2 command wrapper producer available.
 
 **Exit:** each room has one exact executor binding and checkpoint recovery test; wrong activation,
-lane, tenant, case, room, command hash, Graph binding, nonce, and fence fail before checkpoint
-mutation; import and credential tests prove no Domain adapter or credential is reachable.
+lane, tenant, case, room, command hash, signed room fence, Graph binding, nonce, and distinct Graph
+lease fence fail before checkpoint mutation; import and credential tests prove no Domain adapter
+or credential is reachable.
 
 ### P9-S4: Java Finalization And Browser Flow
 
@@ -162,13 +182,17 @@ mutation; import and credential tests prove no Domain adapter or credential is r
 
 **Work:** target-only facts providers and room committers; proposal/result loading; exact binding
 and fence revalidation; transactional AgentRun finalization; room facts, projections, audit, SSE;
-browser command/API adapters and all expected intermediate/terminal views.
+browser command/API adapters and all expected intermediate/terminal views. A target-only outer
+adapter and immutable receipt ledger wrap the existing Java room commit receipt to persist the
+activation/lane/database-bound target receipt. That adapter is not discoverable from default main
+assembly and must preserve `IntakeFormalSinkAssemblyTest`.
 
 **Entry:** S2 workflow result handoff and S3 proposal envelope stable.
 
-**Exit:** focused transaction tests prove one Java commit or identical replay receipt, different
-hash conflict, rollback on partial failure, no direct Python write, and browser visibility from
-durable Java projection rather than client-derived phase logic.
+**Exit:** focused transaction tests prove one Java `COMMITTED` receipt or byte/hash-identical
+original receipt replay, different-hash conflict, explicit hash sources for AgentRun manifest,
+isolated DB binding, and every room proposal, rollback on partial failure, no direct Python write,
+and browser visibility from durable Java projection rather than client-derived phase logic.
 
 ### P9-S5: Recovery, Drain, And Unified Evidence
 
@@ -180,9 +204,9 @@ windows; run the final browser all-room scenario; capture DB/Temporal/Graph asse
 
 **Entry:** S1-S4 focused gates pass on one immutable candidate and all P0 findings are closed.
 
-**Exit:** unified Batch 4 passes on one activation/environment generation and the activation reaches
-`DRAINED`; no unresolved command, outbox, lease, AgentRun, finalization, compensation, or projection
-gap remains. The result is an engineering checkpoint only.
+**Exit:** unified Batch 4 passes on one activation/environment generation and the activation follows
+`DRAIN_ONLY -> DRAINED -> REVOKED_TERMINAL`; no unresolved command, outbox, lease, AgentRun,
+finalization, compensation, or projection gap remains. The result is an engineering checkpoint only.
 
 ## Focused Verification
 
@@ -219,7 +243,8 @@ The required scenario is:
    duplicate cognition, message, Artifact, operation, or external effect.
 6. Reconnect SSE and reload every browser view from Java projections.
 7. Execute the Domain, Graph, Temporal, security, and negative-default assertions below.
-8. Close admission, drain accepted work, revoke the activation, and prove a new command is rejected.
+8. Expire/close admission into `DRAIN_ONLY`, prove only pre-expiry admitted commands can continue,
+   reach `DRAINED`, then `REVOKED_TERMINAL`, and prove a new command is rejected throughout.
 
 ## Required Database Assertions
 
@@ -229,12 +254,14 @@ manifest tenant, case, activation, environment generation, and candidate.
 **Activation/control ledger:** exactly one activation row exists for the five-part registration
 identity `(environmentId, environmentGeneration, activationId, nonce, manifestHash)`;
 its candidate, environment, Build, image, Graph, namespace, and database hashes match the manifest;
-the terminal lifecycle is `DRAINED`; identical replicas attach to that row and no second
+the durable environment generation high-water equals this generation; terminal lifecycle is
+`REVOKED_TERMINAL` after recorded `DRAIN_ONLY` and `DRAINED`; identical replicas attach to that row and no second
 nonce-consumption row exists. Activation ID and nonce cannot arm a different environment,
-generation, manifest hash, or binding set. For browser-created
-synthetic cases, each generated ID has exactly one atomic reservation below the signed capacity,
-matches the exact prefix, and is bound before its first room epoch; no seventeenth slot or wildcard
-match exists.
+generation, manifest hash, or binding set. For browser-created synthetic cases, canonical fixture
+bytes/hash equal the manifest and measured context, each generated ID has exactly one atomic slot
+reservation below signed capacity and one durable global tombstone, matches the exact prefix, and
+is bound before its first room epoch; no seventeenth slot, cross-activation reuse, concurrent
+different-slot reuse, or wildcard match exists.
 
 **Domain PostgreSQL:** `case_room_epoch` contains the complete ordered
 `INTAKE/EVIDENCE/HEARING/REVIEW` set with `writer_mode=TEMPORAL`, READY/terminal provisioning,
@@ -267,6 +294,9 @@ sequence, or function privilege in Domain PostgreSQL, and the Java Domain runtim
 Graph checkpoint/ledger write privilege. No credential or connection string is present in Graph
 state, Temporal History, result, receipt, log, trace, or evidence artifact.
 
+Physical identity assertions separately prove Domain and Graph cluster identities differ and
+Domain and Graph database identities differ. Principal separation alone never satisfies this gate.
+
 **Temporal:** public Workflow APIs show the exact namespace, Build IDs, Workflow/Run IDs, typed
 children, closed histories, and no stuck task/update/signal. History contains references, hashes,
 revisions, epochs, fences, and deadlines only; it contains no prompt body, private reasoning,
@@ -274,7 +304,9 @@ credential, binary evidence, or unrestricted URL.
 
 ## Hard Failures
 
-Any wrong or mixed binding, nonce replay, future/overlong/expired capability, double writer,
+Any wrong or mixed binding, generation high-water regression, nonce replay, fixture-byte/hash
+mismatch, global generated-case tombstone conflict, physical DB collision, future/overlong new
+admission, double writer,
 legacy executor, lost accepted command, duplicate formal fact/effect, stale-fence success,
 unrecoverable checkpoint, cross-scope read, Graph Domain access, unapproved effect, unresolved
 ledger/outbox/lease, or production-default mutation fails the checkpoint. A rerun cannot erase the
@@ -282,15 +314,19 @@ failed attempt; classify it as `PRODUCT`, `FIXTURE`, `INFRA`, `CONTRACT`, or `EX
 
 ## Rollback And Drain
 
-1. Set activation lifecycle to `DRAINING` and reject new cases/commands.
-2. Keep exact compatible control/agent/Graph workers available for already accepted work.
+1. At expiry or operator stop, set activation lifecycle to `DRAIN_ONLY` and reject every new
+   case/command.
+2. Allow exact replicas to attach only for a durable command admitted before expiry, with matching
+   command/envelope hashes and room epoch/fence; keep compatible workers only for that work.
 3. Drain Temporal updates/Activities, Java outboxes/finalizers, and Graph commands/leases to a
    bounded deadline while preserving immutable receipts.
 4. If drain fails, suspend at a safe boundary and require manual reconciliation; never hand an
    active epoch to LEGACY.
-5. Record `DRAINED` or `REVOKED`, stop target-only workers, and retain histories, databases,
-   manifests, proposals, receipts, and evidence.
-6. A retry uses a higher environment generation and a newly signed activation ID and nonce.
+5. Record `DRAINED` only after unresolved accepted work is zero, then detach replicas and seal
+   evidence before recording `REVOKED_TERMINAL`; stop target-only workers and retain histories,
+   databases, global case tombstones, manifests, proposals, receipts, and evidence.
+6. A retry uses a higher environment generation and a newly signed activation ID and nonce; no
+   generation or generated case ID is reused.
 
 ## Exit Decision
 
