@@ -68,6 +68,22 @@ const unapprovedOutcome = {
   actions: [],
 };
 
+function apiResponse(data) {
+  return {
+    ok: true,
+    status: 200,
+    json: async () => ({ success: true, data }),
+  };
+}
+
+function apiFailure(code, message) {
+  return {
+    ok: false,
+    status: 400,
+    json: async () => ({ success: false, code, message }),
+  };
+}
+
 async function mountOutcome(initialOutcome) {
   const router = createRouter({
     history: createMemoryHistory(),
@@ -326,5 +342,61 @@ describe("OutcomeView", () => {
     expect(wrapper.text()).not.toContain("这是一条尚未审批的内部草案结论");
     expect(wrapper.text()).not.toContain("这是一条尚未审批的内部审核意见");
     expect(wrapper.text()).not.toContain("这是一条尚未审批的内部执行方案");
+  });
+
+  it("loads a persisted closed outcome without querying an active hearing run", async () => {
+    const historicalOutcome = {
+      case_id: "CASE_OUTCOME_1",
+      title: "退款履约争议已结案",
+      case_status: "CLOSED",
+      closed_at: null,
+      final_decision: {
+        conclusion: "历史结案记录",
+        explanation: "平台终审完成，确定性执行记录可以查看。",
+        source: "EXTERNAL_IMPORT",
+        human_confirmed: false,
+        approved_plan: null,
+      },
+      adjudication_draft: null,
+      review_task_status: null,
+      actions: [],
+    };
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url === "/api/disputes/CASE_OUTCOME_1/outcome") {
+        return apiResponse(historicalOutcome);
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    const wrapper = await mountOutcome(null);
+    await flushPromises();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(wrapper.get("[data-outcome-summary-layout]").text()).toContain("历史结案记录");
+    expect(wrapper.find('[role="alert"]').exists()).toBe(false);
+  });
+
+  it("still reports an active-run failure while an outcome is not final", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url === "/api/disputes/CASE_OUTCOME_1/outcome") {
+        return apiResponse(unapprovedOutcome);
+      }
+      if (
+        url ===
+        "/api/disputes/CASE_OUTCOME_1/rooms/HEARING/agent-runs/active"
+      ) {
+        return apiFailure("ROOM_PHASE_MISMATCH", "当前案件阶段不能读取庭审任务");
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    const wrapper = await mountOutcome(null);
+    await flushPromises();
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(wrapper.get('[role="alert"]').text()).toContain("最终结果暂时无法更新");
+    expect(wrapper.find("[data-outcome-summary-layout]").exists()).toBe(false);
   });
 });

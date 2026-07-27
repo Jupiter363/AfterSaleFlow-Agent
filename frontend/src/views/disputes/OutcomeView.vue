@@ -103,6 +103,11 @@ const reviewTaskStatus = computed(() =>
     .trim()
     .toUpperCase(),
 );
+const caseStatus = computed(() =>
+  String(outcome.value?.case_status || outcome.value?.caseStatus || "")
+    .trim()
+    .toUpperCase(),
+);
 const approvedPlan = computed(() => {
   const decisionPlan =
     rawDecision.value?.approved_plan || rawDecision.value?.approvedPlan;
@@ -131,9 +136,12 @@ const isFinalOutcome = computed(() => {
   const humanConfirmed = Boolean(
     decision.human_confirmed || decision.humanConfirmed,
   );
-  return (
-    humanConfirmed &&
-    (!reviewTaskStatus.value || reviewTaskStatus.value === "APPROVED")
+  const reviewApproved =
+    !reviewTaskStatus.value || reviewTaskStatus.value === "APPROVED";
+  return Boolean(
+    persistedDecision.value &&
+      reviewApproved &&
+      (humanConfirmed || caseStatus.value === "CLOSED"),
   );
 });
 const executionMode = computed(() => {
@@ -260,9 +268,7 @@ const closureStatus = computed(() => {
     .trim()
     .toUpperCase();
   if (explicit) return explicit;
-  return String(outcome.value?.case_status || outcome.value?.caseStatus || "")
-    .trim()
-    .toUpperCase();
+  return caseStatus.value;
 });
 const closedAt = computed(
   () =>
@@ -722,7 +728,7 @@ async function consumeOutcomeDraftRun(value) {
 
 // 业务位置：【前端处理结果】resumeOutcomeDraftRuns：执行 阶段处理结果或草案 对应的业务动作，并将结果交给 当事人可见的处理结论和后续动作。上游：审核决定和执行/结案状态。下游：当事人可见的处理结论和后续动作。边界：仅展示当前角色获授权的结论。
 async function resumeOutcomeDraftRuns() {
-  if (props.initialOutcome !== null) return false;
+  if (props.initialOutcome !== null || isFinalOutcome.value) return false;
   const activeRuns = await loadActiveAgentRuns(actor, caseId.value, "HEARING");
   const draftRuns = (activeRuns || []).filter(isDraftStreamDescriptor);
   if (!draftRuns.length) return false;
