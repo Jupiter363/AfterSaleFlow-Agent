@@ -1,7 +1,7 @@
 {
   "contractVersion": "target-e2e-activation.v1",
   "activationId": "p9act.v1.fedcba9876543210fedcba9876543210",
-  "manifestHash": "a83c2eb4dfeb3d06a17ad9557b3b1e2d022c026bf71c1718801ab6f6f26010e4",
+  "manifestHash": "04f732fe0fa5672f91efe4b23fcbd9f3ecab33324d955648474367ba65de9d75",
   "executionLane": "TARGET_E2E_CANDIDATE",
   "environmentId": "p9-isolated-preprod-01",
   "environmentGeneration": 7,
@@ -26,10 +26,10 @@
     "agentBuildId": "p9-agent-8a322ec2"
   },
   "graphBinding": {
-    "key": "all-rooms/target-e2e.v1",
+    "key": "all-rooms.target-e2e.v1",
     "version": "target-e2e-graph.2026-07-27.1",
     "checkpointSchemaVersion": "target-e2e-checkpoint.v1",
-    "bindingHash": "2d739d09e37cc53d9cc02a08bfec0bd6eeac7b57bd72f641040a270bdb3bcb99",
+    "bindingHash": "efda5d5dac82a404b2a089baa6072b00bdf306d12ab42daa07e001b9274fc02f",
     "codeBuildId": "p9-graph-8a322ec2"
   },
   "imageDigests": {

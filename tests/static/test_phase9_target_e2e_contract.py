@@ -243,6 +243,38 @@ def test_canonical_hashes_and_non_secret_jws_golden_are_frozen() -> None:
     assert _canonical_hash(_without(graph, "bindingHash")) == graph["bindingHash"]
 
 
+def test_target_graph_key_is_compatible_with_frozen_room_graph_command_v1() -> None:
+    activation_schema = _json(SCHEMA_PATH)
+    target_key = activation_schema["$defs"]["graphBinding"]["properties"]["key"]["const"]
+    command_schema = _json(
+        ROOT / "contracts/agent-platform/v1/room-graph-command.schema.json"
+    )
+    graph_key_schema = command_schema["$defs"]["identifier"]
+
+    assert target_key == "all-rooms.target-e2e.v1"
+    assert not list(jsonschema.Draft202012Validator(graph_key_schema).iter_errors(target_key))
+    assert command_schema["properties"]["graph_key"] == {"$ref": "#/$defs/identifier"}
+
+    manifests = [
+        _json(VALID_ROOT / "target-e2e-activation-allowlist-valid.json"),
+        _json(VALID_ROOT / "target-e2e-activation-synthetic-valid.json"),
+    ]
+    assert all(manifest["graphBinding"]["key"] == target_key for manifest in manifests)
+    assert _json(CONTEXT_PATH)["graphBinding"]["key"] == target_key
+    assert all(
+        manifest["productionDefaults"]
+        == {"formalCaseSelector": "LEGACY", "targetE2EActivation": "DISABLED"}
+        for manifest in manifests
+    )
+
+    incompatible_key = "all-rooms" + "/" + "target-e2e.v1"
+    assert all(
+        incompatible_key not in path.read_text(encoding="utf-8")
+        for path in CONTRACT_ROOT.rglob("*")
+        if path.is_file()
+    )
+
+
 def test_invalid_fixture_matrix_rejects_every_required_failure_mode() -> None:
     invalid = _json(INVALID_PATH)
     base = _json((INVALID_PATH.parent / invalid["baseFixture"]).resolve())

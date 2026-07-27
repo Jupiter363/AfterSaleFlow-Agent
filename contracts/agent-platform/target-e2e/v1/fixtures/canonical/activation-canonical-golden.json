@@ -3,7 +3,7 @@
   "canonicalization": "RFC_8785",
   "fixture": "../valid/target-e2e-activation-allowlist-valid.json",
   "selfHashOmitFields": ["manifestHash"],
-  "manifestHash": "cc491d6ea2c9b260da43b6cbfa02b20a0d5c90690a57af8976cc3307c3ec22d0",
+  "manifestHash": "f72667121d4e54faa98b5c3a806642d02bfa07b04123af613509d5dcd149aec7",
   "activationJwsProtectedHeader": {
     "alg": "ES256",
     "kid": "p9-java-activation-key-01",

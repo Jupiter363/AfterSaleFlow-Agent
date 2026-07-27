@@ -25,10 +25,10 @@
     "agentBuildId": "p9-agent-8a322ec2"
   },
   "graphBinding": {
-    "key": "all-rooms/target-e2e.v1",
+    "key": "all-rooms.target-e2e.v1",
     "version": "target-e2e-graph.2026-07-27.1",
     "checkpointSchemaVersion": "target-e2e-checkpoint.v1",
-    "bindingHash": "2d739d09e37cc53d9cc02a08bfec0bd6eeac7b57bd72f641040a270bdb3bcb99",
+    "bindingHash": "efda5d5dac82a404b2a089baa6072b00bdf306d12ab42daa07e001b9274fc02f",
     "codeBuildId": "p9-graph-8a322ec2"
   },
   "imageDigests": {
