@@ -1,0 +1,2 @@
+org.springframework.boot.env.EnvironmentPostProcessor=\
+com.example.dispute.workflow.targete2e.artifact.TargetE2eEnvironmentPostProcessor

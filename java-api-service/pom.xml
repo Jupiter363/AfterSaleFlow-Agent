@@ -24,6 +24,9 @@
 
     <properties>
         <java.version>21</java.version>
+        <target-e2e.classifier>target-e2e</target-e2e.classifier>
+        <target-e2e.classes-directory>${project.build.directory}/target-e2e-classes</target-e2e.classes-directory>
+        <target-e2e.skip-unit-tests>false</target-e2e.skip-unit-tests>
         <springdoc.version>2.8.11</springdoc.version>
         <temporal.version>1.35.0</temporal.version>
         <archunit.version>1.4.1</archunit.version>
@@ -166,6 +169,11 @@
 
     <build>
         <plugins>
+            <!-- Keep every classified source jar ahead of Boot's package-phase repackaging. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+            </plugin>
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
@@ -174,6 +182,7 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <configuration>
+                    <skipTests>${target-e2e.skip-unit-tests}</skipTests>
                     <useModulePath>false</useModulePath>
                     <excludes>
                         <exclude>**/*IntegrationTest.java</exclude>
@@ -189,6 +198,136 @@
     </build>
 
     <profiles>
+        <profile>
+            <id>target-e2e</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-antrun-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <id>prepare-target-e2e-classes</id>
+                                <phase>prepare-package</phase>
+                                <goals>
+                                    <goal>run</goal>
+                                </goals>
+                                <configuration>
+                                    <target>
+                                        <delete dir="${target-e2e.classes-directory}"/>
+                                        <mkdir dir="${target-e2e.classes-directory}"/>
+                                    </target>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-resources-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <id>copy-main-classes-for-target-e2e</id>
+                                <phase>prepare-package</phase>
+                                <goals>
+                                    <goal>copy-resources</goal>
+                                </goals>
+                                <configuration>
+                                    <outputDirectory>${target-e2e.classes-directory}</outputDirectory>
+                                    <resources>
+                                        <resource>
+                                            <directory>${project.build.outputDirectory}</directory>
+                                            <filtering>false</filtering>
+                                        </resource>
+                                    </resources>
+                                </configuration>
+                            </execution>
+                            <execution>
+                                <id>copy-target-e2e-resources</id>
+                                <phase>prepare-package</phase>
+                                <goals>
+                                    <goal>copy-resources</goal>
+                                </goals>
+                                <configuration>
+                                    <outputDirectory>${target-e2e.classes-directory}</outputDirectory>
+                                    <resources>
+                                        <resource>
+                                            <directory>${project.basedir}/src/target-e2e/resources</directory>
+                                            <filtering>false</filtering>
+                                        </resource>
+                                    </resources>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-compiler-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <id>compile-target-e2e-classes</id>
+                                <phase>prepare-package</phase>
+                                <goals>
+                                    <goal>compile</goal>
+                                </goals>
+                                <configuration>
+                                    <compileSourceRoots>
+                                        <compileSourceRoot>${project.basedir}/src/target-e2e/java</compileSourceRoot>
+                                    </compileSourceRoots>
+                                    <outputDirectory>${target-e2e.classes-directory}</outputDirectory>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-jar-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <id>package-target-e2e-classes</id>
+                                <phase>package</phase>
+                                <goals>
+                                    <goal>jar</goal>
+                                </goals>
+                                <configuration>
+                                    <classesDirectory>${target-e2e.classes-directory}</classesDirectory>
+                                    <classifier>${target-e2e.classifier}</classifier>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.springframework.boot</groupId>
+                        <artifactId>spring-boot-maven-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <id>repackage-target-e2e</id>
+                                <goals>
+                                    <goal>repackage</goal>
+                                </goals>
+                                <configuration>
+                                    <classifier>${target-e2e.classifier}</classifier>
+                                    <mainClass>com.example.dispute.DisputeApplication</mainClass>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-failsafe-plugin</artifactId>
+                        <configuration>
+                            <includes>
+                                <include>**/TargetE2eArtifactIsolationIT.java</include>
+                            </includes>
+                            <systemPropertyVariables>
+                                <targetE2e.buildDirectory>${project.build.directory}</targetE2e.buildDirectory>
+                                <targetE2e.finalName>${project.build.finalName}</targetE2e.finalName>
+                                <targetE2e.classifier>${target-e2e.classifier}</targetE2e.classifier>
+                            </systemPropertyVariables>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
         <profile>
             <id>integration-test</id>
             <build>
