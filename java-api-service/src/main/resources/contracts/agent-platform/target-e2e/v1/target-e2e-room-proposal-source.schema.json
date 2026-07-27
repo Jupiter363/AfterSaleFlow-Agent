@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.after-sale-flow.example/agent-platform/target-e2e/v1/target-e2e-room-proposal-source.schema.json",
+  "title": "Target E2E Normalized Room Proposal Hash Source v1",
+  "type": "object",
+  "additionalProperties": false,
+  "x-proposal-hash": {"algorithm": "SHA-256", "sourceJsonPointer": "/proposal", "preimage": "RFC8785_EXACT_VALIDATED_POINTER_VALUE", "consumerFields": ["target-e2e-graph-result-envelope.v1.proposal_hash", "target-e2e-finalization-receipt.v1.proposal_hash"]},
+  "required": ["schema_version", "room_type", "proposal"],
+  "properties": {
+    "schema_version": {"const": "target-e2e-room-proposal-source.v1"},
+    "room_type": {"enum": ["INTAKE", "EVIDENCE", "HEARING", "REVIEW"]},
+    "proposal": {"$ref": "#/$defs/proposal"}
+  },
+  "allOf": [
+    {"if": {"properties": {"room_type": {"const": "INTAKE"}}}, "then": {"properties": {"proposal": {"properties": {"schema_version": {"const": "target-e2e-intake-proposal.v1"}}}}}},
+    {"if": {"properties": {"room_type": {"const": "EVIDENCE"}}}, "then": {"properties": {"proposal": {"properties": {"schema_version": {"const": "target-e2e-evidence-proposal.v1"}}}}}},
+    {"if": {"properties": {"room_type": {"const": "HEARING"}}}, "then": {"properties": {"proposal": {"properties": {"schema_version": {"const": "target-e2e-hearing-proposal.v1"}}}}}},
+    {"if": {"properties": {"room_type": {"const": "REVIEW"}}}, "then": {"properties": {"proposal": {"properties": {"schema_version": {"const": "target-e2e-review-proposal.v1"}}}}}}
+  ],
+  "$defs": {
+    "identifier": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "proposal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "proposal_id", "command_id", "logical_run_id", "attempt_id", "payload_schema_version", "payload_ref", "payload_hash", "terminal_class", "formal_authority"],
+      "properties": {
+        "schema_version": {"enum": ["target-e2e-intake-proposal.v1", "target-e2e-evidence-proposal.v1", "target-e2e-hearing-proposal.v1", "target-e2e-review-proposal.v1"]},
+        "proposal_id": {"$ref": "#/$defs/identifier"},
+        "command_id": {"$ref": "#/$defs/identifier"},
+        "logical_run_id": {"$ref": "#/$defs/identifier"},
+        "attempt_id": {"$ref": "#/$defs/identifier"},
+        "payload_schema_version": {"$ref": "#/$defs/identifier"},
+        "payload_ref": {"type": "string", "minLength": 1, "maxLength": 512, "pattern": "^urn:target-e2e:proposal:"},
+        "payload_hash": {"$ref": "#/$defs/sha256"},
+        "terminal_class": {"enum": ["NEEDS_INPUT", "COMPLETED", "NEEDS_REVIEW"]},
+        "formal_authority": {"const": false}
+      }
+    }
+  }
+}

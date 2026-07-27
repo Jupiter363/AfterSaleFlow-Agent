@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.after-sale-flow.example/agent-platform/target-e2e/v1/target-e2e-graph-command-envelope.schema.json",
+  "title": "Target E2E Graph Command Envelope v1",
+  "description": "Additive lane wrapper. The embedded room-graph-command.v1 contract remains byte-for-byte compatible and unchanged.",
+  "type": "object",
+  "additionalProperties": false,
+  "x-canonicalization": "RFC_8785",
+  "x-command-hash": {"algorithm": "SHA-256", "covers": "FULL_EMBEDDED_COMMAND_INCLUDING_REQUEST_HASH"},
+  "x-self-hash": {"algorithm": "SHA-256", "field": "command_envelope_hash", "preimage": "RFC8785_OMIT_TOP_LEVEL_FIELD", "omitFields": ["command_envelope_hash"]},
+  "x-jws": {"algorithm": "ES256", "protectedHeaderTyp": "target-e2e-graph-command+jwt", "requiredClaims": ["execution_lane", "activation_id", "room_fencing_token", "command_hash", "command_envelope_hash"]},
+  "x-fence-separation": {"room_fencing_token": "JAVA_SIGNED_DOMAIN_ROOM_FENCE", "graph_lease_fence": "GRAPH_RUNTIME_LOCAL_CHECKPOINT_LEASE", "equalityOrSubstitutionAllowed": false, "bothRequiredBeforeCheckpointMutation": true},
+  "required": ["schema_version", "execution_lane", "activation_id", "room_fencing_token", "command_hash", "command_envelope_hash", "command"],
+  "properties": {
+    "schema_version": {"const": "target-e2e-graph-command-envelope.v1"},
+    "execution_lane": {"const": "TARGET_E2E_CANDIDATE"},
+    "activation_id": {"type": "string", "pattern": "^p9act\\.v1\\.[0-9a-f]{32}$"},
+    "room_fencing_token": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "command_hash": {"$ref": "#/$defs/sha256"},
+    "command_envelope_hash": {"$ref": "#/$defs/sha256"},
+    "command": {"$ref": "../../v1/room-graph-command.schema.json"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

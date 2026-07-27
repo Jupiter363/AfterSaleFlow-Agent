@@ -1,0 +1,268 @@
+package com.example.dispute.workflow.targete2e.graph;
+
+import com.example.dispute.workflow.activity.agent.AgentRunCancellationToken;
+import com.example.dispute.workflow.infrastructure.agent.GraphReconciliationHttpTransport;
+import com.example.dispute.workflow.infrastructure.agent.GraphReconciliationTransportException;
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.io.IOException;
+import java.net.URI;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+
+/** Exact-body result reconciliation client for target-E2E candidate commands. */
+public final class HttpTargetE2EGraphReconciliationClient
+    implements TargetE2EGraphReconciliationClient {
+
+  public static final String PATH = "internal/graphs/target-e2e/commands/reconcile";
+  public static final String ACTIVATION_HEADER = "X-AfterSaleFlow-Target-E2E-Activation";
+  private static final int MAXIMUM_RESPONSE_BYTES = 131_072;
+  private static final Pattern ERROR_CODE = Pattern.compile("[A-Za-z0-9_.-]{1,128}");
+  private static final Set<String> ERROR_FIELDS = Set.of("code", "retryable");
+  private static final Set<Integer> RETRYABLE_STATUSES = Set.of(409, 429, 503);
+
+  private final GraphReconciliationHttpTransport transport;
+  private final TargetE2EGraphEnvelopeCodec codec;
+  private final TargetE2EGraphProposalPayloadSource proposalSource;
+  private final ObjectMapper mapper;
+  private final URI endpoint;
+  private final Duration timeout;
+
+  public HttpTargetE2EGraphReconciliationClient(
+      GraphReconciliationHttpTransport transport,
+      TargetE2EGraphEnvelopeCodec codec,
+      TargetE2EGraphProposalPayloadSource proposalSource,
+      ObjectMapper objectMapper,
+      URI baseUri,
+      Duration timeout) {
+    this(transport, codec, proposalSource, objectMapper, baseUri, timeout, false);
+  }
+
+  public HttpTargetE2EGraphReconciliationClient(
+      GraphReconciliationHttpTransport transport,
+      TargetE2EGraphEnvelopeCodec codec,
+      TargetE2EGraphProposalPayloadSource proposalSource,
+      ObjectMapper objectMapper,
+      URI baseUri,
+      Duration timeout,
+      boolean allowPlaintextTransport) {
+    this.transport = Objects.requireNonNull(transport, "transport");
+    this.codec = Objects.requireNonNull(codec, "codec");
+    this.proposalSource = Objects.requireNonNull(proposalSource, "proposalSource");
+    this.mapper = Objects.requireNonNull(objectMapper, "objectMapper").copy();
+    this.mapper.setSerializationInclusion(JsonInclude.Include.NON_NULL);
+    this.mapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+    this.mapper.enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION);
+    this.mapper.enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
+    this.timeout = requireTimeout(timeout);
+    this.endpoint = endpoint(baseUri, allowPlaintextTransport);
+  }
+
+  @Override
+  public TargetE2EGraphResultEnvelope reconcile(
+      TargetE2ESealedGraphCommand sealed,
+      String resultRef,
+      String resultHash,
+      AgentRunCancellationToken cancellationToken) {
+    Objects.requireNonNull(sealed, "sealed");
+    Objects.requireNonNull(cancellationToken, "cancellationToken").throwIfCancellationRequested();
+    TargetE2EGraphCommandEnvelope command = sealed.envelope();
+    TargetE2EGraphCommandEnvelope.requirePattern(
+        resultHash, TargetE2EGraphCommandEnvelope.SHA256, "resultHash");
+    if (!validResultReference(resultRef)) {
+      throw TargetE2EGraphClientException.protocol(
+          "target Graph reconciliation result reference is invalid", null);
+    }
+    GraphReconciliationHttpTransport.Request request =
+        new GraphReconciliationHttpTransport.Request(
+            endpoint, requestHeaders(sealed), sealed.body(), timeout, MAXIMUM_RESPONSE_BYTES);
+    GraphReconciliationHttpTransport.Response response;
+    try {
+      response = transport.exchange(request, cancellationToken);
+    } catch (TargetE2EGraphClientException exception) {
+      throw exception;
+    } catch (GraphReconciliationTransportException exception) {
+      cancellationToken.throwIfCancellationRequested();
+      if (exception.protocolViolation()) {
+        throw TargetE2EGraphClientException.protocol(
+            "target Graph reconciliation transport violated the protocol", exception);
+      }
+      throw TargetE2EGraphClientException.transport(
+          "target Graph reconciliation transport failed", exception);
+    } catch (RuntimeException exception) {
+      cancellationToken.throwIfCancellationRequested();
+      throw TargetE2EGraphClientException.transport(
+          "target Graph reconciliation transport failed", exception);
+    }
+    cancellationToken.throwIfCancellationRequested();
+    requireResponseMetadata(response);
+    if (response.statusCode() == 200) {
+      try {
+        byte[] body = response.body();
+        String proposalHash = codec.declaredProposalHash(body);
+        byte[] proposal =
+            Objects.requireNonNull(
+                proposalSource.loadSchemaValidatedProposalSource(resultRef, proposalHash),
+                "proposal source returned no source document");
+        TargetE2EGraphResultEnvelope result = codec.decodeResult(body, command, proposal);
+        if (!TargetE2EGraphEnvelopeCodec.constantTimeEquals(resultHash, result.resultHash())) {
+          throw new IllegalArgumentException("stream final hash differs from reconciled result");
+        }
+        return result;
+      } catch (IllegalArgumentException | NullPointerException exception) {
+        throw TargetE2EGraphClientException.protocol(
+            "target Graph reconciliation result is invalid", exception);
+      }
+    }
+    if (response.statusCode() >= 400 && response.statusCode() <= 599) {
+      throw decodeRemoteError(response.statusCode(), response.body());
+    }
+    throw TargetE2EGraphClientException.protocol(
+        "target Graph reconciliation returned an unsupported HTTP status", null);
+  }
+
+  private Map<String, String> requestHeaders(TargetE2ESealedGraphCommand sealed) {
+    Map<String, String> headers =
+        Map.of(
+            "Authorization", "Bearer " + sealed.credential().compactJws(),
+            "Accept", "application/json",
+            "Content-Type", "application/json; charset=utf-8",
+            "Content-Encoding", "identity",
+            "Cache-Control", "no-store",
+            "traceparent", sealed.envelope().command().traceparent());
+    if (headers.keySet().stream().anyMatch(ACTIVATION_HEADER::equalsIgnoreCase)) {
+      throw new IllegalStateException("activation JWS header must never reach Graph");
+    }
+    return headers;
+  }
+
+  private TargetE2EGraphClientException decodeRemoteError(int status, byte[] body) {
+    try {
+      ObjectNode node = readObject(body);
+      Set<String> fields =
+          node.properties().stream().map(Map.Entry::getKey).collect(Collectors.toUnmodifiableSet());
+      if (!fields.equals(ERROR_FIELDS)
+          || !node.required("code").isTextual()
+          || !node.required("retryable").isBoolean()) {
+        throw new IllegalArgumentException("remote error envelope is invalid");
+      }
+      String code = node.required("code").asText();
+      boolean retryable = node.required("retryable").asBoolean();
+      if (!ERROR_CODE.matcher(code).matches() || retryable != RETRYABLE_STATUSES.contains(status)) {
+        throw new IllegalArgumentException(
+            "remote error retry identity conflicts with HTTP status");
+      }
+      return TargetE2EGraphClientException.remote(
+          code, retryable, "Python rejected target Graph reconciliation");
+    } catch (IllegalArgumentException exception) {
+      return TargetE2EGraphClientException.protocol(
+          "target Graph reconciliation error body is invalid", exception);
+    }
+  }
+
+  private ObjectNode readObject(byte[] body) {
+    if (body == null || body.length == 0 || body.length > MAXIMUM_RESPONSE_BYTES) {
+      throw new IllegalArgumentException("response body size is invalid");
+    }
+    try {
+      JsonNode node =
+          mapper.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS).readTree(body);
+      if (!(node instanceof ObjectNode object)) {
+        throw new IllegalArgumentException("response body must be an object");
+      }
+      return object;
+    } catch (IOException exception) {
+      throw new IllegalArgumentException("response body is invalid JSON", exception);
+    }
+  }
+
+  private static boolean validResultReference(String value) {
+    if (value == null || value.isBlank() || value.length() > 1024) {
+      return false;
+    }
+    try {
+      URI reference = URI.create(value);
+      return reference.isAbsolute()
+          && Set.of("s3", "minio", "urn").contains(reference.getScheme())
+          && reference.getRawSchemeSpecificPart() != null
+          && !reference.getRawSchemeSpecificPart().isBlank();
+    } catch (IllegalArgumentException exception) {
+      return false;
+    }
+  }
+
+  private static void requireResponseMetadata(GraphReconciliationHttpTransport.Response response) {
+    Objects.requireNonNull(response, "response");
+    List<String> contentType = headerValues(response.headers(), "content-type");
+    List<String> contentEncoding = headerValues(response.headers(), "content-encoding");
+    Set<String> cacheDirectives =
+        headerValues(response.headers(), "cache-control").stream()
+            .flatMap(value -> List.of(value.split(",", -1)).stream())
+            .map(value -> value.trim().toLowerCase(Locale.ROOT))
+            .collect(Collectors.toSet());
+    if (contentType.size() != 1
+        || !jsonUtf8(contentType.getFirst())
+        || contentEncoding.size() > 1
+        || (contentEncoding.size() == 1
+            && !"identity".equalsIgnoreCase(contentEncoding.getFirst().trim()))
+        || !cacheDirectives.contains("no-store")) {
+      throw TargetE2EGraphClientException.protocol(
+          "target Graph reconciliation response metadata is invalid", null);
+    }
+  }
+
+  static List<String> headerValues(Map<String, List<String>> headers, String expectedName) {
+    List<String> values = new ArrayList<>();
+    headers.forEach(
+        (name, candidates) -> {
+          if (name.equalsIgnoreCase(expectedName)) {
+            values.addAll(candidates);
+          }
+        });
+    return List.copyOf(values);
+  }
+
+  static boolean jsonUtf8(String value) {
+    String[] parts = value.split(";", -1);
+    if (!"application/json".equalsIgnoreCase(parts[0].trim())) {
+      return false;
+    }
+    return parts.length == 1
+        || (parts.length == 2 && "charset=utf-8".equalsIgnoreCase(parts[1].trim()));
+  }
+
+  static Duration requireTimeout(Duration timeout) {
+    Duration value = Objects.requireNonNull(timeout, "timeout");
+    if (value.isZero() || value.isNegative()) {
+      throw new IllegalArgumentException("target Graph timeout must be positive");
+    }
+    return value;
+  }
+
+  static URI endpoint(URI baseUri, boolean allowPlaintextTransport) {
+    Objects.requireNonNull(baseUri, "baseUri");
+    String scheme = baseUri.getScheme();
+    if (baseUri.getHost() == null
+        || baseUri.getUserInfo() != null
+        || baseUri.getQuery() != null
+        || baseUri.getFragment() != null
+        || (!("https".equalsIgnoreCase(scheme))
+            && !(allowPlaintextTransport && "http".equalsIgnoreCase(scheme)))) {
+      throw new IllegalArgumentException("target Graph base URI is not trusted");
+    }
+    String normalized = baseUri.toString().endsWith("/") ? baseUri.toString() : baseUri + "/";
+    return URI.create(normalized).resolve(PATH);
+  }
+}
