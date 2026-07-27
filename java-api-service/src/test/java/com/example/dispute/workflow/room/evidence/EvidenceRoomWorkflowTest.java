@@ -234,8 +234,22 @@ class EvidenceRoomWorkflowTest {
     stopWorkflowProcessing();
     advanceTimeTo(timerPlan.warningAt().plus(TIMER_BOUNDARY_SETTLE));
     awaitTimerCount(workflowId, EVENT_TYPE_TIMER_FIRED, 1);
-    started.workflow().partyCompleted(signal(INITIATOR, "COMPLETE_AFTER_WARNING_I", 5));
-    started.workflow().partyCompleted(signal(RESPONDENT, "COMPLETE_AFTER_WARNING_R", 6));
+    started
+        .workflow()
+        .partyCompleted(
+            signal(
+                INITIATOR,
+                "COMPLETE_AFTER_WARNING_I",
+                5,
+                timerPlan.warningAt().plusMillis(1)));
+    started
+        .workflow()
+        .partyCompleted(
+            signal(
+                RESPONDENT,
+                "COMPLETE_AFTER_WARNING_R",
+                6,
+                timerPlan.warningAt().plusMillis(1)));
     awaitTimerCount(workflowId, EVENT_TYPE_WORKFLOW_EXECUTION_SIGNALED, 2);
     assertLastTimerFiredPrecedesSignals(workflowId);
     restartWorkflowProcessing();
@@ -254,6 +268,41 @@ class EvidenceRoomWorkflowTest {
   }
 
   @Test
+  void completionAcceptedAfterDeadlineCannotBypassTheWarningToDeadlineTransition() {
+    String suffix = "same-task-warning-late-completion";
+    String workflowId = workflowId(suffix);
+    StartedWorkflow started = start(suffix, Duration.ofHours(2));
+    EvidenceTimerPlan timerPlan = EvidenceTimerPlan.from(started.start());
+    awaitTimerCount(workflowId, EVENT_TYPE_TIMER_STARTED, 1);
+    stopWorkflowProcessing();
+    advanceTimeTo(timerPlan.warningAt().plus(TIMER_BOUNDARY_SETTLE));
+    awaitTimerCount(workflowId, EVENT_TYPE_TIMER_FIRED, 1);
+    Instant acceptedAfterDeadline = timerPlan.deadlineAt().plusMillis(1);
+    started
+        .workflow()
+        .partyCompleted(
+            signal(INITIATOR, "COMPLETE_AFTER_WINDOW_I", 7, acceptedAfterDeadline));
+    started
+        .workflow()
+        .partyCompleted(
+            signal(RESPONDENT, "COMPLETE_AFTER_WINDOW_R", 8, acceptedAfterDeadline));
+    awaitTimerCount(workflowId, EVENT_TYPE_WORKFLOW_EXECUTION_SIGNALED, 2);
+    assertLastTimerFiredPrecedesSignals(workflowId);
+    restartWorkflowProcessing();
+
+    EvidenceRoomSnapshot result = result(started.workflow());
+    assertThat(result.terminalReason()).isEqualTo("DEADLINE_EXPIRED");
+    assertThat(result.warningSent()).isTrue();
+    assertThat(result.deadlineExpired()).isTrue();
+    assertThat(result.initiatorCompleted()).isFalse();
+    assertThat(result.respondentCompleted()).isFalse();
+    assertThat(result.orderedOperationKeys())
+        .containsExactly(
+            EvidenceOperationKeys.deadlineWarn(CASE_ID, EPOCH, 1),
+            EvidenceOperationKeys.deadlineExpire(CASE_ID, EPOCH, 1));
+  }
+
+  @Test
   void deadlineRecordedBeforeCompletionSignalsWinsWhenHistoryIsDeliveredInOneWorkflowTask() {
     String suffix = "same-task-deadline-first";
     String workflowId = workflowId(suffix);
@@ -265,8 +314,22 @@ class EvidenceRoomWorkflowTest {
     stopWorkflowProcessing();
     advanceTimeTo(timerPlan.deadlineAt().plus(TIMER_BOUNDARY_SETTLE));
     awaitTimerCount(workflowId, EVENT_TYPE_TIMER_FIRED, 2);
-    started.workflow().partyCompleted(signal(INITIATOR, "COMPLETE_AFTER_DEADLINE_I", 7));
-    started.workflow().partyCompleted(signal(RESPONDENT, "COMPLETE_AFTER_DEADLINE_R", 8));
+    started
+        .workflow()
+        .partyCompleted(
+            signal(
+                INITIATOR,
+                "COMPLETE_AFTER_DEADLINE_I",
+                7,
+                timerPlan.deadlineAt().plusMillis(1)));
+    started
+        .workflow()
+        .partyCompleted(
+            signal(
+                RESPONDENT,
+                "COMPLETE_AFTER_DEADLINE_R",
+                8,
+                timerPlan.deadlineAt().plusMillis(1)));
     awaitTimerCount(workflowId, EVENT_TYPE_WORKFLOW_EXECUTION_SIGNALED, 2);
     assertLastTimerFiredPrecedesSignals(workflowId);
     restartWorkflowProcessing();
@@ -356,16 +419,44 @@ class EvidenceRoomWorkflowTest {
   }
 
   @Test
+  void completionSignalV2RequiresAcceptedAtWhileV1RemainsReplayDecodable() {
+    String operationKey =
+        EvidenceOperationKeys.partyComplete(CASE_ID, EPOCH, INITIATOR, "COMPLETE_SCHEMA");
+    EvidenceRoomSignal legacy =
+        new EvidenceRoomSignal(
+            "evidence-room-party-completion.v1",
+            INITIATOR,
+            "COMPLETE_SCHEMA",
+            operationKey,
+            hash(7),
+            null);
+
+    assertThat(legacy.acceptedAt()).isNull();
+    assertThatThrownBy(
+            () ->
+                new EvidenceRoomSignal(
+                    "evidence-room-party-completion.v2",
+                    INITIATOR,
+                    "COMPLETE_SCHEMA",
+                    operationKey,
+                    hash(7),
+                    null))
+        .isInstanceOf(NullPointerException.class)
+        .hasMessage("acceptedAt must not be null for v2");
+  }
+
+  @Test
   void wrongSemanticOperationKeyIsRejectedWithoutAdvancingPartyState() {
     StartedWorkflow started = start("reject", Duration.ofHours(2));
     EvidenceRoomSignal malformed =
         new EvidenceRoomSignal(
-            "evidence-room-party-completion.v1",
+            "evidence-room-party-completion.v2",
             INITIATOR,
             "COMPLETE_WRONG_KEY",
             EvidenceOperationKeys.partyComplete(
                 CASE_ID, EPOCH, RESPONDENT, "COMPLETE_WRONG_KEY"),
-            hash(8));
+            hash(8),
+            Instant.now());
     started.workflow().partyCompleted(malformed);
     environment.sleep(Duration.ofSeconds(1));
 
@@ -494,13 +585,19 @@ class EvidenceRoomWorkflowTest {
 
   private static EvidenceRoomSignal signal(
       String participantId, String completionRequestId, int hashDigit) {
+    return signal(participantId, completionRequestId, hashDigit, Instant.now());
+  }
+
+  private static EvidenceRoomSignal signal(
+      String participantId, String completionRequestId, int hashDigit, Instant acceptedAt) {
     return new EvidenceRoomSignal(
-        "evidence-room-party-completion.v1",
+        "evidence-room-party-completion.v2",
         participantId,
         completionRequestId,
         EvidenceOperationKeys.partyComplete(
             CASE_ID, EPOCH, participantId, completionRequestId),
-        hash(hashDigit));
+        hash(hashDigit),
+        acceptedAt);
   }
 
   private static String hash(int digit) {

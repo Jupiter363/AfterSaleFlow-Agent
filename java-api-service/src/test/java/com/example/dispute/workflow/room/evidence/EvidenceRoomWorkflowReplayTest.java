@@ -216,12 +216,13 @@ class EvidenceRoomWorkflowReplayTest {
   private static EvidenceRoomSignal signal(
       String participantId, String completionRequestId, int digit) {
     return new EvidenceRoomSignal(
-        "evidence-room-party-completion.v1",
+        "evidence-room-party-completion.v2",
         participantId,
         completionRequestId,
         EvidenceOperationKeys.partyComplete(
             CASE_ID, EPOCH, participantId, completionRequestId),
-        Integer.toString(digit).repeat(64));
+        Integer.toString(digit).repeat(64),
+        Instant.now());
   }
 
   private static void awaitTimerCount(

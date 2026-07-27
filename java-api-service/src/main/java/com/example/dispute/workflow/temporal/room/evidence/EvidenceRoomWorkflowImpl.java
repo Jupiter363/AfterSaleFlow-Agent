@@ -1,5 +1,7 @@
 package com.example.dispute.workflow.temporal.room.evidence;
 
+import io.temporal.failure.CanceledFailure;
+import io.temporal.workflow.Async;
 import io.temporal.workflow.CancellationScope;
 import io.temporal.workflow.Promise;
 import io.temporal.workflow.Workflow;
@@ -7,6 +9,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -17,6 +20,7 @@ public final class EvidenceRoomWorkflowImpl implements EvidenceRoomWorkflow {
   private static final String TIMER_ARBITRATION_CHANGE_ID =
       "evidence-history-ordered-timer-arbitration";
   private static final int HISTORY_ORDERED_TIMER_ARBITRATION = 1;
+  private static final int ACCEPTED_TIME_TIMER_ARBITRATION = 2;
 
   private final ArrayDeque<WorkflowEvent> inbox = new ArrayDeque<>();
   private final Map<String, EvidenceRoomSignal> observedRequests = new LinkedHashMap<>();
@@ -37,9 +41,10 @@ public final class EvidenceRoomWorkflowImpl implements EvidenceRoomWorkflow {
   private long duplicateSignalCount;
   private long rejectedSignalCount;
   private String protocolErrorCode;
+  private int timerArbitrationVersion;
   private CancellationScope activeTimerScope;
   private Promise<Void> activeTimer;
-  private Promise<Void> activeTimerCallback;
+  private Promise<Void> activeTimerContinuation;
   private TimerBoundary scheduledBoundary;
 
   @Override
@@ -53,15 +58,17 @@ public final class EvidenceRoomWorkflowImpl implements EvidenceRoomWorkflow {
     roomRevision = start.initialRoomRevision();
     roomPhase = EvidenceRoomPhase.WAITING_PARTIES;
 
-    int timerArbitrationVersion =
+    timerArbitrationVersion =
         Workflow.getVersion(
             TIMER_ARBITRATION_CHANGE_ID,
             Workflow.DEFAULT_VERSION,
-            HISTORY_ORDERED_TIMER_ARBITRATION);
+            ACCEPTED_TIME_TIMER_ARBITRATION);
     if (timerArbitrationVersion == Workflow.DEFAULT_VERSION) {
       runLegacyTimerKernel();
-    } else {
+    } else if (timerArbitrationVersion == HISTORY_ORDERED_TIMER_ARBITRATION) {
       runHistoryOrderedTimerKernel();
+    } else {
+      runAcceptedTimeTimerKernel();
     }
 
     Workflow.await(Workflow::isEveryHandlerFinished);
@@ -73,6 +80,17 @@ public final class EvidenceRoomWorkflowImpl implements EvidenceRoomWorkflow {
     while (roomPhase != EvidenceRoomPhase.COMPLETED) {
       Workflow.await(() -> !inbox.isEmpty());
       drainHistoryOrderedInbox();
+      if (roomPhase != EvidenceRoomPhase.COMPLETED && scheduledBoundary == null) {
+        scheduleTimer(TimerBoundary.DEADLINE, timerPlan.deadlineAt());
+      }
+    }
+  }
+
+  private void runAcceptedTimeTimerKernel() {
+    scheduleTimer(TimerBoundary.WARNING, timerPlan.warningAt());
+    while (roomPhase != EvidenceRoomPhase.COMPLETED) {
+      Workflow.await(this::hasProcessableEvent);
+      drainAcceptedTimeInbox();
       if (roomPhase != EvidenceRoomPhase.COMPLETED && scheduledBoundary == null) {
         scheduleTimer(TimerBoundary.DEADLINE, timerPlan.deadlineAt());
       }
@@ -145,16 +163,76 @@ public final class EvidenceRoomWorkflowImpl implements EvidenceRoomWorkflow {
 
   private void drainHistoryOrderedInbox() {
     while (roomPhase != EvidenceRoomPhase.COMPLETED && !inbox.isEmpty()) {
-      WorkflowEvent event = inbox.removeFirst();
-      if (event.completion() != null) {
-        processSignal(event.completion());
-        if (bothPartiesCompleted()) {
-          complete("BOTH_PARTIES_COMPLETED");
-        }
-      } else {
-        processTimer(event.timerBoundary());
+      processWorkflowEvent(inbox.removeFirst());
+    }
+  }
+
+  private void drainAcceptedTimeInbox() {
+    while (roomPhase != EvidenceRoomPhase.COMPLETED && hasProcessableEvent()) {
+      WorkflowEvent event = removeNextProcessableEvent();
+      processWorkflowEvent(event);
+      if (event.timerBoundary() != null && roomPhase != EvidenceRoomPhase.COMPLETED) {
+        return;
       }
     }
+  }
+
+  private void processWorkflowEvent(WorkflowEvent event) {
+    if (event.completion() != null) {
+      processSignal(event.completion());
+      if (bothPartiesCompleted()) {
+        complete("BOTH_PARTIES_COMPLETED");
+      }
+    } else {
+      processTimer(event.timerBoundary());
+    }
+  }
+
+  private boolean hasProcessableEvent() {
+    if (inbox.isEmpty()) {
+      return false;
+    }
+    if (scheduledBoundary == null) {
+      return true;
+    }
+    Instant boundaryAt = boundaryAt(scheduledBoundary);
+    return inbox.stream()
+        .anyMatch(
+            event ->
+                event.timerBoundary() != null
+                    || (event.completion() != null
+                        && acceptedBefore(event.completion(), boundaryAt)));
+  }
+
+  private WorkflowEvent removeNextProcessableEvent() {
+    if (scheduledBoundary == null) {
+      return inbox.removeFirst();
+    }
+    Instant boundaryAt = boundaryAt(scheduledBoundary);
+    WorkflowEvent timer = null;
+    for (Iterator<WorkflowEvent> iterator = inbox.iterator(); iterator.hasNext(); ) {
+      WorkflowEvent event = iterator.next();
+      if (event.completion() != null && acceptedBefore(event.completion(), boundaryAt)) {
+        iterator.remove();
+        return event;
+      }
+      if (timer == null && event.timerBoundary() != null) {
+        timer = event;
+      }
+    }
+    if (timer != null) {
+      inbox.removeFirstOccurrence(timer);
+      return timer;
+    }
+    throw new IllegalStateException("Evidence inbox did not contain a processable event");
+  }
+
+  private boolean acceptedBefore(EvidenceRoomSignal signal, Instant boundaryAt) {
+    return signal.acceptedAt() == null || signal.acceptedAt().isBefore(boundaryAt);
+  }
+
+  private Instant boundaryAt(TimerBoundary boundary) {
+    return boundary == TimerBoundary.WARNING ? timerPlan.warningAt() : timerPlan.deadlineAt();
   }
 
   private void drainLegacyInbox() {
@@ -194,6 +272,11 @@ public final class EvidenceRoomWorkflowImpl implements EvidenceRoomWorkflow {
       return;
     }
     observedRequests.put(signal.completionRequestId(), signal);
+    if (timerArbitrationVersion == ACCEPTED_TIME_TIMER_ARBITRATION
+        && signal.acceptedAt() == null) {
+      reject("EVIDENCE_COMPLETION_ACCEPTED_AT_REQUIRED");
+      return;
+    }
 
     String expectedKey =
         EvidenceOperationKeys.partyComplete(
@@ -247,15 +330,28 @@ public final class EvidenceRoomWorkflowImpl implements EvidenceRoomWorkflow {
         Workflow.newCancellationScope(
             () -> {
               activeTimer = Workflow.newTimer(Duration.ofMillis(delayMillis));
-              // Timer and Signal callbacks are queued by the SDK in Event History order.
-              activeTimerCallback =
-                  activeTimer.handle(
-                      (ignored, failure) -> {
-                        if (failure == null) {
-                          inbox.addLast(WorkflowEvent.timer(boundary));
-                        }
-                        return null;
-                      });
+              if (timerArbitrationVersion == HISTORY_ORDERED_TIMER_ARBITRATION) {
+                activeTimerContinuation =
+                    activeTimer.handle(
+                        (ignored, failure) -> {
+                          if (failure == null) {
+                            inbox.addLast(WorkflowEvent.timer(boundary));
+                          }
+                          return null;
+                        });
+              } else {
+                // Collect signal callbacks from the same activation before accepted-time arbitration.
+                activeTimerContinuation =
+                    Async.procedure(
+                        () -> {
+                          try {
+                            activeTimer.get();
+                            inbox.addLast(WorkflowEvent.timer(boundary));
+                          } catch (CanceledFailure ignored) {
+                            // Completing the room cancels its outstanding timer.
+                          }
+                        });
+              }
             });
     activeTimerScope.run();
   }
@@ -270,7 +366,7 @@ public final class EvidenceRoomWorkflowImpl implements EvidenceRoomWorkflow {
   private void clearActiveTimer() {
     activeTimerScope = null;
     activeTimer = null;
-    activeTimerCallback = null;
+    activeTimerContinuation = null;
     scheduledBoundary = null;
   }
 
