@@ -359,7 +359,7 @@ services:
       LANGFUSE_HOST: http://observability-contract-blocker:3000
       LANGFUSE_PUBLIC_KEY: target-e2e-disabled
       LANGFUSE_SECRET_KEY: ${TARGET_E2E_LOCAL_OBSERVABILITY_KEY:?}
-      JAVA_API_SERVICE_URL: http://java-callback-contract-blocker:8080
+      JAVA_API_SERVICE_URL: http://java-api-service:8080
       JAVA_SERVICE_SECRET: ${TARGET_E2E_JAVA_SERVICE_SECRET:?}
       PYTHON_AGENT_SERVICE_SECRET: ${TARGET_E2E_PYTHON_SERVICE_SECRET:?}
       ENABLE_SENSITIVE_LOG_MASKING: "true"
