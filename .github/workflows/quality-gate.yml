@@ -207,6 +207,8 @@ jobs:
           distribution: temurin
           java-version: "21"
           cache: maven
+      - name: Generate ephemeral Compose credentials
+        run: bash ./scripts/generate-secrets.sh
       - name: Pull Compose images with bounded backoff
         env:
           COMPOSE_PARALLEL_LIMIT: "1"

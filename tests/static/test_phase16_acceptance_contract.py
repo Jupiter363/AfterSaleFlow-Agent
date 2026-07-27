@@ -46,10 +46,14 @@ def test_phase16_ci_quality_gate_exists() -> None:
     ):
         assert required in text
     assert 'COMPOSE_PARALLEL_LIMIT: "1"' in text
+    secret_generation = text.index("bash ./scripts/generate-secrets.sh")
+    compose_pull = text.index("docker compose pull --ignore-buildable --policy missing")
+    compose_up = text.index(
+        "docker compose up -d --build --pull never --wait --wait-timeout 360"
+    )
+    assert secret_generation < compose_pull < compose_up
     assert "max_attempts=5" in text
-    assert "docker compose pull --ignore-buildable --policy missing" in text
     assert "delay=$((15 * 2 ** (attempt - 1)))" in text
-    assert "docker compose up -d --build --pull never --wait --wait-timeout 360" in text
 
 
 # 所属模块：跨服务契约测试 > test_phase16_acceptance_contract；函数角色：回归测试用例。
