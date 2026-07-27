@@ -365,7 +365,6 @@ def load_image_lock(
         if (
             not isinstance(layers, list)
             or not layers
-            or len(layers) != len(set(layers))
             or any(
                 not isinstance(layer, str) or not DIGEST.fullmatch(layer)
                 for layer in layers
