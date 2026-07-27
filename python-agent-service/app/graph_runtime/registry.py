@@ -184,7 +184,6 @@ select graph_key, graph_version, checkpoint_schema_version, registry_state,
  where graph_key = %s
    and graph_version = %s
    and checkpoint_schema_version = %s
- for share
 """
 
 

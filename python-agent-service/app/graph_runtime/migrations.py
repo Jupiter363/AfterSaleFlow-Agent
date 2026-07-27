@@ -888,6 +888,102 @@ async def run_graph_migrations(
     ).run()
 
 
+async def seed_target_e2e_registry(
+    connection_string: str,
+    *,
+    schema: str,
+    expected_user: str,
+    bindings_json: str,
+) -> None:
+    from app.config import GraphTargetE2EBindingSettings
+
+    try:
+        candidates = json.loads(bindings_json)
+        if not isinstance(candidates, list) or len(candidates) != 1:
+            raise ValueError("one target-E2E binding is required")
+        binding = GraphTargetE2EBindingSettings.model_validate(candidates[0])
+    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        raise GraphMigrationError("target-E2E registry seed is invalid") from error
+
+    expected = {
+        "graph_key": binding.graph_key,
+        "graph_version": binding.graph_version,
+        "checkpoint_schema_version": binding.checkpoint_schema_version,
+        "registry_state": "ACTIVE_CANDIDATE",
+        "state_schema_version": binding.state_schema_version,
+        "state_schema_hash": binding.state_schema_hash,
+        "command_schema_version": binding.command_schema_version,
+        "result_schema_version": binding.result_schema_version,
+        "prompt_version": binding.prompt_version,
+        "model_profile_id": binding.model_profile_id,
+        "output_schema_version": binding.output_schema_version,
+        "policy_version": binding.policy_version,
+        "guardrail_version": binding.guardrail_version,
+        "tool_policy_version": binding.tool_policy_version,
+        "binding_hash": binding.binding_hash,
+        "code_build_id": binding.code_build_id,
+        "loadable": True,
+        "registry_revision": 0,
+    }
+    async with await AsyncConnection.connect(
+        connection_string,
+        row_factory=dict_row,
+    ) as connection:
+        async with connection.transaction():
+            identity = await (
+                await connection.execute("select current_user as current_user")
+            ).fetchone()
+            if identity is None or identity["current_user"] != expected_user:
+                raise GraphMigrationError("target-E2E registry seed user mismatch")
+            await connection.execute(
+                sql.SQL("set local search_path to {}, pg_catalog").format(
+                    sql.Identifier(schema)
+                )
+            )
+            await connection.execute(
+                """
+                insert into agent_graph_version_registry (
+                    graph_key, graph_version, checkpoint_schema_version,
+                    registry_state, state_schema_version, state_schema_hash,
+                    command_schema_version, result_schema_version, prompt_version,
+                    model_profile_id, output_schema_version, policy_version,
+                    guardrail_version, tool_policy_version, binding_hash,
+                    code_build_id, loadable, activated_at, registry_revision
+                ) values (
+                    %(graph_key)s, %(graph_version)s, %(checkpoint_schema_version)s,
+                    'ACTIVE_CANDIDATE', %(state_schema_version)s, %(state_schema_hash)s,
+                    %(command_schema_version)s, %(result_schema_version)s,
+                    %(prompt_version)s, %(model_profile_id)s,
+                    %(output_schema_version)s, %(policy_version)s,
+                    %(guardrail_version)s, %(tool_policy_version)s,
+                    %(binding_hash)s, %(code_build_id)s, true, clock_timestamp(), 0
+                )
+                on conflict (graph_key, graph_version, checkpoint_schema_version)
+                do nothing
+                """,
+                expected,
+            )
+            row = await (
+                await connection.execute(
+                    """
+                    select graph_key, graph_version, checkpoint_schema_version,
+                           registry_state, state_schema_version, state_schema_hash,
+                           command_schema_version, result_schema_version, prompt_version,
+                           model_profile_id, output_schema_version, policy_version,
+                           guardrail_version, tool_policy_version, binding_hash,
+                           code_build_id, loadable, registry_revision
+                      from agent_graph_version_registry
+                     where graph_key = %(graph_key)s
+                       and graph_version = %(graph_version)s
+                       and checkpoint_schema_version = %(checkpoint_schema_version)s
+                    """,
+                    expected,
+                )
+            ).fetchone()
+            if row is None or dict(row) != expected:
+                raise GraphMigrationError("target-E2E registry seed conflicts with storage")
+
+
 def main() -> None:
     connection_string = os.environ.get("GRAPH_MIGRATION_DATABASE_DSN")
     if not connection_string:
@@ -908,6 +1004,16 @@ def main() -> None:
             environment_generation=environment_generation,
         )
     )
+    target_bindings = os.environ.get("GRAPH_TARGET_E2E_BINDINGS")
+    if target_bindings:
+        asyncio.run(
+            seed_target_e2e_registry(
+                connection_string,
+                schema=schema,
+                expected_user=expected_user,
+                bindings_json=target_bindings,
+            )
+        )
     print(
         json.dumps(
             {

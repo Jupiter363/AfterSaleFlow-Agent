@@ -306,6 +306,7 @@ services:
       GRAPH_RETENTION_USER: graph_retention
       GRAPH_DB_SCHEMA: graph_runtime
       GRAPH_DB_ENVIRONMENT_GENERATION: ${TARGET_E2E_GRAPH_ENVIRONMENT_GENERATION:?}
+      GRAPH_TARGET_E2E_BINDINGS: ${GRAPH_TARGET_E2E_BINDINGS:?}
     networks: [graph-data]
 
   graph-restore-validation:
