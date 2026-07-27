@@ -893,9 +893,13 @@ async def seed_target_e2e_registry(
     *,
     schema: str,
     expected_user: str,
+    owner_role: str,
     bindings_json: str,
 ) -> None:
     from app.config import GraphTargetE2EBindingSettings
+
+    schema = require_sql_identifier(schema, "schema")
+    owner_role = require_sql_identifier(owner_role, "owner_role")
 
     try:
         candidates = json.loads(bindings_json)
@@ -931,10 +935,18 @@ async def seed_target_e2e_registry(
     ) as connection:
         async with connection.transaction():
             identity = await (
+                await connection.execute("select session_user as session_user")
+            ).fetchone()
+            if identity is None or identity["session_user"] != expected_user:
+                raise GraphMigrationError("target-E2E registry seed user mismatch")
+            await connection.execute(
+                sql.SQL("set role {}").format(sql.Identifier(owner_role))
+            )
+            owner = await (
                 await connection.execute("select current_user as current_user")
             ).fetchone()
-            if identity is None or identity["current_user"] != expected_user:
-                raise GraphMigrationError("target-E2E registry seed user mismatch")
+            if owner is None or owner["current_user"] != owner_role:
+                raise GraphMigrationError("target-E2E registry seed cannot assume owner role")
             await connection.execute(
                 sql.SQL("set local search_path to {}, pg_catalog").format(
                     sql.Identifier(schema)
@@ -1011,6 +1023,7 @@ def main() -> None:
                 connection_string,
                 schema=schema,
                 expected_user=expected_user,
+                owner_role=os.environ.get("GRAPH_OWNER_USER", "graph_owner"),
                 bindings_json=target_bindings,
             )
         )

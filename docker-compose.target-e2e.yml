@@ -254,6 +254,7 @@ services:
       temporal-db:
         condition: service_healthy
     environment:
+      BIND_ON_IP: 0.0.0.0
       DB: postgres12
       DB_PORT: 5432
       POSTGRES_SEEDS: temporal-db

@@ -7,8 +7,18 @@ case "$namespace" in
   *) echo "target E2E namespace is not isolated" >&2; exit 64 ;;
 esac
 
-if tctl --address temporal-server:7233 --namespace "$namespace" namespace describe >/dev/null 2>&1; then
-  exit 0
-fi
-tctl --address temporal-server:7233 --namespace "$namespace" namespace register \
-  --retention 1
+attempt=1
+while [ "$attempt" -le 30 ]; do
+  if tctl --address temporal-server:7233 --namespace "$namespace" namespace describe >/dev/null 2>&1; then
+    exit 0
+  fi
+  if tctl --address temporal-server:7233 --namespace "$namespace" namespace register \
+    --retention 1; then
+    exit 0
+  fi
+  attempt=$((attempt + 1))
+  sleep 2
+done
+
+echo "target E2E Temporal namespace was not ready after 30 attempts" >&2
+exit 1
