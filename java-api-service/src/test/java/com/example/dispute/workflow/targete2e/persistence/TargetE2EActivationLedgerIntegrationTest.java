@@ -495,7 +495,8 @@ class TargetE2EActivationLedgerIntegrationTest {
                         'EPOCH_TARGET_P9', 'tenant-p9', 'CASE_P9_EXPLICIT_001', 'INTAKE', 0, 1,
                         repeat('2', 64), 'TEMPORAL', 'CaseProcessWorkflow', 'case-build',
                         'IntakeRoomWorkflow', 'control-build', 'case-process-contract.v1',
-                        'all-rooms.target-e2e.v1', 'target-graph-v1', 'target-checkpoint-v1',
+                        'all-rooms.target-e2e.v1', 'target-e2e-graph.2026-07-27.1',
+                        'target-e2e-checkpoint.v1',
                         'target-e2e-graph-state.v1', 'agent-stream.v2', 'target-prompt-v1',
                         'target-model-v1', 'target-room-proposal.v1', 'target-policy-v1',
                         'target-guardrail-v1', 'no-tools.v1', 'target-cohort-v1',
@@ -635,8 +636,8 @@ class TargetE2EActivationLedgerIntegrationTest {
                 List.of("INTAKE", "EVIDENCE", "HEARING", "REVIEW"),
                 new BuildBindings("case-build", "control-build", "agent-build"),
                 new GraphBinding(
-                        "all-rooms.target-e2e.v1", "target-graph-v1",
-                        "target-checkpoint-v1", "f".repeat(64), "graph-code-build"),
+                        "all-rooms.target-e2e.v1", "target-e2e-graph.2026-07-27.1",
+                        "target-e2e-checkpoint.v1", "f".repeat(64), "graph-code-build"),
                 new ImageDigests(
                         "sha256:" + "1".repeat(64),
                         "sha256:" + "2".repeat(64),

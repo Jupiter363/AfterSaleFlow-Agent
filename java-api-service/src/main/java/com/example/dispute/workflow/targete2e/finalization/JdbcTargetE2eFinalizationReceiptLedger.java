@@ -16,6 +16,7 @@ import java.util.Objects;
 import java.util.Optional;
 import javax.sql.DataSource;
 import org.springframework.jdbc.datasource.DataSourceUtils;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 /** V047 adapter preserving the original COMMITTED receipt bytes on every replay. */
 public final class JdbcTargetE2eFinalizationReceiptLedger
@@ -91,6 +92,11 @@ public final class JdbcTargetE2eFinalizationReceiptLedger
     }
 
     private Connection transactionalConnection() {
+        if (!TransactionSynchronizationManager.isActualTransactionActive()
+                || TransactionSynchronizationManager.isCurrentTransactionReadOnly()) {
+            throw new IllegalStateException(
+                    "target receipt requires an active writable Java Finalizer transaction");
+        }
         Connection connection = DataSourceUtils.getConnection(dataSource);
         try {
             if (connection.getAutoCommit()) {
