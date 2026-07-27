@@ -8,6 +8,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import common  # noqa: E402
+import ledger  # noqa: E402
 
 
 def _redact_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -19,17 +20,31 @@ def _redact_config(config: dict[str, Any]) -> dict[str, Any]:
     return redacted
 
 
-def _container_summary(document: dict[str, Any]) -> dict[str, Any]:
+def _container_summary(
+    document: dict[str, Any], lock: dict[str, Any]
+) -> dict[str, Any]:
+    labels = document["Config"].get("Labels", {})
+    expected = {
+        "target-e2e.after-sale-flow.dev/run-id": lock["run_id"],
+        "target-e2e.after-sale-flow.dev/project": lock["project_name"],
+        "target-e2e.after-sale-flow.dev/lock-nonce": lock["lock_nonce"],
+        "target-e2e.after-sale-flow.dev/image-lock-hash": lock["image_lock_hash"],
+    }
+    if any(labels.get(key) != value for key, value in expected.items()):
+        raise common.TargetE2EError(
+            "forensic container labels do not match the host lock"
+        )
     return {
         "id": document["Id"],
         "name": document["Name"].lstrip("/"),
+        "service": labels.get("com.docker.compose.service"),
         "image_id": document["Image"],
         "state": {
             "status": document["State"].get("Status"),
             "exit_code": document["State"].get("ExitCode"),
             "health": document["State"].get("Health", {}).get("Status"),
         },
-        "labels": document["Config"].get("Labels", {}),
+        "labels": labels,
         "environment_keys": sorted(
             item.split("=", 1)[0] for item in document["Config"].get("Env", [])
         ),
@@ -50,50 +65,82 @@ def _container_summary(document: dict[str, Any]) -> dict[str, Any]:
 
 
 def _redact_log(payload: str, environment: dict[str, str]) -> str:
-    sensitive_parts = ("PASSWORD", "SECRET", "KEY", "TOKEN", "USER")
+    sensitive_parts = ("PASSWORD", "SECRET", "KEY", "TOKEN", "USER", "JWS")
     secrets = {
         key: value
         for key, value in environment.items()
         if value and any(part in key for part in sensitive_parts)
     }
     redacted = payload
-    for key, value in sorted(secrets.items(), key=lambda item: len(item[1]), reverse=True):
+    for key, value in sorted(
+        secrets.items(), key=lambda item: len(item[1]), reverse=True
+    ):
         redacted = redacted.replace(value, f"<redacted:{key}>")
     return redacted
 
 
 def export_forensics(env_file: Path) -> dict[str, Any]:
-    env = common.parse_env_file(env_file)
-    evidence_dir = common.assert_external_runtime_path(Path(env["TARGET_E2E_EVIDENCE_DIR"]))
+    env, lock = common.validate_env_lock(env_file)
+    evidence_dir = Path(env["TARGET_E2E_EVIDENCE_DIR"])
     evidence_dir.mkdir(parents=True, exist_ok=True)
+    run_context = common.load_json(Path(env["TARGET_E2E_RUN_CONTEXT_PATH"]))
+    context = common.validate_run_context_bindings(run_context, env, lock)
     config_result = common.run_command(
         common.compose_argv(env_file, "config", "--format", "json", profile="evidence")
     )
     config = json.loads(config_result.stdout)
     common.write_json(evidence_dir / "compose.redacted.json", _redact_config(config))
 
-    identifiers = common.run_command(
-        common.compose_argv(env_file, "ps", "--all", "--quiet")
-    ).stdout.splitlines()
+    identifiers = [
+        item
+        for item in common.run_command(
+            common.compose_argv(env_file, "ps", "--all", "--quiet")
+        ).stdout.splitlines()
+        if item
+    ]
     containers: list[dict[str, Any]] = []
     if identifiers:
-        inspected = json.loads(common.run_command(["docker", "inspect", *identifiers]).stdout)
-        containers = sorted((_container_summary(item) for item in inspected), key=lambda item: item["name"])
+        inspected = json.loads(
+            common.run_command(["docker", "inspect", *identifiers]).stdout
+        )
+        containers = sorted(
+            (_container_summary(item, lock) for item in inspected),
+            key=lambda item: item["name"],
+        )
     common.write_json(evidence_dir / "containers.json", containers)
 
+    _candidate, locked_images, _image_lock = common.load_image_lock(
+        Path(env["TARGET_E2E_IMAGE_LOCK_PATH"])
+    )
     images: list[dict[str, Any]] = []
-    for reference in sorted({service["image"] for service in config["services"].values()}):
-        result = common.run_command(["docker", "image", "inspect", reference], check=False)
+    for key, expected in sorted(locked_images.items()):
+        result = common.run_command(
+            ["docker", "image", "inspect", expected["reference"]], check=False
+        )
         if result.returncode:
-            images.append({"reference": reference, "status": "UNAVAILABLE"})
+            images.append(
+                {
+                    "key": key,
+                    "reference": expected["reference"],
+                    "status": "UNAVAILABLE",
+                }
+            )
             continue
         document = json.loads(result.stdout)[0]
         images.append(
             {
-                "reference": reference,
+                "key": key,
+                "reference": expected["reference"],
                 "status": "PRESENT",
-                "image_id": document["Id"],
-                "repo_digests": sorted(document.get("RepoDigests") or []),
+                "manifest_digest": expected["manifest_digest"],
+                "config_digest": document["Id"],
+                "layer_digests": document.get("RootFS", {}).get("Layers") or [],
+                "locked_match": (
+                    document["Id"] == expected["config_digest"]
+                    and expected["reference"] in set(document.get("RepoDigests") or [])
+                    and (document.get("RootFS", {}).get("Layers") or [])
+                    == expected["layer_digests"]
+                ),
             }
         )
     common.write_json(evidence_dir / "images.json", images)
@@ -102,7 +149,15 @@ def export_forensics(env_file: Path) -> dict[str, Any]:
     service_logs.mkdir(exist_ok=True)
     for service in sorted(config["services"]):
         result = common.run_command(
-            common.compose_argv(env_file, "logs", "--no-color", "--timestamps", "--tail", "2000", service),
+            common.compose_argv(
+                env_file,
+                "logs",
+                "--no-color",
+                "--timestamps",
+                "--tail",
+                "2000",
+                service,
+            ),
             check=False,
         )
         (service_logs / f"{service}.log").write_text(
@@ -112,33 +167,48 @@ def export_forensics(env_file: Path) -> dict[str, Any]:
             newline="\n",
         )
 
-    by_service = {
-        item["labels"].get("com.docker.compose.service"): item for item in containers
-    }
+    by_service = {item["service"]: item for item in containers}
     python = by_service.get("python-agent-service")
     domain = by_service.get("domain-db")
-    shared_networks = sorted(
-        set(python["networks"]) & set(domain["networks"])
-    ) if python and domain else ["RUNTIME_INSPECTION_INCOMPLETE"]
+    shared_networks = (
+        sorted(set(python["networks"]) & set(domain["networks"]))
+        if python and domain
+        else ["RUNTIME_INSPECTION_INCOMPLETE"]
+    )
     forbidden_keys = sorted(
         key
         for key in (python["environment_keys"] if python else [])
         if key.startswith(("POSTGRES_", "JAVA_DB_", "DOMAIN_DB_"))
+        or any(
+            part in key
+            for part in ("ACTIVATION_JWS", "ACTIVATION_PATH", "ACTIVATION_DIRECTORY")
+        )
     )
     network_proof = {
-        "schema_version": "target-e2e-network-proof.v1",
+        "schema_version": "target-e2e-network-proof.v2",
         "status": "PASS" if not shared_networks and not forbidden_keys else "FAIL",
+        "python_networks": python["networks"] if python else [],
         "python_domain_shared_networks": shared_networks,
-        "python_domain_credential_keys": forbidden_keys,
+        "python_domain_or_activation_credential_keys": forbidden_keys,
     }
     common.write_json(evidence_dir / "network-proof.json", network_proof)
 
-    files = sorted(path for path in evidence_dir.rglob("*") if path.is_file() and path.name != "forensic-manifest.json")
-    manifest = {
-        "schema_version": "target-e2e-forensic-manifest.v1",
-        "run_id": env["TARGET_E2E_RUN_ID"],
-        "build_id": env["TARGET_E2E_BUILD_ID"],
+    files = sorted(
+        path
+        for path in evidence_dir.rglob("*")
+        if path.is_file()
+        and path.name not in {"forensic-manifest.json", "ledger.jsonl"}
+        and not path.name.endswith(".append.lock")
+    )
+    base_manifest = {
+        "schema_version": "target-e2e-forensic-manifest.v2",
+        "run_id": lock["run_id"],
+        "candidate_sha": lock["candidate_sha"],
+        "run_context_hash": context["run_context_hash"],
+        "host_lock_nonce": lock["lock_nonce"],
         "network_isolation_status": network_proof["status"],
+        "locked_images_match": bool(images)
+        and all(item.get("locked_match") is True for item in images),
         "files": [
             {
                 "path": path.relative_to(evidence_dir).as_posix(),
@@ -148,6 +218,32 @@ def export_forensics(env_file: Path) -> dict[str, Any]:
             for path in files
         ],
     }
+    harness_private = ledger.load_private_key(
+        Path(env["TARGET_E2E_SECRETS_DIR"])
+        / "harness-attestation"
+        / "harness.private.pem"
+    )
+    harness_public = ledger.load_public_key(
+        Path(env["TARGET_E2E_PUBLIC_DIR"]) / "harness" / "harness.public.pem"
+    )
+    record = ledger.append_record(
+        evidence_dir / "ledger.jsonl",
+        harness_private,
+        harness_public,
+        key_id=f"p9-harness-{lock['candidate_sha'][:12]}",
+        context=context,
+        source_kind="HARNESS_DIRECT",
+        source_identity="target-e2e-forensic-exporter",
+        case_id=None,
+        payload_type="FORENSIC_EXPORT",
+        payload=base_manifest,
+    )
+    manifest = ledger.attest_document(
+        {**base_manifest, "ledger_record_hash": record["record_hash"]},
+        harness_private,
+        harness_public,
+        key_id=f"p9-harness-{lock['candidate_sha'][:12]}",
+    )
     common.write_json(evidence_dir / "forensic-manifest.json", manifest)
     return manifest
 

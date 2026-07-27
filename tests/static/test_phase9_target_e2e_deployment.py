@@ -1,18 +1,27 @@
 from __future__ import annotations
 
-import importlib.util
+import copy
+import datetime as dt
+import importlib
+import json
 import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
 import yaml
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec
 
 
 ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_PATH = ROOT / "docker-compose.target-e2e.yml"
 DEPLOY = ROOT / "deploy" / "target-e2e"
 SCRIPTS = ROOT / "scripts" / "target-e2e"
+sys.path.insert(0, str(SCRIPTS))
+common = importlib.import_module("common")
+ledger = importlib.import_module("ledger")
+assertion = importlib.import_module("assert_evidence")
 
 
 def _compose() -> dict[str, Any]:
@@ -26,151 +35,178 @@ def _networks(service: dict[str, Any]) -> set[str]:
     return set(value if isinstance(value, list) else value)
 
 
-def _load_assertion_module() -> Any:
-    sys.path.insert(0, str(SCRIPTS))
-    spec = importlib.util.spec_from_file_location(
-        "phase9_target_assert_evidence",
-        SCRIPTS / "assert_evidence.py",
-    )
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def test_target_compose_has_run_scoped_project_networks_volumes_and_port() -> None:
-    compose = _compose()
-    assert compose["name"].startswith("aflow-target-e2e-${TARGET_E2E_RUN_ID:?")
-    assert compose["services"]["gateway"]["ports"] == [
-        "127.0.0.1:${TARGET_E2E_GATEWAY_PORT:-25180}:8080"
-    ]
-    assert all(
-        not service.get("ports")
-        for name, service in compose["services"].items()
-        if name != "gateway"
-    )
-    for network in compose["networks"].values():
-        assert network["name"].startswith("aflow_target_e2e_${TARGET_E2E_RUN_ID:?}_")
-    for volume in compose["volumes"].values():
-        assert volume["name"].startswith("aflow_target_e2e_${TARGET_E2E_RUN_ID:?}_")
-    assert {5173, 8080, 18000, 18010, 18080}.isdisjoint({25180})
-
-
-def test_every_image_and_worker_identity_is_immutable_and_candidate_bound() -> None:
-    compose = _compose()
-    for service in compose["services"].values():
-        image = service["image"]
-        assert image.startswith("${TARGET_E2E_")
-        assert ":?immutable image digest required}" in image
-        assert "latest" not in image.lower()
-        labels = service["labels"]
-        assert labels["target-e2e.after-sale-flow.dev/build-id"] == "${TARGET_E2E_BUILD_ID:?}"
-        assert labels["target-e2e.after-sale-flow.dev/target-lane-runnable"] == "false"
-    for name in ("java-control-worker", "java-agent-worker"):
-        environment = compose["services"][name]["environment"]
-        assert environment["TEMPORAL_WORKER_BUILD_ID"] == "${TARGET_E2E_BUILD_ID:?}"
-        assert environment["TEMPORAL_WORKER_VERSIONING_MODE"] == "BUILD_ID"
-    provision = (SCRIPTS / "provision.py").read_text(encoding="utf-8")
-    assert "target-e2e-image-lock.v1" in (SCRIPTS / "common.py").read_text(encoding="utf-8")
-    assert "image lock build_id is not the checked-out candidate commit" in provision
-
-
-def test_domain_graph_and_temporal_storage_are_physically_separated() -> None:
-    compose = _compose()
-    services = compose["services"]
-    assert {"domain-db", "graph-db", "temporal-db"} <= set(services)
-    assert services["domain-db"]["volumes"][0] == "target_domain_data:/var/lib/postgresql/data"
-    assert services["graph-db"]["volumes"][0] == "target_graph_data:/var/lib/postgresql/data"
-    assert services["temporal-db"]["volumes"][0] == "target_temporal_data:/var/lib/postgresql/data"
-    assert _networks(services["domain-db"]) == {"domain-data"}
-    assert _networks(services["graph-db"]) == {"graph-data"}
-    assert _networks(services["temporal-db"]) == {"temporal-data"}
-    assert services["temporal-namespace-init"]["environment"][
-        "TARGET_E2E_TEMPORAL_NAMESPACE"
-    ] == "${TARGET_E2E_TEMPORAL_NAMESPACE:?}"
-    assert "target-e2e-*" in (DEPLOY / "temporal" / "create-namespace.sh").read_text(encoding="utf-8")
-
-
-def test_python_has_only_graph_database_authority_and_no_domain_network_path() -> None:
-    compose = _compose()
-    services = compose["services"]
-    python = services["python-agent-service"]
-    environment = python["environment"]
-    assert environment["GRAPH_DATABASE_DSN"].startswith(
-        "postgresql://graph_runtime:${TARGET_E2E_GRAPH_RUNTIME_PASSWORD:?}@graph-db:5432/target_graph"
-    )
-    assert not any(
-        key.startswith(("POSTGRES_", "JAVA_DB_", "DOMAIN_DB_")) for key in environment
-    )
-    assert "domain-data" not in _networks(python)
-    assert not (_networks(python) & _networks(services["domain-db"]))
-    preflight = (SCRIPTS / "preflight.py").read_text(encoding="utf-8")
-    readiness = (SCRIPTS / "readiness.py").read_text(encoding="utf-8")
-    exporter = (SCRIPTS / "export_forensics.py").read_text(encoding="utf-8")
-    assert "Python received Domain database credentials" in preflight
-    assert "runtime inspection disproved Python/Domain isolation" in readiness
-    assert "target-e2e-network-proof.v1" in exporter
-
-
-def test_real_mtls_is_terminated_and_injected_only_across_two_member_adapter_network() -> None:
-    compose = _compose()
-    services = compose["services"]
-    adapter_members = {
-        name for name, service in services.items() if "graph-adapter" in _networks(service)
+def _volume_sources(service: dict[str, Any]) -> set[str]:
+    return {
+        str(value.get("source"))
+        for value in service.get("volumes", [])
+        if isinstance(value, dict)
     }
-    assert adapter_members == {"graph-mtls-proxy", "python-agent-service"}
-    assert services["java-agent-worker"]["environment"][
-        "APP_AGENT_RUN_V2_GRAPH_CLIENT_BASE_URI"
-    ] == "https://graph-mtls-proxy:8443"
-    assert services["java-agent-worker"]["environment"][
-        "APP_AGENT_RUN_V2_GRAPH_CLIENT_ALLOW_PLAINTEXT_TRANSPORT"
-    ] == "false"
-    mtls = (DEPLOY / "nginx" / "mtls.conf").read_text(encoding="utf-8")
-    assert "ssl_protocols TLSv1.3" in mtls
-    assert "ssl_verify_client on" in mtls
-    assert "$ssl_client_escaped_cert" in mtls
-    adapter = (DEPLOY / "python" / "mtls_adapter.py").read_text(encoding="utf-8")
-    assert '"after_sale_flow.mtls"' in adapter
-    assert '"client_certificate_der"' in adapter
-    assert "x-target-e2e-mtls-certificate" in adapter
-    assert "request.headers" not in adapter
-    provision = (SCRIPTS / "provision.py").read_text(encoding="utf-8")
-    assert "prime256v1" in provision
-    assert "spiffe://after-sale-flow/java-api-service" in provision
-    assert "extendedKeyUsage=clientAuth" in provision
 
 
-def test_separate_public_only_jwks_publisher_breaks_boot_cycle() -> None:
-    compose = _compose()
-    services = compose["services"]
-    publisher = services["jwks-publisher"]
-    assert publisher["environment"]["APP_GRAPH_JWKS_ENABLED"] == "true"
-    assert publisher["environment"]["APP_AGENT_RUN_V2_GRAPH_CLIENT_MODE"] == "DISABLED"
-    assert "python-agent-service" not in publisher["depends_on"]
-    assert services["python-agent-service"]["depends_on"]["jwks-publisher"][
-        "condition"
-    ] == "service_healthy"
-    assert services["python-agent-service"]["environment"]["GRAPH_JWKS_URL"] == (
-        "http://jwks-publisher:8080/.well-known/graph-jwks.json"
+def _write_key_pair(directory: Path, name: str) -> tuple[Any, Any, Path, Path]:
+    private = ec.generate_private_key(ec.SECP256R1())
+    public = private.public_key()
+    private_path = directory / f"{name}.private.pem"
+    public_path = directory / f"{name}.public.pem"
+    private_path.write_bytes(
+        private.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
     )
-    assert "graph-public-keys" in publisher["volumes"][0]["source"]
+    public_path.write_bytes(
+        public.public_bytes(
+            serialization.Encoding.PEM,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+    )
+    return private, public, private_path, public_path
 
 
-def test_provisioning_and_teardown_keep_secrets_external_and_export_forensics() -> None:
-    provision = (SCRIPTS / "provision.py").read_text(encoding="utf-8")
-    assert "assert_external_runtime_path" in provision
-    assert "target-e2e-short-lived-activation.v1" in provision
-    assert "target-e2e-graph-registry-seed.v1" in provision
-    assert "BLOCKING_UNTIL_CONSUMED_AND_RECEIPTED" in provision
-    assert "activation.private.pem" in provision
-    teardown = (SCRIPTS / "teardown.py").read_text(encoding="utf-8")
-    assert "export_forensics.export_forensics" in teardown
-    assert '"--volumes"' in teardown
-    assert "target-e2e-teardown-receipt.v1" in teardown
-    assert not (ROOT / ".runtime" / "target-e2e").exists()
+def _image_lock(candidate: str = "b" * 40) -> dict[str, Any]:
+    images: dict[str, Any] = {}
+    for index, key in enumerate(common.IMAGE_KEYS, 1):
+        manifest = f"sha256:{index:064x}"
+        images[key] = {
+            "reference": f"registry.invalid/target-e2e/{key}@{manifest}",
+            "manifest_digest": manifest,
+            "config_digest": f"sha256:{index + 100:064x}",
+            "layer_digests": [f"sha256:{index + 200:064x}"],
+            "source_revision": candidate
+            if key in common.APPLICATION_IMAGE_KEYS
+            else f"upstream-{index}",
+            "build_id": f"build-{key}-{index}",
+        }
+    return common.seal_self_hash(
+        {
+            "schema_version": "target-e2e-image-lock.v2",
+            "candidate_sha": candidate,
+            "source_revision": candidate,
+            "build_provenance": {
+                "builder_id": "trusted-builder-01",
+                "invocation_id": "build-invocation-01",
+                "source_tree_sha256": "sha256:" + "c" * 64,
+                "built_at": "2026-07-27T10:00:00+00:00",
+                "attestation_type": "SLSA_PROVENANCE_V1",
+                "attestation_digest": "sha256:" + "d" * 64,
+            },
+            "images": images,
+        }
+    )
 
 
-def _valid_evidence() -> dict[str, Any]:
+def _run_context(now: dt.datetime) -> dict[str, Any]:
+    return common.seal_self_hash(
+        {
+            "schema_version": "target-e2e-run-context.v2",
+            "runtime_projection": {
+                "schemaVersion": "graph-target-e2e-runtime-context.v1",
+                "executionLane": "TARGET_E2E_CANDIDATE",
+                "activationId": "p9act.v1." + "a" * 32,
+                "environmentId": "p9-isolated-run001",
+                "environmentGeneration": 7,
+                "candidateSha": "b" * 40,
+                "issuedAt": (now - dt.timedelta(minutes=1)).isoformat(),
+                "expiresAt": (now + dt.timedelta(minutes=20)).isoformat(),
+                "runNonce": "p9-nonce-" + "c" * 32,
+                "tenantSurrogate": "tenant-run001",
+                "caseScope": {
+                    "mode": "ISOLATED_SYNTHETIC_NEW_CASES",
+                    "caseIdPrefix": "CASE_P9_SYNTHETIC_",
+                    "maxCases": 4,
+                    "fixtureSetId": "p9-synthetic-all-rooms-001",
+                    "fixtureSetHash": "d" * 64,
+                    "containsRealCaseOrPartyData": False,
+                    "externalEffectsAllowed": False,
+                },
+                "allowedRoomTypes": ["INTAKE", "EVIDENCE", "HEARING", "REVIEW"],
+                "composeProject": "aflow-target-e2e-p9-run001",
+                "temporalNamespace": "after-sale-flow-p9-p9-run001",
+                "buildBindings": {
+                    "caseBuildId": "p9-case-bbbbbbbb",
+                    "controlBuildId": "p9-control-bbbbbbbb",
+                    "agentBuildId": "p9-agent-bbbbbbbb",
+                },
+                "imageDigests": {
+                    "javaApi": "sha256:" + "1" * 64,
+                    "temporalControlWorker": "sha256:" + "2" * 64,
+                    "temporalAgentWorker": "sha256:" + "3" * 64,
+                    "pythonAgent": "sha256:" + "4" * 64,
+                    "frontend": "sha256:" + "5" * 64,
+                },
+                "databaseIdentities": {
+                    "domain": {
+                        "service": "domain-db",
+                        "database": "target_domain",
+                        "schema": "public",
+                        "expectedUser": "domain_app",
+                    },
+                    "graph": {
+                        "service": "graph-db",
+                        "database": "target_graph",
+                        "schema": "graph_runtime",
+                        "runtimeUser": "graph_runtime",
+                        "environmentGeneration": "p9-generation-7",
+                        "restoreVerificationHash": "e" * 64,
+                    },
+                },
+                "trustedSigningKeyIds": ["p9-java-finalizer-01"],
+                "perCommandManifestAllowed": False,
+            },
+            "executor_bindings": [
+                {
+                    "graph_key": "all-rooms/target-e2e.v1",
+                    "graph_version": "target-e2e-graph.2026-07-27.1",
+                    "checkpoint_schema_version": "target-e2e-checkpoint.v1",
+                    "state_schema_version": "target-e2e-graph-state.v1",
+                    "state_schema_hash": "7" * 64,
+                    "command_schema_version": "room-graph-command.v1",
+                    "result_schema_version": "room-graph-result.v1",
+                    "agent_profile_id": "all-rooms-agent.target-e2e.v1",
+                    "prompt_version": "all-rooms-prompt.target-e2e.v1",
+                    "model_profile_id": "target-e2e.contract-blocked",
+                    "output_schema_version": "target-e2e-room-proposal-source.v1",
+                    "policy_version": "all-rooms-policy.target-e2e.v1",
+                    "guardrail_version": "all-rooms-guardrail.target-e2e.v1",
+                    "tool_policy_version": "tools.none.v1",
+                    "binding_hash": "f" * 64,
+                    "code_build_id": "p9-graph-bbbbbbbb",
+                    "allowed_room_types": [
+                        "INTAKE",
+                        "EVIDENCE",
+                        "HEARING",
+                        "REVIEW",
+                    ],
+                    "allowed_stage_codes": [
+                        "INTAKE_MESSAGE",
+                        "EVIDENCE_SEAL",
+                        "HEARING_DELIBERATION",
+                        "REVIEW_OUTCOME",
+                    ],
+                }
+            ],
+            "current_shadow_binding": {},
+            "activation_manifest_hash": "a" * 64,
+            "image_lock_hash": "1" * 64,
+            "image_lock_path": "/external/image-lock.snapshot.json",
+            "resources": common.expected_resource_names("p9-run001"),
+            "mtls": {
+                "ca_certificate_sha256": "2" * 64,
+                "client_certificate_sha256": "3" * 64,
+                "expected_spiffe_id": "spiffe://after-sale-flow/java-api-service",
+            },
+            "jwks_sha256": "4" * 64,
+            "ledger_public_key_sha256": "5" * 64,
+            "lock_nonce": "6" * 64,
+        }
+    )
+
+
+def _valid_evidence(
+    run_context: dict[str, Any], measurement_hash: str
+) -> dict[str, Any]:
+    projection = run_context["runtime_projection"]
     digest = "a" * 64
     rooms = []
     runs = []
@@ -183,7 +219,8 @@ def _valid_evidence() -> dict[str, Any]:
                 "allocation": "TEMPORAL",
                 "protocol": "V2",
                 "execution_engine": "TEMPORAL_ACTIVITY",
-                "worker_lane": "candidate",
+                "execution_lane": "TARGET_E2E_CANDIDATE",
+                "shadow": False,
             }
         )
         rooms.append(
@@ -192,89 +229,539 @@ def _valid_evidence() -> dict[str, Any]:
                 "allocation": "TEMPORAL",
                 "protocol": "V2",
                 "execution_engine": "TEMPORAL_ACTIVITY",
-                "worker_lane": "candidate",
+                "execution_lane": "TARGET_E2E_CANDIDATE",
                 "temporal_run_id": run_id,
+                "room_fencing_token": index,
                 "graph_checkpoint_id": f"checkpoint-{index}",
                 "graph_checkpoint_hash": digest,
                 "graph_result_hash": digest,
+                "proposal_hash": digest,
+                "result_envelope_hash": digest,
+                "graph_output_authority": "PROPOSAL_ONLY",
+                "agent_run_manifest_hash": digest,
+                "isolated_domain_db_binding_hash": digest,
                 "java_final_receipt_id": f"receipt-{index}",
                 "java_final_receipt_hash": digest,
-                "completed_at": f"2026-07-27T00:0{index}:00+00:00",
+                "java_writer": "JAVA_FINALIZER_ONLY",
+                "domain_commit_status": "COMMITTED",
+                "completed_at": f"2026-07-27T10:0{index}:00+00:00",
             }
         )
     return {
-        "schema_version": "target-architecture-e2e-evidence.v1",
-        "run_id": "p9-run001",
-        "build_id": "b" * 40,
-        "case_id": "case-target-001",
+        "schema_version": "target-architecture-e2e-evidence.v2",
+        "candidate_sha": projection["candidateSha"],
+        "activation_id": projection["activationId"],
+        "environment_generation": projection["environmentGeneration"],
+        "compose_project": projection["composeProject"],
+        "temporal_namespace": projection["temporalNamespace"],
+        "database_identities": projection["databaseIdentities"],
+        "case_id": "CASE_P9_SYNTHETIC_0001",
+        "run_nonce": projection["runNonce"],
+        "run_context_hash": run_context["self_hash"],
+        "runtime_measurement_hash": measurement_hash,
         "inventory_complete": True,
         "legacy_run_count": 0,
+        "shadow_run_count": 0,
+        "infra_only": False,
         "runs": runs,
         "rooms": rooms,
         "activation_receipt": {
-            "activation_id": "activation-001",
-            "consumed": True,
-            "consumed_at": "2026-07-27T00:00:00+00:00",
-            "registry_hash": digest,
+            "activation_id": projection["activationId"],
+            "state": "ACTIVE",
+            "consumed_at": "2026-07-27T10:00:00+00:00",
+            "manifest_hash": digest,
         },
     }
 
 
-def test_evidence_assertions_require_all_target_architecture_proofs() -> None:
-    assertion = _load_assertion_module()
-    valid = _valid_evidence()
-    receipt = assertion.validate_target_evidence(valid, "p9-run001", "b" * 40, "a" * 64)
-    assert receipt["status"] == "PASS"
-    assert receipt["legacy_run_count"] == 0
-    assert receipt["rooms"] == ["INTAKE", "EVIDENCE", "HEARING", "REVIEW"]
-
-    mutations = (
-        ("legacy_run_count", 1),
-        ("inventory_complete", False),
+def _java_jws(
+    private: Any,
+    run_context: dict[str, Any],
+    evidence: dict[str, Any],
+    now: dt.datetime,
+) -> str:
+    epoch = int(now.timestamp())
+    projection = run_context["runtime_projection"]
+    return ledger.sign_compact_jws(
+        {
+            "iss": "java-finalizer",
+            "aud": "target-e2e-evidence-harness",
+            "iat": epoch - 1,
+            "exp": epoch + 120,
+            "jti": f"{projection['runNonce']}:CASE_P9_SYNTHETIC_0001",
+            "schema_version": "target-e2e-java-evidence-attestation.v1",
+            "evidence": evidence,
+        },
+        private,
+        key_id="p9-java-finalizer-01",
+        typ="target-e2e-final-evidence+jwt",
     )
-    for key, value in mutations:
-        changed = _valid_evidence()
-        changed[key] = value
-        with pytest.raises(assertion.common.TargetE2EError):
-            assertion.validate_target_evidence(changed, "p9-run001", "b" * 40, "a" * 64)
+
+
+def test_compose_is_host_locked_run_scoped_and_has_no_baseline_port_overlap() -> None:
+    compose = _compose()
+    assert (
+        compose["name"]
+        == "${TARGET_E2E_PROJECT_NAME:?provision a host-locked target E2E run first}"
+    )
+    assert compose["services"]["gateway"]["ports"] == [
+        "127.0.0.1:${TARGET_E2E_GATEWAY_PORT:-25180}:8080"
+    ]
+    assert all(
+        not service.get("ports")
+        for name, service in compose["services"].items()
+        if name != "gateway"
+    )
+    assert set(compose["services"]) == set(common.EXPECTED_SERVICES)
+    for service in compose["services"].values():
+        labels = service["labels"]
+        assert (
+            labels["target-e2e.after-sale-flow.dev/lock-nonce"]
+            == "${TARGET_E2E_LOCK_NONCE:?}"
+        )
+        assert labels["target-e2e.after-sale-flow.dev/target-lane-runnable"] == "false"
+    for collection in (compose["networks"], compose["volumes"]):
+        for resource in collection.values():
+            assert (
+                resource["labels"]["target-e2e.after-sale-flow.dev/lock-nonce"]
+                == "${TARGET_E2E_LOCK_NONCE:?}"
+            )
+
+
+def test_image_lock_binds_manifest_config_layers_source_and_provenance(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "images.json"
+    document = _image_lock()
+    common.write_json(path, document)
+    candidate, images, validated = common.load_image_lock(path)
+    assert candidate == "b" * 40
+    assert validated["self_hash"] == document["self_hash"]
+    assert all(
+        images[key]["reference"].endswith(images[key]["manifest_digest"])
+        for key in images
+    )
+
+    for mutation in ("self_hash", "config", "layers", "source"):
+        changed = copy.deepcopy(document)
+        if mutation == "self_hash":
+            changed["self_hash"] = "0" * 64
+        elif mutation == "config":
+            changed["images"]["java"]["config_digest"] = "not-a-digest"
+            changed = common.seal_self_hash(changed)
+        elif mutation == "layers":
+            changed["images"]["python"]["layer_digests"] = []
+            changed = common.seal_self_hash(changed)
+        else:
+            changed["images"]["frontend"]["source_revision"] = "wrong-source"
+            changed = common.seal_self_hash(changed)
+        common.write_json(path, changed)
+        with pytest.raises(common.TargetE2EError):
+            common.load_image_lock(path)
+
+
+def test_domain_graph_temporal_and_python_authority_are_physically_separated() -> None:
+    compose = _compose()
+    services = compose["services"]
+    assert _networks(services["domain-db"]) == {"domain-data"}
+    assert _networks(services["graph-db"]) == {"graph-data", "python-egress"}
+    assert _networks(services["temporal-db"]) == {"temporal-data"}
+    python = services["python-agent-service"]
+    assert _networks(python) == {"python-egress"}
+    assert "domain-data" not in _networks(python)
+    assert not any(
+        key.startswith(("POSTGRES_", "JAVA_DB_", "DOMAIN_DB_"))
+        for key in python["environment"]
+    )
+    assert not any("activation" in value.lower() for value in _volume_sources(python))
+    assert not any(
+        part in key
+        for key in python["environment"]
+        for part in ("ACTIVATION_JWS", "ACTIVATION_DIRECTORY", "ACTIVATION_PATH")
+    )
+
+
+def test_python_has_uds_only_inbound_and_mtls_bypass_is_rejected() -> None:
+    compose = _compose()
+    services = compose["services"]
+    python = services["python-agent-service"]
+    command = " ".join(python["command"])
+    assert "--uds /run/target-e2e/python/agent.sock" in command
+    assert "--host" not in command and "--port" not in command
+    assert not python.get("ports")
+    proxy = services["graph-mtls-proxy"]
+    assert _networks(proxy) == {"graph-mtls-client"}
+    assert _volume_sources(proxy) & _volume_sources(python) == {
+        "${TARGET_E2E_SOCKET_DIR:?}"
+    }
+    mtls = (DEPLOY / "nginx" / "mtls.conf").read_text(encoding="utf-8")
+    assert "server unix:/run/target-e2e/python/agent.sock" in mtls
+    assert "ssl_verify_client on" in mtls and "ssl_protocols TLSv1.3" in mtls
+    for inbound in (
+        "X-Client-Cert",
+        "X-SSL-Client-Cert",
+        "X-Forwarded-Client-Cert",
+        "X-Service-Identity",
+    ):
+        assert f'proxy_set_header {inbound} ""' in mtls
+    adapter = (DEPLOY / "python" / "mtls_adapter.py").read_text(encoding="utf-8")
+    for proof in (
+        "expected_ca_sha256",
+        "expected_client_sha256",
+        "certificate.issuer",
+        "CLIENT_AUTH",
+        "uri_names != {self._expected_spiffe_id}",
+        "ca_key.verify",
+    ):
+        assert proof in adapter
+    readiness = (SCRIPTS / "readiness.py").read_text(encoding="utf-8")
+    assert "tcp_bypass_listener_present" in readiness
+    assert "/proc/net/tcp" in readiness
+
+
+def test_jwks_is_static_public_only_and_has_no_java_business_surface() -> None:
+    compose = _compose()
+    services = compose["services"]
+    assert "jwks-publisher" not in services
+    jwks = services["jwks-server"]
+    assert jwks["image"] == "${TARGET_E2E_NGINX_IMAGE:?immutable image digest required}"
+    assert not jwks.get("environment")
+    assert _networks(jwks) == {"python-egress"}
+    assert services["python-agent-service"]["environment"]["GRAPH_JWKS_URL"] == (
+        "http://jwks-server:8080/.well-known/graph-jwks.json"
+    )
+    config = (DEPLOY / "nginx" / "jwks.conf").read_text(encoding="utf-8")
+    assert "location = /.well-known/graph-jwks.json" in config
+    assert "location /" in config and "return 404" in config
+    assert "HeaderAuthenticationFilter" not in config
+    python_members = {
+        name
+        for name, service in services.items()
+        if "python-egress" in _networks(service)
+    }
+    assert python_members == {
+        "python-agent-service",
+        "graph-db",
+        "minio",
+        "jwks-server",
+    }
+    assert not any(name.startswith("java-") for name in python_members)
+
+
+def test_activation_grant_is_java_control_only_and_python_gets_strict_projection() -> (
+    None
+):
+    compose = _compose()
+    services = compose["services"]
+    activation_consumers = {
+        name
+        for name, service in services.items()
+        if any(
+            "TARGET_E2E_ACTIVATION_DIR" in source for source in _volume_sources(service)
+        )
+    }
+    assert activation_consumers == {"java-control-worker"}
+    python_env = services["python-agent-service"]["environment"]
+    assert (
+        python_env["GRAPH_TARGET_E2E_RUNTIME_CONTEXT"]
+        == "${GRAPH_TARGET_E2E_RUNTIME_CONTEXT:?}"
+    )
+    assert python_env["GRAPH_TARGET_E2E_BINDINGS"] == "${GRAPH_TARGET_E2E_BINDINGS:?}"
+    provision = (SCRIPTS / "provision.py").read_text(encoding="utf-8")
+    for field in (
+        '"perCommandManifestAllowed": False',
+        '"databaseIdentities"',
+        '"trustedSigningKeyIds"',
+        'typ="target-e2e-activation+jwt"',
+    ):
+        assert field in provision
+
+
+def test_append_only_ledger_uses_real_p256_chain_and_detects_tamper(
+    tmp_path: Path,
+) -> None:
+    private, public, _private_path, _public_path = _write_key_pair(tmp_path, "harness")
+    now = dt.datetime.now(dt.timezone.utc)
+    run_context = _run_context(now)
+    context = common.ledger_context_from_run_context(run_context)
+    path = tmp_path / "ledger.jsonl"
+    first = ledger.append_record(
+        path,
+        private,
+        public,
+        key_id="harness-01",
+        context=context,
+        source_kind="HARNESS_DIRECT",
+        source_identity="unit-harness",
+        case_id=None,
+        payload_type="PROVISIONED_RUN_CONTEXT",
+        payload=run_context,
+    )
+    second = ledger.append_record(
+        path,
+        private,
+        public,
+        key_id="harness-01",
+        context=context,
+        source_kind="HARNESS_DIRECT",
+        source_identity="unit-runtime",
+        case_id=None,
+        payload_type="RUNTIME_MEASUREMENT",
+        payload={"measurement": "direct"},
+    )
+    records = ledger.verify_ledger(
+        path,
+        public,
+        expected_public_key_sha256=ledger.public_key_sha256(public),
+        expected_context=context,
+        require_fresh_last=True,
+    )
+    assert first["previous_record_hash"] == ledger.ZERO_SHA256
+    assert second["previous_record_hash"] == first["record_hash"]
+    assert len(records) == 2
+
+    tampered = path.read_text(encoding="utf-8").replace('"direct"', '"forged"')
+    path.write_text(tampered, encoding="utf-8")
+    with pytest.raises(common.TargetE2EError):
+        ledger.verify_ledger(
+            path,
+            public,
+            expected_public_key_sha256=ledger.public_key_sha256(public),
+            expected_context=context,
+        )
+
+
+def test_java_evidence_requires_real_jws_and_rejects_legacy_shadow_infra_and_stale() -> (
+    None
+):
+    now = dt.datetime.now(dt.timezone.utc)
+    private = ec.generate_private_key(ec.SECP256R1())
+    public = private.public_key()
+    run_context = _run_context(now)
+    measurement_hash = "9" * 64
+    evidence = _valid_evidence(run_context, measurement_hash)
+    compact = _java_jws(private, run_context, evidence, now)
+    result, key_id, verified = assertion.verify_java_attestation(
+        compact,
+        run_context=run_context,
+        runtime_measurement_hash=measurement_hash,
+        case_id="CASE_P9_SYNTHETIC_0001",
+        trusted_public_keys={"p9-java-finalizer-01": public},
+        now=now,
+    )
+    assert result["status"] == "PASS"
+    assert key_id == "p9-java-finalizer-01"
+    assert verified == evidence
 
     for field, value in (
-        ("allocation", "LEGACY"),
-        ("protocol", "V1"),
-        ("execution_engine", "EXECUTOR"),
-        ("worker_lane", "default"),
-        ("graph_checkpoint_hash", ""),
-        ("graph_result_hash", ""),
-        ("java_final_receipt_hash", ""),
+        ("legacy_run_count", 1),
+        ("shadow_run_count", 1),
+        ("infra_only", True),
+        ("inventory_complete", False),
     ):
-        changed = _valid_evidence()
-        changed["rooms"][0][field] = value
-        with pytest.raises(assertion.common.TargetE2EError):
-            assertion.validate_target_evidence(changed, "p9-run001", "b" * 40, "a" * 64)
+        changed = copy.deepcopy(evidence)
+        changed[field] = value
+        signed = _java_jws(private, run_context, changed, now)
+        with pytest.raises(common.TargetE2EError):
+            assertion.verify_java_attestation(
+                signed,
+                run_context=run_context,
+                runtime_measurement_hash=measurement_hash,
+                case_id="CASE_P9_SYNTHETIC_0001",
+                trusted_public_keys={"p9-java-finalizer-01": public},
+                now=now,
+            )
+
+    shadow = copy.deepcopy(evidence)
+    shadow["runs"][0]["shadow"] = True
+    signed_shadow = _java_jws(private, run_context, shadow, now)
+    with pytest.raises(common.TargetE2EError):
+        assertion.verify_java_attestation(
+            signed_shadow,
+            run_context=run_context,
+            runtime_measurement_hash=measurement_hash,
+            case_id="CASE_P9_SYNTHETIC_0001",
+            trusted_public_keys={"p9-java-finalizer-01": public},
+            now=now,
+        )
+
+    wrong_activation = copy.deepcopy(evidence)
+    wrong_activation["activation_receipt"]["manifest_hash"] = "0" * 64
+    signed_wrong_activation = _java_jws(
+        private, run_context, wrong_activation, now
+    )
+    with pytest.raises(common.TargetE2EError, match="activation manifest"):
+        assertion.verify_java_attestation(
+            signed_wrong_activation,
+            run_context=run_context,
+            runtime_measurement_hash=measurement_hash,
+            case_id="CASE_P9_SYNTHETIC_0001",
+            trusted_public_keys={"p9-java-finalizer-01": public},
+            now=now,
+        )
+
+    with pytest.raises(common.TargetE2EError):
+        assertion.verify_java_attestation(
+            compact[:-1] + ("A" if compact[-1] != "A" else "B"),
+            run_context=run_context,
+            runtime_measurement_hash=measurement_hash,
+            case_id="CASE_P9_SYNTHETIC_0001",
+            trusted_public_keys={"p9-java-finalizer-01": public},
+            now=now,
+        )
+    with pytest.raises(common.TargetE2EError):
+        assertion.verify_java_attestation(
+            compact,
+            run_context=run_context,
+            runtime_measurement_hash=measurement_hash,
+            case_id="CASE_P9_SYNTHETIC_0001",
+            trusted_public_keys={"p9-java-finalizer-01": public},
+            now=now + dt.timedelta(minutes=10),
+        )
 
 
-def test_missing_application_evidence_contract_is_an_explicit_blocker() -> None:
+def test_assertion_has_fixed_run_local_source_and_no_arbitrary_url_or_path() -> None:
     source = (SCRIPTS / "assert_evidence.py").read_text(encoding="utf-8")
-    assert "BLOCKING_APPLICATION_CONTRACT" in source
-    assert "pytest.skip" not in source
-    for required in (
-        "TEMPORAL",
-        "V2",
-        "TEMPORAL_ACTIVITY",
-        "candidate",
-        "graph_checkpoint_hash",
-        "graph_result_hash",
-        "java_final_receipt_hash",
-        "LEGACY",
-    ):
-        assert required in source
-    gates = __import__("json").loads(
+    assert "--source" not in source
+    assert "urlopen" not in source
+    assert 'evidence_dir / "inbox" / f"{case_id}.java-evidence.jws"' in source
+    assert 'source_kind="JAVA_SIGNED"' in source
+    assert "require_fresh_last=True" in source
+
+
+def test_attested_receipt_has_self_hash_and_real_signature(tmp_path: Path) -> None:
+    private, public, _private_path, _public_path = _write_key_pair(tmp_path, "receipt")
+    receipt = ledger.attest_document(
+        {"schema_version": "receipt.v1", "status": "PASS"},
+        private,
+        public,
+        key_id="receipt-key-01",
+    )
+    ledger.verify_attested_document(
+        receipt,
+        public,
+        expected_key_sha256=ledger.public_key_sha256(public),
+        context="unit receipt",
+    )
+    changed = copy.deepcopy(receipt)
+    changed["status"] = "FORGED"
+    with pytest.raises(common.TargetE2EError):
+        ledger.verify_attested_document(
+            changed,
+            public,
+            expected_key_sha256=ledger.public_key_sha256(public),
+            context="unit receipt",
+        )
+
+
+def test_env_cannot_redirect_paths_outside_the_host_locked_run(tmp_path: Path) -> None:
+    run_id = "p9-lock01"
+    project = f"aflow-target-e2e-{run_id}"
+    runtime_root = tmp_path / "target-e2e"
+    run_directory = runtime_root / run_id
+    locks = runtime_root / ".locks"
+    run_directory.mkdir(parents=True)
+    locks.mkdir()
+    port_lock_path = locks / "gateway-25180.lock.json"
+    port_lock = common.seal_self_hash(
+        {
+            "schema_version": "target-e2e-port-lock.v1",
+            "state": "ACTIVE",
+            "gateway_port": 25180,
+            "project_name": project,
+            "run_id": run_id,
+            "lock_nonce": "a" * 64,
+            "owner": common.current_owner(),
+            "created_at": "2026-07-27T00:00:00+00:00",
+            "released_at": None,
+        }
+    )
+    common.write_json(port_lock_path, port_lock)
+    lock_path = locks / f"{project}.lock.json"
+    host_lock = common.seal_self_hash(
+        {
+            "schema_version": "target-e2e-host-lock.v1",
+            "state": "ACTIVE",
+            "project_name": project,
+            "run_id": run_id,
+            "runtime_root": runtime_root.as_posix(),
+            "run_directory": run_directory.as_posix(),
+            "env_file": (run_directory / "target-e2e.env").as_posix(),
+            "lock_nonce": "a" * 64,
+            "owner": common.current_owner(),
+            "candidate_sha": "b" * 40,
+            "image_lock_hash": "c" * 64,
+            "gateway_port": 25180,
+            "port_lock": port_lock_path.as_posix(),
+            "resources": common.expected_resource_names(run_id),
+            "ledger_public_key_sha256": "d" * 64,
+            "created_at": "2026-07-27T00:00:00+00:00",
+            "released_at": None,
+        }
+    )
+    common.write_json(lock_path, host_lock)
+    values = {
+        "TARGET_E2E_LOCK_PATH": lock_path.as_posix(),
+        "TARGET_E2E_RUN_ID": run_id,
+        "TARGET_E2E_PROJECT_NAME": project,
+        "TARGET_E2E_LOCK_NONCE": "a" * 64,
+        "TARGET_E2E_BUILD_ID": "b" * 40,
+        "TARGET_E2E_SOURCE_COMMIT": "b" * 40,
+        "TARGET_E2E_IMAGE_LOCK_HASH": "c" * 64,
+        "TARGET_E2E_GATEWAY_PORT": "25180",
+        "TARGET_E2E_IMAGE_LOCK_PATH": (
+            run_directory / "image-lock.snapshot.json"
+        ).as_posix(),
+        "TARGET_E2E_RUN_CONTEXT_PATH": (run_directory / "run-context.json").as_posix(),
+        "TARGET_E2E_SECRETS_DIR": (run_directory / "secrets").as_posix(),
+        "TARGET_E2E_PUBLIC_DIR": (run_directory / "public").as_posix(),
+        "TARGET_E2E_ACTIVATION_DIR": (run_directory / "java-activation").as_posix(),
+        "TARGET_E2E_EVIDENCE_DIR": (run_directory / "evidence").as_posix(),
+        "TARGET_E2E_SOCKET_DIR": (run_directory / "python-socket").as_posix(),
+    }
+    env_path = run_directory / "target-e2e.env"
+    env_path.write_text(
+        "\n".join(f"{key}={common.env_quote(value)}" for key, value in values.items())
+        + "\n",
+        encoding="ascii",
+    )
+    common.validate_env_lock(env_path)
+    values["TARGET_E2E_PUBLIC_DIR"] = (tmp_path / "attacker-public").as_posix()
+    env_path.write_text(
+        "\n".join(f"{key}={common.env_quote(value)}" for key, value in values.items())
+        + "\n",
+        encoding="ascii",
+    )
+    with pytest.raises(common.TargetE2EError, match="redirects locked runtime path"):
+        common.validate_env_lock(env_path)
+
+
+def test_host_lock_and_teardown_are_exact_and_never_use_broad_compose_down() -> None:
+    provision = (SCRIPTS / "provision.py").read_text(encoding="utf-8")
+    assert "provision.coordinator" in provision
+    assert "O_EXCL" in provision
+    assert "target-e2e-host-lock.v1" in provision
+    assert "gateway-" in provision and "target-e2e-port-lock.v1" in provision
+    teardown = (SCRIPTS / "teardown.py").read_text(encoding="utf-8")
+    assert '"docker", "rm", "--force"' in teardown
+    assert '"docker", "network", "rm"' in teardown
+    assert '"docker", "volume", "rm"' in teardown
+    assert '"--remove-orphans"' not in teardown
+    assert '"down"' not in teardown
+    assert "_validate_labels" in teardown and "_release_port_lock" in teardown
+
+
+def test_application_contract_gates_keep_infrastructure_only_from_claiming_pass() -> (
+    None
+):
+    gates = json.loads(
         (DEPLOY / "application-contract-gates.json").read_text(encoding="utf-8")
     )
-    assert gates["schema_version"] == "target-e2e-application-contract-gates.v1"
-    assert len(gates["gates"]) == 6
     assert all(gate["required"] is True for gate in gates["gates"])
-    assert all(gate["status"] == "BLOCKING_UNTIL_RUNTIME_PROVES" for gate in gates["gates"])
-    readiness = (SCRIPTS / "readiness.py").read_text(encoding="utf-8")
-    assert '"status": "INFRASTRUCTURE_READY_ONLY"' in readiness
-    assert '"target_lane_runnable": False' in readiness
+    assert all(
+        gate["status"] == "BLOCKING_UNTIL_RUNTIME_PROVES" for gate in gates["gates"]
+    )
+    readiness_source = (SCRIPTS / "readiness.py").read_text(encoding="utf-8")
+    assert '"status": "INFRASTRUCTURE_READY_ONLY"' in readiness_source
+    assert '"target_lane_runnable": False' in readiness_source
+    assert "runtime_measurement_hash" in readiness_source

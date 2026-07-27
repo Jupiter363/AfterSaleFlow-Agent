@@ -1,11 +1,20 @@
-name: aflow-target-e2e-${TARGET_E2E_RUN_ID:?provision a target E2E run first}
+name: ${TARGET_E2E_PROJECT_NAME:?provision a host-locked target E2E run first}
 
 x-runtime-labels: &runtime-labels
   target-e2e.after-sale-flow.dev/run-id: ${TARGET_E2E_RUN_ID:?}
   target-e2e.after-sale-flow.dev/build-id: ${TARGET_E2E_BUILD_ID:?}
   target-e2e.after-sale-flow.dev/source-commit: ${TARGET_E2E_SOURCE_COMMIT:?}
+  target-e2e.after-sale-flow.dev/project: ${TARGET_E2E_PROJECT_NAME:?}
+  target-e2e.after-sale-flow.dev/lock-nonce: ${TARGET_E2E_LOCK_NONCE:?}
+  target-e2e.after-sale-flow.dev/image-lock-hash: ${TARGET_E2E_IMAGE_LOCK_HASH:?}
   target-e2e.after-sale-flow.dev/target-lane-runnable: "false"
   target-e2e.after-sale-flow.dev/application-contracts: blocking
+
+x-resource-labels: &resource-labels
+  target-e2e.after-sale-flow.dev/run-id: ${TARGET_E2E_RUN_ID:?}
+  target-e2e.after-sale-flow.dev/project: ${TARGET_E2E_PROJECT_NAME:?}
+  target-e2e.after-sale-flow.dev/lock-nonce: ${TARGET_E2E_LOCK_NONCE:?}
+  target-e2e.after-sale-flow.dev/image-lock-hash: ${TARGET_E2E_IMAGE_LOCK_HASH:?}
 
 x-java-environment: &java-environment
   APP_ENV: target-e2e
@@ -34,6 +43,10 @@ x-java-environment: &java-environment
   PYTHON_AGENT_SERVICE_SECRET: ${TARGET_E2E_PYTHON_SERVICE_SECRET:?}
   OCR_SERVICE_SECRET: ${TARGET_E2E_OCR_SERVICE_SECRET:?}
   APP_TENANT_SURROGATE: target-e2e
+  TARGET_E2E_ACTIVATION_ID: ${TARGET_E2E_ACTIVATION_ID:?}
+  TARGET_E2E_ENVIRONMENT_ID: ${TARGET_E2E_ENVIRONMENT_ID:?}
+  TARGET_E2E_ENVIRONMENT_GENERATION: ${TARGET_E2E_ENVIRONMENT_GENERATION:?}
+  TARGET_E2E_RUN_NONCE: ${TARGET_E2E_RUN_NONCE:?}
   APP_ORCHESTRATION_COMMAND_V1_ENABLED: "true"
   APP_ORCHESTRATION_NEW_EPOCH_MODE: TEMPORAL
   APP_ORCHESTRATION_NON_LEGACY_EPOCH_ALLOCATION_ENABLED: "true"
@@ -112,7 +125,7 @@ services:
         source: ./deploy/target-e2e/postgresql/init-graph.sh
         target: /docker-entrypoint-initdb.d/10-init-graph.sh
         read_only: true
-    networks: [graph-data]
+    networks: [graph-data, python-egress]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 5s
@@ -170,7 +183,7 @@ services:
       MINIO_ROOT_PASSWORD: ${TARGET_E2E_MINIO_ROOT_PASSWORD:?}
     volumes:
       - target_minio_data:/data
-    networks: [object-data]
+    networks: [object-data, python-egress]
     healthcheck:
       test: ["CMD-SHELL", "mc ready local"]
       interval: 5s
@@ -312,45 +325,31 @@ services:
       GRAPH_DB_RESTORE_VERIFICATION_HASH: ${TARGET_E2E_GRAPH_RESTORE_HASH:?}
     networks: [graph-data]
 
-  jwks-publisher:
-    image: ${TARGET_E2E_JAVA_IMAGE:?immutable image digest required}
+  jwks-server:
+    image: ${TARGET_E2E_NGINX_IMAGE:?immutable image digest required}
     labels: *runtime-labels
     restart: unless-stopped
-    environment:
-      <<: *java-environment
-      SPRING_PROFILES_ACTIVE: api
-      SERVER_PORT: 8080
-      APP_TEMPORAL_WORKER_ENABLED: "false"
-      APP_ORCHESTRATION_COMMAND_OUTBOX_ENABLED: "false"
-      APP_ORCHESTRATION_ROOM_EPOCH_BOOTSTRAP_ENABLED: "false"
-      APP_GRAPH_JWKS_ENABLED: "true"
-      APP_GRAPH_JWKS_KEY_DIRECTORY: /run/target-e2e/graph-public-keys
-      APP_AGENT_RUN_V2_GRAPH_CLIENT_MODE: DISABLED
     volumes:
+      - ./deploy/target-e2e/nginx/jwks.conf:/etc/nginx/conf.d/default.conf:ro
       - type: bind
-        source: ${TARGET_E2E_SECRETS_DIR:?}/graph-public-keys
-        target: /run/target-e2e/graph-public-keys
+        source: ${TARGET_E2E_PUBLIC_DIR:?}/jwks/graph-jwks.json
+        target: /srv/jwks/graph-jwks.json
         read_only: true
-    depends_on: *java-core-depends
-    networks:
-      - domain-data
-      - cache-data
-      - object-data
-      - search-data
-      - temporal-runtime
-      - jwks-plane
+    networks: [python-egress]
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/.well-known/graph-jwks.json | grep '\"ES256\"'"]
-      interval: 10s
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/.well-known/graph-jwks.json | grep '\"ES256\"'"]
+      interval: 5s
       timeout: 5s
-      retries: 30
-      start_period: 30s
+      retries: 20
 
   python-agent-service:
     image: ${TARGET_E2E_PYTHON_IMAGE:?immutable image digest required}
     labels: *runtime-labels
     restart: unless-stopped
-    command: ["uvicorn", "target_e2e_mtls_adapter:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000", "--no-server-header"]
+    command:
+      - sh
+      - -c
+      - umask 000; rm -f /run/target-e2e/python/agent.sock; exec uvicorn target_e2e_mtls_adapter:create_app --factory --uds /run/target-e2e/python/agent.sock --no-server-header
     environment:
       APP_ENV: target-e2e
       LITELLM_BASE_URL: http://model-contract-blocker:4000
@@ -369,28 +368,35 @@ services:
       GRAPH_DATABASE_NAME: target_graph
       GRAPH_DATABASE_USER: graph_runtime
       GRAPH_DATABASE_SCHEMA: graph_runtime
-      GRAPH_JWKS_URL: http://jwks-publisher:8080/.well-known/graph-jwks.json
+      GRAPH_JWKS_URL: http://jwks-server:8080/.well-known/graph-jwks.json
       GRAPH_EXPECTED_SPIFFE_ID: spiffe://after-sale-flow/java-api-service
       GRAPH_EXPECTED_ENVIRONMENT_GENERATION: ${TARGET_E2E_GRAPH_ENVIRONMENT_GENERATION:?}
       GRAPH_EXPECTED_RESTORE_VERIFICATION_HASH: ${TARGET_E2E_GRAPH_RESTORE_HASH:?}
       GRAPH_SHADOW_BINDINGS: ${TARGET_E2E_GRAPH_SHADOW_BINDINGS:?}
       GRAPH_SHADOW_THREADS: "[]"
-      TARGET_E2E_ACTIVATION_DIRECTORY: /run/target-e2e/activation
+      GRAPH_TARGET_E2E_RUNTIME_CONTEXT: ${GRAPH_TARGET_E2E_RUNTIME_CONTEXT:?}
+      GRAPH_TARGET_E2E_BINDINGS: ${GRAPH_TARGET_E2E_BINDINGS:?}
+      TARGET_E2E_MTLS_CA_CERTIFICATE_PATH: /run/target-e2e/public/ca.crt
+      TARGET_E2E_MTLS_CA_CERT_SHA256: ${TARGET_E2E_MTLS_CA_CERT_SHA256:?}
+      TARGET_E2E_MTLS_CLIENT_CERT_SHA256: ${TARGET_E2E_MTLS_CLIENT_CERT_SHA256:?}
     volumes:
       - ./contracts/agent-platform/v1:/contracts/agent-platform/v1:ro
       - ./deploy/target-e2e/python/mtls_adapter.py:/app/target_e2e_mtls_adapter.py:ro
       - type: bind
-        source: ${TARGET_E2E_ACTIVATION_DIR:?}
-        target: /run/target-e2e/activation
+        source: ${TARGET_E2E_SOCKET_DIR:?}
+        target: /run/target-e2e/python
+      - type: bind
+        source: ${TARGET_E2E_PUBLIC_DIR:?}/mtls/ca.crt
+        target: /run/target-e2e/public/ca.crt
         read_only: true
     depends_on:
       graph-restore-validation:
         condition: service_completed_successfully
-      jwks-publisher:
+      jwks-server:
         condition: service_healthy
-    networks: [graph-data, graph-adapter, jwks-plane, object-data]
+    networks: [python-egress]
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
+      test: ["CMD-SHELL", "test -S /run/target-e2e/python/agent.sock && kill -0 1"]
       interval: 10s
       timeout: 5s
       retries: 30
@@ -417,9 +423,12 @@ services:
         source: ${TARGET_E2E_SECRETS_DIR:?}/mtls/ca.crt
         target: /run/target-e2e/mtls/ca.crt
         read_only: true
-    networks: [graph-mtls-client, graph-adapter]
+      - type: bind
+        source: ${TARGET_E2E_SOCKET_DIR:?}
+        target: /run/target-e2e/python
+    networks: [graph-mtls-client]
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz | grep ok"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/backend-healthz | grep ok"]
       interval: 5s
       timeout: 5s
       retries: 30
@@ -465,12 +474,6 @@ services:
       SPRING_PROFILES_ACTIVE: api
       APP_TEMPORAL_WORKER_ENABLED: "false"
       APP_GRAPH_JWKS_ENABLED: "false"
-      TARGET_E2E_ACTIVATION_DIRECTORY: /run/target-e2e/activation
-    volumes:
-      - type: bind
-        source: ${TARGET_E2E_ACTIVATION_DIR:?}
-        target: /run/target-e2e/activation
-        read_only: true
     depends_on:
       <<: *java-core-depends
       ocr-parser-service:
@@ -504,11 +507,12 @@ services:
       TEMPORAL_WORKER_BUILD_ID: ${TARGET_E2E_BUILD_ID:?}
       TEMPORAL_WORKER_VERSIONING_MODE: BUILD_ID
       APP_ORCHESTRATION_COMMAND_OUTBOX_ENABLED: "false"
-      TARGET_E2E_ACTIVATION_DIRECTORY: /run/target-e2e/activation
+      TARGET_E2E_ACTIVATION_JWS_PATH: /run/target-e2e/java-activation/activation.jws
+      TARGET_E2E_ACTIVATION_MANIFEST_PATH: /run/target-e2e/java-activation/activation-manifest.json
     volumes:
       - type: bind
         source: ${TARGET_E2E_ACTIVATION_DIR:?}
-        target: /run/target-e2e/activation
+        target: /run/target-e2e/java-activation
         read_only: true
     depends_on: *java-core-depends
     networks: [domain-data, cache-data, object-data, search-data, temporal-runtime]
@@ -554,7 +558,6 @@ services:
       APP_AGENT_RUN_V2_GRAPH_BINDING_AUDIENCE: SYSTEM
       APP_AGENT_RUN_V2_GRAPH_BINDING_REGISTRY_HASH: ${TARGET_E2E_GRAPH_REGISTRY_HASH:?}
       APP_AGENT_RUN_V2_GRAPH_BINDING_TOOL_POLICY_VERSION: no-tools.v1
-      TARGET_E2E_ACTIVATION_DIRECTORY: /run/target-e2e/activation
     volumes:
       - type: bind
         source: ${TARGET_E2E_SECRETS_DIR:?}/graph-signing-keys
@@ -563,10 +566,6 @@ services:
       - type: bind
         source: ${TARGET_E2E_SECRETS_DIR:?}/mtls
         target: /run/target-e2e/mtls
-        read_only: true
-      - type: bind
-        source: ${TARGET_E2E_ACTIVATION_DIR:?}
-        target: /run/target-e2e/activation
         read_only: true
     depends_on:
       <<: *java-core-depends
@@ -649,56 +648,73 @@ networks:
   domain-data:
     name: aflow_target_e2e_${TARGET_E2E_RUN_ID:?}_domain_data
     internal: true
+    labels: *resource-labels
   graph-data:
     name: aflow_target_e2e_${TARGET_E2E_RUN_ID:?}_graph_data
     internal: true
+    labels: *resource-labels
   temporal-data:
     name: aflow_target_e2e_${TARGET_E2E_RUN_ID:?}_temporal_data
     internal: true
+    labels: *resource-labels
   temporal-runtime:
     name: aflow_target_e2e_${TARGET_E2E_RUN_ID:?}_temporal_runtime
     internal: true
+    labels: *resource-labels
   cache-data:
     name: aflow_target_e2e_${TARGET_E2E_RUN_ID:?}_cache_data
     internal: true
+    labels: *resource-labels
   object-data:
     name: aflow_target_e2e_${TARGET_E2E_RUN_ID:?}_object_data
     internal: true
+    labels: *resource-labels
   search-data:
     name: aflow_target_e2e_${TARGET_E2E_RUN_ID:?}_search_data
     internal: true
+    labels: *resource-labels
+  python-egress:
+    name: aflow_target_e2e_${TARGET_E2E_RUN_ID:?}_python_egress
+    internal: true
+    labels: *resource-labels
   graph-mtls-client:
     name: aflow_target_e2e_${TARGET_E2E_RUN_ID:?}_graph_mtls_client
     internal: true
-  graph-adapter:
-    name: aflow_target_e2e_${TARGET_E2E_RUN_ID:?}_graph_adapter
-    internal: true
-  jwks-plane:
-    name: aflow_target_e2e_${TARGET_E2E_RUN_ID:?}_jwks_plane
-    internal: true
+    labels: *resource-labels
   ocr-plane:
     name: aflow_target_e2e_${TARGET_E2E_RUN_ID:?}_ocr_plane
     internal: true
+    labels: *resource-labels
   app-internal:
     name: aflow_target_e2e_${TARGET_E2E_RUN_ID:?}_app_internal
     internal: true
+    labels: *resource-labels
   edge:
     name: aflow_target_e2e_${TARGET_E2E_RUN_ID:?}_edge
+    labels: *resource-labels
 
 volumes:
   target_domain_data:
     name: aflow_target_e2e_${TARGET_E2E_RUN_ID:?}_domain_data
+    labels: *resource-labels
   target_graph_data:
     name: aflow_target_e2e_${TARGET_E2E_RUN_ID:?}_graph_data
+    labels: *resource-labels
   target_temporal_data:
     name: aflow_target_e2e_${TARGET_E2E_RUN_ID:?}_temporal_data
+    labels: *resource-labels
   target_redis_data:
     name: aflow_target_e2e_${TARGET_E2E_RUN_ID:?}_redis_data
+    labels: *resource-labels
   target_minio_data:
     name: aflow_target_e2e_${TARGET_E2E_RUN_ID:?}_minio_data
+    labels: *resource-labels
   target_elasticsearch_data:
     name: aflow_target_e2e_${TARGET_E2E_RUN_ID:?}_elasticsearch_data
+    labels: *resource-labels
   target_ocr_data:
     name: aflow_target_e2e_${TARGET_E2E_RUN_ID:?}_ocr_data
+    labels: *resource-labels
   target_ocr_models:
     name: aflow_target_e2e_${TARGET_E2E_RUN_ID:?}_ocr_models
+    labels: *resource-labels
