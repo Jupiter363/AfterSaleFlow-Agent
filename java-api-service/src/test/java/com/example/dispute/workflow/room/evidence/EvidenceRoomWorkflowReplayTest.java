@@ -36,6 +36,7 @@ class EvidenceRoomWorkflowReplayTest {
   private static final long EPOCH = 8;
   private static final String INITIATOR = "PARTICIPANT_P5_REPLAY_INITIATOR";
   private static final String RESPONDENT = "PARTICIPANT_P5_REPLAY_RESPONDENT";
+  private static final long INFRASTRUCTURE_TIMEOUT_SECONDS = 30;
   private static final WorkerOptions IMMEDIATE_STICKY_FALLBACK_WORKER_OPTIONS =
       WorkerOptions.newBuilder().setStickyQueueScheduleToStartTimeout(Duration.ZERO).build();
 
@@ -190,8 +191,14 @@ class EvidenceRoomWorkflowReplayTest {
   }
 
   private static void shutdownAndAwait(WorkerFactory factory) {
-    factory.shutdown();
-    factory.awaitTermination(5, TimeUnit.SECONDS);
+    factory.shutdownNow();
+    factory.awaitTermination(INFRASTRUCTURE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+    long publicationDeadline =
+        System.nanoTime()
+            + TimeUnit.SECONDS.toNanos(INFRASTRUCTURE_TIMEOUT_SECONDS);
+    while (!factory.isTerminated() && System.nanoTime() < publicationDeadline) {
+      sleepBriefly();
+    }
     assertThat(factory.isTerminated()).as("worker factory terminated").isTrue();
   }
 
