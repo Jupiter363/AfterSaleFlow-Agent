@@ -666,7 +666,7 @@ def ledger_context_from_run_context(run_context: dict[str, Any]) -> dict[str, An
     if not isinstance(executor_binding, dict) or set(executor_binding) != TARGET_EXECUTOR_BINDING_KEYS:
         raise TargetE2EError("target E2E executor binding fields drifted")
     expected_executor_values = {
-        "graph_key": "all-rooms/target-e2e.v1",
+        "graph_key": "all-rooms.target-e2e.v1",
         "graph_version": "target-e2e-graph.2026-07-27.1",
         "checkpoint_schema_version": "target-e2e-checkpoint.v1",
         "output_schema_version": "target-e2e-room-proposal-source.v1",
