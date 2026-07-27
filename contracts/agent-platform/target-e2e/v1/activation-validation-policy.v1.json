@@ -1,0 +1,121 @@
+{
+  "schemaVersion": "target-e2e-activation-validation-policy.v1",
+  "contractVersion": "target-e2e-activation.v1",
+  "executionLane": "TARGET_E2E_CANDIDATE",
+  "transport": {
+    "scope": "DEPLOYMENT_STARTUP_ONLY",
+    "preferredSource": "READ_ONLY_MOUNTED_FILE",
+    "environmentAdapterAllowed": true,
+    "bootstrapHeader": "X-AfterSaleFlow-Target-E2E-Activation",
+    "graphEndpointHeaderAllowed": false,
+    "perCommandManifestAllowed": false,
+    "reusableBearerAllowed": false
+  },
+  "canonicalSigning": {
+    "canonicalization": "RFC_8785",
+    "selfHashAlgorithm": "SHA-256",
+    "selfHashField": "manifestHash",
+    "selfHashOmitFields": ["manifestHash"],
+    "signatureAlgorithm": "ES256",
+    "signatureInput": "FULL_RFC_8785_CANONICAL_MANIFEST_PAYLOAD",
+    "signatureEncoding": "COMPACT_JWS_JOSE_P1363_BASE64URL",
+    "protectedHeaderTyp": "target-e2e-activation+jwt",
+    "signer": "JAVA_CONTROL_PLANE",
+    "verifierPrivateKeyAllowed": false
+  },
+  "timePolicy": {
+    "maximumLifetimeSeconds": 7200,
+    "futureIssuedAtToleranceSeconds": 0,
+    "expiresAtMustBeAfterIssuedAt": true,
+    "expiredManifestAllowed": false
+  },
+  "replayPolicy": {
+    "operation": "ATOMIC_REGISTER_OR_ATTACH_IDENTICAL",
+    "identity": ["environmentId", "environmentGeneration", "activationId", "nonce", "manifestHash"],
+    "uniqueGrantKeys": ["activationId", "nonce"],
+    "retention": "THROUGH_EXPIRES_AT",
+    "registerOnceBeforeWorkerAdmission": true,
+    "identicalReplicaAttachResult": "ATTACHED_EXISTING",
+    "identicalReplicaCreatesSecondConsumptionRow": false,
+    "differentBindingEnvironmentOrGenerationResult": "REJECT_NONCE_REPLAY_OR_BINDING_CONFLICT"
+  },
+  "newCaseReservationPolicy": {
+    "mode": "ISOLATED_SYNTHETIC_NEW_CASES",
+    "operation": "ATOMIC_RESERVE_CASE_SLOT_BEFORE_FIRST_EPOCH_SELECTION",
+    "identity": ["environmentId", "environmentGeneration", "activationId", "generatedCaseId"],
+    "maximumCases": 16,
+    "prefixWildcardAllowed": false,
+    "existingCaseIdReservationResult": "IDEMPOTENT_ONLY_FOR_SAME_ACTIVATION_SLOT",
+    "wrongPrefixOrExhaustedCapacityResult": "REJECT"
+  },
+  "verificationOrder": [
+    "REJECT_OVERSIZE_OR_NON_UNIQUE_JSON_MEMBERS",
+    "VALIDATE_DRAFT_2020_12_SCHEMA",
+    "VERIFY_RFC_8785_SELF_HASH",
+    "VERIFY_JAVA_ES256_SIGNATURE_AND_TRUSTED_KEY",
+    "VERIFY_ISSUED_AT_NOT_FUTURE_AND_LIFETIME_AT_MOST_7200_SECONDS",
+    "VERIFY_NOT_EXPIRED",
+    "VERIFY_EXACT_ENVIRONMENT_GENERATION_CANDIDATE_LANE_AND_VERSION",
+    "VERIFY_EXACT_CASE_CONTROL_AGENT_GRAPH_IMAGE_TEMPORAL_AND_DATABASE_BINDINGS",
+    "VERIFY_TENANT_CASE_OR_SYNTHETIC_SCOPE_AND_ROOM_SCOPE",
+    "VERIFY_GRAPH_PROPOSAL_ONLY_NO_DOMAIN_CREDENTIALS_AND_JAVA_FINALIZER_ONLY",
+    "ATOMICALLY_REGISTER_OR_ATTACH_IDENTICAL_ACTIVATION",
+    "ADMIT_TARGET_E2E_WORKERS"
+  ],
+  "bindingRules": [
+    {"id": "CONTRACT_VERSION", "manifestPointer": "/contractVersion", "contextPointer": "/expectedContractVersion", "operator": "EQUAL", "rejectionCode": "CONTRACT_VERSION_MISMATCH"},
+    {"id": "EXECUTION_LANE", "manifestPointer": "/executionLane", "contextPointer": "/expectedExecutionLane", "operator": "EQUAL", "rejectionCode": "EXECUTION_LANE_MISMATCH"},
+    {"id": "ENVIRONMENT_ID", "manifestPointer": "/environmentId", "contextPointer": "/environmentId", "operator": "EQUAL", "rejectionCode": "ENVIRONMENT_ID_MISMATCH"},
+    {"id": "ENVIRONMENT_GENERATION", "manifestPointer": "/environmentGeneration", "contextPointer": "/environmentGeneration", "operator": "EQUAL", "rejectionCode": "ENVIRONMENT_GENERATION_MISMATCH"},
+    {"id": "CANDIDATE_SHA", "manifestPointer": "/candidateSha", "contextPointer": "/candidateSha", "operator": "EQUAL", "rejectionCode": "CANDIDATE_SHA_MISMATCH"},
+    {"id": "TENANT", "manifestPointer": "/tenantSurrogate", "contextPointer": "/tenantSurrogate", "operator": "EQUAL", "rejectionCode": "TENANT_SCOPE_MISMATCH"},
+    {"id": "CASE", "manifestPointer": "/caseScope", "contextPointer": "/requestedCaseId", "operator": "EXPLICIT_CASE_ID_OR_ATOMIC_SYNTHETIC_NEW_CASE_SLOT", "rejectionCode": "CASE_SCOPE_MISMATCH"},
+    {"id": "ROOM", "manifestPointer": "/allowedRoomTypes", "contextPointer": "/requestedRoomType", "operator": "CONTAINS", "rejectionCode": "ROOM_SCOPE_MISMATCH"},
+    {"id": "BUILDS", "manifestPointer": "/buildBindings", "contextPointer": "/buildBindings", "operator": "DEEP_EQUAL", "rejectionCode": "BUILD_BINDING_MISMATCH"},
+    {"id": "GRAPH", "manifestPointer": "/graphBinding", "contextPointer": "/graphBinding", "operator": "DEEP_EQUAL", "rejectionCode": "GRAPH_BINDING_MISMATCH"},
+    {"id": "IMAGES", "manifestPointer": "/imageDigests", "contextPointer": "/imageDigests", "operator": "DEEP_EQUAL", "rejectionCode": "IMAGE_DIGEST_MISMATCH"},
+    {"id": "TEMPORAL_NAMESPACE", "manifestPointer": "/temporalNamespace", "contextPointer": "/temporalNamespace", "operator": "EQUAL", "rejectionCode": "TEMPORAL_NAMESPACE_MISMATCH"},
+    {"id": "DATABASE_IDENTITIES", "manifestPointer": "/databaseIdentities", "contextPointer": "/databaseIdentities", "operator": "DEEP_EQUAL", "rejectionCode": "DATABASE_IDENTITY_MISMATCH"}
+  ],
+  "semanticRules": [
+    {"id": "GRAPH_BINDING_SELF_HASH", "rule": "bindingHash equals RFC8785 SHA-256 of graphBinding with bindingHash omitted", "rejectionCode": "GRAPH_BINDING_HASH_MISMATCH"},
+    {"id": "DATABASE_SEPARATION", "rule": "Domain and Graph cluster/database/runtime-principal identity tuples are distinct", "rejectionCode": "DATABASE_IDENTITY_COLLISION"},
+    {"id": "GRAPH_AUTHORITY", "rule": "Graph output is proposal-only and Graph has no Domain credentials or Domain write authority", "rejectionCode": "GRAPH_AUTHORITY_VIOLATION"},
+    {"id": "FORMAL_WRITER", "rule": "Java Finalizer is the only formal Domain writer and may commit only to the manifest-bound isolated Domain database", "rejectionCode": "FORMAL_WRITER_VIOLATION"},
+    {"id": "EXTERNAL_EFFECTS", "rule": "External and production side effects are forbidden", "rejectionCode": "EXTERNAL_EFFECT_AUTHORITY_VIOLATION"},
+    {"id": "DEFAULTS", "rule": "Production formal selector remains LEGACY and target E2E activation remains DISABLED by default", "rejectionCode": "PRODUCTION_DEFAULT_VIOLATION"},
+    {"id": "NO_PROMOTION", "rule": "Manifest carries no production, migration, canary, or promotion authority", "rejectionCode": "AUTHORITY_CEILING_VIOLATION"}
+  ],
+  "commandBinding": {
+    "embeddedContract": "room-graph-command.v1",
+    "wrapperContract": "target-e2e-graph-command-envelope.v1",
+    "wrapperMembers": ["schema_version", "execution_lane", "activation_id", "command_hash", "command_envelope_hash", "command"],
+    "commandHash": "SHA256_RFC8785_FULL_EMBEDDED_COMMAND_INCLUDING_VERIFIED_REQUEST_HASH",
+    "commandEnvelopeHash": "SHA256_RFC8785_WRAPPER_OMITTING_ONLY_COMMAND_ENVELOPE_HASH",
+    "jwsProtectedHeaderTyp": "target-e2e-graph-command+jwt",
+    "jwsClaimAdditions": ["execution_lane", "activation_id", "command_hash", "command_envelope_hash"],
+    "jwsCovers": "EXACT_WRAPPER_VALUES_VIA_SIGNED_CLAIMS_AND_COMMAND_HASH",
+    "legacyCommandContractMutationAllowed": false
+  },
+  "resultAndFinalizationBinding": {
+    "resultHash": "EQUALS_ROOM_GRAPH_RESULT_OUTPUT_HASH_WHERE_OUTPUT_HASH_IS_SHA256_RFC8785_NESTED_RESULT_OMITTING_ONLY_OUTPUT_HASH",
+    "proposalHash": "SHA256_RFC8785_EXACT_ROOM_SPECIFIC_PROPOSAL_PAYLOAD",
+    "resultEnvelopeHash": "SHA256_RFC8785_RESULT_WRAPPER_OMITTING_ONLY_RESULT_ENVELOPE_HASH",
+    "receiptHash": "SHA256_RFC8785_FINALIZATION_RECEIPT_OMITTING_ONLY_RECEIPT_HASH",
+    "requiredReceiptBindings": [
+      "execution_lane", "activation_id", "tenant_surrogate", "case_id", "room_type",
+      "room_epoch", "fencing_token", "process_revision", "stage_sequence", "logical_run_id",
+      "attempt_id", "command_hash", "command_envelope_hash", "graph_key", "graph_version",
+      "checkpoint_schema_version", "checkpoint_id", "result_hash", "proposal_hash",
+      "result_envelope_hash", "agent_run_manifest_id", "agent_run_manifest_hash",
+      "isolated_domain_db_binding_hash", "committed_at"
+    ],
+    "formalWriter": "JAVA_FINALIZER_ONLY"
+  },
+  "failurePolicy": {
+    "default": "FAIL_CLOSED_BEFORE_WORKER_ADMISSION",
+    "partialActivationAllowed": false,
+    "fallbackToLegacyInsideEpochAllowed": false,
+    "mixedManifestOrDeploymentBindingsAllowed": false
+  }
+}

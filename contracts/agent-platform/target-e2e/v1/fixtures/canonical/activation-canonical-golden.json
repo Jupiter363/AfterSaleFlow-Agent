@@ -1,0 +1,13 @@
+{
+  "schemaVersion": "target-e2e-activation-canonical-golden.v1",
+  "canonicalization": "RFC_8785",
+  "fixture": "../valid/target-e2e-activation-allowlist-valid.json",
+  "selfHashOmitFields": ["manifestHash"],
+  "manifestHash": "cc491d6ea2c9b260da43b6cbfa02b20a0d5c90690a57af8976cc3307c3ec22d0",
+  "activationJwsProtectedHeader": {
+    "alg": "ES256",
+    "kid": "p9-java-activation-key-01",
+    "typ": "target-e2e-activation+jwt"
+  },
+  "signatureFixtureStatus": "STRUCTURAL_GOLDEN_ONLY_NO_PRIVATE_KEY_OR_VALID_SIGNATURE"
+}
