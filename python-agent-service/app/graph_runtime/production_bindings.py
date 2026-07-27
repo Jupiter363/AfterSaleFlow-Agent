@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 import hmac
 import re
 from typing import Any, cast
@@ -23,7 +23,13 @@ from app.config import (
     Settings,
 )
 from app.contracts.v1.codec import canonical_sha256
-from app.contracts.v1.models import ExecutionMetadata, RoomGraphCommand, SnapshotRef, Usage
+from app.contracts.v1.models import (
+    AgentStreamEvent,
+    ExecutionMetadata,
+    RoomGraphCommand,
+    SnapshotRef,
+    Usage,
+)
 from app.graph_runtime.compiled_executor import (
     CompiledGraphShadowExecutor,
     CompiledStateGraphPort,
@@ -51,6 +57,8 @@ from app.graph_runtime.result import ResultBindings, TERMINAL_DRAFT_ADAPTER
 from app.graph_runtime.state import CommonGraphState, validate_graph_state
 from app.graph_runtime.target_e2e import (
     TargetE2EInputAuthorizer,
+    TargetE2ERoomProposal,
+    TargetE2ERoomProposalSource,
     TargetE2EThreadIdentityResolver,
 )
 from app.graph_runtime.target_e2e_composite import (
@@ -257,16 +265,15 @@ def build_graph_runtime_bindings(
         kernel: GraphExecutorKernel,
     ) -> ExactShadowExecutorRegistry:
         if settings.graph_gateway_mode == "TARGET_E2E_CANDIDATE":
-            if target_e2e_provider_factory is None:
-                raise GraphContractError(
-                    "target-E2E all-room provider assembly is unavailable"
-                )
+            provider_factory = (
+                target_e2e_provider_factory or _build_target_e2e_room_providers
+            )
             return ExactShadowExecutorRegistry(
                 (
                     _target_e2e_executor_registration(
                         bindings[0],
                         kernel,
-                        providers=target_e2e_provider_factory(kernel),
+                        providers=provider_factory(kernel),
                     ),
                 )
             )
@@ -320,6 +327,51 @@ def _target_e2e_executor_registration(
             allowed_nodes=frozenset(room.value for room in TARGET_E2E_ROOM_TYPES),
         ),
     )
+
+
+class _TargetE2ESyntheticRoomProvider:
+    """Candidate-only LangGraph provider with proposal output and no external effects."""
+
+    def __init__(
+        self,
+        room_type: RoomType,
+        executor: CompiledGraphShadowExecutor,
+    ) -> None:
+        self._room_type = room_type
+        self._executor = executor
+
+    @property
+    def room_type(self) -> RoomType:
+        return self._room_type
+
+    def stream(self, execution: GatewayExecution) -> AsyncIterator[AgentStreamEvent]:
+        if execution.admission.command.room_type != self._room_type.value:
+            raise GraphContractError("target-E2E room provider received another room")
+        return self._executor.stream(execution)
+
+
+def _build_target_e2e_room_providers(
+    kernel: GraphExecutorKernel,
+) -> tuple[TargetE2ERoomProvider, ...]:
+    providers: list[TargetE2ERoomProvider] = []
+    for room_type in RoomType:
+        builder = build_shadow_kernel_graph(
+            validate_command=_validate_synthetic_state,
+            execute_graph=_advance_revision,
+            project_result=_project_synthetic_result,
+        )
+        graph = builder.compile(checkpointer=kernel.saver)
+        executor = CompiledGraphShadowExecutor(
+            graph=cast(CompiledStateGraphPort, graph),
+            saver=kernel.saver,
+            initial_state=_initial_state,
+            terminal_plan=lambda execution, state, bound_room=room_type: (
+                _target_terminal_plan(execution, state, bound_room)
+            ),
+            start_node="validate_command",
+        )
+        providers.append(_TargetE2ESyntheticRoomProvider(room_type, executor))
+    return tuple(providers)
 
 
 def _executor_registration(
@@ -546,6 +598,54 @@ def _terminal_plan(
                 guardrail_version=invocation.guardrail_version,
             ),
         ),
+    )
+
+
+def _target_terminal_plan(
+    execution: GatewayExecution,
+    state: Mapping[str, Any],
+    room_type: RoomType,
+) -> TerminalResultPlan:
+    base = _terminal_plan(execution, state)
+    command = execution.admission.command
+    if command.room_type != room_type.value:
+        raise GraphContractError("target-E2E terminal proposal room differs from command")
+    payload = {
+        "schema_version": "target-e2e-synthetic-room-payload.v1",
+        "room_type": room_type.value,
+        "case_id": command.case_id,
+        "command_id": command.command_id,
+        "status": "COMPLETED",
+    }
+    payload_hash = canonical_sha256(payload)
+    proposal_schema = {
+        RoomType.INTAKE: "target-e2e-intake-proposal.v1",
+        RoomType.EVIDENCE: "target-e2e-evidence-proposal.v1",
+        RoomType.HEARING: "target-e2e-hearing-proposal.v1",
+        RoomType.REVIEW: "target-e2e-review-proposal.v1",
+    }[room_type]
+    source = TargetE2ERoomProposalSource(
+        schema_version="target-e2e-room-proposal-source.v1",
+        room_type=room_type.value,
+        proposal=TargetE2ERoomProposal(
+            schema_version=proposal_schema,
+            proposal_id=f"proposal.{room_type.value.lower()}.{payload_hash[:32]}",
+            command_id=command.command_id,
+            logical_run_id=command.logical_run_id,
+            attempt_id=command.attempt_id,
+            payload_schema_version="target-e2e-synthetic-room-payload.v1",
+            payload_ref=(
+                f"urn:target-e2e:proposal:{room_type.value.lower()}:{payload_hash}"
+            ),
+            payload_hash=payload_hash,
+            terminal_class="COMPLETED",
+            formal_authority=False,
+        ),
+    )
+    return TerminalResultPlan(
+        draft=base.draft,
+        bindings=base.bindings,
+        target_proposal_source=source,
     )
 
 
