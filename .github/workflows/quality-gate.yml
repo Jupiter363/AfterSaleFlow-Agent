@@ -207,6 +207,13 @@ jobs:
           distribution: temurin
           java-version: "21"
           cache: maven
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install acceptance test dependencies
+        run: |
+          python -m pip install --disable-pip-version-check --require-hashes \
+            -r infra-tests/phase8/runtime/requirements.lock
       - name: Generate ephemeral Compose credentials
         run: bash ./scripts/generate-secrets.sh
       - name: Pull Compose images with bounded backoff

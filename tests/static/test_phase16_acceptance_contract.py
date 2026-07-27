@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import yaml
+
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -47,11 +49,30 @@ def test_phase16_ci_quality_gate_exists() -> None:
         assert required in text
     assert 'COMPOSE_PARALLEL_LIMIT: "1"' in text
     secret_generation = text.index("bash ./scripts/generate-secrets.sh")
+    acceptance_dependencies = text.index("name: Install acceptance test dependencies")
     compose_pull = text.index("docker compose pull --ignore-buildable --policy missing")
     compose_up = text.index(
         "docker compose up -d --build --pull never --wait --wait-timeout 360"
     )
-    assert secret_generation < compose_pull < compose_up
+    acceptance_tests = text.index("python -m pytest tests/api tests/e2e tests/load -q")
+    assert acceptance_dependencies < secret_generation < compose_pull < compose_up
+    assert compose_up < acceptance_tests
+    assert "-r infra-tests/phase8/runtime/requirements.lock" in text
+    compose_steps = yaml.safe_load(text)["jobs"]["compose-smoke"]["steps"]
+    setup_python = next(
+        step for step in compose_steps if step.get("uses") == "actions/setup-python@v5"
+    )
+    install_dependencies = next(
+        step
+        for step in compose_steps
+        if step.get("name") == "Install acceptance test dependencies"
+    )
+    assert setup_python["with"]["python-version"] == "3.11"
+    assert "--require-hashes" in install_dependencies["run"]
+    assert (
+        "infra-tests/phase8/runtime/requirements.lock"
+        in install_dependencies["run"]
+    )
     assert "max_attempts=5" in text
     assert "delay=$((15 * 2 ** (attempt - 1)))" in text
     assert 'SEED_DEMO_DISPUTES: "true"' in text
