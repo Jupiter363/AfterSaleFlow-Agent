@@ -27,6 +27,7 @@ import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import com.example.dispute.workflow.contract.v1.RoomGraphResult;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import java.nio.file.Path;
 import java.time.Instant;
@@ -43,7 +44,10 @@ import org.mockito.junit.jupiter.MockitoExtension;
 @ExtendWith(MockitoExtension.class)
 class AgentRunFormalResultCommitterTest {
 
-    private static final ObjectMapper MAPPER = JsonMapper.builder().findAndAddModules().build();
+    private static final ObjectMapper MAPPER = JsonMapper.builder()
+            .findAndAddModules()
+            .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
+            .build();
     private static final Path FIXTURES =
             Path.of("..", "contracts", "agent-platform", "v1", "fixtures", "valid");
     private static final Instant NOW = Instant.parse("2026-07-17T08:05:00Z");

@@ -28,6 +28,16 @@ public final class TargetE2eAgentRunV2FinalizationFactsProvider
     public AgentRunV2ManifestFactory.FinalizationFacts resolve(
             ExecuteAgentRunRequest request, ExecuteAgentRunResult result) {
         var authorized = source.resolve(request, result);
+        return create(authorized, request, result);
+    }
+
+    public AgentRunV2ManifestFactory.FinalizationFacts create(
+            TargetE2eAuthorizedIntakeFinalizationSource.AuthorizedState authorized,
+            ExecuteAgentRunRequest request,
+            ExecuteAgentRunResult result) {
+        Objects.requireNonNull(authorized, "authorized");
+        Objects.requireNonNull(request, "request");
+        Objects.requireNonNull(result, "result");
         var state = authorized.state();
         var attempt = state.attempt();
         ArtifactPointer proposal = proposal(result);

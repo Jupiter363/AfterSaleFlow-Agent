@@ -17,17 +17,30 @@ public final class IntakeAgentRunDomainResultCommitter
 
     private final IntakeAgentRunFinalizationRequestResolver requestResolver;
     private final IntakeGraphResultFinalizer finalizer;
+    private final String expectedGraphKey;
 
     public IntakeAgentRunDomainResultCommitter(
             IntakeAgentRunFinalizationRequestResolver requestResolver,
             IntakeGraphResultFinalizer finalizer) {
+        this(requestResolver, finalizer, IntakeGraphResultFinalizer.LEGACY_GRAPH_KEY);
+    }
+
+    public IntakeAgentRunDomainResultCommitter(
+            IntakeAgentRunFinalizationRequestResolver requestResolver,
+            IntakeGraphResultFinalizer finalizer,
+            String expectedGraphKey) {
         this.requestResolver = Objects.requireNonNull(requestResolver, "requestResolver");
         this.finalizer = Objects.requireNonNull(finalizer, "finalizer");
+        if (!IntakeGraphResultFinalizer.LEGACY_GRAPH_KEY.equals(expectedGraphKey)
+                && !IntakeGraphResultFinalizer.TARGET_E2E_GRAPH_KEY.equals(expectedGraphKey)) {
+            throw new IllegalArgumentException("expectedGraphKey is not an allowed Intake graph");
+        }
+        this.expectedGraphKey = expectedGraphKey;
     }
 
     @Override
     public boolean supports(RoomType roomType, String graphKey) {
-        return roomType == RoomType.INTAKE && "intake.v2".equals(graphKey);
+        return roomType == RoomType.INTAKE && expectedGraphKey.equals(graphKey);
     }
 
     @Override
@@ -53,7 +66,7 @@ public final class IntakeAgentRunDomainResultCommitter
                 receipt.resultHash());
     }
 
-    private static void requireOuterCommitBinding(
+    private void requireOuterCommitBinding(
             CommitCommand outer, IntakeGraphFinalizationRequest request) {
         var executeRequest = outer.request();
         var executeResult = outer.result();
@@ -75,7 +88,7 @@ public final class IntakeAgentRunDomainResultCommitter
                 || manifest.fencingToken() != authority.fencingToken()
                 || !manifest.agentRun().logicalRunId().equals(authority.logicalRunId())
                 || !manifest.agentRun().attemptId().equals(authority.attemptId())
-                || !manifest.graph().graphKey().equals("intake.v2")
+                || !manifest.graph().graphKey().equals(expectedGraphKey)
                 || !manifest.graph().graphVersion()
                         .equals(authority.profileVersions().graphVersion())
                 || !manifest.graph().checkpointSchemaVersion()

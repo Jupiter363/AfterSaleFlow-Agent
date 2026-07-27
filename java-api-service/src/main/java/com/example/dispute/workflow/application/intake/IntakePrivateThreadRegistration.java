@@ -36,6 +36,11 @@ public record IntakePrivateThreadRegistration(
         Instant issuedAt,
         String registrationHash) {
 
+    private static final String LEGACY_GRAPH_KEY = "intake.v2";
+    private static final String TARGET_GRAPH_KEY = "all-rooms.target-e2e.v1";
+    private static final String TARGET_GRAPH_VERSION = "target-e2e-graph.2026-07-27.1";
+    private static final String TARGET_CHECKPOINT_SCHEMA = "target-e2e-checkpoint.v1";
+
     public IntakePrivateThreadRegistration {
         if (!"graph-private-thread-registration.v1".equals(schemaVersion)) {
             throw new IllegalArgumentException(
@@ -55,8 +60,9 @@ public record IntakePrivateThreadRegistration(
             throw new IllegalArgumentException("actorScopeHash does not match actorScope");
         }
         agentSessionId = IntakeContractSupport.identifier(agentSessionId, "agentSessionId");
-        if (!"intake.v2".equals(graphKey)) {
-            throw new IllegalArgumentException("graphKey must be intake.v2");
+        graphKey = IntakeContractSupport.identifier(graphKey, "graphKey");
+        if (!LEGACY_GRAPH_KEY.equals(graphKey) && !TARGET_GRAPH_KEY.equals(graphKey)) {
+            throw new IllegalArgumentException("graphKey is not an allowed Intake graph");
         }
         graphVersion = IntakeContractSupport.identifier(graphVersion, "graphVersion");
         checkpointSchemaVersion = IntakeContractSupport.identifier(
@@ -76,6 +82,13 @@ public record IntakePrivateThreadRegistration(
                 toolPolicyVersion, "toolPolicyVersion");
         if (writerMode != WriterMode.SHADOW && writerMode != WriterMode.TEMPORAL) {
             throw new IllegalArgumentException("registration writerMode must be SHADOW or TEMPORAL");
+        }
+        if (TARGET_GRAPH_KEY.equals(graphKey)
+                && (writerMode != WriterMode.TEMPORAL
+                        || !TARGET_GRAPH_VERSION.equals(graphVersion)
+                        || !TARGET_CHECKPOINT_SCHEMA.equals(checkpointSchemaVersion))) {
+            throw new IllegalArgumentException(
+                    "target graph requires the exact TEMPORAL target-E2E version pins");
         }
         issuedAt = Objects.requireNonNull(issuedAt, "issuedAt must not be null");
         registrationHash = IntakeContractSupport.sha256(registrationHash, "registrationHash");

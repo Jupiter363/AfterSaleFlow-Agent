@@ -14,6 +14,8 @@ import java.util.Set;
 @FunctionalInterface
 public interface TargetE2eFinalizationActivationPort {
 
+    long MAX_SAFE_INTEGER = 9_007_199_254_740_991L;
+
     AuthorizationDecision authorize(AuthorizationRequest request);
 
     record AuthorizationRequest(
@@ -24,7 +26,12 @@ public interface TargetE2eFinalizationActivationPort {
             String agentRunId,
             String workflowId,
             String workflowRunId,
-            String workflowBuildId) {
+            String workflowBuildId,
+            String commandId,
+            String commandHash,
+            String commandEnvelopeHash,
+            long roomEpoch,
+            long roomFencingToken) {
 
         public AuthorizationRequest {
             required(tenantSurrogate, "tenantSurrogate");
@@ -35,6 +42,15 @@ public interface TargetE2eFinalizationActivationPort {
             required(workflowId, "workflowId");
             required(workflowRunId, "workflowRunId");
             required(workflowBuildId, "workflowBuildId");
+            required(commandId, "commandId");
+            sha256(commandHash, "commandHash");
+            sha256(commandEnvelopeHash, "commandEnvelopeHash");
+            if (roomEpoch < 0
+                    || roomEpoch > MAX_SAFE_INTEGER
+                    || roomFencingToken < 1
+                    || roomFencingToken > MAX_SAFE_INTEGER) {
+                throw new IllegalArgumentException("room epoch or fencing token is invalid");
+            }
         }
     }
 
@@ -67,6 +83,13 @@ public interface TargetE2eFinalizationActivationPort {
             Set<String> allowedCaseIds,
             Set<RoomType> allowedRoomTypes,
             String expectedAgentBuildId,
+            String graphKey,
+            String graphVersion,
+            String checkpointSchemaVersion,
+            String activationManifestHash,
+            String isolatedDomainDbBindingHash,
+            Lifecycle lifecycle,
+            AcceptedCommandProof acceptedCommandProof,
             Instant issuedAt,
             Instant expiresAt,
             Instant revokedAt) {
@@ -83,12 +106,50 @@ public interface TargetE2eFinalizationActivationPort {
             }
             allowedCaseIds.forEach(value -> required(value, "allowedCaseId"));
             required(expectedAgentBuildId, "expectedAgentBuildId");
+            required(graphKey, "graphKey");
+            required(graphVersion, "graphVersion");
+            required(checkpointSchemaVersion, "checkpointSchemaVersion");
+            sha256(activationManifestHash, "activationManifestHash");
+            sha256(isolatedDomainDbBindingHash, "isolatedDomainDbBindingHash");
+            lifecycle = Objects.requireNonNull(lifecycle, "lifecycle");
             issuedAt = Objects.requireNonNull(issuedAt, "issuedAt");
             expiresAt = Objects.requireNonNull(expiresAt, "expiresAt");
             if (!expiresAt.isAfter(issuedAt)) {
                 throw new IllegalArgumentException("activation expiry must follow issuance");
             }
+            if ((lifecycle == Lifecycle.DRAIN_ONLY) != (acceptedCommandProof != null)) {
+                throw new IllegalArgumentException(
+                        "DRAIN_ONLY grants require one accepted command proof");
+            }
         }
+    }
+
+    record AcceptedCommandProof(
+            String commandId,
+            String commandHash,
+            String commandEnvelopeHash,
+            long roomEpoch,
+            long roomFencingToken,
+            Instant admittedAt) {
+        public AcceptedCommandProof {
+            required(commandId, "commandId");
+            sha256(commandHash, "commandHash");
+            sha256(commandEnvelopeHash, "commandEnvelopeHash");
+            if (roomEpoch < 0
+                    || roomEpoch > MAX_SAFE_INTEGER
+                    || roomFencingToken < 1
+                    || roomFencingToken > MAX_SAFE_INTEGER) {
+                throw new IllegalArgumentException("accepted command fence is invalid");
+            }
+            admittedAt = Objects.requireNonNull(admittedAt, "admittedAt");
+        }
+    }
+
+    enum Lifecycle {
+        ACTIVE,
+        DRAIN_ONLY,
+        DRAINED,
+        REVOKED_TERMINAL
     }
 
     enum Decision {
@@ -105,6 +166,13 @@ public interface TargetE2eFinalizationActivationPort {
     private static String required(String value, String field) {
         if (value == null || value.isBlank()) {
             throw new IllegalArgumentException(field + " is required");
+        }
+        return value;
+    }
+
+    private static String sha256(String value, String field) {
+        if (value == null || !value.matches("[0-9a-f]{64}")) {
+            throw new IllegalArgumentException(field + " must be a lowercase SHA-256");
         }
         return value;
     }

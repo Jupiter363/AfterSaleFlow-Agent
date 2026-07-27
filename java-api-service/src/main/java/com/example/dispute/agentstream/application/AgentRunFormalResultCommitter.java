@@ -12,6 +12,7 @@ import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import com.example.dispute.workflow.contract.v1.RoomGraphResult;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
 import java.util.Objects;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -33,7 +34,8 @@ public class AgentRunFormalResultCommitter {
         this.ledger = Objects.requireNonNull(ledger, "ledger");
         this.domainCommitters = Objects.requireNonNull(domainCommitters, "domainCommitters");
         this.manifestStore = Objects.requireNonNull(manifestStore, "manifestStore");
-        this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper");
+        this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper").copy();
+        this.objectMapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
     }
 
     @Transactional

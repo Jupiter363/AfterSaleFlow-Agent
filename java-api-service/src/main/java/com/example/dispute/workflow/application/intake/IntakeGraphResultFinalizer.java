@@ -21,17 +21,22 @@ import java.util.Optional;
  */
 public final class IntakeGraphResultFinalizer {
 
+    public static final String LEGACY_GRAPH_KEY = "intake.v2";
+    public static final String TARGET_E2E_GRAPH_KEY = "all-rooms.target-e2e.v1";
+
     private final IntakeTurnProposalLoader proposalLoader;
     private final IntakeFormalCommitPort commitPort;
     private final Optional<IntakeFinalizationReceiptReader> receiptReader;
     private final Optional<AuthorityPreflight> authorityPreflight;
+    private final String expectedGraphKey;
 
     public IntakeGraphResultFinalizer(
             IntakeTurnProposalLoader proposalLoader, IntakeFormalCommitPort commitPort) {
         this(
                 proposalLoader,
                 commitPort,
-                commitPort instanceof IntakeFinalizationReceiptReader reader ? reader : null);
+                commitPort instanceof IntakeFinalizationReceiptReader reader ? reader : null,
+                LEGACY_GRAPH_KEY);
     }
 
     /**
@@ -44,12 +49,25 @@ public final class IntakeGraphResultFinalizer {
             IntakeTurnProposalLoader proposalLoader,
             IntakeFormalCommitPort commitPort,
             IntakeFinalizationReceiptReader receiptReader) {
+        this(proposalLoader, commitPort, receiptReader, LEGACY_GRAPH_KEY);
+    }
+
+    public IntakeGraphResultFinalizer(
+            IntakeTurnProposalLoader proposalLoader,
+            IntakeFormalCommitPort commitPort,
+            IntakeFinalizationReceiptReader receiptReader,
+            String expectedGraphKey) {
         this.proposalLoader = Objects.requireNonNull(proposalLoader, "proposalLoader");
         this.commitPort = Objects.requireNonNull(commitPort, "commitPort");
         this.receiptReader = Optional.ofNullable(receiptReader);
         this.authorityPreflight = commitPort instanceof AuthorityPreflight preflight
                 ? Optional.of(preflight)
                 : Optional.empty();
+        if (!LEGACY_GRAPH_KEY.equals(expectedGraphKey)
+                && !TARGET_E2E_GRAPH_KEY.equals(expectedGraphKey)) {
+            throw new IllegalArgumentException("expectedGraphKey is not an allowed Intake graph");
+        }
+        this.expectedGraphKey = expectedGraphKey;
     }
 
     public IntakeFinalizationReceipt finalizeResult(IntakeGraphFinalizationRequest request) {
@@ -160,7 +178,7 @@ public final class IntakeGraphResultFinalizer {
                 authority.fencingToken());
     }
 
-    private static void validateRequest(IntakeGraphFinalizationRequest request) {
+    private void validateRequest(IntakeGraphFinalizationRequest request) {
         try {
             request.requireCanonicalRequestHash();
         } catch (IntakeFinalizationRejectedException failure) {
@@ -197,7 +215,7 @@ public final class IntakeGraphResultFinalizer {
         requireEqual(registration.threadId(), authority.threadId(), "thread");
         requireEqual(registration.actorScopeHash(), authority.actorScopeHash(), "actor scope");
         requireEqual(registration.agentSessionId(), authority.agentSessionId(), "agent session");
-        requireEqual(registration.graphKey(), "intake.v2", "graph key");
+        requireEqual(registration.graphKey(), expectedGraphKey, "graph key");
         requireEqual(registration.graphVersion(), authority.profileVersions().graphVersion(), "graph version");
         requireEqual(
                 registration.checkpointSchemaVersion(),

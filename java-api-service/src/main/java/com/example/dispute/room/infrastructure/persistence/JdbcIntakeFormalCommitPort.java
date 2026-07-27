@@ -433,7 +433,7 @@ public final class JdbcIntakeFormalCommitPort
                    and binding.audience = :audience
                    and binding.actor_scope_hash = :actorScopeHash
                    and binding.agent_session_id = :agentSessionId
-                   and binding.graph_key = 'intake.v2'
+                   and binding.graph_key = :graphKey
                    and binding.graph_version = :graphVersion
                    and binding.checkpoint_schema_version = :checkpointSchemaVersion
                    and binding.prompt_version = :promptVersion
@@ -653,7 +653,7 @@ public final class JdbcIntakeFormalCommitPort
                    and attempt.command_id = :commandId
                    and attempt.command_request_hash = :commandRequestHash
                    and attempt.result_hash = :resultHash
-                   and attempt.graph_key = 'intake.v2'
+                   and attempt.graph_key = :graphKey
                    and attempt.graph_version = :graphVersion
                    and attempt.checkpoint_schema_version = :checkpointSchemaVersion
                    and attempt.checkpoint_id = :checkpointId
@@ -1135,6 +1135,7 @@ public final class JdbcIntakeFormalCommitPort
                 .addValue("commandRequestHash", request.command().requestHash())
                 .addValue("resultHash", authority.resultHash())
                 .addValue("checkpointId", authority.checkpointId())
+                .addValue("graphKey", request.command().graphKey())
                 .addValue("graphVersion", profiles.graphVersion())
                 .addValue("checkpointSchemaVersion", profiles.checkpointSchemaVersion())
                 .addValue("promptVersion", profiles.promptVersion())

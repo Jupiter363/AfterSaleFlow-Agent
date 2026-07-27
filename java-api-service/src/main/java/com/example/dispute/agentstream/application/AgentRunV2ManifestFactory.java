@@ -15,6 +15,7 @@ import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import com.example.dispute.workflow.contract.v1.RoomGraphResult;
 import com.example.dispute.workflow.temporal.agentrun.AgentRunWorkflow;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
 
 import org.springframework.stereotype.Component;
 
@@ -35,7 +36,8 @@ public final class AgentRunV2ManifestFactory {
     private final ObjectMapper objectMapper;
 
     public AgentRunV2ManifestFactory(ObjectMapper objectMapper) {
-        this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper");
+        this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper").copy();
+        this.objectMapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
     }
 
     public ManifestCommit create(

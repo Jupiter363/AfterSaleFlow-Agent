@@ -7,7 +7,9 @@ import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationActivationPort.ActivationGrant;
+import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationActivationPort.AuthorizationRequest;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationActivationPort.AuthorizationDecision;
+import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationActivationPort.Lifecycle;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationRuntimeContextProvider.RuntimeContext;
 import java.time.Clock;
 import java.time.Instant;
@@ -17,6 +19,9 @@ import java.util.Objects;
 public final class TargetE2eExecutionLaneVerifier {
 
     public static final String EXECUTION_LANE = "TARGET_E2E_CANDIDATE";
+    public static final String GRAPH_KEY = "all-rooms.target-e2e.v1";
+    public static final String GRAPH_VERSION = "target-e2e-graph.2026-07-27.1";
+    public static final String CHECKPOINT_SCHEMA_VERSION = "target-e2e-checkpoint.v1";
 
     private final Clock clock;
 
@@ -26,11 +31,13 @@ public final class TargetE2eExecutionLaneVerifier {
 
     public ActivationGrant requireAuthorized(
             AuthorizationDecision decision,
+            AuthorizationRequest authorizationRequest,
             ExecuteAgentRunRequest request,
             ExecuteAgentRunResult result,
             RuntimeContext runtime,
             TargetE2eIntakeFinalizationState state) {
         Objects.requireNonNull(decision, "decision");
+        Objects.requireNonNull(authorizationRequest, "authorizationRequest");
         Objects.requireNonNull(request, "request");
         Objects.requireNonNull(result, "result");
         Objects.requireNonNull(runtime, "runtime");
@@ -48,12 +55,10 @@ public final class TargetE2eExecutionLaneVerifier {
                     "TARGET_E2E_LANE_MISMATCH",
                     "finalization requires the exact target-E2E candidate lane");
         }
-        if (grant.revokedAt() != null) {
+        if (grant.revokedAt() != null || grant.lifecycle() == Lifecycle.REVOKED_TERMINAL) {
             throw rejected("TARGET_E2E_ACTIVATION_REVOKED", "target-E2E activation is revoked");
         }
-        if (now.isBefore(grant.issuedAt()) || !now.isBefore(grant.expiresAt())) {
-            throw rejected("TARGET_E2E_ACTIVATION_EXPIRED", "target-E2E activation is not active");
-        }
+        requireLifecycle(grant, authorizationRequest, now);
 
         var run = state.run();
         var attempt = state.attempt();
@@ -63,6 +68,26 @@ public final class TargetE2eExecutionLaneVerifier {
         var command = request.command();
         var graphResult = result.graphResult();
 
+        requireEqual(authorizationRequest.tenantSurrogate(), run.tenantSurrogate(), "authorized tenant");
+        requireEqual(authorizationRequest.caseId(), run.caseId(), "authorized case");
+        requireEqual(authorizationRequest.roomId(), run.roomId(), "authorized room");
+        requireEqual(authorizationRequest.roomType(), RoomType.INTAKE, "authorized room type");
+        requireEqual(authorizationRequest.agentRunId(), run.agentRunId(), "authorized AgentRun");
+        requireEqual(authorizationRequest.workflowId(), runtime.workflowId(), "authorized workflow");
+        requireEqual(
+                authorizationRequest.workflowRunId(),
+                runtime.workflowRunId(),
+                "authorized workflow run");
+        requireEqual(
+                authorizationRequest.workflowBuildId(),
+                runtime.workflowBuildId(),
+                "authorized workflow build");
+        requireEqual(authorizationRequest.commandId(), command.commandId(), "authorized command");
+        requireEqual(authorizationRequest.roomEpoch(), run.roomEpoch(), "authorized room epoch");
+        requireEqual(
+                authorizationRequest.roomFencingToken(),
+                run.fencingToken(),
+                "authorized room fence");
         requireEqual(grant.tenantSurrogate(), run.tenantSurrogate(), "activation tenant");
         if (!grant.allowedCaseIds().contains(run.caseId())
                 || !grant.allowedRoomTypes().contains(RoomType.INTAKE)) {
@@ -71,6 +96,12 @@ public final class TargetE2eExecutionLaneVerifier {
                     "finalization is outside the activation case or room scope");
         }
         requireEqual(grant.expectedAgentBuildId(), runtime.workflowBuildId(), "agent build");
+        requireEqual(grant.graphKey(), GRAPH_KEY, "activation graph key");
+        requireEqual(grant.graphVersion(), GRAPH_VERSION, "activation graph version");
+        requireEqual(
+                grant.checkpointSchemaVersion(),
+                CHECKPOINT_SCHEMA_VERSION,
+                "activation checkpoint schema");
         requireEqual(
                 TemporalAgentRunV2WorkflowLauncher.workflowId(request.logicalRunId()),
                 runtime.workflowId(),
@@ -160,7 +191,18 @@ public final class TargetE2eExecutionLaneVerifier {
         requireEqual(epoch.roomEpoch(), run.roomEpoch(), "epoch number");
         requireEqual(epoch.processRevision(), run.processRevision(), "epoch process revision");
         requireEqual(epoch.fencingToken(), run.fencingToken(), "epoch fence");
-        requireEqual(epoch.graphKey(), "intake.v2", "epoch graph key");
+        requireEqual(epoch.graphKey(), GRAPH_KEY, "epoch graph key");
+        requireEqual(epoch.graphVersion(), GRAPH_VERSION, "epoch graph version");
+        requireEqual(
+                epoch.checkpointSchemaVersion(),
+                CHECKPOINT_SCHEMA_VERSION,
+                "epoch checkpoint schema");
+        requireEqual(command.graphKey(), GRAPH_KEY, "command graph key");
+        requireEqual(command.graphVersion(), GRAPH_VERSION, "command graph version");
+        requireEqual(
+                command.checkpointSchemaVersion(),
+                CHECKPOINT_SCHEMA_VERSION,
+                "command checkpoint schema");
         requireEqual(epoch.graphKey(), command.graphKey(), "command graph key");
         requireEqual(epoch.graphVersion(), command.graphVersion(), "command graph version");
         requireEqual(
@@ -190,6 +232,12 @@ public final class TargetE2eExecutionLaneVerifier {
         requireEqual(registration.caseId(), run.caseId(), "thread case");
         requireEqual(registration.roomEpoch(), run.roomEpoch(), "thread room epoch");
         requireEqual(registration.threadId(), command.threadId(), "thread id");
+        requireEqual(registration.graphKey(), GRAPH_KEY, "thread graph key");
+        requireEqual(registration.graphVersion(), GRAPH_VERSION, "thread graph version");
+        requireEqual(
+                registration.checkpointSchemaVersion(),
+                CHECKPOINT_SCHEMA_VERSION,
+                "thread checkpoint schema");
         requireEqual(registration.graphKey(), command.graphKey(), "thread graph key");
         requireEqual(registration.graphVersion(), command.graphVersion(), "thread graph version");
         requireEqual(
@@ -197,6 +245,39 @@ public final class TargetE2eExecutionLaneVerifier {
                 command.checkpointSchemaVersion(),
                 "thread checkpoint schema");
         return grant;
+    }
+
+    private static void requireLifecycle(
+            ActivationGrant grant, AuthorizationRequest request, Instant now) {
+        if (now.isBefore(grant.issuedAt())) {
+            throw rejected("TARGET_E2E_ACTIVATION_EXPIRED", "target-E2E activation is not active");
+        }
+        if (grant.lifecycle() == Lifecycle.ACTIVE) {
+            if (!now.isBefore(grant.expiresAt())) {
+                throw rejected(
+                        "TARGET_E2E_ACTIVATION_EXPIRED",
+                        "expired activation must enter DRAIN_ONLY before finalization");
+            }
+            return;
+        }
+        if (grant.lifecycle() == Lifecycle.DRAIN_ONLY) {
+            var proof = Objects.requireNonNull(
+                    grant.acceptedCommandProof(), "DRAIN_ONLY accepted command proof");
+            if (!proof.admittedAt().isBefore(grant.expiresAt())
+                    || !proof.commandId().equals(request.commandId())
+                    || !proof.commandHash().equals(request.commandHash())
+                    || !proof.commandEnvelopeHash().equals(request.commandEnvelopeHash())
+                    || proof.roomEpoch() != request.roomEpoch()
+                    || proof.roomFencingToken() != request.roomFencingToken()) {
+                throw rejected(
+                        "TARGET_E2E_DRAIN_PROOF_MISMATCH",
+                        "DRAIN_ONLY finalization is not bound to pre-cutoff accepted work");
+            }
+            return;
+        }
+        throw rejected(
+                "TARGET_E2E_ACTIVATION_DRAINED",
+                "DRAINED activation cannot finalize additional work");
     }
 
     private static void requireTerminalEligibility(

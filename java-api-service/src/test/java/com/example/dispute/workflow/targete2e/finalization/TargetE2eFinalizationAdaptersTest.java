@@ -32,11 +32,14 @@ class TargetE2eFinalizationAdaptersTest {
                 request -> {
                     authorizations.incrementAndGet();
                     assertThat(request.workflowBuildId()).isEqualTo(TargetE2eFinalizationFixture.BUILD_ID);
-                    return TargetE2eFinalizationFixture.activeDecision();
+                    return TargetE2eFinalizationFixture.activeDecision(fixture);
                 },
                 () -> fixture.runtime(),
                 new TargetE2eExecutionLaneVerifier(Clock.fixed(
-                        TargetE2eFinalizationFixture.NOW, ZoneOffset.UTC)));
+                        TargetE2eFinalizationFixture.NOW, ZoneOffset.UTC)),
+                (request, result, runtime, state) -> fixture.evidence(),
+                new TargetE2eFinalizationBindingVerifier(
+                        JsonMapper.builder().findAndAddModules().build()));
         var factsProvider = new TargetE2eAgentRunV2FinalizationFactsProvider(source);
         var mapper = JsonMapper.builder().findAndAddModules().build();
 
