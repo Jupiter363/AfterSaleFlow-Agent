@@ -12,7 +12,13 @@ import com.example.dispute.workflow.targete2e.TargetE2eActivationExpectedRuntime
 import com.example.dispute.workflow.targete2e.TargetE2eActivationExpectedRuntime.GraphBinding;
 import com.example.dispute.workflow.targete2e.TargetE2eActivationExpectedRuntime.ImageDigests;
 import com.example.dispute.workflow.targete2e.TargetE2eActivationExpectedRuntime.IsolatedSyntheticNewCases;
+import com.example.dispute.workflow.targete2e.TargetE2eActivationExpectedRuntime.MeasuredAuthorityFacts;
 import com.example.dispute.workflow.targete2e.TargetE2eActivationExpectedRuntime.RoomType;
+import com.example.dispute.workflow.targete2e.TargetE2eActivationExpectedRuntime.SyntheticFixtureDeployment;
+import com.example.dispute.workflow.targete2e.TargetE2eActivationLifecycleStore.ActivationIdentity;
+import com.example.dispute.workflow.targete2e.TargetE2eActivationLifecycleStore.DrainCompletionProof;
+import com.example.dispute.workflow.targete2e.TargetE2eActivationLifecycleStore.LifecycleState;
+import com.example.dispute.workflow.targete2e.TargetE2eActivationLifecycleStore.TransitionResult;
 import com.example.dispute.workflow.targete2e.TargetE2eActivationReplayStore.Registration;
 import com.example.dispute.workflow.targete2e.TargetE2eActivationReplayStore.RegistrationResult;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -32,6 +38,7 @@ import java.time.ZoneOffset;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
@@ -47,7 +54,7 @@ class TargetE2eActivationManifestVerifierTest {
   private static final String ACTIVATION_ID = "p9act.v1." + "1".repeat(32);
   private static final String CANDIDATE_SHA = "a".repeat(40);
   private static final String NONCE = "activation-nonce-" + "0".repeat(20);
-  private static final String FIXTURE_HASH = "3".repeat(64);
+  private static final String FIXTURE_PATH = "/run/target-e2e/p9-synthetic-fixtures.json";
   private static final String CASE_ID = "CASE_EXPLICIT_001";
 
   private static KeyPair trustedKey;
@@ -302,15 +309,55 @@ class TargetE2eActivationManifestVerifierTest {
         verifier
             .arm(sign(conflict, trustedKey, KEY_ID), expectedRuntime())
             .authorize(request(ActivationScope.FINALIZER));
-    assertThat(replay.reason()).isEqualTo(Reason.REPLAYED);
+    assertThat(replay.reason()).isEqualTo(Reason.ENVIRONMENT_GENERATION_CONFLICT);
     assertThat(replayStore.calls()).isEqualTo(3);
+  }
+
+  @Test
+  void enforcesDurableEnvironmentGenerationHighWater() throws Exception {
+    RecordingReplayStore replayStore = new RecordingReplayStore();
+    assertThat(
+            verifier(replayStore, TargetE2eActivationCaseLedger.denyAll(), fixedClock())
+                .arm(sign(payload(), trustedKey, KEY_ID), expectedRuntime())
+                .authorize(request(ActivationScope.AGENT_RUN))
+                .allowed())
+        .isTrue();
+
+    ObjectNode stalePayload = payload();
+    stalePayload.put("environmentGeneration", 16);
+    stalePayload.put("activationId", "p9act.v1." + "2".repeat(32));
+    stalePayload.put("nonce", "activation-nonce-" + "2".repeat(20));
+    refreshManifestHash(stalePayload);
+    ActivationDecision stale =
+        verifier(replayStore, TargetE2eActivationCaseLedger.denyAll(), fixedClock())
+            .arm(sign(stalePayload, trustedKey, KEY_ID), withGeneration(expectedRuntime(), 16))
+            .authorize(request(ActivationScope.AGENT_RUN));
+    assertThat(stale.reason()).isEqualTo(Reason.ENVIRONMENT_GENERATION_STALE);
+
+    ObjectNode conflictPayload = payload();
+    conflictPayload.put("activationId", "p9act.v1." + "3".repeat(32));
+    conflictPayload.put("nonce", "activation-nonce-" + "3".repeat(20));
+    refreshManifestHash(conflictPayload);
+    ActivationDecision conflict =
+        verifier(replayStore, TargetE2eActivationCaseLedger.denyAll(), fixedClock())
+            .arm(sign(conflictPayload, trustedKey, KEY_ID), expectedRuntime())
+            .authorize(request(ActivationScope.AGENT_RUN));
+    assertThat(conflict.reason()).isEqualTo(Reason.ENVIRONMENT_GENERATION_CONFLICT);
   }
 
   @Test
   void failsClosedWhenReplayRegistrationFails() throws Exception {
     TargetE2eActivationReplayStore failing =
-        registration -> {
-          throw new IllegalStateException("store unavailable");
+        new TargetE2eActivationReplayStore() {
+          @Override
+          public RegistrationResult registerOrAttach(Registration registration) {
+            throw new IllegalStateException("store unavailable");
+          }
+
+          @Override
+          public RegistrationResult attachExistingForDrain(Registration registration) {
+            throw new IllegalStateException("store unavailable");
+          }
         };
     ActivationDecision failure =
         verifier(failing, TargetE2eActivationCaseLedger.denyAll(), fixedClock())
@@ -327,27 +374,45 @@ class TargetE2eActivationManifestVerifierTest {
             .arm(sign(syntheticPayload(), trustedKey, KEY_ID), syntheticRuntime());
     ActivationRequest graphBeforeSelector =
         new ActivationRequest(
-            ActivationScope.GRAPH_CLIENT, "tenant-e2e", RoomType.INTAKE, "CASE_NEW_001");
+            ActivationScope.GRAPH_CLIENT,
+            "tenant-e2e",
+            RoomType.INTAKE,
+            "CASE_NEW_001",
+            1,
+            ActivationPurpose.NEW_ADMISSION,
+            null);
     assertThat(authority.authorize(graphBeforeSelector).reason())
         .isEqualTo(Reason.CASE_NOT_RESERVED);
 
     ActivationRequest selector =
         new ActivationRequest(
-            ActivationScope.ROOM_SELECTOR, "tenant-e2e", RoomType.INTAKE, "CASE_NEW_001");
+            ActivationScope.ROOM_SELECTOR,
+            "tenant-e2e",
+            RoomType.INTAKE,
+            "CASE_NEW_001",
+            1,
+            ActivationPurpose.NEW_ADMISSION,
+            null);
     assertThat(authority.authorize(selector).allowed()).isTrue();
     assertThat(authority.authorize(graphBeforeSelector).allowed()).isTrue();
     assertThat(
             authority
                 .authorize(
                     new ActivationRequest(
-                        ActivationScope.FINALIZER, "tenant-e2e", RoomType.INTAKE, "WRONG_001"))
+                        ActivationScope.FINALIZER,
+                        "tenant-e2e",
+                        RoomType.INTAKE,
+                        "WRONG_001",
+                        1,
+                        ActivationPurpose.NEW_ADMISSION,
+                        null))
                 .reason())
         .isEqualTo(Reason.WRONG_TARGET);
   }
 
   @Test
   void enforcesSyntheticCaseCapacityAndNoRealDataOrWildcardPrefix() throws Exception {
-    RecordingCaseLedger caseLedger = new RecordingCaseLedger();
+    RecordingCaseLedger caseLedger = new RecordingCaseLedger(1);
     TargetE2eActivationAuthority authority =
         verifier(new RecordingReplayStore(), caseLedger, fixedClock())
             .arm(sign(syntheticPayload(), trustedKey, KEY_ID), syntheticRuntime());
@@ -358,7 +423,10 @@ class TargetE2eActivationManifestVerifierTest {
                         ActivationScope.ROOM_SELECTOR,
                         "tenant-e2e",
                         RoomType.INTAKE,
-                        "CASE_NEW_001"))
+                        "CASE_NEW_001",
+                        1,
+                        ActivationPurpose.NEW_ADMISSION,
+                        null))
                 .allowed())
         .isTrue();
     assertThat(
@@ -368,18 +436,171 @@ class TargetE2eActivationManifestVerifierTest {
                         ActivationScope.ROOM_SELECTOR,
                         "tenant-e2e",
                         RoomType.INTAKE,
-                        "CASE_NEW_002"))
+                        "CASE_NEW_002",
+                        2,
+                        ActivationPurpose.NEW_ADMISSION,
+                        null))
                 .reason())
         .isEqualTo(Reason.CASE_CAPACITY_EXHAUSTED);
 
     assertThatThrownBy(
-            () -> new IsolatedSyntheticNewCases("*", 1, "fixtures-v1", FIXTURE_HASH, false, false))
+            () -> new IsolatedSyntheticNewCases("*", 1, "fixtures-v1", fixtureHash(), false, false))
         .isInstanceOf(IllegalArgumentException.class);
     assertThatThrownBy(
             () ->
                 new IsolatedSyntheticNewCases(
-                    "CASE_NEW_", 1, "fixtures-v1", FIXTURE_HASH, true, false))
+                    "CASE_NEW_", 1, "fixtures-v1", fixtureHash(), true, false))
         .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void preservesGlobalGeneratedCaseTombstoneAcrossActivationsAndSlots() {
+    RecordingCaseLedger ledger = new RecordingCaseLedger();
+    TargetE2eActivationCaseLedger.Reservation first =
+        reservation(ACTIVATION_ID, 1, "CASE_NEW_GLOBAL_001");
+    assertThat(
+            ledger.apply(
+                TargetE2eActivationCaseLedger.Action.RESERVE_BEFORE_EPOCH_SELECTION, first))
+        .isEqualTo(TargetE2eActivationCaseLedger.ReservationResult.RESERVED);
+    assertThat(ledger.apply(TargetE2eActivationCaseLedger.Action.REQUIRE_EXISTING, first))
+        .isEqualTo(TargetE2eActivationCaseLedger.ReservationResult.ALREADY_RESERVED_IDENTICALLY);
+
+    TargetE2eActivationCaseLedger.Reservation crossActivation =
+        reservation("p9act.v1." + "9".repeat(32), 1, "CASE_NEW_GLOBAL_001");
+    assertThat(
+            ledger.apply(
+                TargetE2eActivationCaseLedger.Action.RESERVE_BEFORE_EPOCH_SELECTION,
+                crossActivation))
+        .isEqualTo(
+            TargetE2eActivationCaseLedger.ReservationResult.GENERATED_CASE_ID_GLOBAL_CONFLICT);
+  }
+
+  @Test
+  void recomputesConfiguredFixtureBytesBeforeAnyCaseReservation() throws Exception {
+    ObjectNode changedFixture = syntheticFixture();
+    ((ObjectNode) ((ArrayNode) changedFixture.get("scenarios")).get(0))
+        .put("inputHash", "f".repeat(64));
+    TargetE2eSyntheticFixtureSource wrongBytes =
+        fixtureSetId ->
+            new TargetE2eSyntheticFixtureSource.ConfiguredFixture(
+                FIXTURE_PATH, ContractJson.canonicalize(changedFixture));
+    RecordingReplayStore replayStore = new RecordingReplayStore();
+
+    ActivationDecision decision =
+        verifier(
+                replayStore,
+                new RecordingCaseLedger(),
+                new RecordingLifecycleStore(),
+                wrongBytes,
+                fixedClock())
+            .arm(sign(syntheticPayload(), trustedKey, KEY_ID), syntheticRuntime())
+            .authorize(
+                new ActivationRequest(
+                    ActivationScope.ROOM_SELECTOR,
+                    "tenant-e2e",
+                    RoomType.INTAKE,
+                    "CASE_NEW_001",
+                    1,
+                    ActivationPurpose.NEW_ADMISSION,
+                    null));
+    assertThat(decision.reason()).isEqualTo(Reason.WRONG_RUNTIME);
+    assertThat(replayStore.calls()).isZero();
+
+    TargetE2eSyntheticFixtureSource nonCanonical =
+        fixtureSetId -> {
+          try {
+            return new TargetE2eSyntheticFixtureSource.ConfiguredFixture(
+                FIXTURE_PATH,
+                MAPPER.writerWithDefaultPrettyPrinter().writeValueAsBytes(syntheticFixture()));
+          } catch (Exception failure) {
+            throw new IllegalStateException(failure);
+          }
+        };
+    ActivationDecision nonCanonicalDecision =
+        verifier(
+                new RecordingReplayStore(),
+                new RecordingCaseLedger(),
+                new RecordingLifecycleStore(),
+                nonCanonical,
+                fixedClock())
+            .arm(sign(syntheticPayload(), trustedKey, KEY_ID), syntheticRuntime())
+            .authorize(
+                new ActivationRequest(
+                    ActivationScope.ROOM_SELECTOR,
+                    "tenant-e2e",
+                    RoomType.INTAKE,
+                    "CASE_NEW_001",
+                    1,
+                    ActivationPurpose.NEW_ADMISSION,
+                    null));
+    assertThat(nonCanonicalDecision.reason()).isEqualTo(Reason.NON_CANONICAL_MANIFEST);
+  }
+
+  @Test
+  void drainsOnlyDurablyAdmittedCommandsThenRevokesInOrder() throws Exception {
+    MutableClock clock = new MutableClock(NOW);
+    RecordingReplayStore replayStore = new RecordingReplayStore();
+    RecordingLifecycleStore lifecycle = new RecordingLifecycleStore();
+    ObjectNode shortLived = payload();
+    shortLived.put("expiresAt", NOW.plusSeconds(60).toString());
+    refreshManifestHash(shortLived);
+    String compact = sign(shortLived, trustedKey, KEY_ID);
+    TargetE2eActivationManifestVerifier verifier =
+        verifier(
+            replayStore,
+            TargetE2eActivationCaseLedger.denyAll(),
+            lifecycle,
+            fixtureSource(),
+            clock);
+    TargetE2eActivationAuthority authority = verifier.arm(compact, expectedRuntime());
+    ActivationDecision active = authority.authorize(request(ActivationScope.AGENT_RUN));
+    ActivationGrant grant = active.grant().orElseThrow();
+    DrainAcceptedCommand accepted = drainCommand(NOW.plusSeconds(30));
+    lifecycle.accept(accepted);
+
+    clock.advance(Duration.ofSeconds(60));
+    assertThat(authority.authorize(request(ActivationScope.AGENT_RUN)).reason())
+        .isEqualTo(Reason.DRAIN_PROOF_REQUIRED);
+    ActivationRequest drainRequest =
+        new ActivationRequest(
+            ActivationScope.FINALIZER,
+            "tenant-e2e",
+            RoomType.INTAKE,
+            CASE_ID,
+            null,
+            ActivationPurpose.DRAIN_ACCEPTED_COMMAND,
+            accepted);
+    ActivationDecision draining = authority.authorize(drainRequest);
+    assertThat(draining.allowed()).isTrue();
+    assertThat(draining.authorizationMode())
+        .contains(ActivationDecision.AuthorizationMode.DRAIN_ACCEPTED_COMMAND);
+    assertThat(
+            verifier
+                .armForDrain(compact, expectedRuntime(), accepted)
+                .authorize(drainRequest)
+                .allowed())
+        .isTrue();
+
+    ActivationIdentity identity =
+        new ActivationIdentity(
+            grant.environmentId(),
+            grant.environmentGeneration(),
+            grant.activationId(),
+            grant.manifestHash());
+    assertThat(
+            lifecycle.markDrained(
+                identity, new DrainCompletionProof(1, 0, true, NOW.plusSeconds(61))))
+        .isEqualTo(TransitionResult.REJECTED_UNRESOLVED_WORK);
+    assertThat(lifecycle.revokeTerminal(identity, NOW.plusSeconds(62)))
+        .isEqualTo(TransitionResult.REJECTED_WRONG_STATE);
+    assertThat(
+            lifecycle.markDrained(
+                identity, new DrainCompletionProof(0, 0, true, NOW.plusSeconds(63))))
+        .isEqualTo(TransitionResult.TRANSITIONED);
+    assertThat(authority.authorize(drainRequest).reason()).isEqualTo(Reason.DRAINED);
+    assertThat(lifecycle.revokeTerminal(identity, NOW.plusSeconds(64)))
+        .isEqualTo(TransitionResult.TRANSITIONED);
+    assertThat(authority.authorize(drainRequest).reason()).isEqualTo(Reason.REVOKED);
   }
 
   @Test
@@ -394,35 +615,68 @@ class TargetE2eActivationManifestVerifierTest {
     assertThat(authority.authorize(request(ActivationScope.FINALIZER)).allowed()).isTrue();
     clock.advance(Duration.ofSeconds(60));
     assertThat(authority.authorize(request(ActivationScope.FINALIZER)).reason())
-        .isEqualTo(Reason.EXPIRED);
+        .isEqualTo(Reason.DRAIN_PROOF_REQUIRED);
   }
 
   @Test
-  void permitsOnlyLocalProfilesAndFrozenZeroSkewPolicy() throws Exception {
+  void permitsOnlyDedicatedTargetProfileAndFrozenZeroSkewPolicy() {
     TargetE2eActivationExpectedRuntime target = expectedRuntime();
-    TargetE2eActivationExpectedRuntime local = withProfile(target, "local");
-    assertThat(
-            verifier(
-                    new RecordingReplayStore(),
-                    TargetE2eActivationCaseLedger.denyAll(),
-                    fixedClock())
-                .arm(sign(payload(), trustedKey, KEY_ID), local)
-                .authorize(request(ActivationScope.AGENT_RUN))
-                .allowed())
-        .isTrue();
+    assertThatThrownBy(() -> withProfile(target, "local"))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("dedicated target-e2e");
     assertThatThrownBy(() -> withProfile(target, "prod"))
         .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining("local or target-e2e");
+        .hasMessageContaining("dedicated target-e2e");
     assertThatThrownBy(
             () ->
                 new TargetE2eActivationManifestVerifier(
                     keySet(),
                     new RecordingReplayStore(),
                     TargetE2eActivationCaseLedger.denyAll(),
+                    new RecordingLifecycleStore(),
+                    fixtureSource(),
                     fixedClock(),
                     Duration.ofSeconds(1)))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("zero clock skew");
+  }
+
+  @Test
+  void rejectsMeasuredCredentialsPrivilegesDefaultsAndNonisolatedDeployment() {
+    assertThatThrownBy(
+            () -> measuredAuthorityFacts(false, false, false, false, "LEGACY", "DISABLED"))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> measuredAuthorityFacts(true, true, false, false, "LEGACY", "DISABLED"))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> measuredAuthorityFacts(true, false, true, false, "LEGACY", "DISABLED"))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> measuredAuthorityFacts(true, false, false, true, "LEGACY", "DISABLED"))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> measuredAuthorityFacts(true, false, false, false, "LEGACY", "ENABLED"))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void rejectsSamePhysicalDatabaseEvenWhenRuntimePrincipalsDiffer() {
+    DatabaseIdentity domain =
+        new DatabaseIdentity(
+            "pg-system-id/shared-100", "pg-database-oid/shared-200", "pg-role-oid/301");
+    assertThatThrownBy(
+            () ->
+                new DatabaseIdentities(
+                    domain,
+                    new DatabaseIdentity(
+                        "pg-system-id/shared-100", "pg-database-oid/other-201", "pg-role-oid/302")))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("physically distinct");
+    assertThatThrownBy(
+            () ->
+                new DatabaseIdentities(
+                    domain,
+                    new DatabaseIdentity(
+                        "pg-system-id/other-101", "pg-database-oid/shared-200", "pg-role-oid/302")))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("physically distinct");
   }
 
   @Test
@@ -453,8 +707,31 @@ class TargetE2eActivationManifestVerifierTest {
       TargetE2eActivationReplayStore replayStore,
       TargetE2eActivationCaseLedger caseLedger,
       Clock clock) {
+    return verifier(replayStore, caseLedger, new RecordingLifecycleStore(), clock);
+  }
+
+  private static TargetE2eActivationManifestVerifier verifier(
+      TargetE2eActivationReplayStore replayStore,
+      TargetE2eActivationCaseLedger caseLedger,
+      TargetE2eActivationLifecycleStore lifecycleStore,
+      Clock clock) {
+    return verifier(replayStore, caseLedger, lifecycleStore, fixtureSource(), clock);
+  }
+
+  private static TargetE2eActivationManifestVerifier verifier(
+      TargetE2eActivationReplayStore replayStore,
+      TargetE2eActivationCaseLedger caseLedger,
+      TargetE2eActivationLifecycleStore lifecycleStore,
+      TargetE2eSyntheticFixtureSource syntheticFixtureSource,
+      Clock clock) {
     return new TargetE2eActivationManifestVerifier(
-        keySet(), replayStore, caseLedger, clock, Duration.ZERO);
+        keySet(),
+        replayStore,
+        caseLedger,
+        lifecycleStore,
+        syntheticFixtureSource,
+        clock,
+        Duration.ZERO);
   }
 
   private static TargetE2eActivationPublicKeySet keySet() {
@@ -468,7 +745,7 @@ class TargetE2eActivationManifestVerifierTest {
 
   private static TargetE2eActivationExpectedRuntime syntheticRuntime() {
     return runtime(
-        new IsolatedSyntheticNewCases("CASE_NEW_", 1, "fixtures-v1", FIXTURE_HASH, false, false));
+        new IsolatedSyntheticNewCases("CASE_NEW_", 2, "fixtures-v1", fixtureHash(), false, false));
   }
 
   private static TargetE2eActivationExpectedRuntime runtime(
@@ -480,7 +757,9 @@ class TargetE2eActivationManifestVerifierTest {
         CANDIDATE_SHA,
         "tenant-e2e",
         caseScope,
-        Set.of(RoomType.INTAKE, RoomType.EVIDENCE),
+        caseScope instanceof IsolatedSyntheticNewCases
+            ? Set.of(RoomType.values())
+            : Set.of(RoomType.INTAKE, RoomType.EVIDENCE),
         new BuildBindings("case-v9", "control-v9", "agent-v9"),
         new GraphBinding(
             "all-rooms/target-e2e.v1",
@@ -490,7 +769,13 @@ class TargetE2eActivationManifestVerifierTest {
             "graph-code-v9"),
         new ImageDigests(digest('4'), digest('5'), digest('6'), digest('7'), digest('8')),
         "target-e2e-namespace",
-        databaseIdentities());
+        databaseIdentities(),
+        caseScope instanceof IsolatedSyntheticNewCases synthetic
+            ? Optional.of(
+                new SyntheticFixtureDeployment(
+                    synthetic.fixtureSetId(), FIXTURE_PATH, fixtureHash()))
+            : Optional.empty(),
+        authorityFacts());
   }
 
   private static TargetE2eActivationExpectedRuntime withProfile(
@@ -507,13 +792,87 @@ class TargetE2eActivationManifestVerifierTest {
         source.graphBinding(),
         source.imageDigests(),
         source.temporalNamespace(),
-        source.databaseIdentities());
+        source.databaseIdentities(),
+        source.syntheticFixtureDeployment(),
+        source.authorityFacts());
+  }
+
+  private static TargetE2eActivationExpectedRuntime withGeneration(
+      TargetE2eActivationExpectedRuntime source, long generation) {
+    return new TargetE2eActivationExpectedRuntime(
+        source.appProfile(),
+        source.environmentId(),
+        generation,
+        source.candidateSha(),
+        source.tenantSurrogate(),
+        source.caseScope(),
+        source.allowedRoomTypes(),
+        source.buildBindings(),
+        source.graphBinding(),
+        source.imageDigests(),
+        source.temporalNamespace(),
+        source.databaseIdentities(),
+        source.syntheticFixtureDeployment(),
+        source.authorityFacts());
+  }
+
+  private static TargetE2eActivationCaseLedger.Reservation reservation(
+      String activationId, int slot, String caseId) {
+    return new TargetE2eActivationCaseLedger.Reservation(
+        "target-e2e-env-01",
+        17,
+        activationId,
+        slot,
+        caseId,
+        "CASE_NEW_",
+        2,
+        "fixtures-v1",
+        fixtureHash());
+  }
+
+  private static DrainAcceptedCommand drainCommand(Instant admittedAt) {
+    return new DrainAcceptedCommand(
+        "command-001", "a".repeat(64), "b".repeat(64), 1, 11, admittedAt);
   }
 
   private static DatabaseIdentities databaseIdentities() {
     return new DatabaseIdentities(
-        new DatabaseIdentity("domain-cluster", "domain-db", "java-domain-principal"),
-        new DatabaseIdentity("graph-cluster", "graph-db", "python-graph-principal"));
+        new DatabaseIdentity("pg-system-id/domain-101", "pg-database-oid/201", "pg-role-oid/301"),
+        new DatabaseIdentity("pg-system-id/graph-102", "pg-database-oid/202", "pg-role-oid/302"));
+  }
+
+  private static MeasuredAuthorityFacts authorityFacts() {
+    return measuredAuthorityFacts(true, false, false, false, "LEGACY", "DISABLED");
+  }
+
+  private static MeasuredAuthorityFacts measuredAuthorityFacts(
+      boolean isolated,
+      boolean graphCredentials,
+      boolean graphPrivileges,
+      boolean graphWrites,
+      String formalSelector,
+      String targetActivationDefault) {
+    return new MeasuredAuthorityFacts(
+        isolated,
+        "ISOLATED_PREPRODUCTION",
+        "PROPOSAL_ONLY",
+        graphCredentials,
+        graphPrivileges,
+        graphWrites,
+        "JAVA_FINALIZER_ONLY",
+        true,
+        false,
+        false,
+        false,
+        false,
+        formalSelector,
+        targetActivationDefault);
+  }
+
+  private static TargetE2eSyntheticFixtureSource fixtureSource() {
+    byte[] bytes = ContractJson.canonicalize(syntheticFixture());
+    return fixtureSetId ->
+        new TargetE2eSyntheticFixtureSource.ConfiguredFixture(FIXTURE_PATH, bytes);
   }
 
   private static ObjectNode payload() {
@@ -527,12 +886,17 @@ class TargetE2eActivationManifestVerifierTest {
 
   private static ObjectNode syntheticPayload() {
     ObjectNode payload = basePayload();
+    ArrayNode rooms = payload.putArray("allowedRoomTypes");
+    rooms.add("INTAKE");
+    rooms.add("EVIDENCE");
+    rooms.add("HEARING");
+    rooms.add("REVIEW");
     ObjectNode scope = payload.putObject("caseScope");
     scope.put("mode", "ISOLATED_SYNTHETIC_NEW_CASES");
     scope.put("caseIdPrefix", "CASE_NEW_");
-    scope.put("maxCases", 1);
+    scope.put("maxCases", 2);
     scope.put("fixtureSetId", "fixtures-v1");
-    scope.put("fixtureSetHash", FIXTURE_HASH);
+    scope.put("fixtureSetHash", fixtureHash());
     scope.put("containsRealCaseOrPartyData", false);
     scope.put("externalEffectsAllowed", false);
     refreshHashes(payload);
@@ -571,8 +935,16 @@ class TargetE2eActivationManifestVerifierTest {
     images.put("frontend", digest('8'));
     payload.put("temporalNamespace", "target-e2e-namespace");
     ObjectNode databases = payload.putObject("databaseIdentities");
-    database(databases.putObject("domain"), "domain-cluster", "domain-db", "java-domain-principal");
-    database(databases.putObject("graph"), "graph-cluster", "graph-db", "python-graph-principal");
+    database(
+        databases.putObject("domain"),
+        "pg-system-id/domain-101",
+        "pg-database-oid/201",
+        "pg-role-oid/301");
+    database(
+        databases.putObject("graph"),
+        "pg-system-id/graph-102",
+        "pg-database-oid/202",
+        "pg-role-oid/302");
     ObjectNode authority = payload.putObject("authority");
     authority.put("environmentClass", "ISOLATED_PREPRODUCTION");
     authority.put("graphOutputAuthority", "PROPOSAL_ONLY");
@@ -588,6 +960,38 @@ class TargetE2eActivationManifestVerifierTest {
     defaults.put("formalCaseSelector", "LEGACY");
     defaults.put("targetE2EActivation", "DISABLED");
     return payload;
+  }
+
+  private static ObjectNode syntheticFixture() {
+    ObjectNode fixture = MAPPER.createObjectNode();
+    fixture.put("schemaVersion", "target-e2e-synthetic-fixture-set.v1");
+    fixture.put("fixtureSetId", "fixtures-v1");
+    fixture.put("caseIdPrefix", "CASE_NEW_");
+    fixture.put("maximumCases", 2);
+    ArrayNode rooms = fixture.putArray("roomTypes");
+    rooms.add("INTAKE");
+    rooms.add("EVIDENCE");
+    rooms.add("HEARING");
+    rooms.add("REVIEW");
+    ArrayNode scenarios = fixture.putArray("scenarios");
+    fixtureScenario(scenarios.addObject(), "fixture-intake", "INTAKE", '1', "COMPLETED");
+    fixtureScenario(scenarios.addObject(), "fixture-evidence", "EVIDENCE", '2', "COMPLETED");
+    fixtureScenario(scenarios.addObject(), "fixture-hearing", "HEARING", '3', "COMPLETED");
+    fixtureScenario(scenarios.addObject(), "fixture-review", "REVIEW", '4', "NEEDS_REVIEW");
+    return fixture;
+  }
+
+  private static void fixtureScenario(
+      ObjectNode target, String fixtureId, String roomType, char hash, String terminalClass) {
+    target.put("fixtureId", fixtureId);
+    target.put("roomType", roomType);
+    target.put("inputSchemaVersion", "target-e2e-input.v1");
+    target.put("inputHash", String.valueOf(hash).repeat(64));
+    target.put("expectedTerminalClass", terminalClass);
+  }
+
+  private static String fixtureHash() {
+    return ContractJson.sha256Hex(syntheticFixture());
   }
 
   private static void database(
@@ -671,6 +1075,7 @@ class TargetE2eActivationManifestVerifierTest {
 
     private final Map<String, Registration> byActivationId = new HashMap<>();
     private final Map<String, Registration> byNonce = new HashMap<>();
+    private final Map<String, Long> generationHighWater = new HashMap<>();
     private final AtomicInteger calls = new AtomicInteger();
 
     @Override
@@ -678,14 +1083,38 @@ class TargetE2eActivationManifestVerifierTest {
       calls.incrementAndGet();
       Registration activation = byActivationId.get(registration.activationId());
       Registration nonce = byNonce.get(registration.nonce());
-      if (activation == null && nonce == null) {
-        byActivationId.put(registration.activationId(), registration);
-        byNonce.put(registration.nonce(), registration);
-        return RegistrationResult.REGISTERED;
+      if (registration.equals(activation) && registration.equals(nonce)) {
+        return RegistrationResult.ATTACHED_EXISTING;
       }
-      return registration.equals(activation) && registration.equals(nonce)
-          ? RegistrationResult.ATTACHED_EXISTING
-          : RegistrationResult.CONFLICT;
+      Long highWater = generationHighWater.get(registration.environmentId());
+      if (highWater != null && registration.environmentGeneration() < highWater) {
+        return RegistrationResult.ENVIRONMENT_GENERATION_STALE;
+      }
+      if (highWater != null && registration.environmentGeneration() == highWater) {
+        return RegistrationResult.ENVIRONMENT_GENERATION_CONFLICT;
+      }
+      if (activation != null || nonce != null) {
+        return RegistrationResult.CONFLICT;
+      }
+      byActivationId.put(registration.activationId(), registration);
+      byNonce.put(registration.nonce(), registration);
+      generationHighWater.put(registration.environmentId(), registration.environmentGeneration());
+      return RegistrationResult.REGISTERED;
+    }
+
+    @Override
+    public synchronized RegistrationResult attachExistingForDrain(Registration registration) {
+      calls.incrementAndGet();
+      Registration activation = byActivationId.get(registration.activationId());
+      Registration nonce = byNonce.get(registration.nonce());
+      if (registration.equals(activation) && registration.equals(nonce)) {
+        return RegistrationResult.ATTACHED_EXISTING;
+      }
+      Long highWater = generationHighWater.get(registration.environmentId());
+      if (highWater != null && registration.environmentGeneration() < highWater) {
+        return RegistrationResult.ENVIRONMENT_GENERATION_STALE;
+      }
+      return RegistrationResult.ENVIRONMENT_GENERATION_CONFLICT;
     }
 
     int calls() {
@@ -695,24 +1124,112 @@ class TargetE2eActivationManifestVerifierTest {
 
   private static final class RecordingCaseLedger implements TargetE2eActivationCaseLedger {
 
-    private final Map<String, Reservation> reservations = new HashMap<>();
+    private final Map<String, Reservation> globalCaseTombstones = new HashMap<>();
+    private final Map<String, Reservation> activationSlots = new HashMap<>();
+    private final int capacityLimit;
+
+    private RecordingCaseLedger() {
+      this(16);
+    }
+
+    private RecordingCaseLedger(int capacityLimit) {
+      this.capacityLimit = capacityLimit;
+    }
 
     @Override
     public synchronized ReservationResult apply(Action action, Reservation reservation) {
-      Reservation existing = reservations.get(reservation.caseId());
-      if (existing != null) {
-        return existing.equals(reservation)
-            ? ReservationResult.ALREADY_RESERVED_IDENTICALLY
-            : ReservationResult.CONFLICT;
+      String slotKey = reservation.activationId() + ":" + reservation.slotNumber();
+      Reservation existingCase = globalCaseTombstones.get(reservation.caseId());
+      Reservation existingSlot = activationSlots.get(slotKey);
+      if (existingCase != null || existingSlot != null) {
+        if (reservation.equals(existingCase) && reservation.equals(existingSlot)) {
+          return ReservationResult.ALREADY_RESERVED_IDENTICALLY;
+        }
+        return existingCase != null
+            ? ReservationResult.GENERATED_CASE_ID_GLOBAL_CONFLICT
+            : ReservationResult.SLOT_CONFLICT;
       }
       if (action == Action.REQUIRE_EXISTING) {
         return ReservationResult.NOT_RESERVED;
       }
-      if (reservations.size() >= reservation.maxCases()) {
+      long activationCount =
+          activationSlots.values().stream()
+              .filter(existing -> existing.activationId().equals(reservation.activationId()))
+              .count();
+      if (activationCount >= Math.min(reservation.maxCases(), capacityLimit)) {
         return ReservationResult.CAPACITY_EXHAUSTED;
       }
-      reservations.put(reservation.caseId(), reservation);
+      activationSlots.put(slotKey, reservation);
+      globalCaseTombstones.put(reservation.caseId(), reservation);
       return ReservationResult.RESERVED;
+    }
+  }
+
+  private static final class RecordingLifecycleStore implements TargetE2eActivationLifecycleStore {
+
+    private LifecycleState state = LifecycleState.REGISTERED;
+    private final Set<DrainAcceptedCommand> acceptedCommands = new java.util.HashSet<>();
+    private Instant drainedAt;
+
+    @Override
+    public synchronized LifecycleState refresh(
+        ActivationIdentity identity, Instant expiresAt, Instant now) {
+      if (state == LifecycleState.ACTIVE && !now.isBefore(expiresAt)) {
+        state = LifecycleState.DRAIN_ONLY;
+      }
+      if (state == LifecycleState.REGISTERED) {
+        state = now.isBefore(expiresAt) ? LifecycleState.ACTIVE : LifecycleState.DRAIN_ONLY;
+      }
+      return state;
+    }
+
+    @Override
+    public synchronized boolean hasAcceptedCommandBeforeExpiry(
+        ActivationIdentity identity, DrainAcceptedCommand command, Instant expiresAt) {
+      return command.admittedAt().isBefore(expiresAt) && acceptedCommands.contains(command);
+    }
+
+    @Override
+    public synchronized TransitionResult markDrained(
+        ActivationIdentity identity, DrainCompletionProof proof) {
+      if (state == LifecycleState.DRAINED) {
+        return TransitionResult.ALREADY_IN_TARGET_STATE;
+      }
+      if (state != LifecycleState.DRAIN_ONLY) {
+        return TransitionResult.REJECTED_WRONG_STATE;
+      }
+      if (proof.unresolvedAcceptedWork() != 0) {
+        return TransitionResult.REJECTED_UNRESOLVED_WORK;
+      }
+      if (proof.attachedReplicas() != 0) {
+        return TransitionResult.REJECTED_REPLICAS_ATTACHED;
+      }
+      if (!proof.evidenceSealed()) {
+        return TransitionResult.REJECTED_EVIDENCE_NOT_SEALED;
+      }
+      state = LifecycleState.DRAINED;
+      drainedAt = proof.completedAt();
+      return TransitionResult.TRANSITIONED;
+    }
+
+    @Override
+    public synchronized TransitionResult revokeTerminal(
+        ActivationIdentity identity, Instant revokedAt) {
+      if (state == LifecycleState.REVOKED_TERMINAL) {
+        return TransitionResult.ALREADY_IN_TARGET_STATE;
+      }
+      if (state != LifecycleState.DRAINED) {
+        return TransitionResult.REJECTED_WRONG_STATE;
+      }
+      if (drainedAt == null || !revokedAt.isAfter(drainedAt)) {
+        return TransitionResult.REJECTED_TIMESTAMP_ORDER;
+      }
+      state = LifecycleState.REVOKED_TERMINAL;
+      return TransitionResult.TRANSITIONED;
+    }
+
+    void accept(DrainAcceptedCommand command) {
+      acceptedCommands.add(command);
     }
   }
 

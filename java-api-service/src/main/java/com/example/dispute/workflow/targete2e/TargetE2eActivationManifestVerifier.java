@@ -1,6 +1,7 @@
 package com.example.dispute.workflow.targete2e;
 
 import com.example.dispute.workflow.contract.v1.ContractJson;
+import com.example.dispute.workflow.targete2e.ActivationDecision.AuthorizationMode;
 import com.example.dispute.workflow.targete2e.ActivationDecision.Reason;
 import com.example.dispute.workflow.targete2e.TargetE2eActivationExpectedRuntime.BuildBindings;
 import com.example.dispute.workflow.targete2e.TargetE2eActivationExpectedRuntime.CaseScope;
@@ -10,7 +11,11 @@ import com.example.dispute.workflow.targete2e.TargetE2eActivationExpectedRuntime
 import com.example.dispute.workflow.targete2e.TargetE2eActivationExpectedRuntime.GraphBinding;
 import com.example.dispute.workflow.targete2e.TargetE2eActivationExpectedRuntime.ImageDigests;
 import com.example.dispute.workflow.targete2e.TargetE2eActivationExpectedRuntime.IsolatedSyntheticNewCases;
+import com.example.dispute.workflow.targete2e.TargetE2eActivationExpectedRuntime.MeasuredAuthorityFacts;
 import com.example.dispute.workflow.targete2e.TargetE2eActivationExpectedRuntime.RoomType;
+import com.example.dispute.workflow.targete2e.TargetE2eActivationExpectedRuntime.SyntheticFixtureDeployment;
+import com.example.dispute.workflow.targete2e.TargetE2eActivationLifecycleStore.ActivationIdentity;
+import com.example.dispute.workflow.targete2e.TargetE2eActivationLifecycleStore.LifecycleState;
 import com.example.dispute.workflow.targete2e.TargetE2eActivationReplayStore.BindingSnapshot;
 import com.example.dispute.workflow.targete2e.TargetE2eActivationReplayStore.Registration;
 import com.example.dispute.workflow.targete2e.TargetE2eActivationReplayStore.RegistrationResult;
@@ -35,6 +40,7 @@ import java.util.Base64;
 import java.util.EnumSet;
 import java.util.HashSet;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Pattern;
 
@@ -105,37 +111,38 @@ public final class TargetE2eActivationManifestVerifier {
           "productionTrafficAllowed");
   private static final Set<String> PRODUCTION_DEFAULT_FIELDS =
       Set.of("formalCaseSelector", "targetE2EActivation");
+  private static final Set<String> FIXTURE_SET_FIELDS =
+      Set.of(
+          "caseIdPrefix",
+          "fixtureSetId",
+          "maximumCases",
+          "roomTypes",
+          "scenarios",
+          "schemaVersion");
+  private static final Set<String> FIXTURE_SCENARIO_FIELDS =
+      Set.of("expectedTerminalClass", "fixtureId", "inputHash", "inputSchemaVersion", "roomType");
 
   private final TargetE2eActivationPublicKeySet publicKeys;
   private final TargetE2eActivationReplayStore replayStore;
   private final TargetE2eActivationCaseLedger caseLedger;
+  private final TargetE2eActivationLifecycleStore lifecycleStore;
+  private final TargetE2eSyntheticFixtureSource fixtureSource;
   private final ObjectMapper mapper;
   private final Clock clock;
 
   public TargetE2eActivationManifestVerifier(
       TargetE2eActivationPublicKeySet publicKeys,
       TargetE2eActivationReplayStore replayStore,
-      Clock clock) {
-    this(publicKeys, replayStore, TargetE2eActivationCaseLedger.denyAll(), clock, Duration.ZERO);
-  }
-
-  public TargetE2eActivationManifestVerifier(
-      TargetE2eActivationPublicKeySet publicKeys,
-      TargetE2eActivationReplayStore replayStore,
-      Clock clock,
-      Duration clockSkew) {
-    this(publicKeys, replayStore, TargetE2eActivationCaseLedger.denyAll(), clock, clockSkew);
-  }
-
-  public TargetE2eActivationManifestVerifier(
-      TargetE2eActivationPublicKeySet publicKeys,
-      TargetE2eActivationReplayStore replayStore,
       TargetE2eActivationCaseLedger caseLedger,
+      TargetE2eActivationLifecycleStore lifecycleStore,
+      TargetE2eSyntheticFixtureSource fixtureSource,
       Clock clock,
       Duration clockSkew) {
     this.publicKeys = Objects.requireNonNull(publicKeys, "publicKeys");
     this.replayStore = Objects.requireNonNull(replayStore, "replayStore");
     this.caseLedger = Objects.requireNonNull(caseLedger, "caseLedger");
+    this.lifecycleStore = Objects.requireNonNull(lifecycleStore, "lifecycleStore");
+    this.fixtureSource = Objects.requireNonNull(fixtureSource, "fixtureSource");
     this.clock = Objects.requireNonNull(clock, "clock");
     requireZeroClockSkew(clockSkew);
     this.mapper = JsonMapper.builder().enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION).build();
@@ -143,6 +150,21 @@ public final class TargetE2eActivationManifestVerifier {
 
   public TargetE2eActivationAuthority arm(
       String compactJws, TargetE2eActivationExpectedRuntime expectedRuntime) {
+    return arm(compactJws, expectedRuntime, null);
+  }
+
+  public TargetE2eActivationAuthority armForDrain(
+      String compactJws,
+      TargetE2eActivationExpectedRuntime expectedRuntime,
+      DrainAcceptedCommand acceptedCommand) {
+    return arm(
+        compactJws, expectedRuntime, Objects.requireNonNull(acceptedCommand, "acceptedCommand"));
+  }
+
+  private TargetE2eActivationAuthority arm(
+      String compactJws,
+      TargetE2eActivationExpectedRuntime expectedRuntime,
+      DrainAcceptedCommand drainCommand) {
     if (compactJws == null || compactJws.isBlank()) {
       return denied(Reason.DEFAULT_DENY);
     }
@@ -151,9 +173,15 @@ public final class TargetE2eActivationManifestVerifier {
     }
     try {
       ParsedManifest manifest = verify(compactJws, expectedRuntime);
+      if (manifest.expired() != (drainCommand != null)) {
+        return denied(manifest.expired() ? Reason.EXPIRED : Reason.DRAIN_PROOF_REQUIRED);
+      }
       RegistrationResult registration;
       try {
-        registration = replayStore.registerOrAttach(manifest.registration());
+        registration =
+            manifest.expired()
+                ? replayStore.attachExistingForDrain(manifest.registration())
+                : replayStore.registerOrAttach(manifest.registration());
       } catch (RuntimeException failure) {
         return denied(Reason.REPLAY_STORE_FAILURE);
       }
@@ -163,8 +191,34 @@ public final class TargetE2eActivationManifestVerifier {
       if (registration == RegistrationResult.CONFLICT) {
         return denied(Reason.REPLAYED);
       }
+      if (registration == RegistrationResult.ENVIRONMENT_GENERATION_STALE) {
+        return denied(Reason.ENVIRONMENT_GENERATION_STALE);
+      }
+      if (registration == RegistrationResult.ENVIRONMENT_GENERATION_CONFLICT) {
+        return denied(Reason.ENVIRONMENT_GENERATION_CONFLICT);
+      }
+      if (manifest.expired() && registration != RegistrationResult.ATTACHED_EXISTING) {
+        return denied(Reason.REPLAYED);
+      }
       ActivationGrant grant = manifest.grant();
-      return new ArmedAuthority(grant, caseLedger, clock);
+      ActivationIdentity identity = identity(grant);
+      LifecycleState state;
+      try {
+        state = lifecycleStore.refresh(identity, grant.expiresAt(), clock.instant());
+      } catch (RuntimeException failure) {
+        return denied(Reason.REPLAY_STORE_FAILURE);
+      }
+      if (manifest.expired()) {
+        if (state != LifecycleState.DRAIN_ONLY
+            || !drainCommand.admittedAt().isBefore(grant.expiresAt())
+            || !hasAcceptedDrainCommand(identity, drainCommand, grant.expiresAt())) {
+          return denied(Reason.DRAIN_PROOF_REQUIRED);
+        }
+      } else if (state != LifecycleState.ACTIVE) {
+        return denied(lifecycleReason(state));
+      }
+      return new ArmedAuthority(
+          grant, caseLedger, lifecycleStore, manifest.verifiedFixtureSet(), clock);
     } catch (Rejected failure) {
       return denied(failure.reason());
     } catch (RuntimeException failure) {
@@ -200,8 +254,9 @@ public final class TargetE2eActivationManifestVerifier {
     ECPublicKey publicKey =
         publicKeys.resolve(keyId).orElseThrow(() -> rejected(Reason.UNTRUSTED_KEY));
     verifySignature(segments, publicKey);
-    requireTimeWindow(bindings.issuedAt(), bindings.expiresAt());
+    boolean expired = requireTimeWindow(bindings.issuedAt(), bindings.expiresAt());
     requireRuntime(bindings, expectedRuntime);
+    Optional<VerifiedFixtureSet> verifiedFixtureSet = verifyFixtureSet(bindings, expectedRuntime);
 
     ActivationGrant grant =
         new ActivationGrant(
@@ -241,9 +296,12 @@ public final class TargetE2eActivationManifestVerifier {
                 bindings.graphBinding(),
                 bindings.imageDigests(),
                 bindings.temporalNamespace(),
-                bindings.databaseIdentities()),
+                bindings.databaseIdentities(),
+                expectedRuntime.syntheticFixtureDeployment(),
+                bindings.authorityFacts()),
+            bindings.issuedAt(),
             bindings.expiresAt());
-    return new ParsedManifest(grant, registration);
+    return new ParsedManifest(grant, registration, expired, verifiedFixtureSet);
   }
 
   private static ManifestBindings parseManifest(ObjectNode payload) {
@@ -279,8 +337,7 @@ public final class TargetE2eActivationManifestVerifier {
           TargetE2eActivationContract.identifier(
               requiredText(payload, "temporalNamespace"), "temporalNamespace");
       DatabaseIdentities databases = requiredDatabaseIdentities(payload);
-      requireAuthority(payload);
-      requireProductionDefaults(payload);
+      MeasuredAuthorityFacts authorityFacts = requiredAuthorityFacts(payload);
       return new ManifestBindings(
           activationId,
           manifestHash,
@@ -297,7 +354,8 @@ public final class TargetE2eActivationManifestVerifier {
           graph,
           images,
           namespace,
-          databases);
+          databases,
+          authorityFacts);
     } catch (Rejected failure) {
       throw failure;
     } catch (RuntimeException failure) {
@@ -348,8 +406,11 @@ public final class TargetE2eActivationManifestVerifier {
   }
 
   private static Set<RoomType> requiredRoomTypes(ObjectNode payload) {
-    ArrayNode rooms = requiredArray(payload, "allowedRoomTypes");
-    if (rooms.isEmpty() || rooms.size() > 4) {
+    return roomTypes(requiredArray(payload, "allowedRoomTypes"), 1, 4);
+  }
+
+  private static Set<RoomType> roomTypes(ArrayNode rooms, int minimum, int maximum) {
+    if (rooms.size() < minimum || rooms.size() > maximum) {
       throw rejected(Reason.WRONG_CONTRACT);
     }
     EnumSet<RoomType> result = EnumSet.noneOf(RoomType.class);
@@ -357,7 +418,13 @@ public final class TargetE2eActivationManifestVerifier {
       if (!room.isTextual()) {
         throw rejected(Reason.WRONG_CONTRACT);
       }
-      if (!result.add(RoomType.valueOf(room.textValue()))) {
+      RoomType roomType;
+      try {
+        roomType = RoomType.valueOf(room.textValue());
+      } catch (IllegalArgumentException failure) {
+        throw rejected(Reason.WRONG_CONTRACT);
+      }
+      if (!result.add(roomType)) {
         throw rejected(Reason.WRONG_CONTRACT);
       }
     }
@@ -418,33 +485,55 @@ public final class TargetE2eActivationManifestVerifier {
         requiredText(database, "runtimePrincipalIdentity"));
   }
 
-  private static void requireAuthority(ObjectNode payload) {
+  private static MeasuredAuthorityFacts requiredAuthorityFacts(ObjectNode payload) {
     ObjectNode authority = requiredObject(payload, "authority");
     requireExactFields(authority, AUTHORITY_FIELDS);
-    if (!"ISOLATED_PREPRODUCTION".equals(requiredText(authority, "environmentClass"))
-        || !"PROPOSAL_ONLY".equals(requiredText(authority, "graphOutputAuthority"))
-        || requiredBoolean(authority, "graphDomainCredentialsPresent")
-        || requiredBoolean(authority, "graphDomainWriteAllowed")
-        || !"JAVA_FINALIZER_ONLY".equals(requiredText(authority, "formalWriter"))
-        || !requiredBoolean(authority, "javaDomainCommitAllowed")
-        || requiredBoolean(authority, "externalEffectsAllowed")
-        || requiredBoolean(authority, "productionTrafficAllowed")
-        || requiredBoolean(authority, "productionPromotionAuthority")
-        || requiredBoolean(authority, "migrationPromotionAuthority")) {
-      throw rejected(Reason.AUTHORITY_VIOLATION);
-    }
-  }
-
-  private static void requireProductionDefaults(ObjectNode payload) {
+    String environmentClass = requiredText(authority, "environmentClass");
+    String graphOutputAuthority = requiredText(authority, "graphOutputAuthority");
+    boolean graphCredentials = requiredBoolean(authority, "graphDomainCredentialsPresent");
+    boolean graphWrites = requiredBoolean(authority, "graphDomainWriteAllowed");
+    String formalWriter = requiredText(authority, "formalWriter");
+    boolean javaCommit = requiredBoolean(authority, "javaDomainCommitAllowed");
+    boolean externalEffects = requiredBoolean(authority, "externalEffectsAllowed");
+    boolean productionTraffic = requiredBoolean(authority, "productionTrafficAllowed");
+    boolean productionPromotion = requiredBoolean(authority, "productionPromotionAuthority");
+    boolean migrationPromotion = requiredBoolean(authority, "migrationPromotionAuthority");
     ObjectNode defaults = requiredObject(payload, "productionDefaults");
     requireExactFields(defaults, PRODUCTION_DEFAULT_FIELDS);
-    if (!"LEGACY".equals(requiredText(defaults, "formalCaseSelector"))
-        || !"DISABLED".equals(requiredText(defaults, "targetE2EActivation"))) {
+    String formalCaseSelector = requiredText(defaults, "formalCaseSelector");
+    String targetActivation = requiredText(defaults, "targetE2EActivation");
+    if (!"ISOLATED_PREPRODUCTION".equals(environmentClass)
+        || !"PROPOSAL_ONLY".equals(graphOutputAuthority)
+        || graphCredentials
+        || graphWrites
+        || !"JAVA_FINALIZER_ONLY".equals(formalWriter)
+        || !javaCommit
+        || externalEffects
+        || productionTraffic
+        || productionPromotion
+        || migrationPromotion
+        || !"LEGACY".equals(formalCaseSelector)
+        || !"DISABLED".equals(targetActivation)) {
       throw rejected(Reason.AUTHORITY_VIOLATION);
     }
+    return new MeasuredAuthorityFacts(
+        true,
+        environmentClass,
+        graphOutputAuthority,
+        graphCredentials,
+        false,
+        graphWrites,
+        formalWriter,
+        javaCommit,
+        externalEffects,
+        productionTraffic,
+        productionPromotion,
+        migrationPromotion,
+        formalCaseSelector,
+        targetActivation);
   }
 
-  private void requireTimeWindow(Instant issuedAt, Instant expiresAt) {
+  private boolean requireTimeWindow(Instant issuedAt, Instant expiresAt) {
     Duration lifetime;
     try {
       lifetime = Duration.between(issuedAt, expiresAt);
@@ -458,9 +547,7 @@ public final class TargetE2eActivationManifestVerifier {
     if (issuedAt.isAfter(now)) {
       throw rejected(Reason.NOT_YET_VALID);
     }
-    if (!now.isBefore(expiresAt)) {
-      throw rejected(Reason.EXPIRED);
-    }
+    return !now.isBefore(expiresAt);
   }
 
   private static void requireRuntime(
@@ -476,9 +563,75 @@ public final class TargetE2eActivationManifestVerifier {
         || !manifest.imageDigests().equals(expected.imageDigests())
         || !TargetE2eActivationContract.same(
             manifest.temporalNamespace(), expected.temporalNamespace())
-        || !manifest.databaseIdentities().equals(expected.databaseIdentities())) {
+        || !manifest.databaseIdentities().equals(expected.databaseIdentities())
+        || !manifest.authorityFacts().equals(expected.authorityFacts())) {
       throw rejected(Reason.WRONG_RUNTIME);
     }
+  }
+
+  private Optional<VerifiedFixtureSet> verifyFixtureSet(
+      ManifestBindings manifest, TargetE2eActivationExpectedRuntime expected) {
+    if (!(manifest.caseScope() instanceof IsolatedSyntheticNewCases synthetic)) {
+      return Optional.empty();
+    }
+    SyntheticFixtureDeployment deployment =
+        expected.syntheticFixtureDeployment().orElseThrow(() -> rejected(Reason.WRONG_RUNTIME));
+    TargetE2eSyntheticFixtureSource.ConfiguredFixture loaded;
+    try {
+      loaded = fixtureSource.loadConfigured(synthetic.fixtureSetId());
+    } catch (RuntimeException failure) {
+      throw rejected(Reason.WRONG_RUNTIME);
+    }
+    if (loaded == null
+        || !TargetE2eActivationContract.same(
+            loaded.readOnlyPathBinding(), deployment.readOnlyPathBinding())) {
+      throw rejected(Reason.WRONG_RUNTIME);
+    }
+    byte[] bytes = loaded.bytes();
+    ObjectNode fixture = parseCanonicalObject(bytes);
+    requireExactFields(fixture, FIXTURE_SET_FIELDS);
+    if (!"target-e2e-synthetic-fixture-set.v1".equals(requiredText(fixture, "schemaVersion"))
+        || !TargetE2eActivationContract.same(
+            requiredText(fixture, "fixtureSetId"), synthetic.fixtureSetId())
+        || !TargetE2eActivationContract.same(
+            requiredText(fixture, "caseIdPrefix"), synthetic.caseIdPrefix())
+        || requiredGeneration(fixture, "maximumCases") != synthetic.maxCases()) {
+      throw rejected(Reason.WRONG_RUNTIME);
+    }
+    Set<RoomType> fixtureRooms = roomTypes(requiredArray(fixture, "roomTypes"), 4, 4);
+    if (!fixtureRooms.equals(Set.of(RoomType.values()))
+        || !fixtureRooms.equals(manifest.allowedRoomTypes())) {
+      throw rejected(Reason.WRONG_CONTRACT);
+    }
+    ArrayNode scenarios = requiredArray(fixture, "scenarios");
+    if (scenarios.size() < 4 || scenarios.size() > 16) {
+      throw rejected(Reason.WRONG_CONTRACT);
+    }
+    for (JsonNode item : scenarios) {
+      if (!(item instanceof ObjectNode scenario)) {
+        throw rejected(Reason.WRONG_CONTRACT);
+      }
+      requireExactFields(scenario, FIXTURE_SCENARIO_FIELDS);
+      TargetE2eActivationContract.identifier(requiredText(scenario, "fixtureId"), "fixtureId");
+      try {
+        RoomType.valueOf(requiredText(scenario, "roomType"));
+      } catch (IllegalArgumentException failure) {
+        throw rejected(Reason.WRONG_CONTRACT);
+      }
+      TargetE2eActivationContract.identifier(
+          requiredText(scenario, "inputSchemaVersion"), "inputSchemaVersion");
+      TargetE2eActivationContract.sha256(requiredText(scenario, "inputHash"), "inputHash");
+      String terminalClass = requiredText(scenario, "expectedTerminalClass");
+      if (!Set.of("NEEDS_INPUT", "COMPLETED", "NEEDS_REVIEW").contains(terminalClass)) {
+        throw rejected(Reason.WRONG_CONTRACT);
+      }
+    }
+    String actualHash = ContractJson.sha256Hex(fixture);
+    if (!TargetE2eActivationContract.same(actualHash, synthetic.fixtureSetHash())
+        || !TargetE2eActivationContract.same(actualHash, deployment.measuredCanonicalHash())) {
+      throw rejected(Reason.WRONG_RUNTIME);
+    }
+    return Optional.of(new VerifiedFixtureSet(actualHash, loaded.readOnlyPathBinding(), bytes));
   }
 
   private void verifySignature(String[] segments, ECPublicKey publicKey) {
@@ -600,6 +753,36 @@ public final class TargetE2eActivationManifestVerifier {
     }
   }
 
+  private boolean hasAcceptedDrainCommand(
+      ActivationIdentity identity, DrainAcceptedCommand command, Instant expiresAt) {
+    try {
+      return lifecycleStore.hasAcceptedCommandBeforeExpiry(identity, command, expiresAt);
+    } catch (RuntimeException failure) {
+      return false;
+    }
+  }
+
+  private static ActivationIdentity identity(ActivationGrant grant) {
+    return new ActivationIdentity(
+        grant.environmentId(),
+        grant.environmentGeneration(),
+        grant.activationId(),
+        grant.manifestHash());
+  }
+
+  private static Reason lifecycleReason(LifecycleState state) {
+    if (state == LifecycleState.DRAIN_ONLY) {
+      return Reason.DRAIN_PROOF_REQUIRED;
+    }
+    if (state == LifecycleState.DRAINED) {
+      return Reason.DRAINED;
+    }
+    if (state == LifecycleState.REVOKED_TERMINAL) {
+      return Reason.REVOKED;
+    }
+    return Reason.REPLAY_STORE_FAILURE;
+  }
+
   private static TargetE2eActivationAuthority denied(Reason reason) {
     ActivationDecision decision = ActivationDecision.denied(reason);
     return request -> decision;
@@ -625,24 +808,79 @@ public final class TargetE2eActivationManifestVerifier {
       GraphBinding graphBinding,
       ImageDigests imageDigests,
       String temporalNamespace,
-      DatabaseIdentities databaseIdentities) {}
+      DatabaseIdentities databaseIdentities,
+      MeasuredAuthorityFacts authorityFacts) {}
 
-  private record ParsedManifest(ActivationGrant grant, Registration registration) {}
+  private record ParsedManifest(
+      ActivationGrant grant,
+      Registration registration,
+      boolean expired,
+      Optional<VerifiedFixtureSet> verifiedFixtureSet) {}
+
+  private record VerifiedFixtureSet(
+      String canonicalHash, String readOnlyPathBinding, byte[] canonicalBytes) {
+
+    private VerifiedFixtureSet {
+      TargetE2eActivationContract.sha256(canonicalHash, "fixtureSetHash");
+      TargetE2eSyntheticFixtureSource.requirePathBinding(readOnlyPathBinding);
+      canonicalBytes = Objects.requireNonNull(canonicalBytes, "canonicalBytes").clone();
+    }
+
+    @Override
+    public byte[] canonicalBytes() {
+      return canonicalBytes.clone();
+    }
+  }
 
   private record ArmedAuthority(
-      ActivationGrant grant, TargetE2eActivationCaseLedger caseLedger, Clock clock)
+      ActivationGrant grant,
+      TargetE2eActivationCaseLedger caseLedger,
+      TargetE2eActivationLifecycleStore lifecycleStore,
+      Optional<VerifiedFixtureSet> verifiedFixtureSet,
+      Clock clock)
       implements TargetE2eActivationAuthority {
 
     private ArmedAuthority {
       Objects.requireNonNull(grant, "grant");
       Objects.requireNonNull(caseLedger, "caseLedger");
+      Objects.requireNonNull(lifecycleStore, "lifecycleStore");
+      verifiedFixtureSet = Objects.requireNonNull(verifiedFixtureSet, "verifiedFixtureSet");
+      if ((grant.caseScope() instanceof IsolatedSyntheticNewCases)
+          != verifiedFixtureSet.isPresent()) {
+        throw new IllegalArgumentException("synthetic activation fixture cache is inconsistent");
+      }
       Objects.requireNonNull(clock, "clock");
     }
 
     @Override
     public ActivationDecision authorize(ActivationRequest request) {
-      if (!clock.instant().isBefore(grant.expiresAt())) {
-        return ActivationDecision.denied(Reason.EXPIRED);
+      LifecycleState state;
+      Instant now = clock.instant();
+      try {
+        state = lifecycleStore.refresh(identity(grant), grant.expiresAt(), now);
+      } catch (RuntimeException failure) {
+        return ActivationDecision.denied(Reason.REPLAY_STORE_FAILURE);
+      }
+      if (state == null || state == LifecycleState.REGISTERED) {
+        return ActivationDecision.denied(Reason.REPLAY_STORE_FAILURE);
+      }
+      if (!now.isBefore(grant.expiresAt()) && state == LifecycleState.ACTIVE) {
+        return ActivationDecision.denied(Reason.REPLAY_STORE_FAILURE);
+      }
+      if (state == LifecycleState.DRAINED) {
+        return ActivationDecision.denied(Reason.DRAINED);
+      }
+      if (state == LifecycleState.REVOKED_TERMINAL) {
+        return ActivationDecision.denied(Reason.REVOKED);
+      }
+      if (state == LifecycleState.DRAIN_ONLY && !validDrainRequest(request)) {
+        return ActivationDecision.denied(Reason.DRAIN_PROOF_REQUIRED);
+      }
+      if (state == LifecycleState.ACTIVE
+          && request != null
+          && request.purpose() == ActivationPurpose.DRAIN_ACCEPTED_COMMAND
+          && !validDrainRequest(request)) {
+        return ActivationDecision.denied(Reason.DRAIN_PROOF_REQUIRED);
       }
       if (request == null
           || !TargetE2eActivationContract.same(
@@ -652,23 +890,57 @@ public final class TargetE2eActivationManifestVerifier {
       if (!grant.allowedRoomTypes().contains(request.roomType())) {
         return ActivationDecision.denied(Reason.WRONG_TARGET);
       }
-      ActivationDecision caseDecision = authorizeCase(request);
-      return caseDecision == null ? ActivationDecision.activated(grant) : caseDecision;
+      ActivationDecision caseDecision = authorizeCase(request, state);
+      if (caseDecision != null) {
+        return caseDecision;
+      }
+      AuthorizationMode mode =
+          state == LifecycleState.DRAIN_ONLY
+                  || request.purpose() == ActivationPurpose.DRAIN_ACCEPTED_COMMAND
+              ? AuthorizationMode.DRAIN_ACCEPTED_COMMAND
+              : AuthorizationMode.ACTIVE;
+      return ActivationDecision.activated(grant, mode);
     }
 
-    private ActivationDecision authorizeCase(ActivationRequest request) {
+    private boolean validDrainRequest(ActivationRequest request) {
+      if (request == null
+          || request.scope() == ActivationScope.ROOM_SELECTOR
+          || request.purpose() != ActivationPurpose.DRAIN_ACCEPTED_COMMAND
+          || request.drainAcceptedCommand() == null
+          || !request.drainAcceptedCommand().admittedAt().isBefore(grant.expiresAt())) {
+        return false;
+      }
+      try {
+        return lifecycleStore.hasAcceptedCommandBeforeExpiry(
+            identity(grant), request.drainAcceptedCommand(), grant.expiresAt());
+      } catch (RuntimeException failure) {
+        return false;
+      }
+    }
+
+    private ActivationDecision authorizeCase(ActivationRequest request, LifecycleState state) {
       if (grant.caseScope() instanceof ExplicitCaseIds explicit) {
         return explicit.allowedCaseIds().contains(request.caseId())
             ? null
             : ActivationDecision.denied(Reason.WRONG_TARGET);
       }
       IsolatedSyntheticNewCases synthetic = (IsolatedSyntheticNewCases) grant.caseScope();
+      VerifiedFixtureSet fixture = verifiedFixtureSet.orElseThrow();
+      if (!TargetE2eActivationContract.same(fixture.canonicalHash(), synthetic.fixtureSetHash())) {
+        return ActivationDecision.denied(Reason.CASE_LEDGER_FAILURE);
+      }
       if (!request.caseId().startsWith(synthetic.caseIdPrefix())
           || request.caseId().length() == synthetic.caseIdPrefix().length()) {
         return ActivationDecision.denied(Reason.WRONG_TARGET);
       }
+      if (request.syntheticCaseSlot() == null
+          || request.syntheticCaseSlot() > synthetic.maxCases()) {
+        return ActivationDecision.denied(Reason.WRONG_TARGET);
+      }
       TargetE2eActivationCaseLedger.Action action =
-          request.scope() == ActivationScope.ROOM_SELECTOR
+          state == LifecycleState.ACTIVE
+                  && request.purpose() == ActivationPurpose.NEW_ADMISSION
+                  && request.scope() == ActivationScope.ROOM_SELECTOR
               ? TargetE2eActivationCaseLedger.Action.RESERVE_BEFORE_EPOCH_SELECTION
               : TargetE2eActivationCaseLedger.Action.REQUIRE_EXISTING;
       TargetE2eActivationCaseLedger.Reservation reservation =
@@ -676,6 +948,7 @@ public final class TargetE2eActivationManifestVerifier {
               grant.environmentId(),
               grant.environmentGeneration(),
               grant.activationId(),
+              request.syntheticCaseSlot(),
               request.caseId(),
               synthetic.caseIdPrefix(),
               synthetic.maxCases(),
@@ -697,6 +970,10 @@ public final class TargetE2eActivationManifestVerifier {
       }
       if (result == TargetE2eActivationCaseLedger.ReservationResult.CAPACITY_EXHAUSTED) {
         return ActivationDecision.denied(Reason.CASE_CAPACITY_EXHAUSTED);
+      }
+      if (result
+          == TargetE2eActivationCaseLedger.ReservationResult.GENERATED_CASE_ID_GLOBAL_CONFLICT) {
+        return ActivationDecision.denied(Reason.GENERATED_CASE_ID_CONFLICT);
       }
       return ActivationDecision.denied(Reason.CASE_LEDGER_FAILURE);
     }

@@ -5,25 +5,37 @@ import com.example.dispute.workflow.targete2e.TargetE2eActivationExpectedRuntime
 import com.example.dispute.workflow.targete2e.TargetE2eActivationExpectedRuntime.DatabaseIdentities;
 import com.example.dispute.workflow.targete2e.TargetE2eActivationExpectedRuntime.GraphBinding;
 import com.example.dispute.workflow.targete2e.TargetE2eActivationExpectedRuntime.ImageDigests;
+import com.example.dispute.workflow.targete2e.TargetE2eActivationExpectedRuntime.IsolatedSyntheticNewCases;
+import com.example.dispute.workflow.targete2e.TargetE2eActivationExpectedRuntime.MeasuredAuthorityFacts;
 import com.example.dispute.workflow.targete2e.TargetE2eActivationExpectedRuntime.RoomType;
+import com.example.dispute.workflow.targete2e.TargetE2eActivationExpectedRuntime.SyntheticFixtureDeployment;
 import java.time.Instant;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 
 /**
  * Atomic register-or-attach boundary shared by all replicas in one environment generation.
  *
  * <p>Implementations must uniquely index both activation ID and nonce. Existing rows may attach
- * only when the entire registration is equal; every other collision is a conflict.
+ * only when the entire registration is equal; every other collision is a conflict. Registration and
+ * the durable per-environment generation high-water update are one transaction. A first grant must
+ * exceed the high-water; an identical HA attach may equal it; all other equal or lower generations
+ * are rejected and high-water never decreases after drain or revocation. Grant rows are retained
+ * through REVOKED_TERMINAL, not merely through signed expiry.
  */
-@FunctionalInterface
 public interface TargetE2eActivationReplayStore {
 
   RegistrationResult registerOrAttach(Registration registration);
 
+  /** Never creates a registration; attaches only to one byte-identical existing grant. */
+  RegistrationResult attachExistingForDrain(Registration registration);
+
   enum RegistrationResult {
     REGISTERED,
     ATTACHED_EXISTING,
+    ENVIRONMENT_GENERATION_STALE,
+    ENVIRONMENT_GENERATION_CONFLICT,
     CONFLICT
   }
 
@@ -34,7 +46,8 @@ public interface TargetE2eActivationReplayStore {
       String nonce,
       String manifestHash,
       BindingSnapshot bindings,
-      Instant retainUntil) {
+      Instant issuedAt,
+      Instant expiresAt) {
 
     public Registration {
       TargetE2eActivationContract.identifier(environmentId, "environmentId");
@@ -43,7 +56,8 @@ public interface TargetE2eActivationReplayStore {
       TargetE2eActivationContract.nonce(nonce);
       TargetE2eActivationContract.sha256(manifestHash, "manifestHash");
       Objects.requireNonNull(bindings, "bindings");
-      Objects.requireNonNull(retainUntil, "retainUntil");
+      Objects.requireNonNull(issuedAt, "issuedAt");
+      Objects.requireNonNull(expiresAt, "expiresAt");
     }
   }
 
@@ -56,7 +70,9 @@ public interface TargetE2eActivationReplayStore {
       GraphBinding graphBinding,
       ImageDigests imageDigests,
       String temporalNamespace,
-      DatabaseIdentities databaseIdentities) {
+      DatabaseIdentities databaseIdentities,
+      Optional<SyntheticFixtureDeployment> syntheticFixtureDeployment,
+      MeasuredAuthorityFacts authorityFacts) {
 
     public BindingSnapshot {
       TargetE2eActivationContract.candidateSha(candidateSha);
@@ -68,6 +84,22 @@ public interface TargetE2eActivationReplayStore {
       Objects.requireNonNull(imageDigests, "imageDigests");
       TargetE2eActivationContract.identifier(temporalNamespace, "temporalNamespace");
       Objects.requireNonNull(databaseIdentities, "databaseIdentities");
+      syntheticFixtureDeployment =
+          Objects.requireNonNull(syntheticFixtureDeployment, "syntheticFixtureDeployment");
+      if ((caseScope instanceof IsolatedSyntheticNewCases)
+          != syntheticFixtureDeployment.isPresent()) {
+        throw new IllegalArgumentException(
+            "replay snapshot fixture deployment is inconsistent with case scope");
+      }
+      if (caseScope instanceof IsolatedSyntheticNewCases synthetic) {
+        SyntheticFixtureDeployment deployment = syntheticFixtureDeployment.orElseThrow();
+        if (!synthetic.fixtureSetId().equals(deployment.fixtureSetId())
+            || !synthetic.fixtureSetHash().equals(deployment.measuredCanonicalHash())) {
+          throw new IllegalArgumentException(
+              "replay snapshot fixture deployment does not match synthetic scope");
+        }
+      }
+      Objects.requireNonNull(authorityFacts, "authorityFacts");
     }
   }
 }

@@ -1,6 +1,7 @@
 package com.example.dispute.workflow.targete2e;
 
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 
 /** Java-owned exact runtime binding against which one signed activation is armed. */
@@ -16,7 +17,9 @@ public record TargetE2eActivationExpectedRuntime(
     GraphBinding graphBinding,
     ImageDigests imageDigests,
     String temporalNamespace,
-    DatabaseIdentities databaseIdentities) {
+    DatabaseIdentities databaseIdentities,
+    Optional<SyntheticFixtureDeployment> syntheticFixtureDeployment,
+    MeasuredAuthorityFacts authorityFacts) {
 
   public TargetE2eActivationExpectedRuntime {
     TargetE2eActivationContract.appProfile(appProfile);
@@ -34,6 +37,22 @@ public record TargetE2eActivationExpectedRuntime(
     Objects.requireNonNull(imageDigests, "imageDigests");
     TargetE2eActivationContract.identifier(temporalNamespace, "temporalNamespace");
     Objects.requireNonNull(databaseIdentities, "databaseIdentities");
+    syntheticFixtureDeployment =
+        Objects.requireNonNull(syntheticFixtureDeployment, "syntheticFixtureDeployment");
+    if ((caseScope instanceof IsolatedSyntheticNewCases)
+        != syntheticFixtureDeployment.isPresent()) {
+      throw new IllegalArgumentException(
+          "synthetic case scope requires exactly one fixture deployment binding");
+    }
+    if (caseScope instanceof IsolatedSyntheticNewCases synthetic) {
+      SyntheticFixtureDeployment deployment = syntheticFixtureDeployment.orElseThrow();
+      if (!synthetic.fixtureSetId().equals(deployment.fixtureSetId())
+          || !synthetic.fixtureSetHash().equals(deployment.measuredCanonicalHash())) {
+        throw new IllegalArgumentException(
+            "synthetic fixture deployment must match the expected activation scope");
+      }
+    }
+    Objects.requireNonNull(authorityFacts, "authorityFacts");
   }
 
   public enum RoomType {
@@ -126,8 +145,12 @@ public record TargetE2eActivationExpectedRuntime(
     public DatabaseIdentities {
       Objects.requireNonNull(domain, "domain");
       Objects.requireNonNull(graph, "graph");
-      if (domain.equals(graph)) {
-        throw new IllegalArgumentException("Domain and Graph database identities must be distinct");
+      if (domain.clusterIdentity().equals(graph.clusterIdentity())
+          || domain.databaseIdentity().equals(graph.databaseIdentity())
+          || domain.runtimePrincipalIdentity().equals(graph.runtimePrincipalIdentity())) {
+        throw new IllegalArgumentException(
+            "Domain and Graph cluster and database must be physically distinct and principals"
+                + " distinct");
       }
     }
   }
@@ -139,6 +162,54 @@ public record TargetE2eActivationExpectedRuntime(
       TargetE2eActivationContract.identifier(clusterIdentity, "clusterIdentity");
       TargetE2eActivationContract.identifier(databaseIdentity, "databaseIdentity");
       TargetE2eActivationContract.identifier(runtimePrincipalIdentity, "runtimePrincipalIdentity");
+    }
+  }
+
+  public record SyntheticFixtureDeployment(
+      String fixtureSetId, String readOnlyPathBinding, String measuredCanonicalHash) {
+
+    public SyntheticFixtureDeployment {
+      TargetE2eActivationContract.identifier(fixtureSetId, "fixtureSetId");
+      TargetE2eSyntheticFixtureSource.requirePathBinding(readOnlyPathBinding);
+      TargetE2eActivationContract.sha256(measuredCanonicalHash, "measuredCanonicalHash");
+    }
+  }
+
+  /** Deployment facts measured independently of the signed manifest. */
+  public record MeasuredAuthorityFacts(
+      boolean isolatedDeployment,
+      String environmentClass,
+      String graphOutputAuthority,
+      boolean graphDomainCredentialsPresent,
+      boolean graphDomainPrivilegesPresent,
+      boolean graphDomainWriteAllowed,
+      String formalWriter,
+      boolean javaDomainCommitAllowed,
+      boolean externalEffectsAllowed,
+      boolean productionTrafficAllowed,
+      boolean productionPromotionAuthority,
+      boolean migrationPromotionAuthority,
+      String formalCaseSelectorDefault,
+      String targetE2EActivationDefault) {
+
+    public MeasuredAuthorityFacts {
+      if (!isolatedDeployment
+          || !"ISOLATED_PREPRODUCTION".equals(environmentClass)
+          || !"PROPOSAL_ONLY".equals(graphOutputAuthority)
+          || graphDomainCredentialsPresent
+          || graphDomainPrivilegesPresent
+          || graphDomainWriteAllowed
+          || !"JAVA_FINALIZER_ONLY".equals(formalWriter)
+          || !javaDomainCommitAllowed
+          || externalEffectsAllowed
+          || productionTrafficAllowed
+          || productionPromotionAuthority
+          || migrationPromotionAuthority
+          || !"LEGACY".equals(formalCaseSelectorDefault)
+          || !"DISABLED".equals(targetE2EActivationDefault)) {
+        throw new IllegalArgumentException(
+            "measured deployment authority exceeds the target E2E ceiling");
+      }
     }
   }
 }

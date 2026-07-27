@@ -25,6 +25,7 @@ final class TargetE2eActivationContract {
   private static final Pattern CANDIDATE_SHA = Pattern.compile("[0-9a-f]{40}");
   private static final Pattern SHA256 = Pattern.compile("[0-9a-f]{64}");
   private static final Pattern IMAGE_DIGEST = Pattern.compile("sha256:[0-9a-f]{64}");
+  private static final long MAXIMUM_SAFE_JSON_INTEGER = 9_007_199_254_740_991L;
 
   private TargetE2eActivationContract() {}
 
@@ -92,16 +93,16 @@ final class TargetE2eActivationContract {
   }
 
   static String appProfile(String value) {
-    if (!"local".equals(value) && !"target-e2e".equals(value)) {
+    if (!"target-e2e".equals(value)) {
       throw new IllegalArgumentException(
-          "target E2E activation requires the local or target-e2e profile");
+          "target E2E activation requires the dedicated target-e2e profile");
     }
     return value;
   }
 
   static long generation(long value) {
-    if (value < 1) {
-      throw new IllegalArgumentException("activation generation must be positive");
+    if (value < 1 || value > MAXIMUM_SAFE_JSON_INTEGER) {
+      throw new IllegalArgumentException("activation generation must be a positive safe integer");
     }
     return value;
   }

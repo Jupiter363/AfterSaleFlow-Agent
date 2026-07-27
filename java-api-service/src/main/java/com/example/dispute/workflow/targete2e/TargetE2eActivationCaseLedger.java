@@ -4,7 +4,9 @@ package com.example.dispute.workflow.targete2e;
  * Atomic bounded-case ledger shared by every call site in one isolated synthetic activation.
  *
  * <p>{@link Action#RESERVE_BEFORE_EPOCH_SELECTION} may create a slot. {@link
- * Action#REQUIRE_EXISTING} must never create one and is used by all downstream call sites.
+ * Action#REQUIRE_EXISTING} must never create one and is used by all downstream call sites. Every
+ * generated case ID also creates a global tombstone outside environment/activation partitioning;
+ * tombstones survive drain and revocation forever.
  */
 @FunctionalInterface
 public interface TargetE2eActivationCaseLedger {
@@ -25,13 +27,15 @@ public interface TargetE2eActivationCaseLedger {
     ALREADY_RESERVED_IDENTICALLY,
     NOT_RESERVED,
     CAPACITY_EXHAUSTED,
-    CONFLICT
+    SLOT_CONFLICT,
+    GENERATED_CASE_ID_GLOBAL_CONFLICT
   }
 
   record Reservation(
       String environmentId,
       long environmentGeneration,
       String activationId,
+      int slotNumber,
       String caseId,
       String caseIdPrefix,
       int maxCases,
@@ -42,6 +46,9 @@ public interface TargetE2eActivationCaseLedger {
       TargetE2eActivationContract.identifier(environmentId, "environmentId");
       TargetE2eActivationContract.generation(environmentGeneration);
       TargetE2eActivationContract.activationId(activationId);
+      if (slotNumber < 1 || slotNumber > maxCases) {
+        throw new IllegalArgumentException("slotNumber must be inside the activation capacity");
+      }
       TargetE2eActivationContract.caseId(caseId);
       TargetE2eActivationContract.caseIdPrefix(caseIdPrefix);
       if (!caseId.startsWith(caseIdPrefix) || caseId.length() == caseIdPrefix.length()) {
