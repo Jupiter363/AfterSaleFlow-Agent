@@ -2,6 +2,7 @@ package com.example.dispute.workflow.targete2e;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.mock;
 
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.targete2e.ActivationDecision.Reason;
@@ -21,11 +22,17 @@ import com.example.dispute.workflow.targete2e.TargetE2eActivationLifecycleStore.
 import com.example.dispute.workflow.targete2e.TargetE2eActivationLifecycleStore.TransitionResult;
 import com.example.dispute.workflow.targete2e.TargetE2eActivationReplayStore.Registration;
 import com.example.dispute.workflow.targete2e.TargetE2eActivationReplayStore.RegistrationResult;
+import com.example.dispute.workflow.targete2e.TargetE2eRuntimeMeasurementProvider.DatabasePrivilegeEvidence;
+import com.example.dispute.workflow.targete2e.TargetE2eRuntimeMeasurementProvider.FixedMeasurementProvider;
+import com.example.dispute.workflow.targete2e.TargetE2eRuntimeMeasurementProvider.MeasurementEvidence;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.Signature;
@@ -35,6 +42,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.Map;
@@ -42,8 +50,11 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
+import javax.sql.DataSource;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.springframework.mock.env.MockEnvironment;
 
 class TargetE2eActivationManifestVerifierTest {
 
@@ -60,6 +71,8 @@ class TargetE2eActivationManifestVerifierTest {
   private static KeyPair trustedKey;
   private static KeyPair otherKey;
 
+  @TempDir Path tempDirectory;
+
   @BeforeAll
   static void generateKeys() throws Exception {
     trustedKey = keyPair("secp256r1");
@@ -71,7 +84,7 @@ class TargetE2eActivationManifestVerifierTest {
     RecordingReplayStore replayStore = new RecordingReplayStore();
     TargetE2eActivationAuthority authority =
         verifier(replayStore, TargetE2eActivationCaseLedger.denyAll(), fixedClock())
-            .arm(sign(payload(), trustedKey, KEY_ID), expectedRuntime());
+            .arm(sign(payload(), trustedKey, KEY_ID));
 
     ActivationDecision selector = authority.authorize(request(ActivationScope.ROOM_SELECTOR));
     ActivationDecision graph = authority.authorize(request(ActivationScope.GRAPH_CLIENT));
@@ -107,7 +120,7 @@ class TargetE2eActivationManifestVerifierTest {
         .containsExactly(false, Reason.DEFAULT_DENY);
     TargetE2eActivationAuthority missing =
         verifier(new RecordingReplayStore(), TargetE2eActivationCaseLedger.denyAll(), fixedClock())
-            .arm(null, expectedRuntime());
+            .arm(null);
     assertThat(missing.authorize(request(ActivationScope.AGENT_RUN)).reason())
         .isEqualTo(Reason.DEFAULT_DENY);
   }
@@ -119,7 +132,7 @@ class TargetE2eActivationManifestVerifierTest {
     wrongManifestHash.put("manifestHash", "f".repeat(64));
     ActivationDecision manifestFailure =
         verifier(replayStore, TargetE2eActivationCaseLedger.denyAll(), fixedClock())
-            .arm(sign(wrongManifestHash, trustedKey, KEY_ID), expectedRuntime())
+            .arm(sign(wrongManifestHash, trustedKey, KEY_ID))
             .authorize(request(ActivationScope.AGENT_RUN));
     assertThat(manifestFailure.reason()).isEqualTo(Reason.INVALID_MANIFEST_HASH);
 
@@ -128,7 +141,7 @@ class TargetE2eActivationManifestVerifierTest {
     refreshManifestHash(wrongGraphHash);
     ActivationDecision graphFailure =
         verifier(replayStore, TargetE2eActivationCaseLedger.denyAll(), fixedClock())
-            .arm(sign(wrongGraphHash, trustedKey, KEY_ID), expectedRuntime())
+            .arm(sign(wrongGraphHash, trustedKey, KEY_ID))
             .authorize(request(ActivationScope.AGENT_RUN));
     assertThat(graphFailure.reason()).isEqualTo(Reason.INVALID_GRAPH_BINDING_HASH);
     assertThat(replayStore.calls()).isZero();
@@ -189,7 +202,7 @@ class TargetE2eActivationManifestVerifierTest {
 
     TargetE2eActivationAuthority authority =
         verifier(new RecordingReplayStore(), TargetE2eActivationCaseLedger.denyAll(), fixedClock())
-            .arm(sign(payload(), trustedKey, KEY_ID), expectedRuntime());
+            .arm(sign(payload(), trustedKey, KEY_ID));
     assertThat(
             authority
                 .authorize(
@@ -228,7 +241,7 @@ class TargetE2eActivationManifestVerifierTest {
     refreshHashes(collision);
     ActivationDecision collisionDecision =
         verifier(new RecordingReplayStore(), TargetE2eActivationCaseLedger.denyAll(), fixedClock())
-            .arm(sign(collision, trustedKey, KEY_ID), expectedRuntime())
+            .arm(sign(collision, trustedKey, KEY_ID))
             .authorize(request(ActivationScope.AGENT_RUN));
     assertThat(collisionDecision.reason()).isEqualTo(Reason.WRONG_CONTRACT);
   }
@@ -238,20 +251,19 @@ class TargetE2eActivationManifestVerifierTest {
     RecordingReplayStore replayStore = new RecordingReplayStore();
     ActivationDecision untrusted =
         verifier(replayStore, TargetE2eActivationCaseLedger.denyAll(), fixedClock())
-            .arm(sign(payload(), trustedKey, "untrusted-key"), expectedRuntime())
+            .arm(sign(payload(), trustedKey, "untrusted-key"))
             .authorize(request(ActivationScope.AGENT_RUN));
     assertThat(untrusted.reason()).isEqualTo(Reason.UNTRUSTED_KEY);
 
     ActivationDecision invalidSignature =
         verifier(replayStore, TargetE2eActivationCaseLedger.denyAll(), fixedClock())
-            .arm(sign(payload(), otherKey, KEY_ID), expectedRuntime())
+            .arm(sign(payload(), otherKey, KEY_ID))
             .authorize(request(ActivationScope.AGENT_RUN));
     assertThat(invalidSignature.reason()).isEqualTo(Reason.INVALID_SIGNATURE);
 
     ActivationDecision wrongType =
         verifier(replayStore, TargetE2eActivationCaseLedger.denyAll(), fixedClock())
-            .arm(
-                sign(payload(), trustedKey, KEY_ID, "target-e2e-activation+jws"), expectedRuntime())
+            .arm(sign(payload(), trustedKey, KEY_ID, "target-e2e-activation+jws"))
             .authorize(request(ActivationScope.AGENT_RUN));
     assertThat(wrongType.reason()).isEqualTo(Reason.WRONG_CONTRACT);
     assertThat(replayStore.calls()).isZero();
@@ -262,13 +274,13 @@ class TargetE2eActivationManifestVerifierTest {
     byte[] prettyPayload = MAPPER.writerWithDefaultPrettyPrinter().writeValueAsBytes(payload());
     ActivationDecision nonCanonical =
         verifier(new RecordingReplayStore(), TargetE2eActivationCaseLedger.denyAll(), fixedClock())
-            .arm(signRaw(prettyPayload, trustedKey, KEY_ID), expectedRuntime())
+            .arm(signRaw(prettyPayload, trustedKey, KEY_ID))
             .authorize(request(ActivationScope.AGENT_RUN));
     assertThat(nonCanonical.reason()).isEqualTo(Reason.NON_CANONICAL_MANIFEST);
 
     ActivationDecision malformed =
         verifier(new RecordingReplayStore(), TargetE2eActivationCaseLedger.denyAll(), fixedClock())
-            .arm("not-a-compact-jws", expectedRuntime())
+            .arm("not-a-compact-jws")
             .authorize(request(ActivationScope.AGENT_RUN));
     assertThat(malformed.reason()).isEqualTo(Reason.MALFORMED_MANIFEST);
 
@@ -277,7 +289,7 @@ class TargetE2eActivationManifestVerifierTest {
     refreshManifestHash(expanded);
     ActivationDecision unknownField =
         verifier(new RecordingReplayStore(), TargetE2eActivationCaseLedger.denyAll(), fixedClock())
-            .arm(sign(expanded, trustedKey, KEY_ID), expectedRuntime())
+            .arm(sign(expanded, trustedKey, KEY_ID))
             .authorize(request(ActivationScope.AGENT_RUN));
     assertThat(unknownField.reason()).isEqualTo(Reason.WRONG_CONTRACT);
   }
@@ -289,17 +301,9 @@ class TargetE2eActivationManifestVerifierTest {
         verifier(replayStore, TargetE2eActivationCaseLedger.denyAll(), fixedClock());
     String original = sign(payload(), trustedKey, KEY_ID);
 
-    assertThat(
-            verifier
-                .arm(original, expectedRuntime())
-                .authorize(request(ActivationScope.FINALIZER))
-                .allowed())
+    assertThat(verifier.arm(original).authorize(request(ActivationScope.FINALIZER)).allowed())
         .isTrue();
-    assertThat(
-            verifier
-                .arm(original, expectedRuntime())
-                .authorize(request(ActivationScope.FINALIZER))
-                .allowed())
+    assertThat(verifier.arm(original).authorize(request(ActivationScope.FINALIZER)).allowed())
         .isTrue();
 
     ObjectNode conflict = payload();
@@ -307,7 +311,7 @@ class TargetE2eActivationManifestVerifierTest {
     refreshManifestHash(conflict);
     ActivationDecision replay =
         verifier
-            .arm(sign(conflict, trustedKey, KEY_ID), expectedRuntime())
+            .arm(sign(conflict, trustedKey, KEY_ID))
             .authorize(request(ActivationScope.FINALIZER));
     assertThat(replay.reason()).isEqualTo(Reason.ENVIRONMENT_GENERATION_CONFLICT);
     assertThat(replayStore.calls()).isEqualTo(3);
@@ -318,7 +322,7 @@ class TargetE2eActivationManifestVerifierTest {
     RecordingReplayStore replayStore = new RecordingReplayStore();
     assertThat(
             verifier(replayStore, TargetE2eActivationCaseLedger.denyAll(), fixedClock())
-                .arm(sign(payload(), trustedKey, KEY_ID), expectedRuntime())
+                .arm(sign(payload(), trustedKey, KEY_ID))
                 .authorize(request(ActivationScope.AGENT_RUN))
                 .allowed())
         .isTrue();
@@ -329,8 +333,12 @@ class TargetE2eActivationManifestVerifierTest {
     stalePayload.put("nonce", "activation-nonce-" + "2".repeat(20));
     refreshManifestHash(stalePayload);
     ActivationDecision stale =
-        verifier(replayStore, TargetE2eActivationCaseLedger.denyAll(), fixedClock())
-            .arm(sign(stalePayload, trustedKey, KEY_ID), withGeneration(expectedRuntime(), 16))
+        verifier(
+                replayStore,
+                TargetE2eActivationCaseLedger.denyAll(),
+                withGeneration(expectedRuntime(), 16),
+                fixedClock())
+            .arm(sign(stalePayload, trustedKey, KEY_ID))
             .authorize(request(ActivationScope.AGENT_RUN));
     assertThat(stale.reason()).isEqualTo(Reason.ENVIRONMENT_GENERATION_STALE);
 
@@ -340,7 +348,7 @@ class TargetE2eActivationManifestVerifierTest {
     refreshManifestHash(conflictPayload);
     ActivationDecision conflict =
         verifier(replayStore, TargetE2eActivationCaseLedger.denyAll(), fixedClock())
-            .arm(sign(conflictPayload, trustedKey, KEY_ID), expectedRuntime())
+            .arm(sign(conflictPayload, trustedKey, KEY_ID))
             .authorize(request(ActivationScope.AGENT_RUN));
     assertThat(conflict.reason()).isEqualTo(Reason.ENVIRONMENT_GENERATION_CONFLICT);
   }
@@ -361,7 +369,7 @@ class TargetE2eActivationManifestVerifierTest {
         };
     ActivationDecision failure =
         verifier(failing, TargetE2eActivationCaseLedger.denyAll(), fixedClock())
-            .arm(sign(payload(), trustedKey, KEY_ID), expectedRuntime())
+            .arm(sign(payload(), trustedKey, KEY_ID))
             .authorize(request(ActivationScope.AGENT_RUN));
     assertThat(failure.reason()).isEqualTo(Reason.REPLAY_STORE_FAILURE);
   }
@@ -370,8 +378,8 @@ class TargetE2eActivationManifestVerifierTest {
   void reservesSyntheticCaseBeforeEpochSelectionAndRequiresItDownstream() throws Exception {
     RecordingCaseLedger caseLedger = new RecordingCaseLedger();
     TargetE2eActivationAuthority authority =
-        verifier(new RecordingReplayStore(), caseLedger, fixedClock())
-            .arm(sign(syntheticPayload(), trustedKey, KEY_ID), syntheticRuntime());
+        verifier(new RecordingReplayStore(), caseLedger, syntheticRuntime(), fixedClock())
+            .arm(sign(syntheticPayload(), trustedKey, KEY_ID));
     ActivationRequest graphBeforeSelector =
         new ActivationRequest(
             ActivationScope.GRAPH_CLIENT,
@@ -414,8 +422,8 @@ class TargetE2eActivationManifestVerifierTest {
   void enforcesSyntheticCaseCapacityAndNoRealDataOrWildcardPrefix() throws Exception {
     RecordingCaseLedger caseLedger = new RecordingCaseLedger(1);
     TargetE2eActivationAuthority authority =
-        verifier(new RecordingReplayStore(), caseLedger, fixedClock())
-            .arm(sign(syntheticPayload(), trustedKey, KEY_ID), syntheticRuntime());
+        verifier(new RecordingReplayStore(), caseLedger, syntheticRuntime(), fixedClock())
+            .arm(sign(syntheticPayload(), trustedKey, KEY_ID));
     assertThat(
             authority
                 .authorize(
@@ -492,8 +500,9 @@ class TargetE2eActivationManifestVerifierTest {
                 new RecordingCaseLedger(),
                 new RecordingLifecycleStore(),
                 wrongBytes,
+                syntheticRuntime(),
                 fixedClock())
-            .arm(sign(syntheticPayload(), trustedKey, KEY_ID), syntheticRuntime())
+            .arm(sign(syntheticPayload(), trustedKey, KEY_ID))
             .authorize(
                 new ActivationRequest(
                     ActivationScope.ROOM_SELECTOR,
@@ -522,8 +531,9 @@ class TargetE2eActivationManifestVerifierTest {
                 new RecordingCaseLedger(),
                 new RecordingLifecycleStore(),
                 nonCanonical,
+                syntheticRuntime(),
                 fixedClock())
-            .arm(sign(syntheticPayload(), trustedKey, KEY_ID), syntheticRuntime())
+            .arm(sign(syntheticPayload(), trustedKey, KEY_ID))
             .authorize(
                 new ActivationRequest(
                     ActivationScope.ROOM_SELECTOR,
@@ -551,8 +561,9 @@ class TargetE2eActivationManifestVerifierTest {
             TargetE2eActivationCaseLedger.denyAll(),
             lifecycle,
             fixtureSource(),
+            expectedRuntime(),
             clock);
-    TargetE2eActivationAuthority authority = verifier.arm(compact, expectedRuntime());
+    TargetE2eActivationAuthority authority = verifier.arm(compact);
     ActivationDecision active = authority.authorize(request(ActivationScope.AGENT_RUN));
     ActivationGrant grant = active.grant().orElseThrow();
     DrainAcceptedCommand accepted = drainCommand(NOW.plusSeconds(30));
@@ -574,12 +585,7 @@ class TargetE2eActivationManifestVerifierTest {
     assertThat(draining.allowed()).isTrue();
     assertThat(draining.authorizationMode())
         .contains(ActivationDecision.AuthorizationMode.DRAIN_ACCEPTED_COMMAND);
-    assertThat(
-            verifier
-                .armForDrain(compact, expectedRuntime(), accepted)
-                .authorize(drainRequest)
-                .allowed())
-        .isTrue();
+    assertThat(verifier.armForDrain(compact, accepted).authorize(drainRequest).allowed()).isTrue();
 
     ActivationIdentity identity =
         new ActivationIdentity(
@@ -611,7 +617,7 @@ class TargetE2eActivationManifestVerifierTest {
     refreshManifestHash(shortLived);
     TargetE2eActivationAuthority authority =
         verifier(new RecordingReplayStore(), TargetE2eActivationCaseLedger.denyAll(), clock)
-            .arm(sign(shortLived, trustedKey, KEY_ID), expectedRuntime());
+            .arm(sign(shortLived, trustedKey, KEY_ID));
     assertThat(authority.authorize(request(ActivationScope.FINALIZER)).allowed()).isTrue();
     clock.advance(Duration.ofSeconds(60));
     assertThat(authority.authorize(request(ActivationScope.FINALIZER)).reason())
@@ -635,6 +641,7 @@ class TargetE2eActivationManifestVerifierTest {
                     TargetE2eActivationCaseLedger.denyAll(),
                     new RecordingLifecycleStore(),
                     fixtureSource(),
+                    fixedMeasurementProvider(expectedRuntime()),
                     fixedClock(),
                     Duration.ofSeconds(1)))
         .isInstanceOf(IllegalArgumentException.class)
@@ -680,6 +687,145 @@ class TargetE2eActivationManifestVerifierTest {
   }
 
   @Test
+  void exposesNoPublicCallerConstructedRuntimeAuthorityPath() {
+    assertThat(TargetE2eActivationExpectedRuntime.class.getConstructors()).isEmpty();
+    assertThat(MeasuredRuntime.class.getConstructors()).isEmpty();
+    assertThat(TargetE2eRuntimeMeasurementProvider.class.isSealed()).isTrue();
+    assertThat(
+            Arrays.stream(TargetE2eActivationManifestVerifier.class.getMethods())
+                .filter(method -> method.getName().equals("arm"))
+                .map(Method::getParameterTypes)
+                .flatMap(Arrays::stream))
+        .doesNotContain(TargetE2eActivationExpectedRuntime.class, MeasuredRuntime.class);
+  }
+
+  @Test
+  void measurementFailuresNeverReachReplayRegistration() throws Exception {
+    assertMeasuredProviderDenied(
+        environment -> environment.setActiveProfiles("target-e2e", "prod"),
+        safeDatabaseProbe(),
+        Reason.RUNTIME_MEASUREMENT_FAILED);
+    assertMeasuredProviderDenied(
+        environment ->
+            environment.setProperty(
+                "app.target-e2e.measurement.production-formal-selector-default", "TEMPORAL"),
+        safeDatabaseProbe(),
+        Reason.RUNTIME_MEASUREMENT_FAILED);
+    assertMeasuredProviderDenied(
+        environment -> environment.setProperty("APP_GRAPH_DOMAIN_PASSWORD", "forbidden"),
+        safeDatabaseProbe(),
+        Reason.RUNTIME_MEASUREMENT_FAILED);
+
+    DatabaseIdentity shared =
+        new DatabaseIdentity(
+            "pg-system-id/shared-100", "pg-database-oid/shared-200", "pg-role-oid/301");
+    assertMeasuredProviderDenied(
+        environment -> {},
+        databaseProbe(
+            observation(shared, "domain_runtime", false),
+            observation(
+                new DatabaseIdentity(
+                    "pg-system-id/shared-100", "pg-database-oid/graph-201", "pg-role-oid/302"),
+                "graph_runtime",
+                false)),
+        Reason.RUNTIME_MEASUREMENT_FAILED);
+    assertMeasuredProviderDenied(
+        environment -> {},
+        databaseProbe(
+            observation(domainIdentity(), "domain_runtime", false),
+            observation(graphIdentity(), "graph_runtime", true)),
+        Reason.RUNTIME_MEASUREMENT_FAILED);
+    assertMeasuredProviderDenied(
+        environment -> {},
+        databaseProbe(
+            observation(domainIdentity(), "domain_runtime", true),
+            observation(graphIdentity(), "graph_runtime", false)),
+        Reason.RUNTIME_MEASUREMENT_FAILED);
+  }
+
+  @Test
+  void forgedIsolationAttestationNeverReachesReplayRegistration() throws Exception {
+    Path forged = tempDirectory.resolve("forged-isolation-attestation.jws");
+    Files.writeString(forged, "not-a-signed-attestation", StandardCharsets.US_ASCII);
+    RecordingReplayStore replay = new RecordingReplayStore();
+    TargetE2eRuntimeMeasurementProvider provider =
+        measuredProvider(safeEnvironment(), safeDatabaseProbe(), forged);
+    ActivationDecision decision =
+        verifier(replay, provider, fixedClock())
+            .arm(sign(payload(), trustedKey, KEY_ID))
+            .authorize(request(ActivationScope.AGENT_RUN));
+    assertThat(decision.reason()).isEqualTo(Reason.RUNTIME_MEASUREMENT_FAILED);
+    assertThat(replay.calls()).isZero();
+  }
+
+  @Test
+  void concreteMeasurementAcceptsOnlyIndependentlySignedExactAttestation() throws Exception {
+    Path attestation = tempDirectory.resolve("isolation-attestation.jws");
+    Files.writeString(
+        attestation,
+        sign(
+            isolationAttestationPayload(),
+            otherKey,
+            "isolation-attestation-key",
+            TargetE2eIsolationAttestationVerifier.JWS_TYPE),
+        StandardCharsets.US_ASCII);
+    RecordingReplayStore replay = new RecordingReplayStore();
+    TargetE2eRuntimeMeasurementProvider provider =
+        measuredProvider(safeEnvironment(), safeDatabaseProbe(), attestation);
+    assertThat(
+            verifier(replay, provider, fixedClock())
+                .arm(sign(payload(), trustedKey, KEY_ID))
+                .authorize(request(ActivationScope.AGENT_RUN))
+                .allowed())
+        .isTrue();
+    assertThat(replay.calls()).isEqualTo(1);
+
+    ObjectNode wrongCandidate = isolationAttestationPayload();
+    wrongCandidate.put("candidateSha", "f".repeat(40));
+    refreshAttestationHash(wrongCandidate);
+    Files.writeString(
+        attestation,
+        sign(
+            wrongCandidate,
+            otherKey,
+            "isolation-attestation-key",
+            TargetE2eIsolationAttestationVerifier.JWS_TYPE),
+        StandardCharsets.US_ASCII);
+    RecordingReplayStore rejectedReplay = new RecordingReplayStore();
+    ActivationDecision rejected =
+        verifier(
+                rejectedReplay,
+                measuredProvider(safeEnvironment(), safeDatabaseProbe(), attestation),
+                fixedClock())
+            .arm(sign(payload(), trustedKey, KEY_ID))
+            .authorize(request(ActivationScope.AGENT_RUN));
+    assertThat(rejected.reason()).isEqualTo(Reason.RUNTIME_MEASUREMENT_FAILED);
+    assertThat(rejectedReplay.calls()).isZero();
+
+    ObjectNode wrongArtifact = isolationAttestationPayload();
+    wrongArtifact.put("artifactDigest", "f".repeat(64));
+    refreshAttestationHash(wrongArtifact);
+    Files.writeString(
+        attestation,
+        sign(
+            wrongArtifact,
+            otherKey,
+            "isolation-attestation-key",
+            TargetE2eIsolationAttestationVerifier.JWS_TYPE),
+        StandardCharsets.US_ASCII);
+    RecordingReplayStore artifactReplay = new RecordingReplayStore();
+    ActivationDecision artifactRejected =
+        verifier(
+                artifactReplay,
+                measuredProvider(safeEnvironment(), safeDatabaseProbe(), attestation),
+                fixedClock())
+            .arm(sign(payload(), trustedKey, KEY_ID))
+            .authorize(request(ActivationScope.AGENT_RUN));
+    assertThat(artifactRejected.reason()).isEqualTo(Reason.RUNTIME_MEASUREMENT_FAILED);
+    assertThat(artifactReplay.calls()).isZero();
+  }
+
+  @Test
   void rejectsNonP256PublicKeys() throws Exception {
     KeyPair p384 = keyPair("secp384r1");
     assertThatThrownBy(
@@ -697,7 +843,7 @@ class TargetE2eActivationManifestVerifierTest {
     refreshHashes(changed);
     ActivationDecision decision =
         verifier(new RecordingReplayStore(), TargetE2eActivationCaseLedger.denyAll(), fixedClock())
-            .arm(sign(changed, trustedKey, KEY_ID), expectedRuntime())
+            .arm(sign(changed, trustedKey, KEY_ID))
             .authorize(request(ActivationScope.AGENT_RUN));
     assertThat(decision.allowed()).isFalse();
     assertThat(decision.reason()).isEqualTo(expectedReason);
@@ -707,7 +853,31 @@ class TargetE2eActivationManifestVerifierTest {
       TargetE2eActivationReplayStore replayStore,
       TargetE2eActivationCaseLedger caseLedger,
       Clock clock) {
-    return verifier(replayStore, caseLedger, new RecordingLifecycleStore(), clock);
+    return verifier(replayStore, caseLedger, expectedRuntime(), clock);
+  }
+
+  private static TargetE2eActivationManifestVerifier verifier(
+      TargetE2eActivationReplayStore replayStore,
+      TargetE2eRuntimeMeasurementProvider measurementProvider,
+      Clock clock) {
+    return new TargetE2eActivationManifestVerifier(
+        keySet(),
+        replayStore,
+        TargetE2eActivationCaseLedger.denyAll(),
+        new RecordingLifecycleStore(),
+        fixtureSource(),
+        measurementProvider,
+        clock,
+        Duration.ZERO);
+  }
+
+  private static TargetE2eActivationManifestVerifier verifier(
+      TargetE2eActivationReplayStore replayStore,
+      TargetE2eActivationCaseLedger caseLedger,
+      TargetE2eActivationExpectedRuntime runtime,
+      Clock clock) {
+    return verifier(
+        replayStore, caseLedger, new RecordingLifecycleStore(), fixtureSource(), runtime, clock);
   }
 
   private static TargetE2eActivationManifestVerifier verifier(
@@ -715,7 +885,8 @@ class TargetE2eActivationManifestVerifierTest {
       TargetE2eActivationCaseLedger caseLedger,
       TargetE2eActivationLifecycleStore lifecycleStore,
       Clock clock) {
-    return verifier(replayStore, caseLedger, lifecycleStore, fixtureSource(), clock);
+    return verifier(
+        replayStore, caseLedger, lifecycleStore, fixtureSource(), expectedRuntime(), clock);
   }
 
   private static TargetE2eActivationManifestVerifier verifier(
@@ -723,6 +894,7 @@ class TargetE2eActivationManifestVerifierTest {
       TargetE2eActivationCaseLedger caseLedger,
       TargetE2eActivationLifecycleStore lifecycleStore,
       TargetE2eSyntheticFixtureSource syntheticFixtureSource,
+      TargetE2eActivationExpectedRuntime runtime,
       Clock clock) {
     return new TargetE2eActivationManifestVerifier(
         keySet(),
@@ -730,6 +902,7 @@ class TargetE2eActivationManifestVerifierTest {
         caseLedger,
         lifecycleStore,
         syntheticFixtureSource,
+        fixedMeasurementProvider(runtime),
         clock,
         Duration.ZERO);
   }
@@ -737,6 +910,153 @@ class TargetE2eActivationManifestVerifierTest {
   private static TargetE2eActivationPublicKeySet keySet() {
     return TargetE2eActivationPublicKeySet.allowlisted(
         Map.of(KEY_ID, (java.security.interfaces.ECPublicKey) trustedKey.getPublic()));
+  }
+
+  private void assertMeasuredProviderDenied(
+      Consumer<MockEnvironment> mutation,
+      SpringJdbcTargetE2eRuntimeMeasurementProvider.DatabaseProbe databaseProbe,
+      Reason expectedReason)
+      throws Exception {
+    MockEnvironment environment = safeEnvironment();
+    mutation.accept(environment);
+    RecordingReplayStore replay = new RecordingReplayStore();
+    TargetE2eRuntimeMeasurementProvider provider =
+        measuredProvider(
+            environment, databaseProbe, tempDirectory.resolve("absent-attestation.jws"));
+    ActivationDecision decision =
+        verifier(replay, provider, fixedClock())
+            .arm(sign(payload(), trustedKey, KEY_ID))
+            .authorize(request(ActivationScope.AGENT_RUN));
+    assertThat(decision.reason()).isEqualTo(expectedReason);
+    assertThat(replay.calls()).isZero();
+  }
+
+  private static TargetE2eRuntimeMeasurementProvider measuredProvider(
+      MockEnvironment environment,
+      SpringJdbcTargetE2eRuntimeMeasurementProvider.DatabaseProbe databaseProbe,
+      Path attestationPath) {
+    TargetE2eIsolationAttestationPublicKeySet isolationKeys =
+        TargetE2eIsolationAttestationPublicKeySet.allowlisted(
+            Map.of(
+                "isolation-attestation-key",
+                (java.security.interfaces.ECPublicKey) otherKey.getPublic()));
+    return new SpringJdbcTargetE2eRuntimeMeasurementProvider(
+        environment,
+        mock(DataSource.class),
+        mock(DataSource.class),
+        databaseProbe,
+        () ->
+            new SpringJdbcTargetE2eRuntimeMeasurementProvider.ArtifactMeasurement(
+                SpringJdbcTargetE2eRuntimeMeasurementProvider.ARTIFACT_MARKER, "0".repeat(64)),
+        new TargetE2eIsolationAttestationVerifier(isolationKeys, fixedClock()),
+        attestationPath);
+  }
+
+  private static MockEnvironment safeEnvironment() {
+    MockEnvironment environment = new MockEnvironment();
+    environment.setActiveProfiles("target-e2e", "agent-worker");
+    environment.setProperty(
+        "app.target-e2e.measurement.artifact-marker",
+        SpringJdbcTargetE2eRuntimeMeasurementProvider.ARTIFACT_MARKER);
+    environment.setProperty("app.temporal.worker.enabled", "true");
+    environment.setProperty("app.temporal.worker.role", "AGENT");
+    environment.setProperty("app.temporal.worker.versioning-mode", "BUILD_ID");
+    environment.setProperty("app.temporal.worker.build-id", "agent-v9");
+    environment.setProperty("app.temporal.namespace", "target-e2e-namespace");
+    environment.setProperty("app.target-e2e.measurement.environment-id", "target-e2e-env-01");
+    environment.setProperty("app.target-e2e.measurement.environment-generation", "17");
+    environment.setProperty("app.target-e2e.measurement.candidate-sha", CANDIDATE_SHA);
+    environment.setProperty("app.target-e2e.measurement.tenant-surrogate", "tenant-e2e");
+    environment.setProperty("app.target-e2e.measurement.case-scope.mode", "EXPLICIT_CASE_IDS");
+    environment.setProperty("app.target-e2e.measurement.case-scope.allowed-case-ids", CASE_ID);
+    environment.setProperty("app.target-e2e.measurement.allowed-room-types", "INTAKE,EVIDENCE");
+    environment.setProperty("app.target-e2e.measurement.build.case", "case-v9");
+    environment.setProperty("app.target-e2e.measurement.build.control", "control-v9");
+    environment.setProperty("app.target-e2e.measurement.build.agent", "agent-v9");
+    environment.setProperty("app.target-e2e.measurement.graph.key", "all-rooms.target-e2e.v1");
+    environment.setProperty("app.target-e2e.measurement.graph.version", "graph-v9");
+    environment.setProperty(
+        "app.target-e2e.measurement.graph.checkpoint-schema-version", "checkpoint-v9");
+    environment.setProperty("app.target-e2e.measurement.graph.binding-hash", graphBindingHash());
+    environment.setProperty("app.target-e2e.measurement.graph.code-build-id", "graph-code-v9");
+    environment.setProperty("app.target-e2e.measurement.images.java-api", digest('4'));
+    environment.setProperty(
+        "app.target-e2e.measurement.images.temporal-control-worker", digest('5'));
+    environment.setProperty("app.target-e2e.measurement.images.temporal-agent-worker", digest('6'));
+    environment.setProperty("app.target-e2e.measurement.images.python-agent", digest('7'));
+    environment.setProperty("app.target-e2e.measurement.images.frontend", digest('8'));
+    environment.setProperty(
+        "app.target-e2e.measurement.environment-class", "ISOLATED_PREPRODUCTION");
+    environment.setProperty("app.target-e2e.measurement.graph-output-authority", "PROPOSAL_ONLY");
+    environment.setProperty("app.target-e2e.measurement.formal-writer", "JAVA_FINALIZER_ONLY");
+    environment.setProperty(
+        "app.target-e2e.measurement.production-formal-selector-default", "LEGACY");
+    environment.setProperty("app.target-e2e.measurement.activation-default", "DISABLED");
+    environment.setProperty(
+        "app.target-e2e.measurement.network-isolation-mode", "ATTESTED_DENY_EXTERNAL_EGRESS");
+    environment.setProperty("app.target-e2e.measurement.external-effects-enabled", "false");
+    return environment;
+  }
+
+  private static SpringJdbcTargetE2eRuntimeMeasurementProvider.DatabaseProbe safeDatabaseProbe() {
+    return databaseProbe(
+        observation(domainIdentity(), "domain_runtime", false),
+        observation(graphIdentity(), "graph_runtime", false));
+  }
+
+  private static SpringJdbcTargetE2eRuntimeMeasurementProvider.DatabaseProbe databaseProbe(
+      SpringJdbcTargetE2eRuntimeMeasurementProvider.DatabaseObservation domain,
+      SpringJdbcTargetE2eRuntimeMeasurementProvider.DatabaseObservation graph) {
+    AtomicInteger measurements = new AtomicInteger();
+    return new SpringJdbcTargetE2eRuntimeMeasurementProvider.DatabaseProbe() {
+      @Override
+      public SpringJdbcTargetE2eRuntimeMeasurementProvider.DatabaseObservation measure(
+          DataSource dataSource) {
+        return measurements.getAndIncrement() == 0 ? domain : graph;
+      }
+
+      @Override
+      public boolean peerPrincipalCanConnect(DataSource dataSource, String peerRoleName) {
+        return false;
+      }
+    };
+  }
+
+  private static SpringJdbcTargetE2eRuntimeMeasurementProvider.DatabaseObservation observation(
+      DatabaseIdentity identity, String roleName, boolean elevated) {
+    return new SpringJdbcTargetE2eRuntimeMeasurementProvider.DatabaseObservation(
+        identity, roleName, elevated, false, false, false, false);
+  }
+
+  private static DatabaseIdentity domainIdentity() {
+    return databaseIdentities().domain();
+  }
+
+  private static DatabaseIdentity graphIdentity() {
+    return databaseIdentities().graph();
+  }
+
+  private static TargetE2eRuntimeMeasurementProvider fixedMeasurementProvider(
+      TargetE2eActivationExpectedRuntime runtime) {
+    DatabasePrivilegeEvidence privileges =
+        new DatabasePrivilegeEvidence(false, false, false, false, false, false);
+    TargetE2eIsolationAttestationVerifier.VerifiedAttestation attestation =
+        new TargetE2eIsolationAttestationVerifier.VerifiedAttestation(
+            "isolation-attestation-key",
+            "isolation-attestation-nonce-00000000",
+            "1".repeat(64),
+            NOW.minusSeconds(10),
+            NOW.plusSeconds(600));
+    MeasurementEvidence evidence =
+        new MeasurementEvidence(
+            Set.of("target-e2e", "agent-worker"),
+            SpringJdbcTargetE2eRuntimeMeasurementProvider.ARTIFACT_MARKER,
+            "0".repeat(64),
+            "AGENT",
+            privileges,
+            privileges,
+            attestation);
+    return new FixedMeasurementProvider(new MeasuredRuntime(runtime, evidence));
   }
 
   private static TargetE2eActivationExpectedRuntime expectedRuntime() {
@@ -762,7 +1082,7 @@ class TargetE2eActivationManifestVerifierTest {
             : Set.of(RoomType.INTAKE, RoomType.EVIDENCE),
         new BuildBindings("case-v9", "control-v9", "agent-v9"),
         new GraphBinding(
-            "all-rooms/target-e2e.v1",
+                "all-rooms.target-e2e.v1",
             "graph-v9",
             "checkpoint-v9",
             graphBindingHash(),
@@ -884,6 +1204,39 @@ class TargetE2eActivationManifestVerifierTest {
     return payload;
   }
 
+  private static ObjectNode isolationAttestationPayload() {
+    DatabasePrivilegeEvidence privileges =
+        new DatabasePrivilegeEvidence(false, false, false, false, false, false);
+    ObjectNode payload = MAPPER.createObjectNode();
+    payload.put("schemaVersion", TargetE2eIsolationAttestationVerifier.SCHEMA_VERSION);
+    payload.put("attestationNonce", "isolation-attestation-nonce-00000000");
+    payload.put("environmentId", "target-e2e-env-01");
+    payload.put("environmentGeneration", 17);
+    payload.put("candidateSha", CANDIDATE_SHA);
+    payload.put("artifactDigest", "0".repeat(64));
+    payload.put("issuedAt", NOW.minusSeconds(10).toString());
+    payload.put("expiresAt", NOW.plusSeconds(600).toString());
+    payload.put(
+        "imageDigestsHash",
+        TargetE2eIsolationAttestationVerifier.imageDigestsHash(expectedRuntime().imageDigests()));
+    payload.put(
+        "databaseMeasurementHash",
+        TargetE2eIsolationAttestationVerifier.databaseMeasurementHash(
+            databaseIdentities(), privileges, privileges));
+    payload.put("networkIsolationEnforced", true);
+    payload.put("externalEffectEndpointsEnabled", false);
+    payload.put("graphDomainCredentialsPresent", false);
+    payload.put("graphDomainPrivilegesPresent", false);
+    refreshAttestationHash(payload);
+    return payload;
+  }
+
+  private static void refreshAttestationHash(ObjectNode payload) {
+    ObjectNode source = payload.deepCopy();
+    source.remove("attestationHash");
+    payload.put("attestationHash", ContractJson.sha256Hex(source));
+  }
+
   private static ObjectNode syntheticPayload() {
     ObjectNode payload = basePayload();
     ArrayNode rooms = payload.putArray("allowedRoomTypes");
@@ -923,7 +1276,7 @@ class TargetE2eActivationManifestVerifierTest {
     builds.put("controlBuildId", "control-v9");
     builds.put("agentBuildId", "agent-v9");
     ObjectNode graph = payload.putObject("graphBinding");
-    graph.put("key", "all-rooms/target-e2e.v1");
+        graph.put("key", "all-rooms.target-e2e.v1");
     graph.put("version", "graph-v9");
     graph.put("checkpointSchemaVersion", "checkpoint-v9");
     graph.put("codeBuildId", "graph-code-v9");
@@ -1015,7 +1368,7 @@ class TargetE2eActivationManifestVerifierTest {
 
   private static String graphBindingHash() {
     ObjectNode graph = MAPPER.createObjectNode();
-    graph.put("key", "all-rooms/target-e2e.v1");
+        graph.put("key", "all-rooms.target-e2e.v1");
     graph.put("version", "graph-v9");
     graph.put("checkpointSchemaVersion", "checkpoint-v9");
     graph.put("codeBuildId", "graph-code-v9");

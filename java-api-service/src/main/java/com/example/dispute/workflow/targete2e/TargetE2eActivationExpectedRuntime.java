@@ -4,24 +4,39 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 
-/** Java-owned exact runtime binding against which one signed activation is armed. */
-public record TargetE2eActivationExpectedRuntime(
-    String appProfile,
-    String environmentId,
-    long environmentGeneration,
-    String candidateSha,
-    String tenantSurrogate,
-    CaseScope caseScope,
-    Set<RoomType> allowedRoomTypes,
-    BuildBindings buildBindings,
-    GraphBinding graphBinding,
-    ImageDigests imageDigests,
-    String temporalNamespace,
-    DatabaseIdentities databaseIdentities,
-    Optional<SyntheticFixtureDeployment> syntheticFixtureDeployment,
-    MeasuredAuthorityFacts authorityFacts) {
+/** Exact runtime binding created only inside the trusted measurement package. */
+public final class TargetE2eActivationExpectedRuntime {
 
-  public TargetE2eActivationExpectedRuntime {
+  private final String appProfile;
+  private final String environmentId;
+  private final long environmentGeneration;
+  private final String candidateSha;
+  private final String tenantSurrogate;
+  private final CaseScope caseScope;
+  private final Set<RoomType> allowedRoomTypes;
+  private final BuildBindings buildBindings;
+  private final GraphBinding graphBinding;
+  private final ImageDigests imageDigests;
+  private final String temporalNamespace;
+  private final DatabaseIdentities databaseIdentities;
+  private final Optional<SyntheticFixtureDeployment> syntheticFixtureDeployment;
+  private final MeasuredAuthorityFacts authorityFacts;
+
+  TargetE2eActivationExpectedRuntime(
+      String appProfile,
+      String environmentId,
+      long environmentGeneration,
+      String candidateSha,
+      String tenantSurrogate,
+      CaseScope caseScope,
+      Set<RoomType> allowedRoomTypes,
+      BuildBindings buildBindings,
+      GraphBinding graphBinding,
+      ImageDigests imageDigests,
+      String temporalNamespace,
+      DatabaseIdentities databaseIdentities,
+      Optional<SyntheticFixtureDeployment> syntheticFixtureDeployment,
+      MeasuredAuthorityFacts authorityFacts) {
     TargetE2eActivationContract.appProfile(appProfile);
     TargetE2eActivationContract.identifier(environmentId, "environmentId");
     TargetE2eActivationContract.generation(environmentGeneration);
@@ -53,6 +68,76 @@ public record TargetE2eActivationExpectedRuntime(
       }
     }
     Objects.requireNonNull(authorityFacts, "authorityFacts");
+    this.appProfile = appProfile;
+    this.environmentId = environmentId;
+    this.environmentGeneration = environmentGeneration;
+    this.candidateSha = candidateSha;
+    this.tenantSurrogate = tenantSurrogate;
+    this.caseScope = caseScope;
+    this.allowedRoomTypes = allowedRoomTypes;
+    this.buildBindings = buildBindings;
+    this.graphBinding = graphBinding;
+    this.imageDigests = imageDigests;
+    this.temporalNamespace = temporalNamespace;
+    this.databaseIdentities = databaseIdentities;
+    this.syntheticFixtureDeployment = syntheticFixtureDeployment;
+    this.authorityFacts = authorityFacts;
+  }
+
+  public String appProfile() {
+    return appProfile;
+  }
+
+  public String environmentId() {
+    return environmentId;
+  }
+
+  public long environmentGeneration() {
+    return environmentGeneration;
+  }
+
+  public String candidateSha() {
+    return candidateSha;
+  }
+
+  public String tenantSurrogate() {
+    return tenantSurrogate;
+  }
+
+  public CaseScope caseScope() {
+    return caseScope;
+  }
+
+  public Set<RoomType> allowedRoomTypes() {
+    return allowedRoomTypes;
+  }
+
+  public BuildBindings buildBindings() {
+    return buildBindings;
+  }
+
+  public GraphBinding graphBinding() {
+    return graphBinding;
+  }
+
+  public ImageDigests imageDigests() {
+    return imageDigests;
+  }
+
+  public String temporalNamespace() {
+    return temporalNamespace;
+  }
+
+  public DatabaseIdentities databaseIdentities() {
+    return databaseIdentities;
+  }
+
+  public Optional<SyntheticFixtureDeployment> syntheticFixtureDeployment() {
+    return syntheticFixtureDeployment;
+  }
+
+  public MeasuredAuthorityFacts authorityFacts() {
+    return authorityFacts;
   }
 
   public enum RoomType {
@@ -114,7 +199,7 @@ public record TargetE2eActivationExpectedRuntime(
       String codeBuildId) {
 
     public GraphBinding {
-      if (!"all-rooms/target-e2e.v1".equals(key)) {
+      if (!"all-rooms.target-e2e.v1".equals(key)) {
         throw new IllegalArgumentException("target E2E Graph key is invalid");
       }
       TargetE2eActivationContract.identifier(version, "graph version");

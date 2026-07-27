@@ -19,6 +19,7 @@ import com.example.dispute.workflow.targete2e.TargetE2eActivationLifecycleStore.
 import com.example.dispute.workflow.targete2e.TargetE2eActivationReplayStore.BindingSnapshot;
 import com.example.dispute.workflow.targete2e.TargetE2eActivationReplayStore.Registration;
 import com.example.dispute.workflow.targete2e.TargetE2eActivationReplayStore.RegistrationResult;
+import com.example.dispute.workflow.targete2e.TargetE2eRuntimeMeasurementProvider.MeasurementChallenge;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.StreamReadFeature;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -127,6 +128,7 @@ public final class TargetE2eActivationManifestVerifier {
   private final TargetE2eActivationCaseLedger caseLedger;
   private final TargetE2eActivationLifecycleStore lifecycleStore;
   private final TargetE2eSyntheticFixtureSource fixtureSource;
+  private final TargetE2eRuntimeMeasurementProvider measurementProvider;
   private final ObjectMapper mapper;
   private final Clock clock;
 
@@ -136,6 +138,26 @@ public final class TargetE2eActivationManifestVerifier {
       TargetE2eActivationCaseLedger caseLedger,
       TargetE2eActivationLifecycleStore lifecycleStore,
       TargetE2eSyntheticFixtureSource fixtureSource,
+      TargetE2eRuntimeMeasurementProvider measurementProvider,
+      Clock clock) {
+    this(
+        publicKeys,
+        replayStore,
+        caseLedger,
+        lifecycleStore,
+        fixtureSource,
+        measurementProvider,
+        clock,
+        Duration.ZERO);
+  }
+
+  public TargetE2eActivationManifestVerifier(
+      TargetE2eActivationPublicKeySet publicKeys,
+      TargetE2eActivationReplayStore replayStore,
+      TargetE2eActivationCaseLedger caseLedger,
+      TargetE2eActivationLifecycleStore lifecycleStore,
+      TargetE2eSyntheticFixtureSource fixtureSource,
+      TargetE2eRuntimeMeasurementProvider measurementProvider,
       Clock clock,
       Duration clockSkew) {
     this.publicKeys = Objects.requireNonNull(publicKeys, "publicKeys");
@@ -143,36 +165,27 @@ public final class TargetE2eActivationManifestVerifier {
     this.caseLedger = Objects.requireNonNull(caseLedger, "caseLedger");
     this.lifecycleStore = Objects.requireNonNull(lifecycleStore, "lifecycleStore");
     this.fixtureSource = Objects.requireNonNull(fixtureSource, "fixtureSource");
+    this.measurementProvider = Objects.requireNonNull(measurementProvider, "measurementProvider");
     this.clock = Objects.requireNonNull(clock, "clock");
     requireZeroClockSkew(clockSkew);
     this.mapper = JsonMapper.builder().enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION).build();
   }
 
-  public TargetE2eActivationAuthority arm(
-      String compactJws, TargetE2eActivationExpectedRuntime expectedRuntime) {
-    return arm(compactJws, expectedRuntime, null);
+  public TargetE2eActivationAuthority arm(String compactJws) {
+    return arm(compactJws, null);
   }
 
   public TargetE2eActivationAuthority armForDrain(
-      String compactJws,
-      TargetE2eActivationExpectedRuntime expectedRuntime,
-      DrainAcceptedCommand acceptedCommand) {
-    return arm(
-        compactJws, expectedRuntime, Objects.requireNonNull(acceptedCommand, "acceptedCommand"));
+      String compactJws, DrainAcceptedCommand acceptedCommand) {
+    return arm(compactJws, Objects.requireNonNull(acceptedCommand, "acceptedCommand"));
   }
 
-  private TargetE2eActivationAuthority arm(
-      String compactJws,
-      TargetE2eActivationExpectedRuntime expectedRuntime,
-      DrainAcceptedCommand drainCommand) {
+  private TargetE2eActivationAuthority arm(String compactJws, DrainAcceptedCommand drainCommand) {
     if (compactJws == null || compactJws.isBlank()) {
       return denied(Reason.DEFAULT_DENY);
     }
-    if (expectedRuntime == null) {
-      return denied(Reason.WRONG_RUNTIME);
-    }
     try {
-      ParsedManifest manifest = verify(compactJws, expectedRuntime);
+      ParsedManifest manifest = verify(compactJws);
       if (manifest.expired() != (drainCommand != null)) {
         return denied(manifest.expired() ? Reason.EXPIRED : Reason.DRAIN_PROOF_REQUIRED);
       }
@@ -226,8 +239,7 @@ public final class TargetE2eActivationManifestVerifier {
     }
   }
 
-  private ParsedManifest verify(
-      String compactJws, TargetE2eActivationExpectedRuntime expectedRuntime) {
+  private ParsedManifest verify(String compactJws) {
     if (compactJws.length() > MAXIMUM_JWS_CHARACTERS) {
       throw rejected(Reason.MALFORMED_MANIFEST);
     }
@@ -255,6 +267,9 @@ public final class TargetE2eActivationManifestVerifier {
         publicKeys.resolve(keyId).orElseThrow(() -> rejected(Reason.UNTRUSTED_KEY));
     verifySignature(segments, publicKey);
     boolean expired = requireTimeWindow(bindings.issuedAt(), bindings.expiresAt());
+    TargetE2eActivationExpectedRuntime expectedRuntime =
+        measureRuntime(
+            new MeasurementChallenge(keyId, bindings.nonce(), publicKeyFingerprint(publicKey)));
     requireRuntime(bindings, expectedRuntime);
     Optional<VerifiedFixtureSet> verifiedFixtureSet = verifyFixtureSet(bindings, expectedRuntime);
 
@@ -302,6 +317,29 @@ public final class TargetE2eActivationManifestVerifier {
             bindings.issuedAt(),
             bindings.expiresAt());
     return new ParsedManifest(grant, registration, expired, verifiedFixtureSet);
+  }
+
+  private TargetE2eActivationExpectedRuntime measureRuntime(MeasurementChallenge challenge) {
+    try {
+      MeasuredRuntime measured = measurementProvider.measure(challenge);
+      if (measured == null || measured.runtime() == null || measured.evidence() == null) {
+        throw rejected(Reason.RUNTIME_MEASUREMENT_FAILED);
+      }
+      return measured.runtime();
+    } catch (Rejected failure) {
+      throw failure;
+    } catch (RuntimeException failure) {
+      throw rejected(Reason.RUNTIME_MEASUREMENT_FAILED);
+    }
+  }
+
+  private static String publicKeyFingerprint(ECPublicKey publicKey) {
+    try {
+      return java.util.HexFormat.of()
+          .formatHex(MessageDigest.getInstance("SHA-256").digest(publicKey.getEncoded()));
+    } catch (GeneralSecurityException failure) {
+      throw rejected(Reason.RUNTIME_MEASUREMENT_FAILED);
+    }
   }
 
   private static ManifestBindings parseManifest(ObjectNode payload) {
