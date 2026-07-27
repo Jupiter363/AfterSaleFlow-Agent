@@ -833,7 +833,7 @@ def provision(
             "TARGET_E2E_OCR_SERVICE_SECRET": _secret(),
             "TARGET_E2E_LOCAL_MODEL_KEY": _secret(),
             "TARGET_E2E_LOCAL_OBSERVABILITY_KEY": _secret(),
-            "TARGET_E2E_GRAPH_ENVIRONMENT_GENERATION": graph_generation,
+            "TARGET_E2E_GRAPH_ENVIRONMENT_GENERATION": str(graph_generation),
             "TARGET_E2E_GRAPH_RESTORE_HASH": restore_hash,
             "TARGET_E2E_GRAPH_SIGNING_KEY_ID": graph_key_id,
             "TARGET_E2E_GRAPH_REGISTRY_HASH": binding_hash,
