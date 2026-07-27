@@ -78,7 +78,7 @@ def _target_command() -> RoomGraphCommand:
     values = command.model_dump(mode="json", exclude_none=True)
     values.update(
         {
-            "graph_key": "all-rooms/target-e2e.v1",
+        "graph_key": "all-rooms.target-e2e.v1",
             "graph_version": "target-e2e-graph.2026-07-27.1",
             "checkpoint_schema_version": "target-e2e-checkpoint.v1",
             "invocation_context": {

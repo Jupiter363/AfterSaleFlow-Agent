@@ -477,7 +477,7 @@ class Settings(BaseSettings):
                 raise ValueError("target-E2E requires one shared all-room executor binding")
             composite = self.graph_target_e2e_bindings[0]
             if (
-                composite.graph_key != "all-rooms/target-e2e.v1"
+                composite.graph_key != "all-rooms.target-e2e.v1"
                 or composite.graph_version != "target-e2e-graph.2026-07-27.1"
                 or composite.checkpoint_schema_version != "target-e2e-checkpoint.v1"
                 or composite.output_schema_version

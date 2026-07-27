@@ -249,7 +249,7 @@ class TargetE2ERuntimeAuthority:
             raise ValueError("target-E2E runtime authority requires one composite binding")
         binding = bindings[0]
         if (
-            binding.graph_key != "all-rooms/target-e2e.v1"
+            binding.graph_key != "all-rooms.target-e2e.v1"
             or binding.graph_version != "target-e2e-graph.2026-07-27.1"
             or binding.checkpoint_schema_version != "target-e2e-checkpoint.v1"
             or binding.output_schema_version != "target-e2e-room-proposal-source.v1"

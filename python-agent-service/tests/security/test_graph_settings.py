@@ -109,7 +109,7 @@ def test_graph_configuration_rejects_formal_mode_and_unsafe_bounds(overrides) ->
 
 def _target_binding() -> GraphTargetE2EBindingSettings:
     return GraphTargetE2EBindingSettings(
-        graph_key="all-rooms/target-e2e.v1",
+        graph_key="all-rooms.target-e2e.v1",
         graph_version="target-e2e-graph.2026-07-27.1",
         checkpoint_schema_version="target-e2e-checkpoint.v1",
         state_schema_version="target-e2e-room-state.v1",

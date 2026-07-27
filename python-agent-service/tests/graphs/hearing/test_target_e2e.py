@@ -63,7 +63,7 @@ ACTIVATION_ID = "p9act.v1." + "a" * 32
 ROOM_FENCE = 17
 GRAPH_FENCE = 29
 COMMAND_ENVELOPE_HASH = "e" * 64
-OUTER_GRAPH_KEY = "all-rooms/target-e2e.v1"
+OUTER_GRAPH_KEY = "all-rooms.target-e2e.v1"
 OUTER_GRAPH_VERSION = "target-e2e-graph.2026-07-27.1"
 OUTER_CHECKPOINT_SCHEMA = "target-e2e-checkpoint.v1"
 

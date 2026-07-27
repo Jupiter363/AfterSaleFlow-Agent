@@ -325,7 +325,7 @@ def _write_static_jwks(public_key_path: Path, destination: Path, key_id: str) ->
 
 def _target_binding(candidate: str) -> tuple[dict[str, Any], str]:
     binding = {
-        "graph_key": "all-rooms/target-e2e.v1",
+        "graph_key": "all-rooms.target-e2e.v1",
         "graph_version": "target-e2e-graph.2026-07-27.1",
         "checkpoint_schema_version": "target-e2e-checkpoint.v1",
         "state_schema_version": "target-e2e-graph-state.v1",
@@ -718,7 +718,7 @@ def provision(
         )
         _write_private(activation_dir / "activation.jws", activation_jws + "\n")
 
-        graph_generation = f"p9-{selected_run_id}-{environment_generation}"
+        graph_generation = environment_generation
         restore_hash = hashlib.sha256(
             f"{selected_run_id}:{candidate}:restore".encode("ascii")
         ).hexdigest()
