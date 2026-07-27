@@ -326,6 +326,38 @@ def test_nginx_supports_replayable_sse_without_exposing_internal_routes() -> Non
     assert "return 404;" in nginx
 
 
+def test_nginx_only_proxies_the_public_model_health_endpoint() -> None:
+    nginx = (ROOT / "deploy" / "nginx" / "default.conf").read_text(
+        encoding="utf-8"
+    )
+
+    assert "server python-agent-service:8000;" in nginx
+    assert "location = /agent-api/health/model" in nginx
+
+    model_health_proxy = nginx.split(
+        "location = /agent-api/health/model {", maxsplit=1
+    )[1].split(
+        "}", maxsplit=1
+    )[0]
+    assert "proxy_pass http://python_agent_upstream/health/model;" in model_health_proxy
+    assert "proxy_http_version 1.1;" in model_health_proxy
+    assert "proxy_set_header X-Request-Id $request_id;" in model_health_proxy
+    assert (
+        "proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;"
+        in model_health_proxy
+    )
+    assert "proxy_set_header X-Forwarded-Proto $scheme;" in model_health_proxy
+    assert "proxy_connect_timeout 5s;" in model_health_proxy
+    assert "proxy_read_timeout 20s;" in model_health_proxy
+    assert "proxy_send_timeout 10s;" in model_health_proxy
+
+    denied_agent_api = nginx.split("location ^~ /agent-api/ {", maxsplit=1)[1].split(
+        "}", maxsplit=1
+    )[0]
+    assert "return 404;" in denied_agent_api
+    assert "proxy_pass" not in denied_agent_api
+
+
 # 所属模块：跨服务契约测试 > test_repository_contract；函数角色：回归测试用例。
 # 具体功能：`test_room_timing_configuration_is_declared_with_final_defaults` 验证运行配置在固定案例中的输出、边界和失败行为；关键协作调用：`read_text`。
 # 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 协作调用 `read_text`。
