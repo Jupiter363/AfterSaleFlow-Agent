@@ -24,6 +24,7 @@ import com.example.dispute.workflow.temporal.caseprocess.CaseProcessWorkflowImpl
 import com.example.dispute.workflow.temporal.caseprocess.IntakeChildBridgeActivitiesV2;
 import com.example.dispute.workflow.temporal.room.common.RoomControlWorkflowImpl;
 import com.example.dispute.workflow.temporal.room.intake.IntakeRoomWorkflowImpl;
+import com.example.dispute.workflow.targete2e.temporal.TargetTemporalWorkerRegistration;
 import com.example.dispute.workflow.infrastructure.persistence.authority.bridge.JdbcIntakeChildBridgeReadPort;
 import com.example.dispute.workflow.shadow.intake.IntakeSyntheticWorkerRegistration;
 import io.temporal.client.WorkflowClient;
@@ -65,13 +66,16 @@ public class TemporalWorkerConfiguration {
             CaseProcessLedgerActivitiesImpl ledgerActivities,
             ProcessProjectionActivitiesImpl projectionActivities,
             ObjectProvider<IntakeAuthorityWorkerRegistration> intakeAuthorityRegistrationProvider,
-            ObjectProvider<IntakeChildBridgeReadPort> intakeChildBridgeReadPortProvider) {
+            ObjectProvider<IntakeChildBridgeReadPort> intakeChildBridgeReadPortProvider,
+            ObjectProvider<TargetTemporalWorkerRegistration> targetRegistrationProvider) {
         requireVersionedControlWorker(properties);
         IntakeAuthorityWorkerRegistration intakeAuthorityRegistration =
                 resolveIntakeAuthorityRegistration(
                         intakeEpochSelectionProperties,
                         intakeAuthorityRegistrationProvider,
                         intakeChildBridgeReadPortProvider);
+        TargetTemporalWorkerRegistration.Registration targetRegistration =
+                resolveTargetRegistration(targetRegistrationProvider, properties);
         WorkerFactory factory =
                 WorkerFactory.newInstance(workflowClient, optionsFactory.factoryOptions());
         return start(
@@ -85,7 +89,8 @@ public class TemporalWorkerConfiguration {
                                 evidenceWindowActivities,
                                 ledgerActivities,
                                 projectionActivities,
-                                intakeAuthorityRegistration));
+                                intakeAuthorityRegistration,
+                                targetRegistration));
     }
 
     @Bean(destroyMethod = "shutdown")
@@ -130,38 +135,58 @@ public class TemporalWorkerConfiguration {
             EvidenceWindowActivitiesAdapter evidenceWindowActivities,
             CaseProcessLedgerActivitiesImpl ledgerActivities,
             ProcessProjectionActivitiesImpl projectionActivities,
-            IntakeAuthorityWorkerRegistration intakeAuthorityRegistration) {
+            IntakeAuthorityWorkerRegistration intakeAuthorityRegistration,
+            TargetTemporalWorkerRegistration.Registration targetRegistration) {
         requireDedicatedLegacyTaskQueue(legacyTaskQueue);
 
         Worker caseControl =
                 factory.newWorker(CASE_CONTROL, optionsFactory.workerOptions(CASE_CONTROL));
-        List<Class<?>> caseControlWorkflows =
-                List.of(CaseProcessWorkflowImpl.class, TemporalWorkerProbeWorkflowImpl.class);
+        List<Class<?>> caseControlWorkflows = new ArrayList<>();
+        caseControlWorkflows.add(
+                targetRegistration == null
+                        ? CaseProcessWorkflowImpl.class
+                        : targetRegistration.caseProcessWorkflowImplementation());
+        caseControlWorkflows.add(TemporalWorkerProbeWorkflowImpl.class);
         IntakeChildBridgeActivitiesV2Adapter v2BridgeActivities =
                 new IntakeChildBridgeActivitiesV2Adapter(intakeAuthorityRegistration.bridgeActivities());
         IntakeAuthorityWorkerRegistration.V2BridgeActivityRegistration v2BridgeRegistration =
                 intakeAuthorityRegistration.authorityBackedV2Activity(
                         v2BridgeActivities, IntakeChildBridgeActivitiesV2.class);
-        List<Object> caseControlActivities =
+        List<Object> caseControlActivities = new ArrayList<>(
                 intakeAuthorityRegistration.caseControlActivityImplementations(
                         v2BridgeRegistration,
                         ledgerActivities,
                         projectionActivities,
-                        new TemporalWorkerProbeActivitiesImpl(properties, CASE_CONTROL));
+                        new TemporalWorkerProbeActivitiesImpl(properties, CASE_CONTROL)));
+        if (targetRegistration != null) {
+            caseControlActivities.addAll(targetRegistration.caseControlActivities());
+        }
+        if (targetRegistration != null) {
+            IntakeAuthorityWorkerRegistration.requireNoForbiddenRuntimeTypes(caseControlWorkflows);
+        }
         intakeAuthorityRegistration.validateCaseControlRegistration(
-                caseControlWorkflows, caseControlActivities, v2BridgeRegistration);
+                caseControlWorkflows,
+                caseControlActivities,
+                v2BridgeRegistration);
         caseControl.registerWorkflowImplementationTypes(caseControlWorkflows.toArray(Class[]::new));
         caseControl.registerActivitiesImplementations(caseControlActivities.toArray());
 
         Worker roomControl =
                 factory.newWorker(ROOM_CONTROL, optionsFactory.workerOptions(ROOM_CONTROL));
-        List<Class<?>> roomControlWorkflows =
-                List.of(
-                        RoomControlWorkflowImpl.class,
-                        IntakeRoomWorkflowImpl.class,
-                        TemporalWorkerProbeWorkflowImpl.class);
-        List<Object> roomControlActivities =
-                List.of(new TemporalWorkerProbeActivitiesImpl(properties, ROOM_CONTROL));
+        List<Class<?>> roomControlWorkflows = new ArrayList<>();
+        roomControlWorkflows.add(RoomControlWorkflowImpl.class);
+        roomControlWorkflows.add(IntakeRoomWorkflowImpl.class);
+        roomControlWorkflows.add(TemporalWorkerProbeWorkflowImpl.class);
+        List<Object> roomControlActivities = new ArrayList<>();
+        roomControlActivities.add(new TemporalWorkerProbeActivitiesImpl(properties, ROOM_CONTROL));
+        if (targetRegistration != null) {
+            roomControlWorkflows.addAll(targetRegistration.roomWorkflowImplementations());
+            roomControlActivities.addAll(targetRegistration.roomControlActivities());
+        }
+        if (roomControlWorkflows.stream().distinct().count() != roomControlWorkflows.size()) {
+            throw new IllegalStateException(
+                    "ROOM_CONTROL workflow implementation types must be unique");
+        }
         intakeAuthorityRegistration.validateRoomControlRegistration(
                 roomControlWorkflows, roomControlActivities);
         roomControl.registerWorkflowImplementationTypes(roomControlWorkflows.toArray(Class[]::new));
@@ -267,6 +292,26 @@ public class TemporalWorkerConfiguration {
                     "CASE_CONTROL requires at most one IntakeAuthorityWorkerRegistration");
         }
         return IntakeAuthorityWorkerRegistration.fromReadPortProvider(readPortProvider);
+    }
+
+    private static TargetTemporalWorkerRegistration.Registration resolveTargetRegistration(
+            ObjectProvider<TargetTemporalWorkerRegistration> provider,
+            TemporalWorkerProperties properties) {
+        List<TargetTemporalWorkerRegistration> registrations = provider.stream().toList();
+        if (registrations.isEmpty()) {
+            return null;
+        }
+        if (registrations.size() != 1) {
+            throw new IllegalStateException(
+                    "target Temporal worker requires exactly one target registration");
+        }
+        TargetTemporalWorkerRegistration.Registration registration =
+                registrations.getFirst().registration();
+        if (!properties.buildId().equals(registration.controlBuildId())) {
+            throw new IllegalStateException(
+                    "target Temporal worker registration does not match the configured control Build ID");
+        }
+        return registration;
     }
 
     private static void requireVersionedAgentWorker(

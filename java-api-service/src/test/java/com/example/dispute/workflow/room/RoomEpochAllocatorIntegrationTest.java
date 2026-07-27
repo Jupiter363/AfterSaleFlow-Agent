@@ -12,6 +12,7 @@ import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.Termina
 import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.TerminateRoomEpoch;
 import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.TransitionRoomEpoch;
 import com.example.dispute.workflow.application.epoch.RoomEpochSelection;
+import com.example.dispute.workflow.application.epoch.RoomEpochSelection.TargetActivationBinding;
 import com.example.dispute.workflow.application.epoch.RoomEpochSelector;
 import com.example.dispute.workflow.application.epoch.TransactionalRoomEpochAllocator;
 import com.example.dispute.workflow.contract.v1.CaseProcessWorkflowProtocol;
@@ -21,6 +22,9 @@ import com.example.dispute.workflow.infrastructure.bootstrap.RoomEpochBootstrapE
 import com.example.dispute.workflow.infrastructure.persistence.entity.CaseProcessProjectionEntity;
 import com.example.dispute.workflow.infrastructure.persistence.entity.CaseRoomEpochEntity;
 import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.EpochLifecycleStatus;
+import com.example.dispute.workflow.targete2e.temporal.TargetRoomEpochBindingWriter;
+import com.example.dispute.workflow.targete2e.temporal.TargetRoomEpochBindingWriter.BindingContext;
+import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
@@ -93,6 +97,7 @@ class RoomEpochAllocatorIntegrationTest {
     @Autowired private RoomEpochAllocator allocator;
     @Autowired private TrackingRoomEpochSelector selector;
     @Autowired private CapturingBootstrapEnqueuer bootstrapEnqueuer;
+    @Autowired private CapturingTargetBindingWriter targetBindingWriter;
     @Autowired private PlatformTransactionManager transactionManager;
     @Autowired private JdbcTemplate jdbc;
 
@@ -107,6 +112,7 @@ class RoomEpochAllocatorIntegrationTest {
         jdbc.update("delete from fulfillment_dispute_case where id like 'CASE_ALLOC_%'");
         selector.reset();
         bootstrapEnqueuer.reset();
+        targetBindingWriter.reset();
     }
 
     @Test
@@ -293,7 +299,7 @@ class RoomEpochAllocatorIntegrationTest {
         assertThat(allocation.selection().roomWorkflowType())
                 .isEqualTo("IntakeRoomWorkflow");
         assertThat(allocation.selection().roomWorkflowBuildId())
-                .isEqualTo("intake-room.synthetic.v1");
+                .isEqualTo("p9-control-build");
         assertThat(countEpochs(caseId)).isEqualTo(1);
         assertThat(projectionCount(caseId)).isEqualTo(1);
         assertThat(
@@ -312,8 +318,8 @@ class RoomEpochAllocatorIntegrationTest {
                                 String.class,
                                 caseId))
                 .isEqualTo(
-                        "CaseProcessWorkflow:temporal-build-v1:"
-                                + "IntakeRoomWorkflow:intake-room.synthetic.v1");
+                        "CaseProcessWorkflow:p9-control-build:"
+                                + "IntakeRoomWorkflow:p9-control-build");
         assertThat(
                         jdbc.queryForObject(
                                 "select writer_activation_status from case_process_projection where case_id = ?",
@@ -321,6 +327,38 @@ class RoomEpochAllocatorIntegrationTest {
                                 caseId))
                 .isEqualTo("PREPARING");
         assertThat(bootstrapEnqueuer.epochId()).isEqualTo(allocation.epochId());
+        assertThat(targetBindingWriter.binding().epochId()).isEqualTo(allocation.epochId());
+        assertThat(targetBindingWriter.binding().selection().targetActivationBinding())
+                .isEqualTo(TrackingRoomEpochSelector.targetActivationBinding());
+        assertThat(allocation.selection().targetActivationBinding()).isNull();
+    }
+
+    @Test
+    void targetTemporalSelectionPersistsAnExactActivationBindingForEveryRoomType() {
+        selector.useTemporal();
+
+        for (RoomType roomType : RoomType.values()) {
+            String caseId = "CASE_ALLOC_TARGET_" + roomType.name();
+            insertCaseAndRooms(caseId, roomType);
+            targetBindingWriter.reset();
+
+            RoomEpochAllocation allocation =
+                    inTransaction(() -> allocator.activate(activate(caseId, roomType, NOW)));
+
+            BindingContext binding = targetBindingWriter.binding();
+            assertThat(allocation.writerMode()).isEqualTo(WriterMode.TEMPORAL);
+            assertThat(allocation.selection().roomWorkflowType())
+                    .isEqualTo(TargetTypedRoomProtocol.workflowType(roomType));
+            assertThat(binding.caseId()).isEqualTo(caseId);
+            assertThat(binding.roomType()).isEqualTo(roomType);
+            assertThat(binding.roomEpoch()).isZero();
+            assertThat(binding.fencingToken()).isPositive();
+            assertThat(binding.selection().writerMode()).isEqualTo(allocation.writerMode());
+            assertThat(binding.selection().graphKey()).isEqualTo(allocation.selection().graphKey());
+            assertThat(binding.selection().targetActivationBinding())
+                    .isEqualTo(TrackingRoomEpochSelector.targetActivationBinding());
+            assertThat(allocation.selection().targetActivationBinding()).isNull();
+        }
     }
 
     @Test
@@ -732,6 +770,11 @@ class RoomEpochAllocatorIntegrationTest {
         CapturingBootstrapEnqueuer roomEpochBootstrapEnqueuer() {
             return new CapturingBootstrapEnqueuer();
         }
+
+        @Bean
+        CapturingTargetBindingWriter targetRoomEpochBindingWriter() {
+            return new CapturingTargetBindingWriter();
+        }
     }
 
     static final class TrackingRoomEpochSelector implements RoomEpochSelector {
@@ -750,22 +793,31 @@ class RoomEpochAllocatorIntegrationTest {
             SelectorConfiguration selected = configuration.get();
             boolean legacy = selected.writerMode() == WriterMode.LEGACY;
             if (!legacy) {
-                if (roomType != RoomType.INTAKE) {
+                if (selected.writerMode() == WriterMode.SHADOW
+                        && roomType != RoomType.INTAKE) {
                     throw new IllegalStateException(
-                            "test selector refuses non-LEGACY non-INTAKE selection");
+                            "test selector refuses SHADOW non-INTAKE selection");
                 }
+                boolean target = selected.writerMode() == WriterMode.TEMPORAL;
                 return new RoomEpochSelection(
                         selected.writerMode(),
                         "room-epoch-selection.v2",
                         "case-process-contract.v1",
                         CaseProcessWorkflowProtocol.CASE_WORKFLOW_TYPE,
                         selected.buildId(),
-                        "IntakeRoomWorkflow",
-                        "intake-room.synthetic.v1",
-                        "intake.v2",
+                        target
+                                ? TargetTypedRoomProtocol.workflowType(roomType)
+                                : "IntakeRoomWorkflow",
+                        target ? selected.buildId() : "intake-room.synthetic.v1",
+                        target ? TargetTypedRoomProtocol.GRAPH_KEY : "intake.v2",
                         selected.graphVersion(),
-                        "intake-checkpoint.v2",
-                        "agent-stream.v2");
+                        target
+                                ? TargetTypedRoomProtocol.CHECKPOINT_SCHEMA_VERSION
+                                : "intake-checkpoint.v2",
+                        "agent-stream.v2",
+                        selected.writerMode() == WriterMode.TEMPORAL
+                                ? targetActivationBinding()
+                                : null);
             }
             return new RoomEpochSelection(
                     selected.writerMode(),
@@ -798,7 +850,9 @@ class RoomEpochAllocatorIntegrationTest {
         void useTemporal() {
             configuration.set(
                     new SelectorConfiguration(
-                            WriterMode.TEMPORAL, "temporal-build-v1", "1.0.0"));
+                            WriterMode.TEMPORAL,
+                            "p9-control-build",
+                            TargetTypedRoomProtocol.GRAPH_VERSION));
         }
 
         int calls() {
@@ -807,6 +861,32 @@ class RoomEpochAllocatorIntegrationTest {
 
         private record SelectorConfiguration(
                 WriterMode writerMode, String buildId, String graphVersion) {}
+
+        static TargetActivationBinding targetActivationBinding() {
+            return new TargetActivationBinding(
+                    "p9act.v1.0123456789abcdef0123456789abcdef",
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "TARGET_E2E_CANDIDATE",
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        }
+    }
+
+    static final class CapturingTargetBindingWriter implements TargetRoomEpochBindingWriter {
+
+        private final AtomicReference<BindingContext> binding = new AtomicReference<>();
+
+        @Override
+        public void persist(BindingContext context) {
+            binding.set(context);
+        }
+
+        void reset() {
+            binding.set(null);
+        }
+
+        BindingContext binding() {
+            return binding.get();
+        }
     }
 
     static final class CapturingBootstrapEnqueuer implements RoomEpochBootstrapEnqueuer {

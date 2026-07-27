@@ -541,7 +541,7 @@ public class CaseRoomEpochEntity extends AbstractEntity {
             }
             entity.roomWorkflowType = required(roomWorkflowType, "roomWorkflowType");
             entity.roomWorkflowBuildId = required(roomWorkflowBuildId, "roomWorkflowBuildId");
-            if (requiredWriterMode != WriterMode.LEGACY
+            if (requiredWriterMode == WriterMode.SHADOW
                     && (entity.roomType != RoomType.INTAKE
                             || !"IntakeRoomWorkflow".equals(entity.roomWorkflowType))) {
                 throw new IllegalArgumentException(

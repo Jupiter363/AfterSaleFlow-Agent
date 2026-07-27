@@ -267,7 +267,7 @@ public record ProvisionRoomEpochReceipt(
       throw new IllegalArgumentException(
           "v2 receipt requires the CaseProcessWorkflow case binding");
     }
-    if (writerMode != WriterMode.LEGACY
+    if (writerMode == WriterMode.SHADOW
         && (roomType != RoomType.INTAKE || !"IntakeRoomWorkflow".equals(roomWorkflowType))) {
       throw new IllegalArgumentException(
           "non-LEGACY v2 receipt requires the IntakeRoomWorkflow binding");

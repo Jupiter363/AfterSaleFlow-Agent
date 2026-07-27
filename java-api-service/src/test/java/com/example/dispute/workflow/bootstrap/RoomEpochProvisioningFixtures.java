@@ -5,6 +5,7 @@ import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
 import com.example.dispute.workflow.contract.v1.ProvisionRoomEpoch;
 import com.example.dispute.workflow.contract.v1.ProvisionRoomEpochReceipt;
+import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
 import java.time.Instant;
 
 final class RoomEpochProvisioningFixtures {
@@ -83,6 +84,49 @@ final class RoomEpochProvisioningFixtures {
                 roomType == RoomType.INTAKE ? "intake.v2" : "evidence.v2",
                 "2.0.0",
                 "intake-checkpoint.v2",
+                "agent-stream.v2",
+                4,
+                6,
+                5,
+                7,
+                REQUESTED_AT.plusSeconds(3600),
+                null,
+                null,
+                REQUESTED_AT);
+    }
+
+    static ProvisionRoomEpoch targetV2Command(
+            String epochId,
+            String caseId,
+            RoomType roomType,
+            String roomWorkflowType) {
+        String tenant = "tenant";
+        return new ProvisionRoomEpoch(
+                ProvisionRoomEpoch.SCHEMA_VERSION,
+                epochId,
+                tenant,
+                caseId,
+                "ROOM_1",
+                roomType,
+                1,
+                10,
+                3,
+                7,
+                roomType.name(),
+                roomType.name(),
+                "OPEN",
+                WriterMode.TEMPORAL,
+                CaseProcessWorkflowProtocol.caseWorkflowId(tenant, caseId),
+                CaseProcessWorkflowProtocol.roomWorkflowId(caseId, roomType, 1),
+                "room-epoch-selection.v2",
+                "case-process-contract.v1",
+                CaseProcessWorkflowProtocol.CASE_WORKFLOW_TYPE,
+                "p9-case-build",
+                roomWorkflowType,
+                "p9-control-build",
+                "all-rooms.target-e2e.v1",
+                TargetTypedRoomProtocol.GRAPH_VERSION,
+                "target-e2e-checkpoint.v1",
                 "agent-stream.v2",
                 4,
                 6,

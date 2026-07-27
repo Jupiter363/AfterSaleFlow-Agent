@@ -319,7 +319,10 @@ public final class IntakeAuthorityWorkerRegistration {
 
     private static void requireRequiredWorkflowTypes(
             Collection<Class<?>> actualTypes, Collection<Class<?>> requiredTypes, String taskQueue) {
-        if (!actualTypes.containsAll(requiredTypes)) {
+        boolean missingRequiredType = requiredTypes.stream()
+                .anyMatch(requiredType -> actualTypes.stream()
+                        .noneMatch(requiredType::isAssignableFrom));
+        if (missingRequiredType) {
             throw new IllegalStateException(
                     taskQueue + " is missing required Intake workflow implementation types");
         }

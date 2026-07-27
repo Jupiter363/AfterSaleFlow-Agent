@@ -50,6 +50,39 @@ class IntakeAuthorityWorkerRegistrationTest {
     }
 
     @Test
+    void acceptsAConcreteTargetDispatcherThatExtendsTheRequiredCaseWorkflow() {
+        IntakeAuthorityWorkerRegistration registration =
+                IntakeAuthorityWorkerRegistration.fromReadPorts(List.of(new StubReadPort()));
+        IntakeAuthorityWorkerRegistration.V2BridgeActivityRegistration v2Bridge =
+                v2Bridge(registration);
+
+        assertThatCode(
+                        () ->
+                                registration.validateCaseControlRegistration(
+                                        List.of(TargetCaseProcessWorkflow.class),
+                                        registration.caseControlActivityImplementations(v2Bridge),
+                                        v2Bridge))
+                .doesNotThrowAnyException();
+    }
+
+    @Test
+    void rejectsARegistrationThatDoesNotProvideTheRequiredCaseWorkflow() {
+        IntakeAuthorityWorkerRegistration registration =
+                IntakeAuthorityWorkerRegistration.fromReadPorts(List.of(new StubReadPort()));
+        IntakeAuthorityWorkerRegistration.V2BridgeActivityRegistration v2Bridge =
+                v2Bridge(registration);
+
+        assertThatThrownBy(
+                        () ->
+                                registration.validateCaseControlRegistration(
+                                        List.of(Object.class),
+                                        registration.caseControlActivityImplementations(v2Bridge),
+                                        v2Bridge))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("case-control is missing required Intake workflow implementation types");
+    }
+
+    @Test
     void failsClosedForMissingOrAmbiguousReadPorts() {
         assertThatThrownBy(() -> IntakeAuthorityWorkerRegistration.fromReadPorts(List.of()))
                 .isInstanceOf(IllegalStateException.class)
@@ -246,4 +279,6 @@ class IntakeAuthorityWorkerRegistrationTest {
                 new IntakeChildBridgeActivitiesV2Adapter(registration.bridgeActivities()),
                 IntakeChildBridgeActivitiesV2.class);
     }
+
+    private static final class TargetCaseProcessWorkflow extends CaseProcessWorkflowImpl {}
 }

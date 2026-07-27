@@ -12,6 +12,9 @@ import com.example.dispute.workflow.config.OrchestrationCutoverProperties;
 import com.example.dispute.workflow.config.TemporalWorkerProperties;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
+import com.example.dispute.workflow.targete2e.temporal.TargetRoomEpochSelectionAuthority;
+import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
+import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
 class ConfiguredRoomEpochSelectorTest {
@@ -119,7 +122,84 @@ class ConfiguredRoomEpochSelectorTest {
 
         assertThatThrownBy(() -> selector(properties).selectForNewEpoch(RoomType.INTAKE))
                 .isInstanceOf(IllegalStateException.class)
-                .hasMessage("TEMPORAL Intake epoch selection is forbidden under the current gate");
+                .hasMessage("TEMPORAL room epoch selection requires scoped selection context");
+    }
+
+    @Test
+    void selectsAllTargetRoomsOnlyFromAnExactlyBoundAuthorityGrant() {
+        var properties = new OrchestrationCutoverProperties(WriterMode.TEMPORAL, true, true);
+        for (RoomType roomType : RoomType.values()) {
+            RoomEpochSelectionContext context =
+                    RoomEpochSelectionContext.verifiedSignedSynthetic("tenant-1", "case-1");
+            TargetRoomEpochSelectionAuthority authority =
+                    request -> Optional.of(targetGrant(request));
+
+            var selection =
+                    selector(properties, shadowProperties(), authority)
+                            .selectForNewEpoch(roomType, context);
+
+            assertThat(selection.writerMode()).isEqualTo(WriterMode.TEMPORAL);
+            assertThat(selection.selectionSchemaVersion()).isEqualTo("room-epoch-selection.v2");
+            assertThat(selection.caseWorkflowType()).isEqualTo("CaseProcessWorkflow");
+            assertThat(selection.caseWorkflowBuildId()).isEqualTo("p9-case-build");
+            assertThat(selection.roomWorkflowType())
+                    .isEqualTo(TargetTypedRoomProtocol.workflowType(roomType));
+            assertThat(selection.roomWorkflowBuildId()).isEqualTo("p9-control-build");
+            assertThat(selection.graphKey()).isEqualTo("all-rooms.target-e2e.v1");
+            assertThat(selection.graphVersion())
+                    .isEqualTo(TargetTypedRoomProtocol.GRAPH_VERSION);
+            assertThat(selection.checkpointSchemaVersion())
+                    .isEqualTo("target-e2e-checkpoint.v1");
+            assertThat(selection.targetActivationBinding().activationId())
+                    .isEqualTo("p9act.v1.0123456789abcdef0123456789abcdef");
+        }
+    }
+
+    @Test
+    void rejectsAuthorityGrantBoundToAnotherCase() {
+        var properties = new OrchestrationCutoverProperties(WriterMode.TEMPORAL, true, true);
+        TargetRoomEpochSelectionAuthority authority =
+                request -> {
+                    var anotherCase =
+                            new TargetRoomEpochSelectionAuthority.Request(
+                                    request.profile(),
+                                    request.executionLane(),
+                                    request.tenantSurrogate(),
+                                    "case-2",
+                                    request.roomType(),
+                                    request.trafficSource());
+                    return Optional.of(targetGrant(anotherCase));
+                };
+
+        assertThatThrownBy(
+                        () ->
+                                selector(properties, shadowProperties(), authority)
+                                        .selectForNewEpoch(
+                                                RoomType.INTAKE,
+                                                RoomEpochSelectionContext.verifiedSignedSynthetic(
+                                                        "tenant-1", "case-1")))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage(
+                        "target room epoch authorization does not match the requested scope");
+    }
+
+    @Test
+    void globalTemporalSwitchFailsClosedForEveryRoomWithoutAuthority() {
+        var properties = new OrchestrationCutoverProperties(WriterMode.TEMPORAL, true, true);
+
+        for (RoomType roomType : RoomType.values()) {
+            assertThatThrownBy(
+                            () ->
+                                    selector(properties)
+                                            .selectForNewEpoch(
+                                                    roomType,
+                                                    RoomEpochSelectionContext
+                                                            .verifiedSignedSynthetic(
+                                                                    "tenant-1", "case-1")))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessage(
+                            "TEMPORAL room epoch selection requires exact target activation authority");
+        }
     }
 
     @Test
@@ -164,6 +244,35 @@ class ConfiguredRoomEpochSelectorTest {
         return selector(
                 properties,
                 new IntakeEpochSelectionProperties(WriterMode.LEGACY, 0, null, false));
+    }
+
+    private static ConfiguredRoomEpochSelector selector(
+            OrchestrationCutoverProperties properties,
+            IntakeEpochSelectionProperties intakeProperties,
+            TargetRoomEpochSelectionAuthority authority) {
+        TemporalWorkerProperties worker = mock(TemporalWorkerProperties.class);
+        when(worker.legacyBuildId()).thenReturn("after-sale-control.local-dev");
+        return new ConfiguredRoomEpochSelector(
+                properties, worker, intakeProperties, authority);
+    }
+
+    private static TargetRoomEpochSelectionAuthority.Grant targetGrant(
+            TargetRoomEpochSelectionAuthority.Request request) {
+        return new TargetRoomEpochSelectionAuthority.Grant(
+                "p9act.v1.0123456789abcdef0123456789abcdef",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                request,
+                "room-epoch-selection.v2",
+                "case-process-contract.v1",
+                "CaseProcessWorkflow",
+                "p9-case-build",
+                TargetTypedRoomProtocol.workflowType(request.roomType()),
+                "p9-control-build",
+                "all-rooms.target-e2e.v1",
+                TargetTypedRoomProtocol.GRAPH_VERSION,
+                "target-e2e-checkpoint.v1",
+                "agent-stream.v2");
     }
 
     private static ConfiguredRoomEpochSelector selector(

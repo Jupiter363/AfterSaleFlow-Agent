@@ -1,5 +1,7 @@
 package com.example.dispute.workflow.temporal.caseprocess;
 
+import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
+
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
 import com.example.dispute.workflow.contract.v1.ProvisionRoomEpoch;
@@ -424,7 +426,7 @@ public record CaseProcessCarryState(
       previousRoomTypeOrdinal = highWater.roomType().ordinal();
     }
     if (activeChildDescriptor != null
-        && activeChildDescriptor.kind() == ActiveChildKind.TYPED_INTAKE) {
+        && activeChildDescriptor.kind() != ActiveChildKind.GENERIC_ROOM_CONTROL) {
       ProvisioningCommitment pinned = null;
       for (ProvisioningCommitment commitment : provisioningCommitments) {
         if (commitment.request().roomType() == activeRoomType
@@ -502,7 +504,8 @@ public record CaseProcessCarryState(
 
   public enum ActiveChildKind {
     GENERIC_ROOM_CONTROL,
-    TYPED_INTAKE
+    TYPED_INTAKE,
+    TARGET_TYPED_ROOM
   }
 
   public enum RecoveryErrorOrigin {
@@ -601,6 +604,16 @@ public record CaseProcessCarryState(
               || fencingToken < 1
               || startedRunId == null)) {
         throw new IllegalArgumentException("typed Intake descriptor binding is invalid");
+      }
+      if (kind == ActiveChildKind.TARGET_TYPED_ROOM
+          && (!"room-epoch-selection.v2".equals(selectionSchemaVersion)
+              || writerMode != WriterMode.TEMPORAL
+              || fencingToken < 1
+              || startedRunId == null
+              || initiatorActorScopeHash != null
+              || respondentActorScopeHash != null
+              || !TargetTypedRoomProtocol.workflowType(roomType).equals(roomWorkflowType))) {
+        throw new IllegalArgumentException("target typed room descriptor binding is invalid");
       }
     }
 

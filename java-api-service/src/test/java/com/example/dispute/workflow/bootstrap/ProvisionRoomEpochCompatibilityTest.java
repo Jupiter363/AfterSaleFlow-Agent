@@ -12,6 +12,7 @@ import com.example.dispute.workflow.contract.v1.ProvisionRoomEpoch;
 import com.example.dispute.workflow.infrastructure.bootstrap.RoomEpochProvisioningMapper;
 import com.example.dispute.workflow.infrastructure.persistence.entity.CaseProcessProjectionEntity;
 import com.example.dispute.workflow.infrastructure.persistence.entity.CaseRoomEpochEntity;
+import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
@@ -153,5 +154,61 @@ class ProvisionRoomEpochCompatibilityTest {
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage(
                         "non-LEGACY v2 bootstrap requires the IntakeRoomWorkflow binding");
+    }
+
+    @Test
+    void targetV2BindsTypedWorkflowAndReceiptForEveryExistingRoomType() {
+        for (RoomType roomType : RoomType.values()) {
+            ProvisionRoomEpoch command =
+                    RoomEpochProvisioningFixtures.targetV2Command(
+                            "EPOCH_TARGET_" + roomType.name(),
+                            "CASE_TARGET_" + roomType.name(),
+                            roomType,
+                            TargetTypedRoomProtocol.workflowType(roomType));
+
+            var receipt = RoomEpochProvisioningFixtures.receipt(command);
+
+            assertThat(command.writerMode()).isEqualTo(WriterMode.TEMPORAL);
+            assertThat(command.selectionSchemaVersion()).isEqualTo("room-epoch-selection.v2");
+            assertThat(receipt.matches(command)).isTrue();
+            assertThat(receipt.roomType()).isEqualTo(roomType);
+        }
+    }
+
+    @Test
+    void targetV2PreparingEpochPersistsEveryExactTypedRoomPin() {
+        OffsetDateTime now = OffsetDateTime.parse("2026-07-27T10:00:00Z");
+        for (RoomType roomType : RoomType.values()) {
+            String caseId = "CASE_TARGET_ENTITY_" + roomType.name();
+            String roomWorkflowType = TargetTypedRoomProtocol.workflowType(roomType);
+            CaseRoomEpochEntity epoch =
+                    CaseRoomEpochEntity.preparing(
+                            "EPOCH_TARGET_ENTITY_" + roomType.name(),
+                            "tenant",
+                            caseId,
+                            "ROOM_1",
+                            roomType,
+                            1,
+                            10,
+                            0,
+                            7,
+                            CaseProcessWorkflowProtocol.caseWorkflowId("tenant", caseId),
+                            "p9-case-build",
+                            "all-rooms.target-e2e.v1",
+                            TargetTypedRoomProtocol.GRAPH_VERSION,
+                            "target-e2e-checkpoint.v1",
+                            "agent-stream.v2",
+                            "room-epoch-selection.v2",
+                            "case-process-contract.v1",
+                            "CaseProcessWorkflow",
+                            roomWorkflowType,
+                            "p9-control-build",
+                            now);
+
+            assertThat(epoch.getWriterMode()).isEqualTo(WriterMode.TEMPORAL);
+            assertThat(epoch.getRoomType()).isEqualTo(roomType);
+            assertThat(epoch.getRoomWorkflowType()).isEqualTo(roomWorkflowType);
+            assertThat(epoch.getRoomWorkflowBuildId()).isEqualTo("p9-control-build");
+        }
     }
 }

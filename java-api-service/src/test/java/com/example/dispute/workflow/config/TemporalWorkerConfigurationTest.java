@@ -87,7 +87,8 @@ class TemporalWorkerConfigurationTest {
                                             mock(CaseProcessLedgerActivitiesImpl.class),
                                             mock(ProcessProjectionActivitiesImpl.class),
                                             streamProvider(),
-                                            intakeChildBridgeReadPortProvider))
+                                            intakeChildBridgeReadPortProvider,
+                                            streamProvider()))
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining(
                             "requires Temporal versioningMode BUILD_ID or DEPLOYMENT");
@@ -115,7 +116,8 @@ class TemporalWorkerConfigurationTest {
                             mock(CaseProcessLedgerActivitiesImpl.class),
                             mock(ProcessProjectionActivitiesImpl.class),
                             streamProvider(),
-                            intakeChildBridgeReadPortProvider))
+                            intakeChildBridgeReadPortProvider,
+                            streamProvider()))
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining(
                             "exactly one admission-backed IntakeAuthorityWorkerRegistration");
@@ -451,7 +453,8 @@ class TemporalWorkerConfigurationTest {
                 mock(CaseProcessLedgerActivitiesImpl.class),
                 mock(ProcessProjectionActivitiesImpl.class),
                 streamProvider(),
-                provider(mock(IntakeChildBridgeReadPort.class)));
+                provider(mock(IntakeChildBridgeReadPort.class)),
+                streamProvider());
     }
 
     @SuppressWarnings("unchecked")

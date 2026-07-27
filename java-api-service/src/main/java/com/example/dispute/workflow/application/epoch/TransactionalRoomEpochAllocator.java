@@ -18,10 +18,13 @@ import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPe
 import com.example.dispute.workflow.infrastructure.persistence.repository.CaseProcessProjectionRepository;
 import com.example.dispute.workflow.infrastructure.persistence.repository.CaseRoomEpochRepository;
 import com.example.dispute.workflow.infrastructure.bootstrap.RoomEpochBootstrapEnqueuer;
+import com.example.dispute.workflow.targete2e.temporal.TargetRoomEpochBindingWriter;
+import com.example.dispute.workflow.targete2e.temporal.TargetRoomEpochBindingWriter.BindingContext;
 import java.time.OffsetDateTime;
 import java.util.Objects;
 import java.util.UUID;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -35,6 +38,25 @@ public class TransactionalRoomEpochAllocator implements RoomEpochAllocator {
     private final RoomEpochSelector selector;
     private final TenantAuthority tenantAuthority;
     private final ObjectProvider<RoomEpochBootstrapEnqueuer> bootstrapEnqueuer;
+    private final ObjectProvider<TargetRoomEpochBindingWriter> targetBindingWriter;
+
+    @Autowired
+    public TransactionalRoomEpochAllocator(
+            FulfillmentCaseRepository caseRepository,
+            CaseRoomEpochRepository epochRepository,
+            CaseProcessProjectionRepository projectionRepository,
+            RoomEpochSelector selector,
+            TenantAuthority tenantAuthority,
+            ObjectProvider<RoomEpochBootstrapEnqueuer> bootstrapEnqueuer,
+            ObjectProvider<TargetRoomEpochBindingWriter> targetBindingWriter) {
+        this.caseRepository = caseRepository;
+        this.epochRepository = epochRepository;
+        this.projectionRepository = projectionRepository;
+        this.selector = selector;
+        this.tenantAuthority = tenantAuthority;
+        this.bootstrapEnqueuer = bootstrapEnqueuer;
+        this.targetBindingWriter = targetBindingWriter;
+    }
 
     public TransactionalRoomEpochAllocator(
             FulfillmentCaseRepository caseRepository,
@@ -43,12 +65,14 @@ public class TransactionalRoomEpochAllocator implements RoomEpochAllocator {
             RoomEpochSelector selector,
             TenantAuthority tenantAuthority,
             ObjectProvider<RoomEpochBootstrapEnqueuer> bootstrapEnqueuer) {
-        this.caseRepository = caseRepository;
-        this.epochRepository = epochRepository;
-        this.projectionRepository = projectionRepository;
-        this.selector = selector;
-        this.tenantAuthority = tenantAuthority;
-        this.bootstrapEnqueuer = bootstrapEnqueuer;
+        this(
+                caseRepository,
+                epochRepository,
+                projectionRepository,
+                selector,
+                tenantAuthority,
+                bootstrapEnqueuer,
+                null);
     }
 
     @Override
@@ -92,6 +116,7 @@ public class TransactionalRoomEpochAllocator implements RoomEpochAllocator {
                         selection,
                         command.occurredAt());
         epochRepository.saveAndFlush(epoch);
+        persistTargetBinding(epoch, selection);
         CaseProcessProjectionEntity projection =
                 projection(
                         epoch,
@@ -161,6 +186,7 @@ public class TransactionalRoomEpochAllocator implements RoomEpochAllocator {
                         selection,
                         command.occurredAt());
         epochRepository.saveAndFlush(next);
+        persistTargetBinding(next, selection);
         projection.switchTo(
                 active.getRoomEpoch(),
                 active.getFencingToken(),
@@ -450,12 +476,52 @@ public class TransactionalRoomEpochAllocator implements RoomEpochAllocator {
     }
 
     private void requireProvisionable(RoomEpochSelection selection) {
+        if (selection.writerMode() == WriterMode.TEMPORAL
+                && selection.targetActivationBinding() == null) {
+            throw failure(
+                    "TARGET_E2E_ACTIVATION_BINDING_MISSING",
+                    "TEMPORAL room epoch selection requires a target activation binding");
+        }
         if (selection.writerMode() != WriterMode.LEGACY
                 && bootstrapEnqueuer.getIfAvailable() == null) {
             throw failure(
                     "ROOM_EPOCH_BOOTSTRAP_UNAVAILABLE",
                     "non-LEGACY epoch activation requires durable bootstrap infrastructure");
         }
+    }
+
+    private void persistTargetBinding(
+            CaseRoomEpochEntity epoch,
+            RoomEpochSelection selection) {
+        if (selection.targetActivationBinding() == null) {
+            return;
+        }
+        if (selection.writerMode() != WriterMode.TEMPORAL) {
+            throw failure(
+                    "TARGET_E2E_ACTIVATION_BINDING_INVALID",
+                    "only a TEMPORAL room epoch can persist a target activation binding");
+        }
+        if (targetBindingWriter == null) {
+            throw failure(
+                    "TARGET_E2E_ACTIVATION_BINDING_UNAVAILABLE",
+                    "target room epoch binding writer is unavailable");
+        }
+        var writers = targetBindingWriter.stream().toList();
+        if (writers.size() != 1) {
+            throw failure(
+                    "TARGET_E2E_ACTIVATION_BINDING_UNAVAILABLE",
+                    "target room epoch binding requires exactly one writer");
+        }
+        writers.getFirst()
+                .persist(
+                        new BindingContext(
+                                epoch.getId(),
+                                epoch.getTenantSurrogate(),
+                                epoch.getCaseId(),
+                                epoch.getRoomType(),
+                                epoch.getRoomEpoch(),
+                                epoch.getFencingToken(),
+                                selection));
     }
 
     private void enqueueProvisioning(
