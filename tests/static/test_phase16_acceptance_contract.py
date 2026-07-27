@@ -67,6 +67,11 @@ def test_phase16_ci_quality_gate_exists() -> None:
         for step in compose_steps
         if step.get("name") == "Install acceptance test dependencies"
     )
+    acceptance_step = next(
+        step
+        for step in compose_steps
+        if step.get("name") == "API, E2E, and load smoke tests"
+    )
     assert setup_python["with"]["python-version"] == "3.11"
     assert "--require-hashes" in install_dependencies["run"]
     assert (
@@ -76,6 +81,10 @@ def test_phase16_ci_quality_gate_exists() -> None:
     assert "max_attempts=5" in text
     assert "delay=$((15 * 2 ** (attempt - 1)))" in text
     assert 'SEED_DEMO_DISPUTES: "true"' in text
+    assert acceptance_step["run"] == "python -m pytest tests/api tests/e2e tests/load -q"
+    assert acceptance_step["env"] == {
+        "ACCEPTANCE_BASE_URL": "http://127.0.0.1:18080"
+    }
 
 
 # 所属模块：跨服务契约测试 > test_phase16_acceptance_contract；函数角色：回归测试用例。

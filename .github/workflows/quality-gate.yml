@@ -264,6 +264,8 @@ jobs:
           DEFAULT_LLM_API_BASE: http://127.0.0.1:9
         run: bash ./scripts/smoke-test.sh
       - name: API, E2E, and load smoke tests
+        env:
+          ACCEPTANCE_BASE_URL: http://127.0.0.1:18080
         run: python -m pytest tests/api tests/e2e tests/load -q
       - name: Compose logs on failure
         if: failure()
