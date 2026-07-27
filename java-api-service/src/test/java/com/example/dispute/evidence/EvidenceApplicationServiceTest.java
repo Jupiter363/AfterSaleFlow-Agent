@@ -380,6 +380,77 @@ class EvidenceApplicationServiceTest {
         verify(ocrTaskClient).createParseTask(any());
     }
 
+    @Test
+    void canonicalizesChromiumMarkdownContentTypeForStorageEntityAndOcr() throws Exception {
+        when(caseRepository.findById("CASE_evidence")).thenReturn(Optional.of(caseEntity()));
+        when(evidenceRepository.findFirstByCaseIdAndFileHashAndSourceTypeAndDeletedAtIsNullOrderByCreatedAtDesc(
+                        any(), any(), any()))
+                .thenReturn(Optional.empty());
+        when(evidenceRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(storage.storeOriginal(any(), any(), any(), any(), any()))
+                .thenReturn(
+                        new EvidenceStorage.StoredObject(
+                                "evidence-original",
+                                "CASE_evidence/EVIDENCE_test/browser-record.md"));
+        MockMultipartFile file =
+                new MockMultipartFile(
+                        "file",
+                        "browser-record.MD",
+                        "application/text",
+                        "# browser evidence".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+
+        EvidenceView result =
+                service.upload(
+                        "CASE_evidence",
+                        file,
+                        "DOCUMENT",
+                        "USER_UPLOAD",
+                        "PARTIES",
+                        "浏览器上传的 Markdown 用于证明争议事实",
+                        true,
+                        null,
+                        actor());
+
+        assertThat(result.contentType()).isEqualTo("text/markdown");
+        ArgumentCaptor<String> storedContentType = ArgumentCaptor.forClass(String.class);
+        verify(storage)
+                .storeOriginal(any(), any(), any(), storedContentType.capture(), any());
+        assertThat(storedContentType.getValue()).isEqualTo("text/markdown");
+        ArgumentCaptor<OcrTaskClient.ParseTask> parseTask =
+                ArgumentCaptor.forClass(OcrTaskClient.ParseTask.class);
+        verify(ocrTaskClient).createParseTask(parseTask.capture());
+        assertThat(parseTask.getValue().contentType()).isEqualTo("text/markdown");
+    }
+
+    @Test
+    void rejectsChromiumTextAliasForNonMarkdownFilename() {
+        when(caseRepository.findById("CASE_evidence"))
+                .thenReturn(Optional.of(caseEntity()));
+        MockMultipartFile file =
+                new MockMultipartFile(
+                        "file",
+                        "browser-record.txt",
+                        "application/text",
+                        "plain evidence".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+
+        assertThatThrownBy(
+                        () ->
+                                service.upload(
+                                        "CASE_evidence",
+                                        file,
+                                        "DOCUMENT",
+                                        "USER_UPLOAD",
+                                        "PARTIES",
+                                        "该文件用于证明本案相关争议事实",
+                                        true,
+                                        null,
+                                        actor()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("content type");
+        verify(storage, never()).storeOriginal(any(), any(), any(), any(), any());
+    }
+
     // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceApplicationServiceTest.reuploadingVoidedPendingEvidenceCreatesFreshPendingEvidence()」。
     // 具体功能：「EvidenceApplicationServiceTest.reuploadingVoidedPendingEvidenceCreatesFreshPendingEvidence()」：复现“核对完整业务行为（场景方法「reuploadingVoidedPendingEvidenceCreatesFreshPendingEvidence」）”场景：驱动 「caseRepository.findById」、「evidenceRepository.findFirstByCaseIdAndFileHashAndSourceTypeAndDeletedAtIsNullOrderByCreatedAtDesc」、「dossierRepository.findByCaseId」、「evidenceRepository.save」，再用 「assertThat」、「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「EVIDENCE_voided」、「CASE_evidence」、「DOSSIER_existing」、「DOCUMENT」。
     // 上游调用：「EvidenceApplicationServiceTest.reuploadingVoidedPendingEvidenceCreatesFreshPendingEvidence()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
