@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import pytest
@@ -160,6 +161,20 @@ def test_repository_contains_required_root_files_and_directories() -> None:
 
     assert not missing_files, f"missing root files: {missing_files}"
     assert not missing_directories, f"missing directories: {missing_directories}"
+
+
+def test_java_maven_settings_use_the_official_central_repository() -> None:
+    settings = ET.parse(ROOT / "java-api-service" / ".mvn" / "settings.xml")
+    namespace = {"m": "http://maven.apache.org/SETTINGS/1.2.0"}
+    mirrors = settings.findall("m:mirrors/m:mirror", namespace)
+
+    assert len(mirrors) == 1
+    mirror = mirrors[0]
+    assert mirror.findtext("m:id", namespaces=namespace) == "maven-central"
+    assert mirror.findtext("m:url", namespaces=namespace) == (
+        "https://repo.maven.apache.org/maven2/"
+    )
+    assert mirror.findtext("m:mirrorOf", namespaces=namespace) == "central"
 
 
 # 所属模块：跨服务契约测试 > test_repository_contract；函数角色：回归测试用例。
