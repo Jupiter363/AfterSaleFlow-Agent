@@ -268,6 +268,7 @@ services:
       POSTGRES_PWD: ${TEMPORAL_DB_PASSWORD}
       DBNAME: ${TEMPORAL_DB_NAME:-temporal}
       VISIBILITY_DBNAME: temporal_visibility
+      SKIP_DB_CREATE: "true"
       DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/development-sql.yaml
     volumes:
       - ./deploy/temporal/dynamicconfig:/etc/temporal/config/dynamicconfig:ro
@@ -401,6 +402,8 @@ services:
       GRAPH_EXPECTED_RESTORE_VERIFICATION_HASH: ${GRAPH_DB_RESTORE_VERIFICATION_HASH}
       GRAPH_SHADOW_BINDINGS: ${GRAPH_SHADOW_BINDINGS:-[]}
       GRAPH_SHADOW_THREADS: ${GRAPH_SHADOW_THREADS:-[]}
+    volumes:
+      - ./contracts/agent-platform/v1:/contracts/agent-platform/v1:ro
     ports:
       - "127.0.0.1:${PYTHON_AGENT_PORT:-18000}:8000"
     depends_on:

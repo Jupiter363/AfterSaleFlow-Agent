@@ -3,6 +3,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+import yaml
+
 
 ROOT = Path(__file__).resolve().parents[2]
 PYTHON_APP = ROOT / "python-agent-service/app"
@@ -222,6 +224,22 @@ def test_compose_does_not_share_bootstrap_or_graph_credentials_with_services() -
     assert "${POSTGRES_USER}" not in java_environment
     assert "GRAPH_RUNTIME_PASSWORD" not in java_environment
     assert "GRAPH_MIGRATOR_PASSWORD" not in java_environment
+
+
+def test_python_agent_mounts_authoritative_contracts_read_only() -> None:
+    compose = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
+
+    assert "./contracts/agent-platform/v1:/contracts/agent-platform/v1:ro" in compose[
+        "services"
+    ]["python-agent-service"]["volumes"]
+
+
+def test_temporal_setup_does_not_create_bootstrapped_databases() -> None:
+    compose = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
+
+    assert compose["services"]["temporal-server"]["environment"][
+        "SKIP_DB_CREATE"
+    ] == "true"
 
 
 def test_graph_database_bootstrap_and_image_are_least_privilege_and_locked() -> None:
