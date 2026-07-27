@@ -25,6 +25,9 @@ import com.example.dispute.room.infrastructure.persistence.repository.CasePartic
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.RoomMessageRepository;
 import com.example.dispute.workflow.application.intake.LegacyIntakeWriterGuard;
+import com.example.dispute.workflow.targete2e.ingress.IntakeIngressSelection;
+import com.example.dispute.workflow.targete2e.ingress.IntakeMessageIngressRouter;
+import com.example.dispute.workflow.targete2e.ingress.TargetIntakeMessageRequest;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -53,6 +56,7 @@ public class RoomMessageService {
     private final AccessSessionResolver accessSessionResolver;
     private final SessionPermissionService permissionService;
     private final IntakeProgressService intakeProgressService;
+    private final IntakeMessageIngressRouter intakeMessageIngressRouter;
     private final LegacyIntakeWriterGuard legacyIntakeWriterGuard;
     private final Clock clock;
     private final ObjectMapper objectMapper = new ObjectMapper();
@@ -74,6 +78,7 @@ public class RoomMessageService {
             AccessSessionResolver accessSessionResolver,
             SessionPermissionService permissionService,
             IntakeProgressService intakeProgressService,
+            IntakeMessageIngressRouter intakeMessageIngressRouter,
             LegacyIntakeWriterGuard legacyIntakeWriterGuard,
             Clock clock) {
         this.caseRepository = caseRepository;
@@ -86,6 +91,7 @@ public class RoomMessageService {
         this.accessSessionResolver = accessSessionResolver;
         this.permissionService = permissionService;
         this.intakeProgressService = intakeProgressService;
+        this.intakeMessageIngressRouter = intakeMessageIngressRouter;
         this.legacyIntakeWriterGuard = legacyIntakeWriterGuard;
         this.clock = clock;
     }
@@ -108,9 +114,10 @@ public class RoomMessageService {
                 caseRepository
                         .findByIdForUpdate(caseId)
                         .orElseThrow(() -> new IllegalArgumentException("case not found"));
-        if (roomType == RoomType.INTAKE) {
-            legacyIntakeWriterGuard.assertLegacyWriteAllowed(caseId);
-        }
+        IntakeIngressSelection intakeIngressSelection =
+                roomType == RoomType.INTAKE
+                        ? intakeMessageIngressRouter.select(caseId)
+                        : null;
         CaseAccessSessionEntity accessSession = accessSessionResolver.resolve(caseId, actor);
         permissionService.requireRoomRead(accessSession, roomType);
         permissionService.require(accessSession, PermissionScope.ROOM_MESSAGE_WRITE);
@@ -135,7 +142,8 @@ public class RoomMessageService {
                                         command,
                                         actor,
                                         idempotencyKey,
-                                        traceId));
+                                        traceId,
+                                        intakeIngressSelection));
     }
 
     // 所属模块：【房间协作与权限 / 应用编排层】「RoomMessageService.list(String,RoomType,AuthenticatedActor)」。
@@ -215,7 +223,8 @@ public class RoomMessageService {
             RoomMessageCommand command,
             AuthenticatedActor actor,
             String idempotencyKey,
-            String traceId) {
+            String traceId,
+            IntakeIngressSelection intakeIngressSelection) {
         if (room.getRoomStatus() != RoomStatus.OPEN) {
             throw new IllegalStateException("room is not open");
         }
@@ -240,22 +249,33 @@ public class RoomMessageService {
                         idempotencyKey,
                         clock.instant(),
                         traceId);
-        AgentRunAcceptedView accepted = intakeAgentTurnService.continueFromParticipantMessage(
-                dispute.getId(),
-                room.getRoomType(),
-                actor,
-                message,
-                traceId,
-                traceId);
-        AgentRunAcceptedView evidenceRun = evidenceAgentTurnService.continueFromParticipantMessage(
-                dispute.getId(),
-                room.getRoomType(),
-                actor,
-                command,
-                message.getId(),
-                message.getCreatedAt(),
-                traceId,
-                traceId);
+        if (room.getRoomType() == RoomType.INTAKE && intakeIngressSelection == null) {
+            throw new IllegalStateException("Intake message writer was not selected");
+        }
+        boolean targetIntake =
+                room.getRoomType() == RoomType.INTAKE && intakeIngressSelection.isTarget();
+        AgentRunAcceptedView accepted =
+                targetIntake
+                        ? null
+                        : intakeAgentTurnService.continueFromParticipantMessage(
+                                dispute.getId(),
+                                room.getRoomType(),
+                                actor,
+                                message,
+                                traceId,
+                                traceId);
+        AgentRunAcceptedView evidenceRun =
+                targetIntake
+                        ? null
+                        : evidenceAgentTurnService.continueFromParticipantMessage(
+                                dispute.getId(),
+                                room.getRoomType(),
+                                actor,
+                                command,
+                                message.getId(),
+                                message.getCreatedAt(),
+                                traceId,
+                                traceId);
         if (accepted == null) {
             accepted = evidenceRun;
         } else if (evidenceRun != null) {
@@ -273,6 +293,22 @@ public class RoomMessageService {
                 audienceJson,
                 audienceActorIdsJson,
                 actor.actorId());
+        if (targetIntake) {
+            intakeMessageIngressRouter.dispatchTarget(
+                    intakeIngressSelection,
+                    new TargetIntakeMessageRequest(
+                            saved.getCaseId(),
+                            saved.getRoomId(),
+                            saved.getId(),
+                            saved.getMessageType(),
+                            saved.getMessageText(),
+                            command.attachmentRefs(),
+                            actor,
+                            idempotencyKey,
+                            traceId,
+                            saved.getCreatedAt(),
+                            intakeIngressSelection.targetGrant()));
+        }
         return view(saved);
     }
 

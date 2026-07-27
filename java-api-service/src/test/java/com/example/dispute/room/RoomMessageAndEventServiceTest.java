@@ -14,6 +14,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -50,6 +51,11 @@ import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRe
 import com.example.dispute.room.infrastructure.persistence.repository.CaseTimelineEventRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.RoomMessageRepository;
 import com.example.dispute.workflow.application.intake.LegacyIntakeWriterGuard;
+import com.example.dispute.workflow.targete2e.ingress.IntakeIngressSelection;
+import com.example.dispute.workflow.targete2e.ingress.IntakeMessageIngressRouter;
+import com.example.dispute.workflow.targete2e.ingress.TargetIntakeActivationGrant;
+import com.example.dispute.workflow.targete2e.ingress.TargetIntakeIngressReceipt;
+import com.example.dispute.workflow.targete2e.ingress.TargetIntakeMessageRequest;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.time.Instant;
@@ -61,6 +67,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import org.hibernate.annotations.Immutable;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -92,6 +99,7 @@ class RoomMessageAndEventServiceTest {
     @Mock private EvidenceAgentTurnService evidenceAgentTurnService;
     @Mock private AccessSessionResolver accessSessionResolver;
     @Mock private IntakeProgressService intakeProgressService;
+    @Mock private IntakeMessageIngressRouter intakeMessageIngressRouter;
     @Mock private LegacyIntakeWriterGuard legacyIntakeWriterGuard;
 
     private CaseEventService eventService;
@@ -126,8 +134,12 @@ class RoomMessageAndEventServiceTest {
                         accessSessionResolver,
                         permissionService,
                         intakeProgressService,
+                        intakeMessageIngressRouter,
                         legacyIntakeWriterGuard,
                         CLOCK);
+        lenient()
+                .when(intakeMessageIngressRouter.select(any()))
+                .thenReturn(IntakeIngressSelection.legacy());
         lenient()
                 .when(accessSessionResolver.resolve(any(), any()))
                 .thenAnswer(
@@ -414,9 +426,7 @@ class RoomMessageAndEventServiceTest {
                         ErrorCode.CASE_STATUS_INVALID,
                         "Temporal owns Intake",
                         Map.of("reason_code", LegacyIntakeWriterGuard.REASON_CODE));
-        doThrow(rejected)
-                .when(legacyIntakeWriterGuard)
-                .assertLegacyWriteAllowed(dispute.getId());
+        when(intakeMessageIngressRouter.select(dispute.getId())).thenThrow(rejected);
 
         assertThatThrownBy(
                         () ->
@@ -433,7 +443,8 @@ class RoomMessageAndEventServiceTest {
                                         "TRACE_TEMPORAL_GUARD"))
                 .isSameAs(rejected);
 
-        verify(legacyIntakeWriterGuard).assertLegacyWriteAllowed(dispute.getId());
+        verify(intakeMessageIngressRouter).select(dispute.getId());
+        verifyNoInteractions(legacyIntakeWriterGuard);
         verifyNoInteractions(
                 accessSessionResolver,
                 roomRepository,
@@ -573,6 +584,98 @@ class RoomMessageAndEventServiceTest {
                         any(RoomMessageEntity.class),
                         eq("TRACE_INTAKE"),
                         eq("TRACE_INTAKE"));
+    }
+
+    @Test
+    void targetIntakeMessageDispatchesOneCommandAndNeverCallsLegacyAgentsOnReplay() {
+        FulfillmentCaseEntity dispute = intakeCase();
+        CaseRoomEntity room =
+                CaseRoomEntity.open(
+                        "ROOM_INTAKE",
+                        dispute.getId(),
+                        RoomType.INTAKE,
+                        OffsetDateTime.parse("2026-07-03T00:00:00Z"),
+                        "system");
+        TargetIntakeActivationGrant grant =
+                new TargetIntakeActivationGrant(
+                        TargetIntakeActivationGrant.TARGET_LANE,
+                        "p9act.v1." + "a".repeat(32),
+                        "b".repeat(64),
+                        "tenant-target",
+                        dispute.getId(),
+                        3L,
+                        5L,
+                        7L,
+                        "case/tenant-target/" + dispute.getId(),
+                        "target-control-build",
+                        Instant.parse("2026-07-03T01:00:00Z"));
+        IntakeIngressSelection selection = IntakeIngressSelection.target(grant);
+        when(intakeMessageIngressRouter.select(dispute.getId())).thenReturn(selection);
+        when(intakeMessageIngressRouter.dispatchTarget(eq(selection), any()))
+                .thenReturn(
+                        new TargetIntakeIngressReceipt(
+                                "intake-message:MESSAGE_TARGET",
+                                "c".repeat(64),
+                                "PENDING_ORCHESTRATION",
+                                false,
+                                Instant.parse("2026-07-03T00:00:01Z")));
+        when(caseRepository.findByIdForUpdate(dispute.getId()))
+                .thenReturn(Optional.of(dispute));
+        when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.INTAKE))
+                .thenReturn(Optional.of(room));
+        when(participantRepository.existsByCaseIdAndActorIdAndParticipantRole(
+                        dispute.getId(), "user-local", ActorRole.USER))
+                .thenReturn(true);
+        AtomicReference<RoomMessageEntity> savedMessage = new AtomicReference<>();
+        when(messageRepository.findByCaseIdAndIdempotencyKey(
+                        dispute.getId(), "target-intake-msg-1"))
+                .thenAnswer(invocation -> Optional.ofNullable(savedMessage.get()));
+        when(messageRepository.findMaxSequenceByRoomId(room.getId())).thenReturn(0L);
+        when(eventRepository.findMaxSequenceByCaseId(dispute.getId())).thenReturn(0L);
+        when(messageRepository.save(any()))
+                .thenAnswer(
+                        invocation -> {
+                            RoomMessageEntity saved = invocation.getArgument(0);
+                            savedMessage.set(saved);
+                            return saved;
+                        });
+        when(eventRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        RoomMessageCommand command =
+                new RoomMessageCommand(
+                        MessageType.PARTY_TEXT,
+                        "Package was not received.",
+                        List.of("PHOTO_1"));
+        AuthenticatedActor actor = new AuthenticatedActor("user-local", ActorRole.USER);
+
+        RoomMessageView first =
+                messageService.post(
+                        dispute.getId(),
+                        RoomType.INTAKE,
+                        command,
+                        actor,
+                        "target-intake-msg-1",
+                        "TRACE_TARGET_INTAKE");
+        RoomMessageView replay =
+                messageService.post(
+                        dispute.getId(),
+                        RoomType.INTAKE,
+                        command,
+                        actor,
+                        "target-intake-msg-1",
+                        "TRACE_REPLAY");
+
+        assertThat(replay.id()).isEqualTo(first.id());
+        verifyNoInteractions(intakeAgentTurnService, evidenceAgentTurnService);
+        verify(messageRepository, times(1)).save(any());
+        verify(eventRepository, times(1)).save(any());
+        ArgumentCaptor<TargetIntakeMessageRequest> targetRequest =
+                ArgumentCaptor.forClass(TargetIntakeMessageRequest.class);
+        verify(intakeMessageIngressRouter, times(1))
+                .dispatchTarget(eq(selection), targetRequest.capture());
+        assertThat(targetRequest.getValue().idempotencyKey())
+                .isEqualTo("target-intake-msg-1");
+        assertThat(targetRequest.getValue().activation()).isSameAs(grant);
     }
 
     // 所属模块：【房间协作与权限 / 自动化测试层】「RoomMessageAndEventServiceTest.evidencePartyEvidenceReferenceTriggersTheEvidenceAgentTurnAfterTheMessageIsPersisted()」。
