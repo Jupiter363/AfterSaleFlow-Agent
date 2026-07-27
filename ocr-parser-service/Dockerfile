@@ -8,11 +8,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
 
-RUN sed -i \
-    -e 's|http://deb.debian.org/debian|https://mirrors.aliyun.com/debian|g' \
-    -e 's|http://deb.debian.org/debian-security|https://mirrors.aliyun.com/debian-security|g' \
-    /etc/apt/sources.list.d/debian.sources
-
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
         curl \

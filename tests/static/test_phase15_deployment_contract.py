@@ -70,6 +70,15 @@ def test_frontend_container_serves_a_production_build_as_non_root() -> None:
     assert 'url.pathname === "/healthz"' in server
 
 
+def test_ocr_container_preserves_the_base_image_official_debian_sources() -> None:
+    dockerfile = read(ROOT / "ocr-parser-service" / "Dockerfile")
+
+    assert "/etc/apt/sources.list.d/debian.sources" not in dockerfile
+    assert "mirrors.aliyun.com" not in dockerfile
+    assert "apt-get update" in dockerfile
+    assert "--no-install-recommends" in dockerfile
+
+
 # 所属模块：跨服务契约测试 > test_phase15_deployment_contract；函数角色：回归测试用例。
 # 具体功能：`test_smoke_test_checks_health_and_lists_disputes_through_nginx` 验证被测业务场景在固定案例中的输出、边界和失败行为。
 # 上下游：上游为 仓库源码、固定夹具、服务契约；下游为 本文件的 `read`。
