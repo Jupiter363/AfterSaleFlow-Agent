@@ -3,7 +3,7 @@ set -eu
 
 namespace="$TARGET_E2E_TEMPORAL_NAMESPACE"
 case "$namespace" in
-  target-e2e-*) ;;
+  after-sale-flow-p9-*) ;;
   *) echo "target E2E namespace is not isolated" >&2; exit 64 ;;
 esac
 
