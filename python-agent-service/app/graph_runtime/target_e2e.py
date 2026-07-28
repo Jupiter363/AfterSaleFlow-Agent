@@ -225,6 +225,7 @@ class TargetE2EInvocationClaims(InvocationClaims):
     room_fencing_token: int = Field(ge=1, le=9_007_199_254_740_991)
     command_hash: str = Field(pattern=_SHA256.pattern)
     command_envelope_hash: str = Field(pattern=_SHA256.pattern)
+    agent_session_id: str | None = Field(default=None, pattern=_IDENTIFIER.pattern)
 
 
 @dataclass(frozen=True, slots=True)
@@ -308,6 +309,8 @@ class TargetE2ERuntimeAuthority:
     def synthetic_slot(self, case_id: str) -> int | None:
         scope = self.context.caseScope
         if isinstance(scope, GraphTargetE2EExplicitCaseScope):
+            return None
+        if not case_id.startswith(scope.caseIdPrefix):
             return None
         suffix = case_id.removeprefix(scope.caseIdPrefix)
         if not suffix or not suffix.isascii() or not suffix.isdigit():
@@ -872,15 +875,23 @@ class TargetE2EThreadIdentityResolver:
         ):
             raise GraphThreadBindingError("TARGET_E2E_COMMAND_AUTHORITY_MISMATCH")
         scope = ActorScopeBinding.from_json(command.actor_scope.model_dump(mode="json"))
-        session_hash = canonical_sha256(
-            {
-                "activation_id": verified_invocation.authority.activation_id,
-                "tenant_surrogate": command.tenant_surrogate,
-                "case_id": command.case_id,
-                "room_type": command.room_type,
-                "actor_scope": command.actor_scope.model_dump(mode="json"),
-            }
-        )
+        agent_session_id = verified_invocation.claims.agent_session_id
+        if command.room_type == "INTAKE":
+            if agent_session_id is None:
+                raise GraphThreadBindingError("TARGET_E2E_AGENT_SESSION_REQUIRED")
+        elif agent_session_id is None:
+            # Non-Intake target rooms have not yet adopted the v2 session claim. Their existing
+            # deterministic binding remains isolated from the Intake authority path.
+            session_hash = canonical_sha256(
+                {
+                    "activation_id": verified_invocation.authority.activation_id,
+                    "tenant_surrogate": command.tenant_surrogate,
+                    "case_id": command.case_id,
+                    "room_type": command.room_type,
+                    "actor_scope": command.actor_scope.model_dump(mode="json"),
+                }
+            )
+            agent_session_id = f"p9ses.v1.{session_hash[:32]}"
         return ThreadIdentity(
             thread_id=command.thread_id,
             tenant_surrogate=command.tenant_surrogate,
@@ -888,7 +899,7 @@ class TargetE2EThreadIdentityResolver:
             room_type=RoomType(command.room_type),
             room_epoch=command.room_epoch,
             actor_scope=scope,
-            agent_session_id=f"p9ses.v1.{session_hash[:32]}",
+            agent_session_id=agent_session_id,
             shared_session=(command.room_type == "HEARING" and command.actor_scope.actor_role == "SYSTEM"),
             graph_key=command.graph_key,
             graph_version=command.graph_version,

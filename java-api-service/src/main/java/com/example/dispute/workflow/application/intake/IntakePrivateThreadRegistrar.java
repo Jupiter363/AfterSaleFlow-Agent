@@ -26,7 +26,10 @@ public final class IntakePrivateThreadRegistrar {
             requireIssueRequestMatches(request, existing.get());
             return IntakeGraphBindingStore.WriteReceipt.replayed(existing.get());
         }
-        return register(factory.issue(request));
+        IntakeGraphBindingStore.WriteReceipt<IntakeGraphThreadBinding> receipt =
+                Objects.requireNonNull(store.register(factory.issue(request)), "registration receipt");
+        requireIssueRequestMatches(request, receipt.value());
+        return receipt;
     }
 
     public IntakeGraphBindingStore.WriteReceipt<IntakeGraphThreadBinding> register(
@@ -63,8 +66,7 @@ public final class IntakePrivateThreadRegistrar {
                         && pins.policyVersion().equals(registration.policyVersion())
                         && pins.guardrailVersion().equals(registration.guardrailVersion())
                         && pins.toolPolicyVersion().equals(registration.toolPolicyVersion())
-                        && request.writerMode() == registration.writerMode()
-                        && request.issuedAt().equals(registration.issuedAt());
+                        && request.writerMode() == registration.writerMode();
         if (!matches) {
             throw new IntakeGraphBindingConflictException(
                     "registration id is already bound to different private-thread material");

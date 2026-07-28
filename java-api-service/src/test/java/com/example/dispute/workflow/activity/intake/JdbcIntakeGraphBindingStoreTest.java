@@ -256,6 +256,53 @@ class JdbcIntakeGraphBindingStoreTest {
         assertThat(store.bindEvent(event).created()).isTrue();
     }
 
+    @Test
+    void lockedThreadStateReturnsTheOneExistingInitialSnapshotWithoutCreatingAnother() {
+        IntakeGraphThreadBinding binding = IntakeTestFixtures.binding();
+        IntakeSnapshotReference snapshot = IntakeTestFixtures.snapshot(binding);
+        stubLockedThread(binding);
+        when(jdbc.query(
+                        contains("binding_type = 'INITIAL'"),
+                        anyMap(),
+                        org.mockito.ArgumentMatchers.<RowMapper<IntakeSnapshotReference>>any()))
+                .thenReturn(List.of(snapshot));
+
+        var state = store.lockThreadSnapshotState(binding.registration().registrationId());
+
+        assertThat(state.thread()).isEqualTo(binding);
+        assertThat(state.initialSnapshot()).contains(snapshot);
+    }
+
+    @Test
+    void eventAllocationReplaysTheSameMessageOrAllocatesTheNextSequenceUnderThreadLock() {
+        IntakeGraphThreadBinding binding = IntakeTestFixtures.binding();
+        IntakeEventReference replayed = eventAtSequence(binding, 2);
+        stubLockedThread(binding);
+        stubInitialSequence(1);
+        when(jdbc.query(
+                        contains("binding_type = 'EVENT'"),
+                        anyMap(),
+                        org.mockito.ArgumentMatchers.<RowMapper<IntakeEventReference>>any()))
+                .thenReturn(List.of(replayed))
+                .thenReturn(List.of());
+        when(jdbc.queryForObject(
+                        contains("select max(event_sequence)"), anyMap(), eq(Long.class)))
+                .thenReturn(2L);
+
+        var sameMessage = store.allocateEvent(
+                binding.registration().registrationId(), replayed.eventId(), replayed.messageId());
+        var nextMessage = store.allocateEvent(
+                binding.registration().registrationId(), "EVENT_P4_SEQUENCE_3", "MESSAGE_P4_SEQUENCE_3");
+
+        assertThat(sameMessage.sequenceNo()).isEqualTo(2);
+        assertThat(sameMessage.existing()).contains(replayed);
+        assertThat(nextMessage.sequenceNo()).isEqualTo(3);
+        assertThat(nextMessage.existing()).isEmpty();
+        verify(jdbc, times(2)).query(
+                contains("for update"), anyMap(),
+                org.mockito.ArgumentMatchers.<RowMapper<IntakeGraphThreadBinding>>any());
+    }
+
     private void stubLockedThread(IntakeGraphThreadBinding binding) {
         when(jdbc.query(
                         contains("for update"),

@@ -112,32 +112,37 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
                 access, RoomType.INTAKE, IntakeAgentTurnService.AGENT_ROLE,
                 activePins.promptVersion(), activePins.memoryPolicyVersion());
 
-        String identity = token(activation.activationId() + "\n" + request.messageId());
-        String commandId = "intake-message:" + identity;
-        String registrationId = "target-intake-registration:" + identity;
+        String messageIdentity = token(activation.activationId() + "\n" + request.messageId());
+        String commandId = "intake-message:" + messageIdentity;
         IntakePrivateThreadRegistration.ActorScope actorScope = new IntakePrivateThreadRegistration.ActorScope(
                 request.actor().actorId(),
                 com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole.valueOf(request.actor().role().name()),
                 audience(request), List.of(caseCapability(request.caseId())));
+        String registrationId = "target-intake-registration:" + token(threadIdentity(
+                activation, request, actorScope, session.getId(), activePins));
         IntakeGraphThreadBinding thread = threadRegistrar.register(
                 new IntakePrivateThreadRegistrationFactory.IssueRequest(
                         registrationId, activation.tenantSurrogate(), request.caseId(), activation.roomEpoch(),
                         activation.roomFencingToken(), actorScope, session.getId(), activePins.registrationPins(),
                         WriterMode.TEMPORAL, request.createdAt())).value();
 
-        IntakeSnapshotReference snapshot = snapshots.publish(new IntakeDomainSnapshotPublisher.SnapshotRequest(
-                "target-intake-snapshot:" + identity, thread,
+        IntakeSnapshotReference snapshot = snapshots.publishOrLoad(new IntakeDomainSnapshotPublisher.SnapshotRequest(
+                "target-intake-snapshot:" + token(registrationId), thread,
                 activation.processRevision(), activation.processRevision(), activation.processRevision(),
                 List.of(request.messageId()), JsonNodeFactory.instance.objectNode(),
                 JsonNodeFactory.instance.objectNode(), List.of(), JsonNodeFactory.instance.objectNode(),
                 request.createdAt())).value();
-        var event = events.publish(new IntakeTurnEventPublisher.EventRequest(
-                "target-intake-event:" + identity, request.messageId(), thread, 1,
-                activation.processRevision(), audience(request), IntakeTurnEventPublisher.SourceType.ROOM_MESSAGE,
-                request.text(), List.of(request.messageId()), request.createdAt(), now)).value();
+        String eventId = "target-intake-event:" + messageIdentity;
+        var allocation = events.allocate(thread, eventId, request.messageId());
+        var event = allocation.existing().orElseGet(() -> events.publish(
+                new IntakeTurnEventPublisher.EventRequest(
+                        eventId, request.messageId(), thread, allocation.sequenceNo(),
+                        activation.processRevision(), audience(request),
+                        IntakeTurnEventPublisher.SourceType.ROOM_MESSAGE, request.text(),
+                        List.of(request.messageId()), request.createdAt(), now)).value());
 
-        String logicalRunId = "target-intake-run:" + identity;
-        String attemptId = "target-intake-attempt:" + identity + ":1";
+        String logicalRunId = "target-intake-run:" + messageIdentity;
+        String attemptId = "target-intake-attempt:" + messageIdentity + ":1";
         Instant deadline = request.createdAt().plus(DEADLINE);
         RoomGraphCommand graph = commands.create(new IntakeGraphCommandFactory.CommandRequest(
                 commandId, logicalRunId, attemptId, thread, snapshot, event, activation.processRevision(),
@@ -200,6 +205,23 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
 
     private static String nonce(TargetIntakeMessageRequest request) {
         return "target-intake-nonce:" + token(request.messageId());
+    }
+
+    private static String threadIdentity(
+            TargetIntakeActivationGrant activation,
+            TargetIntakeMessageRequest request,
+            IntakePrivateThreadRegistration.ActorScope actorScope,
+            String agentSessionId,
+            TargetIntakeRuntimePins pins) {
+        var graphPins = pins.registrationPins();
+        return String.join("\n",
+                activation.activationId(), activation.tenantSurrogate(), request.caseId(),
+                Long.toString(activation.roomEpoch()), Long.toString(activation.roomFencingToken()),
+                actorScope.actorId(), actorScope.actorRole().name(), actorScope.audience().name(), agentSessionId,
+                graphPins.graphKey(), graphPins.graphVersion(), graphPins.checkpointSchemaVersion(),
+                graphPins.stateSchemaVersion(), graphPins.promptVersion(), graphPins.modelProfileId(),
+                graphPins.outputSchemaVersion(), graphPins.policyVersion(), graphPins.guardrailVersion(),
+                graphPins.toolPolicyVersion(), WriterMode.TEMPORAL.name());
     }
 
     private static String caseCapability(String caseId) {

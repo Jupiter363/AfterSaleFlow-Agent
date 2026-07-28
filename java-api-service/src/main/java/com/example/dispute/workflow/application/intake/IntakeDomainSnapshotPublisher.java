@@ -90,6 +90,26 @@ public final class IntakeDomainSnapshotPublisher {
         return receipt;
     }
 
+    /**
+     * Returns the already established initialization snapshot, or creates it while holding the
+     * actor thread lock. The lock is owned by the caller transaction, not by an object-store
+     * retry, so a second durable turn cannot manufacture a competing initial snapshot.
+     */
+    public IntakeGraphBindingStore.WriteReceipt<IntakeSnapshotReference> publishOrLoad(
+            SnapshotRequest request) {
+        Objects.requireNonNull(request, "request");
+        var state = bindingStore.lockThreadSnapshotState(
+                request.threadBinding().registration().registrationId());
+        if (!state.thread().equals(request.threadBinding())) {
+            throw new IntakeGraphBindingConflictException(
+                    "locked private thread differs from the requested snapshot scope");
+        }
+        if (state.initialSnapshot().isPresent()) {
+            return IntakeGraphBindingStore.WriteReceipt.replayed(state.initialSnapshot().get());
+        }
+        return publish(request);
+    }
+
     public static String operationKey(SnapshotRequest request) {
         IntakePrivateThreadRegistration registration = request.threadBinding().registration();
         return "intake.snapshot.publish:"

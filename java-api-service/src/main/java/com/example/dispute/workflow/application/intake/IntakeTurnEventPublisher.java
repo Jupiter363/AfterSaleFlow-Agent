@@ -88,6 +88,16 @@ public final class IntakeTurnEventPublisher {
         return receipt;
     }
 
+    /** Allocates a durable per-thread event slot or returns the exact replayed event. */
+    public IntakeGraphBindingStore.EventAllocation allocate(
+            IntakeGraphThreadBinding threadBinding, String eventId, String messageId) {
+        Objects.requireNonNull(threadBinding, "threadBinding");
+        return bindingStore.allocateEvent(
+                threadBinding.registration().registrationId(),
+                IntakeContractSupport.identifier(eventId, "eventId"),
+                IntakeContractSupport.identifier(messageId, "messageId"));
+    }
+
     private static ObjectNode eventPayload(
             EventRequest request, IntakePrivateThreadRegistration registration) {
         ObjectNode root = JsonNodeFactory.instance.objectNode();

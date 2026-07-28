@@ -75,6 +75,25 @@ class IntakePrivateThreadRegistrationTest {
     }
 
     @Test
+    void stableThreadIdentityReusesTheOriginalIssuedAtAcrossLaterTurns() {
+        var store = new IntakeTestFixtures.SingleBindingStore();
+        var factory = new IntakePrivateThreadRegistrationFactory(() -> IntakeTestFixtures.THREAD_ID);
+        var registrar = new IntakePrivateThreadRegistrar(store, factory);
+        var first = IntakeTestFixtures.issueRequest("intake-prompt.v2");
+        var later = new IntakePrivateThreadRegistrationFactory.IssueRequest(
+                first.registrationId(), first.tenantSurrogate(), first.caseId(), first.roomEpoch(),
+                first.fencingToken(), first.actorScope(), first.agentSessionId(), first.versionPins(),
+                first.writerMode(), first.issuedAt().plusSeconds(30));
+
+        var created = registrar.register(first);
+        var replayed = registrar.register(later);
+
+        assertThat(created.created()).isTrue();
+        assertThat(replayed.created()).isFalse();
+        assertThat(replayed.value().registration().issuedAt()).isEqualTo(first.issuedAt());
+    }
+
+    @Test
     void issuesTargetRegistrationFromExplicitTargetPins() {
         var factory = new IntakePrivateThreadRegistrationFactory(() -> IntakeTestFixtures.THREAD_ID);
         var binding = factory.issue(

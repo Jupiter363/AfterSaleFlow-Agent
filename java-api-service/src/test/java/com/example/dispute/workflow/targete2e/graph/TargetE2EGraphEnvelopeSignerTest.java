@@ -124,6 +124,32 @@ class TargetE2EGraphEnvelopeSignerTest {
         .hasMessageContaining("does not match");
   }
 
+  @Test
+  void signsTheExactJavaIssuedAgentSessionWhenTheTargetResolverSuppliesOne()
+      throws Exception {
+    var codec = TargetE2EGraphTestFixtures.codec();
+    var command = codec.wrapCommand(ACTIVATION_ID, 7L, TargetE2EGraphTestFixtures.command());
+    var signer =
+        new Es256TargetE2EGraphEnvelopeSigner(
+            requestedKey -> signingKey(requestedKey),
+            MAPPER,
+            Clock.fixed(NOW, ZoneOffset.UTC),
+            Duration.ofSeconds(45),
+            () -> "target-command-jti-001",
+            ignored -> "AGENT_SESSION_java_issued_001");
+
+    var signed = signer.sign(command, REGISTRY_BINDING);
+    String[] segments = signed.compactJws().split("\\.", -1);
+    ObjectNode claims = decode(segments[1]);
+
+    assertThat(claims.path("agent_session_id").asText())
+        .isEqualTo("AGENT_SESSION_java_issued_001");
+    Signature verifier = Signature.getInstance("SHA256withECDSAinP1363Format");
+    verifier.initVerify(keyPair.getPublic());
+    verifier.update((segments[0] + "." + segments[1]).getBytes(StandardCharsets.US_ASCII));
+    assertThat(verifier.verify(Base64.getUrlDecoder().decode(segments[2]))).isTrue();
+  }
+
   private static Es256TargetE2EGraphEnvelopeSigner signer(String keyId) {
     return new Es256TargetE2EGraphEnvelopeSigner(
         signingKey(keyId),

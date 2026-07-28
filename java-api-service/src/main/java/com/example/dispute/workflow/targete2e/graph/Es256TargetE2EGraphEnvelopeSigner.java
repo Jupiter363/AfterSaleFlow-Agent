@@ -37,6 +37,7 @@ public final class Es256TargetE2EGraphEnvelopeSigner implements TargetE2EGraphEn
   private final Clock clock;
   private final long lifetimeSeconds;
   private final Supplier<String> jtiSupplier;
+  private final TargetE2EAgentSessionResolver agentSessions;
 
   public Es256TargetE2EGraphEnvelopeSigner(
       GraphEnvelopeSigningKeyResolver signingKeys, ObjectMapper objectMapper, Clock clock) {
@@ -45,7 +46,8 @@ public final class Es256TargetE2EGraphEnvelopeSigner implements TargetE2EGraphEn
         objectMapper,
         clock,
         Duration.ofSeconds(60),
-        () -> "target-command-" + UUID.randomUUID());
+        () -> "target-command-" + UUID.randomUUID(),
+        command -> null);
   }
 
   public Es256TargetE2EGraphEnvelopeSigner(
@@ -59,6 +61,16 @@ public final class Es256TargetE2EGraphEnvelopeSigner implements TargetE2EGraphEn
       Clock clock,
       Duration lifetime,
       Supplier<String> jtiSupplier) {
+    this(signingKeys, objectMapper, clock, lifetime, jtiSupplier, command -> null);
+  }
+
+  public Es256TargetE2EGraphEnvelopeSigner(
+      GraphEnvelopeSigningKeyResolver signingKeys,
+      ObjectMapper objectMapper,
+      Clock clock,
+      Duration lifetime,
+      Supplier<String> jtiSupplier,
+      TargetE2EAgentSessionResolver agentSessions) {
     this.signingKeys = Objects.requireNonNull(signingKeys, "signingKeys");
     this.mapper = Objects.requireNonNull(objectMapper, "objectMapper").copy();
     this.mapper.setSerializationInclusion(JsonInclude.Include.NON_NULL);
@@ -74,6 +86,7 @@ public final class Es256TargetE2EGraphEnvelopeSigner implements TargetE2EGraphEn
     }
     this.lifetimeSeconds = lifetime.getSeconds();
     this.jtiSupplier = Objects.requireNonNull(jtiSupplier, "jtiSupplier");
+    this.agentSessions = Objects.requireNonNull(agentSessions, "agentSessions");
   }
 
   public Es256TargetE2EGraphEnvelopeSigner(
@@ -183,6 +196,10 @@ public final class Es256TargetE2EGraphEnvelopeSigner implements TargetE2EGraphEn
     claims.put("room_fencing_token", envelope.roomFencingToken());
     claims.put("command_hash", envelope.commandHash());
     claims.put("command_envelope_hash", envelope.commandEnvelopeHash());
+    String agentSessionId = agentSessions.resolve(command);
+    if (agentSessionId != null) {
+      claims.put("agent_session_id", identifier(agentSessionId, "agentSessionId"));
+    }
     return claims;
   }
 

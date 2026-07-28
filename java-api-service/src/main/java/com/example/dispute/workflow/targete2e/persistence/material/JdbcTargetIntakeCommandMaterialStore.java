@@ -11,6 +11,7 @@ import com.example.dispute.workflow.temporal.room.intake.IntakeTargetAgentRunCon
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -42,7 +43,11 @@ public final class JdbcTargetIntakeCommandMaterialStore implements TargetIntakeC
             ObjectMapper objectMapper) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
         this.activationLedger = Objects.requireNonNull(activationLedger, "activationLedger");
-        this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper").copy();
+        this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper")
+                .copy()
+                // V049 persists the unannotated execution-context envelope as camelCase. Nested
+                // graph contracts retain their explicit @JsonNaming(SnakeCaseStrategy) contract.
+                .setPropertyNamingStrategy(PropertyNamingStrategies.LOWER_CAMEL_CASE);
     }
 
     @Override

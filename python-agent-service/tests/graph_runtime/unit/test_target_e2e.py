@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import base64
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,7 +18,7 @@ from app.config import (
 from app.contracts.v1.codec import canonical_sha256, canonical_sha256_omitting
 from app.contracts.v1.models import ExecutionMetadata, RoomGraphCommand, Usage
 from app.graph_runtime.checkpoint import TerminalResultMaterializer
-from app.graph_runtime.errors import GraphContractError
+from app.graph_runtime.errors import GraphContractError, GraphThreadBindingError
 from app.graph_runtime.gateway import GraphCommandGateway
 from app.graph_runtime.ledger import PostgresCommandLedger
 from app.graph_runtime.persistence_models import (
@@ -35,6 +36,7 @@ from app.graph_runtime.target_e2e import (
     TargetE2ERoomProposal,
     TargetE2ERoomProposalSource,
     TargetE2ERuntimeAuthority,
+    TargetE2EThreadIdentityResolver,
     target_e2e_command_hash,
 )
 from app.graph_runtime.target_e2e_composite import TargetE2ECompositeExecutor
@@ -83,6 +85,7 @@ def _command() -> RoomGraphCommand:
             },
         }
     )
+    values[vector["hash_field"]] = vector["sha256"]
     values[vector["hash_field"]] = canonical_sha256_omitting(
         values,
         vector["hash_field"],
@@ -233,7 +236,6 @@ def test_runtime_projection_and_command_credential_are_distinct() -> None:
     assert authority.context_hash == canonical_sha256(
         authority.context.model_dump(mode="json", by_alias=True)
     )
-
     verified = TargetE2EInvocationVerifier(
         key_resolver=_Resolver(key.public_key()),
         authority=authority,
@@ -256,6 +258,55 @@ def test_runtime_projection_and_command_credential_are_distinct() -> None:
             transport_identity=TransportIdentity("java-api-service", True, "e" * 64),
         )
 
+
+@pytest.mark.asyncio
+async def test_signed_java_agent_session_round_trips_and_missing_or_tampered_claims_fail_closed() -> None:
+    key = ec.generate_private_key(ec.SECP256R1())
+    command = _command()
+    verifier = TargetE2EInvocationVerifier(
+        key_resolver=_Resolver(key.public_key()),
+        authority=_authority(),
+        now=lambda: NOW,
+    )
+    transport = TransportIdentity("java-api-service", True, "e" * 64)
+    session_id = "AGENT_SESSION_java_issued_001"
+    verified = verifier.verify_envelope(
+        token=_command_token(key, command, agent_session_id=session_id),
+        envelope=_command_envelope(command),
+        transport_identity=transport,
+    )
+
+    identity = await TargetE2EThreadIdentityResolver().resolve(
+        command=command,
+        verified_invocation=verified,
+    )
+    assert identity.agent_session_id == session_id
+
+    without_session = verifier.verify_envelope(
+        token=_command_token(key, command),
+        envelope=_command_envelope(command),
+        transport_identity=transport,
+    )
+    with pytest.raises(GraphThreadBindingError, match="AGENT_SESSION_REQUIRED"):
+        await TargetE2EThreadIdentityResolver().resolve(
+            command=command,
+            verified_invocation=without_session,
+        )
+
+    token = _command_token(key, command, agent_session_id=session_id)
+    header, payload, signature = token.split(".")
+    padding = "=" * (-len(payload) % 4)
+    claims = json.loads(base64.urlsafe_b64decode(payload + padding))
+    claims["agent_session_id"] = "AGENT_SESSION_tampered_001"
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(claims, separators=(",", ":")).encode("utf-8")
+    ).rstrip(b"=").decode("ascii")
+    with pytest.raises(InvocationEnvelopeError, match="CLAIMS_REJECTED"):
+        verifier.verify_envelope(
+            token=f"{header}.{encoded}.{signature}",
+            envelope=_command_envelope(command),
+            transport_identity=transport,
+        )
 
 def test_command_key_must_be_in_runtime_projection_allowlist() -> None:
     key = ec.generate_private_key(ec.SECP256R1())
@@ -448,6 +499,8 @@ def test_runtime_projection_scope_and_synthetic_slots_fail_closed() -> None:
     )
     assert synthetic.synthetic_slot("CASE_P9_SYNTHETIC_0001") == 1
     assert synthetic.synthetic_slot("CASE_P9_SYNTHETIC_0005") is None
+    assert synthetic.synthetic_slot("CASE_P9_SYNTHETIC_6f4f10b5-8f77-4a2d-9fbc-1ca2b9af4321") is None
+    assert synthetic.synthetic_slot("1") is None
 
 
 def test_shadow_and_candidate_gateways_reject_each_others_credentials() -> None:

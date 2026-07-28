@@ -55,7 +55,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.minio.MinioClient;
 import java.nio.file.Path;
 import java.time.Clock;
-import java.util.UUID;
 import javax.sql.DataSource;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
@@ -90,12 +89,13 @@ public class TargetE2eApiConfiguration {
   }
 
   @Bean
-  ImportedCaseIdFactory targetE2eImportedCaseIdFactory(Environment environment) {
-    String prefix = required(environment, "app.target-e2e.case-id-prefix");
-    if (!prefix.matches("[A-Z][A-Z0-9_]{2,31}")) {
-      throw new IllegalStateException("target E2E case ID prefix is invalid");
-    }
-    return () -> prefix + UUID.randomUUID().toString().replace("-", "");
+  ImportedCaseIdFactory targetE2eImportedCaseIdFactory(
+      DataSource dataSource, Environment environment, Clock clock) {
+    // The signed activation row is the authority for prefix, capacity, and fixture binding.
+    // Keep the environment property mandatory as an early deployment wiring guard only.
+    required(environment, "app.target-e2e.case-id-prefix");
+    return new TargetE2eSyntheticCaseIdFactory(
+        dataSource, required(environment, "target.e2e.activation.id"), clock);
   }
 
   @Bean

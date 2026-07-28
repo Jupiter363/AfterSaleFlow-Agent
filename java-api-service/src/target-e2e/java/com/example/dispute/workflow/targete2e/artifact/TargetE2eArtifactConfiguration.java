@@ -47,6 +47,7 @@ import com.example.dispute.workflow.targete2e.finalization.TargetE2eIntakePropos
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eIntakeProposalStore;
 import com.example.dispute.workflow.targete2e.finalization.TemporalTargetE2eFinalizationRuntimeContextProvider;
 import com.example.dispute.workflow.targete2e.graph.Es256TargetE2EGraphEnvelopeSigner;
+import com.example.dispute.workflow.targete2e.graph.JdbcTargetE2EAgentSessionResolver;
 import com.example.dispute.workflow.targete2e.graph.HttpTargetE2EGraphProposalClient;
 import com.example.dispute.workflow.targete2e.graph.HttpTargetE2EGraphProposalSourceClient;
 import com.example.dispute.workflow.targete2e.graph.HttpTargetE2EGraphReconciliationClient;
@@ -54,6 +55,7 @@ import com.example.dispute.workflow.targete2e.graph.JpaTargetE2EAgentRunIdentity
 import com.example.dispute.workflow.targete2e.graph.TargetE2EAgentGraphCommandClient;
 import com.example.dispute.workflow.targete2e.graph.TargetE2EAgentGraphReconciliationClient;
 import com.example.dispute.workflow.targete2e.graph.TargetE2EAgentRunIdentityResolver;
+import com.example.dispute.workflow.targete2e.graph.TargetE2EAgentSessionResolver;
 import com.example.dispute.workflow.targete2e.graph.TargetE2EGraphEnvelopeCodec;
 import com.example.dispute.workflow.targete2e.graph.TargetE2EGraphEnvelopeSigner;
 import com.example.dispute.workflow.targete2e.graph.TargetE2EGraphProposalClient;
@@ -89,10 +91,23 @@ public class TargetE2eArtifactConfiguration {
     }
 
     @Bean
+    TargetE2EAgentSessionResolver targetE2EAgentSessionResolver(
+            DataSource dataSource, ObjectMapper objectMapper) {
+        return new JdbcTargetE2EAgentSessionResolver(dataSource, objectMapper);
+    }
+
+    @Bean
     TargetE2EGraphEnvelopeSigner targetE2EGraphEnvelopeSigner(
-            MountedPemGraphEnvelopeKeySet signingKeys, ObjectMapper objectMapper) {
+            MountedPemGraphEnvelopeKeySet signingKeys,
+            ObjectMapper objectMapper,
+            TargetE2EAgentSessionResolver agentSessions) {
         return new Es256TargetE2EGraphEnvelopeSigner(
-                signingKeys, objectMapper, Clock.systemUTC());
+                signingKeys,
+                objectMapper,
+                Clock.systemUTC(),
+                java.time.Duration.ofSeconds(60),
+                () -> "target-command-" + java.util.UUID.randomUUID(),
+                agentSessions);
     }
 
     @Bean

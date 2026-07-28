@@ -84,6 +84,45 @@ public class JdbcIntakeGraphBindingStore implements IntakeGraphBindingStore {
 
     @Override
     @Transactional
+    public ThreadSnapshotState lockThreadSnapshotState(String registrationId) {
+        IntakeGraphThreadBinding thread = lockThread(registrationId);
+        return new ThreadSnapshotState(thread, findInitialSnapshot(registrationId));
+    }
+
+    @Override
+    @Transactional
+    public EventAllocation allocateEvent(String registrationId, String eventId, String messageId) {
+        IntakeGraphThreadBinding thread = lockThread(registrationId);
+        requireInitialSnapshot(registrationId);
+        List<IntakeEventReference> existing = jdbc.query(
+                """
+                select %s
+                  from case_intake_snapshot_binding
+                 where binding_type = 'EVENT'
+                   and thread_registration_id = :registrationId
+                   and (event_id = :eventId or message_id = :messageId)
+                """.formatted(EVENT_COLUMNS),
+                Map.of("registrationId", registrationId, "eventId", eventId, "messageId", messageId),
+                JdbcIntakeGraphBindingStore::mapEvent);
+        if (existing.size() > 1) {
+            throw conflict("event id or message id resolves to multiple private events");
+        }
+        if (existing.size() == 1) {
+            IntakeEventReference event = existing.getFirst();
+            if (!event.eventId().equals(eventId) || !event.messageId().equals(messageId)) {
+                throw conflict("event id and message id are bound to different private events");
+            }
+            requireReferenceScope(thread, event);
+            return new EventAllocation(event.sequenceNo(), Optional.of(event));
+        }
+        long initialLastSequence = requireInitialSnapshot(registrationId);
+        long previousSequence = Math.max(initialLastSequence,
+                maximumEventSequence(registrationId).orElse(0L));
+        return new EventAllocation(Math.addExact(previousSequence, 1L), Optional.empty());
+    }
+
+    @Override
+    @Transactional
     public WriteReceipt<IntakeGraphThreadBinding> register(IntakeGraphThreadBinding binding) {
         binding.registration().requireCanonicalHash();
         requireRegistrationAuthority(binding);
@@ -115,7 +154,7 @@ public class JdbcIntakeGraphBindingStore implements IntakeGraphBindingStore {
         IntakeGraphThreadBinding existing =
                 findConflictingRegistration(binding)
                         .orElseThrow(() -> conflict("registration uniqueness"));
-        if (!existing.equals(binding)) {
+        if (!sameThreadIdentity(existing, binding)) {
             throw conflict("registration hash, private tuple, or fencing token");
         }
         return WriteReceipt.replayed(existing);
@@ -304,6 +343,22 @@ public class JdbcIntakeGraphBindingStore implements IntakeGraphBindingStore {
         return rows.size() == 1 ? Optional.of(rows.getFirst()) : Optional.empty();
     }
 
+    private Optional<IntakeSnapshotReference> findInitialSnapshot(String registrationId) {
+        List<IntakeSnapshotReference> rows = jdbc.query(
+                """
+                select %s
+                  from case_intake_snapshot_binding
+                 where binding_type = 'INITIAL'
+                   and thread_registration_id = :registrationId
+                """.formatted(SNAPSHOT_COLUMNS),
+                Map.of("registrationId", registrationId),
+                JdbcIntakeGraphBindingStore::mapSnapshot);
+        if (rows.size() > 1) {
+            throw conflict("multiple initial snapshots exist for one private thread");
+        }
+        return rows.isEmpty() ? Optional.empty() : Optional.of(rows.getFirst());
+    }
+
     private Optional<IntakeEventReference> findEvent(IntakeEventReference candidate) {
         List<IntakeEventReference> rows = jdbc.query(
                 """
@@ -348,6 +403,33 @@ public class JdbcIntakeGraphBindingStore implements IntakeGraphBindingStore {
                 reference.threadId(),
                 reference.actorScopeHash(),
                 reference.agentSessionId());
+    }
+
+    /** The generated thread id and issue timestamp are intentionally excluded for first-write races. */
+    private static boolean sameThreadIdentity(
+            IntakeGraphThreadBinding left, IntakeGraphThreadBinding right) {
+        IntakePrivateThreadRegistration a = left.registration();
+        IntakePrivateThreadRegistration b = right.registration();
+        return a.registrationId().equals(b.registrationId())
+                && a.tenantSurrogate().equals(b.tenantSurrogate())
+                && a.caseId().equals(b.caseId())
+                && a.roomType().equals(b.roomType())
+                && a.roomEpoch() == b.roomEpoch()
+                && left.fencingToken() == right.fencingToken()
+                && a.actorScope().equals(b.actorScope())
+                && a.actorScopeHash().equals(b.actorScopeHash())
+                && a.agentSessionId().equals(b.agentSessionId())
+                && a.graphKey().equals(b.graphKey())
+                && a.graphVersion().equals(b.graphVersion())
+                && a.checkpointSchemaVersion().equals(b.checkpointSchemaVersion())
+                && a.stateSchemaVersion().equals(b.stateSchemaVersion())
+                && a.promptVersion().equals(b.promptVersion())
+                && a.modelProfileId().equals(b.modelProfileId())
+                && a.outputSchemaVersion().equals(b.outputSchemaVersion())
+                && a.policyVersion().equals(b.policyVersion())
+                && a.guardrailVersion().equals(b.guardrailVersion())
+                && a.toolPolicyVersion().equals(b.toolPolicyVersion())
+                && a.writerMode() == b.writerMode();
     }
 
     private static void requireReferenceScope(
