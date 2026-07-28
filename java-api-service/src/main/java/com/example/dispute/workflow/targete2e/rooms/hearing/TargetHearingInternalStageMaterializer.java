@@ -118,9 +118,9 @@ public final class TargetHearingInternalStageMaterializer {
   private RoomGraphCommand graph(String commandId, String logicalRunId, String attemptId, HearingRoomStart start,
       long processRevision, HearingWorkflowStage stage, RoomGraphCommand.SnapshotRef domain,
       RoomGraphCommand.SnapshotRef event, Instant now) {
-    RoomGraphCommand.InvocationContext invocation = new RoomGraphCommand.InvocationContext("all-rooms-agent.target-e2e.v1",
+    RoomGraphCommand.InvocationContext invocation = new RoomGraphCommand.InvocationContext(pins.agentProfileId(),
         pins.promptVersion(), pins.modelProfileId(), "target-e2e-room-proposal-source.v1", pins.policyVersion(),
-        pins.guardrailVersion(), List.of(pins.toolPolicyVersion()), pins.envelopeKeyId(), "target-hearing-nonce:" + stable(commandId));
+        pins.guardrailVersion(), List.of(), pins.envelopeKeyId(), "target-hearing-nonce:" + stable(commandId));
     RoomGraphCommand provisional = new RoomGraphCommand("room-graph-command.v1", commandId, logicalRunId, attemptId,
         start.tenantSurrogate(), start.caseId(), RoomType.HEARING, start.roomEpoch(), TargetTypedRoomProtocol.GRAPH_KEY,
         TargetTypedRoomProtocol.GRAPH_VERSION, TargetTypedRoomProtocol.CHECKPOINT_SCHEMA_VERSION, "grt.v1." + stable(start.caseId()),

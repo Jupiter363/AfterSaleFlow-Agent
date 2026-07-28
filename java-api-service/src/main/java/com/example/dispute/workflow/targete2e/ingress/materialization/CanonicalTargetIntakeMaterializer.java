@@ -144,7 +144,7 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
         Instant deadline = request.commandDeadlineAt();
         RoomGraphCommand graph = commands.create(new IntakeGraphCommandFactory.CommandRequest(
                 commandId, logicalRunId, attemptId, thread, snapshot, event, activation.processRevision(),
-                "INTAKE", activation.processRevision(), session.getPromptProfileId(), 2, 3, 1, deadline,
+                OPERATION, activation.processRevision(), activePins.agentProfileId(), 2, 3, 1, deadline,
                 traceparent(request.traceId()), activePins.envelopeKeyId(), nonce(request)));
         TargetE2EGraphCommandEnvelope envelope = envelopes.wrapCommand(
                 activation.activationId(), activation.roomFencingToken(), graph);

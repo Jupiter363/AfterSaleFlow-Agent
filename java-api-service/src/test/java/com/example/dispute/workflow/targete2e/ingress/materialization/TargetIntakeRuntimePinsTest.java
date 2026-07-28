@@ -10,7 +10,8 @@ class TargetIntakeRuntimePinsTest {
     void suppliesTheExplicitTargetRegistrationContract() {
         TargetIntakeRuntimePins pins = new TargetIntakeRuntimePins(
                 "case-build", "agent-build", "a".repeat(64), "graph-code-build", "b".repeat(64),
-                "prompt", "model", "policy", "guardrail", "tool-policy", "memory", "envelope-key");
+                "agent-profile", "prompt", "model", "policy", "guardrail", "tool-policy", "memory",
+                "envelope-key");
 
         var registration = pins.registrationPins();
 
@@ -20,5 +21,6 @@ class TargetIntakeRuntimePinsTest {
         assertThat(registration.stateSchemaVersion()).isEqualTo("intake-graph-state.v2");
         assertThat(registration.outputSchemaVersion())
                 .isEqualTo("target-e2e-room-proposal-source.v1");
+        assertThat(pins.agentProfileId()).isEqualTo("agent-profile");
     }
 }

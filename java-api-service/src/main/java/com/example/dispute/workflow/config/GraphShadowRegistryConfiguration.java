@@ -10,9 +10,7 @@ import org.springframework.context.annotation.Configuration;
 /** Supplies Java-authoritative visibility and registry policies for signed Graph client modes. */
 @Configuration(proxyBeanMethods = false)
 @EnableConfigurationProperties(GraphShadowRegistryProperties.class)
-@ConditionalOnExpression(
-        "'${app.agent-run-v2.graph-client.mode:DISABLED}' == 'SHADOW' || "
-                + "'${app.agent-run-v2.graph-client.mode:DISABLED}' == 'TARGET_E2E_CANDIDATE'")
+@ConditionalOnExpression("'${app.agent-run-v2.graph-client.mode:DISABLED}' == 'SHADOW'")
 public class GraphShadowRegistryConfiguration {
 
     @Bean

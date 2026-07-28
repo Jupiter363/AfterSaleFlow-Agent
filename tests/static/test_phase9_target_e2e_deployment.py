@@ -183,7 +183,13 @@ def _run_context(now: dt.datetime) -> dict[str, Any]:
                     "allowed_stage_codes": [
                         "INTAKE_MESSAGE",
                         "EVIDENCE_SEAL",
-                        "HEARING_DELIBERATION",
+                        "INTAKE_QUESTIONS_GENERATING",
+                        "INTAKE_SYNTHESIZING",
+                        "EVIDENCE_REQUESTS_GENERATING",
+                        "EVIDENCE_SYNTHESIZING",
+                        "JUDGE_V1_GENERATING",
+                        "JURY_REVIEWING",
+                        "JUDGE_V2_GENERATING",
                         "REVIEW_OUTCOME",
                     ],
                 }

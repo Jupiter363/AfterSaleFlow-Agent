@@ -204,8 +204,8 @@ public final class CanonicalTargetRoomCommandMaterializer implements TargetRoomC
             AcceptCaseCommand command, AuthenticatedActor actor, String traceId, RoomGraphCommand.SnapshotRef domain,
             RoomGraphCommand.SnapshotRef event, Instant now) {
         RoomGraphCommand.InvocationContext invocation = new RoomGraphCommand.InvocationContext(
-                "all-rooms-agent.target-e2e.v1", pins.promptVersion(), pins.modelProfileId(), OUTPUT_SCHEMA,
-                pins.policyVersion(), pins.guardrailVersion(), List.of(pins.toolPolicyVersion()), pins.envelopeKeyId(),
+                pins.agentProfileId(), pins.promptVersion(), pins.modelProfileId(), OUTPUT_SCHEMA,
+                pins.policyVersion(), pins.guardrailVersion(), List.of(), pins.envelopeKeyId(),
                 "target-room-nonce:" + stableToken(commandId));
         RoomGraphCommand provisional = new RoomGraphCommand("room-graph-command.v1", commandId, logicalRunId, attemptId,
                 epoch.getTenantSurrogate(), epoch.getCaseId(), command.roomType(), epoch.getRoomEpoch(),
@@ -214,7 +214,7 @@ public final class CanonicalTargetRoomCommandMaterializer implements TargetRoomC
                     : "target-room-thread:" + stableToken(epoch.getCaseId() + "\n" + actor.actorId() + "\n" + command.roomType()),
                 new RoomGraphCommand.ActorScope(actor.actorId(), mapRole(actor.role()), audience(actor.role()),
                         List.of("case:" + epoch.getCaseId() + ":command:" + command.commandType().name())),
-                epoch.getProcessRevision(), command.commandType().name(), epoch.getProcessRevision(), domain, event,
+                epoch.getProcessRevision(), graphStageCode(command.roomType()), epoch.getProcessRevision(), domain, event,
                 invocation, new RoomGraphCommand.RetryBudget(2, 3, 1), command.deadlineAt(), traceparent(traceId),
                 "0".repeat(64));
         ObjectNode canonical = mapper.valueToTree(provisional);
@@ -247,6 +247,14 @@ public final class CanonicalTargetRoomCommandMaterializer implements TargetRoomC
     private static boolean isGraphCommand(CommandType type) {
         return type == CommandType.EVIDENCE_SUBMIT || type == CommandType.HEARING_STATEMENT
                 || type == CommandType.HEARING_EVIDENCE_BATCH || type == CommandType.REVIEW_DECISION;
+    }
+    private static String graphStageCode(RoomType roomType) {
+        return switch (roomType) {
+            case EVIDENCE -> "EVIDENCE_SEAL";
+            case REVIEW -> "REVIEW_OUTCOME";
+            default -> throw new IllegalArgumentException(
+                    "target browser Graph stage is unsupported for " + roomType);
+        };
     }
     private static Authority authority(String activationId, CaseRoomEpochEntity epoch, RoomGraphCommand graph,
             String commandHash, String commandEnvelopeHash) {

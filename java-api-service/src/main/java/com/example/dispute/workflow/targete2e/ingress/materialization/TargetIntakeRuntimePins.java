@@ -5,13 +5,13 @@ import com.example.dispute.workflow.application.intake.IntakePrivateThreadRegist
 /** Frozen target activation/profile values required to build a graph-private Intake command. */
 public record TargetIntakeRuntimePins(
         String caseBuildId, String agentBuildId, String graphBindingHash, String graphCodeBuildId,
-        String isolatedDomainDbBindingHash, String promptVersion, String modelProfileId,
+        String isolatedDomainDbBindingHash, String agentProfileId, String promptVersion, String modelProfileId,
         String policyVersion, String guardrailVersion, String toolPolicyVersion,
         String memoryPolicyVersion, String envelopeKeyId) {
     public TargetIntakeRuntimePins {
         for (String value : java.util.List.of(caseBuildId, agentBuildId, graphBindingHash, graphCodeBuildId,
-                isolatedDomainDbBindingHash, promptVersion, modelProfileId, policyVersion, guardrailVersion,
-                toolPolicyVersion, memoryPolicyVersion, envelopeKeyId)) {
+                isolatedDomainDbBindingHash, agentProfileId, promptVersion, modelProfileId, policyVersion,
+                guardrailVersion, toolPolicyVersion, memoryPolicyVersion, envelopeKeyId)) {
             if (value == null || value.isBlank()) throw new IllegalArgumentException("target Intake runtime pin is blank");
         }
         if (!graphBindingHash.matches("[0-9a-f]{64}") || !isolatedDomainDbBindingHash.matches("[0-9a-f]{64}")) {

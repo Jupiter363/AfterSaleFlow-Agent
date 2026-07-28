@@ -244,6 +244,7 @@ public class TargetE2eApiConfiguration {
         required(environment, "target.e2e.graph-binding-hash"),
         required(environment, "target.e2e.graph-code-build-id"),
         required(environment, "target.e2e.isolated-domain-db-binding-hash"),
+        required(environment, "target.e2e.intake.agent-profile-id"),
         required(environment, "target.e2e.intake.prompt-version"),
         required(environment, "target.e2e.intake.model-profile-id"),
         required(environment, "target.e2e.intake.policy-version"),

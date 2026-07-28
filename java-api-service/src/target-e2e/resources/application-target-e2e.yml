@@ -24,6 +24,7 @@ target:
     graph-code-build-id: ${TARGET_E2E_GRAPH_CODE_BUILD_ID:}
     isolated-domain-db-binding-hash: ${TARGET_E2E_ISOLATED_DOMAIN_DB_BINDING_HASH:}
     intake:
+      agent-profile-id: ${TARGET_E2E_INTAKE_AGENT_PROFILE_ID:}
       prompt-version: ${TARGET_E2E_INTAKE_PROMPT_VERSION:}
       model-profile-id: ${TARGET_E2E_INTAKE_MODEL_PROFILE_ID:}
       policy-version: ${TARGET_E2E_INTAKE_POLICY_VERSION:}
