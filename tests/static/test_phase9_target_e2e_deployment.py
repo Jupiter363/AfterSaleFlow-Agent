@@ -497,6 +497,22 @@ def test_preflight_requires_the_exact_restricted_graph_exchange_proxy() -> None:
         )
 
 
+def test_target_e2e_commands_decode_docker_output_as_utf8(monkeypatch) -> None:
+    captured = {}
+
+    def fake_run(*args, **kwargs):
+        captured.update(kwargs)
+        return common.subprocess.CompletedProcess(args[0], 0, stdout="", stderr="")
+
+    monkeypatch.setattr(common.subprocess, "run", fake_run)
+
+    common.run_command(["docker", "version"], check=False)
+
+    assert captured["encoding"] == "utf-8"
+    assert captured["errors"] == "strict"
+    assert "text" not in captured
+
+
 def test_browser_graph_readiness_is_exact_read_only_and_never_uses_mtls() -> None:
     compose = _compose()
     services = compose["services"]
