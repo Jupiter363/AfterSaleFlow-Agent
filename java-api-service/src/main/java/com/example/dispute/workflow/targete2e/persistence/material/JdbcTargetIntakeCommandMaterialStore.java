@@ -232,7 +232,7 @@ public final class JdbcTargetIntakeCommandMaterialStore implements TargetIntakeC
                     command_hash, command_envelope_hash, room_type, room_epoch, room_fencing_token,
                     material_schema_version, context_schema_version, context_canonical_json,
                     context_sha256
-                ) values (?, ?, ?, 'TARGET_E2E_CANDIDATE', ?, ?, ?, ?, ?, ?, 'INTAKE', ?, ?, ?, ?, ?, ?, ?)
+                ) values (?, ?, ?, 'TARGET_E2E_CANDIDATE', ?, ?, ?, ?, ?, ?, 'INTAKE', ?, ?, ?, ?, ?, ?)
                 """)) {
             int index = 1;
             statement.setString(index++, admissionId);

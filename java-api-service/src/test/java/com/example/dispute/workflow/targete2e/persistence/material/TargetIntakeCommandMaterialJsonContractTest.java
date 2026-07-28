@@ -2,6 +2,8 @@ package com.example.dispute.workflow.targete2e.persistence.material;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
@@ -10,6 +12,7 @@ import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import com.example.dispute.workflow.targete2e.persistence.TargetE2EActivationLedger;
+import com.example.dispute.workflow.targete2e.persistence.TargetE2EActivationLedger.CommandAdmission;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.RetryBudget;
 import com.example.dispute.workflow.temporal.room.intake.IntakeCommandExecutionContext;
 import com.example.dispute.workflow.temporal.room.intake.IntakeTargetAgentRunContext;
@@ -18,10 +21,13 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.List;
 import javax.sql.DataSource;
+import org.mockito.ArgumentCaptor;
 import org.junit.jupiter.api.Test;
 
 class TargetIntakeCommandMaterialJsonContractTest {
@@ -60,6 +66,42 @@ class TargetIntakeCommandMaterialJsonContractTest {
         assertThat(canonicalJson).isEqualTo(ContractJson.canonicalString(document));
         assertThat(selfHash).isEqualTo(ContractJson.sha256Hex(document));
         assertThat(deserialize(store, canonicalJson, selfHash)).isEqualTo(context());
+    }
+
+    @Test
+    void insertBindsEveryNonLiteralColumnExactlyOnce() throws Exception {
+        Connection connection = mock(Connection.class);
+        PreparedStatement statement = mock(PreparedStatement.class);
+        ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+        when(connection.prepareStatement(sql.capture())).thenReturn(statement);
+        when(statement.executeUpdate()).thenReturn(1);
+
+        JdbcTargetIntakeCommandMaterialStore store = new JdbcTargetIntakeCommandMaterialStore(
+                mock(DataSource.class),
+                new TargetE2EActivationLedger(mock(DataSource.class), Clock.systemUTC()),
+                new ObjectMapper().findAndRegisterModules());
+        Object canonical = canonicalize(store, context());
+        CommandAdmission admission = admission();
+
+        insert(connection, "admission-p9", admission, canonical);
+
+        assertThat(sql.getValue().chars().filter(value -> value == '?').count()).isEqualTo(15);
+        verify(statement).setString(1, "admission-p9");
+        verify(statement).setString(2, admission.activationId());
+        verify(statement).setString(3, admission.manifestHash());
+        verify(statement).setString(4, admission.isolatedDomainDbBindingHash());
+        verify(statement).setString(5, admission.tenantSurrogate());
+        verify(statement).setString(6, admission.caseId());
+        verify(statement).setString(7, admission.commandId());
+        verify(statement).setString(8, admission.commandHash());
+        verify(statement).setString(9, admission.commandEnvelopeHash());
+        verify(statement).setLong(10, admission.roomEpoch());
+        verify(statement).setLong(11, admission.roomFencingToken());
+        verify(statement).setString(12, "target-e2e-intake-command-material.v1");
+        verify(statement).setString(13, "intake-command-execution-context.v2");
+        verify(statement).setString(14, (String) accessor(canonical, "json"));
+        verify(statement).setString(15, (String) accessor(canonical, "sha256"));
+        verify(statement).executeUpdate();
     }
 
     private static Object canonicalize(
@@ -103,6 +145,29 @@ class TargetIntakeCommandMaterialJsonContractTest {
                 .getDeclaredMethod("deserialize", persistedMaterial);
         method.setAccessible(true);
         return (IntakeCommandExecutionContext) method.invoke(store, material);
+    }
+
+    private static void insert(
+            Connection connection, String admissionId, CommandAdmission admission, Object canonical)
+            throws Exception {
+        Method method = JdbcTargetIntakeCommandMaterialStore.class.getDeclaredMethod(
+                "insert", Connection.class, String.class, CommandAdmission.class, canonical.getClass());
+        method.setAccessible(true);
+        method.invoke(null, connection, admissionId, admission, canonical);
+    }
+
+    private static CommandAdmission admission() {
+        return new CommandAdmission(
+                "p9act.v1." + "a".repeat(32),
+                hash('3'),
+                hash('4'),
+                "tenant-p9",
+                "CASE_P9_001",
+                "command-p9-001",
+                hash('b'),
+                hash('5'),
+                0,
+                1);
     }
 
     private static IntakeCommandExecutionContext context() {
