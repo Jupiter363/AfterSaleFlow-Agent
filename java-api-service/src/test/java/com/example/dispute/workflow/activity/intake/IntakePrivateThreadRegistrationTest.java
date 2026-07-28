@@ -21,6 +21,24 @@ import org.junit.jupiter.api.Test;
 
 class IntakePrivateThreadRegistrationTest {
 
+    @Test
+    void normalizesIssueTimeToPostgresPrecisionBeforeHashing() {
+        Instant nanos = Instant.parse("2026-07-28T17:47:47.123456789Z");
+        var template = IntakeTestFixtures.issueRequest("intake-prompt.v2");
+        var request = new IntakePrivateThreadRegistrationFactory.IssueRequest(
+                template.registrationId(), template.tenantSurrogate(), template.caseId(),
+                template.roomEpoch(), template.fencingToken(), template.actorScope(),
+                template.agentSessionId(), template.versionPins(), template.writerMode(), nanos);
+        var factory = new IntakePrivateThreadRegistrationFactory(
+                () -> IntakeTestFixtures.THREAD_ID);
+
+        var binding = factory.issue(request);
+
+        assertThat(binding.registration().issuedAt())
+                .isEqualTo(Instant.parse("2026-07-28T17:47:47.123456Z"));
+        binding.registration().requireCanonicalHash();
+    }
+
     private static final ObjectMapper MAPPER = JsonMapper.builder().findAndAddModules().build();
 
     static {

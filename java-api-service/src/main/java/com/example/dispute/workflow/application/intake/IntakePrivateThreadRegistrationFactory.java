@@ -2,6 +2,7 @@ package com.example.dispute.workflow.application.intake;
 
 import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.Objects;
 
 /** Issues the Java-owned opaque thread and exact, hash-bound registration object. */
@@ -103,7 +104,8 @@ public final class IntakePrivateThreadRegistrationFactory {
             if (writerMode != WriterMode.SHADOW && writerMode != WriterMode.TEMPORAL) {
                 throw new IllegalArgumentException("writerMode must be SHADOW or TEMPORAL");
             }
-            Objects.requireNonNull(issuedAt, "issuedAt must not be null");
+            issuedAt = Objects.requireNonNull(issuedAt, "issuedAt must not be null")
+                    .truncatedTo(ChronoUnit.MICROS);
         }
     }
 
