@@ -33,6 +33,7 @@ import com.example.dispute.workflow.targete2e.ingress.rooms.TargetE2eEvidenceMan
 import com.example.dispute.workflow.targete2e.ingress.rooms.TargetE2eReviewInvocationPublisher;
 import com.example.dispute.workflow.targete2e.ingress.rooms.JdbcTargetReviewInvocationFactsLoader;
 import com.example.dispute.workflow.infrastructure.security.GraphEnvelopeSigningKey;
+import com.example.dispute.workflow.infrastructure.security.MountedPemGraphEnvelopeKeySet;
 import com.example.dispute.workflow.targete2e.rooms.evidence.JdbcTargetEvidenceCommandMaterialStore;
 import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceCommandMaterialStore;
 import com.example.dispute.workflow.targete2e.rooms.hearing.JdbcTargetHearingCommandMaterialStore;
@@ -52,6 +53,7 @@ import com.example.dispute.room.application.AccessSessionResolver;
 import com.example.dispute.room.application.AgentSessionResolver;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.minio.MinioClient;
+import java.nio.file.Path;
 import java.time.Clock;
 import java.util.UUID;
 import javax.sql.DataSource;
@@ -193,6 +195,22 @@ public class TargetE2eApiConfiguration {
       TargetE2eRoomObjectIndex objectIndex,
       ObjectMapper objectMapper) {
     return new TargetE2eHearingInvocationPublisher(payloadPublisher, objectIndex, objectMapper);
+  }
+
+  @Bean
+  GraphEnvelopeSigningKey targetE2eApiGraphEnvelopeSigningKey(Environment environment) {
+    Path keyDirectory =
+        Path.of(
+                required(
+                    environment,
+                    "app.agent-run-v2.graph-client.signing.key-directory"))
+            .toAbsolutePath()
+            .normalize();
+    return MountedPemGraphEnvelopeKeySet.load(keyDirectory)
+        .resolve(
+            required(
+                environment,
+                "app.agent-run-v2.graph-client.signing.active-key-id"));
   }
 
   @Bean

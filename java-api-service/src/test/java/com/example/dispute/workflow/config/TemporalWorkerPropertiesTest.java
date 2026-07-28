@@ -44,6 +44,33 @@ class TemporalWorkerPropertiesTest {
     }
 
     @Test
+    void bindsApiAsANonWorkerProcessRoleAndRejectsWorkerActivation() {
+        ApplicationContextRunner runner =
+                new ApplicationContextRunner()
+                        .withUserConfiguration(PropertiesConfiguration.class)
+                        .withPropertyValues("app.temporal.worker.role=API");
+
+        runner.run(
+                context -> {
+                    assertThat(context).hasNotFailed();
+                    TemporalWorkerProperties properties =
+                            context.getBean(TemporalWorkerProperties.class);
+                    assertThat(properties.enabled()).isFalse();
+                    assertThat(properties.role()).isEqualTo(WorkerRole.API);
+                });
+
+        runner.withPropertyValues("app.temporal.worker.enabled=true")
+                .run(
+                        context -> {
+                            assertThat(context).hasFailed();
+                            assertThat(context.getStartupFailure())
+                                    .rootCause()
+                                    .hasMessageContaining(
+                                            "API process role cannot enable a Temporal worker");
+                        });
+    }
+
+    @Test
     void rejectsWorkflowPollerCountsThatTheTemporalSdkWouldSilentlyRewrite() {
         assertThatThrownBy(() -> new TemporalWorkerProperties.QueueCapacity(8, 8, 1, 2, 0))
                 .isInstanceOf(IllegalArgumentException.class)

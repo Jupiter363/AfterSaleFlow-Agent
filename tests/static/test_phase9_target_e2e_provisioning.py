@@ -74,6 +74,16 @@ def test_all_java_roles_use_the_target_artifact_and_control_mounts_activation_ma
     ):
         assert value in control
 
+    api = _compose_service(compose, "java-api-service")
+    for value in (
+        "APP_AGENT_RUN_V2_GRAPH_SIGNING_KEY_DIRECTORY: /run/target-e2e/graph-signing-keys",
+        "APP_AGENT_RUN_V2_GRAPH_SIGNING_ACTIVE_KEY_ID: ${TARGET_E2E_GRAPH_SIGNING_KEY_ID:?}",
+        "source: ${TARGET_E2E_SECRETS_DIR:?}/graph-signing-keys",
+        "target: /run/target-e2e/graph-signing-keys",
+        "read_only: true",
+    ):
+        assert value in api
+
 
 def test_fixture_hash_uses_the_actual_canonical_fixture_bytes(tmp_path: Path) -> None:
     document, canonical, digest = provision._canonical_fixture(

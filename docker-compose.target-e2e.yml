@@ -496,6 +496,13 @@ services:
       APP_TARGET_E2E_ENABLED: "true"
       TEMPORAL_WORKER_ROLE: API
       APP_GRAPH_JWKS_ENABLED: "false"
+      APP_AGENT_RUN_V2_GRAPH_SIGNING_KEY_DIRECTORY: /run/target-e2e/graph-signing-keys
+      APP_AGENT_RUN_V2_GRAPH_SIGNING_ACTIVE_KEY_ID: ${TARGET_E2E_GRAPH_SIGNING_KEY_ID:?}
+    volumes:
+      - type: bind
+        source: ${TARGET_E2E_SECRETS_DIR:?}/graph-signing-keys
+        target: /run/target-e2e/graph-signing-keys
+        read_only: true
     depends_on:
       <<: *java-core-depends
       java-control-worker:

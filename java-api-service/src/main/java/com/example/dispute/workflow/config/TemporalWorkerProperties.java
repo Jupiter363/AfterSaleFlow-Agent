@@ -29,6 +29,9 @@ public record TemporalWorkerProperties(
         if (role == null) {
             throw new IllegalArgumentException("Temporal worker role must be configured");
         }
+        if (enabled && role == WorkerRole.API) {
+            throw new IllegalArgumentException("API process role cannot enable a Temporal worker");
+        }
         if (versioningMode == null) {
             throw new IllegalArgumentException(
                     "Temporal worker versioningMode must be configured");
@@ -71,6 +74,7 @@ public record TemporalWorkerProperties(
     }
 
     public enum WorkerRole {
+        API,
         CONTROL,
         AGENT
     }
