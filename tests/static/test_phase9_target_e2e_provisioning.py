@@ -84,6 +84,16 @@ def test_all_java_roles_use_the_target_artifact_and_control_mounts_activation_ma
     ):
         assert value in api
 
+    agent = _compose_service(compose, "java-agent-worker")
+    assert (
+        "APP_AGENT_RUN_V2_GRAPH_CLIENT_TLS_KEY_STORE_PASSWORD: "
+        "${TARGET_E2E_MTLS_KEYSTORE_PASSWORD:?}"
+    ) in agent
+    assert (
+        "APP_AGENT_RUN_V2_GRAPH_CLIENT_TLS_TRUST_STORE_PASSWORD: "
+        "${TARGET_E2E_MTLS_TRUSTSTORE_PASSWORD:?}"
+    ) in agent
+
 
 def test_fixture_hash_uses_the_actual_canonical_fixture_bytes(tmp_path: Path) -> None:
     document, canonical, digest = provision._canonical_fixture(
