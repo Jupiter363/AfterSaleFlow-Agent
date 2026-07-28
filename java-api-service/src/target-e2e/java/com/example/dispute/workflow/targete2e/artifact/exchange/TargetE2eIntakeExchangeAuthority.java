@@ -13,6 +13,7 @@ import com.example.dispute.workflow.temporal.room.intake.IntakeCommandExecutionC
 import com.example.dispute.workflow.temporal.room.intake.IntakeTargetAgentRunContext;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -112,7 +113,11 @@ public final class TargetE2eIntakeExchangeAuthority
   TargetE2eIntakeExchangeAuthority(
       NamedParameterJdbcOperations jdbc, ObjectMapper objectMapper, String activationId) {
     this.jdbc = Objects.requireNonNull(jdbc, "jdbc");
-    this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper");
+    this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper")
+        .copy()
+        // The persisted execution-context envelope is camelCase; nested graph contracts retain
+        // their explicit snake_case @JsonNaming contracts.
+        .setPropertyNamingStrategy(PropertyNamingStrategies.LOWER_CAMEL_CASE);
     if (activationId == null || !activationId.matches("p9act\\.v1\\.[0-9a-f]{32}")) {
       throw new IllegalArgumentException("target E2E activationId is invalid");
     }
