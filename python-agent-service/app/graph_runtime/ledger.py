@@ -333,7 +333,7 @@ insert into agent_graph_command (
     tool_policy_version, deadline_at, status
 )
 select %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-       %s, %s, %s, %s, %s, %s, %s, %s, %s, 'REGISTERED'
+       %s, %s, %s, %s, %s, %s, %s, %s, 'REGISTERED'
  where %s > clock_timestamp()
    and (
        %s <> 'TARGET_E2E_CANDIDATE'

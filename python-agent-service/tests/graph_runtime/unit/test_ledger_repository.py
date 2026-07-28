@@ -158,6 +158,7 @@ async def test_register_inserts_command_then_nonce_on_one_connection() -> None:
     assert registration.created is True
     assert registration.command.binding == binding
     assert "insert into agent_graph_command" in connection.calls[0][0]
+    assert connection.calls[0][0].count("%s") == len(connection.calls[0][1])
     assert "insert into agent_graph_invocation_nonce" in connection.calls[1][0]
     assert "on conflict (issuer, key_id, jti) do nothing" in connection.calls[1][0]
 
