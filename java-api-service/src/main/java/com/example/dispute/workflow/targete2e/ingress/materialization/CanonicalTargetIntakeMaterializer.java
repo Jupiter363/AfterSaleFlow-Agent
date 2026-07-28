@@ -232,9 +232,12 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
         return UUID.nameUUIDFromBytes(value.getBytes(StandardCharsets.UTF_8)).toString().replace("-", "");
     }
 
-    private static String traceparent(String traceId) {
-        if (traceId != null && traceId.matches("[0-9a-f]{32}")) {
-            return "00-" + traceId + "-0000000000000001-01";
+    static String traceparent(String traceId) {
+        String normalized = traceId != null && traceId.startsWith("TRACE_")
+                ? traceId.substring("TRACE_".length())
+                : traceId;
+        if (normalized != null && normalized.matches("[0-9a-f]{32}")) {
+            return "00-" + normalized + "-0000000000000001-01";
         }
         throw new IllegalArgumentException("target Intake traceId must be a 32-character lowercase trace id");
     }

@@ -17,6 +17,13 @@ class CanonicalTargetIntakeMaterializerTest {
     private static final String ACTOR_ID = "user-local";
 
     @Test
+    void convertsTheApplicationTraceIdToW3cTraceparent() {
+        assertThat(CanonicalTargetIntakeMaterializer.traceparent(
+                        "TRACE_ae3fa9df57c76361ca14af2948ddba85"))
+                .isEqualTo("00-ae3fa9df57c76361ca14af2948ddba85-0000000000000001-01");
+    }
+
+    @Test
     void acceptsDomainAccessTenantThatDiffersFromTargetActivationTenantSurrogate() {
         CaseAccessSessionEntity access = access(DOMAIN_TENANT, CASE_ID, ACTOR_ID, ActorRole.USER);
         assertThat(access.getTenantId()).isNotEqualTo(TARGET_TENANT_SURROGATE);
