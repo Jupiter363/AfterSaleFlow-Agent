@@ -13,6 +13,7 @@ import com.example.dispute.workflow.infrastructure.agent.GraphReconciliationHttp
 import com.example.dispute.workflow.infrastructure.agent.GraphTransportBundle;
 import com.example.dispute.workflow.infrastructure.agent.GraphTransportSecurityProof;
 import com.example.dispute.workflow.infrastructure.agent.LocalGraphTransportFactory;
+import java.io.IOException;
 import java.lang.reflect.Constructor;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
@@ -69,7 +70,8 @@ class HttpTargetE2EGraphProposalClientTest {
         new HttpTargetE2EGraphReconciliationClient(
             transportBundle,
             codec,
-            (resultRef, expectedProposalHash) -> TargetE2EGraphTestFixtures.proposalSourceBytes(),
+            (command, resultRef, expectedProposalHash, cancellationToken) ->
+                TargetE2EGraphTestFixtures.proposalSourceBytes(),
             MAPPER,
             URI.create("https://python-agent.internal/base/"),
             Duration.ofSeconds(8));
@@ -205,7 +207,7 @@ class HttpTargetE2EGraphProposalClientTest {
         new HttpTargetE2EGraphReconciliationClient(
             transportBundle,
             codec,
-            (resultRef, proposalHash) -> {
+            (ignoredSealed, resultRef, proposalHash, cancellationToken) -> {
               proposalLoads.incrementAndGet();
               return TargetE2EGraphTestFixtures.proposalSourceBytes();
             },
@@ -249,7 +251,8 @@ class HttpTargetE2EGraphProposalClientTest {
         new HttpTargetE2EGraphReconciliationClient(
             transportBundle,
             codec,
-            (resultRef, proposalHash) -> TargetE2EGraphTestFixtures.proposalSourceBytes(),
+            (sealedCommand, resultRef, proposalHash, cancellationToken) ->
+                TargetE2EGraphTestFixtures.proposalSourceBytes(),
             MAPPER,
             URI.create("https://python-agent.internal/base/"),
             Duration.ofSeconds(8));
@@ -307,7 +310,7 @@ class HttpTargetE2EGraphProposalClientTest {
                 new HttpTargetE2EGraphReconciliationClient(
                     plaintext,
                     TargetE2EGraphTestFixtures.codec(),
-                    (resultRef, proposalHash) -> {
+                    (ignoredSealed, resultRef, proposalHash, cancellationToken) -> {
                       proposalLoaded.set(true);
                       return TargetE2EGraphTestFixtures.proposalSourceBytes();
                     },
@@ -330,7 +333,7 @@ class HttpTargetE2EGraphProposalClientTest {
                 new HttpTargetE2EGraphReconciliationClient(
                     unboundBundle,
                     TargetE2EGraphTestFixtures.codec(),
-                    (resultRef, proposalHash) ->
+                    (ignoredSealed, resultRef, proposalHash, cancellationToken) ->
                         TargetE2EGraphTestFixtures.proposalSourceBytes(),
                     MAPPER,
                     URI.create("https://python-agent.internal/base/"),
@@ -356,7 +359,7 @@ class HttpTargetE2EGraphProposalClientTest {
                   new HttpTargetE2EGraphReconciliationClient(
                       trustedBundle,
                       TargetE2EGraphTestFixtures.codec(),
-                      (resultRef, proposalHash) ->
+                      (ignoredSealed, resultRef, proposalHash, cancellationToken) ->
                           TargetE2EGraphTestFixtures.proposalSourceBytes(),
                       MAPPER,
                       rejectedUri,
@@ -379,7 +382,8 @@ class HttpTargetE2EGraphProposalClientTest {
         new HttpTargetE2EGraphReconciliationClient(
             firstBundle,
             TargetE2EGraphTestFixtures.codec(),
-            (resultRef, proposalHash) -> TargetE2EGraphTestFixtures.proposalSourceBytes(),
+            (ignoredSealed, resultRef, proposalHash, cancellationToken) ->
+                TargetE2EGraphTestFixtures.proposalSourceBytes(),
             MAPPER,
             URI.create("https://python-agent.internal/base/"),
             Duration.ofSeconds(8));
@@ -479,7 +483,8 @@ class HttpTargetE2EGraphProposalClientTest {
         new HttpTargetE2EGraphReconciliationClient(
             transportBundle,
             codec,
-            (resultRef, proposalHash) -> TargetE2EGraphTestFixtures.proposalSourceBytes(),
+            (ignoredSealed, resultRef, proposalHash, cancellationToken) ->
+                TargetE2EGraphTestFixtures.proposalSourceBytes(),
             MAPPER,
             URI.create("https://python-agent.internal/base/"),
             Duration.ofSeconds(8));
@@ -625,8 +630,19 @@ class HttpTargetE2EGraphProposalClientTest {
           200,
           Map.of(
               "Content-Type", List.of("application/json; charset=utf-8"),
-              "Cache-Control", List.of("no-store")),
+              "Cache-Control", List.of("no-store"),
+              "X-Graph-Result-Ref", List.of("urn:graph-result:1"),
+              "X-Graph-Result-Hash", List.of(field("result_hash")),
+              "X-Graph-Proposal-Hash", List.of(field("proposal_hash"))),
           resultBody);
+    }
+
+    private String field(String name) {
+      try {
+        return MAPPER.readTree(resultBody).required(name).asText();
+      } catch (IOException exception) {
+        throw new IllegalStateException("test result envelope is invalid", exception);
+      }
     }
   }
 }

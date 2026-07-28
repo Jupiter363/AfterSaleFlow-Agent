@@ -4,6 +4,7 @@ import asyncio
 import json
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, cast
 
 import pytest
@@ -19,7 +20,13 @@ from app.graph_runtime.gateway import (
 )
 from app.graph_runtime.identity import ActorScopeBinding, RoomType, ThreadIdentity
 from app.graph_runtime.ledger import CommandBinding, CommandRecord, CommandStatus, ResultRecord
+from app.graph_runtime.persistence_models import GraphGatewayMode
 from app.graph_runtime.registry import RegistryRecord, RegistryState, VersionBinding
+from app.graph_runtime.target_e2e import (
+    TargetE2ERoomProposalSource,
+    VerifiedTargetE2EInvocation,
+    build_target_e2e_result_envelope,
+)
 from app.security.invocation_envelope import VerifiedReconciliation
 
 
@@ -140,11 +147,13 @@ class _Gateway:
         failure: BaseException | None = None,
         started: asyncio.Event | None = None,
         blocker: asyncio.Event | None = None,
+        candidate_result: ResultRecord | None = None,
     ) -> None:
         self.reconciliation = reconciliation
         self.failure = failure
         self.started = started
         self.blocker = blocker
+        self.candidate_result = candidate_result
         self.calls: list[dict[str, Any]] = []
 
     async def reconcile_only(self, **kwargs: Any) -> GraphReconciliation:
@@ -156,6 +165,14 @@ class _Gateway:
         if self.failure is not None:
             raise self.failure
         return self.reconciliation
+
+    async def reconcile_candidate_only(self, **kwargs: Any) -> ResultRecord:
+        self.calls.append(kwargs)
+        if self.failure is not None:
+            raise self.failure
+        if self.candidate_result is None:
+            raise AssertionError("candidate result was not configured")
+        return self.candidate_result
 
 
 async def _service(
@@ -171,6 +188,149 @@ async def _service(
         ),
         gate,
     )
+
+
+def _candidate_result() -> tuple[ResultRecord, TargetE2ERoomProposalSource]:
+    base = _reconciliation().result
+    nested = RoomGraphResult.model_validate(base.result_json)
+    proposal_source = TargetE2ERoomProposalSource.model_validate(
+        {
+            "schema_version": "target-e2e-room-proposal-source.v1",
+            "room_type": "INTAKE",
+            "proposal": {
+                "schema_version": "target-e2e-intake-proposal.v1",
+                "proposal_id": "proposal-target-001",
+                "command_id": nested.command_id,
+                "logical_run_id": nested.logical_run_id,
+                "attempt_id": nested.attempt_id,
+                "payload_schema_version": "intake-turn-proposal.v2",
+                "payload_ref": "urn:target-e2e:proposal:intake:001",
+                "payload_hash": "7" * 64,
+                "terminal_class": nested.status,
+                "formal_authority": False,
+            },
+        }
+    )
+    activation_id = f"p9act.v1.{'a' * 32}"
+    command_hash = "b" * 64
+    command_envelope_hash = "c" * 64
+    envelope = build_target_e2e_result_envelope(
+        nested,
+        activation_id=activation_id,
+        room_fencing_token=19,
+        command_hash=command_hash,
+        command_envelope_hash=command_envelope_hash,
+        proposal_hash=proposal_source.proposal_hash,
+    )
+    return (
+        replace(
+            base,
+            execution_lane=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+            activation_id=activation_id,
+            room_fencing_token=19,
+            command_hash=command_hash,
+            command_envelope_hash=command_envelope_hash,
+            proposal_hash=proposal_source.proposal_hash,
+            result_envelope_hash=envelope.result_envelope_hash,
+            proposal_source_json=proposal_source.model_dump(mode="json"),
+            result_envelope_json=envelope.model_dump(mode="json"),
+        ),
+        proposal_source,
+    )
+
+
+def _verified_candidate(result: ResultRecord) -> VerifiedTargetE2EInvocation:
+    return VerifiedTargetE2EInvocation(
+        claims=cast(Any, object()),
+        key_id="target-key-1",
+        request_hash=result.request_hash,
+        transport_certificate_sha256="d" * 64,
+        authority=cast(
+            Any,
+            SimpleNamespace(activation_id=result.activation_id),
+        ),
+        command_hash=cast(str, result.command_hash),
+        command_envelope_hash=cast(str, result.command_envelope_hash),
+        room_fencing_token=cast(int, result.room_fencing_token),
+    )
+
+
+@pytest.mark.asyncio
+async def test_target_proposal_source_requires_exact_durable_candidate_selectors() -> None:
+    result, proposal_source = _candidate_result()
+    gateway = _Gateway(_reconciliation(), candidate_result=result)
+    service, gate = await _service(gateway)
+    command = _command()
+    verified = _verified_candidate(result)
+    thread = _thread(command)
+
+    actual = await service.retrieve_target_e2e_proposal_source(
+        command=command,
+        verified_invocation=verified,
+        expected_thread=thread,
+        expected_result_ref=result.result_ref,
+        expected_proposal_hash=proposal_source.proposal_hash,
+    )
+
+    assert actual == proposal_source
+    assert gateway.calls == [
+        {
+            "command": command,
+            "verified_invocation": verified,
+            "expected_thread": thread,
+        }
+    ]
+    assert await gate.drain(0.01) is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("result_ref", "proposal_hash"),
+    [
+        ("urn:after-sale-flow:graph-result:other", None),
+        (None, "f" * 64),
+    ],
+)
+async def test_target_proposal_source_rejects_selector_mismatch_without_returning_bytes(
+    result_ref: str | None,
+    proposal_hash: str | None,
+) -> None:
+    result, proposal_source = _candidate_result()
+    gateway = _Gateway(_reconciliation(), candidate_result=result)
+    service, gate = await _service(gateway)
+
+    with pytest.raises(GraphTerminalBindingError, match="selector differs"):
+        await service.retrieve_target_e2e_proposal_source(
+            command=_command(),
+            verified_invocation=_verified_candidate(result),
+            expected_thread=_thread(_command()),
+            expected_result_ref=result_ref or result.result_ref,
+            expected_proposal_hash=proposal_hash or proposal_source.proposal_hash,
+        )
+
+    assert len(gateway.calls) == 1
+    assert await gate.drain(0.01) is True
+
+
+@pytest.mark.asyncio
+async def test_target_proposal_source_rejects_invalid_persisted_source() -> None:
+    result, _ = _candidate_result()
+    invalid_source = dict(cast(dict[str, Any], result.proposal_source_json))
+    invalid_source["unexpected"] = "private-value"
+    result = replace(result, proposal_source_json=invalid_source)
+    gateway = _Gateway(_reconciliation(), candidate_result=result)
+    service, gate = await _service(gateway)
+
+    with pytest.raises(GraphTerminalBindingError, match="missing or invalid"):
+        await service.retrieve_target_e2e_proposal_source(
+            command=_command(),
+            verified_invocation=_verified_candidate(result),
+            expected_thread=_thread(_command()),
+            expected_result_ref=result.result_ref,
+            expected_proposal_hash=cast(str, result.proposal_hash),
+        )
+
+    assert await gate.drain(0.01) is True
 
 
 @pytest.mark.asyncio

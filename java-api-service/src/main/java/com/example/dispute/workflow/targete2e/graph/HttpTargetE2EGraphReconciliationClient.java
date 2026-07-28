@@ -79,12 +79,28 @@ public final class HttpTargetE2EGraphReconciliationClient
       String resultRef,
       String resultHash,
       AgentRunCancellationToken cancellationToken) {
+    return reconcileAvailable(sealed, resultRef, resultHash, cancellationToken).envelope();
+  }
+
+  /** Reconciles a durable result when no Java stream terminal survived the worker restart. */
+  public ReconciledResult reconcileAvailable(
+      TargetE2ESealedGraphCommand sealed, AgentRunCancellationToken cancellationToken) {
+    return reconcileAvailable(sealed, null, null, cancellationToken);
+  }
+
+  private ReconciledResult reconcileAvailable(
+      TargetE2ESealedGraphCommand sealed,
+      String expectedResultRef,
+      String expectedResultHash,
+      AgentRunCancellationToken cancellationToken) {
     Objects.requireNonNull(sealed, "sealed");
     Objects.requireNonNull(cancellationToken, "cancellationToken").throwIfCancellationRequested();
     TargetE2EGraphCommandEnvelope command = sealed.envelope();
-    TargetE2EGraphCommandEnvelope.requirePattern(
-        resultHash, TargetE2EGraphCommandEnvelope.SHA256, "resultHash");
-    if (!validResultReference(resultRef)) {
+    if (expectedResultHash != null) {
+      TargetE2EGraphCommandEnvelope.requirePattern(
+          expectedResultHash, TargetE2EGraphCommandEnvelope.SHA256, "resultHash");
+    }
+    if (expectedResultRef != null && !validResultReference(expectedResultRef)) {
       throw TargetE2EGraphClientException.protocol(
           "target Graph reconciliation result reference is invalid", null);
     }
@@ -113,17 +129,32 @@ public final class HttpTargetE2EGraphReconciliationClient
     requireResponseMetadata(response);
     if (response.statusCode() == 200) {
       try {
+        ResultSelector selector = requireResultSelector(response);
+        if ((expectedResultRef != null && !expectedResultRef.equals(selector.resultRef()))
+            || (expectedResultHash != null
+                && !TargetE2EGraphEnvelopeCodec.constantTimeEquals(
+                    expectedResultHash, selector.resultHash()))) {
+          throw new IllegalArgumentException(
+              "target Graph result selector differs from the observed stream final");
+        }
         byte[] body = response.body();
         String proposalHash = codec.declaredProposalHash(body);
+        if (!TargetE2EGraphEnvelopeCodec.constantTimeEquals(
+            proposalHash, selector.proposalHash())) {
+          throw new IllegalArgumentException(
+              "target Graph proposal hash differs from reconciliation metadata");
+        }
         byte[] proposal =
             Objects.requireNonNull(
-                proposalSource.loadSchemaValidatedProposalSource(resultRef, proposalHash),
+                proposalSource.loadSchemaValidatedProposalSource(
+                    sealed, selector.resultRef(), proposalHash, cancellationToken),
                 "proposal source returned no source document");
         TargetE2EGraphResultEnvelope result = codec.decodeResult(body, command, proposal);
-        if (!TargetE2EGraphEnvelopeCodec.constantTimeEquals(resultHash, result.resultHash())) {
+        if (!TargetE2EGraphEnvelopeCodec.constantTimeEquals(
+            selector.resultHash(), result.resultHash())) {
           throw new IllegalArgumentException("stream final hash differs from reconciled result");
         }
-        return result;
+        return new ReconciledResult(result, selector.resultRef());
       } catch (IllegalArgumentException | NullPointerException exception) {
         throw TargetE2EGraphClientException.protocol(
             "target Graph reconciliation result is invalid", exception);
@@ -192,7 +223,7 @@ public final class HttpTargetE2EGraphReconciliationClient
   }
 
   private static boolean validResultReference(String value) {
-    if (value == null || value.isBlank() || value.length() > 1024) {
+    if (value == null || value.isBlank() || value.length() > 512) {
       return false;
     }
     try {
@@ -224,6 +255,30 @@ public final class HttpTargetE2EGraphReconciliationClient
       throw TargetE2EGraphClientException.protocol(
           "target Graph reconciliation response metadata is invalid", null);
     }
+  }
+
+  private static ResultSelector requireResultSelector(
+      GraphReconciliationHttpTransport.Response response) {
+    List<String> resultRefs =
+        headerValues(
+            response.headers(), HttpTargetE2EGraphProposalSourceClient.RESULT_REF_HEADER);
+    List<String> resultHashes = headerValues(response.headers(), "X-Graph-Result-Hash");
+    List<String> proposalHashes =
+        headerValues(
+            response.headers(), HttpTargetE2EGraphProposalSourceClient.PROPOSAL_HASH_HEADER);
+    if (resultRefs.size() != 1
+        || !validResultReference(resultRefs.getFirst())
+        || resultHashes.size() != 1
+        || proposalHashes.size() != 1) {
+      throw new IllegalArgumentException(
+          "target Graph reconciliation result selector metadata is invalid");
+    }
+    TargetE2EGraphCommandEnvelope.requirePattern(
+        resultHashes.getFirst(), TargetE2EGraphCommandEnvelope.SHA256, "resultHash");
+    TargetE2EGraphCommandEnvelope.requirePattern(
+        proposalHashes.getFirst(), TargetE2EGraphCommandEnvelope.SHA256, "proposalHash");
+    return new ResultSelector(
+        resultRefs.getFirst(), resultHashes.getFirst(), proposalHashes.getFirst());
   }
 
   static List<String> headerValues(Map<String, List<String>> headers, String expectedName) {
@@ -265,4 +320,15 @@ public final class HttpTargetE2EGraphReconciliationClient
   URI baseUri() {
     return baseUri;
   }
+
+  public record ReconciledResult(TargetE2EGraphResultEnvelope envelope, String resultRef) {
+    public ReconciledResult {
+      Objects.requireNonNull(envelope, "envelope");
+      if (!validResultReference(resultRef)) {
+        throw new IllegalArgumentException("target Graph result reference is invalid");
+      }
+    }
+  }
+
+  private record ResultSelector(String resultRef, String resultHash, String proposalHash) {}
 }

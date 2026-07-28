@@ -2,17 +2,17 @@ package com.example.dispute.workflow.config;
 
 import com.example.dispute.workflow.activity.agent.GraphRegistryBindingPolicy;
 import com.example.dispute.workflow.activity.agent.GraphStreamVisibilityPolicy;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
-/** Supplies Java-authoritative visibility and registry policies only for synthetic SHADOW. */
+/** Supplies Java-authoritative visibility and registry policies for signed Graph client modes. */
 @Configuration(proxyBeanMethods = false)
 @EnableConfigurationProperties(GraphShadowRegistryProperties.class)
-@ConditionalOnProperty(
-        name = "app.agent-run-v2.graph-client.mode",
-        havingValue = "SHADOW")
+@ConditionalOnExpression(
+        "'${app.agent-run-v2.graph-client.mode:DISABLED}' == 'SHADOW' || "
+                + "'${app.agent-run-v2.graph-client.mode:DISABLED}' == 'TARGET_E2E_CANDIDATE'")
 public class GraphShadowRegistryConfiguration {
 
     @Bean

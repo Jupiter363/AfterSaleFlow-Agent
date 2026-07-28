@@ -20,7 +20,8 @@ RUN apt-get update \
     && apt-get install --yes --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=build --chown=app:app /workspace/target/java-api-service-0.1.0-SNAPSHOT-target-e2e.jar /home/app/app.jar
+COPY --from=build --chown=app:app /workspace/target/java-api-service-0.1.0-SNAPSHOT.jar /home/app/app-main.jar
+COPY --from=build --chown=app:app /workspace/target/java-api-service-0.1.0-SNAPSHOT-target-e2e.jar /home/app/app-target-e2e.jar
 
 ENV SPRING_PROFILES_ACTIVE=target-e2e,agent-worker \
     APP_AGENT_RUN_V2_ENABLED=true \
@@ -33,4 +34,5 @@ EXPOSE 8080
 HEALTHCHECK --interval=10s --timeout=3s --start-period=45s --retries=12 \
     CMD curl --fail --silent http://127.0.0.1:8080/actuator/health/readiness || exit 1
 
-ENTRYPOINT ["java", "-XX:MaxRAMPercentage=75.0", "-jar", "/home/app/app.jar"]
+ENTRYPOINT ["java", "-XX:MaxRAMPercentage=75.0"]
+CMD ["-jar", "/home/app/app-target-e2e.jar"]

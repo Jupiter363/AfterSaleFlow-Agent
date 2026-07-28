@@ -51,7 +51,7 @@ x-java-environment: &java-environment
   APP_ORCHESTRATION_NEW_EPOCH_MODE: TEMPORAL
   APP_ORCHESTRATION_NON_LEGACY_EPOCH_ALLOCATION_ENABLED: "true"
   APP_ORCHESTRATION_TEMPORAL_WRITER_ENABLED: "true"
-  APP_ORCHESTRATION_INTAKE_EPOCH_SELECTION_MODE: TEMPORAL
+  APP_ORCHESTRATION_INTAKE_EPOCH_SELECTION_MODE: LEGACY
   APP_ORCHESTRATION_INTAKE_SHADOW_COHORT_BASIS_POINTS: "0"
   APP_ORCHESTRATION_INTAKE_COHORT_POLICY_VERSION: target-e2e.temporal.v1
   APP_ORCHESTRATION_COMMAND_OUTBOX_ENABLED: "true"
@@ -429,7 +429,11 @@ services:
         target: /run/target-e2e/python
     networks: [graph-mtls-client]
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/backend-healthz | grep ok"]
+      test:
+        [
+          "CMD-SHELL",
+          "wget -qO- http://127.0.0.1:8080/backend-healthz | grep -q '\"status\":\"UP\"'",
+        ]
       interval: 5s
       timeout: 5s
       retries: 30
@@ -470,9 +474,10 @@ services:
     image: ${TARGET_E2E_JAVA_IMAGE:?immutable image digest required}
     labels: *runtime-labels
     restart: unless-stopped
+    command: ["-jar", "/home/app/app-main.jar"]
     environment:
       <<: *java-environment
-      SPRING_PROFILES_ACTIVE: api
+      SPRING_PROFILES_ACTIVE: local,api
       APP_TEMPORAL_WORKER_ENABLED: "false"
       APP_GRAPH_JWKS_ENABLED: "false"
     depends_on:
@@ -498,9 +503,10 @@ services:
     image: ${TARGET_E2E_JAVA_IMAGE:?immutable image digest required}
     labels: *runtime-labels
     restart: unless-stopped
+    command: ["-jar", "/home/app/app-main.jar"]
     environment:
       <<: *java-environment
-      SPRING_PROFILES_ACTIVE: control-worker
+      SPRING_PROFILES_ACTIVE: local,control-worker
       SPRING_MAIN_WEB_APPLICATION_TYPE: none
       APP_TEMPORAL_WORKER_ENABLED: "true"
       TEMPORAL_WORKER_ROLE: CONTROL
@@ -518,7 +524,11 @@ services:
     depends_on: *java-core-depends
     networks: [domain-data, cache-data, object-data, search-data, temporal-runtime]
     healthcheck:
-      test: ["CMD-SHELL", "kill -0 1"]
+      test:
+        [
+          "CMD-SHELL",
+          "kill -0 1 && grep -Eqs '^[[:space:]]*[0-9]+:[[:space:]]+[0-9A-F]+:[0-9A-F]{4}[[:space:]]+[0-9A-F]+:1C41[[:space:]]+01[[:space:]]' /proc/net/tcp /proc/net/tcp6",
+        ]
       interval: 10s
       timeout: 5s
       retries: 20
@@ -528,18 +538,22 @@ services:
     image: ${TARGET_E2E_JAVA_IMAGE:?immutable image digest required}
     labels: *runtime-labels
     restart: unless-stopped
+    command: ["-jar", "/home/app/app-target-e2e.jar"]
     environment:
       <<: *java-environment
-      SPRING_PROFILES_ACTIVE: agent-worker
+      SPRING_PROFILES_ACTIVE: local,target-e2e,agent-worker
       SPRING_MAIN_WEB_APPLICATION_TYPE: none
       APP_TEMPORAL_WORKER_ENABLED: "true"
+      APP_TARGET_E2E_ENABLED: "true"
+      APP_TARGET_E2E_ACTIVATION_MANIFEST_PATH: /run/target-e2e/java-activation/activation.jws
       TEMPORAL_WORKER_ROLE: AGENT
       TEMPORAL_WORKER_DEPLOYMENT_NAME: target-e2e-agent
       TEMPORAL_WORKER_BUILD_ID: ${TARGET_E2E_BUILD_ID:?}
       TEMPORAL_WORKER_VERSIONING_MODE: BUILD_ID
       APP_ORCHESTRATION_COMMAND_OUTBOX_ENABLED: "false"
-      APP_AGENT_RUN_V2_GRAPH_CLIENT_MODE: SHADOW
+      APP_AGENT_RUN_V2_GRAPH_CLIENT_MODE: TARGET_E2E_CANDIDATE
       APP_AGENT_RUN_V2_GRAPH_CLIENT_BASE_URI: https://graph-mtls-proxy:8443
+      APP_AGENT_RUN_V2_GRAPH_CLIENT_ACTIVATION_ID: ${TARGET_E2E_ACTIVATION_ID:?}
       APP_AGENT_RUN_V2_GRAPH_CLIENT_ALLOW_PLAINTEXT_TRANSPORT: "false"
       APP_AGENT_RUN_V2_GRAPH_SIGNING_KEY_DIRECTORY: /run/target-e2e/graph-signing-keys
       APP_AGENT_RUN_V2_GRAPH_SIGNING_ACTIVE_KEY_ID: ${TARGET_E2E_GRAPH_SIGNING_KEY_ID:?}
@@ -547,19 +561,23 @@ services:
       APP_AGENT_RUN_V2_GRAPH_TLS_KEY_STORE_PASSWORD: ${TARGET_E2E_MTLS_KEYSTORE_PASSWORD:?}
       APP_AGENT_RUN_V2_GRAPH_TLS_TRUST_STORE_PATH: /run/target-e2e/mtls/trust.p12
       APP_AGENT_RUN_V2_GRAPH_TLS_TRUST_STORE_PASSWORD: ${TARGET_E2E_MTLS_TRUSTSTORE_PASSWORD:?}
-      APP_AGENT_RUN_V2_GRAPH_BINDING_GRAPH_KEY: intake.v2
-      APP_AGENT_RUN_V2_GRAPH_BINDING_GRAPH_VERSION: 2.0.0
-      APP_AGENT_RUN_V2_GRAPH_BINDING_CHECKPOINT_SCHEMA_VERSION: intake-checkpoint.v2
-      APP_AGENT_RUN_V2_GRAPH_BINDING_AGENT_PROFILE_ID: intake-agent.target-e2e.v1
-      APP_AGENT_RUN_V2_GRAPH_BINDING_PROMPT_PROFILE_ID: intake-prompt.target-e2e.v1
+      APP_AGENT_RUN_V2_GRAPH_BINDING_GRAPH_KEY: all-rooms.target-e2e.v1
+      APP_AGENT_RUN_V2_GRAPH_BINDING_GRAPH_VERSION: target-e2e-graph.2026-07-27.1
+      APP_AGENT_RUN_V2_GRAPH_BINDING_CHECKPOINT_SCHEMA_VERSION: target-e2e-checkpoint.v1
+      APP_AGENT_RUN_V2_GRAPH_BINDING_AGENT_PROFILE_ID: all-rooms-agent.target-e2e.v1
+      APP_AGENT_RUN_V2_GRAPH_BINDING_PROMPT_PROFILE_ID: all-rooms-prompt.target-e2e.v1
       APP_AGENT_RUN_V2_GRAPH_BINDING_MODEL_PROFILE_ID: target-e2e.contract-blocked
-      APP_AGENT_RUN_V2_GRAPH_BINDING_OUTPUT_SCHEMA_VERSION: intake-turn-proposal.v2
-      APP_AGENT_RUN_V2_GRAPH_BINDING_POLICY_VERSION: intake-policy.target-e2e.v1
-      APP_AGENT_RUN_V2_GRAPH_BINDING_GUARDRAIL_VERSION: intake-guardrail.target-e2e.v1
+      APP_AGENT_RUN_V2_GRAPH_BINDING_OUTPUT_SCHEMA_VERSION: target-e2e-room-proposal-source.v1
+      APP_AGENT_RUN_V2_GRAPH_BINDING_POLICY_VERSION: all-rooms-policy.target-e2e.v1
+      APP_AGENT_RUN_V2_GRAPH_BINDING_GUARDRAIL_VERSION: all-rooms-guardrail.target-e2e.v1
       APP_AGENT_RUN_V2_GRAPH_BINDING_AUDIENCE: SYSTEM
       APP_AGENT_RUN_V2_GRAPH_BINDING_REGISTRY_HASH: ${TARGET_E2E_GRAPH_REGISTRY_HASH:?}
-      APP_AGENT_RUN_V2_GRAPH_BINDING_TOOL_POLICY_VERSION: no-tools.v1
+      APP_AGENT_RUN_V2_GRAPH_BINDING_TOOL_POLICY_VERSION: tools.none.v1
     volumes:
+      - type: bind
+        source: ${TARGET_E2E_ACTIVATION_DIR:?}
+        target: /run/target-e2e/java-activation
+        read_only: true
       - type: bind
         source: ${TARGET_E2E_SECRETS_DIR:?}/graph-signing-keys
         target: /run/target-e2e/graph-signing-keys
@@ -580,7 +598,11 @@ services:
       - temporal-runtime
       - graph-mtls-client
     healthcheck:
-      test: ["CMD-SHELL", "kill -0 1"]
+      test:
+        [
+          "CMD-SHELL",
+          "kill -0 1 && grep -Eqs '^[[:space:]]*[0-9]+:[[:space:]]+[0-9A-F]+:[0-9A-F]{4}[[:space:]]+[0-9A-F]+:1C41[[:space:]]+01[[:space:]]' /proc/net/tcp /proc/net/tcp6",
+        ]
       interval: 10s
       timeout: 5s
       retries: 20

@@ -2,20 +2,20 @@ package com.example.dispute.workflow.config;
 
 import com.example.dispute.workflow.infrastructure.security.MountedPemGraphEnvelopeKeySet;
 import com.example.dispute.workflow.infrastructure.security.GraphEnvelopeSigningKey;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
-/** Fail-closed Phase 3 adapter for mounted signing material and public JWKS publication. */
+/** Fail-closed adapter for mounted signing material shared by signed Graph client modes. */
 @Configuration(proxyBeanMethods = false)
 @EnableConfigurationProperties({
     GraphSigningKeyProperties.class,
     GraphJwksProperties.class
 })
-@ConditionalOnProperty(
-        name = "app.agent-run-v2.graph-client.mode",
-        havingValue = "SHADOW")
+@ConditionalOnExpression(
+        "'${app.agent-run-v2.graph-client.mode:DISABLED}' == 'SHADOW' || "
+                + "'${app.agent-run-v2.graph-client.mode:DISABLED}' == 'TARGET_E2E_CANDIDATE'")
 public class GraphSigningKeyConfiguration {
 
     @Bean

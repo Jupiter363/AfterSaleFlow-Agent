@@ -3,6 +3,7 @@ package com.example.dispute.workflow.targete2e.temporal;
 import com.example.dispute.workflow.application.epoch.RoomEpochSelection.TargetActivationBinding;
 import java.util.Objects;
 import javax.sql.DataSource;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
@@ -14,7 +15,7 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 @ConditionalOnProperty(
         name = "app.orchestration.new-epoch-mode",
         havingValue = "TEMPORAL")
-public final class JdbcTargetRoomEpochBindingWriter implements TargetRoomEpochBindingWriter {
+public class JdbcTargetRoomEpochBindingWriter implements TargetRoomEpochBindingWriter {
 
     private static final String INSERT_BINDING =
             """
@@ -45,6 +46,7 @@ public final class JdbcTargetRoomEpochBindingWriter implements TargetRoomEpochBi
 
     private final NamedParameterJdbcTemplate jdbc;
 
+    @Autowired
     public JdbcTargetRoomEpochBindingWriter(DataSource dataSource) {
         this(new NamedParameterJdbcTemplate(Objects.requireNonNull(dataSource, "dataSource")));
     }

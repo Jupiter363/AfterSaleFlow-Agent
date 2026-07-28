@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 from fastapi import FastAPI
@@ -42,12 +43,14 @@ from app.graph_runtime.target_e2e import (
     TargetE2EGraphCommandEnvelope,
     TargetE2EGraphResultEnvelope,
     TargetE2EInvocationClaims,
+    TargetE2ERoomProposalSource,
     TargetE2ERuntimeAuthority,
     VerifiedTargetE2EInvocation,
     target_e2e_command_hash,
 )
 from app.security.invocation_envelope import (
     InvocationClaims,
+    InvocationEnvelopeError,
     ReconciliationClaims,
     TransportIdentity,
     VerifiedInvocation,
@@ -66,6 +69,7 @@ RESPONSE_FIXTURE = (
 )
 PATH = "/internal/graphs/commands/reconcile"
 TARGET_PATH = "/internal/graphs/target-e2e/commands/reconcile"
+TARGET_PROPOSAL_PATH = "/internal/graphs/target-e2e/commands/proposal-source"
 
 
 def _command() -> tuple[RoomGraphCommand, dict[str, Any]]:
@@ -155,6 +159,65 @@ def _verified_invocation(command: RoomGraphCommand) -> VerifiedInvocation:
         request_hash=command.request_hash,
         transport_certificate_sha256="c" * 64,
     )
+
+
+def _target_proposal_fixture() -> tuple[
+    RoomGraphCommand,
+    TargetE2EGraphCommandEnvelope,
+    VerifiedTargetE2EInvocation,
+    TargetE2ERoomProposalSource,
+    str,
+]:
+    command = _target_command()
+    activation_id = f"p9act.v1.{'a' * 32}"
+    command_hash = target_e2e_command_hash(command)
+    envelope_values = {
+        "schema_version": "target-e2e-graph-command-envelope.v1",
+        "execution_lane": "TARGET_E2E_CANDIDATE",
+        "activation_id": activation_id,
+        "room_fencing_token": 19,
+        "command_hash": command_hash,
+        "command": command.model_dump(mode="json", exclude_none=True),
+    }
+    envelope = TargetE2EGraphCommandEnvelope.model_validate(
+        {
+            **envelope_values,
+            "command_envelope_hash": canonical_sha256(envelope_values),
+        }
+    )
+    verified = VerifiedTargetE2EInvocation(
+        claims=_verified_invocation(command).claims,
+        key_id=command.invocation_context.envelope_key_id,
+        request_hash=command.request_hash,
+        transport_certificate_sha256="c" * 64,
+        authority=cast(
+            Any,
+            SimpleNamespace(activation_id=activation_id),
+        ),
+        command_hash=command_hash,
+        command_envelope_hash=envelope.command_envelope_hash,
+        room_fencing_token=19,
+    )
+    proposal_source = TargetE2ERoomProposalSource.model_validate(
+        {
+            "schema_version": "target-e2e-room-proposal-source.v1",
+            "room_type": command.room_type,
+            "proposal": {
+                "schema_version": "target-e2e-intake-proposal.v1",
+                "proposal_id": "proposal-target-001",
+                "command_id": command.command_id,
+                "logical_run_id": command.logical_run_id,
+                "attempt_id": command.attempt_id,
+                "payload_schema_version": "intake-turn-proposal.v2",
+                "payload_ref": "urn:target-e2e:proposal:intake:001",
+                "payload_hash": "7" * 64,
+                "terminal_class": "COMPLETED",
+                "formal_authority": False,
+            },
+        }
+    )
+    result_ref = f"urn:after-sale-flow:graph-result:{'8' * 64}"
+    return command, envelope, verified, proposal_source, result_ref
 
 
 def _thread(command: RoomGraphCommand) -> ThreadIdentity:
@@ -287,6 +350,305 @@ def _headers() -> dict[str, str]:
         "Authorization": "Bearer reconciliation.token.signature",
         "Content-Type": "application/json; charset=utf-8",
     }
+
+
+class _TargetProposalVerifier:
+    def __init__(
+        self,
+        verified: VerifiedTargetE2EInvocation,
+        *,
+        failure: InvocationEnvelopeError | None = None,
+    ) -> None:
+        self.verified = verified
+        self.failure = failure
+        self.calls: list[dict[str, Any]] = []
+
+    def verify_envelope(self, **kwargs: Any) -> VerifiedTargetE2EInvocation:
+        return self.verify_envelope_for_reconciliation(**kwargs)
+
+    def verify_envelope_for_reconciliation(
+        self,
+        **kwargs: Any,
+    ) -> VerifiedTargetE2EInvocation:
+        self.calls.append(kwargs)
+        if self.failure is not None:
+            raise self.failure
+        return self.verified
+
+
+class _TargetProposalThreadResolver:
+    def __init__(self, command: RoomGraphCommand) -> None:
+        self.thread = _thread(command)
+        self.calls: list[dict[str, Any]] = []
+
+    async def resolve(self, **kwargs: Any) -> ThreadIdentity:
+        self.calls.append(kwargs)
+        return self.thread
+
+
+class _TargetProposalService:
+    def __init__(
+        self,
+        proposal_source: TargetE2ERoomProposalSource,
+        *,
+        failure: Exception | None = None,
+    ) -> None:
+        self.proposal_source = proposal_source
+        self.failure = failure
+        self.calls: list[dict[str, Any]] = []
+
+    async def retrieve_target_e2e_proposal_source(
+        self,
+        **kwargs: Any,
+    ) -> TargetE2ERoomProposalSource:
+        self.calls.append(kwargs)
+        if self.failure is not None:
+            raise self.failure
+        return self.proposal_source
+
+
+def _target_proposal_client(
+    *,
+    mode: str = "TARGET_E2E_CANDIDATE",
+    ready: bool = True,
+    verification_failure: InvocationEnvelopeError | None = None,
+    service_failure: Exception | None = None,
+) -> tuple[
+    TestClient,
+    TargetE2EGraphCommandEnvelope,
+    TargetE2ERoomProposalSource,
+    str,
+    _TargetProposalVerifier,
+    _TargetProposalThreadResolver,
+    _TargetProposalService,
+]:
+    command, envelope, verified, proposal_source, result_ref = (
+        _target_proposal_fixture()
+    )
+    verifier = _TargetProposalVerifier(
+        verified,
+        failure=verification_failure,
+    )
+    resolver = _TargetProposalThreadResolver(command)
+    service = _TargetProposalService(proposal_source, failure=service_failure)
+    app = FastAPI()
+    app.include_router(
+        create_graph_reconciliation_router(
+            GraphReconciliationEndpointDependencies(
+                mode=mode,
+                codec=ContractCodec(CONTRACT_ROOT),
+                transport_identity_resolver=IdentityResolver(),
+                envelope_verifier=Verifier(_verified_reconciliation(command)),
+                thread_identity_resolver=ThreadResolver(),
+                reconciliation_service=cast(Any, service),
+                ready=lambda: ready,
+                target_e2e_envelope_verifier=verifier,
+                target_e2e_thread_identity_resolver=resolver,
+            )
+        )
+    )
+    return (
+        TestClient(app, raise_server_exceptions=False),
+        envelope,
+        proposal_source,
+        result_ref,
+        verifier,
+        resolver,
+        service,
+    )
+
+
+def _target_proposal_headers(
+    result_ref: str,
+    proposal_hash: str,
+) -> dict[str, str]:
+    return {
+        **_headers(),
+        "X-Graph-Result-Ref": result_ref,
+        "X-Graph-Proposal-Hash": proposal_hash,
+    }
+
+
+def test_target_proposal_source_returns_only_exact_validated_persisted_object() -> None:
+    client, envelope, proposal_source, result_ref, verifier, resolver, service = (
+        _target_proposal_client()
+    )
+
+    response = client.post(
+        TARGET_PROPOSAL_PATH,
+        content=json.dumps(envelope.model_dump(mode="json")),
+        headers=_target_proposal_headers(result_ref, proposal_source.proposal_hash),
+    )
+
+    assert response.status_code == 200
+    assert response.json() == proposal_source.model_dump(mode="json")
+    assert set(response.json()) == {"schema_version", "room_type", "proposal"}
+    assert response.headers["cache-control"] == "no-store, no-transform"
+    assert response.headers["pragma"] == "no-cache"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert len(verifier.calls) == len(resolver.calls) == len(service.calls) == 1
+    assert service.calls[0]["expected_result_ref"] == result_ref
+    assert (
+        service.calls[0]["expected_proposal_hash"]
+        == proposal_source.proposal_hash
+    )
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        _headers(),
+        {
+            **_headers(),
+            "X-Graph-Result-Ref": "not-a-result-ref",
+            "X-Graph-Proposal-Hash": "7" * 64,
+        },
+        {
+            **_headers(),
+            "X-Graph-Result-Ref": f"urn:{'x' * 509}",
+            "X-Graph-Proposal-Hash": "7" * 64,
+        },
+        {
+            **_headers(),
+            "X-Graph-Result-Ref": "urn:result:valid",
+            "X-Graph-Proposal-Hash": "A" * 64,
+        },
+    ],
+)
+def test_target_proposal_source_rejects_missing_malformed_or_oversized_headers(
+    headers: dict[str, str],
+) -> None:
+    client, envelope, _, _, verifier, resolver, service = _target_proposal_client()
+
+    response = client.post(
+        TARGET_PROPOSAL_PATH,
+        content=json.dumps(envelope.model_dump(mode="json")),
+        headers=headers,
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "TARGET_E2E_PROPOSAL_SOURCE_HEADERS_REJECTED"
+    assert verifier.calls == resolver.calls == service.calls == []
+    assert "proposal" not in response.text
+
+
+def test_target_proposal_source_rejects_duplicate_selector_headers() -> None:
+    client, envelope, proposal_source, result_ref, verifier, resolver, service = (
+        _target_proposal_client()
+    )
+
+    response = client.post(
+        TARGET_PROPOSAL_PATH,
+        content=json.dumps(envelope.model_dump(mode="json")),
+        headers=[
+            ("Authorization", "Bearer reconciliation.token.signature"),
+            ("Content-Type", "application/json"),
+            ("X-Graph-Result-Ref", result_ref),
+            ("X-Graph-Result-Ref", result_ref),
+            ("X-Graph-Proposal-Hash", proposal_source.proposal_hash),
+            ("X-Graph-Proposal-Hash", proposal_source.proposal_hash),
+        ],
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "TARGET_E2E_PROPOSAL_SOURCE_HEADERS_REJECTED"
+    assert verifier.calls == resolver.calls == service.calls == []
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_code"),
+    [
+        (
+            InvocationEnvelopeError("TARGET_E2E_COMMAND_SIGNATURE_REJECTED"),
+            "TARGET_E2E_COMMAND_SIGNATURE_REJECTED",
+        ),
+        (
+            InvocationEnvelopeError("TARGET_E2E_COMMAND_BINDING_MISMATCH"),
+            "TARGET_E2E_COMMAND_BINDING_MISMATCH",
+        ),
+    ],
+)
+def test_target_proposal_source_rejects_wrong_credential_or_binding(
+    failure: InvocationEnvelopeError,
+    expected_code: str,
+) -> None:
+    client, envelope, proposal_source, result_ref, verifier, resolver, service = (
+        _target_proposal_client(verification_failure=failure)
+    )
+
+    response = client.post(
+        TARGET_PROPOSAL_PATH,
+        content=json.dumps(envelope.model_dump(mode="json")),
+        headers=_target_proposal_headers(result_ref, proposal_source.proposal_hash),
+    )
+
+    assert response.status_code == 401
+    assert response.json()["code"] == expected_code
+    assert len(verifier.calls) == 1
+    assert resolver.calls == service.calls == []
+    assert "proposal-target-001" not in response.text
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        GraphCommandNotFoundError(),
+        GraphResultNotCommittedError(),
+        GraphTerminalBindingError("candidate proposal selector differs"),
+    ],
+)
+def test_target_proposal_source_rejects_missing_nonterminal_or_hash_mismatched_result(
+    failure: Exception,
+) -> None:
+    client, envelope, proposal_source, result_ref, _, _, service = (
+        _target_proposal_client(service_failure=failure)
+    )
+
+    response = client.post(
+        TARGET_PROPOSAL_PATH,
+        content=json.dumps(envelope.model_dump(mode="json")),
+        headers=_target_proposal_headers(result_ref, proposal_source.proposal_hash),
+    )
+
+    assert response.status_code in {404, 409}
+    assert len(service.calls) == 1
+    assert "proposal-target-001" not in response.text
+
+
+def test_target_proposal_source_rejects_wrong_mode_activation_and_oversized_body() -> None:
+    disabled, envelope, proposal_source, result_ref, _, _, disabled_service = (
+        _target_proposal_client(mode="SHADOW")
+    )
+    headers = _target_proposal_headers(result_ref, proposal_source.proposal_hash)
+    wrong_mode = disabled.post(
+        TARGET_PROPOSAL_PATH,
+        content=json.dumps(envelope.model_dump(mode="json")),
+        headers=headers,
+    )
+
+    client, envelope, proposal_source, result_ref, verifier, resolver, service = (
+        _target_proposal_client()
+    )
+    activation = client.post(
+        TARGET_PROPOSAL_PATH,
+        content=json.dumps(envelope.model_dump(mode="json")),
+        headers={
+            **_target_proposal_headers(result_ref, proposal_source.proposal_hash),
+            "X-AfterSaleFlow-Target-E2E-Activation": "forbidden",
+        },
+    )
+    oversized = client.post(
+        TARGET_PROPOSAL_PATH,
+        content=b"x" * 65_537,
+        headers=_target_proposal_headers(result_ref, proposal_source.proposal_hash),
+    )
+
+    assert wrong_mode.status_code == 503
+    assert activation.status_code == 400
+    assert activation.json()["code"] == "TARGET_E2E_ACTIVATION_HEADER_FORBIDDEN"
+    assert oversized.status_code == 413
+    assert disabled_service.calls == []
+    assert verifier.calls == resolver.calls == service.calls == []
 
 
 def test_reconciliation_returns_exact_schema_json_without_stream_semantics() -> None:
@@ -555,15 +917,13 @@ def test_target_reconciliation_returns_exact_result_envelope_without_proposal_by
         agent_profile_id=command.invocation_context.agent_profile_id,
         prompt_version=command.invocation_context.prompt_profile_id,
         model_profile_id=command.invocation_context.model_profile_id,
-        output_schema_version=command.invocation_context.output_schema_version,
+            output_schema_version="target-e2e-room-proposal-source.v1",
         policy_version=command.invocation_context.policy_version,
         guardrail_version=command.invocation_context.guardrail_version,
-        tool_policy_version=(
-            "no-tools.v1" if command.graph_key == "intake.v2" else "tools.none.v1"
-        ),
+            tool_policy_version="tools.none.v1",
         binding_hash="2" * 64,
         code_build_id="target-build-1",
-        allowed_room_types=(command.room_type,),
+            allowed_room_types=("INTAKE", "EVIDENCE", "HEARING", "REVIEW"),
         allowed_stage_codes=(command.stage_code,),
     )
     context = GraphTargetE2ERuntimeContextSettings.model_validate(
@@ -582,7 +942,7 @@ def test_target_reconciliation_returns_exact_result_envelope_without_proposal_by
                 "mode": "EXPLICIT_CASE_IDS",
                 "allowedCaseIds": [command.case_id],
             },
-            "allowedRoomTypes": [command.room_type],
+                "allowedRoomTypes": ["INTAKE", "EVIDENCE", "HEARING", "REVIEW"],
             "composeProject": "p9_target_e2e",
             "temporalNamespace": "target-e2e-test",
             "buildBindings": {
@@ -683,8 +1043,15 @@ def test_target_reconciliation_returns_exact_result_envelope_without_proposal_by
             return _thread(command)
 
     class TargetService(ReconciliationService):
-        async def reconcile_target_e2e(self, **_: Any) -> TargetE2EGraphResultEnvelope:
-            return result_envelope
+        async def reconcile_target_e2e(self, **_: Any) -> Any:
+            from app.api.graph_reconciliation_service import TargetE2EReconciliationArtifacts
+
+            return TargetE2EReconciliationArtifacts(
+                envelope=result_envelope,
+                result_ref="urn:graph-result:1",
+                result_hash=result_envelope.result_hash,
+                proposal_hash=result_envelope.proposal_hash,
+            )
 
     service = TargetService(_response(command))
     app = FastAPI()
@@ -711,4 +1078,7 @@ def test_target_reconciliation_returns_exact_result_envelope_without_proposal_by
 
     assert response.status_code == 200
     assert response.json() == result_envelope.model_dump(mode="json", exclude_none=True)
+    assert response.headers["X-Graph-Result-Ref"] == "urn:graph-result:1"
+    assert response.headers["X-Graph-Result-Hash"] == result_envelope.result_hash
+    assert response.headers["X-Graph-Proposal-Hash"] == result_envelope.proposal_hash
     assert "proposal" not in response.json()

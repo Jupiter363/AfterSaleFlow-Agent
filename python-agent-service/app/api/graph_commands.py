@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from email.message import Message
@@ -10,7 +11,10 @@ from typing import Any, Protocol, cast
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from app.api.graph_reconciliation_service import GraphReconciliationService
+from app.api.graph_reconciliation_service import (
+    GraphReconciliationService,
+    TargetE2EReconciliationArtifacts,
+)
 from app.contracts.v1.codec import ContractCodec
 from app.contracts.v1.models import (
     AgentStreamEvent,
@@ -36,7 +40,7 @@ from app.graph_runtime.identity import ThreadIdentity
 from app.graph_runtime.target_e2e import (
     TARGET_E2E_COMMAND_PATH,
     TargetE2EGraphCommandEnvelope,
-    TargetE2EGraphResultEnvelope,
+    TargetE2ERoomProposalSource,
     VerifiedTargetE2EInvocation,
 )
 from app.security.invocation_envelope import (
@@ -56,6 +60,9 @@ GRAPH_COMMAND_MAX_BYTES = 65_536
 GRAPH_STREAM_PATH = "/internal/graphs/commands/stream"
 GRAPH_RECONCILE_PATH = "/internal/graphs/commands/reconcile"
 TARGET_E2E_RECONCILE_PATH = "/internal/graphs/target-e2e/commands/reconcile"
+TARGET_E2E_PROPOSAL_SOURCE_PATH = (
+    "/internal/graphs/target-e2e/commands/proposal-source"
+)
 _TERMINAL_EVENTS = frozenset({"attempt_aborted", "final", "error"})
 _NO_STORE_HEADERS: Mapping[str, str] = {
     "Cache-Control": "no-store, no-transform",
@@ -73,6 +80,10 @@ _REQUIRED_PAYLOAD_FIELDS: Mapping[str, frozenset[str]] = {
 }
 LOGGER = logging.getLogger(__name__)
 _FORBIDDEN_BOOTSTRAP_HEADER = "x-aftersaleflow-target-e2e-activation"
+_TARGET_RESULT_REF_HEADER = "x-graph-result-ref"
+_TARGET_PROPOSAL_HASH_HEADER = "x-graph-proposal-hash"
+_TARGET_RESULT_REF = re.compile(r"^(?:s3|minio|urn):[!-~]{1,507}$")
+_TARGET_PROPOSAL_HASH = re.compile(r"^[0-9a-f]{64}$")
 
 
 class TransportIdentityResolver(Protocol):
@@ -691,12 +702,17 @@ def create_graph_reconciliation_router(
                 verified_invocation=verified,
                 expected_thread=expected_thread,
             )
-            if not isinstance(result, TargetE2EGraphResultEnvelope):
-                raise TypeError("candidate reconciliation returned an invalid envelope")
+            if not isinstance(result, TargetE2EReconciliationArtifacts):
+                raise TypeError("candidate reconciliation returned invalid durable artifacts")
             return JSONResponse(
                 status_code=200,
-                content=result.model_dump(mode="json", exclude_none=True),
-                headers=dict(_NO_STORE_HEADERS),
+                content=result.envelope.model_dump(mode="json", exclude_none=True),
+                headers={
+                    **_NO_STORE_HEADERS,
+                    "X-Graph-Result-Ref": result.result_ref,
+                    "X-Graph-Result-Hash": result.result_hash,
+                    "X-Graph-Proposal-Hash": result.proposal_hash,
+                },
             )
         except GraphRuntimeError as error:
             return _graph_runtime_error(error)
@@ -706,7 +722,113 @@ def create_graph_reconciliation_router(
             _log_safe_failure("target-E2E reconciliation", error)
             return _error_response(500, "GRAPH_RECONCILIATION_INTERNAL_ERROR", False)
 
+    @router.post(TARGET_E2E_PROPOSAL_SOURCE_PATH, response_model=None)
+    async def retrieve_target_e2e_proposal_source(request: Request) -> JSONResponse:
+        if dependencies.mode != "TARGET_E2E_CANDIDATE":
+            return _error_response(503, GraphGatewayDisabledError.code, False)
+        if request.headers.get(_FORBIDDEN_BOOTSTRAP_HEADER) is not None:
+            return _error_response(400, "TARGET_E2E_ACTIVATION_HEADER_FORBIDDEN", False)
+        verifier = dependencies.target_e2e_envelope_verifier
+        resolver = dependencies.target_e2e_thread_identity_resolver
+        if verifier is None or resolver is None:
+            return _error_response(503, "TARGET_E2E_VERIFIER_NOT_CONFIGURED", False)
+        try:
+            if not dependencies.ready():
+                return _error_response(503, "GRAPH_GATEWAY_NOT_READY", True)
+        except Exception:
+            return _error_response(503, "GRAPH_GATEWAY_NOT_READY", True)
+        if not _has_json_utf8_content_type(request):
+            return _error_response(415, "GRAPH_CONTENT_TYPE_REJECTED", False)
+        if not _has_identity_content_encoding(request):
+            return _error_response(415, "GRAPH_CONTENT_ENCODING_REJECTED", False)
+        try:
+            expected_result_ref, expected_proposal_hash = _target_proposal_selector(
+                request
+            )
+        except ValueError:
+            return _error_response(
+                400,
+                "TARGET_E2E_PROPOSAL_SOURCE_HEADERS_REJECTED",
+                False,
+            )
+        try:
+            authorization = request.headers.getlist("authorization")
+            if len(authorization) > 1:
+                raise InvocationEnvelopeError("INVOCATION_AUTHORIZATION_REJECTED")
+            token = extract_bearer_token(authorization[0] if authorization else None)
+            transport_identity = dependencies.transport_identity_resolver.resolve(
+                request.scope
+            )
+            body_text = await _read_bounded_body(request, GRAPH_COMMAND_MAX_BYTES)
+            envelope = TargetE2EGraphCommandEnvelope.model_validate(json.loads(body_text))
+            verified = verifier.verify_envelope_for_reconciliation(
+                token=token,
+                envelope=envelope,
+                transport_identity=transport_identity,
+            )
+            if not isinstance(verified, VerifiedTargetE2EInvocation):
+                raise InvocationEnvelopeError("TARGET_E2E_CREDENTIAL_TYPE_REJECTED")
+        except _BodyTooLarge:
+            return _error_response(413, "GRAPH_COMMAND_TOO_LARGE", False)
+        except InvocationEnvelopeError as error:
+            return _error_response(401, error.code, False)
+        except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
+            return _error_response(400, "TARGET_E2E_COMMAND_ENVELOPE_REJECTED", False)
+        except Exception as error:
+            _log_safe_failure("target-E2E proposal-source verification", error)
+            return _error_response(500, "GRAPH_RECONCILIATION_INTERNAL_ERROR", False)
+        try:
+            expected_thread = await resolver.resolve(
+                command=envelope.command,
+                verified_invocation=verified,
+            )
+            if not isinstance(expected_thread, ThreadIdentity):
+                raise TypeError("trusted resolver returned an invalid thread identity")
+            proposal_source = await (
+                dependencies.reconciliation_service.retrieve_target_e2e_proposal_source(
+                    command=envelope.command,
+                    verified_invocation=verified,
+                    expected_thread=expected_thread,
+                    expected_result_ref=expected_result_ref,
+                    expected_proposal_hash=expected_proposal_hash,
+                )
+            )
+            if not isinstance(proposal_source, TargetE2ERoomProposalSource):
+                raise TypeError("candidate reconciliation returned an invalid proposal source")
+            return JSONResponse(
+                status_code=200,
+                content=proposal_source.model_dump(mode="json", exclude_none=True),
+                headers={
+                    **_NO_STORE_HEADERS,
+                    "X-Graph-Result-Ref": expected_result_ref,
+                    "X-Graph-Proposal-Hash": expected_proposal_hash,
+                },
+            )
+        except GraphRuntimeError as error:
+            return _graph_runtime_error(error)
+        except (TypeError, ValueError):
+            return _error_response(502, "TARGET_E2E_PROPOSAL_SOURCE_REJECTED", False)
+        except Exception as error:
+            _log_safe_failure("target-E2E proposal-source retrieval", error)
+            return _error_response(500, "GRAPH_RECONCILIATION_INTERNAL_ERROR", False)
+
     return router
+
+
+def _target_proposal_selector(request: Request) -> tuple[str, str]:
+    result_refs = request.headers.getlist(_TARGET_RESULT_REF_HEADER)
+    proposal_hashes = request.headers.getlist(_TARGET_PROPOSAL_HASH_HEADER)
+    if len(result_refs) != 1 or len(proposal_hashes) != 1:
+        raise ValueError("target-E2E proposal selector headers must be singular")
+    result_ref = result_refs[0]
+    proposal_hash = proposal_hashes[0]
+    if (
+        _TARGET_RESULT_REF.fullmatch(result_ref) is None
+        or len(result_ref) > 512
+        or _TARGET_PROPOSAL_HASH.fullmatch(proposal_hash) is None
+    ):
+        raise ValueError("target-E2E proposal selector headers are malformed")
+    return result_ref, proposal_hash
 
 
 async def _read_bounded_body(request: Request, maximum: int) -> str:

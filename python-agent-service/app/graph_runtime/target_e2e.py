@@ -541,7 +541,6 @@ select activation_id, run_nonce, context_hash, environment_id,
        allowed_room_types, temporal_namespace, context_json, issued_at, expires_at
   from agent_graph_target_e2e_activation
  where activation_id = %s
- for share
 """
 
 ACTIVATE_RUNTIME_CONTEXT_SQL = """
@@ -816,7 +815,6 @@ LOAD_SYNTHETIC_CASE_SQL = """
 select activation_id, slot_number, generated_case_id, fixture_set_id, fixture_set_hash
   from agent_graph_target_e2e_synthetic_case_reservation
  where activation_id = %s and slot_number = %s
- for share
 """
 
 

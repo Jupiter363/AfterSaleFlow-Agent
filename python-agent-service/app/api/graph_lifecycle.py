@@ -27,6 +27,7 @@ from app.api.graph_commands import (
 from app.api.graph_reconciliation_service import (
     GatewayBackedGraphReconciliationService,
     GraphReconciliationService,
+    TargetE2EReconciliationArtifacts,
 )
 from app.api.graph_stream_service import (
     ExactShadowExecutorRegistry,
@@ -54,7 +55,7 @@ from app.graph_runtime.registry import PostgresGraphVersionRegistry
 from app.graph_runtime.target_e2e import (
     PostgresTargetE2EActivationRepository,
     TargetE2EGraphCommandEnvelope,
-    TargetE2EGraphResultEnvelope,
+    TargetE2ERoomProposalSource,
     TargetE2EInvocationVerifier,
     TargetE2ERuntimeAuthority,
     VerifiedTargetE2EInvocation,
@@ -753,12 +754,32 @@ class _RuntimeReconciliationService:
         command: RoomGraphCommand,
         verified_invocation: VerifiedTargetE2EInvocation,
         expected_thread: ThreadIdentity,
-    ) -> TargetE2EGraphResultEnvelope:
+    ) -> TargetE2EReconciliationArtifacts:
         return await (
             self._handle.require_runtime().reconciliation_service.reconcile_target_e2e(
                 command=command,
                 verified_invocation=verified_invocation,
                 expected_thread=expected_thread,
+            )
+        )
+
+    async def retrieve_target_e2e_proposal_source(
+        self,
+        *,
+        command: RoomGraphCommand,
+        verified_invocation: VerifiedTargetE2EInvocation,
+        expected_thread: ThreadIdentity,
+        expected_result_ref: str,
+        expected_proposal_hash: str,
+    ) -> TargetE2ERoomProposalSource:
+        return await (
+            self._handle.require_runtime()
+            .reconciliation_service.retrieve_target_e2e_proposal_source(
+                command=command,
+                verified_invocation=verified_invocation,
+                expected_thread=expected_thread,
+                expected_result_ref=expected_result_ref,
+                expected_proposal_hash=expected_proposal_hash,
             )
         )
 

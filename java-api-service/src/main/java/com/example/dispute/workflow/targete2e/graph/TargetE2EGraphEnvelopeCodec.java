@@ -178,6 +178,19 @@ public final class TargetE2EGraphEnvelopeCodec {
     return value;
   }
 
+  /** Validates the exact proposal-source document before it crosses the HTTP adapter boundary. */
+  public byte[] validateProposalSource(
+      byte[] body, RoomGraphCommand expectedCommand, String expectedProposalHash) {
+    TargetE2EGraphCommandEnvelope.requirePattern(
+        expectedProposalHash, TargetE2EGraphCommandEnvelope.SHA256, "expectedProposalHash");
+    ObjectNode source = readObject(body, 65_536, "room proposal source");
+    ValidatedProposal proposal = validatedProposal(source, expectedCommand);
+    if (!constantTimeEquals(expectedProposalHash, proposal.proposalHash())) {
+      throw new IllegalArgumentException("room proposal source hash differs from the result");
+    }
+    return body.clone();
+  }
+
   public byte[] encodeResult(
       TargetE2EGraphResultEnvelope envelope,
       TargetE2EGraphCommandEnvelope expectedCommand,
@@ -324,6 +337,15 @@ public final class TargetE2EGraphEnvelopeCodec {
 
   private String proposalHash(
       JsonNode sourceNode, RoomGraphCommand command, RoomGraphResult result) {
+    ValidatedProposal validated = validatedProposal(sourceNode, command);
+    if (!validated.proposal().terminalClass().name().equals(result.status().name())) {
+      throw new IllegalArgumentException("room proposal source differs from its result terminal");
+    }
+    return validated.proposalHash();
+  }
+
+  private ValidatedProposal validatedProposal(
+      JsonNode sourceNode, RoomGraphCommand command) {
     if (!(sourceNode instanceof ObjectNode source)) {
       throw new IllegalArgumentException("room proposal source must be a schema-validated object");
     }
@@ -344,12 +366,11 @@ public final class TargetE2EGraphEnvelopeCodec {
         decoded.roomType() == command.roomType()
             && proposal.commandId().equals(command.commandId())
             && proposal.logicalRunId().equals(command.logicalRunId())
-            && proposal.attemptId().equals(command.attemptId())
-            && proposal.terminalClass().name().equals(result.status().name());
+            && proposal.attemptId().equals(command.attemptId());
     if (!matches) {
       throw new IllegalArgumentException("room proposal source differs from its immutable command");
     }
-    return ContractJson.sha256Hex(proposalNode);
+    return new ValidatedProposal(proposal, ContractJson.sha256Hex(proposalNode));
   }
 
   private ObjectNode readObject(byte[] body, int maximumBytes, String label) {
@@ -399,4 +420,7 @@ public final class TargetE2EGraphEnvelopeCodec {
     return MessageDigest.isEqual(
         left.getBytes(StandardCharsets.US_ASCII), right.getBytes(StandardCharsets.US_ASCII));
   }
+
+  private record ValidatedProposal(
+      TargetE2ERoomProposalSource.Proposal proposal, String proposalHash) {}
 }

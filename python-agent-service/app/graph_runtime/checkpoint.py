@@ -79,7 +79,7 @@ select room.room_fencing_token
    and command.command_envelope_hash = %s
    and command.registered_at < activation.expires_at
    and lifecycle.lifecycle_state in ('ACTIVE', 'DRAIN_ONLY')
- for share
+ for share of room, lifecycle, command
 """
 
 DRAIN_EXPIRED_TARGET_E2E_SQL: Final[str] = """
