@@ -100,7 +100,7 @@ public class AgentSessionInitializer {
                         promptProfileId)
                 .orElseGet(
                         () ->
-                                repository.save(
+                                repository.saveAndFlush(
                                         AgentConversationSessionEntity.create(
                                                 "AGENT_SESSION_" + compactUuid(),
                                                 accessSession,
