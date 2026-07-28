@@ -88,7 +88,7 @@ class TargetE2eArtifactIsolationIT {
                 tempDirectory.resolve("wrong-worker-role.log"),
                 "TARGET_E2E_WORKER_ROLE_INVALID",
                 "--spring.profiles.active=target-e2e,agent-worker",
-                "--app.temporal.worker.role=CONTROL",
+                "--app.temporal.worker.role=UNKNOWN",
                 "--app.target-e2e.activation.manifest-jws=" + activation);
         assertStartupRejected(
                 targetJar,

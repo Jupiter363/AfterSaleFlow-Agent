@@ -29,10 +29,14 @@ import java.time.Clock;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Profile;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 
 /** Target-only AgentRun and proposal Graph assembly, absent from the ordinary Java artifact. */
 @Configuration(proxyBeanMethods = false)
 @Profile(TargetE2eArtifactPrerequisites.REQUIRED_PROFILE)
+@ConditionalOnProperty(
+        name = TargetE2eArtifactPrerequisites.WORKER_ROLE_PROPERTY,
+        havingValue = TargetE2eArtifactPrerequisites.AGENT_WORKER_ROLE)
 public class TargetE2eArtifactConfiguration {
 
     @Bean

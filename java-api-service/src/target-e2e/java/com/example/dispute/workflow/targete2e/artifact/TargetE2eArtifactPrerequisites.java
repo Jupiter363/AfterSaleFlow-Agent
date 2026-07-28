@@ -16,7 +16,10 @@ import org.springframework.core.env.Environment;
 final class TargetE2eArtifactPrerequisites {
 
     static final String REQUIRED_PROFILE = "target-e2e";
-    static final String REQUIRED_WORKER_ROLE = "AGENT";
+    static final String CONTROL_WORKER_ROLE = "CONTROL";
+    static final String AGENT_WORKER_ROLE = "AGENT";
+    private static final Set<String> TARGET_WORKER_ROLES =
+            Set.of(CONTROL_WORKER_ROLE, AGENT_WORKER_ROLE);
     static final String WORKER_ENABLED_PROPERTY = "app.temporal.worker.enabled";
     static final String WORKER_ROLE_PROPERTY = "app.temporal.worker.role";
     static final String WORKER_VERSIONING_PROPERTY = "app.temporal.worker.versioning-mode";
@@ -107,18 +110,22 @@ final class TargetE2eArtifactPrerequisites {
                 TargetE2eArtifactMarker.EXPECTED_VALUE.equals(embeddedMarker),
                 "TARGET_E2E_ARTIFACT_MARKER_INVALID");
         require(workerEnabled, "TARGET_E2E_WORKER_DISABLED");
-        require(REQUIRED_WORKER_ROLE.equals(workerRole), "TARGET_E2E_WORKER_ROLE_INVALID");
+        require(TARGET_WORKER_ROLES.contains(workerRole), "TARGET_E2E_WORKER_ROLE_INVALID");
         validateActivationMaterialShape(activationJws);
         require(
                 "BUILD_ID".equals(workerVersioningMode)
                         || "DEPLOYMENT".equals(workerVersioningMode),
                 "TARGET_E2E_WORKER_VERSIONING_REQUIRED");
-        require(agentRunV2Enabled, "TARGET_E2E_AGENT_RUN_V2_REQUIRED");
+        if (AGENT_WORKER_ROLE.equals(workerRole)) {
+            require(agentRunV2Enabled, "TARGET_E2E_AGENT_RUN_V2_REQUIRED");
+        }
         require("V2".equals(agentRunProtocol), "TARGET_E2E_AGENT_RUN_PROTOCOL_INVALID");
         require("DETECTOR".equals(agentRunScheduler), "TARGET_E2E_AGENT_RUN_SCHEDULER_INVALID");
-        require(
-                "TARGET_E2E_CANDIDATE".equals(graphClientMode),
-                "TARGET_E2E_GRAPH_CLIENT_MODE_INVALID");
+        if (AGENT_WORKER_ROLE.equals(workerRole)) {
+            require(
+                    "TARGET_E2E_CANDIDATE".equals(graphClientMode),
+                    "TARGET_E2E_GRAPH_CLIENT_MODE_INVALID");
+        }
     }
 
     private static void validateActivationMaterialShape(String compactJws) {
