@@ -701,6 +701,7 @@ def test_graph_exchange_proxy_has_exact_allowlist_and_no_catch_all_proxy() -> No
         block = config.split(f"location = {route} {{", 1)[1].split("\n    }", 1)[0]
         assert "if ($request_method != POST)" in block
         assert "return 404" in block
+        assert "proxy_set_header X-Service-Identity python-agent-service" in block
         assert "proxy_set_header X-Service-Secret $http_x_service_secret" in block
         assert "proxy_pass_request_body on" in block
         assert "proxy_pass http://target_e2e_java_graph_exchange" in block
@@ -712,6 +713,7 @@ def test_graph_exchange_proxy_has_exact_allowlist_and_no_catch_all_proxy() -> No
     evidence_block = config.split(evidence_location, 1)[1].split("\n    }", 1)[0]
     assert "if ($request_method != GET)" in evidence_block
     assert "return 404" in evidence_block
+    assert "proxy_set_header X-Service-Identity python-agent-service" in evidence_block
     assert "proxy_set_header X-Service-Secret $http_x_service_secret" in evidence_block
     assert "proxy_pass_request_body off" in evidence_block
     assert "proxy_pass http://target_e2e_java_graph_exchange" in evidence_block
