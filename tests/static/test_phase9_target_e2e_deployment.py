@@ -471,6 +471,32 @@ def test_preflight_allows_only_the_two_graph_mtls_proxy_networks() -> None:
             preflight._validate_graph_mtls_proxy_networks({"networks": networks})
 
 
+def test_preflight_requires_the_exact_restricted_graph_exchange_proxy() -> None:
+    preflight._validate_graph_exchange_proxy(
+        {
+            "networks": ["python-egress", "graph-exchange"],
+            "volumes": [
+                {
+                    "type": "bind",
+                    "source": str(DEPLOY / "nginx" / "exchange.conf"),
+                    "target": "/etc/nginx/conf.d/default.conf",
+                    "read_only": True,
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(
+        common.TargetE2EError, match="graph exchange proxy config mount drifted"
+    ):
+        preflight._validate_graph_exchange_proxy(
+            {
+                "networks": ["python-egress", "graph-exchange"],
+                "volumes": [],
+            }
+        )
+
+
 def test_browser_graph_readiness_is_exact_read_only_and_never_uses_mtls() -> None:
     compose = _compose()
     services = compose["services"]
@@ -599,8 +625,71 @@ def test_jwks_is_static_public_only_and_has_no_java_business_surface() -> None:
         "graph-db",
         "minio",
         "jwks-server",
+        "graph-exchange-proxy",
     }
     assert not any(name.startswith("java-") for name in python_members)
+
+
+def test_python_to_java_graph_exchange_uses_only_the_restricted_proxy() -> None:
+    compose = _compose()
+    services = compose["services"]
+    proxy = services["graph-exchange-proxy"]
+    python = services["python-agent-service"]
+    java_api = services["java-api-service"]
+
+    assert proxy["image"] == "${TARGET_E2E_NGINX_IMAGE:?immutable image digest required}"
+    assert _networks(proxy) == {"python-egress", "graph-exchange"}
+    assert _networks(python) == {"python-egress"}
+    assert "graph-exchange" in _networks(java_api)
+    assert python["environment"]["JAVA_API_SERVICE_URL"] == (
+        "http://graph-exchange-proxy:8080"
+    )
+    assert proxy["volumes"] == [
+        "./deploy/target-e2e/nginx/exchange.conf:/etc/nginx/conf.d/default.conf:ro"
+    ]
+
+    graph_exchange_members = {
+        name
+        for name, service in services.items()
+        if "graph-exchange" in _networks(service)
+    }
+    assert graph_exchange_members == {"graph-exchange-proxy", "java-api-service"}
+
+    python_members = {
+        name
+        for name, service in services.items()
+        if "python-egress" in _networks(service)
+    }
+    assert python_members == {
+        "python-agent-service",
+        "graph-db",
+        "minio",
+        "jwks-server",
+        "graph-exchange-proxy",
+    }
+    assert not any(name.startswith("java-") for name in python_members)
+
+
+def test_graph_exchange_proxy_has_exact_post_allowlist_and_no_catch_all_proxy() -> None:
+    config = (DEPLOY / "nginx" / "exchange.conf").read_text(encoding="utf-8")
+    routes = {
+        "/internal/graph/intake/v2/payload:load",
+        "/internal/graph/intake/v2/proposals:put",
+        "/internal/graph/target-e2e/rooms/object:load",
+        "/internal/graph/target-e2e/rooms/proposal:put",
+    }
+
+    assert "location = /healthz" in config
+    assert "client_max_body_size 1m" in config
+    for route in routes:
+        block = config.split(f"location = {route} {{", 1)[1].split("\n    }", 1)[0]
+        assert "if ($request_method != POST)" in block
+        assert "return 404" in block
+        assert "proxy_set_header X-Service-Secret $http_x_service_secret" in block
+        assert "proxy_pass_request_body on" in block
+        assert "proxy_pass http://target_e2e_java_graph_exchange" in block
+    assert config.count("proxy_pass http://target_e2e_java_graph_exchange") == len(routes)
+    assert "location / {\n        return 404;\n    }" in config
 
 
 def test_activation_grant_is_java_control_only_and_python_gets_strict_projection() -> (

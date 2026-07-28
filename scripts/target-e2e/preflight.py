@@ -24,6 +24,16 @@ FORBIDDEN_PYTHON_ACTIVATION_PARTS = (
 EXPECTED_GRAPH_MTLS_PROXY_NETWORKS = frozenset(
     {"graph-mtls-client", "app-internal"}
 )
+EXPECTED_GRAPH_EXCHANGE_PROXY_NETWORKS = frozenset(
+    {"python-egress", "graph-exchange"}
+)
+GRAPH_EXCHANGE_PROXY_CONFIG = (
+    Path(__file__).resolve().parents[2]
+    / "deploy"
+    / "target-e2e"
+    / "nginx"
+    / "exchange.conf"
+)
 ALLOWED_URL_HOSTS = {
     "domain-db",
     "graph-db",
@@ -32,6 +42,7 @@ ALLOWED_URL_HOSTS = {
     "elasticsearch",
     "temporal-server",
     "jwks-server",
+    "graph-exchange-proxy",
     "graph-mtls-proxy",
     "java-api-service",
     "ocr-parser-service",
@@ -59,6 +70,26 @@ def _environment(service: dict[str, Any]) -> dict[str, str]:
 def _validate_graph_mtls_proxy_networks(proxy: dict[str, Any]) -> None:
     if _networks(proxy) != EXPECTED_GRAPH_MTLS_PROXY_NETWORKS:
         raise common.TargetE2EError("mTLS proxy has an unexpected peer network")
+
+
+def _validate_graph_exchange_proxy(proxy: dict[str, Any]) -> None:
+    if _networks(proxy) != EXPECTED_GRAPH_EXCHANGE_PROXY_NETWORKS:
+        raise common.TargetE2EError("graph exchange proxy has an unexpected peer network")
+    volumes = proxy.get("volumes")
+    if not isinstance(volumes, list) or len(volumes) != 1:
+        raise common.TargetE2EError("graph exchange proxy config mount drifted")
+    mount = volumes[0]
+    if not isinstance(mount, dict):
+        raise common.TargetE2EError("graph exchange proxy config mount drifted")
+    source = mount.get("source")
+    if (
+        mount.get("type") != "bind"
+        or mount.get("target") != "/etc/nginx/conf.d/default.conf"
+        or mount.get("read_only") is not True
+        or not isinstance(source, str)
+        or Path(source).resolve() != GRAPH_EXCHANGE_PROXY_CONFIG.resolve()
+    ):
+        raise common.TargetE2EError("graph exchange proxy config mount drifted")
 
 
 def _walk_strings(value: Any) -> list[str]:
@@ -109,6 +140,7 @@ def validate_rendered_config(
         "graph-migrate": "python",
         "graph-restore-validation": "python",
         "jwks-server": "nginx",
+        "graph-exchange-proxy": "nginx",
         "graph-mtls-proxy": "nginx",
         "python-agent-service": "python",
         "ocr-parser-service": "ocr",
@@ -185,6 +217,23 @@ def validate_rendered_config(
     if _networks(python) & _networks(services["domain-db"]):
         raise common.TargetE2EError("Python can reach the Domain database network")
 
+    exchange_proxy = services["graph-exchange-proxy"]
+    if exchange_proxy.get("image") != images["nginx"]["reference"]:
+        raise common.TargetE2EError("graph exchange proxy image is not the locked Nginx manifest")
+    _validate_graph_exchange_proxy(exchange_proxy)
+    if (
+        python_environment.get("JAVA_API_SERVICE_URL")
+        != "http://graph-exchange-proxy:8080"
+    ):
+        raise common.TargetE2EError("Python must use the restricted graph exchange proxy")
+    graph_exchange_members = {
+        name
+        for name, service in services.items()
+        if "graph-exchange" in _networks(service)
+    }
+    if graph_exchange_members != {"graph-exchange-proxy", "java-api-service"}:
+        raise common.TargetE2EError("graph exchange network membership drifted")
+
     proxy = services["graph-mtls-proxy"]
     _validate_graph_mtls_proxy_networks(proxy)
     socket_sources = {
@@ -230,6 +279,7 @@ def validate_rendered_config(
         "graph-db",
         "minio",
         "jwks-server",
+        "graph-exchange-proxy",
     }:
         raise common.TargetE2EError(
             "Python egress network exposes an unexpected business service"
