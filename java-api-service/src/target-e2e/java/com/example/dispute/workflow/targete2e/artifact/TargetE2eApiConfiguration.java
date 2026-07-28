@@ -70,7 +70,8 @@ import org.springframework.core.env.Environment;
 public class TargetE2eApiConfiguration {
 
   private static final String INTAKE_EXCHANGE_BUCKET = "target-e2e-intake-activation";
-  private static final String INTAKE_EXCHANGE_PREFIX = "graph-proposals";
+  private static final String INTAKE_EXCHANGE_PAYLOAD_PREFIX = "browser-messages";
+  private static final String INTAKE_EXCHANGE_PROPOSAL_PREFIX = "graph-proposals";
 
   @Bean
   JdbcTargetE2eActivationStores targetE2eApiActivationStores(
@@ -117,20 +118,30 @@ public class TargetE2eApiConfiguration {
   }
 
   @Bean
+  MinioIntakeSyntheticExchangeStore targetE2eIntakeExchangePayloadReader(
+      MinioClient minioClient, IntakeExchangeCanonicalPayloadValidator validator) {
+    return new MinioIntakeSyntheticExchangeStore(
+        minioClient, validator, INTAKE_EXCHANGE_BUCKET, INTAKE_EXCHANGE_PAYLOAD_PREFIX);
+  }
+
+  @Bean
   MinioIntakeSyntheticExchangeStore targetE2eIntakeExchangeProposalPublisher(
       MinioClient minioClient, IntakeExchangeCanonicalPayloadValidator validator) {
     return new MinioIntakeSyntheticExchangeStore(
-        minioClient, validator, INTAKE_EXCHANGE_BUCKET, INTAKE_EXCHANGE_PREFIX);
+        minioClient, validator, INTAKE_EXCHANGE_BUCKET, INTAKE_EXCHANGE_PROPOSAL_PREFIX);
   }
 
   @Bean
   IntakeExchangeService targetE2eIntakeExchangeService(
       IntakeExchangeAuthorityValidationPort authority,
-      MinioIntakeSyntheticExchangeStore proposalStore,
+      @Qualifier("targetE2eIntakeExchangePayloadReader")
+          MinioIntakeSyntheticExchangeStore payloadReader,
+      @Qualifier("targetE2eIntakeExchangeProposalPublisher")
+          MinioIntakeSyntheticExchangeStore proposalStore,
       IntakeExchangeCanonicalPayloadValidator validator) {
     return new IntakeExchangeService(
         authority,
-        new IntakePrivateObjectStoreExchangeAdapter(proposalStore, proposalStore),
+        new IntakePrivateObjectStoreExchangeAdapter(payloadReader, proposalStore),
         validator);
   }
 
@@ -150,7 +161,7 @@ public class TargetE2eApiConfiguration {
   @Bean
   TargetE2eIntakeProposalStore targetE2eIntakeProposalStore(MinioClient minioClient) {
     return new MinioTargetE2eIntakeProposalStore(
-        minioClient, INTAKE_EXCHANGE_BUCKET, INTAKE_EXCHANGE_PREFIX);
+        minioClient, INTAKE_EXCHANGE_BUCKET, INTAKE_EXCHANGE_PROPOSAL_PREFIX);
   }
 
   @Bean
