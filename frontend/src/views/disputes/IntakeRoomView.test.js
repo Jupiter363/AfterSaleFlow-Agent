@@ -1278,6 +1278,27 @@ describe("IntakeRoomView", () => {
     );
   });
 
+  it("accepts target Graph readiness as the browser connection signal", async () => {
+    const wrapper = await mountInteractiveView({
+      modelHealthLoader: vi.fn().mockResolvedValue({ ready: true }),
+    });
+
+    expect(wrapper.get('[data-model-state="connected"]').attributes("data-model-state"))
+      .toBe("connected");
+    wrapper.unmount();
+  });
+
+  it("allows the first durable party message before a legacy intake dossier exists", async () => {
+    const wrapper = await mountInteractiveView({
+      initialTurnMemory: null,
+      modelHealthLoader: vi.fn().mockResolvedValue({ ready: true }),
+      eventStreamer: vi.fn(async () => {}),
+    });
+
+    expect(wrapper.get('[data-send-message] textarea').element.disabled).toBe(false);
+    wrapper.unmount();
+  });
+
   // 业务位置：【前端接待室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
   it("refreshes room messages and the live dossier after every intake dialogue turn", async () => {
     const postMessageAction = vi.fn().mockResolvedValue({

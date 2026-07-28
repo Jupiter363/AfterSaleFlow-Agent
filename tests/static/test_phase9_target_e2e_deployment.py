@@ -416,13 +416,16 @@ def test_python_has_uds_only_inbound_and_mtls_bypass_is_rejected() -> None:
     assert "--host" not in command and "--port" not in command
     assert not python.get("ports")
     proxy = services["graph-mtls-proxy"]
-    assert _networks(proxy) == {"graph-mtls-client"}
+    assert _networks(proxy) == {"graph-mtls-client", "app-internal"}
     assert _volume_sources(proxy) & _volume_sources(python) == {
         "${TARGET_E2E_SOCKET_DIR:?}"
     }
     mtls = (DEPLOY / "nginx" / "mtls.conf").read_text(encoding="utf-8")
     assert "server unix:/run/target-e2e/python/agent.sock" in mtls
     assert "ssl_verify_client on" in mtls and "ssl_protocols TLSv1.3" in mtls
+    assert "location = /ready/graph" in mtls
+    assert "proxy_pass http://target_e2e_python_backend/ready/graph" in mtls
+    assert "location / {\n        return 404;" in mtls
     for inbound in (
         "X-Client-Cert",
         "X-SSL-Client-Cert",
@@ -443,6 +446,27 @@ def test_python_has_uds_only_inbound_and_mtls_bypass_is_rejected() -> None:
     readiness = (SCRIPTS / "readiness.py").read_text(encoding="utf-8")
     assert "tcp_bypass_listener_present" in readiness
     assert "/proc/net/tcp" in readiness
+
+
+def test_browser_graph_readiness_is_exact_read_only_and_never_uses_mtls() -> None:
+    compose = _compose()
+    services = compose["services"]
+    assert "app-internal" in _networks(services["gateway"])
+    assert "app-internal" in _networks(services["graph-mtls-proxy"])
+    gateway = (DEPLOY / "nginx" / "gateway.conf").read_text(encoding="utf-8")
+    assert "location = /agent-api/health/model" in gateway
+    assert "proxy_pass http://graph-mtls-proxy:8080/ready/graph" in gateway
+    assert "graph-mtls-proxy:8443" not in gateway
+    assert "location ^~ /agent-api/ {\n        return 404;" in gateway
+    for header in (
+        "X-Client-Cert",
+        "X-SSL-Client-Cert",
+        "X-Forwarded-Client-Cert",
+        "X-Service-Identity",
+        "X-Target-E2E-Mtls-Verified",
+        "X-Target-E2E-Mtls-Certificate",
+    ):
+        assert f'proxy_set_header {header} ""' in gateway
 
 
 @pytest.mark.parametrize(

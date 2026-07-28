@@ -443,7 +443,7 @@ services:
       - type: bind
         source: ${TARGET_E2E_SOCKET_DIR:?}
         target: /run/target-e2e/python
-    networks: [graph-mtls-client]
+    networks: [graph-mtls-client, app-internal]
     healthcheck:
       test:
         [

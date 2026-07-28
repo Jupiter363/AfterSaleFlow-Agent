@@ -523,9 +523,6 @@ const intakeComposerDisabledReason = computed(() => {
       ? "正在检测数字人模型连接，连接成功后才能发布陈述。"
       : "数字人未连接，模型服务恢复后才能继续提交陈述。";
   }
-  if (!initialAgentReady.value) {
-    return "接待官正在生成首轮案情追问和展板，请等待初始回复完成后再发布陈述。";
-  }
   return "";
 });
 const intakeWorkStatus = computed(() => {
@@ -1784,7 +1781,9 @@ async function checkModelConnection() {
       const payload = await fetchModelHealth();
       const status = String(payload?.model_status || payload?.status || "").toUpperCase();
       modelConnectionState.value =
-        status === "CONNECTED" || status === "UP" ? "connected" : "disconnected";
+        payload?.ready === true || status === "CONNECTED" || status === "UP"
+          ? "connected"
+          : "disconnected";
     } catch (_failure) {
       modelConnectionState.value = "disconnected";
     } finally {
@@ -2184,7 +2183,7 @@ onBeforeUnmount(() => {
           <ConversationStream
             :messages="intakeRecipientView ? [] : messages"
             :streaming-runs="historyMode || intakeRecipientView ? [] : intakeStreamingRuns"
-            :disabled="historyMode || submitting || intakeStreamingRuns.length > 0 || admitted || !partyCanChat || !initialAgentReady || !modelConnected"
+            :disabled="historyMode || submitting || intakeStreamingRuns.length > 0 || admitted || !partyCanChat || !modelConnected"
             :composer-visible="!historyMode && partyCanChat"
             :disabled-reason="intakeComposerDisabledReason"
             :empty-text="intakeConversationEmptyText"

@@ -1630,6 +1630,16 @@ describe("EvidenceRoomView", () => {
     expect(wrapper.get("[data-enter-hearing]").text()).toContain("进入小法庭");
   });
 
+  it("accepts target Graph readiness as the browser connection signal", async () => {
+    const { wrapper } = await mountView({
+      modelHealthLoader: vi.fn().mockResolvedValue({ ready: true }),
+    });
+
+    expect(wrapper.get('[data-model-state="connected"]').attributes("data-model-state"))
+      .toBe("connected");
+    wrapper.unmount();
+  });
+
   // 业务位置：【前端证据室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 可见证据、事实矩阵和证据 Agent 流 正确进入 核验提示、补证操作和庭审准备。上游：可见证据、事实矩阵和证据 Agent 流。下游：核验提示、补证操作和庭审准备。边界：只展示当前角色可见证据。
   it("keeps the evidence conversation composer enabled while evidence is not uploading or completing", async () => {
     const { wrapper } = await mountView();

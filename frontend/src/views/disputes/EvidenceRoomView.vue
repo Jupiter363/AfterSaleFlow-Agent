@@ -1349,7 +1349,9 @@ async function checkModelConnection() {
       const payload = await fetchModelHealth();
       const status = String(payload?.model_status || payload?.status || "").toUpperCase();
       modelConnectionState.value =
-        status === "CONNECTED" || status === "UP" ? "connected" : "disconnected";
+        payload?.ready === true || status === "CONNECTED" || status === "UP"
+          ? "connected"
+          : "disconnected";
     } catch (_failure) {
       modelConnectionState.value = "disconnected";
     } finally {

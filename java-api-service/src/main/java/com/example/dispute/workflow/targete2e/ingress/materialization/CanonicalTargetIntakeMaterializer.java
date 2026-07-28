@@ -107,7 +107,7 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
         }
         TargetIntakeRuntimePins activePins = activationAuthority.resolveIntakeRuntimePins(activation, pins);
         CaseAccessSessionEntity access = accessSessions.resolve(request.caseId(), request.actor());
-        requireActor(access, request, activation);
+        requireActor(access, request.caseId(), request.actor().actorId(), request.actor().role());
         AgentConversationSessionEntity session = agentSessions.resolve(
                 access, RoomType.INTAKE, IntakeAgentTurnService.AGENT_ROLE,
                 activePins.promptVersion(), activePins.memoryPolicyVersion());
@@ -185,12 +185,11 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
         return new MaterializedIntake(commandId, event.payloadRef(), appended.admittedAt());
     }
 
-    private static void requireActor(CaseAccessSessionEntity access, TargetIntakeMessageRequest request,
-            TargetIntakeActivationGrant activation) {
-        if (!activation.tenantSurrogate().equals(access.getTenantId())
-                || !request.caseId().equals(access.getCaseId())
-                || !request.actor().actorId().equals(access.getActorId())
-                || request.actor().role() != access.getActorRole()) {
+    static void requireActor(CaseAccessSessionEntity access, String caseId, String actorId,
+            com.example.dispute.config.ActorRole actorRole) {
+        if (!caseId.equals(access.getCaseId())
+                || !actorId.equals(access.getActorId())
+                || actorRole != access.getActorRole()) {
             throw new IllegalStateException("target Intake access session does not match the active authority");
         }
     }
