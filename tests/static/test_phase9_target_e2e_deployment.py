@@ -22,6 +22,7 @@ sys.path.insert(0, str(SCRIPTS))
 common = importlib.import_module("common")
 ledger = importlib.import_module("ledger")
 assertion = importlib.import_module("assert_evidence")
+readiness = importlib.import_module("readiness")
 
 
 def _compose() -> dict[str, Any]:
@@ -417,6 +418,88 @@ def test_python_has_uds_only_inbound_and_mtls_bypass_is_rejected() -> None:
     readiness = (SCRIPTS / "readiness.py").read_text(encoding="utf-8")
     assert "tcp_bypass_listener_present" in readiness
     assert "/proc/net/tcp" in readiness
+
+
+@pytest.mark.parametrize(
+    ("listener", "owned_inodes", "resolver_addresses", "expected_unexpected"),
+    (
+        (
+            {"family": "ipv4", "address": "127.0.0.11", "uid": "0", "inode": "1"},
+            set(),
+            {"127.0.0.11"},
+            [],
+        ),
+        (
+            {"family": "ipv4", "address": "0.0.0.0", "uid": "0", "inode": "2"},
+            set(),
+            {"127.0.0.11"},
+            ["2"],
+        ),
+        (
+            {"family": "ipv4", "address": "0.0.0.0", "uid": "0", "inode": "6"},
+            set(),
+            {"0.0.0.0"},
+            ["6"],
+        ),
+        (
+            {"family": "ipv4", "address": "172.28.0.5", "uid": "0", "inode": "3"},
+            set(),
+            {"127.0.0.11"},
+            ["3"],
+        ),
+        (
+            {"family": "ipv4", "address": "127.0.0.11", "uid": "0", "inode": "4"},
+            {"4"},
+            {"127.0.0.11"},
+            ["4"],
+        ),
+        (
+            {"family": "ipv4", "address": "127.0.0.1", "uid": "0", "inode": "5"},
+            set(),
+            {"127.0.0.11"},
+            ["5"],
+        ),
+    ),
+    ids=(
+        "docker-dns-ownerless-listener-is-allowed",
+        "wildcard-listener-is-rejected",
+        "wildcard-resolver-cannot-exempt-listener",
+        "container-ip-listener-is-rejected",
+        "process-owned-dns-listener-is-rejected",
+        "unexpected-ownerless-listener-is-rejected",
+    ),
+)
+def test_readiness_tcp_listener_exception_is_exact(
+    listener: dict[str, str],
+    owned_inodes: set[str],
+    resolver_addresses: set[str],
+    expected_unexpected: list[str],
+) -> None:
+    unexpected = readiness._unexpected_tcp_listeners(
+        [listener], owned_inodes, resolver_addresses
+    )
+    assert [item["inode"] for item in unexpected] == expected_unexpected
+
+
+def test_readiness_tcp_listener_ownership_scan_fails_closed() -> None:
+    class InaccessibleProc:
+        def iterdir(self):
+            raise PermissionError("ownership scan denied")
+
+    with pytest.raises(PermissionError, match="ownership scan denied"):
+        readiness._owned_socket_inodes(InaccessibleProc())
+
+
+def test_readiness_tcp_listener_probe_reads_visible_process_ownership_and_resolver() -> (
+    None
+):
+    probe = readiness._tcp_listener_probe()
+    assert "Path('/proc/net/tcp6')" in probe
+    assert "(process / \"fd\").iterdir()" in probe
+    assert 'listener["inode"] in owned_socket_inodes' in probe
+    assert 'listener["family"] == "ipv4"' in probe
+    assert 'listener["address"] == "127.0.0.11"' in probe
+    assert '"127.0.0.11" in resolver_ipv4_addresses' in probe
 
 
 def test_jwks_is_static_public_only_and_has_no_java_business_surface() -> None:

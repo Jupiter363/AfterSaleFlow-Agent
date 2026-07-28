@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import sys
 from pathlib import Path
@@ -61,6 +62,107 @@ SERVICE_IMAGE_KEY = {
     "graph-migrate": "python",
     "graph-restore-validation": "python",
 }
+
+
+def _parse_tcp_listener_rows(lines: list[str], *, family: str) -> list[dict[str, str]]:
+    listeners: list[dict[str, str]] = []
+    for line in lines:
+        fields = line.split()
+        if len(fields) < 10 or fields[3] != "0A":
+            continue
+        address = "<invalid>"
+        if family == "ipv4":
+            try:
+                encoded_address = fields[1].split(":", 1)[0]
+                address = ".".join(
+                    str(value) for value in bytes.fromhex(encoded_address)[::-1]
+                )
+            except ValueError:
+                pass
+        listeners.append(
+            {
+                "family": family,
+                "address": address,
+                "uid": fields[7],
+                "inode": fields[9],
+            }
+        )
+    return listeners
+
+
+def _owned_socket_inodes(proc_root: Path = Path("/proc")) -> set[str]:
+    inodes: set[str] = set()
+    for process in proc_root.iterdir():
+        if not process.name.isdecimal():
+            continue
+        try:
+            descriptors = (process / "fd").iterdir()
+            for descriptor in descriptors:
+                try:
+                    target = str(descriptor.readlink())
+                except FileNotFoundError:
+                    continue
+                if target.startswith("socket:[") and target.endswith("]"):
+                    inodes.add(target[8:-1])
+        except FileNotFoundError:
+            continue
+    return inodes
+
+
+def _resolver_ipv4_addresses() -> set[str]:
+    nameservers: set[str] = set()
+    for line in Path("/etc/resolv.conf").read_text(encoding="utf-8").splitlines():
+        fields = line.split("#", 1)[0].split()
+        if len(fields) == 2 and fields[0] == "nameserver":
+            octets = fields[1].split(".")
+            if len(octets) == 4 and all(
+                octet.isdecimal() and 0 <= int(octet) <= 255 for octet in octets
+            ):
+                nameservers.add(".".join(str(int(octet)) for octet in octets))
+    return nameservers
+
+
+def _unexpected_tcp_listeners(
+    listeners: list[dict[str, str]],
+    owned_socket_inodes: set[str],
+    resolver_ipv4_addresses: set[str],
+) -> list[dict[str, str]]:
+    return [
+        listener
+        for listener in listeners
+        if listener["inode"] in owned_socket_inodes
+        or not (
+            listener["family"] == "ipv4"
+            and listener["uid"] == "0"
+            and listener["address"] == "127.0.0.11"
+            and "127.0.0.11" in resolver_ipv4_addresses
+        )
+    ]
+
+
+def _tcp_listener_probe() -> str:
+    helpers = (
+        _parse_tcp_listener_rows,
+        _owned_socket_inodes,
+        _resolver_ipv4_addresses,
+        _unexpected_tcp_listeners,
+    )
+    return "\n\n".join(
+        (
+            "from __future__ import annotations",
+            "from pathlib import Path",
+            *(inspect.getsource(helper) for helper in helpers),
+            "listeners = _parse_tcp_listener_rows("
+            "Path('/proc/net/tcp').read_text(encoding='utf-8').splitlines()[1:], "
+            "family='ipv4')",
+            "listeners.extend(_parse_tcp_listener_rows("
+            "Path('/proc/net/tcp6').read_text(encoding='utf-8').splitlines()[1:], "
+            "family='ipv6'))",
+            "unexpected = _unexpected_tcp_listeners("
+            "listeners, _owned_socket_inodes(), _resolver_ipv4_addresses())",
+            "assert not unexpected, f'unexpected TCP listener(s): {unexpected!r}'",
+        )
+    )
 
 
 def _inspect(env_file: Path, service: str) -> dict[str, Any]:
@@ -239,7 +341,7 @@ def collect_runtime_measurement(env_file: Path) -> dict[str, Any]:
             python_inspect["Id"],
             "python",
             "-c",
-            "from pathlib import Path; files=(Path('/proc/net/tcp'),Path('/proc/net/tcp6')); rows=[line.split() for p in files for line in p.read_text().splitlines()[1:]]; assert not any(r[3]=='0A' for r in rows)",
+            _tcp_listener_probe(),
         ]
     )
     if no_tcp_listener.returncode:

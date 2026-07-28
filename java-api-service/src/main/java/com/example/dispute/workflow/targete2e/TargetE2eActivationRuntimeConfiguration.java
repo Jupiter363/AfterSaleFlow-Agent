@@ -18,6 +18,7 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.context.annotation.Profile;
 import org.springframework.core.env.ConfigurableEnvironment;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
@@ -116,6 +117,7 @@ public class TargetE2eActivationRuntimeConfiguration {
   }
 
   @Bean
+  @Lazy(false)
   TargetE2eActivationAuthority targetE2eActivationAuthority(
       TargetE2eActivationManifestVerifier verifier, ConfigurableEnvironment environment) {
     String configuredPath = environment.getProperty("app.target-e2e.activation-manifest-path");

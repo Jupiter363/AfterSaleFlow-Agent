@@ -171,7 +171,8 @@ public class GlobalExceptionHandler {
             Exception exception, HttpServletRequest request) {
         LOGGER.error(
                 "Unhandled request failure: exception_type={}",
-                exception.getClass().getName());
+                exception.getClass().getName(),
+                exception);
         ErrorCode errorCode = ErrorCode.INTERNAL_ERROR;
         ApiResponse<Void> body =
                 failure(errorCode, "internal server error", Map.of(), request);

@@ -13,6 +13,7 @@ import java.util.Base64;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.core.env.ConfigurableEnvironment;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.mock.env.MockEnvironment;
@@ -108,6 +109,20 @@ class TargetE2eActivationRuntimeConfigurationTest {
     assertThatThrownBy(() -> source.loadConfigured("fixture-set-2"))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("not deployment-configured");
+  }
+
+  @Test
+  void activationAuthorityOverridesControlWorkerLazyInitialization() throws Exception {
+    Lazy lazy =
+        TargetE2eActivationRuntimeConfiguration.class
+            .getDeclaredMethod(
+                "targetE2eActivationAuthority",
+                TargetE2eActivationManifestVerifier.class,
+                ConfigurableEnvironment.class)
+            .getAnnotation(Lazy.class);
+
+    assertThat(lazy).isNotNull();
+    assertThat(lazy.value()).isFalse();
   }
 
   private KeyPair p256() throws Exception {
