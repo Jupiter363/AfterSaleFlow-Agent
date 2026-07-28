@@ -472,6 +472,11 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
       lastGraphExecutionRef = event.graphExecutionRef();
     }
     pendingCommand = null;
+    // The child state authorizes only this command's finalization event. Once that event is
+    // consumed, retain the public references above but release the per-command child slot.
+    if (targetAgentRunOperation) {
+      targetAgentRunChild = null;
+    }
     activityExecution = null;
     sharedActivityRetriesRemaining = 0;
     activityExecutionAuthorized = false;
@@ -497,11 +502,12 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
     IntakeCommandExecutionContext context = command.executionContext();
     try {
       if (command.commandType() == IntakeCommandType.INTAKE_MESSAGE) {
-        ensureSnapshot(command, context);
         if (targetAgentRunChildEnabled(context)) {
+          ensureTargetThreadInitialization(command, context);
           orchestrateTargetAgentRun(command, context);
           return;
         }
+        ensureSnapshot(command, context);
         GraphExecutionReceipt graph = completedGraphFor(command, context);
         if (graph == null) {
           graph = executeGraph(command, context);
@@ -1154,6 +1160,58 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
             context.threadId(),
             context.agentSessionId(),
             domainRevision,
+            receipt));
+  }
+
+  /**
+   * The target lane receives a command that was already admitted with an immutable domain
+   * snapshot. That signed command is the initialization authority, so invoking the legacy
+   * snapshot Activity here would both duplicate the publication and reintroduce its legacy
+   * pinned-version contract.
+   */
+  private void ensureTargetThreadInitialization(
+      IntakeWorkflowCommand command, IntakeCommandExecutionContext context) {
+    IntakeThreadInitialization existing = threadInitializations.get(command.party());
+    if (existing != null) {
+      requireThreadBinding(existing, command, context);
+      return;
+    }
+
+    IntakeTargetAgentRunContext target = context.targetAgentRun();
+    target.requireMatches(start, command, processRevision, roomRevision);
+    var snapshot = target.request().command().domainSnapshotRef();
+    String operationKey =
+        IntakeOperationKeys.snapshotPublish(
+            command.caseId(), command.roomEpoch(), command.actorScopeHash(), processRevision);
+    SnapshotPublicationReceipt receipt =
+        new SnapshotPublicationReceipt(
+            "intake-snapshot-publication-receipt.v1",
+            new OperationReceipt(
+                "intake-operation-receipt.v1",
+                operationKey,
+                command.requestHash(),
+                snapshot.sha256(),
+                processRevision,
+                roomRevision),
+            new IntakeActivityProtocol.ImmutablePayloadRef(
+                "immutable-payload-ref.v1",
+                snapshot.artifactId(),
+                "INTAKE_SNAPSHOT",
+                snapshot.schemaVersion(),
+                snapshot.uri(),
+                target.commandEnvelopeHash(),
+                snapshot.sha256(),
+                snapshot.sizeBytes()),
+            processRevision);
+    threadInitializations.put(
+        command.party(),
+        new IntakeThreadInitialization(
+            "intake-thread-initialization.v1",
+            command.party(),
+            command.actorScopeHash(),
+            context.threadId(),
+            context.agentSessionId(),
+            processRevision,
             receipt));
   }
 

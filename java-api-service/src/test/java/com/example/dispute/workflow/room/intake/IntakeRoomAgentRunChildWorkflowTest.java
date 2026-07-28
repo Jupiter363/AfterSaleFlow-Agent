@@ -5,6 +5,7 @@ import static com.example.dispute.workflow.contract.v1.TemporalTaskQueues.CASE_C
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.example.dispute.workflow.application.TemporalAgentRunV2WorkflowLauncher;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
 import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
 import com.example.dispute.workflow.contract.v1.ContractTypes.GraphStatus;
@@ -93,7 +94,6 @@ class IntakeRoomAgentRunChildWorkflowTest {
       roomWorker.registerWorkflowImplementationTypes(IntakeRoomWorkflowImpl.class);
       Worker agentWorker = environment.newWorker(AGENT_EXECUTION);
       agentWorker.registerWorkflowImplementationTypes(RecordingAgentRunWorkflow.class);
-      agentWorker.registerActivitiesImplementations(snapshotActivities);
       Worker controlWorker = environment.newWorker(CASE_CONTROL);
       controlWorker.registerActivitiesImplementations(new RecordingFinalizationReads());
       environment.start();
@@ -116,7 +116,7 @@ class IntakeRoomAgentRunChildWorkflowTest {
       assertThat(state.pendingCommand()).isNull();
       assertThat(state.lastAgentRunRef().logicalRunId()).isEqualTo(LOGICAL_RUN_ID);
       assertThat(state.lastGraphExecutionRef().proposalHash()).isEqualTo(PROPOSAL_HASH);
-      assertThat(snapshotActivities.snapshotRequests).hasSize(1);
+      assertThat(snapshotActivities.snapshotRequests).isEmpty();
       assertThat(snapshotActivities.graphRequests).isEmpty();
       assertThat(snapshotActivities.finalizationRequests).isEmpty();
       assertThat(RecordingAgentRunWorkflow.requests).containsExactly(targetRequest(command));
@@ -125,6 +125,25 @@ class IntakeRoomAgentRunChildWorkflowTest {
           .isEqualTo(IntakeAgentRunFinalizationReadRequest.Mode.AFTER_CHILD_COMPLETION);
       assertThat(IntakeAgentRunChildIds.forCommand(command))
           .isEqualTo("agent-run-v2:" + LOGICAL_RUN_ID);
+
+      IntakeWorkflowCommand second = targetCommand("CMD:P9:CHILD:2", 2, 1);
+      workflow.commandAccepted(second);
+      IntakeRoomSnapshot continued =
+          awaitState(
+              workflow,
+              snapshot ->
+                  snapshot.processedCommandCount() == 2
+                      && snapshot.pendingCommand() == null
+                      && snapshot.lastGraphExecutionRef() != null
+                      && second.commandId().equals(snapshot.lastGraphExecutionRef().graphCommandId()));
+      assertThat(continued.protocolErrorCode()).isNull();
+      assertThat(continued.lastGraphExecutionRef().threadId()).isEqualTo(THREAD_ID);
+      assertThat(RecordingAgentRunWorkflow.requests)
+          .containsExactly(targetRequest(command), targetRequest(second));
+      assertThat(RecordingFinalizationReads.requests).hasSize(2);
+      assertThat(snapshotActivities.snapshotRequests).isEmpty();
+      assertThat(snapshotActivities.graphRequests).isEmpty();
+      assertThat(snapshotActivities.finalizationRequests).isEmpty();
     }
   }
 
@@ -132,7 +151,9 @@ class IntakeRoomAgentRunChildWorkflowTest {
   void targetChildIdentityUsesCanonicalAgentRunIdAndUnresolvedChildCannotContinueAsNew() {
     IntakeWorkflowCommand command = targetCommand("C".repeat(128));
     assertThat(IntakeAgentRunChildIds.forCommand(command))
-        .isEqualTo("agent-run-v2:" + LOGICAL_RUN_ID);
+        .isEqualTo(
+            TemporalAgentRunV2WorkflowLauncher.workflowId(
+                command.executionContext().targetAgentRun().request().logicalRunId()));
 
     IntakeAgentRunChildState pending =
         IntakeAgentRunChildState.pending(
@@ -177,7 +198,7 @@ class IntakeRoomAgentRunChildWorkflowTest {
         CHECKPOINT_SCHEMA,
         "p9-prompt-v1",
         "p9-model-v1",
-        "intake-turn-proposal.v2",
+        "target-e2e-intake-output.v1",
         "p9-policy-v1",
         "p9-guardrail-v1",
         "p9-tools-v1",
@@ -186,10 +207,15 @@ class IntakeRoomAgentRunChildWorkflowTest {
   }
 
   private static IntakeWorkflowCommand targetCommand() {
-    return targetCommand(COMMAND_ID);
+    return targetCommand(COMMAND_ID, 1, 0);
   }
 
   private static IntakeWorkflowCommand targetCommand(String commandId) {
+    return targetCommand(commandId, 1, 0);
+  }
+
+  private static IntakeWorkflowCommand targetCommand(
+      String commandId, long sequence, long expectedRevision) {
     long deadline = System.currentTimeMillis() + Duration.ofMinutes(5).toMillis();
     String payloadRef = "urn:after-sale-flow:intake-command:" + commandId;
     String payloadHash = hash(3);
@@ -202,7 +228,7 @@ class IntakeRoomAgentRunChildWorkflowTest {
             CASE_ID,
             EPOCH,
             FENCE,
-            1,
+            sequence,
             IntakeCommandType.INTAKE_MESSAGE,
             IntakeParty.INITIATOR,
             INITIATOR_SCOPE,
@@ -210,7 +236,7 @@ class IntakeRoomAgentRunChildWorkflowTest {
             payloadHash,
             "intake.operation:" + CASE_ID + ":" + commandId,
             commandRequestHash);
-    ExecuteAgentRunRequest request = targetRequest(shell, deadline);
+    ExecuteAgentRunRequest request = targetRequest(shell, deadline, expectedRevision);
     IntakeTargetAgentRunContext target =
         new IntakeTargetAgentRunContext(
             "intake-target-agent-run-context.v1",
@@ -218,8 +244,8 @@ class IntakeRoomAgentRunChildWorkflowTest {
             ACTIVATION_ID,
             hash(5),
             FENCE,
-            0,
-            0,
+            expectedRevision,
+            expectedRevision,
             "p9-case-build",
             CONTROL_BUILD,
             "p9-agent-build",
@@ -259,12 +285,25 @@ class IntakeRoomAgentRunChildWorkflowTest {
 
   private static ExecuteAgentRunRequest targetRequest(
       IntakeWorkflowCommand command, long deadlineEpochMillis) {
+    return targetRequest(command, deadlineEpochMillis, 0);
+  }
+
+  private static ExecuteAgentRunRequest targetRequest(
+      IntakeWorkflowCommand command, long deadlineEpochMillis, long expectedRevision) {
+    String logicalRunId =
+        COMMAND_ID.equals(command.commandId())
+            ? LOGICAL_RUN_ID
+            : "RUN:P9:" + command.commandId().replace(':', '_');
+    String attemptId =
+        COMMAND_ID.equals(command.commandId())
+            ? ATTEMPT_ID
+            : "ATTEMPT:P9:" + command.commandId().replace(':', '_') + ":1";
     RoomGraphCommand graphCommand =
         new RoomGraphCommand(
             "room-graph-command.v1",
             command.commandId(),
-            LOGICAL_RUN_ID,
-            ATTEMPT_ID,
+            logicalRunId,
+            attemptId,
             TENANT,
             CASE_ID,
             RoomType.INTAKE,
@@ -275,7 +314,7 @@ class IntakeRoomAgentRunChildWorkflowTest {
             THREAD_ID,
             new RoomGraphCommand.ActorScope(
                 "USER_P9_CHILD", ActorRole.USER, Audience.USER, List.of("INTAKE_MESSAGE")),
-            0,
+            expectedRevision,
             "INTAKE_MESSAGE",
             1,
             new RoomGraphCommand.SnapshotRef(
@@ -294,7 +333,7 @@ class IntakeRoomAgentRunChildWorkflowTest {
                 "p9-intake-agent",
                 "p9-prompt-v1",
                 "p9-model-v1",
-                "intake-turn-proposal.v2",
+                "target-e2e-intake-output.v1",
                 "p9-policy-v1",
                 "p9-guardrail-v1",
                 List.of(),
@@ -306,7 +345,7 @@ class IntakeRoomAgentRunChildWorkflowTest {
             hash(4));
     return new ExecuteAgentRunRequest(
         ExecuteAgentRunRequest.SCHEMA_VERSION,
-        LOGICAL_RUN_ID,
+        logicalRunId,
         1,
         2,
         "agent-stream.v2",
@@ -404,7 +443,7 @@ class IntakeRoomAgentRunChildWorkflowTest {
           new RoomGraphResult.ExecutionMetadata(
               "p9-prompt-v1",
               "p9-model-v1",
-              "intake-turn-proposal.v2",
+              "target-e2e-intake-output.v1",
               "p9-policy-v1",
               "p9-guardrail-v1"));
     }
@@ -420,18 +459,25 @@ class IntakeRoomAgentRunChildWorkflowTest {
         IntakeAgentRunFinalizationReadRequest request) {
       requests.add(request);
       IntakeWorkflowCommand command = request.command();
+      IntakeTargetAgentRunContext target = command.executionContext().targetAgentRun();
+      ExecuteAgentRunRequest agentRequest = target.request();
+      long committedRevision = target.expectedProcessRevision() + 1;
+      String eventId = "EVENT_" + command.commandId().replace(':', '_');
       String operationKey =
           IntakeOperationKeys.turnFinalize(
               CASE_ID, EPOCH, THREAD_ID, command.commandId(), RESULT_HASH);
       IntakeAgentRunRef agentRun =
           new IntakeAgentRunRef(
-              "intake-agent-run-ref.v1", LOGICAL_RUN_ID, ATTEMPT_ID, RESULT_HASH);
+              "intake-agent-run-ref.v1",
+              agentRequest.logicalRunId(),
+              agentRequest.attemptId(),
+              RESULT_HASH);
       IntakeGraphExecutionRef graph =
           new IntakeGraphExecutionRef(
               "intake-graph-execution-ref.v1",
               THREAD_ID,
               command.commandId(),
-              "intake.v2",
+              agentRequest.command().graphKey(),
               GRAPH_VERSION,
               "CHECKPOINT_P9_CHILD",
               "urn:after-sale-flow:graph-result:p9-child",
@@ -444,15 +490,15 @@ class IntakeRoomAgentRunChildWorkflowTest {
               operationKey,
               command.requestHash(),
               RESULT_HASH,
-              1,
-              1);
+              committedRevision,
+              committedRevision);
       IntakeDomainEventRef event =
           new IntakeDomainEventRef(
               "intake-domain-event-ref.v1",
-              "EVENT_P9_CHILD_COMMITTED",
-              "urn:after-sale-flow:intake-event:p9-child",
+              eventId,
+              "urn:after-sale-flow:intake-event:" + eventId,
               hash(5),
-              1,
+              command.sequence(),
               IntakeDomainEventType.TURN_READY_TO_CONFIRM,
               IntakeParty.INITIATOR,
               command.commandId(),
@@ -464,8 +510,8 @@ class IntakeRoomAgentRunChildWorkflowTest {
               operationKey,
               command.requestHash(),
               RESULT_HASH,
-              1,
-              1,
+              committedRevision,
+              committedRevision,
               agentRun,
               graph);
       FormalFinalizationReceipt formal =
@@ -479,15 +525,15 @@ class IntakeRoomAgentRunChildWorkflowTest {
               INITIATOR_SCOPE,
               AGENT_SESSION_ID,
               command.commandId(),
-              LOGICAL_RUN_ID,
-              ATTEMPT_ID,
+              agentRequest.logicalRunId(),
+              agentRequest.attemptId(),
               RESULT_HASH,
               PROPOSAL_HASH,
-              1,
-              1,
+              committedRevision,
+              committedRevision,
               FENCE,
-              "MESSAGE_P9_CHILD",
-              1L,
+              "MESSAGE_" + command.commandId().replace(':', '_'),
+              command.sequence(),
               null,
               List.of(event.eventId()),
               List.of("OUTBOX_P9_CHILD"),
@@ -502,10 +548,10 @@ class IntakeRoomAgentRunChildWorkflowTest {
               "intake-agent-run-finalization-locator.v1",
               IntakeTargetAgentRunContext.TARGET_LANE,
               ACTIVATION_ID,
-              hash(5),
+              target.activationManifestHash(),
               FENCE,
-              LOGICAL_RUN_ID,
-              ATTEMPT_ID,
+              agentRequest.logicalRunId(),
+              agentRequest.attemptId(),
               RESULT_HASH,
               PROPOSAL_HASH,
               "CHECKPOINT_P9_CHILD",
