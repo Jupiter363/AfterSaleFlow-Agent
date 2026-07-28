@@ -116,11 +116,7 @@ class CompiledIntakeGraphShadowExecutor:
         )
         sequence += 1
 
-        loaded = await self._input_loader.load(execution)
-        context = decode_authorized_intake_ingress(
-            command=runtime_execution.admission.command,
-            loaded=loaded,
-        )
+        context = await self._load_context(execution, runtime_execution)
         bundle = build_governed_intake_runtime(
             execution=runtime_execution,
             transport=self._transport,
@@ -245,6 +241,35 @@ class CompiledIntakeGraphShadowExecutor:
         if record.last_checkpoint_id is None:
             return build_intake_execution_state(execution)
         return build_intake_command_patch(execution)
+
+    async def _load_context(
+        self,
+        execution: GatewayExecution,
+        runtime_execution: GatewayExecution,
+    ) -> IntakeTurnContext:
+        command = runtime_execution.admission.command
+        fresh = runtime_execution.thread_record.last_checkpoint_id is None
+        if fresh and command.domain_snapshot_ref is not None and command.event_ref is not None:
+            snapshot_ref = command.domain_snapshot_ref
+            event_ref = command.event_ref
+            snapshot = decode_authorized_intake_ingress(
+                command=command,
+                loaded=await self._input_loader.load(execution, object_ref=snapshot_ref),
+                object_ref=snapshot_ref,
+            )
+            event = decode_authorized_intake_ingress(
+                command=command,
+                loaded=await self._input_loader.load(execution, object_ref=event_ref),
+                object_ref=event_ref,
+            )
+            if snapshot.ingress_kind != "SNAPSHOT" or event.ingress_kind != "EVENT":
+                raise GraphContractError("fresh Intake command did not load its exact bootstrap inputs")
+            return IntakeTurnContext(
+                "BOOTSTRAP_EVENT",
+                {"snapshot": snapshot.ingress_payload, "event": event.ingress_payload},
+            )
+        loaded = await self._input_loader.load(execution)
+        return decode_authorized_intake_ingress(command=command, loaded=loaded)
 
     @staticmethod
     def _graph_config(execution: GatewayExecution) -> RunnableConfig:

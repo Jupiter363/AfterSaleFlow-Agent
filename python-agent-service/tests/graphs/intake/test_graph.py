@@ -195,6 +195,38 @@ def test_event_before_snapshot_fails_closed(bindings, version_pins, event) -> No
         graph.invoke(state, context=IntakeTurnContext("EVENT", event))
 
 
+def test_bootstrap_event_imports_snapshot_before_first_event(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+) -> None:
+    """A fresh command may carry both exact ingress objects without weakening EVENT alone."""
+    snapshot["own_messages"] = []
+    snapshot["source_refs"] = ["SNAPSHOT_SOURCE_P4"]
+    snapshot["snapshot_hash"] = canonical_sha256_omitting(snapshot, "snapshot_hash")
+    event["sequence_no"] = 1
+    event["event_hash"] = canonical_sha256_omitting(event, "event_hash")
+    graph = compile_intake_v2_graph(
+        intake_lcel=_create_test_only_intake_cognition(deterministic_message_fallback)
+    )
+    state = new_intake_graph_state(bindings=bindings, version_pins=version_pins)
+
+    result = graph.invoke(
+        state,
+        context=IntakeTurnContext(
+            "BOOTSTRAP_EVENT",
+            {"snapshot": snapshot, "event": event},
+        ),
+    )
+
+    assert result["initial_snapshot_hash"] == snapshot["snapshot_hash"]
+    assert result["last_event_hash"] == event["event_hash"]
+    assert result["last_event_sequence"] == 1
+    assert result["messages"][event["message_id"]]["sequence"] == 1
+    assert result["route"] == "message"
+
+
 def test_identical_event_replay_uses_cached_proposal(
     bindings,
     version_pins,

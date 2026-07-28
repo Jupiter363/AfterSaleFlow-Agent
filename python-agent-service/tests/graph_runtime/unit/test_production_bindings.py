@@ -15,7 +15,7 @@ from langgraph.graph import END, START, StateGraph
 from app.api.graph_lifecycle import GraphExecutorKernel
 from app.config import GraphShadowBindingSettings, Settings
 from app.contracts.v1.codec import canonical_sha256_omitting, canonicalize
-from app.contracts.v1.models import RoomGraphCommand
+from app.contracts.v1.models import RoomGraphCommand, SnapshotRef
 from app.graph_runtime.compiled_executor import CompiledGraphShadowExecutor
 from app.graph_runtime.errors import (
     GraphContractError,
@@ -875,6 +875,88 @@ async def test_java_intake_exchange_loads_only_exact_canonical_receipt_bytes() -
     assert loaded.object_version == "version-1"
     assert loaded.canonical_payload == payload
     assert loaded.sha256 == command.domain_snapshot_ref.sha256
+
+
+@pytest.mark.asyncio
+async def test_intake_executor_bootstraps_with_two_exact_loads_then_resumes_with_one() -> None:
+    command, snapshot, snapshot_payload = _intake_command()
+    event = json.loads(
+        (
+            ROOT
+            / "contracts/agent-platform/intake/v2/fixtures/valid/intake-turn-event-valid.json"
+        ).read_text(encoding="utf-8")
+    )
+    event_payload = canonicalize(event)
+    event_ref = SnapshotRef(
+        artifact_id=event["event_id"],
+        schema_version=event["schema_version"],
+        uri="s3://graph-input/intake/event-p4-user-2.json",
+        sha256=event["event_hash"],
+        size_bytes=len(event_payload),
+    )
+    command = command.model_copy(update={"event_ref": event_ref})
+    execution = _intake_execution(command)
+
+    def loaded(reference, payload: bytes) -> LoadedIntakePayload:
+        return LoadedIntakePayload(
+            artifact_id=reference.artifact_id,
+            schema_version=reference.schema_version,
+            uri=reference.uri,
+            sha256=reference.sha256,
+            size_bytes=reference.size_bytes,
+            object_version="version-1",
+            canonical_payload=payload,
+        )
+
+    class Loader:
+        def __init__(self) -> None:
+            self.calls: list[object | None] = []
+
+        async def load(self, selected_execution, *, object_ref=None):
+            assert selected_execution is execution
+            self.calls.append(object_ref)
+            if object_ref == command.domain_snapshot_ref:
+                return loaded(object_ref, snapshot_payload)
+            if object_ref == command.event_ref:
+                return loaded(object_ref, event_payload)
+            raise AssertionError("continuation test must not request an unbound object")
+
+    loader = Loader()
+    executor = object.__new__(CompiledIntakeGraphShadowExecutor)
+    executor._input_loader = loader
+
+    context = await executor._load_context(execution, execution)
+
+    assert context.ingress_kind == "BOOTSTRAP_EVENT"
+    assert context.ingress_payload["snapshot"]["snapshot_hash"] == snapshot["snapshot_hash"]
+    assert context.ingress_payload["event"]["event_hash"] == event["event_hash"]
+    assert loader.calls == [command.domain_snapshot_ref, command.event_ref]
+
+    resumed = replace(
+        execution,
+        thread_record=replace(
+            execution.thread_record,
+            last_checkpoint_ns="",
+            last_checkpoint_id="checkpoint-p4-1",
+        ),
+    )
+
+    class ContinuationLoader:
+        def __init__(self) -> None:
+            self.calls: list[object | None] = []
+
+        async def load(self, selected_execution, *, object_ref=None):
+            assert selected_execution is resumed
+            self.calls.append(object_ref)
+            assert object_ref is None
+            return loaded(command.event_ref, event_payload)
+
+    continuation_loader = ContinuationLoader()
+    executor._input_loader = continuation_loader
+    resumed_context = await executor._load_context(resumed, resumed)
+
+    assert resumed_context.ingress_kind == "EVENT"
+    assert continuation_loader.calls == [None]
 
 
 @pytest.mark.asyncio

@@ -8,16 +8,19 @@ from typing import Any, TypeAlias, cast
 from langgraph.runtime import Runtime
 
 from app.contracts.v1.codec import canonical_sha256
+from app.graph_runtime.reducers import merge_node_results
 from app.graphs.intake.errors import IntakeGraphContractError
 from app.graphs.intake.state import (
     IntakeGraphStateV2,
     IntakeMessageState,
     IntakeTurnContext,
     JsonObject,
+    merge_intake_messages,
 )
 from app.graphs.intake.validators import (
     MATRIX_AUTHORITY_RECORD_KEY,
     ingress,
+    bootstrap_event_ingress,
     matrix_authority_record,
     validate_cognition_patch,
     validate_dossier_transition,
@@ -71,8 +74,12 @@ def authorize_and_load(
     kind, payload = ingress(runtime.context)
     if kind == "SNAPSHOT":
         validate_snapshot(state, payload)
-    else:
+    elif kind == "EVENT":
         validate_event(state, payload)
+    else:
+        snapshot, event = bootstrap_event_ingress(runtime.context)
+        validate_snapshot(state, snapshot)
+        validate_event(state, event)
     return {}
 
 
@@ -83,7 +90,13 @@ def import_snapshot_once_or_apply_event(
     kind, payload = ingress(runtime.context)
     if kind == "SNAPSHOT":
         return validate_node_patch(state, _import_snapshot(state, payload))
-    return validate_node_patch(state, _apply_event(state, payload))
+    if kind == "EVENT":
+        return validate_node_patch(state, _apply_event(state, payload))
+    snapshot, event = bootstrap_event_ingress(runtime.context)
+    snapshot_patch = _import_snapshot(state, snapshot)
+    imported = _state_after_patch(state, snapshot_patch)
+    event_patch = _apply_event(imported, event)
+    return validate_node_patch(state, _merge_bootstrap_patches(snapshot_patch, event_patch))
 
 
 def route_turn(state: IntakeGraphStateV2) -> dict[str, Any]:
@@ -157,7 +170,14 @@ def cached_terminal_projection(
     if kind == "SNAPSHOT":
         if cached.get("source_event_hash") is not None or state.get("last_event_hash") is not None:
             raise IntakeGraphContractError("INTAKE_REPLAY_SOURCE_MISMATCH")
-    elif cached.get("source_event_hash") != payload.get("event_hash"):
+    elif kind == "EVENT":
+        if cached.get("source_event_hash") != payload.get("event_hash"):
+            raise IntakeGraphContractError("INTAKE_REPLAY_SOURCE_MISMATCH")
+    elif kind == "BOOTSTRAP_EVENT":
+        _, event = bootstrap_event_ingress(runtime.context)
+        if cached.get("source_event_hash") != event.get("event_hash"):
+            raise IntakeGraphContractError("INTAKE_REPLAY_SOURCE_MISMATCH")
+    else:
         raise IntakeGraphContractError("INTAKE_REPLAY_SOURCE_MISMATCH")
     return validate_node_patch(state, {"terminal_draft": deepcopy(cached)})
 
@@ -357,6 +377,51 @@ def _apply_event(
         },
         "route": "message",
     }
+
+
+def _state_after_patch(
+    state: IntakeGraphStateV2,
+    patch: Mapping[str, Any],
+) -> IntakeGraphStateV2:
+    """Apply only the reducers needed before the bootstrap event is evaluated."""
+    validate_node_patch(state, patch)
+    candidate = deepcopy(dict(state))
+    for field, reducer in (
+        ("messages", merge_intake_messages),
+        ("node_results", merge_node_results),
+    ):
+        if field in patch:
+            candidate[field] = reducer(candidate.get(field), patch[field])
+    candidate.update(
+        {
+            key: deepcopy(value)
+            for key, value in patch.items()
+            if key not in {"messages", "node_results"}
+        }
+    )
+    validate_state(cast(IntakeGraphStateV2, candidate))
+    return cast(IntakeGraphStateV2, candidate)
+
+
+def _merge_bootstrap_patches(
+    snapshot_patch: Mapping[str, Any],
+    event_patch: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Preserve reducer semantics while making snapshot import precede the first event."""
+    patch = deepcopy(dict(snapshot_patch))
+    for field, reducer in (("messages", merge_intake_messages), ("node_results", merge_node_results)):
+        left = patch.get(field)
+        right = event_patch.get(field)
+        if right is not None:
+            patch[field] = reducer(left, right) if left is not None else deepcopy(right)
+    patch.update(
+        {
+            key: deepcopy(value)
+            for key, value in event_patch.items()
+            if key not in {"messages", "node_results"}
+        }
+    )
+    return patch
 
 
 def _reject_stable_record_rebinding(

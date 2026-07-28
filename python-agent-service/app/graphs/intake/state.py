@@ -135,7 +135,7 @@ class IntakeGraphStateV2(TypedDict):
 
 @dataclass(frozen=True, slots=True)
 class IntakeTurnContext:
-    ingress_kind: Literal["SNAPSHOT", "EVENT"]
+    ingress_kind: Literal["SNAPSHOT", "EVENT", "BOOTSTRAP_EVENT"]
     ingress_payload: JsonObject
 
 

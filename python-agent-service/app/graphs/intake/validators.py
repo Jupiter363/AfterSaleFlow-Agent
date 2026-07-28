@@ -295,10 +295,24 @@ def validate_state(state: IntakeGraphStateV2) -> None:
 def ingress(context: IntakeTurnContext) -> tuple[str, dict[str, Any]]:
     kind = context.ingress_kind
     payload = context.ingress_payload
-    if kind not in {"SNAPSHOT", "EVENT"} or not isinstance(payload, dict):
+    if kind not in {"SNAPSHOT", "EVENT", "BOOTSTRAP_EVENT"} or not isinstance(payload, dict):
         raise IntakeGraphContractError("INTAKE_INGRESS_INVALID")
     _reject_forbidden_keys(payload)
     return kind, payload
+
+
+def bootstrap_event_ingress(context: IntakeTurnContext) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Return the two independently authorized payloads for a first-message ingress."""
+    kind, payload = ingress(context)
+    if kind != "BOOTSTRAP_EVENT" or set(payload) != {"snapshot", "event"}:
+        raise IntakeGraphContractError("INTAKE_BOOTSTRAP_INGRESS_INVALID")
+    snapshot = payload["snapshot"]
+    event = payload["event"]
+    if not isinstance(snapshot, dict) or not isinstance(event, dict):
+        raise IntakeGraphContractError("INTAKE_BOOTSTRAP_INGRESS_INVALID")
+    _reject_forbidden_keys(snapshot)
+    _reject_forbidden_keys(event)
+    return snapshot, event
 
 
 def validate_snapshot(

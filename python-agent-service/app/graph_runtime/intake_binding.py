@@ -109,7 +109,12 @@ class StoredIntakeProposal:
 class IntakeInputLoader(Protocol):
     """Load only the exact immutable object authorized by one admitted execution."""
 
-    async def load(self, execution: GatewayExecution) -> LoadedIntakePayload: ...
+    async def load(
+        self,
+        execution: GatewayExecution,
+        *,
+        object_ref: Any | None = None,
+    ) -> LoadedIntakePayload: ...
 
 
 class IntakeProposalStore(Protocol):
@@ -144,13 +149,17 @@ def decode_authorized_intake_ingress(
     *,
     command: RoomGraphCommand,
     loaded: LoadedIntakePayload,
+    object_ref: Any | None = None,
 ) -> IntakeTurnContext:
     """Decode bytes only after manifest authorization and recheck every immutable reference field."""
 
-    reference = command.event_ref or command.domain_snapshot_ref
-    expected_schema = (
-        INTAKE_EVENT_SCHEMA if command.event_ref is not None else INTAKE_SNAPSHOT_SCHEMA
-    )
+    reference = object_ref or command.event_ref or command.domain_snapshot_ref
+    if (
+        reference is None
+        or (reference != command.event_ref and reference != command.domain_snapshot_ref)
+    ):
+        raise GraphContractError("loaded Intake payload is not one of the exact command references")
+    expected_schema = reference.schema_version
     actual_receipt = (
         loaded.artifact_id,
         loaded.schema_version,
@@ -178,11 +187,11 @@ def decode_authorized_intake_ingress(
         raise GraphContractError("loaded Intake payload is not unique-member JSON") from error
     if not isinstance(document, dict) or canonicalize(document) != payload:
         raise GraphContractError("loaded Intake payload is not canonical JSON")
-    hash_field = "event_hash" if command.event_ref is not None else "snapshot_hash"
+    hash_field = "event_hash" if expected_schema == INTAKE_EVENT_SCHEMA else "snapshot_hash"
     if canonical_sha256_omitting(document, hash_field) != reference.sha256:
         raise GraphContractError("loaded Intake payload hash differs from its immutable reference")
     try:
-        if command.event_ref is not None:
+        if expected_schema == INTAKE_EVENT_SCHEMA:
             typed = IntakeTurnEvent.model_validate(document)
             kind = "EVENT"
         else:

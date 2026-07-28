@@ -86,6 +86,31 @@ class TargetE2eIntakeExchangeAuthorityTest {
         .isInstanceOf(IntakeExchangeAuthorityValidationPort.Rejected.class);
   }
 
+  @Test
+  void authorizesOnlyTheEventOrSnapshotBoundToTheAdmittedCommand(@TempDir Path classes)
+      throws Exception {
+    IntakeCommandExecutionContext context = context();
+    ObjectMapper persistedMapper = new ObjectMapper().findAndRegisterModules()
+        .setPropertyNamingStrategy(PropertyNamingStrategies.LOWER_CAMEL_CASE);
+    JsonNode document = persistedMapper.valueToTree(context);
+    NamedParameterJdbcOperations jdbc = mock(NamedParameterJdbcOperations.class);
+    when(jdbc.queryForList(any(String.class), any(SqlParameterSource.class)))
+        .thenReturn(List.of(row(ContractJson.canonicalString(document), document)));
+    IntakeExchangeAuthorityValidationPort authority = authority(classes, jdbc);
+
+    PayloadLoadRequest snapshotRequest = new PayloadLoadRequest(
+        "intake-payload-load-request.v1", authorityClaim(context), snapshotReference(context));
+    assertThat(authority.requirePayloadLoad(new PayloadLoadClaim(snapshotRequest)).objectVersion())
+        .isEqualTo(context.targetAgentRun().request().command().domainSnapshotRef().sha256());
+
+    ObjectReference unrelated = new ObjectReference("other-p9", "intake-domain-snapshot.v2",
+        "minio://target-e2e/snapshots/other", hash('e'), 1);
+    PayloadLoadRequest unrelatedRequest = new PayloadLoadRequest(
+        "intake-payload-load-request.v1", authorityClaim(context), unrelated);
+    assertThatThrownBy(() -> authority.requirePayloadLoad(new PayloadLoadClaim(unrelatedRequest)))
+        .isInstanceOf(IntakeExchangeAuthorityValidationPort.Rejected.class);
+  }
+
   private static IntakeExchangeAuthorityValidationPort authority(
       Path classes, NamedParameterJdbcOperations jdbc) throws Exception {
     compileAuthority(classes);
@@ -160,6 +185,12 @@ class TargetE2eIntakeExchangeAuthorityTest {
     RoomGraphCommand.SnapshotRef event = context.targetAgentRun().request().command().eventRef();
     return new ObjectReference(event.artifactId(), event.schemaVersion(), event.uri(), event.sha256(),
         event.sizeBytes());
+  }
+
+  private static ObjectReference snapshotReference(IntakeCommandExecutionContext context) {
+    RoomGraphCommand.SnapshotRef snapshot = context.targetAgentRun().request().command().domainSnapshotRef();
+    return new ObjectReference(snapshot.artifactId(), snapshot.schemaVersion(), snapshot.uri(), snapshot.sha256(),
+        snapshot.sizeBytes());
   }
 
   private static IntakeCommandExecutionContext context() {

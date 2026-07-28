@@ -128,8 +128,13 @@ public final class TargetE2eIntakeExchangeAuthority
   public PayloadLoadGrant requirePayloadLoad(PayloadLoadClaim claim) {
     Objects.requireNonNull(claim, "claim");
     Material material = requireMaterial(claim.request().authority());
-    requireExactObject(claim.request().objectRef(), material.graph().eventRef());
-    return new PayloadLoadGrant(claim.request(), material.graph().eventRef().sha256());
+    ObjectReference requested = claim.request().objectRef();
+    RoomGraphCommand graph = material.graph();
+    if (!matchesExactObject(requested, graph.eventRef())
+        && !matchesExactObject(requested, graph.domainSnapshotRef())) {
+      throw rejected("target Intake payload reference differs from the exact command material");
+    }
+    return new PayloadLoadGrant(claim.request(), requested.sha256());
   }
 
   @Override
@@ -260,6 +265,16 @@ public final class TargetE2eIntakeExchangeAuthority
         || expected.sizeBytes() != actual.sizeBytes()) {
       throw rejected("target Intake payload reference differs from the exact command material");
     }
+  }
+
+  private static boolean matchesExactObject(
+      ObjectReference actual, RoomGraphCommand.SnapshotRef expected) {
+    return expected != null
+        && expected.artifactId().equals(actual.artifactId())
+        && expected.schemaVersion().equals(actual.schemaVersion())
+        && expected.uri().equals(actual.uri())
+        && expected.sha256().equals(actual.sha256())
+        && expected.sizeBytes() == actual.sizeBytes();
   }
 
   private MapSqlParameterSource parameters(Authority authority) {

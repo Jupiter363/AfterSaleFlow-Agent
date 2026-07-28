@@ -195,9 +195,19 @@ class JavaIntakeExchangeClient:
         self._timeout = timeout_seconds
         self._transport = transport
 
-    async def load(self, execution: GatewayExecution) -> LoadedIntakePayload:
+    async def load(
+        self,
+        execution: GatewayExecution,
+        *,
+        object_ref: Any | None = None,
+    ) -> LoadedIntakePayload:
         command = execution.admission.command
-        reference = command.event_ref or command.domain_snapshot_ref
+        reference = object_ref or command.event_ref or command.domain_snapshot_ref
+        if (
+            reference is None
+            or (reference != command.event_ref and reference != command.domain_snapshot_ref)
+        ):
+            raise GraphContractError("Intake loader received an object outside the exact command binding")
         request = IntakePayloadLoadRequest(
             authority=_authority(execution),
             object_ref=IntakeExchangeObjectReference.model_validate(
