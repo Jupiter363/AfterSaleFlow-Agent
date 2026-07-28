@@ -6,10 +6,12 @@ import datetime as dt
 import hashlib
 import json
 import os
+import re
 import secrets
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -17,8 +19,22 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import common  # noqa: E402
-import ledger  # noqa: E402
+import common
+import ledger
+
+SYNTHETIC_FIXTURE_SET_ID = "p9-synthetic-all-rooms-001"
+SYNTHETIC_FIXTURE_SOURCE = (
+    common.ROOT
+    / "contracts"
+    / "agent-platform"
+    / "target-e2e"
+    / "v1"
+    / "fixtures"
+    / "synthetic"
+    / f"{SYNTHETIC_FIXTURE_SET_ID}.json"
+)
+TARGET_E2E_JAVA_ARTIFACT = "/home/app/app-target-e2e.jar"
+CONTAINER_ID = re.compile(r"^[0-9a-f]{12,64}$")
 
 
 def _tool(name: str) -> str:
@@ -44,6 +60,21 @@ def _run(arguments: list[str]) -> None:
         )
 
 
+def _run_output(arguments: list[str]) -> str:
+    completed = subprocess.run(
+        arguments,
+        check=False,
+        capture_output=True,
+        text=True,
+        shell=False,
+    )
+    if completed.returncode:
+        raise common.TargetE2EError(
+            f"provisioning command failed: {completed.stderr.strip() or completed.stdout.strip()}"
+        )
+    return completed.stdout.strip()
+
+
 def _secret() -> str:
     return secrets.token_urlsafe(32)
 
@@ -53,6 +84,160 @@ def _write_private(path: Path, payload: str) -> None:
     path.write_text(payload, encoding="ascii", newline="\n")
     if os.name != "nt":
         path.chmod(0o600)
+
+
+def _reject_duplicate_members(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise common.TargetE2EError(
+                f"synthetic fixture contains a duplicate JSON member: {key}"
+            )
+        value[key] = item
+    return value
+
+
+def _canonical_fixture(path: Path) -> tuple[dict[str, Any], bytes, str]:
+    try:
+        if path.is_symlink() or not path.is_file():
+            raise common.TargetE2EError(
+                "synthetic fixture source must be a regular non-link file"
+            )
+        raw = path.read_bytes()
+        if not raw or len(raw) > 256 * 1024:
+            raise common.TargetE2EError("synthetic fixture source size is invalid")
+        document = json.loads(
+            raw.decode("utf-8"), object_pairs_hook=_reject_duplicate_members
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise common.TargetE2EError(
+            "synthetic fixture source is not strict UTF-8 JSON"
+        ) from error
+    if not isinstance(document, dict):
+        raise common.TargetE2EError("synthetic fixture source must be a JSON object")
+    expected_fields = {
+        "schemaVersion",
+        "fixtureSetId",
+        "caseIdPrefix",
+        "maximumCases",
+        "roomTypes",
+        "scenarios",
+    }
+    if (
+        set(document) != expected_fields
+        or document.get("schemaVersion") != "target-e2e-synthetic-fixture-set.v1"
+        or document.get("fixtureSetId") != SYNTHETIC_FIXTURE_SET_ID
+        or document.get("caseIdPrefix") != "CASE_P9_SYNTHETIC_"
+        or document.get("maximumCases") != 4
+        or document.get("roomTypes") != ["INTAKE", "EVIDENCE", "HEARING", "REVIEW"]
+        or not isinstance(document.get("scenarios"), list)
+        or len(document["scenarios"]) != 4
+    ):
+        raise common.TargetE2EError(
+            "synthetic fixture source does not match the frozen all-room fixture contract"
+        )
+    canonical = common.canonical_bytes(document)
+    return document, canonical, hashlib.sha256(canonical).hexdigest()
+
+
+def _write_public_bytes(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(payload)
+    if os.name != "nt":
+        path.chmod(0o444)
+
+
+def _java_artifact_digest(
+    docker: str, image_reference: str, runtime_directory: Path
+) -> str:
+    container_id = _run_output(
+        [docker, "create", "--entrypoint", "/bin/true", image_reference]
+    )
+    if not CONTAINER_ID.fullmatch(container_id):
+        raise common.TargetE2EError(
+            "Docker did not return one canonical container ID for artifact measurement"
+        )
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix=".artifact-measurement-", dir=runtime_directory
+        ) as temporary:
+            artifact = Path(temporary) / "app-target-e2e.jar"
+            _run(
+                [
+                    docker,
+                    "cp",
+                    f"{container_id}:{TARGET_E2E_JAVA_ARTIFACT}",
+                    str(artifact),
+                ]
+            )
+            common.assert_regular_single_link(
+                artifact, "measured target E2E Java artifact"
+            )
+            if artifact.stat().st_size < 1:
+                raise common.TargetE2EError(
+                    "measured target E2E Java artifact is empty"
+                )
+            return common.file_sha256(artifact)
+    finally:
+        _run([docker, "rm", "--force", container_id])
+
+
+def _isolation_attestation_payload(
+    *,
+    now: dt.datetime,
+    environment_id: str,
+    environment_generation: int,
+    candidate: str,
+    artifact_digest: str,
+    image_digests: dict[str, str],
+    domain_identity: dict[str, str],
+    graph_identity: dict[str, str],
+    attestation_nonce: str,
+) -> dict[str, Any]:
+    def database(identity: dict[str, str]) -> dict[str, Any]:
+        return {
+            "bypassRowLevelSecurity": False,
+            "clusterIdentity": identity["clusterIdentity"],
+            "createDatabase": False,
+            "createRole": False,
+            "databaseIdentity": identity["databaseIdentity"],
+            "peerPrincipalCanConnect": False,
+            "replication": False,
+            "runtimePrincipalIdentity": identity["runtimePrincipalIdentity"],
+            "superuser": False,
+        }
+
+    payload: dict[str, Any] = {
+        "schemaVersion": "target-e2e-runtime-measurement.v1",
+        "attestationNonce": attestation_nonce,
+        "environmentId": environment_id,
+        "environmentGeneration": environment_generation,
+        "candidateSha": candidate,
+        "artifactDigest": artifact_digest,
+        "issuedAt": now.isoformat(timespec="seconds"),
+        "expiresAt": (now + dt.timedelta(minutes=15)).isoformat(timespec="seconds"),
+        "imageDigestsHash": common.canonical_sha256(
+            {
+                "frontend": image_digests["frontend"],
+                "javaApi": image_digests["javaApi"],
+                "pythonAgent": image_digests["pythonAgent"],
+                "temporalAgentWorker": image_digests["temporalAgentWorker"],
+                "temporalControlWorker": image_digests["temporalControlWorker"],
+            }
+        ),
+        "databaseMeasurementHash": common.canonical_sha256(
+            {
+                "domain": database(domain_identity),
+                "graph": database(graph_identity),
+            }
+        ),
+        "networkIsolationEnforced": True,
+        "externalEffectEndpointsEnabled": False,
+        "graphDomainCredentialsPresent": False,
+        "graphDomainPrivilegesPresent": False,
+    }
+    payload["attestationHash"] = common.canonical_sha256(payload)
+    return payload
 
 
 def _generate_p256_key_pair(
@@ -516,6 +701,7 @@ def provision(
     run_id: str | None,
     gateway_port: int,
 ) -> Path:
+    docker = _tool("docker")
     openssl = _tool("openssl")
     keytool = _tool("keytool")
     candidate, images, image_lock_document = common.load_image_lock(image_lock)
@@ -579,6 +765,16 @@ def provision(
             openssl, activation_private_path, activation_public_path
         )
         activation_private = ledger.load_private_key(activation_private_path)
+
+        isolation_key_id = f"p9-isolation-attestation-{candidate[:12]}"
+        isolation_private_path = (
+            secrets_dir
+            / "isolation-attestation-signing"
+            / "isolation-attestation.private.pem"
+        )
+        isolation_public_path = activation_dir / "isolation-attestation.public.pem"
+        _generate_p256_key_pair(openssl, isolation_private_path, isolation_public_path)
+        isolation_private = ledger.load_private_key(isolation_private_path)
 
         harness_key_id = f"p9-harness-{candidate[:12]}"
         harness_private_path = (
@@ -650,14 +846,19 @@ def provision(
             "databaseIdentity": f"{selected_run_id}-graph-db",
             "runtimePrincipalIdentity": f"{selected_run_id}-python-graph-runtime",
         }
+        fixture_document, fixture_bytes, fixture_hash = _canonical_fixture(
+            SYNTHETIC_FIXTURE_SOURCE
+        )
+        fixture_path = (
+            activation_dir / "synthetic-fixtures" / f"{SYNTHETIC_FIXTURE_SET_ID}.json"
+        )
+        _write_public_bytes(fixture_path, fixture_bytes)
         case_scope = {
             "mode": "ISOLATED_SYNTHETIC_NEW_CASES",
             "caseIdPrefix": "CASE_P9_SYNTHETIC_",
             "maxCases": 4,
-            "fixtureSetId": "p9-synthetic-all-rooms-001",
-            "fixtureSetHash": hashlib.sha256(
-                f"{candidate}:{selected_run_id}:fixture-set".encode("ascii")
-            ).hexdigest(),
+            "fixtureSetId": fixture_document["fixtureSetId"],
+            "fixtureSetHash": fixture_hash,
             "containsRealCaseOrPartyData": False,
             "externalEffectsAllowed": False,
         }
@@ -678,9 +879,7 @@ def provision(
             "graphBinding": {
                 "key": target_binding["graph_key"],
                 "version": target_binding["graph_version"],
-                "checkpointSchemaVersion": target_binding[
-                    "checkpoint_schema_version"
-                ],
+                "checkpointSchemaVersion": target_binding["checkpoint_schema_version"],
                 "bindingHash": binding_hash,
                 "codeBuildId": target_binding["code_build_id"],
             },
@@ -717,6 +916,35 @@ def provision(
             typ="target-e2e-activation+jwt",
         )
         _write_private(activation_dir / "activation.jws", activation_jws + "\n")
+
+        artifact_digest = _java_artifact_digest(
+            docker, images["java"]["reference"], root
+        )
+        isolation_nonce = f"p9-isolation-nonce-{secrets.token_hex(16)}"
+        isolation_payload = _isolation_attestation_payload(
+            now=now,
+            environment_id=environment_id,
+            environment_generation=environment_generation,
+            candidate=candidate,
+            artifact_digest=artifact_digest,
+            image_digests=image_digests,
+            domain_identity=domain_identity,
+            graph_identity=graph_identity,
+            attestation_nonce=isolation_nonce,
+        )
+        common.write_json(
+            activation_dir / "isolation-attestation.json", isolation_payload
+        )
+        isolation_jws = ledger.sign_compact_jws(
+            isolation_payload,
+            isolation_private,
+            key_id=isolation_key_id,
+            typ="target-e2e-runtime-measurement+jwt",
+        )
+        _write_public_bytes(
+            activation_dir / "isolation-attestation.jws",
+            (isolation_jws + "\n").encode("ascii"),
+        )
 
         graph_generation = environment_generation
         restore_hash = hashlib.sha256(
@@ -805,6 +1033,13 @@ def provision(
             "TARGET_E2E_ENVIRONMENT_ID": environment_id,
             "TARGET_E2E_ENVIRONMENT_GENERATION": str(environment_generation),
             "TARGET_E2E_ACTIVATION_ID": activation_id,
+            "TARGET_E2E_ACTIVATION_KEY_ID": activation_key_id,
+            "TARGET_E2E_ISOLATION_ATTESTATION_KEY_ID": isolation_key_id,
+            "TARGET_E2E_ISOLATION_ATTESTATION_JWS_SHA256": hashlib.sha256(
+                isolation_jws.encode("ascii")
+            ).hexdigest(),
+            "TARGET_E2E_JAVA_ARTIFACT_SHA256": artifact_digest,
+            "TARGET_E2E_SYNTHETIC_FIXTURE_SHA256": fixture_hash,
             "TARGET_E2E_RUN_NONCE": run_nonce,
             "TARGET_E2E_TENANT_SURROGATE": tenant_surrogate,
             "TARGET_E2E_DOMAIN_CLUSTER_IDENTITY": domain_identity["clusterIdentity"],
