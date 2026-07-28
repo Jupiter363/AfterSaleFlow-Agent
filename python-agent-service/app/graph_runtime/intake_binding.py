@@ -192,17 +192,19 @@ def decode_authorized_intake_ingress(
         raise GraphContractError("loaded Intake payload hash differs from its immutable reference")
     try:
         if expected_schema == INTAKE_EVENT_SCHEMA:
-            typed = IntakeTurnEvent.model_validate(document)
+            IntakeTurnEvent.model_validate(document)
             kind = "EVENT"
         else:
-            typed = IntakeDomainSnapshot.model_validate(document)
+            IntakeDomainSnapshot.model_validate(document)
             kind = "SNAPSHOT"
     except ValueError as error:
         raise GraphContractError("loaded Intake payload violates its frozen schema") from error
-    _require_payload_command_binding(command, typed.model_dump(mode="json"))
+    # Validation may normalize timestamps (for example nanoseconds to microseconds).  The
+    # self-hash covers the exact canonical ingress document, so never reserialize it here.
+    _require_payload_command_binding(command, document)
     return IntakeTurnContext(
         cast(Any, kind),
-        cast(Any, typed.model_dump(mode="json", exclude_none=True)),
+        cast(Any, document),
     )
 
 

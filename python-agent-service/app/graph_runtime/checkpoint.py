@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, replace
@@ -42,6 +43,8 @@ from app.graph_runtime.result import (
 FENCE_CONTEXT_KEY: Final[str] = "__trusted_graph_fence_context__"
 TERMINAL_RESULT_CONTEXT_KEY: Final[str] = "__trusted_graph_terminal_result__"
 ROOM_GRAPH_RESULT_SCHEMA_VERSION: Final[str] = "room-graph-result.v1"
+PENDING_WRITE_CHECKPOINT_RETRY_ATTEMPTS: Final[int] = 5
+PENDING_WRITE_CHECKPOINT_RETRY_DELAY_SECONDS: Final[float] = 0.01
 
 FENCE_LOCK_SQL: Final[str] = """
 select fencing_token
@@ -367,6 +370,10 @@ class ExternalTerminalCommit:
             raise TypeError("external terminal commit revision is invalid")
 
 
+class _PendingWriteCheckpointUnavailable(GraphBindingError):
+    """The parent checkpoint is validly addressed but not committed yet."""
+
+
 class FencedPostgresSaver(BaseCheckpointSaver[Any]):
     """Async saver that atomically checks the durable lease before every write.
 
@@ -520,12 +527,22 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
         task_path: str = "",
     ) -> None:
         fence = self._require_fence(config)
-        async with self._connection() as connection:
-            async with connection.transaction():
-                await self._lock_fence(connection, fence)
-                await self._validate_pending_write_target(connection, config, fence)
-                saver = self._direct_saver_factory(connection, self.serde)
-                await saver.aput_writes(config, writes, task_id, task_path)
+        for attempt in range(PENDING_WRITE_CHECKPOINT_RETRY_ATTEMPTS):
+            try:
+                async with self._connection() as connection:
+                    async with connection.transaction():
+                        await self._lock_fence(connection, fence)
+                        await self._validate_pending_write_target(connection, config, fence)
+                        saver = self._direct_saver_factory(connection, self.serde)
+                        await saver.aput_writes(config, writes, task_id, task_path)
+                return
+            except _PendingWriteCheckpointUnavailable:
+                if attempt + 1 == PENDING_WRITE_CHECKPOINT_RETRY_ATTEMPTS:
+                    raise
+                # The transaction and connection exits release the lease and pool slot before aput.
+                await asyncio.sleep(
+                    PENDING_WRITE_CHECKPOINT_RETRY_DELAY_SECONDS * (attempt + 1)
+                )
 
     async def avalidate_external_terminal_checkpoint(
         self,
@@ -761,6 +778,19 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
                 DRAIN_EXPIRED_TARGET_E2E_SQL,
                 (fence.activation_id,),
             )
+        cursor = await connection.execute(
+            FENCE_LOCK_SQL,
+            (
+                fence.thread_id,
+                fence.command_id,
+                fence.owner_id,
+                fence.fencing_token,
+            ),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            raise GraphFenceError("Graph lease is stale, expired, released, or cancelled")
+        if fence.execution_lane is GraphGatewayMode.TARGET_E2E_CANDIDATE:
             room_row = await (
                 await connection.execute(
                     TARGET_E2E_ROOM_FENCE_SQL,
@@ -780,18 +810,6 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
             ).fetchone()
             if room_row is None:
                 raise GraphFenceError("Java room authority fence is stale")
-        cursor = await connection.execute(
-            FENCE_LOCK_SQL,
-            (
-                fence.thread_id,
-                fence.command_id,
-                fence.owner_id,
-                fence.fencing_token,
-            ),
-        )
-        row = await cursor.fetchone()
-        if row is None:
-            raise GraphFenceError("Graph lease is stale, expired, released, or cancelled")
 
     async def _bind_command_checkpoint(
         self,
@@ -888,7 +906,7 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
         )
         row = await cursor.fetchone()
         if row is None:
-            raise GraphBindingError("pending-write checkpoint does not exist")
+            raise _PendingWriteCheckpointUnavailable("pending-write checkpoint does not exist")
         self._validate_checkpoint_metadata(row["metadata"], fence)
 
     async def _lock_external_terminal_checkpoint(

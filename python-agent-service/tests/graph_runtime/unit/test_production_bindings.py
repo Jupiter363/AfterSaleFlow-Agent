@@ -835,6 +835,70 @@ def test_intake_ingress_rejects_private_contaminants_before_graph_mutation() -> 
         )
 
 
+@pytest.mark.parametrize(
+    ("fixture_name", "timestamp_field", "hash_field", "reference_field", "kind"),
+    [
+        (
+            "intake-domain-snapshot-valid.json",
+            "created_at",
+            "snapshot_hash",
+            "domain_snapshot_ref",
+            "SNAPSHOT",
+        ),
+        (
+            "intake-turn-event-valid.json",
+            "occurred_at",
+            "event_hash",
+            "event_ref",
+            "EVENT",
+        ),
+    ],
+)
+def test_intake_ingress_preserves_canonical_nanosecond_timestamps_after_validation(
+    fixture_name: str,
+    timestamp_field: str,
+    hash_field: str,
+    reference_field: str,
+    kind: str,
+) -> None:
+    command, _, _ = _intake_command()
+    document = json.loads(
+        (
+            ROOT / "contracts/agent-platform/intake/v2/fixtures/valid" / fixture_name
+        ).read_text(encoding="utf-8")
+    )
+    timestamp = "2026-07-20T08:02:00.366349890Z"
+    document[timestamp_field] = timestamp
+    document[hash_field] = canonical_sha256_omitting(document, hash_field)
+    payload = canonicalize(document)
+    reference = SnapshotRef(
+        artifact_id=document["event_id"] if kind == "EVENT" else document["snapshot_id"],
+        schema_version=document["schema_version"],
+        uri=f"s3://graph-input/intake/{fixture_name}",
+        sha256=document[hash_field],
+        size_bytes=len(payload),
+    )
+    command = command.model_copy(update={reference_field: reference})
+
+    context = decode_authorized_intake_ingress(
+        command=command,
+        object_ref=reference,
+        loaded=LoadedIntakePayload(
+            artifact_id=reference.artifact_id,
+            schema_version=reference.schema_version,
+            uri=reference.uri,
+            sha256=reference.sha256,
+            size_bytes=reference.size_bytes,
+            object_version="version-1",
+            canonical_payload=payload,
+        ),
+    )
+
+    assert context.ingress_kind == kind
+    assert context.ingress_payload[timestamp_field] == timestamp
+    assert canonical_sha256_omitting(context.ingress_payload, hash_field) == reference.sha256
+
+
 @pytest.mark.asyncio
 async def test_java_intake_exchange_loads_only_exact_canonical_receipt_bytes() -> None:
     command, _, payload = _intake_command()

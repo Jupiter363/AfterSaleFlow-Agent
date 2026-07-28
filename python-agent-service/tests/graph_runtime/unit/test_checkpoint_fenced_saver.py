@@ -9,6 +9,8 @@ from app.contracts.v1.models import ExecutionMetadata, Usage
 from app.graph_runtime.checkpoint import (
     ExternalTerminalCommit,
     FENCE_CONTEXT_KEY,
+    PENDING_WRITE_CHECKPOINT_RETRY_ATTEMPTS,
+    PENDING_WRITE_CHECKPOINT_RETRY_DELAY_SECONDS,
     TERMINAL_RESULT_CONTEXT_KEY,
     FencedPostgresSaver,
     TerminalResultMaterializer,
@@ -186,12 +188,17 @@ class _Connection:
         binding_current: bool = True,
         thread_current: bool = True,
         checkpoint_revision: int = 1,
+        pending_write_checkpoint_unavailable_attempts: int = 0,
     ) -> None:
         self.events: list[str] = []
         self.fence_current = fence_current
         self.binding_current = binding_current
         self.thread_current = thread_current
         self.checkpoint_revision = checkpoint_revision
+        self.pending_write_checkpoint_unavailable_attempts = (
+            pending_write_checkpoint_unavailable_attempts
+        )
+        self.pending_write_checkpoint_reads = 0
 
     def transaction(self) -> _Transaction:
         return _Transaction(self.events)
@@ -203,6 +210,12 @@ class _Connection:
             return _Cursor({"fencing_token": 1} if self.fence_current else None)
         if "from checkpoints" in normalized:
             self.events.append("sql:checkpoint-metadata")
+            self.pending_write_checkpoint_reads += 1
+            if (
+                self.pending_write_checkpoint_reads
+                <= self.pending_write_checkpoint_unavailable_attempts
+            ):
+                return _Cursor()
             return _Cursor(
                 {"metadata": _metadata(graph_cognitive_revision=self.checkpoint_revision)}
             )
@@ -296,9 +309,11 @@ class _Pool:
     def __init__(self, connection: _Connection) -> None:
         self.connection_value = connection
         self.timeouts: list[float] = []
+        self.connection_calls = 0
 
     def connection(self, *, timeout: float) -> _ConnectionContext:
         self.timeouts.append(timeout)
+        self.connection_calls += 1
         return _ConnectionContext(self.connection_value)
 
 
@@ -415,7 +430,7 @@ async def test_checkpoint_write_locks_fence_and_uses_one_connection() -> None:
 
 
 @pytest.mark.asyncio
-async def test_candidate_checkpoint_validates_java_room_fence_before_graph_lease() -> None:
+async def test_candidate_checkpoint_locks_graph_lease_before_java_room_fence() -> None:
     connection = _CandidateFenceConnection()
     saver, _ = _saver(connection)  # type: ignore[arg-type]
 
@@ -423,20 +438,24 @@ async def test_candidate_checkpoint_validates_java_room_fence_before_graph_lease
 
     assert connection.events == [
         "sql:drain-expired",
-        "sql:room-fence",
         "sql:graph-lease-fence",
+        "sql:room-fence",
     ]
 
 
 @pytest.mark.asyncio
-async def test_stale_java_room_fence_rejects_before_graph_lease_lock() -> None:
+async def test_stale_java_room_fence_rejects_after_graph_lease_lock() -> None:
     connection = _CandidateFenceConnection(room_current=False)
     saver, _ = _saver(connection)  # type: ignore[arg-type]
 
     with pytest.raises(GraphFenceError, match="Java room authority fence is stale"):
         await saver._lock_fence(connection, _candidate_fence())  # noqa: SLF001
 
-    assert connection.events == ["sql:drain-expired", "sql:room-fence"]
+    assert connection.events == [
+        "sql:drain-expired",
+        "sql:graph-lease-fence",
+        "sql:room-fence",
+    ]
 
 
 @pytest.mark.asyncio
@@ -939,6 +958,72 @@ async def test_pending_writes_validate_the_parent_under_the_same_fence() -> None
         "transaction:commit",
     ]
     assert direct_savers[0].connection is connection
+
+
+@pytest.mark.asyncio
+async def test_pending_writes_retry_after_releasing_the_lease_until_aput_commits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = _Connection(pending_write_checkpoint_unavailable_attempts=1)
+    saver, direct_savers = _saver(connection)
+    delays: list[float] = []
+
+    async def sleep(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr("app.graph_runtime.checkpoint.asyncio.sleep", sleep)
+
+    await saver.aput_writes(_config(checkpoint=True), [("channel", "value")], "task-1")
+
+    assert connection.events == [
+        "transaction:enter",
+        "sql:fence",
+        "sql:checkpoint-metadata",
+        "transaction:rollback",
+        "transaction:enter",
+        "sql:fence",
+        "sql:checkpoint-metadata",
+        "saver:writes",
+        "transaction:commit",
+    ]
+    assert delays == [PENDING_WRITE_CHECKPOINT_RETRY_DELAY_SECONDS]
+    assert saver._pool.connection_calls == 2  # noqa: SLF001
+    assert direct_savers[0].connection is connection
+
+
+@pytest.mark.asyncio
+async def test_pending_writes_fail_closed_after_bounded_checkpoint_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = _Connection(
+        pending_write_checkpoint_unavailable_attempts=PENDING_WRITE_CHECKPOINT_RETRY_ATTEMPTS
+    )
+    saver, direct_savers = _saver(connection)
+    delays: list[float] = []
+
+    async def sleep(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr("app.graph_runtime.checkpoint.asyncio.sleep", sleep)
+
+    with pytest.raises(GraphBindingError, match="pending-write checkpoint does not exist"):
+        await saver.aput_writes(_config(checkpoint=True), [("channel", "value")], "task-1")
+
+    assert connection.events == [
+        event
+        for _ in range(PENDING_WRITE_CHECKPOINT_RETRY_ATTEMPTS)
+        for event in (
+            "transaction:enter",
+            "sql:fence",
+            "sql:checkpoint-metadata",
+            "transaction:rollback",
+        )
+    ]
+    assert delays == [
+        PENDING_WRITE_CHECKPOINT_RETRY_DELAY_SECONDS * attempt
+        for attempt in range(1, PENDING_WRITE_CHECKPOINT_RETRY_ATTEMPTS)
+    ]
+    assert direct_savers == []
 
 
 @pytest.mark.asyncio
