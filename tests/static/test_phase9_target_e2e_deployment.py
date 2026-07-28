@@ -382,6 +382,31 @@ def test_domain_graph_temporal_and_python_authority_are_physically_separated() -
     )
 
 
+def test_temporal_namespace_init_fails_closed_on_legacy_build_id_routing() -> None:
+    compose = _compose()
+    init = compose["services"]["temporal-namespace-init"]
+    assert init["environment"] == {
+        "TARGET_E2E_TEMPORAL_NAMESPACE": "${TARGET_E2E_TEMPORAL_NAMESPACE:?}",
+        "TARGET_E2E_CONTROL_BUILD_ID": "${TARGET_E2E_CONTROL_BUILD_ID:?}",
+        "TARGET_E2E_AGENT_BUILD_ID": "${TARGET_E2E_AGENT_BUILD_ID:?}",
+    }
+
+    source = (DEPLOY / "temporal" / "create-namespace.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "temporal --output json task-queue get-build-ids" in source
+    assert "temporal task-queue update-build-ids add-new-default" in source
+    assert "after-sale-control.${control_build_component}" in source
+    assert "after-sale-agent.${agent_build_component}" in source
+    assert "case-control" in source
+    assert "room-control" in source
+    assert "notification-and-tools" in source
+    assert "target-e2e-case-dispute" in source
+    assert "agent-execution" in source
+    assert "conflicting or incomplete Build ID routing" in source
+    assert "exit 1" in source
+
+
 def test_python_has_uds_only_inbound_and_mtls_bypass_is_rejected() -> None:
     compose = _compose()
     services = compose["services"]

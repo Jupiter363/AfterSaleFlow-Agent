@@ -297,6 +297,8 @@ services:
         condition: service_healthy
     environment:
       TARGET_E2E_TEMPORAL_NAMESPACE: ${TARGET_E2E_TEMPORAL_NAMESPACE:?}
+      TARGET_E2E_CONTROL_BUILD_ID: ${TARGET_E2E_CONTROL_BUILD_ID:?}
+      TARGET_E2E_AGENT_BUILD_ID: ${TARGET_E2E_AGENT_BUILD_ID:?}
     volumes:
       - type: bind
         source: ./deploy/target-e2e/temporal/create-namespace.sh

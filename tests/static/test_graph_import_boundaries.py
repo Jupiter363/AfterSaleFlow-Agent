@@ -260,6 +260,7 @@ def test_temporal_server_enables_versioning_for_the_control_worker() -> None:
     for setting in (
         "frontend.workerVersioningDataAPIs",
         "frontend.workerVersioningWorkflowAPIs",
+        "frontend.enableExecuteMultiOperation",
     ):
         assert dynamic_config[setting] == [{"value": True, "constraints": {}}]
     assert control_worker["environment"]["TEMPORAL_WORKER_VERSIONING_MODE"] == (

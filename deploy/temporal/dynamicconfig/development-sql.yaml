@@ -16,3 +16,7 @@ frontend.workerVersioningDataAPIs:
 frontend.workerVersioningWorkflowAPIs:
   - value: true
     constraints: {}
+
+frontend.enableExecuteMultiOperation:
+  - value: true
+    constraints: {}
