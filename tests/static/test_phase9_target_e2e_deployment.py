@@ -23,6 +23,7 @@ common = importlib.import_module("common")
 ledger = importlib.import_module("ledger")
 assertion = importlib.import_module("assert_evidence")
 readiness = importlib.import_module("readiness")
+preflight = importlib.import_module("preflight")
 
 
 def _compose() -> dict[str, Any]:
@@ -446,6 +447,22 @@ def test_python_has_uds_only_inbound_and_mtls_bypass_is_rejected() -> None:
     readiness = (SCRIPTS / "readiness.py").read_text(encoding="utf-8")
     assert "tcp_bypass_listener_present" in readiness
     assert "/proc/net/tcp" in readiness
+
+
+def test_preflight_allows_only_the_two_graph_mtls_proxy_networks() -> None:
+    preflight._validate_graph_mtls_proxy_networks(
+        {"networks": ["graph-mtls-client", "app-internal"]}
+    )
+
+    for networks in (
+        ["graph-mtls-client"],
+        ["graph-mtls-client", "app-internal", "unexpected-peer"],
+        ["graph-mtls-client", "unexpected-peer"],
+    ):
+        with pytest.raises(
+            common.TargetE2EError, match="mTLS proxy has an unexpected peer network"
+        ):
+            preflight._validate_graph_mtls_proxy_networks({"networks": networks})
 
 
 def test_browser_graph_readiness_is_exact_read_only_and_never_uses_mtls() -> None:

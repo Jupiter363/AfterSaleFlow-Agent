@@ -21,6 +21,9 @@ FORBIDDEN_PYTHON_ACTIVATION_PARTS = (
     "ACTIVATION_DIRECTORY",
     "ACTIVATION_PATH",
 )
+EXPECTED_GRAPH_MTLS_PROXY_NETWORKS = frozenset(
+    {"graph-mtls-client", "app-internal"}
+)
 ALLOWED_URL_HOSTS = {
     "domain-db",
     "graph-db",
@@ -51,6 +54,11 @@ def _environment(service: dict[str, Any]) -> dict[str, str]:
     if not isinstance(value, dict):
         raise common.TargetE2EError("rendered Compose environment must be an object")
     return {str(key): str(item) for key, item in value.items()}
+
+
+def _validate_graph_mtls_proxy_networks(proxy: dict[str, Any]) -> None:
+    if _networks(proxy) != EXPECTED_GRAPH_MTLS_PROXY_NETWORKS:
+        raise common.TargetE2EError("mTLS proxy has an unexpected peer network")
 
 
 def _walk_strings(value: Any) -> list[str]:
@@ -178,8 +186,7 @@ def validate_rendered_config(
         raise common.TargetE2EError("Python can reach the Domain database network")
 
     proxy = services["graph-mtls-proxy"]
-    if _networks(proxy) != {"graph-mtls-client"}:
-        raise common.TargetE2EError("mTLS proxy has an unexpected peer network")
+    _validate_graph_mtls_proxy_networks(proxy)
     socket_sources = {
         str(item.get("source", ""))
         for item in proxy.get("volumes", [])
