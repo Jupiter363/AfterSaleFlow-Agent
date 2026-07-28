@@ -1,12 +1,16 @@
 package com.example.dispute.workflow.targete2e.ingress;
 
 import com.example.dispute.workflow.activity.intake.IntakeImmutablePayloadPublisher;
+import com.example.dispute.workflow.application.intake.IntakeContractHashes;
+import com.example.dispute.workflow.contract.v1.ContractJson;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.json.JsonMapper;
 import io.minio.PutObjectArgs;
 import io.minio.MinioClient;
 import java.io.ByteArrayInputStream;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.HexFormat;
+import java.io.IOException;
+import java.util.Arrays;
 import java.util.Map;
 import java.util.Objects;
 
@@ -14,8 +18,11 @@ import java.util.Objects;
 public final class MinioTargetE2eIntakePayloadPublisher
     implements IntakeImmutablePayloadPublisher {
 
-  private static final java.util.Set<String> SUPPORTED_SCHEMAS =
-      java.util.Set.of("intake-domain-snapshot.v2", "intake-turn-event.v2");
+  private static final Map<String, String> HASH_FIELDS =
+      Map.of(
+          "intake-domain-snapshot.v2", "snapshot_hash",
+          "intake-turn-event.v2", "event_hash");
+  private static final ObjectMapper MAPPER = JsonMapper.builder().build();
 
   private final MinioClient minio;
   private final String bucket;
@@ -37,13 +44,12 @@ public final class MinioTargetE2eIntakePayloadPublisher
   @Override
   public StoredPayload publish(PublishRequest request) {
     Objects.requireNonNull(request, "request");
-    if (!SUPPORTED_SCHEMAS.contains(request.schemaVersion())) {
+    String hashField = HASH_FIELDS.get(request.schemaVersion());
+    if (hashField == null) {
       throw new IllegalArgumentException("target Intake payload schema is invalid");
     }
     byte[] payload = request.canonicalPayload();
-    if (!request.contentSha256().equals(sha256(payload))) {
-      throw new IllegalArgumentException("target Intake payload hash is invalid");
-    }
+    requireCanonicalSelfHash(payload, hashField, request.contentSha256());
     String objectKey =
         prefix
             + "/"
@@ -78,11 +84,23 @@ public final class MinioTargetE2eIntakePayloadPublisher
         payload.length);
   }
 
-  private static String sha256(byte[] value) {
+  static void requireCanonicalSelfHash(byte[] payload, String hashField, String expectedHash) {
     try {
-      return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(value));
-    } catch (NoSuchAlgorithmException failure) {
-      throw new IllegalStateException("SHA-256 is unavailable", failure);
+      JsonNode document = MAPPER.readTree(payload);
+      JsonNode embeddedHash = document == null ? null : document.get(hashField);
+      if (embeddedHash == null
+          || !embeddedHash.isTextual()
+          || !expectedHash.equals(embeddedHash.textValue())
+          || !expectedHash.equals(IntakeContractHashes.canonicalHashExcluding(document, hashField))
+          || !Arrays.equals(payload, ContractJson.canonicalize(document))) {
+        throw new IllegalArgumentException("target Intake payload hash is invalid");
+      }
+    } catch (IOException | IllegalArgumentException failure) {
+      if (failure instanceof IllegalArgumentException argumentFailure
+          && "target Intake payload hash is invalid".equals(argumentFailure.getMessage())) {
+        throw argumentFailure;
+      }
+      throw new IllegalArgumentException("target Intake payload hash is invalid", failure);
     }
   }
 }
