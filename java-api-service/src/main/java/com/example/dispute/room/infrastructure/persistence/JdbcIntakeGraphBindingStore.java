@@ -262,14 +262,13 @@ public class JdbcIntakeGraphBindingStore implements IntakeGraphBindingStore {
                   join case_access_session access
                     on access.id = session.access_session_id
                  where session.id = :agentSessionId
-                   and session.tenant_id = :tenantSurrogate
+                   and session.tenant_id = access.tenant_id
                    and session.case_id = :caseId
                    and session.room_type = 'INTAKE'
                    and session.actor_id = :actorId
                    and session.actor_role = :actorRole
                    and session.prompt_profile_id = :promptVersion
                    and session.status = 'ACTIVE'
-                   and access.tenant_id = :tenantSurrogate
                    and access.case_id = :caseId
                    and access.actor_id = :actorId
                    and access.actor_role = :actorRole
