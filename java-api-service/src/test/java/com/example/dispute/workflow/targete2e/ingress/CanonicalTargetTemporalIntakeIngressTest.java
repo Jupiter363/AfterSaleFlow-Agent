@@ -6,9 +6,6 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import com.example.dispute.workflow.activity.intake.IntakeImmutablePayloadPublisher;
-import com.example.dispute.workflow.activity.intake.IntakeImmutablePayloadPublisher.PublishRequest;
-import com.example.dispute.workflow.activity.intake.IntakeImmutablePayloadPublisher.StoredPayload;
 import com.example.dispute.workflow.application.command.AcceptCaseCommand;
 import com.example.dispute.workflow.application.command.CaseCommandAcceptance;
 import com.example.dispute.workflow.application.command.CaseCommandService;
@@ -18,9 +15,9 @@ import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
 import com.example.dispute.workflow.contract.v1.ContractTypes.CommandType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.PayloadRef;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.example.dispute.workflow.targete2e.ingress.TargetIntakeCommandAdmissionAuthority.AdmissionReceipt;
-import com.example.dispute.workflow.targete2e.ingress.TargetIntakeCommandAdmissionAuthority.AdmissionRequest;
+import com.example.dispute.workflow.contract.v1.RoomGraphCommand.SnapshotRef;
+import com.example.dispute.workflow.targete2e.ingress.materialization.TargetIntakeMaterializer;
+import com.example.dispute.workflow.targete2e.ingress.materialization.TargetIntakeMaterializer.MaterializedIntake;
 import java.time.Instant;
 import java.util.List;
 import org.junit.jupiter.api.Test;
@@ -33,13 +30,14 @@ import org.mockito.junit.jupiter.MockitoExtension;
 class CanonicalTargetTemporalIntakeIngressTest {
 
     private static final String HASH = "c".repeat(64);
+    private static final String COMMAND_ID = "intake-message:0123456789abcdef0123456789abcdef";
+    private static final Instant ADMITTED_AT = Instant.parse("2026-07-27T01:00:01Z");
 
-    @Mock private IntakeImmutablePayloadPublisher payloadPublisher;
     @Mock private CaseCommandService commandService;
-    @Mock private TargetIntakeCommandAdmissionAuthority commandAdmissionAuthority;
+    @Mock private TargetIntakeMaterializer materializer;
 
     @Test
-    void publishesCanonicalContentAddressedPayloadBeforeAcceptingOneTemporalCommand() {
+    void acceptsOneTemporalCommandBoundToTheMaterializedEvent() {
         TargetIntakeActivationGrant grant =
                 new TargetIntakeActivationGrant(
                         TargetIntakeActivationGrant.TARGET_LANE,
@@ -50,74 +48,41 @@ class CanonicalTargetTemporalIntakeIngressTest {
                         7L,
                         11L,
                         13L,
+                        17L,
                         "case/tenant-target/CASE_TARGET_INGRESS",
                         "target-control-build",
                         Instant.parse("2026-07-27T02:00:00Z"));
         TargetIntakeMessageRequest request = TestRequests.message(grant);
-        when(payloadPublisher.publish(any()))
-                .thenAnswer(
-                        invocation -> {
-                            PublishRequest published = invocation.getArgument(0);
-                            return new StoredPayload(
-                                    published.artifactId(),
-                                    published.schemaVersion(),
-                                    "minio://target-e2e/" + published.artifactId(),
-                                    "version-1",
-                                    published.contentSha256(),
-                                    published.canonicalPayload().length);
-                        });
+        SnapshotRef event =
+                new SnapshotRef(
+                        "target-intake-event-1",
+                        "intake-turn-event.v2",
+                        "minio://target-e2e-intake-activation/browser-messages/event-1",
+                        HASH,
+                        512);
+        when(materializer.materialize(request))
+                .thenReturn(new MaterializedIntake(COMMAND_ID, event, ADMITTED_AT));
         when(commandService.accept(
                         eq(request.caseId()),
-                        eq("intake-message:" + request.messageId()),
+                        eq(COMMAND_ID),
                         any(),
                         eq(request.actor()),
                         eq(request.traceId()),
                         eq(request.idempotencyKey()),
                         eq(null)))
                 .thenAnswer(
-                        invocation -> {
-                            AcceptCaseCommand command = invocation.getArgument(2);
-                            return acceptance(request, command);
-                        });
-        when(commandAdmissionAuthority.admit(any()))
-                .thenAnswer(
-                        invocation -> {
-                            AdmissionRequest admission = invocation.getArgument(0);
-                            return new AdmissionReceipt(
-                                    admission.activationId(),
-                                    admission.manifestHash(),
-                                    admission.commandId(),
-                                    admission.roomEpoch(),
-                                    admission.roomFencingToken(),
-                                    Instant.parse("2026-07-27T01:00:01Z"),
-                                    false);
-                        });
+                        invocation -> acceptance(request, invocation.getArgument(2), COMMAND_ID));
         CanonicalTargetTemporalIntakeIngress ingress =
-                new CanonicalTargetTemporalIntakeIngress(
-                        payloadPublisher,
-                        commandService,
-                        commandAdmissionAuthority,
-                        new ObjectMapper());
+                new CanonicalTargetTemporalIntakeIngress(commandService, materializer);
 
         TargetIntakeIngressReceipt receipt = ingress.accept(request);
 
-        ArgumentCaptor<PublishRequest> publication = ArgumentCaptor.forClass(PublishRequest.class);
-        verify(payloadPublisher).publish(publication.capture());
-        String json = new String(publication.getValue().canonicalPayload(), java.nio.charset.StandardCharsets.UTF_8);
-        assertThat(publication.getValue().schemaVersion())
-                .isEqualTo(CanonicalTargetTemporalIntakeIngress.PAYLOAD_SCHEMA);
-        assertThat(publication.getValue().contentSha256()).hasSize(64);
-        assertThat(json)
-                .contains("TARGET_E2E_CANDIDATE")
-                .contains("CASE_TARGET_INGRESS")
-                .doesNotContain("activation_token")
-                .doesNotContain(request.traceId());
-
+        verify(materializer).materialize(request);
         ArgumentCaptor<AcceptCaseCommand> command = ArgumentCaptor.forClass(AcceptCaseCommand.class);
         verify(commandService)
                 .accept(
                         eq(request.caseId()),
-                        eq("intake-message:" + request.messageId()),
+                        eq(COMMAND_ID),
                         command.capture(),
                         eq(request.actor()),
                         eq(request.traceId()),
@@ -127,31 +92,29 @@ class CanonicalTargetTemporalIntakeIngressTest {
         assertThat(command.getValue().roomType()).isEqualTo(RoomType.INTAKE);
         assertThat(command.getValue().roomEpoch()).isEqualTo(7L);
         assertThat(command.getValue().expectedProcessRevision()).isEqualTo(13L);
-        assertThat(command.getValue().payloadRef().sha256())
-                .isEqualTo(publication.getValue().contentSha256());
-        ArgumentCaptor<AdmissionRequest> admission =
-                ArgumentCaptor.forClass(AdmissionRequest.class);
-        verify(commandAdmissionAuthority).admit(admission.capture());
-        assertThat(admission.getValue().roomFencingToken()).isEqualTo(11L);
-        assertThat(admission.getValue().manifestHash()).isEqualTo(HASH);
-        assertThat(receipt.commandId()).isEqualTo("intake-message:" + request.messageId());
-        assertThat(receipt.admittedAt())
-                .isEqualTo(Instant.parse("2026-07-27T01:00:01Z"));
+        assertThat(command.getValue().payloadRef().uri()).isEqualTo(event.uri());
+        assertThat(command.getValue().payloadRef().sha256()).isEqualTo(event.sha256());
+        assertThat(receipt.commandId()).isEqualTo(COMMAND_ID);
+        assertThat(receipt.payloadSha256()).isEqualTo(HASH);
+        assertThat(receipt.admittedAt()).isEqualTo(ADMITTED_AT);
     }
 
     private static CaseCommandAcceptance acceptance(
-            TargetIntakeMessageRequest request, AcceptCaseCommand command) {
+            TargetIntakeMessageRequest request, AcceptCaseCommand command, String commandId) {
         CaseCommandRef ref =
                 new CaseCommandRef(
                         "case-command-ref.v1",
-                        "intake-message:" + request.messageId(),
+                        commandId,
                         request.activation().tenantSurrogate(),
                         request.caseId(),
                         1L,
                         command.commandType(),
                         command.roomType(),
                         command.roomEpoch(),
-                        new ActorRef("user-local", ActorRole.USER, List.of()),
+                        new ActorRef(
+                                "user-local",
+                                ActorRole.USER,
+                                List.of("case:" + request.caseId() + ":command:INTAKE_MESSAGE")),
                         new PayloadRef(
                                 command.payloadRef().schemaVersion(),
                                 command.payloadRef().uri(),
@@ -162,7 +125,6 @@ class CanonicalTargetTemporalIntakeIngressTest {
                         command.deadlineAt(),
                         "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
                         "e".repeat(64));
-        return new CaseCommandAcceptance(
-                ref, "PENDING_ORCHESTRATION", Instant.parse("2026-07-27T01:00:00Z"), false);
+        return new CaseCommandAcceptance(ref, "PENDING_ORCHESTRATION", request.createdAt(), false);
     }
 }

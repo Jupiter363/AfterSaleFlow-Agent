@@ -1,6 +1,21 @@
 package com.example.dispute.workflow.temporal.room.hearing;
 
+import static com.example.dispute.workflow.contract.v1.CaseProcessWorkflowProtocol.CASE_CONTROL_TASK_QUEUE;
+import static com.example.dispute.workflow.contract.v1.TemporalTaskQueues.AGENT_EXECUTION;
+import static io.temporal.api.enums.v1.ParentClosePolicy.PARENT_CLOSE_POLICY_ABANDON;
+import static io.temporal.api.enums.v1.WorkflowIdReusePolicy.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE;
+
 import com.example.dispute.hearing.domain.HearingAuthorityCommit;
+import com.example.dispute.workflow.contract.v1.ContractTypes.CommandType;
+import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
+import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
+import com.example.dispute.workflow.temporal.agentrun.AgentRunWorkflow;
+import com.example.dispute.workflow.temporal.caseprocess.CaseProcessWorkflow;
+import com.example.dispute.workflow.temporal.caseprocess.TargetRoomProgressReceipt;
+import com.example.dispute.workflow.targete2e.rooms.hearing.TargetHearingFormalizationActivities;
+import com.example.dispute.workflow.targete2e.temporal.room.TargetRoomAgentRunFinalizationReceipt;
+import io.temporal.activity.ActivityOptions;
+import io.temporal.workflow.ChildWorkflowOptions;
 import io.temporal.workflow.CancellationScope;
 import io.temporal.workflow.Promise;
 import io.temporal.workflow.Workflow;
@@ -22,9 +37,21 @@ public final class HearingRoomWorkflowImpl implements HearingRoomWorkflow {
   private static final int MAX_ACCEPTED_RECEIPTS = 64;
   private static final int MAX_INBOX_RECEIPTS = 64;
   private static final int MAX_PENDING_RECEIPTS = 64;
+  private static final int MAX_AGENT_RUN_FINALIZATION_RECEIPTS = 64;
+  private final TargetHearingFormalizationActivities formalization =
+      Workflow.newActivityStub(
+          TargetHearingFormalizationActivities.class,
+          ActivityOptions.newBuilder()
+              .setTaskQueue(CASE_CONTROL_TASK_QUEUE)
+              .setStartToCloseTimeout(Duration.ofSeconds(30))
+              .setScheduleToCloseTimeout(Duration.ofMinutes(5))
+              .build());
 
   private final ArrayDeque<WorkflowEvent> inbox = new ArrayDeque<>();
   private final Map<String, Object> observedReceipts = new LinkedHashMap<>();
+  private final Map<String, HearingPartyCommand> observedPartyCommands = new LinkedHashMap<>();
+  private final Map<String, TargetRoomAgentRunFinalizationReceipt> agentRunFinalizationReceipts =
+      new LinkedHashMap<>();
   private final Map<Long, String> observedEventSequences = new LinkedHashMap<>();
   private final TreeMap<Long, WorkflowEvent> pendingReceipts = new TreeMap<>();
   private final Map<String, HearingPartyTerminalReceipt> partyTerminals = new LinkedHashMap<>();
@@ -68,6 +95,10 @@ public final class HearingRoomWorkflowImpl implements HearingRoomWorkflow {
 
     while (stage != HearingWorkflowStage.CLOSED && "RUNNING".equals(status)) {
       schedulePartyDeadlineIfRequired();
+      if (inbox.isEmpty() && isTargetChild() && formalizationRequired()) {
+        executeFormalization();
+        continue;
+      }
       Workflow.await(() -> !inbox.isEmpty());
       drainInboxInHistoryOrder();
     }
@@ -88,6 +119,19 @@ public final class HearingRoomWorkflowImpl implements HearingRoomWorkflow {
   public void partyTerminal(HearingPartyTerminalReceipt receipt) {
     enqueueReceipt(
         WorkflowEvent.party(Objects.requireNonNull(receipt, "receipt must not be null")));
+  }
+
+  @Override
+  public void partyCommandAccepted(HearingPartyCommand command) {
+    enqueueReceipt(
+        WorkflowEvent.partyCommand(Objects.requireNonNull(command, "command must not be null")));
+  }
+
+  @Override
+  public void agentRunFinalized(TargetRoomAgentRunFinalizationReceipt receipt) {
+    enqueueReceipt(
+        WorkflowEvent.agentRunFinalization(
+            Objects.requireNonNull(receipt, "receipt must not be null")));
   }
 
   @Override
@@ -127,7 +171,8 @@ public final class HearingRoomWorkflowImpl implements HearingRoomWorkflow {
         lastReceiptHash,
         agentResultReceiptId,
         handoffReceiptId,
-        handoffReceiptHash);
+        handoffReceiptHash,
+        new ArrayList<>(agentRunFinalizationReceipts.values()));
   }
 
   private void drainInboxInHistoryOrder() {
@@ -137,6 +182,10 @@ public final class HearingRoomWorkflowImpl implements HearingRoomWorkflow {
       WorkflowEvent event = inbox.removeFirst();
       if (event.timerStage() != null) {
         processDeadline(event.timerStage(), event.timerSequence());
+      } else if (event.agentRunFinalizationReceipt() != null) {
+        processAgentRunFinalizationReceipt(event.agentRunFinalizationReceipt());
+      } else if (event.partyCommand() != null) {
+        processPartyCommand(event.partyCommand());
       } else {
         queueCommittedReceipt(event);
       }
@@ -195,6 +244,172 @@ public final class HearingRoomWorkflowImpl implements HearingRoomWorkflow {
     pendingReceipts.put(committed.processRevision(), event);
   }
 
+  private void processAgentRunFinalizationReceipt(
+      TargetRoomAgentRunFinalizationReceipt receipt) {
+    TargetRoomAgentRunFinalizationReceipt previous =
+        agentRunFinalizationReceipts.get(receipt.commandId());
+    if (previous != null) {
+      if (previous.equals(receipt)) {
+        duplicateSignalCount++;
+      } else {
+        failProtocol("HEARING_AGENT_RUN_RECEIPT_COMMAND_CONFLICT");
+      }
+      return;
+    }
+    if (!receipt.matchesHearingRoom(
+        start.tenantSurrogate(), start.caseId(), start.roomEpoch(), start.fencingToken())) {
+      failProtocol("HEARING_AGENT_RUN_RECEIPT_AUTHORITY_MISMATCH");
+      return;
+    }
+    if (receipt.processRevision() != processRevision
+        || receipt.roomRevision() != roomRevision
+        || receipt.stageSequence() != stageSequence) {
+      failProtocol("HEARING_AGENT_RUN_RECEIPT_STALE_REVISION");
+      return;
+    }
+    if (!stage.requiresAgentRun()) {
+      failProtocol("HEARING_AGENT_RUN_RECEIPT_STAGE_INVALID");
+      return;
+    }
+    if (agentRunFinalizationReceipts.size() >= MAX_AGENT_RUN_FINALIZATION_RECEIPTS) {
+      failProtocol("HEARING_AGENT_RUN_RECEIPT_LIMIT");
+      return;
+    }
+    agentRunFinalizationReceipts.put(receipt.commandId(), receipt);
+  }
+
+  private void processPartyCommand(HearingPartyCommand partyCommand) {
+    HearingPartyCommand previous = observedPartyCommands.get(partyCommand.command().commandId());
+    if (previous != null) {
+      if (previous.equals(partyCommand)) {
+        duplicateSignalCount++;
+      } else {
+        failProtocol("HEARING_PARTY_COMMAND_ID_PAYLOAD_CONFLICT");
+      }
+      return;
+    }
+    if (!stage.isPartyWait()
+        || partyCommand.fencingToken() != start.fencingToken()
+        || partyCommand.expectedProcessRevision() != processRevision
+        || partyCommand.expectedRoomRevision() != roomRevision
+        || !matchesPartyCommand(stage, partyCommand.command().commandType())) {
+      failProtocol("HEARING_PARTY_COMMAND_STAGE_OR_COORDINATE_MISMATCH");
+      return;
+    }
+    observedPartyCommands.put(partyCommand.command().commandId(), partyCommand);
+    String participant = participantFor(partyCommand.command());
+    String operationKey =
+        HearingOperationKeys.partyTerminal(
+            start.tenantSurrogate(),
+            start.caseId(),
+            start.roomEpoch(),
+            stage,
+            stageSequence,
+            participant,
+            partyCommand.command().commandId());
+    TargetHearingFormalizationActivities.TransitionRequest transition = transition(operationKey);
+    HearingPartyTerminalReceipt receipt =
+        formalization
+            .formalizeParty(
+                new TargetHearingFormalizationActivities.PartyRequest(
+                    transition, partyCommand.command()))
+            .receipt();
+    queueCommittedReceipt(WorkflowEvent.party(receipt));
+  }
+
+  private boolean formalizationRequired() {
+    if (stage.isPartyWait()) return false;
+    if (stage == HearingWorkflowStage.HUMAN_REVIEW_OPEN) {
+      return true;
+    }
+    return stage != HearingWorkflowStage.CLOSED;
+  }
+
+  private boolean isTargetChild() {
+    return Workflow.getInfo().getParentWorkflowId() != null;
+  }
+
+  private void executeFormalization() {
+    if (stage.sequence() <= HearingWorkflowStage.EVIDENCE_INTRODUCTION.sequence()) {
+      stageCompleted(formalization.bootstrapNext(transition(stageOperationKey())).receipt());
+      return;
+    }
+    if (stage.requiresAgentRun()) {
+      ExecuteAgentRunRequest request =
+          formalization.prepareAgentStage(transition(agentOperationKey())).request();
+      ExecuteAgentRunResult result = launchAgentRunChild(request);
+      TargetHearingFormalizationActivities.AgentStageResult formalResult =
+          formalization.finalizeAgentStage(
+              new TargetHearingFormalizationActivities.AgentStageFinalizationRequest(
+                  transition(agentOperationKey()), request, result));
+      stageCompleted(formalResult.finalizerReceipt());
+      return;
+    }
+    if (stage == HearingWorkflowStage.DOSSIER_FREEZING) {
+      stageCompleted(formalization.freezeDossier(transition(stageOperationKey())).receipt());
+      return;
+    }
+    if (stage == HearingWorkflowStage.HUMAN_REVIEW_OPEN) {
+      if (handoffReceiptId == null) {
+        stageCompleted(formalization.handoff(transition("hearing.handoff:" + start.caseId())).receipt());
+      } else {
+        stageCompleted(formalization.close(transition(HearingOperationKeys.close(
+            start.tenantSurrogate(), start.caseId(), start.roomEpoch(), handoffReceiptHash))).receipt());
+      }
+    }
+  }
+
+  private TargetHearingFormalizationActivities.TransitionRequest transition(String operationKey) {
+    return new TargetHearingFormalizationActivities.TransitionRequest(
+        start, stage, stageSequence, processRevision, roomRevision, start.fencingToken(), operationKey);
+  }
+
+  private String stageOperationKey() {
+    return HearingOperationKeys.stageCompletion(
+        start.tenantSurrogate(), start.caseId(), start.roomEpoch(), stage, stageSequence);
+  }
+
+  private String agentOperationKey() {
+    return "hearing.agent-stage:"
+        + start.tenantSurrogate() + ':' + start.caseId() + ':' + start.roomEpoch() + ':' + stageSequence;
+  }
+
+  private ExecuteAgentRunResult launchAgentRunChild(ExecuteAgentRunRequest request) {
+    long remainingMillis = request.command().deadlineAt().toEpochMilli() - Workflow.currentTimeMillis();
+    if (remainingMillis <= 0) {
+      throw new IllegalArgumentException("target Hearing AgentRun deadline has elapsed");
+    }
+    AgentRunWorkflow child =
+        Workflow.newChildWorkflowStub(
+            AgentRunWorkflow.class,
+            ChildWorkflowOptions.newBuilder()
+                .setWorkflowId(
+                    com.example.dispute.workflow.application.TemporalAgentRunV2WorkflowLauncher.workflowId(
+                        request.logicalRunId()))
+                .setTaskQueue(AGENT_EXECUTION)
+                .setWorkflowExecutionTimeout(Duration.ofMillis(remainingMillis))
+                .setWorkflowRunTimeout(Duration.ofMillis(remainingMillis))
+                .setWorkflowIdReusePolicy(WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE)
+                .setParentClosePolicy(PARENT_CLOSE_POLICY_ABANDON)
+                .build());
+    return child.run(request);
+  }
+
+  private static boolean matchesPartyCommand(HearingWorkflowStage stage, CommandType commandType) {
+    return (stage == HearingWorkflowStage.PARTY_ANSWERS_OPEN
+            && commandType == CommandType.HEARING_STATEMENT)
+        || (stage == HearingWorkflowStage.PARTY_EVIDENCE_OPEN
+            && commandType == CommandType.HEARING_EVIDENCE_BATCH);
+  }
+
+  private String participantFor(com.example.dispute.workflow.contract.v1.CaseCommandRef command) {
+    return switch (command.actorRef().actorRole()) {
+      case USER -> start.initiatorParticipantId();
+      case MERCHANT -> start.respondentParticipantId();
+      default -> throw new IllegalArgumentException("Hearing party command requires a USER or MERCHANT actor");
+    };
+  }
+
   private void drainCommittedReceipts() {
     while (stage != HearingWorkflowStage.CLOSED && "RUNNING".equals(status)) {
       long expectedRevision = processRevision + 1;
@@ -229,6 +444,7 @@ public final class HearingRoomWorkflowImpl implements HearingRoomWorkflow {
       lastCommittedEventSequence = committed.committedEventSequence();
       lastReceiptId = committed.receiptId();
       lastReceiptHash = committed.receiptHash();
+      notifyParentProgress(committed);
     }
   }
 
@@ -426,6 +642,26 @@ public final class HearingRoomWorkflowImpl implements HearingRoomWorkflow {
     clearActiveTimer();
   }
 
+  private void notifyParentProgress(HearingCommittedReceipt receipt) {
+    if (!isTargetChild()) {
+      return;
+    }
+    CaseProcessWorkflow parent =
+        Workflow.newExternalWorkflowStub(
+            CaseProcessWorkflow.class,
+            com.example.dispute.workflow.contract.v1.CaseProcessWorkflowProtocol.caseWorkflowId(
+                start.tenantSurrogate(), start.caseId()));
+    parent.targetRoomProgressed(
+        new TargetRoomProgressReceipt(
+            com.example.dispute.workflow.contract.v1.ContractTypes.RoomType.HEARING,
+            start.roomEpoch(),
+            start.fencingToken(),
+            processRevision,
+            roomRevision,
+            receipt.receiptId(),
+            receipt.receiptHash()));
+  }
+
   private void clearActiveTimer() {
     activeTimerScope = null;
     activeTimer = null;
@@ -473,6 +709,8 @@ public final class HearingRoomWorkflowImpl implements HearingRoomWorkflow {
   private record WorkflowEvent(
       HearingStageReceipt stageReceipt,
       HearingPartyTerminalReceipt partyReceipt,
+      HearingPartyCommand partyCommand,
+      TargetRoomAgentRunFinalizationReceipt agentRunFinalizationReceipt,
       HearingWorkflowStage timerStage,
       int timerSequence) {
 
@@ -480,6 +718,8 @@ public final class HearingRoomWorkflowImpl implements HearingRoomWorkflow {
       int populated =
           (stageReceipt == null ? 0 : 1)
               + (partyReceipt == null ? 0 : 1)
+              + (partyCommand == null ? 0 : 1)
+              + (agentRunFinalizationReceipt == null ? 0 : 1)
               + (timerStage == null ? 0 : 1);
       if (populated != 1) {
         throw new IllegalArgumentException("Workflow event must contain exactly one payload");
@@ -501,15 +741,24 @@ public final class HearingRoomWorkflowImpl implements HearingRoomWorkflow {
     }
 
     private static WorkflowEvent stage(HearingStageReceipt receipt) {
-      return new WorkflowEvent(receipt, null, null, 0);
+      return new WorkflowEvent(receipt, null, null, null, null, 0);
     }
 
     private static WorkflowEvent party(HearingPartyTerminalReceipt receipt) {
-      return new WorkflowEvent(null, receipt, null, 0);
+      return new WorkflowEvent(null, receipt, null, null, null, 0);
+    }
+
+    private static WorkflowEvent partyCommand(HearingPartyCommand command) {
+      return new WorkflowEvent(null, null, command, null, null, 0);
+    }
+
+    private static WorkflowEvent agentRunFinalization(
+        TargetRoomAgentRunFinalizationReceipt receipt) {
+      return new WorkflowEvent(null, null, null, receipt, null, 0);
     }
 
     private static WorkflowEvent timer(HearingWorkflowStage stage, int sequence) {
-      return new WorkflowEvent(null, null, stage, sequence);
+      return new WorkflowEvent(null, null, null, null, stage, sequence);
     }
   }
 }

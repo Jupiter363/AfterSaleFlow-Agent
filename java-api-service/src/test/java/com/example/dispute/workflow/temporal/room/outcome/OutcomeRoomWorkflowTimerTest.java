@@ -95,6 +95,26 @@ class OutcomeRoomWorkflowTimerTest {
   }
 
   @Test
+  void updateAcknowledgesAcceptedDuplicateAndRejectedDecisionWithExactCoordinates() {
+    Started started = start(Duration.ofMinutes(1), 0);
+    OutcomeReviewDecisionReceipt decision = started.receipts().decision(
+        OutcomeWireTypes.ReviewDecision.APPROVE, 0, 1, started.start().reviewOpenedAt().plusSeconds(1));
+
+    OutcomeReviewDecisionAcceptance accepted = started.workflow().reviewDecisionAccepted(decision);
+    OutcomeReviewDecisionAcceptance duplicate = started.workflow().reviewDecisionAccepted(decision);
+    OutcomeReviewDecisionReceipt stale = started.receipts().decision(
+        OutcomeWireTypes.ReviewDecision.APPROVE, 1, 2, started.start().reviewOpenedAt().plusSeconds(2));
+    OutcomeReviewDecisionAcceptance rejected = started.workflow().reviewDecisionAccepted(stale);
+
+    assertThat(accepted.accepted()).isTrue();
+    assertThat(accepted.receiptId()).isEqualTo(decision.receiptId());
+    assertThat(accepted.acceptedRevision()).isEqualTo(1);
+    assertThat(duplicate.accepted()).isTrue();
+    assertThat(rejected.accepted()).isFalse();
+    assertThat(rejected.acceptedRevision()).isEqualTo(stale.sourceRevision());
+  }
+
+  @Test
   void preDeadlineJavaCommitSurvivesLateTransportDeliveryWithoutWaitingForSla() throws Exception {
     Started started = start(Duration.ofSeconds(3), 0);
     OutcomeReviewDecisionReceipt committedEarly = started.receipts().decision(

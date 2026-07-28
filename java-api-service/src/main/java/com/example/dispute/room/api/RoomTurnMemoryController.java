@@ -54,7 +54,7 @@ public class RoomTurnMemoryController {
     // 系统意义：「RoomTurnMemoryController.latest(String,RoomType,Authentication,HttpServletRequest)」是外部请求进入业务事实源的边界，必须先完成身份/参数校验，再由应用服务决定事务和权限。
     @GetMapping("/latest")
     public ApiResponse<RoomTurnMemoryView> latest(
-            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
+            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9_]{1,59}") String caseId,
             @PathVariable RoomType roomType,
             Authentication authentication,
             HttpServletRequest servletRequest) {

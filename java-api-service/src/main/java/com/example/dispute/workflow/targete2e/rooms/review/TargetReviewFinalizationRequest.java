@@ -1,0 +1,26 @@
+package com.example.dispute.workflow.targete2e.rooms.review;
+
+import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
+import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
+import java.util.Objects;
+
+/** Bindings required before an advisory Review AgentRun can acknowledge its Java-owned decision. */
+public record TargetReviewFinalizationRequest(
+    String executionLane, String activationId, String activationManifestHash, String isolatedDomainDbBindingHash,
+    long roomFencingToken, String admissionId, String commandHash,
+    String commandEnvelopeHash, ExecuteAgentRunRequest request, ExecuteAgentRunResult result,
+    TargetReviewHumanDecisionReceipt humanDecision) {
+  public TargetReviewFinalizationRequest {
+    if (!TargetReviewCommandMaterial.TARGET_LANE.equals(executionLane) || activationId == null || activationId.isBlank()
+        || activationManifestHash == null || !activationManifestHash.matches("[0-9a-f]{64}")
+        || isolatedDomainDbBindingHash == null || !isolatedDomainDbBindingHash.matches("[0-9a-f]{64}")
+        || roomFencingToken < 1
+        || admissionId == null || admissionId.isBlank() || commandHash == null || !commandHash.matches("[0-9a-f]{64}")
+        || commandEnvelopeHash == null || !commandEnvelopeHash.matches("[0-9a-f]{64}")) {
+      throw new IllegalArgumentException("target Review finalization request is invalid");
+    }
+    request = Objects.requireNonNull(request, "request");
+    result = Objects.requireNonNull(result, "result");
+    humanDecision = Objects.requireNonNull(humanDecision, "humanDecision");
+  }
+}

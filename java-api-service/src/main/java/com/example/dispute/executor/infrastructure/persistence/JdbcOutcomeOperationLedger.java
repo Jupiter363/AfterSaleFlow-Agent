@@ -766,7 +766,10 @@ public final class JdbcOutcomeOperationLedger implements OutcomeOperationLedger 
                     MANUAL_RECOVERY ->
                     nextState == OutcomeProcessProjection.ProcessState.READY_TO_CLOSE;
             case READY_TO_CLOSE -> nextState == OutcomeProcessProjection.ProcessState.CLOSED;
-            case CLOSED -> nextState == OutcomeProcessProjection.ProcessState.EVALUATION_PENDING;
+            case CLOSED -> nextState == OutcomeProcessProjection.ProcessState.EVALUATION_PENDING
+                    || (current.writerMode() == OutcomeProcessProjection.WriterMode.TEMPORAL
+                    && current.runtimeMode() == OutcomeProcessProjection.RuntimeMode.TEMPORAL
+                    && nextState == OutcomeProcessProjection.ProcessState.EVALUATED);
             case EVALUATION_PENDING -> nextState == OutcomeProcessProjection.ProcessState.EVALUATED;
             default -> false;
         };

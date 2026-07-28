@@ -13,6 +13,9 @@ import java.util.Objects;
 public final class TargetE2eIntakeFinalizationRequestResolver
         implements IntakeAgentRunFinalizationRequestResolver {
 
+    static final String TARGET_EXECUTION_OUTPUT_SCHEMA = "target-e2e-room-proposal-source.v1";
+    static final String INTAKE_PROPOSAL_OUTPUT_SCHEMA = "intake-turn-proposal.v2";
+
     private final TargetE2eAuthorizedIntakeFinalizationSource source;
     private final TargetE2eIntakeProposalReferenceResolver proposalReferences;
 
@@ -34,6 +37,18 @@ public final class TargetE2eIntakeFinalizationRequestResolver
         var projection = state.projection();
         var registration = state.threadBinding().registration();
         var graphResult = command.result().graphResult();
+        requireExactSchema(
+                registration.outputSchemaVersion(),
+                TARGET_EXECUTION_OUTPUT_SCHEMA,
+                "target thread registration output schema");
+        requireExactSchema(
+                command.request().command().invocationContext().outputSchemaVersion(),
+                TARGET_EXECUTION_OUTPUT_SCHEMA,
+                "target graph invocation output schema");
+        requireExactSchema(
+                graphResult.executionMetadata().schemaVersion(),
+                TARGET_EXECUTION_OUTPUT_SCHEMA,
+                "target graph result output schema");
         IntakeProposalReference proposal = proposalReferences.resolve(
                 TargetE2eAgentRunV2FinalizationFactsProvider.proposal(command.result()));
         var profiles = new IntakeTurnProposal.ProfileVersions(
@@ -41,7 +56,7 @@ public final class TargetE2eIntakeFinalizationRequestResolver
                 registration.checkpointSchemaVersion(),
                 registration.promptVersion(),
                 registration.modelProfileId(),
-                registration.outputSchemaVersion(),
+                INTAKE_PROPOSAL_OUTPUT_SCHEMA,
                 registration.policyVersion(),
                 registration.guardrailVersion(),
                 registration.toolPolicyVersion());
@@ -64,7 +79,8 @@ public final class TargetE2eIntakeFinalizationRequestResolver
                 state.epoch().roomRevision(),
                 projection.roomPhase(),
                 projection.lastCommandSequence(),
-                profiles);
+                profiles,
+                TARGET_EXECUTION_OUTPUT_SCHEMA);
         String operationKey = IntakeFinalizationOperationKey.create(
                 run.caseId(),
                 run.roomEpoch(),
@@ -91,5 +107,13 @@ public final class TargetE2eIntakeFinalizationRequestResolver
                 unsigned.initialSnapshot(),
                 unsigned.event(),
                 unsigned.proposalReference());
+    }
+
+    private static void requireExactSchema(String actual, String expected, String field) {
+        if (!expected.equals(actual)) {
+            throw new TargetE2eFinalizationRejectedException(
+                    "TARGET_E2E_INTAKE_SCHEMA_MISMATCH",
+                    field + " is not pinned to the target execution schema");
+        }
     }
 }

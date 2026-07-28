@@ -4,6 +4,8 @@ import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
 
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
+import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewOutcomeStartBindingPort.Binding;
+import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceParticipantBindingActivities;
 import com.example.dispute.workflow.contract.v1.ProvisionRoomEpoch;
 import java.util.List;
 import java.util.Objects;
@@ -38,7 +40,8 @@ public record CaseProcessCarryState(
     Long activeRoomRevision,
     RecoveryErrorOrigin protocolErrorOrigin,
     boolean provisioningManualRecoveryRequired,
-    List<UnreconciledChildExecution> unreconciledChildren) {
+    List<UnreconciledChildExecution> unreconciledChildren,
+    TargetRoomProgressReceipt lastTargetRoomProgress) {
 
   public static final int MAX_RECENT_COMMANDS = 256;
   public static final int MAX_BUFFERED_EVENTS = 128;
@@ -102,7 +105,8 @@ public record CaseProcessCarryState(
         null,
         null,
         false,
-        List.of());
+        List.of(),
+        null);
   }
 
   public CaseProcessCarryState(
@@ -157,7 +161,8 @@ public record CaseProcessCarryState(
         null,
         null,
         false,
-        List.of());
+        List.of(),
+        null);
   }
 
   public CaseProcessCarryState(
@@ -217,7 +222,8 @@ public record CaseProcessCarryState(
         null,
         null,
         false,
-        List.of());
+        List.of(),
+        null);
   }
 
   public CaseProcessCarryState(
@@ -279,7 +285,8 @@ public record CaseProcessCarryState(
         activeRoomRevision,
         protocolErrorOrigin,
         false,
-        List.of());
+        List.of(),
+        null);
   }
 
   public CaseProcessCarryState(
@@ -342,7 +349,8 @@ public record CaseProcessCarryState(
         activeRoomRevision,
         protocolErrorOrigin,
         provisioningManualRecoveryRequired,
-        List.of());
+        List.of(),
+        null);
   }
 
   public CaseProcessCarryState {
@@ -444,6 +452,20 @@ public record CaseProcessCarryState(
         throw new IllegalArgumentException(
             "active room revision precedes the provisioned initial revision");
       }
+      if (activeChildDescriptor.kind() == ActiveChildKind.TARGET_TYPED_ROOM
+          && (!Objects.equals(
+                  activeChildDescriptor.initialProcessRevision(),
+                  pinned.request().initialProcessRevision())
+              || !Objects.equals(
+                  activeChildDescriptor.initialRoomRevision(), pinned.request().initialRoomRevision())
+              || !Objects.equals(
+                  activeChildDescriptor.currentProcessRevision(), observedProcessRevision)
+              || activeRoomRevision == null
+              || !Objects.equals(
+                  activeChildDescriptor.currentRoomRevision(), activeRoomRevision))) {
+        throw new IllegalArgumentException(
+            "target typed active child revision pins do not match carried authority");
+      }
     }
   }
 
@@ -529,7 +551,13 @@ public record CaseProcessCarryState(
       String workflowId,
       String startedRunId,
       String initiatorActorScopeHash,
-      String respondentActorScopeHash) {
+      String respondentActorScopeHash,
+      Long initialProcessRevision,
+      Long initialRoomRevision,
+      Long currentProcessRevision,
+      Long currentRoomRevision,
+      Binding reviewOutcomeStartBinding,
+      TargetEvidenceParticipantBindingActivities.Binding evidenceParticipantBinding) {
 
     public ActiveChildDescriptor(
         ActiveChildKind kind,
@@ -558,6 +586,92 @@ public record CaseProcessCarryState(
           workflowId,
           startedRunId,
           null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null);
+    }
+
+    public ActiveChildDescriptor(
+        ActiveChildKind kind,
+        String selectionSchemaVersion,
+        WriterMode writerMode,
+        String caseWorkflowType,
+        String caseWorkflowBuildId,
+        String roomWorkflowType,
+        String roomWorkflowBuildId,
+        RoomType roomType,
+        long roomEpoch,
+        long fencingToken,
+        String workflowId,
+        String startedRunId,
+        String initiatorActorScopeHash,
+        String respondentActorScopeHash) {
+      this(
+          kind,
+          selectionSchemaVersion,
+          writerMode,
+          caseWorkflowType,
+          caseWorkflowBuildId,
+          roomWorkflowType,
+          roomWorkflowBuildId,
+          roomType,
+          roomEpoch,
+          fencingToken,
+          workflowId,
+          startedRunId,
+          initiatorActorScopeHash,
+          respondentActorScopeHash,
+           null,
+           null,
+          null,
+          null,
+          null,
+          null);
+    }
+
+    public ActiveChildDescriptor(
+        ActiveChildKind kind,
+        String selectionSchemaVersion,
+        WriterMode writerMode,
+        String caseWorkflowType,
+        String caseWorkflowBuildId,
+        String roomWorkflowType,
+        String roomWorkflowBuildId,
+        RoomType roomType,
+        long roomEpoch,
+        long fencingToken,
+        String workflowId,
+        String startedRunId,
+        String initiatorActorScopeHash,
+        String respondentActorScopeHash,
+        Long initialProcessRevision,
+        Long initialRoomRevision,
+        Long currentProcessRevision,
+        Long currentRoomRevision) {
+      this(
+          kind,
+          selectionSchemaVersion,
+          writerMode,
+          caseWorkflowType,
+          caseWorkflowBuildId,
+          roomWorkflowType,
+          roomWorkflowBuildId,
+          roomType,
+          roomEpoch,
+          fencingToken,
+          workflowId,
+          startedRunId,
+          initiatorActorScopeHash,
+          respondentActorScopeHash,
+          initialProcessRevision,
+          initialRoomRevision,
+          currentProcessRevision,
+          currentRoomRevision,
+          null,
           null);
     }
 
@@ -578,12 +692,33 @@ public record CaseProcessCarryState(
       if ((initiatorActorScopeHash == null) != (respondentActorScopeHash == null)) {
         throw new IllegalArgumentException("active child party scope pins must be bound together");
       }
+      boolean carriesPartyScopePins =
+          initiatorActorScopeHash != null && respondentActorScopeHash != null;
       if (initiatorActorScopeHash != null) {
         requireHash(initiatorActorScopeHash, "initiatorActorScopeHash");
         requireHash(respondentActorScopeHash, "respondentActorScopeHash");
         if (initiatorActorScopeHash.equals(respondentActorScopeHash)) {
           throw new IllegalArgumentException("active child party scope pins must be distinct");
         }
+      }
+      boolean carriesRevisionPins =
+          initialProcessRevision != null
+              || initialRoomRevision != null
+              || currentProcessRevision != null
+              || currentRoomRevision != null;
+      if (carriesRevisionPins
+          && (initialProcessRevision == null
+              || initialRoomRevision == null
+              || currentProcessRevision == null
+              || currentRoomRevision == null)) {
+        throw new IllegalArgumentException("active child revision pins must be bound together");
+      }
+      if (carriesRevisionPins
+          && (initialProcessRevision < 0
+              || initialRoomRevision < 0
+              || currentProcessRevision < initialProcessRevision
+              || currentRoomRevision < initialRoomRevision)) {
+        throw new IllegalArgumentException("active child revision pins are invalid");
       }
       if ("room-epoch-selection.v1".equals(selectionSchemaVersion)) {
         if (roomWorkflowType != null || roomWorkflowBuildId != null) {
@@ -605,15 +740,49 @@ public record CaseProcessCarryState(
               || startedRunId == null)) {
         throw new IllegalArgumentException("typed Intake descriptor binding is invalid");
       }
+      if (kind == ActiveChildKind.TARGET_TYPED_ROOM && !carriesRevisionPins) {
+        throw new IllegalArgumentException(
+            "target typed room descriptor revision pins are required");
+      }
       if (kind == ActiveChildKind.TARGET_TYPED_ROOM
           && (!"room-epoch-selection.v2".equals(selectionSchemaVersion)
-              || writerMode != WriterMode.TEMPORAL
-              || fencingToken < 1
-              || startedRunId == null
-              || initiatorActorScopeHash != null
-              || respondentActorScopeHash != null
-              || !TargetTypedRoomProtocol.workflowType(roomType).equals(roomWorkflowType))) {
+               || writerMode != WriterMode.TEMPORAL
+               || fencingToken < 1
+               || startedRunId == null
+               || !TargetTypedRoomProtocol.workflowType(roomType).equals(roomWorkflowType))) {
         throw new IllegalArgumentException("target typed room descriptor binding is invalid");
+      }
+      if (kind == ActiveChildKind.TARGET_TYPED_ROOM
+          && roomType == RoomType.INTAKE
+          && !carriesPartyScopePins) {
+        throw new IllegalArgumentException("target Intake descriptor requires party scope pins");
+      }
+      if (kind == ActiveChildKind.TARGET_TYPED_ROOM
+          && roomType != RoomType.INTAKE
+          && carriesPartyScopePins) {
+        throw new IllegalArgumentException("non-Intake target descriptor must not pin party scopes");
+      }
+      if (kind == ActiveChildKind.TARGET_TYPED_ROOM && roomType == RoomType.REVIEW) {
+        if (reviewOutcomeStartBinding == null
+            || !workflowId.equals(reviewOutcomeStartBinding.start().workflowId())
+            || roomEpoch != reviewOutcomeStartBinding.start().epoch()
+            || fencingToken != reviewOutcomeStartBinding.start().fence()
+            || !Objects.equals(initialRoomRevision, reviewOutcomeStartBinding.start().revision())) {
+          throw new IllegalArgumentException("target Review descriptor Outcome start binding is invalid");
+        }
+      } else if (reviewOutcomeStartBinding != null) {
+        throw new IllegalArgumentException(
+            "only target Review descriptors may carry an Outcome start binding");
+      }
+      if (kind == ActiveChildKind.TARGET_TYPED_ROOM && roomType == RoomType.EVIDENCE) {
+        if (evidenceParticipantBinding == null
+            || roomEpoch != evidenceParticipantBinding.roomEpoch()
+            || fencingToken != evidenceParticipantBinding.fencingToken()) {
+          throw new IllegalArgumentException("target Evidence descriptor participant binding is invalid");
+        }
+      } else if (evidenceParticipantBinding != null) {
+        throw new IllegalArgumentException(
+            "only target Evidence descriptors may carry a participant binding");
       }
     }
 
@@ -645,7 +814,40 @@ public record CaseProcessCarryState(
           && roomEpoch == request.roomEpoch()
           && fencingToken == request.fencingToken()
           && workflowId.equals(request.roomWorkflowId())
-          && startedRunId.equals(commitment.receipt().roomWorkflowRunId());
+          && startedRunId.equals(commitment.receipt().roomWorkflowRunId())
+          && (kind != ActiveChildKind.TARGET_TYPED_ROOM
+              || (Objects.equals(initialProcessRevision, request.initialProcessRevision())
+                  && Objects.equals(initialRoomRevision, request.initialRoomRevision())));
+    }
+
+    public ActiveChildDescriptor withCurrentRevisions(
+        long updatedProcessRevision, long updatedRoomRevision) {
+      if (kind != ActiveChildKind.TARGET_TYPED_ROOM
+          || initialProcessRevision == null
+          || initialRoomRevision == null) {
+        throw new IllegalStateException("target typed child revision pins are unavailable");
+      }
+      return new ActiveChildDescriptor(
+          kind,
+          selectionSchemaVersion,
+          writerMode,
+          caseWorkflowType,
+          caseWorkflowBuildId,
+          roomWorkflowType,
+          roomWorkflowBuildId,
+          roomType,
+          roomEpoch,
+          fencingToken,
+          workflowId,
+          startedRunId,
+          initiatorActorScopeHash,
+          respondentActorScopeHash,
+          initialProcessRevision,
+          initialRoomRevision,
+          updatedProcessRevision,
+          updatedRoomRevision,
+          reviewOutcomeStartBinding,
+          evidenceParticipantBinding);
     }
   }
 }

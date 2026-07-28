@@ -119,7 +119,8 @@ public class CaseClosureService {
                                 prepareClosure(
                                         caseId,
                                         idempotencyKey,
-                                        actor));
+                                        actor,
+                                        traceId));
         if (pending.invokeEvaluation()) {
             try {
                 EvaluationAgentResult result =
@@ -207,7 +208,8 @@ public class CaseClosureService {
     private PendingClosure prepareClosure(
             String caseId,
             String idempotencyKey,
-            AuthenticatedActor actor) {
+            AuthenticatedActor actor,
+            String expectedTraceId) {
         FulfillmentCaseEntity disputeCase =
                 caseRepository
                         .findByIdForUpdate(caseId)
@@ -223,14 +225,26 @@ public class CaseClosureService {
                                                     "closed case has no evaluation trace",
                                                     Map.of(
                                                             "case_id",
-                                                            caseId)));
-            if ("COMPLETED".equals(existing.getEvaluationStatus())
-                    || "PENDING".equals(existing.getEvaluationStatus())) {
+                                                    caseId)));
+            if (idempotencyKey.startsWith("target-outcome:")
+                    && !expectedTraceId.equals(existing.getId())) {
+                throw closureDenied(
+                        "target outcome closure is bound to a different evaluation trace",
+                        Map.of("case_id", caseId));
+            }
+            if ("COMPLETED".equals(existing.getEvaluationStatus())) {
                 return new PendingClosure(
                         caseId,
                         existing.getId(),
                         read(existing.getInputSnapshotJson()),
                         false);
+            }
+            if ("PENDING".equals(existing.getEvaluationStatus())) {
+                return new PendingClosure(
+                        caseId,
+                        existing.getId(),
+                        read(existing.getInputSnapshotJson()),
+                        true);
             }
             JsonNode snapshot =
                     buildSnapshot(
@@ -259,7 +273,9 @@ public class CaseClosureService {
         EvaluationTraceEntity trace =
                 evaluationRepository.save(
                         EvaluationTraceEntity.pending(
-                                "EVAL_" + compactUuid(),
+                                idempotencyKey.startsWith("target-outcome:")
+                                        ? expectedTraceId
+                                        : "EVAL_" + compactUuid(),
                                 caseId,
                                 1,
                                 snapshot.toString(),
@@ -315,9 +331,16 @@ public class CaseClosureService {
     private void validateCompletedExecution(
             ApprovalRecordEntity approval,
             List<ActionRecordEntity> actions) {
-        if (actions.isEmpty()) {
+        Map<String, Integer> expected =
+                expectedActionTypes(read(approval.getApprovedPlanJson()));
+        if (actions.isEmpty() && !expected.isEmpty()) {
             throw closureDenied(
                     "at least one succeeded action is required",
+                    Map.of("approval_record_id", approval.getId()));
+        }
+        if (expected.isEmpty() && !actions.isEmpty()) {
+            throw closureDenied(
+                    "zero-action approval must not retain action records",
                     Map.of("approval_record_id", approval.getId()));
         }
         if (actions.stream()
@@ -345,8 +368,6 @@ public class CaseClosureService {
                     "action records do not belong to the approved plan",
                     Map.of("approval_record_id", approval.getId()));
         }
-        Map<String, Integer> expected =
-                expectedActionTypes(read(approval.getApprovedPlanJson()));
         Map<String, Integer> actual = new LinkedHashMap<>();
         actions.forEach(
                 action ->

@@ -46,8 +46,15 @@ class TargetE2eIntakeOuterFinalizerTest {
             return domainReceipt(fixture, command, status);
         });
         InMemoryLedger ledger = new InMemoryLedger();
+        AtomicInteger completionCalls = new AtomicInteger();
         var outer = new TargetE2eIntakeOuterFinalizer(
-                transactions, source, facts, manifestFactory, committer, ledger);
+                transactions,
+                source,
+                facts,
+                manifestFactory,
+                committer,
+                ledger,
+                (request, receipt) -> completionCalls.incrementAndGet());
 
         StoredReceipt committed = outer.finalizeResult(fixture.request(), fixture.result());
         StoredReceipt replayed = outer.finalizeResult(fixture.request(), fixture.result());
@@ -57,6 +64,7 @@ class TargetE2eIntakeOuterFinalizerTest {
         assertThat(replayed.receipt()).isEqualTo(committed.receipt());
         assertThat(replayed.canonicalBytes()).containsExactly(committed.canonicalBytes());
         assertThat(ledger.appendCount).isEqualTo(1);
+        assertThat(completionCalls).hasValue(2);
         verify(transactionManager, times(2)).commit(any(TransactionStatus.class));
     }
 
@@ -84,7 +92,13 @@ class TargetE2eIntakeOuterFinalizerTest {
             }
         };
         var outer = new TargetE2eIntakeOuterFinalizer(
-                transactions, source, facts, manifestFactory, committer, failingLedger);
+                transactions,
+                source,
+                facts,
+                manifestFactory,
+                committer,
+                failingLedger,
+                (request, receipt) -> {});
 
         assertThatThrownBy(() -> outer.finalizeResult(fixture.request(), fixture.result()))
                 .isInstanceOf(IllegalStateException.class)
@@ -112,12 +126,42 @@ class TargetE2eIntakeOuterFinalizerTest {
                 facts,
                 manifestFactory,
                 committer,
-                emptyLedger);
+                emptyLedger,
+                (request, receipt) -> {});
 
         assertThatThrownBy(() -> outer.finalizeResult(fixture.request(), fixture.result()))
                 .isInstanceOf(TargetE2eFinalizationRejectedException.class)
                 .hasMessageContaining("no atomically persisted target receipt");
         assertThat(emptyLedger.appendCount).isZero();
+        verify(transactionManager).rollback(any(TransactionStatus.class));
+    }
+
+    @Test
+    void commandCompletionFailureRollsBackTheOuterFinalizerTransaction() {
+        var fixture = TargetE2eFinalizationFixture.valid();
+        PlatformTransactionManager transactionManager = transactionManager();
+        var source = TargetE2eFinalizationFixture.authorizedSource(fixture);
+        var facts = new TargetE2eAgentRunV2FinalizationFactsProvider(source);
+        var manifestFactory = new AgentRunV2ManifestFactory(
+                JsonMapper.builder().findAndAddModules().build());
+        AgentRunFormalResultCommitter committer = mock(AgentRunFormalResultCommitter.class);
+        when(committer.commit(any(FormalResultCommit.class))).thenAnswer(invocation ->
+                domainReceipt(fixture, invocation.getArgument(0), CommitStatus.COMMITTED));
+        var outer = new TargetE2eIntakeOuterFinalizer(
+                transactions(transactionManager),
+                source,
+                facts,
+                manifestFactory,
+                committer,
+                new InMemoryLedger(),
+                (request, receipt) -> {
+                    throw new IllegalStateException("injected command completion failure");
+                });
+
+        assertThatThrownBy(() -> outer.finalizeResult(fixture.request(), fixture.result()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("injected command completion failure");
+
         verify(transactionManager).rollback(any(TransactionStatus.class));
     }
 

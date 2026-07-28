@@ -14,6 +14,7 @@ import com.example.dispute.workflow.contract.outcome.v1.OutcomeSlaEscalationRece
 import com.example.dispute.workflow.contract.outcome.v1.OutcomeWorkflowStart;
 import io.temporal.workflow.QueryMethod;
 import io.temporal.workflow.SignalMethod;
+import io.temporal.workflow.UpdateMethod;
 import io.temporal.workflow.WorkflowInterface;
 import io.temporal.workflow.WorkflowMethod;
 
@@ -26,6 +27,21 @@ public interface OutcomeRoomWorkflow {
 
   @SignalMethod(name = OutcomeRoomProtocol.REVIEW_DECISION_SIGNAL)
   void reviewDecisionCommitted(OutcomeReviewDecisionReceipt receipt);
+
+  /**
+   * Admits a Review receipt synchronously and returns the Outcome kernel's durable decision.
+   * A delivered signal alone is intentionally not evidence that the kernel accepted the receipt.
+   */
+  @UpdateMethod(name = "outcomeReviewDecisionAccepted")
+  OutcomeReviewDecisionAcceptance reviewDecisionAccepted(OutcomeReviewDecisionReceipt receipt);
+
+  /**
+   * Completes a formally accepted Review only after the parent has made command routing durable.
+   * This is deliberately a separate Update: review acceptance must not race the Java-owned
+   * completion Activity's revision mutation.
+   */
+  @UpdateMethod(name = "completeTargetOutcomeAfterRouting")
+  OutcomeCompletionResult completeTargetOutcomeAfterRouting(OutcomeCompletionRequest request);
 
   @SignalMethod(name = OutcomeRoomProtocol.SLA_ESCALATION_SIGNAL)
   void slaEscalationCommitted(OutcomeSlaEscalationReceipt receipt);

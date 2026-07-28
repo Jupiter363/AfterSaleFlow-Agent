@@ -72,7 +72,8 @@ public record IntakeGraphFinalizationRequest(
             long roomRevision,
             String stageCode,
             long stageSequence,
-            IntakeTurnProposal.ProfileVersions profileVersions) {
+            IntakeTurnProposal.ProfileVersions profileVersions,
+            String executionOutputSchemaVersion) {
 
         public Authority {
             tenantSurrogate = IntakeContractSupport.identifier(tenantSurrogate, "tenantSurrogate");
@@ -94,6 +95,55 @@ public record IntakeGraphFinalizationRequest(
             stageCode = IntakeContractSupport.identifier(stageCode, "stageCode");
             IntakeContractSupport.nonNegative(stageSequence, "stageSequence");
             profileVersions = Objects.requireNonNull(profileVersions, "profileVersions");
+            executionOutputSchemaVersion = IntakeContractSupport.identifier(
+                    executionOutputSchemaVersion, "executionOutputSchemaVersion");
+        }
+
+        /**
+         * Compatibility constructor for the original Intake execution contract, where the graph
+         * result and immutable proposal share {@code intake-turn-proposal.v2}.
+         */
+        public Authority(
+                String tenantSurrogate,
+                String caseId,
+                long roomEpoch,
+                long fencingToken,
+                String threadId,
+                String actorScopeHash,
+                String agentSessionId,
+                String commandId,
+                String logicalRunId,
+                String attemptId,
+                String resultHash,
+                String proposalHash,
+                String checkpointId,
+                long cognitiveRevision,
+                long processRevision,
+                long roomRevision,
+                String stageCode,
+                long stageSequence,
+                IntakeTurnProposal.ProfileVersions profileVersions) {
+            this(
+                    tenantSurrogate,
+                    caseId,
+                    roomEpoch,
+                    fencingToken,
+                    threadId,
+                    actorScopeHash,
+                    agentSessionId,
+                    commandId,
+                    logicalRunId,
+                    attemptId,
+                    resultHash,
+                    proposalHash,
+                    checkpointId,
+                    cognitiveRevision,
+                    processRevision,
+                    roomRevision,
+                    stageCode,
+                    stageSequence,
+                    profileVersions,
+                    profileVersions.outputSchemaVersion());
         }
     }
 }

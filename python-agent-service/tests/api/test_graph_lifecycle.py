@@ -318,6 +318,71 @@ async def test_disabled_lifespan_never_constructs_graph_dependencies() -> None:
     assert handle.reconciliation_endpoint_dependencies().mode == "DISABLED"
 
 
+def test_target_e2e_bindings_are_assembled_from_the_open_security_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The candidate provider factory must receive the opened runtime, not settings."""
+
+    import app.graph_runtime.executor as executor
+    import app.graph_runtime.production_bindings as production_bindings
+
+    class SecurityRuntime:
+        def readiness(self) -> Any:
+            return SimpleNamespace(ready=True)
+
+    captured: dict[str, Any] = {}
+
+    class ProviderFactory:
+        def __init__(self, **kwargs: Any) -> None:
+            captured["security_runtime"] = kwargs["security_runtime"]
+            captured["room_exchange"] = kwargs["room_exchange"]
+
+    expected = _bindings()
+
+    def build_bindings(settings: Settings, **kwargs: Any) -> GraphRuntimeBindings:
+        captured["settings"] = settings
+        captured["provider_factory"] = kwargs["target_e2e_specialized_provider_factory"]
+        return expected
+
+    monkeypatch.setattr(graph_lifecycle, "GraphSecurityRuntime", SecurityRuntime)
+    monkeypatch.setattr(executor, "TargetE2ESpecializedRoomProviderFactory", ProviderFactory)
+    monkeypatch.setattr(production_bindings, "build_graph_runtime_bindings", build_bindings)
+
+    runtime = SecurityRuntime()
+    actual = graph_lifecycle._build_target_e2e_runtime_bindings(
+        settings=_settings(),
+        security_runtime=cast(Any, runtime),
+    )
+
+    assert actual is expected
+    assert captured["settings"].java_api_service_url == "http://java-api-service:8080"
+    assert captured["security_runtime"] is runtime
+    assert captured["provider_factory"] is not None
+    assert captured["room_exchange"]._origin == "http://java-api-service:8080"
+
+
+@pytest.mark.asyncio
+async def test_target_e2e_handle_defers_binding_construction_to_runtime_lifecycle() -> None:
+    events: list[str] = []
+
+    async def runtime_factory(
+        settings: Settings,
+        bindings: GraphRuntimeBindings | None,
+    ) -> _FakeRuntime:
+        del settings
+        assert bindings is None
+        events.append("runtime_open")
+        return _FakeRuntime(events)
+
+    handle = GraphRuntimeHandle(settings=_settings(), runtime_factory=runtime_factory)
+    handle._mode = GraphGatewayMode.TARGET_E2E_CANDIDATE
+
+    async with handle.lifespan(None):
+        assert handle.ready is True
+
+    assert events == ["runtime_open", "close"]
+
+
 def test_disabled_readiness_route_is_dependency_free_and_noncacheable() -> None:
     handle = GraphRuntimeHandle(settings=_settings())
     app = FastAPI()

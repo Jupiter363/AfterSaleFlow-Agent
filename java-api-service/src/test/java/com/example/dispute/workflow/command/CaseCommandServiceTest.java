@@ -52,7 +52,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 @ExtendWith(MockitoExtension.class)
 class CaseCommandServiceTest {
 
-    private static final String CASE_ID = "CASE_CommandService";
+    private static final String CASE_ID = "CASE_P9_SYNTHETIC_CommandService";
     private static final Instant NOW = Instant.parse("2026-07-17T08:00:00Z");
 
     @Mock private FulfillmentCaseRepository caseRepository;

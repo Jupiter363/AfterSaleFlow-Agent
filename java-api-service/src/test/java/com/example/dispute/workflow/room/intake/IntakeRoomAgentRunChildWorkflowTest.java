@@ -124,16 +124,15 @@ class IntakeRoomAgentRunChildWorkflowTest {
       assertThat(RecordingFinalizationReads.requests.getFirst().mode())
           .isEqualTo(IntakeAgentRunFinalizationReadRequest.Mode.AFTER_CHILD_COMPLETION);
       assertThat(IntakeAgentRunChildIds.forCommand(command))
-          .isEqualTo("intake-agent-run:" + CASE_ID + ":" + EPOCH + ":" + COMMAND_ID);
+          .isEqualTo("agent-run-v2:" + LOGICAL_RUN_ID);
     }
   }
 
   @Test
-  void childIdentityHashesOversizedCommandsAndUnresolvedChildCannotContinueAsNew() {
+  void targetChildIdentityUsesCanonicalAgentRunIdAndUnresolvedChildCannotContinueAsNew() {
     IntakeWorkflowCommand command = targetCommand("C".repeat(128));
     assertThat(IntakeAgentRunChildIds.forCommand(command))
-        .matches("intake-agent-run:[0-9a-f]{64}")
-        .hasSize(81);
+        .isEqualTo("agent-run-v2:" + LOGICAL_RUN_ID);
 
     IntakeAgentRunChildState pending =
         IntakeAgentRunChildState.pending(

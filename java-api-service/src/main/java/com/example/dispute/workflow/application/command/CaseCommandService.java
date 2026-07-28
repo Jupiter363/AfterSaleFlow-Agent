@@ -43,7 +43,7 @@ import org.springframework.transaction.annotation.Transactional;
 @Service
 public class CaseCommandService {
 
-    private static final Pattern CASE_ID = Pattern.compile("CASE_[A-Za-z0-9]{1,59}");
+    private static final Pattern CASE_ID = Pattern.compile("CASE_[A-Za-z0-9_]{1,59}");
     private static final Pattern COMMAND_ID =
             Pattern.compile("[A-Za-z0-9][A-Za-z0-9._:-]{0,127}");
     private static final Set<CommandStatus> REVISION_RESERVING_STATUSES =
@@ -184,6 +184,16 @@ public class CaseCommandService {
         outboxRepository.save(outbox);
         deliveryTrigger.deliveryRequested(outbox.getId());
         return acceptance(commandEntity, reference, false);
+    }
+
+    /**
+     * Makes an accepted command and the surrounding transaction's authoritative facts visible to
+     * JDBC materializers before commit. Temporal delivery remains registered as a post-commit side
+     * effect, so a later materialization failure still rolls the entire transaction back.
+     */
+    @Transactional
+    public void flushAcceptanceForMaterialization() {
+        commandRepository.flush();
     }
 
     private CaseCommandAcceptance replayOrReject(

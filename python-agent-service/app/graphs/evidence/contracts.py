@@ -73,6 +73,9 @@ _RFC3339_INSTANT = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$"
 )
 _SYNTHETIC_PARSE_REF = re.compile(r"^urn:synthetic-evidence-parse:[A-Za-z0-9._:/-]{1,470}$")
+_TARGET_E2E_OBJECT_REF = re.compile(
+    r"^urn:target-e2e:object:[A-Za-z0-9][A-Za-z0-9._:-]{0,127}:([0-9a-f]{64})$"
+)
 _COMMAND_FIELDS = frozenset(
     {
         "schema_version",
@@ -434,7 +437,9 @@ class EvidenceAdmissionVerifier:
         _verify_room_graph_command(command, target_candidate=target_candidate)
         snapshot_ref = _required_mapping(command, "domain_snapshot_ref")
         payload = bytes(request.signed_manifest_payload)
-        payload_hash = _verify_raw_snapshot_reference(snapshot_ref, payload)
+        payload_hash = _verify_raw_snapshot_reference(
+            snapshot_ref, payload, target_candidate=target_candidate
+        )
         manifest = _parse_canonical_manifest(payload)
         _verify_snapshot_identity(snapshot_ref, manifest)
         if _contains_forbidden_authority(manifest):
@@ -462,7 +467,7 @@ class EvidenceAdmissionVerifier:
             _verify_target_candidate_scope(manifest)
         else:
             _verify_synthetic_shadow_scope(manifest)
-        _verify_manifest_membership(manifest)
+        _verify_manifest_membership(manifest, target_candidate=target_candidate)
         admission = VerifiedEvidenceAdmission(
             runtime_mode=("TARGET_E2E_CANDIDATE" if target_candidate else "SHADOW"),
             room_graph_command=command,
@@ -641,7 +646,12 @@ def _verify_room_graph_command(
         raise EvidenceGraphContractError("EVIDENCE_COMMAND_REQUEST_HASH_MISMATCH")
 
 
-def _verify_raw_snapshot_reference(snapshot: Mapping[str, Any], payload: bytes) -> str:
+def _verify_raw_snapshot_reference(
+    snapshot: Mapping[str, Any],
+    payload: bytes,
+    *,
+    target_candidate: bool,
+) -> str:
     full_hash = hashlib.sha256(payload).hexdigest()
     if snapshot.get("sha256") != full_hash:
         raise EvidenceGraphContractError("EVIDENCE_SNAPSHOT_PAYLOAD_HASH_MISMATCH")
@@ -649,7 +659,15 @@ def _verify_raw_snapshot_reference(snapshot: Mapping[str, Any], payload: bytes) 
         raise EvidenceGraphContractError("EVIDENCE_SNAPSHOT_PAYLOAD_SIZE_MISMATCH")
     uri = snapshot.get("uri")
     match = _CONTENT_ADDRESSED_URI.fullmatch(uri) if isinstance(uri, str) else None
-    if match is None or match.group(1) != full_hash:
+    target_match = _TARGET_E2E_OBJECT_REF.fullmatch(uri) if isinstance(uri, str) else None
+    if (
+        match is None
+        or match.group(1) != full_hash
+    ) and (
+        not target_candidate
+        or target_match is None
+        or target_match.group(1) != full_hash
+    ):
         raise EvidenceGraphContractError("EVIDENCE_SNAPSHOT_URI_NOT_CONTENT_ADDRESSED")
     return full_hash
 
@@ -962,7 +980,7 @@ def _verify_target_candidate_scope(manifest: JsonObject) -> None:
         raise EvidenceGraphContractError("EVIDENCE_TARGET_E2E_SCOPE_REQUIRED")
 
 
-def _verify_manifest_membership(manifest: JsonObject) -> None:
+def _verify_manifest_membership(manifest: JsonObject, *, target_candidate: bool) -> None:
     item_count = manifest.get("item_count")
     ordered = manifest.get("ordered_item_keys")
     items = manifest.get("items")
@@ -1032,7 +1050,7 @@ def _verify_manifest_membership(manifest: JsonObject) -> None:
             or any(ord(character) < 32 for character in filename)
         ):
             raise EvidenceGraphContractError("EVIDENCE_ITEM_FILENAME_INVALID")
-        _verify_item_parse_binding(item)
+        _verify_item_parse_binding(item, target_candidate=target_candidate)
         if item.get("privacy_basis") != "SIGNED_SYNTHETIC_FIXTURE":
             raise EvidenceGraphContractError("EVIDENCE_ITEM_PRIVACY_BASIS_INVALID")
         modalities = item.get("permitted_modalities")
@@ -1134,18 +1152,29 @@ def _verify_snapshot_shape(snapshot: Mapping[str, Any]) -> None:
     _require_integer(snapshot.get("size_bytes"), minimum=0, maximum=1_073_741_824)
 
 
-def _verify_item_parse_binding(item: Mapping[str, Any]) -> None:
+def _verify_item_parse_binding(item: Mapping[str, Any], *, target_candidate: bool) -> None:
     status = item.get("parse_status")
     parse_ref = item.get("parse_ref")
     parse_hash = item.get("parse_hash")
     if status == "AVAILABLE":
+        target_match = (
+            _TARGET_E2E_OBJECT_REF.fullmatch(parse_ref)
+            if isinstance(parse_ref, str)
+            else None
+        )
         if (
             not isinstance(parse_ref, str)
             or len(parse_ref) > 512
-            or not _SYNTHETIC_PARSE_REF.fullmatch(parse_ref)
+            or not (
+                _SYNTHETIC_PARSE_REF.fullmatch(parse_ref)
+                if not target_candidate
+                else _TARGET_E2E_OBJECT_REF.fullmatch(parse_ref)
+            )
         ):
             raise EvidenceGraphContractError("EVIDENCE_ITEM_PARSE_BINDING_INVALID")
         _require_sha256(parse_hash, "EVIDENCE_ITEM_PARSE_BINDING_INVALID")
+        if target_candidate and target_match is not None and target_match.group(1) != parse_hash:
+            raise EvidenceGraphContractError("EVIDENCE_ITEM_PARSE_BINDING_INVALID")
         return
     if status in {"NOT_REQUESTED", "FAILED"} and parse_ref is None and parse_hash is None:
         return

@@ -77,6 +77,9 @@ class CompiledIntakeGraphShadowExecutor:
         input_loader: IntakeInputLoader,
         proposal_store: IntakeProposalStore,
         clock: Callable[[], datetime] | None = None,
+        runtime_execution_projector: (
+            Callable[[GatewayExecution], GatewayExecution] | None
+        ) = None,
     ) -> None:
         if not provider or len(provider) > 64 or not model or len(model) > 128:
             raise ValueError("Intake provider binding is invalid")
@@ -91,11 +94,19 @@ class CompiledIntakeGraphShadowExecutor:
         self._input_loader = input_loader
         self._proposal_store = proposal_store
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._runtime_execution_projector = runtime_execution_projector
 
     async def stream(
         self,
         execution: GatewayExecution,
     ) -> AsyncIterator[AgentStreamEvent]:
+        runtime_execution = (
+            self._runtime_execution_projector(execution)
+            if self._runtime_execution_projector is not None
+            else execution
+        )
+        if not isinstance(runtime_execution, GatewayExecution):
+            raise GraphContractError("Intake runtime execution projector is invalid")
         sequence = 0
         yield self._event(
             execution,
@@ -107,11 +118,11 @@ class CompiledIntakeGraphShadowExecutor:
 
         loaded = await self._input_loader.load(execution)
         context = decode_authorized_intake_ingress(
-            command=execution.admission.command,
+            command=runtime_execution.admission.command,
             loaded=loaded,
         )
         bundle = build_governed_intake_runtime(
-            execution=execution,
+            execution=runtime_execution,
             transport=self._transport,
             provider=self._provider,
             model=self._model,
@@ -120,8 +131,8 @@ class CompiledIntakeGraphShadowExecutor:
         graph = cast(CompiledIntakeStateGraphPort, bundle.graph)
         if graph.checkpointer is not self._saver:
             raise GraphContractError("compiled Intake Graph lost the process fenced saver")
-        graph_input = self._graph_input(execution)
-        config = self._graph_config(execution)
+        graph_input = self._graph_input(runtime_execution)
+        config = self._graph_config(runtime_execution)
         emitted_usage: list[Usage] = []
         source = graph.astream(
             graph_input,
@@ -149,14 +160,14 @@ class CompiledIntakeGraphShadowExecutor:
             await cast(Callable[[], Awaitable[None]], close)()
 
         snapshot = await graph.aget_state(config)
-        state, final_config = self._snapshot(snapshot, execution)
+        state, final_config = self._snapshot(snapshot, runtime_execution)
         proposal = IntakeRuntimeBundle.terminal_proposal(state)
         if state.get("terminal_draft") != state.get("result_json"):
             raise GraphTerminalBindingError(
                 "Intake terminal draft differs from its durable proposal"
             )
         canonical = canonical_intake_proposal(proposal)
-        usage = self._command_usage(state, execution, emitted_usage)
+        usage = self._command_usage(state, runtime_execution, emitted_usage)
         configurable = final_config.get("configurable") or {}
         checkpoint_ns = str(configurable.get("checkpoint_ns") or "")
         checkpoint_id = str(configurable.get("checkpoint_id") or "")

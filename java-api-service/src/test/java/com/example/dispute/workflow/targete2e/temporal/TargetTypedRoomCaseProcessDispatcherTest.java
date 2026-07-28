@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 
 import io.temporal.testing.TestWorkflowEnvironment;
 import java.lang.reflect.Modifier;
+import java.util.Arrays;
 import org.junit.jupiter.api.Test;
 
 class TargetTypedRoomCaseProcessDispatcherTest {
@@ -13,6 +14,14 @@ class TargetTypedRoomCaseProcessDispatcherTest {
   void ordinaryArtifactKeepsTheDispatcherAbstract() {
     assertThat(Modifier.isAbstract(TargetTypedRoomCaseProcessDispatcher.class.getModifiers()))
         .isTrue();
+  }
+
+  @Test
+  void reviewUsesItsOwnHandleInsteadOfTheGenericCoordinateOnlyAdapter() {
+    assertThat(
+            Arrays.stream(TargetTypedRoomCaseProcessDispatcher.class.getDeclaredClasses())
+                .map(Class::getSimpleName))
+        .contains("ReviewHandle");
   }
 
   @Test

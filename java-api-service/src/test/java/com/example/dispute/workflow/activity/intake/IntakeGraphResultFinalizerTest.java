@@ -52,6 +52,16 @@ class IntakeGraphResultFinalizerTest {
             "intake-turn-proposal-valid.json");
 
     @Test
+    void legacyAuthorityConstructorKeepsProposalSchemaAsItsExecutionSchema() throws Exception {
+        Fixture fixture = fixture(WriterMode.TEMPORAL);
+
+        assertThat(fixture.authority().executionOutputSchemaVersion())
+                .isEqualTo("intake-turn-proposal.v2");
+        assertThat(fixture.authority().executionOutputSchemaVersion())
+                .isEqualTo(fixture.authority().profileVersions().outputSchemaVersion());
+    }
+
+    @Test
     void exactReplayReturnsTheSameReceiptAndOnlyUsesTheFormalPort() throws Exception {
         Fixture fixture = fixture(WriterMode.TEMPORAL);
         RecordingCommitPort port = new RecordingCommitPort();

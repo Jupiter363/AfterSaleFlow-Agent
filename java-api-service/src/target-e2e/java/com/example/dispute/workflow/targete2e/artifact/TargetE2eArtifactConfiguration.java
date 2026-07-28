@@ -1,18 +1,51 @@
 package com.example.dispute.workflow.targete2e.artifact;
 
 import com.example.dispute.agentstream.application.AgentRunReconciledFinalStore;
+import com.example.dispute.agentstream.application.AgentRunDomainResultCommitter;
+import com.example.dispute.agentstream.application.AgentRunFormalResultCommitter;
+import com.example.dispute.agentstream.application.AgentRunV2ManifestFactory;
 import com.example.dispute.agentstream.application.AgentRunV2StreamStore;
 import com.example.dispute.infrastructure.persistence.repository.AgentRunAttemptRepository;
 import com.example.dispute.infrastructure.persistence.repository.AgentRunRepository;
+import com.example.dispute.room.infrastructure.persistence.JdbcIntakeFormalCommitPort;
 import com.example.dispute.workflow.activity.agent.AgentGraphCommandClient;
 import com.example.dispute.workflow.activity.agent.AgentGraphReconciliationClient;
 import com.example.dispute.workflow.activity.agent.AgentRunExecutionGateway;
+import com.example.dispute.workflow.activity.agent.AgentRunFinalizationGateway;
 import com.example.dispute.workflow.activity.agent.DurableAgentRunExecutionGateway;
 import com.example.dispute.workflow.activity.agent.GraphRegistryBindingPolicy;
 import com.example.dispute.workflow.activity.agent.GraphStreamVisibilityPolicy;
 import com.example.dispute.workflow.config.GraphCommandClientProperties;
 import com.example.dispute.workflow.infrastructure.agent.GraphTransportBundle;
 import com.example.dispute.workflow.infrastructure.security.MountedPemGraphEnvelopeKeySet;
+import com.example.dispute.workflow.application.intake.IntakeAgentRunDomainResultCommitter;
+import com.example.dispute.workflow.application.intake.IntakeGraphResultFinalizer;
+import com.example.dispute.workflow.application.intake.IntakeTurnProposalLoader;
+import com.example.dispute.workflow.targete2e.artifact.finalization.JdbcTargetE2eFinalizationAuthority;
+import com.example.dispute.workflow.targete2e.artifact.finalization.JdbcTargetE2eIntakeCommandCompletionWriter;
+import com.example.dispute.workflow.targete2e.artifact.finalization.ReconciledTargetE2eFinalizationEvidenceProvider;
+import com.example.dispute.workflow.targete2e.artifact.finalization.TargetE2eGraphOutputSnapshotMaterializer;
+import com.example.dispute.workflow.targete2e.artifact.finalization.TargetE2eMultiRoomFinalizationGateway;
+import com.example.dispute.workflow.targete2e.artifact.finalization.TargetE2eMultiRoomOuterFinalizer;
+import com.example.dispute.workflow.targete2e.finalization.JdbcTargetE2eIntakeFinalizationStateReader;
+import com.example.dispute.workflow.targete2e.finalization.MinioTargetE2eIntakeProposalStore;
+import com.example.dispute.workflow.targete2e.finalization.TargetE2eAgentRunV2FinalizationFactsProvider;
+import com.example.dispute.workflow.targete2e.finalization.TargetE2eAuthorizedIntakeFinalizationSource;
+import com.example.dispute.workflow.targete2e.finalization.TargetE2eExecutionLaneVerifier;
+import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationBindingVerifier;
+import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationEvidenceProvider;
+import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationRuntimeContextProvider;
+import com.example.dispute.workflow.targete2e.finalization.JdbcTargetE2eFinalizationReceiptLedger;
+import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationReceiptLedger;
+import com.example.dispute.workflow.targete2e.finalization.TargetE2eCommandCompletionWriter;
+import com.example.dispute.workflow.targete2e.finalization.TargetE2eIntakeRoomFinalizationStrategy;
+import com.example.dispute.workflow.targete2e.finalization.TargetE2eRoomFinalizationStrategy;
+import com.example.dispute.workflow.targete2e.finalization.TargetE2eRoomFinalizationStrategyRegistry;
+import com.example.dispute.workflow.targete2e.finalization.TargetE2eIntakeFinalizationRequestResolver;
+import com.example.dispute.workflow.targete2e.finalization.TargetE2eIntakeFinalizationStateReader;
+import com.example.dispute.workflow.targete2e.finalization.TargetE2eIntakeProposalReader;
+import com.example.dispute.workflow.targete2e.finalization.TargetE2eIntakeProposalStore;
+import com.example.dispute.workflow.targete2e.finalization.TemporalTargetE2eFinalizationRuntimeContextProvider;
 import com.example.dispute.workflow.targete2e.graph.Es256TargetE2EGraphEnvelopeSigner;
 import com.example.dispute.workflow.targete2e.graph.HttpTargetE2EGraphProposalClient;
 import com.example.dispute.workflow.targete2e.graph.HttpTargetE2EGraphProposalSourceClient;
@@ -24,12 +57,18 @@ import com.example.dispute.workflow.targete2e.graph.TargetE2EAgentRunIdentityRes
 import com.example.dispute.workflow.targete2e.graph.TargetE2EGraphEnvelopeCodec;
 import com.example.dispute.workflow.targete2e.graph.TargetE2EGraphEnvelopeSigner;
 import com.example.dispute.workflow.targete2e.graph.TargetE2EGraphProposalClient;
+import com.example.dispute.workflow.targete2e.persistence.TargetE2EActivationLedger;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.minio.MinioClient;
 import java.time.Clock;
+import java.util.List;
+import javax.sql.DataSource;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Profile;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.core.env.Environment;
+import org.springframework.transaction.PlatformTransactionManager;
 
 /** Target-only AgentRun and proposal Graph assembly, absent from the ordinary Java artifact. */
 @Configuration(proxyBeanMethods = false)
@@ -153,10 +192,215 @@ public class TargetE2eArtifactConfiguration {
                 commandClient, reconciliationClient, streamStore, reconciledFinalStore);
     }
 
+    @Bean
+    JdbcTargetE2eFinalizationAuthority targetE2eFinalizationAuthority(
+            DataSource dataSource,
+            GraphCommandClientProperties properties,
+            Clock clock) {
+        requireTargetMode(properties);
+        return new JdbcTargetE2eFinalizationAuthority(
+                dataSource, properties.activationId(), clock);
+    }
+
+    @Bean
+    TargetE2eIntakeFinalizationStateReader targetE2eIntakeFinalizationStateReader(
+            DataSource dataSource,
+            PlatformTransactionManager transactionManager,
+            ObjectMapper objectMapper) {
+        return new JdbcTargetE2eIntakeFinalizationStateReader(
+                dataSource, transactionManager, objectMapper);
+    }
+
+    @Bean
+    TargetE2eFinalizationRuntimeContextProvider targetE2eFinalizationRuntimeContextProvider(
+            Environment environment) {
+        return new TemporalTargetE2eFinalizationRuntimeContextProvider(
+                required(environment, "app.temporal.worker.build-id"));
+    }
+
+    @Bean
+    TargetE2eFinalizationEvidenceProvider targetE2eFinalizationEvidenceProvider(
+            JdbcTargetE2eFinalizationAuthority authority,
+            TargetE2EGraphEnvelopeCodec codec,
+            TargetE2EGraphEnvelopeSigner signer,
+            HttpTargetE2EGraphReconciliationClient reconciliation,
+            HttpTargetE2EGraphProposalSourceClient proposalSource,
+            GraphRegistryBindingPolicy registryBindings,
+            ObjectMapper objectMapper) {
+        return new ReconciledTargetE2eFinalizationEvidenceProvider(
+                authority,
+                codec,
+                signer,
+                reconciliation,
+                proposalSource,
+                registryBindings,
+                objectMapper);
+    }
+
+    @Bean
+    TargetE2eAuthorizedIntakeFinalizationSource targetE2eAuthorizedFinalizationSource(
+            TargetE2eIntakeFinalizationStateReader stateReader,
+            JdbcTargetE2eFinalizationAuthority authority,
+            TargetE2eFinalizationRuntimeContextProvider runtimeContext,
+            TargetE2eFinalizationEvidenceProvider evidenceProvider,
+            ObjectMapper objectMapper,
+            Clock clock) {
+        return new TargetE2eAuthorizedIntakeFinalizationSource(
+                stateReader,
+                authority,
+                runtimeContext,
+                new TargetE2eExecutionLaneVerifier(clock),
+                evidenceProvider,
+                new TargetE2eFinalizationBindingVerifier(objectMapper));
+    }
+
+    @Bean
+    TargetE2eAgentRunV2FinalizationFactsProvider targetE2eFinalizationFactsProvider(
+            TargetE2eAuthorizedIntakeFinalizationSource source) {
+        return new TargetE2eAgentRunV2FinalizationFactsProvider(source);
+    }
+
+    @Bean
+    TargetE2eIntakeProposalStore targetE2eIntakeProposalStore(
+            MinioClient minioClient, Environment environment) {
+        return new MinioTargetE2eIntakeProposalStore(
+                minioClient,
+                environment.getProperty(
+                        "app.target-e2e.finalization.intake-proposal-bucket",
+                        "target-e2e-intake-activation"),
+                environment.getProperty(
+                        "app.target-e2e.finalization.intake-proposal-prefix",
+                        "graph-proposals"));
+    }
+
+    @Bean
+    TargetE2eIntakeProposalReader targetE2eIntakeProposalReader(
+            TargetE2eIntakeProposalStore store) {
+        return new TargetE2eIntakeProposalReader(store);
+    }
+
+    @Bean
+    JdbcIntakeFormalCommitPort targetE2eIntakeFormalCommitPort(
+            DataSource dataSource,
+            PlatformTransactionManager transactionManager,
+            ObjectMapper objectMapper,
+            Clock clock) {
+        return new JdbcIntakeFormalCommitPort(
+                new org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate(dataSource),
+                transactionManager,
+                objectMapper,
+                clock);
+    }
+
+    @Bean
+    AgentRunDomainResultCommitter targetE2eIntakeDomainResultCommitter(
+            TargetE2eAuthorizedIntakeFinalizationSource source,
+            TargetE2eIntakeProposalReader proposalReader,
+            JdbcIntakeFormalCommitPort commitPort) {
+        var requestResolver = new TargetE2eIntakeFinalizationRequestResolver(
+                source, proposalReader);
+        var finalizer = new IntakeGraphResultFinalizer(
+                new IntakeTurnProposalLoader(proposalReader),
+                commitPort,
+                commitPort,
+                IntakeGraphResultFinalizer.TARGET_E2E_GRAPH_KEY);
+        return new IntakeAgentRunDomainResultCommitter(
+                requestResolver,
+                finalizer,
+                IntakeGraphResultFinalizer.TARGET_E2E_GRAPH_KEY);
+    }
+
+    @Bean
+    TargetE2EActivationLedger targetE2eAgentActivationLedger(DataSource dataSource) {
+        return new TargetE2EActivationLedger(dataSource, Clock.systemUTC());
+    }
+
+    @Bean
+    TargetE2eFinalizationReceiptLedger targetE2eFinalizationReceiptLedger(DataSource dataSource) {
+        return new JdbcTargetE2eFinalizationReceiptLedger(dataSource);
+    }
+
+    @Bean
+    TargetE2eRoomFinalizationStrategy targetE2eIntakeRoomFinalizationStrategy(
+            TargetE2eAuthorizedIntakeFinalizationSource source,
+            TargetE2eAgentRunV2FinalizationFactsProvider factsProvider) {
+        return new TargetE2eIntakeRoomFinalizationStrategy(source, factsProvider);
+    }
+
+    @Bean
+    TargetE2eRoomFinalizationStrategyRegistry targetE2eRoomFinalizationStrategyRegistry(
+            List<TargetE2eRoomFinalizationStrategy> strategies) {
+        return new TargetE2eRoomFinalizationStrategyRegistry(strategies);
+    }
+
+    @Bean
+    TargetE2eMultiRoomOuterFinalizer targetE2eMultiRoomOuterFinalizer(
+            PlatformTransactionManager transactionManager,
+            TargetE2eGraphOutputSnapshotMaterializer outputMaterializer,
+            TargetE2eRoomFinalizationStrategyRegistry strategies,
+            AgentRunV2ManifestFactory manifestFactory,
+            AgentRunFormalResultCommitter formalCommitter,
+            TargetE2eFinalizationReceiptLedger receiptLedger,
+            TargetE2eCommandCompletionWriter completionWriter) {
+        var transactions = new org.springframework.transaction.support.TransactionTemplate(
+                transactionManager);
+        transactions.setPropagationBehavior(
+                org.springframework.transaction.TransactionDefinition.PROPAGATION_REQUIRED);
+        transactions.setIsolationLevel(
+                org.springframework.transaction.TransactionDefinition.ISOLATION_REPEATABLE_READ);
+        return new TargetE2eMultiRoomOuterFinalizer(
+                transactions,
+                outputMaterializer,
+                strategies,
+                manifestFactory,
+                formalCommitter,
+                receiptLedger,
+                completionWriter);
+    }
+
+    @Bean
+    AgentRunFinalizationGateway targetE2eMultiRoomFinalizationGateway(
+            TargetE2eMultiRoomOuterFinalizer outerFinalizer) {
+        return new TargetE2eMultiRoomFinalizationGateway(outerFinalizer);
+    }
+
+    /*
+     * Keep the graph-output materializer adjacent to the single outer finalizer: it is invoked
+     * inside that finalizer's transaction, never as a separately committed provenance write.
+     */
+    @Bean
+    TargetE2eGraphOutputSnapshotMaterializer targetE2eGraphOutputSnapshotMaterializer(
+            DataSource dataSource,
+            AgentRunV2StreamStore streamStore,
+            PlatformTransactionManager transactionManager) {
+        return new TargetE2eGraphOutputSnapshotMaterializer(
+                dataSource, streamStore, transactionManager);
+    }
+
+    /*
+     * The completion writer is deliberately exposed through the shared contract so future room
+     * strategies cannot replace the receipt/completion ordering.
+     */
+    @Bean
+    TargetE2eCommandCompletionWriter targetE2eCommandCompletionWriter(
+            DataSource dataSource, TargetE2EActivationLedger targetE2eAgentActivationLedger) {
+        return new JdbcTargetE2eIntakeCommandCompletionWriter(
+                dataSource, targetE2eAgentActivationLedger);
+    }
+
     private static void requireTargetMode(GraphCommandClientProperties properties) {
         if (properties.mode() != GraphCommandClientProperties.Mode.TARGET_E2E_CANDIDATE) {
             throw new IllegalStateException(
                     "target-E2E artifact requires TARGET_E2E_CANDIDATE Graph mode");
         }
+    }
+
+    private static String required(Environment environment, String property) {
+        String value = environment.getProperty(property);
+        if (value == null || value.isBlank()) {
+            throw new IllegalStateException(
+                    "required target E2E property is absent: " + property);
+        }
+        return value.trim();
     }
 }

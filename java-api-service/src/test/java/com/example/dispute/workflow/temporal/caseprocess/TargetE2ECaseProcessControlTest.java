@@ -7,8 +7,15 @@ import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.ActiveChildDescriptor;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.ActiveChildKind;
+import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceParticipantBindingActivities;
+import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewOutcomeStartBindingPort.Binding;
 import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
+import com.example.dispute.workflow.targete2e.temporal.intake.TargetIntakeActorScopes;
+import com.example.dispute.workflow.temporal.room.intake.IntakeParty;
+import com.example.dispute.workflow.contract.outcome.v1.OutcomeWireTypes;
+import com.example.dispute.workflow.contract.outcome.v1.OutcomeWorkflowStart;
 import io.temporal.failure.ApplicationFailure;
+import java.time.Instant;
 import org.junit.jupiter.api.Test;
 
 class TargetE2ECaseProcessControlTest {
@@ -77,14 +84,133 @@ class TargetE2ECaseProcessControlTest {
               3,
               17,
               "room-child-3",
-              "room-run-3");
+              "room-run-3",
+              roomType == RoomType.INTAKE
+                  ? TargetIntakeActorScopes.hash("case-3", IntakeParty.INITIATOR)
+                  : null,
+              roomType == RoomType.INTAKE
+                  ? TargetIntakeActorScopes.hash("case-3", IntakeParty.RESPONDENT)
+                  : null,
+               5L,
+               11L,
+               7L,
+               13L,
+               roomType == RoomType.REVIEW ? reviewBinding() : null,
+               roomType == RoomType.EVIDENCE ? evidenceBinding() : null);
 
       CaseProcessWorkflowImpl.validateTargetTypedDescriptor(descriptor);
       assertThat(descriptor.roomType()).isEqualTo(roomType);
       assertThat(descriptor.roomEpoch()).isEqualTo(3);
       assertThat(descriptor.fencingToken()).isEqualTo(17);
       assertThat(descriptor.roomWorkflowBuildId()).isEqualTo("p9-control-build");
+      assertThat(descriptor.initialProcessRevision()).isEqualTo(5);
+      assertThat(descriptor.initialRoomRevision()).isEqualTo(11);
+      assertThat(descriptor.currentProcessRevision()).isEqualTo(7);
+      assertThat(descriptor.currentRoomRevision()).isEqualTo(13);
+      if (roomType == RoomType.INTAKE) {
+        assertThat(descriptor.initiatorActorScopeHash())
+            .isEqualTo(TargetIntakeActorScopes.hash("case-3", IntakeParty.INITIATOR));
+        assertThat(descriptor.withCurrentRevisions(8, 14).respondentActorScopeHash())
+            .isEqualTo(TargetIntakeActorScopes.hash("case-3", IntakeParty.RESPONDENT));
+      }
     }
+  }
+
+  @Test
+  void targetReviewAndEvidenceDescriptorsRequireTheirReplayStableBindings() {
+    assertThatThrownBy(
+            () -> targetDescriptor(RoomType.REVIEW, null, null))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("Outcome start binding");
+    assertThatThrownBy(
+            () -> targetDescriptor(RoomType.EVIDENCE, null, null))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("participant binding");
+  }
+
+  private static ActiveChildDescriptor targetDescriptor(
+      RoomType roomType,
+      Binding reviewBinding,
+      TargetEvidenceParticipantBindingActivities.Binding evidenceBinding) {
+    return new ActiveChildDescriptor(
+        ActiveChildKind.TARGET_TYPED_ROOM,
+        "room-epoch-selection.v2",
+        WriterMode.TEMPORAL,
+        "CaseProcessWorkflow",
+        "p9-case-build",
+        TargetTypedRoomProtocol.workflowType(roomType),
+        "p9-control-build",
+        roomType,
+        3,
+        17,
+        "room-child-3",
+        "room-run-3",
+        null,
+        null,
+        5L,
+        11L,
+        7L,
+        13L,
+        reviewBinding,
+        evidenceBinding);
+  }
+
+  private static TargetEvidenceParticipantBindingActivities.Binding evidenceBinding() {
+    return new TargetEvidenceParticipantBindingActivities.Binding(
+        "tenant-3", "case-3", 3, 17, "user-3", "merchant-3", "a".repeat(64));
+  }
+
+  private static Binding reviewBinding() {
+    return new Binding(
+        "p9act.v1." + "a".repeat(32),
+        "b".repeat(64),
+        new OutcomeWorkflowStart(
+            OutcomeWorkflowStart.SCHEMA_VERSION,
+            "room-child-3",
+            "case-3",
+            "review-task-3",
+            "review-packet-3",
+            "c".repeat(64),
+            "draft-3",
+            "d".repeat(64),
+            "action-3",
+            "e".repeat(64),
+            "operations-3",
+            "f".repeat(64),
+            0,
+            3,
+            11,
+            17,
+            Instant.parse("2026-07-28T00:00:00Z"),
+            Instant.parse("2026-07-29T00:00:00Z"),
+            OutcomeWireTypes.RuntimeMode.TEMPORAL,
+            "p9-control-build",
+            "policy-3",
+            "graph-3",
+            "prompt-3",
+            "model-3",
+            false));
+  }
+
+  @Test
+  void targetDescriptorRejectsMissingRevisionPins() {
+    assertThatThrownBy(
+            () ->
+                new ActiveChildDescriptor(
+                    ActiveChildKind.TARGET_TYPED_ROOM,
+                    "room-epoch-selection.v2",
+                    WriterMode.TEMPORAL,
+                    "CaseProcessWorkflow",
+                    "p9-case-build",
+                    TargetTypedRoomProtocol.workflowType(RoomType.HEARING),
+                    "p9-control-build",
+                    RoomType.HEARING,
+                    3,
+                    17,
+                    "room-child-3",
+                    "room-run-3"))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("revision");
   }
 
   @Test

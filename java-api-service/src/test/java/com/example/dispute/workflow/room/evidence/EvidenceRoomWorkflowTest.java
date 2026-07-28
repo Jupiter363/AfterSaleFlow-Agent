@@ -15,6 +15,8 @@ import com.example.dispute.workflow.temporal.room.evidence.EvidenceRoomStart;
 import com.example.dispute.workflow.temporal.room.evidence.EvidenceRoomWorkflow;
 import com.example.dispute.workflow.temporal.room.evidence.EvidenceRoomWorkflowImpl;
 import com.example.dispute.workflow.temporal.room.evidence.EvidenceTimerPlan;
+import com.example.dispute.workflow.targete2e.temporal.room.TargetRoomAgentRunFinalizationReceipt;
+import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import io.grpc.StatusRuntimeException;
 import io.temporal.api.testservice.v1.SleepRequest;
 import io.temporal.api.testservice.v1.TestServiceGrpc;
@@ -104,6 +106,29 @@ class EvidenceRoomWorkflowTest {
             EvidenceOperationKeys.partyComplete(
                 CASE_ID, EPOCH, RESPONDENT, "COMPLETE_RESPONDENT"));
     assertThat(result.originalDeadlineAt()).isEqualTo(started.start().originalDeadlineAt());
+  }
+
+  @Test
+  void completedTargetAgentRunReceiptIsLifecycleOnlyAndExactlyIdempotent() {
+    StartedWorkflow started = start("agent-run-receipt", Duration.ofHours(2));
+    TargetRoomAgentRunFinalizationReceipt receipt =
+        agentRunReceipt(started.start(), "CMD_EVIDENCE_AGENT", "a");
+
+    started.workflow().agentRunFinalized(receipt);
+    started.workflow().agentRunFinalized(receipt);
+
+    EvidenceRoomSnapshot observed =
+        awaitState(
+            started.workflow(), state -> state.agentRunFinalizationReceipts().size() == 1);
+    assertThat(observed.agentRunFinalizationReceipts()).containsExactly(receipt);
+    assertThat(observed.duplicateSignalCount()).isEqualTo(1);
+    assertThat(observed.orderedOperationKeys()).isEmpty();
+    assertThat(observed.processRevision()).isEqualTo(started.start().initialProcessRevision() + 1);
+    assertThat(observed.roomRevision()).isEqualTo(started.start().initialRoomRevision() + 1);
+
+    started.workflow().partyCompleted(signal(INITIATOR, "COMPLETE_AGENT_RECEIPT_I", 1));
+    started.workflow().partyCompleted(signal(RESPONDENT, "COMPLETE_AGENT_RECEIPT_R", 2));
+    assertThat(result(started.workflow()).terminalReason()).isEqualTo("BOTH_PARTIES_COMPLETED");
   }
 
   @Test
@@ -588,6 +613,25 @@ class EvidenceRoomWorkflowTest {
     return signal(participantId, completionRequestId, hashDigit, Instant.now());
   }
 
+  private static TargetRoomAgentRunFinalizationReceipt agentRunReceipt(
+      EvidenceRoomStart start, String commandId, String resultHashDigit) {
+    return new TargetRoomAgentRunFinalizationReceipt(
+        TargetRoomAgentRunFinalizationReceipt.SCHEMA_VERSION,
+        start.tenantSurrogate(),
+        start.caseId(),
+        RoomType.EVIDENCE,
+        start.roomEpoch(),
+        start.fencingToken(),
+        start.initialProcessRevision(),
+        start.initialRoomRevision(),
+        0,
+        commandId,
+        "RUN_EVIDENCE_AGENT",
+        "ATTEMPT_EVIDENCE_AGENT",
+        1,
+        resultHashDigit.repeat(64));
+  }
+
   private static EvidenceRoomSignal signal(
       String participantId, String completionRequestId, int hashDigit, Instant acceptedAt) {
     return new EvidenceRoomSignal(
@@ -798,6 +842,11 @@ class EvidenceRoomWorkflowTest {
     }
 
     @Override
+    public void agentRunFinalized(TargetRoomAgentRunFinalizationReceipt receipt) {
+      // The legacy replay fixture intentionally has no target AgentRun lifecycle state.
+    }
+
+    @Override
     public EvidenceRoomSnapshot state() {
       return new EvidenceRoomSnapshot(
           "evidence-room-snapshot.v1",
@@ -825,7 +874,8 @@ class EvidenceRoomWorkflowTest {
           roomRevision,
           duplicateSignalCount,
           rejectedSignalCount,
-          protocolErrorCode);
+          protocolErrorCode,
+          List.of());
     }
 
     private void drainInbox() {

@@ -18,8 +18,11 @@ final class TargetE2eArtifactPrerequisites {
     static final String REQUIRED_PROFILE = "target-e2e";
     static final String CONTROL_WORKER_ROLE = "CONTROL";
     static final String AGENT_WORKER_ROLE = "AGENT";
+    static final String API_ROLE = "API";
     private static final Set<String> TARGET_WORKER_ROLES =
             Set.of(CONTROL_WORKER_ROLE, AGENT_WORKER_ROLE);
+    private static final Set<String> TARGET_PROCESS_ROLES =
+            Set.of(API_ROLE, CONTROL_WORKER_ROLE, AGENT_WORKER_ROLE);
     static final String WORKER_ENABLED_PROPERTY = "app.temporal.worker.enabled";
     static final String WORKER_ROLE_PROPERTY = "app.temporal.worker.role";
     static final String WORKER_VERSIONING_PROPERTY = "app.temporal.worker.versioning-mode";
@@ -109,13 +112,20 @@ final class TargetE2eArtifactPrerequisites {
         require(
                 TargetE2eArtifactMarker.EXPECTED_VALUE.equals(embeddedMarker),
                 "TARGET_E2E_ARTIFACT_MARKER_INVALID");
-        require(workerEnabled, "TARGET_E2E_WORKER_DISABLED");
-        require(TARGET_WORKER_ROLES.contains(workerRole), "TARGET_E2E_WORKER_ROLE_INVALID");
-        validateActivationMaterialShape(activationJws);
-        require(
-                "BUILD_ID".equals(workerVersioningMode)
-                        || "DEPLOYMENT".equals(workerVersioningMode),
-                "TARGET_E2E_WORKER_VERSIONING_REQUIRED");
+        require(TARGET_PROCESS_ROLES.contains(workerRole), "TARGET_E2E_WORKER_ROLE_INVALID");
+        if (API_ROLE.equals(workerRole)) {
+            require(!workerEnabled, "TARGET_E2E_API_WORKER_MUST_BE_DISABLED");
+        } else {
+            require(workerEnabled, "TARGET_E2E_WORKER_DISABLED");
+            require(TARGET_WORKER_ROLES.contains(workerRole), "TARGET_E2E_WORKER_ROLE_INVALID");
+            require(
+                    "BUILD_ID".equals(workerVersioningMode)
+                            || "DEPLOYMENT".equals(workerVersioningMode),
+                    "TARGET_E2E_WORKER_VERSIONING_REQUIRED");
+        }
+        if (CONTROL_WORKER_ROLE.equals(workerRole)) {
+            validateActivationMaterialShape(activationJws);
+        }
         if (AGENT_WORKER_ROLE.equals(workerRole)) {
             require(agentRunV2Enabled, "TARGET_E2E_AGENT_RUN_V2_REQUIRED");
         }

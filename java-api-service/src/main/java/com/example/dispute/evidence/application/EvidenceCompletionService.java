@@ -44,6 +44,21 @@ import com.example.dispute.workflow.application.epoch.RoomEpochAllocator;
 import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.TransitionRoomEpoch;
 import com.example.dispute.workflow.contract.v1.ContractTypes;
 import com.example.dispute.hearing.application.HearingFlowRuntimeService;
+import com.example.dispute.workflow.application.command.AcceptCaseCommand;
+import com.example.dispute.workflow.application.command.CaseCommandService;
+import com.example.dispute.workflow.contract.v1.ContractJson;
+import com.example.dispute.workflow.contract.v1.ContractTypes.CommandType;
+import com.example.dispute.workflow.contract.v1.ContractTypes.PayloadRef;
+import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
+import com.example.dispute.workflow.infrastructure.persistence.entity.CaseRoomEpochEntity;
+import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.EpochLifecycleStatus;
+import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.EpochProvisioningStatus;
+import com.example.dispute.workflow.infrastructure.persistence.repository.CaseRoomEpochRepository;
+import com.example.dispute.workflow.targete2e.ingress.rooms.TargetRoomCommandIngress;
+import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -71,6 +86,10 @@ public class EvidenceCompletionService {
     private final RoomEpochAllocator roomEpochAllocator;
     private final DisputeProperties disputeProperties;
     private final Clock clock;
+    private final CaseRoomEpochRepository roomEpochRepository;
+    private final ObjectProvider<TargetRoomCommandIngress> targetRoomIngress;
+    private final CaseCommandService caseCommandService;
+    private final ObjectMapper objectMapper;
 
     // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceCompletionService.EvidenceCompletionService(FulfillmentCaseRepository,EvidencePartyCompletionRepository,EvidenceItemRepository,CaseRoomRepository,CasePhaseClockRepository,EvidenceDossierFreezer,EvidenceWindowCoordinator,CaseEventService,NotificationService,CaseLifecycleNotificationService,HearingRoundService,HearingWorkflowCoordinator,DisputeProperties,Clock)」。
     // 具体功能：「EvidenceCompletionService.EvidenceCompletionService(FulfillmentCaseRepository,EvidencePartyCompletionRepository,EvidenceItemRepository,CaseRoomRepository,CasePhaseClockRepository,EvidenceDossierFreezer,EvidenceWindowCoordinator,CaseEventService,NotificationService,CaseLifecycleNotificationService,HearingRoundService,HearingWorkflowCoordinator,DisputeProperties,Clock)」：通过构造器接收 「caseRepository」(FulfillmentCaseRepository)、「completionRepository」(EvidencePartyCompletionRepository)、「evidenceRepository」(EvidenceItemRepository)、「roomRepository」(CaseRoomRepository)、「clockRepository」(CasePhaseClockRepository)、「dossierFreezer」(EvidenceDossierFreezer)、「evidenceWindowCoordinator」(EvidenceWindowCoordinator)、「caseEventService」(CaseEventService)、「notificationService」(NotificationService)、「lifecycleNotifications」(CaseLifecycleNotificationService)、「hearingRoundService」(HearingRoundService)、「hearingWorkflowCoordinator」(HearingWorkflowCoordinator)、「disputeProperties」(DisputeProperties)、「clock」(Clock) 并保存为「EvidenceCompletionService」的协作依赖；这里只完成依赖装配，不提前访问数据库或外部服务。
@@ -95,6 +114,51 @@ public class EvidenceCompletionService {
             RoomEpochAllocator roomEpochAllocator,
             DisputeProperties disputeProperties,
             Clock clock) {
+        this(
+                caseRepository,
+                completionRepository,
+                evidenceRepository,
+                roomRepository,
+                clockRepository,
+                dossierFreezer,
+                evidenceWindowCoordinator,
+                intakeProgressService,
+                intakeMatrixLifecycleService,
+                caseEventService,
+                notificationService,
+                lifecycleNotifications,
+                hearingFlowRuntimeService,
+                roomEpochAllocator,
+                disputeProperties,
+                clock,
+                null,
+                null,
+                null,
+                null);
+    }
+
+    @Autowired
+    public EvidenceCompletionService(
+            FulfillmentCaseRepository caseRepository,
+            EvidencePartyCompletionRepository completionRepository,
+            EvidenceItemRepository evidenceRepository,
+            CaseRoomRepository roomRepository,
+            CasePhaseClockRepository clockRepository,
+            EvidenceDossierFreezer dossierFreezer,
+            EvidenceWindowCoordinator evidenceWindowCoordinator,
+            IntakeProgressService intakeProgressService,
+            IntakeMatrixLifecycleService intakeMatrixLifecycleService,
+            CaseEventService caseEventService,
+            NotificationService notificationService,
+            CaseLifecycleNotificationService lifecycleNotifications,
+            HearingFlowRuntimeService hearingFlowRuntimeService,
+            RoomEpochAllocator roomEpochAllocator,
+            DisputeProperties disputeProperties,
+            Clock clock,
+            CaseRoomEpochRepository roomEpochRepository,
+            ObjectProvider<TargetRoomCommandIngress> targetRoomIngress,
+            CaseCommandService caseCommandService,
+            ObjectMapper objectMapper) {
         this.caseRepository = caseRepository;
         this.completionRepository = completionRepository;
         this.evidenceRepository = evidenceRepository;
@@ -111,6 +175,10 @@ public class EvidenceCompletionService {
         this.roomEpochAllocator = roomEpochAllocator;
         this.disputeProperties = disputeProperties;
         this.clock = clock;
+        this.roomEpochRepository = roomEpochRepository;
+        this.targetRoomIngress = targetRoomIngress;
+        this.caseCommandService = caseCommandService;
+        this.objectMapper = objectMapper;
     }
 
     // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceCompletionService.warnDeadline(String)」。
@@ -119,6 +187,71 @@ public class EvidenceCompletionService {
     // 下游影响：「EvidenceCompletionService.warnDeadline(String)」向下依次触达 「caseRepository.findByIdForUpdate」、「dispute.getCaseStatus」、「dispute.getCurrentDeadlineAt」、「lifecycleNotifications.evidenceDeadlineWarning」；这些数据库变化在方法正常返回后由 Spring 统一提交，异常会触发回滚。
     // 系统意义：「EvidenceCompletionService.warnDeadline(String)」定义原子提交边界；原件不可被摘要替代；迟到材料、脱敏内容和卷宗版本必须可追溯
     // Java 语法：@Transactional 由 Spring 代理拦截；只有通过代理调用时才会开启或加入事务。
+    private void dispatchTargetCompletion(
+            FulfillmentCaseEntity dispute,
+            EvidencePartyCompletionEntity completion,
+            AuthenticatedActor actor,
+            CaseRoomEpochEntity epoch) {
+        if (targetRoomIngress == null || caseCommandService == null || objectMapper == null) {
+            throw new IllegalStateException("target Evidence command ingress is unavailable");
+        }
+        TargetRoomCommandIngress ingress = targetRoomIngress.getIfAvailable();
+        if (ingress == null) {
+            throw new IllegalStateException("target Evidence command ingress is unavailable");
+        }
+        CaseRoomEntity evidenceRoom = roomRepository
+                .findByCaseIdAndRoomType(dispute.getId(), RoomType.EVIDENCE)
+                .orElseThrow(() -> new IllegalStateException("target Evidence room is unavailable"));
+        String commandId = "evidence-complete:" + completion.getId();
+        Map<String, Object> intent = Map.of(
+                "completion_id", completion.getId(),
+                "case_id", dispute.getId(),
+                "dossier_version", completion.getDossierVersion(),
+                "participant_id", completion.getParticipantId(),
+                "participant_role", completion.getParticipantRole().name(),
+                "room_epoch", epoch.getRoomEpoch());
+        var event = caseEventService.recordLifecycleEvent(
+                dispute.getId(), evidenceRoom.getId(), "EVIDENCE_PARTY_COMPLETION_INTENT", intent,
+                "target-evidence-completion:" + completion.getId(), actor.actorId());
+        PayloadRef payload = canonicalPayload(
+                "target-e2e-evidence-completion.v1",
+                "urn:target-e2e:timeline-event:" + event.getId(),
+                intent);
+        AcceptCaseCommand command = new AcceptCaseCommand(
+                CommandType.PARTY_EVIDENCE_COMPLETE,
+                com.example.dispute.workflow.contract.v1.ContractTypes.RoomType.EVIDENCE,
+                epoch.getRoomEpoch(), payload, epoch.getProcessRevision(), requireFutureDeadline(dispute));
+        ingress.materialize(dispute.getId(), commandId, command, actor, commandId);
+        caseCommandService.accept(dispute.getId(), commandId, command, actor, commandId, commandId, null);
+    }
+
+    private Optional<CaseRoomEpochEntity> currentTargetEvidenceEpoch(String caseId) {
+        if (roomEpochRepository == null) return Optional.empty();
+        return roomEpochRepository
+                .findTopByCaseIdAndRoomTypeAndLifecycleStatusOrderByRoomEpochDesc(
+                        caseId,
+                        com.example.dispute.workflow.contract.v1.ContractTypes.RoomType.EVIDENCE,
+                        EpochLifecycleStatus.ACTIVE)
+                .filter(epoch -> epoch.getWriterMode() == WriterMode.TEMPORAL
+                        && epoch.getProvisioningStatus() == EpochProvisioningStatus.READY
+                        && TargetTypedRoomProtocol.GRAPH_KEY.equals(epoch.getGraphKey()));
+    }
+
+    private PayloadRef canonicalPayload(
+            String schemaVersion, String uri, Map<String, Object> value) {
+        var node = objectMapper.valueToTree(value);
+        byte[] canonical = ContractJson.canonicalize(node);
+        String hash = ContractJson.sha256Hex(node);
+        return new PayloadRef(schemaVersion, uri, hash, canonical.length);
+    }
+
+    private static Instant requireFutureDeadline(FulfillmentCaseEntity dispute) {
+        if (dispute.getCurrentDeadlineAt() == null) {
+            throw new IllegalStateException("target Evidence command requires an authoritative deadline");
+        }
+        return dispute.getCurrentDeadlineAt().toInstant();
+    }
+
     @Transactional(readOnly = true)
     public void warnDeadline(String caseId) {
         FulfillmentCaseEntity dispute =
@@ -163,16 +296,31 @@ public class EvidenceCompletionService {
         Optional<EvidencePartyCompletionEntity> participantCompletion =
                 completionRepository.findByCaseIdAndDossierVersionAndParticipantId(
                         caseId, dossierVersion, actor.actorId());
+        EvidencePartyCompletionEntity completion;
         if (existing.isEmpty() && participantCompletion.isEmpty()) {
-            completionRepository.save(
-                    EvidencePartyCompletionEntity.completed(
-                            "EVIDENCE_COMPLETE_" + compactUuid(),
-                            caseId,
-                            dossierVersion,
-                            actor.role(),
-                            actor.actorId(),
-                            idempotencyKey,
-                            observedAt));
+            completion =
+                    completionRepository.save(
+                            EvidencePartyCompletionEntity.completed(
+                                    "EVIDENCE_COMPLETE_" + compactUuid(),
+                                    caseId,
+                                    dossierVersion,
+                                    actor.role(),
+                                    actor.actorId(),
+                                    idempotencyKey,
+                                    observedAt));
+        } else {
+            completion = existing.orElseGet(participantCompletion::orElseThrow);
+        }
+        Optional<CaseRoomEpochEntity> targetEpoch = currentTargetEvidenceEpoch(caseId);
+        if (targetEpoch.isPresent()) {
+            dispatchTargetCompletion(dispute, completion, actor, targetEpoch.orElseThrow());
+            return new EvidenceCompletionView(
+                    caseId,
+                    dossierVersion,
+                    actor.role(),
+                    false,
+                    "EVIDENCE",
+                    dispute.getCurrentDeadlineAt());
         }
         evidenceWindowCoordinator.signalPartyCompletedAfterCommit(
                 caseId, actor.role().name());

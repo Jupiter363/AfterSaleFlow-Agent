@@ -22,6 +22,18 @@ import com.example.dispute.room.application.RoomMessageService;
 import com.example.dispute.room.application.RoomMessageView;
 import com.example.dispute.room.domain.MessageType;
 import com.example.dispute.room.domain.RoomType;
+import com.example.dispute.workflow.application.command.AcceptCaseCommand;
+import com.example.dispute.workflow.application.command.CaseCommandService;
+import com.example.dispute.workflow.contract.v1.ContractJson;
+import com.example.dispute.workflow.contract.v1.ContractTypes.CommandType;
+import com.example.dispute.workflow.contract.v1.ContractTypes.PayloadRef;
+import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
+import com.example.dispute.workflow.infrastructure.persistence.entity.CaseRoomEpochEntity;
+import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.EpochLifecycleStatus;
+import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.EpochProvisioningStatus;
+import com.example.dispute.workflow.infrastructure.persistence.repository.CaseRoomEpochRepository;
+import com.example.dispute.workflow.targete2e.ingress.rooms.TargetRoomCommandIngress;
+import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -32,7 +44,10 @@ import java.time.ZoneOffset;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -51,6 +66,9 @@ public class EvidenceSubmissionService {
     private final ObjectMapper objectMapper;
     private final AuditRecorder auditRecorder;
     private final Clock clock;
+    private final CaseRoomEpochRepository roomEpochRepository;
+    private final ObjectProvider<TargetRoomCommandIngress> targetRoomIngress;
+    private final CaseCommandService caseCommandService;
 
     // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceSubmissionService.EvidenceSubmissionService(FulfillmentCaseRepository,EvidenceItemRepository,EvidenceSubmissionBatchRepository,RoomMessageService,ObjectMapper,AuditRecorder,Clock)」。
     // 具体功能：「EvidenceSubmissionService.EvidenceSubmissionService(FulfillmentCaseRepository,EvidenceItemRepository,EvidenceSubmissionBatchRepository,RoomMessageService,ObjectMapper,AuditRecorder,Clock)」：通过构造器接收 「caseRepository」(FulfillmentCaseRepository)、「evidenceRepository」(EvidenceItemRepository)、「batchRepository」(EvidenceSubmissionBatchRepository)、「roomMessageService」(RoomMessageService)、「objectMapper」(ObjectMapper)、「auditRecorder」(AuditRecorder)、「clock」(Clock) 并保存为「EvidenceSubmissionService」的协作依赖；这里只完成依赖装配，不提前访问数据库或外部服务。
@@ -66,6 +84,31 @@ public class EvidenceSubmissionService {
             ObjectMapper objectMapper,
             AuditRecorder auditRecorder,
             Clock clock) {
+        this(
+                caseRepository,
+                evidenceRepository,
+                batchRepository,
+                roomMessageService,
+                objectMapper,
+                auditRecorder,
+                clock,
+                null,
+                null,
+                null);
+    }
+
+    @Autowired
+    public EvidenceSubmissionService(
+            FulfillmentCaseRepository caseRepository,
+            EvidenceItemRepository evidenceRepository,
+            EvidenceSubmissionBatchRepository batchRepository,
+            RoomMessageService roomMessageService,
+            ObjectMapper objectMapper,
+            AuditRecorder auditRecorder,
+            Clock clock,
+            CaseRoomEpochRepository roomEpochRepository,
+            ObjectProvider<TargetRoomCommandIngress> targetRoomIngress,
+            CaseCommandService caseCommandService) {
         this.caseRepository = caseRepository;
         this.evidenceRepository = evidenceRepository;
         this.batchRepository = batchRepository;
@@ -73,6 +116,9 @@ public class EvidenceSubmissionService {
         this.objectMapper = objectMapper;
         this.auditRecorder = auditRecorder;
         this.clock = clock;
+        this.roomEpochRepository = roomEpochRepository;
+        this.targetRoomIngress = targetRoomIngress;
+        this.caseCommandService = caseCommandService;
     }
 
     // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceSubmissionService.submit(String,EvidenceSubmissionCommand,AuthenticatedActor,String,String)」。
@@ -183,8 +229,20 @@ public class EvidenceSubmissionService {
         for (EvidenceItemEntity item : evidences) {
             item.markSubmittedForParties(batch.getId(), submittedOffset, actor.actorId());
         }
+        Optional<CaseRoomEpochEntity> targetEpoch = currentTargetEvidenceEpoch(dispute.getId());
+        requireTargetIngress(targetEpoch);
         RoomMessageView message =
-                roomMessageService.post(
+                targetEpoch.isPresent()
+                        ? roomMessageService.postTargetEvidenceSubmission(
+                                dispute.getId(),
+                                new RoomMessageCommand(
+                                        MessageType.PARTY_EVIDENCE_REFERENCE,
+                                        submissionMessage(actor, evidenceIds, command.batchNote()),
+                                        evidenceIds),
+                                actor,
+                                "evidence-batch-message:" + idempotencyKey,
+                                traceId)
+                        : roomMessageService.post(
                         dispute.getId(),
                         submissionRoom(dispute),
                         new RoomMessageCommand(
@@ -205,7 +263,98 @@ public class EvidenceSubmissionService {
                 Map.of(
                         "evidence_count", evidenceIds.size(),
                         "room_message_id", message.id()));
+        targetEpoch.ifPresent(
+                epoch ->
+                        submitTargetCommand(
+                                dispute, batch, message, evidenceIds, actor, traceId, epoch));
         return view(batch, message);
+    }
+
+    private void submitTargetCommand(
+            FulfillmentCaseEntity dispute,
+            EvidenceSubmissionBatchEntity batch,
+            RoomMessageView message,
+            List<String> evidenceIds,
+            AuthenticatedActor actor,
+            String traceId,
+            CaseRoomEpochEntity epoch) {
+        String commandId = "evidence-submit:" + batch.getId();
+        Map<String, Object> fact =
+                Map.of(
+                        "batch_id", batch.getId(),
+                        "case_id", dispute.getId(),
+                        "message_id", message.id(),
+                        "actor_id", actor.actorId(),
+                        "actor_role", actor.role().name(),
+                        "evidence_ids", evidenceIds,
+                        "batch_note", batch.getBatchNote() == null ? "" : batch.getBatchNote(),
+                        "submitted_at", batch.getSubmittedAt().toString());
+        var event =
+                roomMessageService.recordTargetEvidenceSubmissionEvent(
+                        dispute.getId(), message.roomId(), fact, batch.getId(), actor.actorId());
+        PayloadRef payload =
+                canonicalPayload(
+                        "target-e2e-evidence-submission.v1",
+                        "urn:target-e2e:timeline-event:" + event.getId(),
+                        fact);
+        AcceptCaseCommand command = new AcceptCaseCommand(
+                CommandType.EVIDENCE_SUBMIT,
+                com.example.dispute.workflow.contract.v1.ContractTypes.RoomType.EVIDENCE,
+                epoch.getRoomEpoch(),
+                payload,
+                epoch.getProcessRevision(),
+                requireFutureDeadline(dispute));
+        TargetRoomCommandIngress ingress = requireTargetIngress(Optional.of(epoch));
+        ingress.materialize(dispute.getId(), commandId, command, actor, traceId);
+        caseCommandService.accept(
+                dispute.getId(), commandId, command, actor, traceId, commandId, null);
+    }
+
+    private Optional<CaseRoomEpochEntity> currentTargetEvidenceEpoch(String caseId) {
+        if (roomEpochRepository == null) {
+            return Optional.empty();
+        }
+        return roomEpochRepository
+                .findTopByCaseIdAndRoomTypeAndLifecycleStatusOrderByRoomEpochDesc(
+                        caseId,
+                        com.example.dispute.workflow.contract.v1.ContractTypes.RoomType.EVIDENCE,
+                        EpochLifecycleStatus.ACTIVE)
+                .filter(
+                        epoch ->
+                                epoch.getWriterMode() == WriterMode.TEMPORAL
+                                        && epoch.getProvisioningStatus()
+                                                == EpochProvisioningStatus.READY
+                                        && TargetTypedRoomProtocol.GRAPH_KEY.equals(
+                                                epoch.getGraphKey()));
+    }
+
+    private TargetRoomCommandIngress requireTargetIngress(Optional<CaseRoomEpochEntity> targetEpoch) {
+        if (targetEpoch.isEmpty()) {
+            return null;
+        }
+        if (targetRoomIngress == null || caseCommandService == null) {
+            throw new IllegalStateException("target Evidence command ingress is unavailable");
+        }
+        TargetRoomCommandIngress ingress = targetRoomIngress.getIfAvailable();
+        if (ingress == null) {
+            throw new IllegalStateException("target Evidence command ingress is unavailable");
+        }
+        return ingress;
+    }
+
+    private PayloadRef canonicalPayload(
+            String schemaVersion, String uri, Map<String, Object> value) {
+        var node = objectMapper.valueToTree(value);
+        byte[] canonical = ContractJson.canonicalize(node);
+        String hash = ContractJson.sha256Hex(node);
+        return new PayloadRef(schemaVersion, uri, hash, canonical.length);
+    }
+
+    private static Instant requireFutureDeadline(FulfillmentCaseEntity dispute) {
+        if (dispute.getCurrentDeadlineAt() == null) {
+            throw new IllegalStateException("target Evidence command requires an authoritative deadline");
+        }
+        return dispute.getCurrentDeadlineAt().toInstant();
     }
 
     // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceSubmissionService.submissionRoom(FulfillmentCaseEntity)」。

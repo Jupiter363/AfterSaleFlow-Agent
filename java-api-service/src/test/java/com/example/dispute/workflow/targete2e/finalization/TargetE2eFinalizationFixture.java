@@ -53,7 +53,7 @@ final class TargetE2eFinalizationFixture {
                 "user-target-e2e",
                 ActorRole.USER,
                 Audience.USER,
-                List.of("graph.command.execute"));
+                List.of("case:" + CASE_ID + ":command:INTAKE_MESSAGE"));
         IntakeGraphThreadBinding binding = targetBinding(threadId, actor);
         var snapshot = new IntakeSnapshotReference(
                 "SNAPSHOT_BINDING_TARGET_E2E",
@@ -121,9 +121,9 @@ final class TargetE2eFinalizationFixture {
                         "graph-envelope.target-e2e.v1",
                         "nonce-target-e2e"));
         ArtifactPointer proposal = new ArtifactPointer(
-                "PROPOSAL_TARGET_E2E",
+                "intake.proposal." + HASH.substring(0, 32),
                 "intake-turn-proposal.v2",
-                "urn:target-e2e:proposal:intake:001",
+                "minio://target-e2e-intake-activation/graph-proposals/" + HASH + ".json",
                 HASH);
         RoomGraphResult unsigned = new RoomGraphResult(
                 "room-graph-result.v1",
@@ -295,12 +295,13 @@ final class TargetE2eFinalizationFixture {
         proposalSource.put("room_type", "INTAKE");
         ObjectNode normalizedProposal = proposalSource.putObject("proposal");
         normalizedProposal.put("schema_version", "target-e2e-intake-proposal.v1");
-        normalizedProposal.put("proposal_id", proposal.artifactId());
+        normalizedProposal.put("proposal_id", "target-proposal." + HASH.substring(0, 32));
         normalizedProposal.put("command_id", command.commandId());
         normalizedProposal.put("logical_run_id", RUN_ID);
         normalizedProposal.put("attempt_id", ATTEMPT_ID);
         normalizedProposal.put("payload_schema_version", proposal.schemaVersion());
-        normalizedProposal.put("payload_ref", proposal.uri());
+        normalizedProposal.put(
+                "payload_ref", "urn:target-e2e:proposal:intake:" + proposal.sha256());
         normalizedProposal.put("payload_hash", proposal.sha256());
         normalizedProposal.put("terminal_class", "COMPLETED");
         normalizedProposal.put("formal_authority", false);
@@ -406,7 +407,7 @@ final class TargetE2eFinalizationFixture {
                 "intake-graph-state.v2",
                 "intake-prompt.v2",
                 "intake-model.target-e2e.v1",
-                "intake-turn-proposal.v2",
+                "target-e2e-room-proposal-source.v1",
                 "intake-policy.v2",
                 "intake-guardrail.v2",
                 "no-tools.v1",

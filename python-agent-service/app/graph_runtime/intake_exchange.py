@@ -58,7 +58,7 @@ class IntakeExchangeAuthority(_ExchangeModel):
     logical_run_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
     attempt_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
     request_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
-    graph_key: Literal["intake.v2"]
+    graph_key: Literal["intake.v2", "all-rooms.target-e2e.v1"]
     graph_version: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
     checkpoint_schema_version: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
     process_revision: int = Field(ge=0)
@@ -409,7 +409,7 @@ def _authority(execution: GatewayExecution) -> IntakeExchangeAuthority:
         logical_run_id=command.logical_run_id,
         attempt_id=command.attempt_id,
         request_hash=command.request_hash,
-        graph_key="intake.v2",
+        graph_key=command.graph_key,
         graph_version=command.graph_version,
         checkpoint_schema_version=command.checkpoint_schema_version,
         process_revision=command.process_revision,
@@ -436,6 +436,7 @@ def _require_proposal_execution_binding(
     record = execution.thread_record
     invocation = command.invocation_context
     registry = execution.admission.registry.binding
+    target_candidate = execution.fence.execution_lane.value == "TARGET_E2E_CANDIDATE"
     expected = {
         "command_id": command.command_id,
         "logical_run_id": command.logical_run_id,
@@ -451,10 +452,20 @@ def _require_proposal_execution_binding(
             "checkpoint_schema_version": command.checkpoint_schema_version,
             "prompt_version": invocation.prompt_profile_id,
             "model_profile_id": invocation.model_profile_id,
-            "output_schema_version": invocation.output_schema_version,
+            # The all-room envelope carries the wrapper schema, while the
+            # immutable Intake artifact remains the private v2 proposal.
+            "output_schema_version": (
+                INTAKE_OUTPUT_SCHEMA
+                if target_candidate
+                else invocation.output_schema_version
+            ),
             "policy_version": invocation.policy_version,
             "guardrail_version": invocation.guardrail_version,
-            "tool_policy_version": registry.tool_policy_version,
+            "tool_policy_version": (
+                "no-tools.v1"
+                if target_candidate
+                else registry.tool_policy_version
+            ),
         },
     }
     if any(proposal.get(field) != value for field, value in expected.items()):

@@ -231,8 +231,8 @@ public final class IntakeGraphResultFinalizer {
                 "model profile");
         requireEqual(
                 registration.outputSchemaVersion(),
-                authority.profileVersions().outputSchemaVersion(),
-                "output schema");
+                authority.executionOutputSchemaVersion(),
+                "execution output schema");
         requireEqual(
                 registration.policyVersion(),
                 authority.profileVersions().policyVersion(),
@@ -278,7 +278,10 @@ public final class IntakeGraphResultFinalizer {
         IntakeTurnProposal.ProfileVersions profiles = authority.profileVersions();
         requireEqual(context.promptProfileId(), profiles.promptVersion(), "prompt profile");
         requireEqual(context.modelProfileId(), profiles.modelProfileId(), "model profile");
-        requireEqual(context.outputSchemaVersion(), profiles.outputSchemaVersion(), "output schema");
+        requireEqual(
+                context.outputSchemaVersion(),
+                authority.executionOutputSchemaVersion(),
+                "execution output schema");
         requireEqual(context.policyVersion(), profiles.policyVersion(), "policy version");
         requireEqual(context.guardrailVersion(), profiles.guardrailVersion(), "guardrail version");
         if (!context.toolCapabilities().isEmpty()) {
@@ -382,7 +385,10 @@ public final class IntakeGraphResultFinalizer {
         ExecutionMetadata metadata = result.executionMetadata();
         requireEqual(metadata.promptVersion(), profiles.promptVersion(), "result prompt version");
         requireEqual(metadata.modelProfileId(), profiles.modelProfileId(), "result model profile");
-        requireEqual(metadata.schemaVersion(), profiles.outputSchemaVersion(), "result output schema");
+        requireEqual(
+                metadata.schemaVersion(),
+                authority.executionOutputSchemaVersion(),
+                "result execution output schema");
         requireEqual(metadata.policyVersion(), profiles.policyVersion(), "result policy version");
         requireEqual(metadata.guardrailVersion(), profiles.guardrailVersion(), "result guardrail version");
         if (result.usage().inputTokens() < 0

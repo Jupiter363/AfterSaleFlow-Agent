@@ -32,14 +32,22 @@ public sealed interface TargetE2eRuntimeMeasurementProvider
 
     public MeasurementEvidence {
       activeProfiles = Set.copyOf(Objects.requireNonNull(activeProfiles, "activeProfiles"));
-      if (!activeProfiles.equals(Set.of("target-e2e", "agent-worker"))) {
+      Set<String> expectedProfiles =
+          workerRole == null
+              ? Set.of()
+              : switch (workerRole) {
+                case "CONTROL" -> Set.of("target-e2e", "control-worker");
+                case "AGENT" -> Set.of("target-e2e", "agent-worker");
+                default -> Set.of();
+              };
+      if (!activeProfiles.equals(expectedProfiles)) {
         throw new IllegalArgumentException("target E2E runtime profiles are not isolated");
       }
       if (!SpringJdbcTargetE2eRuntimeMeasurementProvider.ARTIFACT_MARKER.equals(artifactMarker)) {
         throw new IllegalArgumentException("target E2E artifact marker is invalid");
       }
       TargetE2eActivationContract.sha256(artifactDigest, "artifactDigest");
-      if (!Set.of("CONTROL", "AGENT").contains(workerRole)) {
+      if (expectedProfiles.isEmpty()) {
         throw new IllegalArgumentException("target E2E worker role is invalid");
       }
       Objects.requireNonNull(domainPrivileges, "domainPrivileges");

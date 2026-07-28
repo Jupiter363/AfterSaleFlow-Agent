@@ -1,11 +1,13 @@
 package com.example.dispute.hearing;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.mock;
 
 import com.example.dispute.agentstream.application.AgentRunAcceptedView;
 import com.example.dispute.agentstream.application.AgentRunCoordinator;
@@ -55,6 +57,11 @@ import com.example.dispute.room.infrastructure.persistence.repository.CaseIntake
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.RoomMessageRepository;
 import com.example.dispute.room.application.CaseEventService;
+import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
+import com.example.dispute.workflow.infrastructure.persistence.entity.CaseRoomEpochEntity;
+import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.EpochLifecycleStatus;
+import com.example.dispute.workflow.infrastructure.persistence.repository.CaseRoomEpochRepository;
+import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -299,6 +306,82 @@ class HearingFlowRuntimeServiceTest {
                 .extracting(AgentRunStartCommand::operation)
                 .containsExactly("HEARING_INTAKE_QUESTIONS")
                 .doesNotContain("HEARING_JUDGE_V1", "HEARING_JUDGE_V2");
+    }
+
+    @Test
+    void targetEvidenceTerminalWithoutHearingEpochNeverFallsBackToLegacyStartup() {
+        CaseRoomEpochRepository epochRepository = mock(CaseRoomEpochRepository.class);
+        HearingFlowRuntimeService targetService =
+                new HearingFlowRuntimeService(
+                        caseRepository,
+                        hearingStateRepository,
+                        instanceRepository,
+                        stageRepository,
+                        actionRepository,
+                        artifactRepository,
+                        adjudicationDraftRepository,
+                        trialDossierRepository,
+                        intakeDossierRepository,
+                        evidenceDossierRepository,
+                        evidenceItemRepository,
+                        roomRepository,
+                        messageRepository,
+                        caseEventService,
+                        agentRunRepository,
+                        agentRunCoordinator,
+                        trialDossierService,
+                        reviewHandoffService,
+                        postCommitSideEffects,
+                        remedyPlanRepository,
+                        reviewTaskRepository,
+                        new DisputeProperties(
+                                Duration.ofHours(2),
+                                Duration.ofHours(3),
+                                Duration.ofMinutes(20),
+                                Duration.ofSeconds(15),
+                                false),
+                        objectMapper,
+                        CLOCK,
+                        epochRepository,
+                        null,
+                        null);
+        FulfillmentCaseEntity dispute = hearingCase(NOW.plus(Duration.ofHours(3)));
+        CaseRoomEpochEntity evidence = mock(CaseRoomEpochEntity.class);
+        when(evidence.getWriterMode()).thenReturn(WriterMode.TEMPORAL);
+        when(evidence.getGraphKey()).thenReturn(TargetTypedRoomProtocol.GRAPH_KEY);
+        when(evidence.getRoomWorkflowType())
+                .thenReturn(TargetTypedRoomProtocol.EVIDENCE_WORKFLOW_TYPE);
+        when(caseRepository.findByIdForUpdate(CASE_ID)).thenReturn(Optional.of(dispute));
+        when(caseRepository.findById(CASE_ID)).thenReturn(Optional.of(dispute));
+        when(epochRepository.findTopByCaseIdAndRoomTypeAndLifecycleStatusOrderByRoomEpochDesc(
+                        CASE_ID,
+                        com.example.dispute.workflow.contract.v1.ContractTypes.RoomType.HEARING,
+                        EpochLifecycleStatus.ACTIVE))
+                .thenReturn(Optional.empty());
+        when(epochRepository.findTopByCaseIdAndRoomTypeAndLifecycleStatusOrderByRoomEpochDesc(
+                        CASE_ID,
+                        com.example.dispute.workflow.contract.v1.ContractTypes.RoomType.HEARING,
+                        EpochLifecycleStatus.PREPARING))
+                .thenReturn(Optional.empty());
+        when(epochRepository.findTopByCaseIdAndRoomTypeAndLifecycleStatusOrderByRoomEpochDesc(
+                        CASE_ID,
+                        com.example.dispute.workflow.contract.v1.ContractTypes.RoomType.HEARING,
+                        EpochLifecycleStatus.PROVISIONING))
+                .thenReturn(Optional.empty());
+        when(epochRepository.findTopByCaseIdAndRoomTypeAndLifecycleStatusOrderByRoomEpochDesc(
+                        CASE_ID,
+                        com.example.dispute.workflow.contract.v1.ContractTypes.RoomType.EVIDENCE,
+                        EpochLifecycleStatus.TERMINAL))
+                .thenReturn(Optional.of(evidence));
+
+        assertThatThrownBy(
+                        () ->
+                                targetService.get(
+                                        CASE_ID,
+                                        new AuthenticatedActor("user-1", ActorRole.USER)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("target Hearing epoch is absent");
+        verify(instanceRepository, org.mockito.Mockito.never()).save(any());
     }
 
     @Test

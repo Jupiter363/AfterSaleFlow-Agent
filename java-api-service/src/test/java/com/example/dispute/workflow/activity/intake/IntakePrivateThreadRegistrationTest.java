@@ -14,6 +14,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import java.nio.file.Path;
+import java.time.Instant;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 
@@ -70,5 +72,44 @@ class IntakePrivateThreadRegistrationTest {
                                 registrar.register(
                                         IntakeTestFixtures.issueRequest("intake-prompt.v3")))
                 .isInstanceOf(IntakeGraphBindingConflictException.class);
+    }
+
+    @Test
+    void issuesTargetRegistrationFromExplicitTargetPins() {
+        var factory = new IntakePrivateThreadRegistrationFactory(() -> IntakeTestFixtures.THREAD_ID);
+        var binding = factory.issue(
+                new IntakePrivateThreadRegistrationFactory.IssueRequest(
+                        "target-registration",
+                        "target-tenant",
+                        "CASE_TARGET",
+                        1,
+                        1,
+                        new com.example.dispute.workflow.application.intake.IntakePrivateThreadRegistration.ActorScope(
+                                "target-user",
+                                com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole.USER,
+                                com.example.dispute.workflow.contract.v1.ContractTypes.Audience.USER,
+                                List.of("case:CASE_TARGET:command:INTAKE_MESSAGE")),
+                        "target-agent-session",
+                        new IntakePrivateThreadRegistrationFactory.VersionPins(
+                                "all-rooms.target-e2e.v1",
+                                "target-e2e-graph.2026-07-27.1",
+                                "target-e2e-checkpoint.v1",
+                                "intake-graph-state.v2",
+                                "target-prompt",
+                                "target-model",
+                                "target-e2e-room-proposal-source.v1",
+                                "target-policy",
+                                "target-guardrail",
+                                "target-tool-policy"),
+                        com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode.TEMPORAL,
+                        Instant.parse("2026-07-28T00:00:00Z")));
+
+        assertThat(binding.registration().graphKey()).isEqualTo("all-rooms.target-e2e.v1");
+        assertThat(binding.registration().graphVersion()).isEqualTo("target-e2e-graph.2026-07-27.1");
+        assertThat(binding.registration().checkpointSchemaVersion()).isEqualTo("target-e2e-checkpoint.v1");
+        assertThat(binding.registration().stateSchemaVersion()).isEqualTo("intake-graph-state.v2");
+        assertThat(binding.registration().outputSchemaVersion())
+                .isEqualTo("target-e2e-room-proposal-source.v1");
+        binding.registration().requireCanonicalHash();
     }
 }

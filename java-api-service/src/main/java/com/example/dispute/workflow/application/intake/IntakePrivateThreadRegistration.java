@@ -72,10 +72,8 @@ public record IntakePrivateThreadRegistration(
         }
         promptVersion = IntakeContractSupport.identifier(promptVersion, "promptVersion");
         modelProfileId = IntakeContractSupport.identifier(modelProfileId, "modelProfileId");
-        if (!"intake-turn-proposal.v2".equals(outputSchemaVersion)) {
-            throw new IllegalArgumentException(
-                    "outputSchemaVersion must be intake-turn-proposal.v2");
-        }
+        outputSchemaVersion = IntakeContractSupport.identifier(
+                outputSchemaVersion, "outputSchemaVersion");
         policyVersion = IntakeContractSupport.identifier(policyVersion, "policyVersion");
         guardrailVersion = IntakeContractSupport.identifier(guardrailVersion, "guardrailVersion");
         toolPolicyVersion = IntakeContractSupport.identifier(
@@ -86,9 +84,27 @@ public record IntakePrivateThreadRegistration(
         if (TARGET_GRAPH_KEY.equals(graphKey)
                 && (writerMode != WriterMode.TEMPORAL
                         || !TARGET_GRAPH_VERSION.equals(graphVersion)
-                        || !TARGET_CHECKPOINT_SCHEMA.equals(checkpointSchemaVersion))) {
+                        || !TARGET_CHECKPOINT_SCHEMA.equals(checkpointSchemaVersion)
+                        || !"target-e2e-room-proposal-source.v1".equals(
+                                outputSchemaVersion))) {
             throw new IllegalArgumentException(
                     "target graph requires the exact TEMPORAL target-E2E version pins");
+        }
+        if (LEGACY_GRAPH_KEY.equals(graphKey)
+                && !"intake-turn-proposal.v2".equals(outputSchemaVersion)) {
+            throw new IllegalArgumentException(
+                    "legacy Intake outputSchemaVersion must be intake-turn-proposal.v2");
+        }
+        if (LEGACY_GRAPH_KEY.equals(graphKey)
+                && !actorScope.capabilities().contains("graph.command.execute")) {
+            throw new IllegalArgumentException(
+                    "legacy private Intake capabilities must include graph.command.execute");
+        }
+        if (TARGET_GRAPH_KEY.equals(graphKey)
+                && !actorScope.capabilities().equals(
+                        List.of("case:" + caseId + ":command:INTAKE_MESSAGE"))) {
+            throw new IllegalArgumentException(
+                    "target private Intake capabilities must exactly bind the case command");
         }
         issuedAt = Objects.requireNonNull(issuedAt, "issuedAt must not be null");
         registrationHash = IntakeContractSupport.sha256(registrationHash, "registrationHash");
@@ -128,10 +144,6 @@ public record IntakePrivateThreadRegistration(
             }
             capabilities = IntakeContractSupport.identifiers(
                     capabilities, 1, 16, "capabilities");
-            if (!capabilities.contains("graph.command.execute")) {
-                throw new IllegalArgumentException(
-                        "private Intake capabilities must include graph.command.execute");
-            }
         }
     }
 

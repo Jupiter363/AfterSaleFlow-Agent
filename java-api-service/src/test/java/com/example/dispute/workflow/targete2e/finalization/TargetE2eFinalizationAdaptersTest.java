@@ -76,6 +76,10 @@ class TargetE2eFinalizationAdaptersTest {
                 .isEqualTo(fixture.result().graphResult().checkpointId());
         assertThat(firstRequest.authority().resultHash()).isEqualTo(fixture.result().resultHash());
         assertThat(firstRequest.proposalReference()).isEqualTo(proposalReference);
+        assertThat(firstRequest.authority().executionOutputSchemaVersion())
+                .isEqualTo("target-e2e-room-proposal-source.v1");
+        assertThat(firstRequest.authority().profileVersions().outputSchemaVersion())
+                .isEqualTo("intake-turn-proposal.v2");
         firstRequest.requireCanonicalRequestHash();
         assertThat(authorizations).hasValue(4);
     }

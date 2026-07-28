@@ -19,6 +19,10 @@ import java.util.Objects;
 @Component
 @ConditionalOnBean(AgentRunV2FinalizationFactsProvider.class)
 @ConditionalOnProperty(name = "app.agent-run-v2.enabled", havingValue = "true")
+@ConditionalOnProperty(
+        name = "app.target-e2e.enabled",
+        havingValue = "false",
+        matchIfMissing = true)
 public final class AgentRunV2FinalizationGateway implements AgentRunFinalizationGateway {
 
     private final AgentRunLedger ledger;

@@ -10,6 +10,12 @@ public interface HearingFormalFinalizer {
 
     HearingDomainReceipt appendAction(ActionCommand command);
 
+    HearingDomainReceipt adoptPartyAction(AdoptPartyActionCommand command);
+
+    HearingDomainReceipt advanceStage(StageCommand command);
+
+    HearingDomainReceipt finalizeMatrixSynthesis(MatrixSynthesisCommand command);
+
     HearingDomainReceipt freezeDossier(DossierCommand command);
 
     HearingDomainReceipt finalizeJudgeV1(DecisionCommand command);
@@ -21,6 +27,147 @@ public interface HearingFormalFinalizer {
     HearingDomainReceipt commitHandoff(HandoffCommand command);
 
     HearingDomainReceipt commitClosure(ClosureCommand command);
+
+    /** A deterministic non-Graph transition in the fixed fifteen-stage protocol. */
+    record StageCommand(
+            HearingAuthorityCommit authorityCommit,
+            HearingFormalTransition transition,
+            String stageOutputJson,
+            String stageOutputHash,
+            String actorId) {
+        public StageCommand {
+            Objects.requireNonNull(authorityCommit, "authorityCommit");
+            Objects.requireNonNull(transition, "transition");
+            actorId = HearingAuthorityExpectation.identifier(actorId, "actorId");
+            hash(stageOutputHash, "stageOutputHash");
+            transition.requireSource(authorityCommit.authority());
+            if (!transition.advances() || !transition.actorId().equals(actorId)
+                    || !HearingFormalPayload.canonicalJson(stageOutputJson)
+                            .equals(transition.sourceOutputJson())
+                    || !HearingFormalPayload.hashCanonical(stageOutputJson).equals(stageOutputHash)) {
+                throw new IllegalArgumentException("stage command must carry an exact adjacent canonical output");
+            }
+            requireOperation(authorityCommit, HearingAuthorityCommit.OperationType.STAGE,
+                    authorityPrefix(authorityCommit) + authorityCommit.authority().stageSequence()
+                            + ':' + authorityCommit.authority().stage().name());
+            HearingFormalRequestHash.require(authorityCommit, "STAGE", transition, stageOutputHash, actorId);
+        }
+    }
+
+    /** Attaches a receipt to a browser action already durably written by the Java API transaction. */
+    record AdoptPartyActionCommand(
+            HearingAuthorityCommit authorityCommit,
+            HearingFormalTransition transition,
+            String actionId,
+            HearingFlowActionType actionType,
+            String schemaVersion,
+            String participantId,
+            String participantRole,
+            HearingFlowSubmissionStatus submissionStatus,
+            String payloadJson,
+            String contentHash,
+            String requestId,
+            String actorId) {
+        public AdoptPartyActionCommand {
+            Objects.requireNonNull(authorityCommit, "authorityCommit");
+            Objects.requireNonNull(transition, "transition");
+            Objects.requireNonNull(actionType, "actionType");
+            if (!actionType.isPartyAction()) {
+                throw new IllegalArgumentException("only a party action can be adopted");
+            }
+            actionId = HearingAuthorityExpectation.identifier(actionId, "actionId");
+            participantId = HearingAuthorityExpectation.identifier(participantId, "participantId");
+            participantRole = partyRole(participantRole);
+            Objects.requireNonNull(submissionStatus, "submissionStatus");
+            requestId = HearingAuthorityExpectation.identifier(requestId, "requestId");
+            actorId = HearingAuthorityExpectation.identifier(actorId, "actorId");
+            hash(contentHash, "contentHash");
+            transition.requireSource(authorityCommit.authority());
+            HearingFlowStage source = authorityCommit.authority().stage();
+            HearingFlowActionType expected = source == HearingFlowStage.PARTY_ANSWERS_OPEN
+                    ? HearingFlowActionType.ANSWER_BUNDLE
+                    : source == HearingFlowStage.PARTY_EVIDENCE_OPEN
+                            ? HearingFlowActionType.EVIDENCE_BATCH : null;
+            if (expected != actionType || !transition.actorId().equals(actorId)
+                    || !HearingFormalPayload.hashCanonical(payloadJson).equals(contentHash)) {
+                throw new IllegalArgumentException("party adoption does not match its Hearing wait stage");
+            }
+            if (!actionType.acceptsSchemaVersion(schemaVersion)) {
+                throw new IllegalArgumentException("party action schema is invalid");
+            }
+            HearingFormalPayload.requireAction(payloadJson, schemaVersion, contentHash,
+                    participantId, participantRole, submissionStatus);
+            requireOperation(authorityCommit, HearingAuthorityCommit.OperationType.PARTY_TERMINAL,
+                    authorityPrefix(authorityCommit) + authorityCommit.authority().stageSequence()
+                            + ':' + participantId + ':' + requestId);
+            HearingFormalRequestHash.require(authorityCommit, "ADOPT_PARTY_ACTION", transition, actionId,
+                    actionType, schemaVersion, participantId, participantRole, submissionStatus, contentHash,
+                    requestId, actorId);
+        }
+    }
+
+    /** A bounded Graph synthesis whose only formal effect is the next adjacent stage cursor. */
+    record MatrixSynthesisCommand(
+            HearingAuthorityCommit authorityCommit,
+            HearingFormalTransition transition,
+            MatrixKind matrixKind,
+            String payloadJson,
+            String contentHash,
+            String agentRunId,
+            String agentResultHash,
+            String actorId) {
+        public MatrixSynthesisCommand {
+            Objects.requireNonNull(authorityCommit, "authorityCommit");
+            Objects.requireNonNull(transition, "transition");
+            Objects.requireNonNull(matrixKind, "matrixKind");
+            hash(contentHash, "contentHash");
+            agentRunId = HearingAuthorityExpectation.identifier(agentRunId, "agentRunId");
+            hash(agentResultHash, "agentResultHash");
+            actorId = HearingAuthorityExpectation.identifier(actorId, "actorId");
+            transition.requireSource(authorityCommit.authority());
+            if (authorityCommit.authority().stage() != matrixKind.sourceStage()
+                    || transition.resultStage() != matrixKind.resultStage()
+                    || !transition.advances() || !transition.actorId().equals(actorId)
+                    || !HearingFormalPayload.canonicalJson(payloadJson)
+                            .equals(transition.sourceOutputJson())) {
+                throw new IllegalArgumentException("matrix synthesis does not match its fixed Hearing transition");
+            }
+            HearingFormalPayload.requireMatrixSynthesis(payloadJson, matrixKind, contentHash);
+            requireOperation(authorityCommit, HearingAuthorityCommit.OperationType.FINALIZE,
+                    authorityPrefix(authorityCommit) + authorityCommit.authority().stageSequence()
+                            + ':' + matrixKind.schemaVersion() + ':' + authorityCommit.requestHash());
+            HearingFormalRequestHash.require(authorityCommit, "MATRIX_SYNTHESIS", transition, matrixKind,
+                    contentHash, agentRunId, agentResultHash, actorId);
+        }
+    }
+
+    enum MatrixKind {
+        INTAKE(HearingFlowStage.INTAKE_SYNTHESIZING, HearingFlowStage.EVIDENCE_REQUESTS_GENERATING,
+                "hearing_intake_synthesis.v1", "case_fact_matrix"),
+        EVIDENCE(HearingFlowStage.EVIDENCE_SYNTHESIZING, HearingFlowStage.DOSSIER_FREEZING,
+                "hearing_evidence_synthesis.v1", "fact_evidence_matrix");
+
+        private final HearingFlowStage sourceStage;
+        private final HearingFlowStage resultStage;
+        private final String schemaVersion;
+        private final String matrixField;
+
+        MatrixKind(HearingFlowStage sourceStage, HearingFlowStage resultStage,
+                String schemaVersion, String matrixField) {
+            this.sourceStage = sourceStage;
+            this.resultStage = resultStage;
+            this.schemaVersion = schemaVersion;
+            this.matrixField = matrixField;
+        }
+
+        public HearingFlowStage sourceStage() { return sourceStage; }
+        public HearingFlowStage resultStage() { return resultStage; }
+        public String schemaVersion() { return schemaVersion; }
+        public String matrixField() { return matrixField; }
+        public String matrixSchemaVersion() {
+            return this == INTAKE ? "case_fact_matrix.v2" : "fact_evidence_matrix.v2";
+        }
+    }
 
     record ActionCommand(
             HearingAuthorityCommit authorityCommit,

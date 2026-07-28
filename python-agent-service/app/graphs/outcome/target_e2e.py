@@ -20,6 +20,12 @@ from app.graph_runtime.checkpoint import FencedPostgresSaver, bind_fence_context
 from app.graph_runtime.gateway import GatewayExecution
 from app.graph_runtime.persistence_models import GraphFenceContext
 from app.graph_runtime.registry import VersionBinding
+from app.graph_runtime.target_e2e_composite import (
+    TARGET_E2E_CHECKPOINT_SCHEMA_VERSION,
+    TARGET_E2E_GRAPH_KEY,
+    TARGET_E2E_GRAPH_VERSION,
+    TARGET_E2E_OUTPUT_SCHEMA_VERSION,
+)
 from app.graphs.outcome.contracts import OUTCOME_REVIEW_IDENTITY
 from app.graphs.outcome.errors import OutcomeReviewContractError
 from app.graphs.outcome.graph import compile_outcome_review_v1_graph
@@ -32,7 +38,6 @@ from app.graphs.outcome.state import (
     validate_outcome_review_recovery_state,
 )
 from app.schemas import ReviewCopilotAnswer, ReviewCopilotRequest, ReviewStatement
-
 
 TARGET_E2E_EXECUTION_LANE = "TARGET_E2E_CANDIDATE"
 TARGET_E2E_REVIEW_ROOM_TYPE = "REVIEW"
@@ -469,20 +474,11 @@ def build_outcome_target_e2e_proposal_source(
 
 
 def require_exact_outcome_target_e2e_registry_binding(binding: VersionBinding) -> None:
-    identity = OUTCOME_REVIEW_IDENTITY
     expected = {
-        "graph_key": identity.gateway_graph_key,
-        "graph_version": identity.graph_version,
-        "checkpoint_schema_version": identity.checkpoint_schema_version,
-        "state_schema_version": identity.state_schema_version,
-        "command_schema_version": identity.gateway_command_schema_version,
-        "result_schema_version": identity.gateway_result_schema_version,
-        "prompt_version": identity.prompt_version,
-        "model_profile_id": identity.model_profile_id,
-        "output_schema_version": identity.output_schema_version,
-        "policy_version": identity.policy_version,
-        "guardrail_version": identity.guardrail_version,
-        "tool_policy_version": identity.tool_policy_version,
+        "graph_key": TARGET_E2E_GRAPH_KEY,
+        "graph_version": TARGET_E2E_GRAPH_VERSION,
+        "checkpoint_schema_version": TARGET_E2E_CHECKPOINT_SCHEMA_VERSION,
+        "output_schema_version": TARGET_E2E_OUTPUT_SCHEMA_VERSION,
     }
     if type(binding) is not VersionBinding or any(
         getattr(binding, field, None) != value for field, value in expected.items()
@@ -495,21 +491,21 @@ def _require_gateway_command_binding(
     fence: GraphFenceContext,
     registry: VersionBinding,
 ) -> None:
-    identity = OUTCOME_REVIEW_IDENTITY
     invocation = command.invocation_context
     require_exact_outcome_target_e2e_registry_binding(registry)
     if (
         type(command) is not RoomGraphCommand
         or type(fence) is not GraphFenceContext
         or command.room_type != TARGET_E2E_REVIEW_ROOM_TYPE
-        or command.graph_key != identity.gateway_graph_key
-        or command.graph_version != identity.graph_version
-        or command.checkpoint_schema_version != identity.checkpoint_schema_version
-        or invocation.prompt_profile_id != identity.prompt_version
-        or invocation.model_profile_id != identity.model_profile_id
-        or invocation.output_schema_version != identity.output_schema_version
-        or invocation.policy_version != identity.policy_version
-        or invocation.guardrail_version != identity.guardrail_version
+        or command.graph_key != TARGET_E2E_GRAPH_KEY
+        or command.graph_version != TARGET_E2E_GRAPH_VERSION
+        or command.checkpoint_schema_version != TARGET_E2E_CHECKPOINT_SCHEMA_VERSION
+        or command.schema_version != registry.command_schema_version
+        or invocation.prompt_profile_id != registry.prompt_version
+        or invocation.model_profile_id != registry.model_profile_id
+        or invocation.output_schema_version != TARGET_E2E_OUTPUT_SCHEMA_VERSION
+        or invocation.policy_version != registry.policy_version
+        or invocation.guardrail_version != registry.guardrail_version
         or invocation.tool_capabilities
         or fence.thread_id != command.thread_id
         or fence.command_id != command.command_id
@@ -741,8 +737,8 @@ __all__ = [
     "OutcomeTargetE2EProposalSource",
     "OutcomeTargetE2EProposalStore",
     "StoredOutcomeTargetE2EProposal",
-    "build_outcome_target_e2e_registration",
     "build_outcome_target_e2e_proposal_source",
+    "build_outcome_target_e2e_registration",
     "deterministic_outcome_target_e2e_invocation",
     "require_exact_outcome_target_e2e_registry_binding",
 ]

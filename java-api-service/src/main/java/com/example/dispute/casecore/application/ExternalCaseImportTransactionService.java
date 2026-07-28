@@ -29,6 +29,7 @@ import com.example.dispute.room.infrastructure.persistence.repository.CasePhaseC
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import com.example.dispute.workflow.application.epoch.RoomEpochAllocator;
 import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.ActivateRoomEpoch;
+import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.RoomEpochAllocation;
 import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.TerminalRoomEpoch;
 import com.example.dispute.workflow.contract.v1.ContractTypes;
 import java.nio.charset.StandardCharsets;
@@ -40,6 +41,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -69,6 +72,7 @@ public class ExternalCaseImportTransactionService {
     private final HearingImportedCaseInitializer hearingInitializer;
     private final DisputeProperties properties;
     private final Clock clock;
+    private final ImportedCaseIdFactory caseIdFactory;
 
     // 所属模块：【案件核心与导入 / 应用编排层】「ExternalCaseImportTransactionService.ExternalCaseImportTransactionService(FulfillmentCaseRepository,CaseRoomRepository,CasePhaseClockRepository,ParticipantService,IntakeAgentTurnService,SimulatedImportTemplateCursorRepository,SimulatedExternalDisputeTemplateCatalog,PostCommitSideEffectExecutor,DisputeProperties,Clock)」。
     // 具体功能：「ExternalCaseImportTransactionService.ExternalCaseImportTransactionService(FulfillmentCaseRepository,CaseRoomRepository,CasePhaseClockRepository,ParticipantService,IntakeAgentTurnService,SimulatedImportTemplateCursorRepository,SimulatedExternalDisputeTemplateCatalog,PostCommitSideEffectExecutor,DisputeProperties,Clock)」：通过构造器接收 「repository」(FulfillmentCaseRepository)、「roomRepository」(CaseRoomRepository)、「clockRepository」(CasePhaseClockRepository)、「participantService」(ParticipantService)、「intakeAgentTurnService」(IntakeAgentTurnService)、「simulatedImportCursorRepository」(SimulatedImportTemplateCursorRepository)、「simulatedImportTemplates」(SimulatedExternalDisputeTemplateCatalog)、「postCommit」(PostCommitSideEffectExecutor)、「properties」(DisputeProperties)、「clock」(Clock) 并保存为「ExternalCaseImportTransactionService」的协作依赖；这里只完成依赖装配，不提前访问数据库或外部服务。
@@ -76,6 +80,38 @@ public class ExternalCaseImportTransactionService {
     // 下游影响：「ExternalCaseImportTransactionService.ExternalCaseImportTransactionService(FulfillmentCaseRepository,CaseRoomRepository,CasePhaseClockRepository,ParticipantService,IntakeAgentTurnService,SimulatedImportTemplateCursorRepository,SimulatedExternalDisputeTemplateCatalog,PostCommitSideEffectExecutor,DisputeProperties,Clock)」只产生当前对象的返回值或字段变化，不访问额外基础设施。
     // 系统意义：「ExternalCaseImportTransactionService.ExternalCaseImportTransactionService(FulfillmentCaseRepository,CaseRoomRepository,CasePhaseClockRepository,ParticipantService,IntakeAgentTurnService,SimulatedImportTemplateCursorRepository,SimulatedExternalDisputeTemplateCatalog,PostCommitSideEffectExecutor,DisputeProperties,Clock)」负责主链路中的“外部案件导入Transaction服务”；Java/PostgreSQL 是案件状态事实源，导入重试不能创建重复案件
     // Java 语法：构造器名称与类名相同且没有返回类型；参数通常由 Spring 按类型注入。
+    @Autowired
+    public ExternalCaseImportTransactionService(
+            FulfillmentCaseRepository repository,
+            CaseRoomRepository roomRepository,
+            CasePhaseClockRepository clockRepository,
+            ParticipantService participantService,
+            IntakeAgentTurnService intakeAgentTurnService,
+            SimulatedImportTemplateCursorRepository simulatedImportCursorRepository,
+            SimulatedExternalDisputeTemplateCatalog simulatedImportTemplates,
+            PostCommitSideEffectExecutor postCommit,
+            RoomEpochAllocator roomEpochAllocator,
+            HearingImportedCaseInitializer hearingInitializer,
+            DisputeProperties properties,
+            Clock clock,
+            ObjectProvider<ImportedCaseIdFactory> caseIdFactoryProvider) {
+        this(
+                repository,
+                roomRepository,
+                clockRepository,
+                participantService,
+                intakeAgentTurnService,
+                simulatedImportCursorRepository,
+                simulatedImportTemplates,
+                postCommit,
+                roomEpochAllocator,
+                hearingInitializer,
+                properties,
+                clock,
+                caseIdFactoryProvider.getIfUnique(
+                        () -> () -> "CASE_" + compactUuid()));
+    }
+
     public ExternalCaseImportTransactionService(
             FulfillmentCaseRepository repository,
             CaseRoomRepository roomRepository,
@@ -89,6 +125,36 @@ public class ExternalCaseImportTransactionService {
             HearingImportedCaseInitializer hearingInitializer,
             DisputeProperties properties,
             Clock clock) {
+        this(
+                repository,
+                roomRepository,
+                clockRepository,
+                participantService,
+                intakeAgentTurnService,
+                simulatedImportCursorRepository,
+                simulatedImportTemplates,
+                postCommit,
+                roomEpochAllocator,
+                hearingInitializer,
+                properties,
+                clock,
+                () -> "CASE_" + compactUuid());
+    }
+
+    private ExternalCaseImportTransactionService(
+            FulfillmentCaseRepository repository,
+            CaseRoomRepository roomRepository,
+            CasePhaseClockRepository clockRepository,
+            ParticipantService participantService,
+            IntakeAgentTurnService intakeAgentTurnService,
+            SimulatedImportTemplateCursorRepository simulatedImportCursorRepository,
+            SimulatedExternalDisputeTemplateCatalog simulatedImportTemplates,
+            PostCommitSideEffectExecutor postCommit,
+            RoomEpochAllocator roomEpochAllocator,
+            HearingImportedCaseInitializer hearingInitializer,
+            DisputeProperties properties,
+            Clock clock,
+            ImportedCaseIdFactory caseIdFactory) {
         this.repository = repository;
         this.roomRepository = roomRepository;
         this.clockRepository = clockRepository;
@@ -101,6 +167,7 @@ public class ExternalCaseImportTransactionService {
         this.hearingInitializer = hearingInitializer;
         this.properties = properties;
         this.clock = clock;
+        this.caseIdFactory = Objects.requireNonNull(caseIdFactory, "caseIdFactory");
     }
 
     /**
@@ -189,7 +256,7 @@ public class ExternalCaseImportTransactionService {
                         () -> {
                             FulfillmentCaseEntity entity =
                                     FulfillmentCaseEntity.imported(
-                                            "CASE_" + compactUuid(),
+                                            caseIdFactory.nextCaseId(),
                                             command.orderReference(),
                                             command.afterSalesReference(),
                                             command.logisticsReference(),
@@ -214,9 +281,16 @@ public class ExternalCaseImportTransactionService {
                                             saved, command, actor.actorId(), now);
                             participantService.ensureImportedParties(
                                     saved, actor, now);
-                            recordRoomEpoch(saved, materializedRoom, now);
+                            RoomEpochAllocation roomEpoch =
+                                    recordRoomEpoch(saved, materializedRoom, now);
                             initializeHearingIfNeeded(saved, materializedRoom);
-                            startIntakeIfNeeded(saved, command, initiatorRole, traceId, requestId);
+                            startIntakeIfNeeded(
+                                    saved,
+                                    command,
+                                    initiatorRole,
+                                    traceId,
+                                    requestId,
+                                    roomEpoch);
                             return view(saved);
                         });
     }
@@ -277,8 +351,14 @@ public class ExternalCaseImportTransactionService {
             ImportDisputeCommand command,
             ActorRole initiatorRole,
             String traceId,
-            String requestId) {
+            String requestId,
+            RoomEpochAllocation roomEpoch) {
         if (isTerminal(command.caseStatus()) || currentRoom(command) != RoomType.INTAKE) {
+            return;
+        }
+        if (roomEpoch != null
+                && roomEpoch.roomType() == ContractTypes.RoomType.INTAKE
+                && roomEpoch.writerMode() == ContractTypes.WriterMode.TEMPORAL) {
             return;
         }
         AuthenticatedActor intakeActor =
@@ -441,7 +521,7 @@ public class ExternalCaseImportTransactionService {
         return new MaterializedRoom(room, deadline);
     }
 
-    private void recordRoomEpoch(
+    private RoomEpochAllocation recordRoomEpoch(
             FulfillmentCaseEntity dispute,
             MaterializedRoom materializedRoom,
             OffsetDateTime occurredAt) {
@@ -457,9 +537,9 @@ public class ExternalCaseImportTransactionService {
                             dispute.getCaseStatus().name(),
                             room.getRoomStatus().name(),
                             occurredAt));
-            return;
+            return null;
         }
-        roomEpochAllocator.activate(
+        return roomEpochAllocator.activate(
                 new ActivateRoomEpoch(
                         dispute.getId(),
                         room.getId(),

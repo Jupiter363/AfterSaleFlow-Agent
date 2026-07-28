@@ -66,6 +66,7 @@ public class EpochAwareIntakeMessageIngressRouter implements IntakeMessageIngres
                         epoch.getRoomEpoch(),
                         epoch.getFencingToken(),
                         epoch.getProcessRevision(),
+                        epoch.getRoomRevision(),
                         epoch.getTemporalWorkflowId(),
                         epoch.getTemporalBuildId());
         TargetIntakeActivationGrant grant = activationAuthorities.getFirst().authorize(binding);

@@ -37,6 +37,24 @@ import com.example.dispute.infrastructure.persistence.repository.RemedyPlanRepos
 import com.example.dispute.infrastructure.persistence.repository.ReviewPacketRepository;
 import com.example.dispute.infrastructure.persistence.repository.ReviewTaskRepository;
 import com.example.dispute.notification.application.CaseLifecycleNotificationService;
+import com.example.dispute.room.application.CaseEventService;
+import com.example.dispute.workflow.application.command.AcceptCaseCommand;
+import com.example.dispute.workflow.application.command.CaseCommandService;
+import com.example.dispute.workflow.application.epoch.RoomEpochSelectionContext.TrafficSource;
+import com.example.dispute.workflow.contract.v1.ContractJson;
+import com.example.dispute.workflow.contract.v1.ContractTypes.CommandType;
+import com.example.dispute.workflow.contract.v1.ContractTypes.PayloadRef;
+import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
+import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
+import com.example.dispute.workflow.infrastructure.persistence.entity.CaseRoomEpochEntity;
+import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.EpochLifecycleStatus;
+import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.EpochProvisioningStatus;
+import com.example.dispute.workflow.infrastructure.persistence.repository.CaseRoomEpochRepository;
+import com.example.dispute.workflow.targete2e.ingress.rooms.TargetRoomCommandIngress;
+import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewHumanDecisionReceipt;
+import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewFrozenExecutionContract;
+import com.example.dispute.workflow.targete2e.temporal.TargetRoomEpochSelectionAuthority;
+import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
 import com.example.dispute.review.domain.ApprovalPolicyDecision;
 import com.example.dispute.review.domain.ApprovalPolicyEngine;
 import com.example.dispute.review.domain.ApprovalPolicyInput;
@@ -62,6 +80,8 @@ import java.util.Objects;
 import java.util.TreeMap;
 import java.util.UUID;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -94,6 +114,12 @@ public class ReviewApplicationService {
     private final ApprovalPolicyEngine policyEngine;
     private final int packetExpiryHours;
     private final int reviewDueBusinessDays;
+    private final CaseRoomEpochRepository roomEpochRepository;
+    private final CaseCommandService caseCommandService;
+    private final ObjectProvider<TargetRoomCommandIngress> targetIngressProvider;
+    private final ObjectProvider<TargetRoomEpochSelectionAuthority> targetAuthorityProvider;
+    private final CaseEventService caseEventService;
+    private final ReviewTargetDecisionHandoffWriter targetHandoffWriter;
 
     // 所属模块：【平台人工终审 / 应用编排层】「ReviewApplicationService.ReviewApplicationService(FulfillmentCaseRepository,RemedyPlanRepository,AdjudicationDraftRepository,HearingStateRepository,EvidenceDossierRepository,ReviewPacketRepository,ReviewTaskRepository,ApprovalRecordRepository,DeliberationReportRepository,ApprovalPolicyDecisionRepository,CaseLifecycleNotificationService,AuditRecorder,PostReviewOrchestrationService,ObjectMapper,TransactionTemplate,BigDecimal,BigDecimal,int)」。
     // 具体功能：「ReviewApplicationService.ReviewApplicationService(FulfillmentCaseRepository,RemedyPlanRepository,AdjudicationDraftRepository,HearingStateRepository,EvidenceDossierRepository,ReviewPacketRepository,ReviewTaskRepository,ApprovalRecordRepository,DeliberationReportRepository,ApprovalPolicyDecisionRepository,CaseLifecycleNotificationService,AuditRecorder,PostReviewOrchestrationService,ObjectMapper,TransactionTemplate,BigDecimal,BigDecimal,int)」：通过构造器接收 「caseRepository」(FulfillmentCaseRepository)、「planRepository」(RemedyPlanRepository)、「draftRepository」(AdjudicationDraftRepository)、「hearingRepository」(HearingStateRepository)、「dossierRepository」(EvidenceDossierRepository)、「packetRepository」(ReviewPacketRepository)、「taskRepository」(ReviewTaskRepository)、「approvalRepository」(ApprovalRecordRepository)、「deliberationRepository」(DeliberationReportRepository)、「policyDecisionRepository」(ApprovalPolicyDecisionRepository)、「lifecycleNotifications」(CaseLifecycleNotificationService)、「auditRecorder」(AuditRecorder)、「postReviewOrchestration」(PostReviewOrchestrationService)、「objectMapper」(ObjectMapper)、「transactions」(TransactionTemplate)、「refundThreshold」(BigDecimal)、「reshipThreshold」(BigDecimal)、「reviewTimeoutHours」(int) 并保存为「ReviewApplicationService」的协作依赖；这里只完成依赖装配，不提前访问数据库或外部服务。
@@ -101,6 +127,7 @@ public class ReviewApplicationService {
     // 下游影响：「ReviewApplicationService.ReviewApplicationService(FulfillmentCaseRepository,RemedyPlanRepository,AdjudicationDraftRepository,HearingStateRepository,EvidenceDossierRepository,ReviewPacketRepository,ReviewTaskRepository,ApprovalRecordRepository,DeliberationReportRepository,ApprovalPolicyDecisionRepository,CaseLifecycleNotificationService,AuditRecorder,PostReviewOrchestrationService,ObjectMapper,TransactionTemplate,BigDecimal,BigDecimal,int)」只产生当前对象的返回值或字段变化，不访问额外基础设施。
     // 系统意义：「ReviewApplicationService.ReviewApplicationService(FulfillmentCaseRepository,RemedyPlanRepository,AdjudicationDraftRepository,HearingStateRepository,EvidenceDossierRepository,ReviewPacketRepository,ReviewTaskRepository,ApprovalRecordRepository,DeliberationReportRepository,ApprovalPolicyDecisionRepository,CaseLifecycleNotificationService,AuditRecorder,PostReviewOrchestrationService,ObjectMapper,TransactionTemplate,BigDecimal,BigDecimal,int)」负责主链路中的“审核应用服务”；最终决定权属于具备平台审核角色的人；过期、改版或哈希不一致的审批必须失效
     // Java 语法：构造器名称与类名相同且没有返回类型；参数通常由 Spring 按类型注入。
+    @Autowired
     public ReviewApplicationService(
             FulfillmentCaseRepository caseRepository,
             RemedyPlanRepository planRepository,
@@ -120,7 +147,13 @@ public class ReviewApplicationService {
             @Value("${app.approval.refund-threshold:500.00}") BigDecimal refundThreshold,
             @Value("${app.approval.reship-threshold:300.00}") BigDecimal reshipThreshold,
             @Value("${app.approval.packet-expiry-hours:168}") int packetExpiryHours,
-            @Value("${app.approval.review-due-business-days:1}") int reviewDueBusinessDays) {
+            @Value("${app.approval.review-due-business-days:1}") int reviewDueBusinessDays,
+            CaseRoomEpochRepository roomEpochRepository,
+            CaseCommandService caseCommandService,
+            ObjectProvider<TargetRoomCommandIngress> targetIngressProvider,
+            ObjectProvider<TargetRoomEpochSelectionAuthority> targetAuthorityProvider,
+            CaseEventService caseEventService,
+            ReviewTargetDecisionHandoffWriter targetHandoffWriter) {
         this.caseRepository=caseRepository; this.planRepository=planRepository;
         this.draftRepository=draftRepository;
         this.hearingArtifactRepository=hearingArtifactRepository;
@@ -136,6 +169,40 @@ public class ReviewApplicationService {
         this.policyEngine=new ApprovalPolicyEngine(refundThreshold,reshipThreshold);
         this.packetExpiryHours=packetExpiryHours;
         this.reviewDueBusinessDays=Math.max(1,reviewDueBusinessDays);
+        this.roomEpochRepository=roomEpochRepository;
+        this.caseCommandService=caseCommandService;
+        this.targetIngressProvider=targetIngressProvider;
+        this.targetAuthorityProvider=targetAuthorityProvider;
+        this.caseEventService=caseEventService;
+        this.targetHandoffWriter=targetHandoffWriter;
+    }
+
+    /** Compatibility constructor retained for focused legacy unit tests. */
+    public ReviewApplicationService(
+            FulfillmentCaseRepository caseRepository,
+            RemedyPlanRepository planRepository,
+            AdjudicationDraftRepository draftRepository,
+            HearingFlowArtifactRepository hearingArtifactRepository,
+            HearingStateRepository hearingRepository,
+            EvidenceDossierRepository dossierRepository,
+            ReviewPacketRepository packetRepository,
+            ReviewTaskRepository taskRepository,
+            ApprovalRecordRepository approvalRepository,
+            ApprovalPolicyDecisionRepository policyDecisionRepository,
+            CaseLifecycleNotificationService lifecycleNotifications,
+            AuditRecorder auditRecorder,
+            PostReviewOrchestrationService postReviewOrchestration,
+            ObjectMapper objectMapper,
+            TransactionTemplate transactions,
+            BigDecimal refundThreshold,
+            BigDecimal reshipThreshold,
+            int packetExpiryHours,
+            int reviewDueBusinessDays) {
+        this(caseRepository, planRepository, draftRepository, hearingArtifactRepository, hearingRepository,
+                dossierRepository, packetRepository, taskRepository, approvalRepository,
+                policyDecisionRepository, lifecycleNotifications, auditRecorder, postReviewOrchestration,
+                objectMapper, transactions, refundThreshold, reshipThreshold, packetExpiryHours,
+                reviewDueBusinessDays, null, null, null, null, null, null);
     }
 
     // 所属模块：【平台人工终审 / 应用编排层】「ReviewApplicationService.createForWorkflow(String,String)」。
@@ -294,6 +361,12 @@ public class ReviewApplicationService {
                 caseRepository
                         .findByIdForUpdate(task.getCaseId())
                         .orElseThrow(() -> notFound("case", task.getCaseId()));
+        if (targetEpoch(task.getCaseId()) != null) {
+            // Target Review has no browser-side orchestration. This is only the durable human task opening.
+            task.startReview(actor.actorId());
+            taskRepository.save(task);
+            return view(task);
+        }
         String previousTaskStatus = task.getTaskStatus().name();
         String previousRoom = Objects.toString(disputeCase.getCurrentRoom(), "");
         task.startReview(actor.actorId());
@@ -382,6 +455,10 @@ public class ReviewApplicationService {
     // 系统意义：「ReviewApplicationService.decide(String,ReviewDecisionCommand,AuthenticatedActor)」负责主链路中的“审核决定”；最终决定权属于具备平台审核角色的人；过期、改版或哈希不一致的审批必须失效
     public ReviewDecisionView decide(String taskId,ReviewDecisionCommand command,AuthenticatedActor actor){
         PlatformReviewerAuthorization.requireDecisionAccess(actor);
+        ReviewTaskEntity task = taskRepository.findById(taskId).orElseThrow(()->notFound("review task",taskId));
+        if (targetEpoch(task.getCaseId()) != null) {
+            return transactions.execute(ignored -> decideTarget(taskId, command, actor));
+        }
         // 审批事实先在事务内完成版本、哈希和幂等校验并提交。
         // 工具执行与结案属于事务后编排，不能在持有 ReviewTask 行锁时调用外部系统。
         ReviewDecisionView result=transactions.execute(ignored->persistDecision(taskId,command,actor,null));
@@ -391,6 +468,202 @@ public class ReviewApplicationService {
         }
         return result;
     }
+
+    private ReviewDecisionView decideTarget(
+            String taskId,
+            ReviewDecisionCommand command,
+            AuthenticatedActor actor) {
+        ReviewTaskEntity initialTask = taskRepository.findByIdForUpdate(taskId)
+                .orElseThrow(() -> notFound("review task", taskId));
+        TargetReviewRoute target = targetRoute(initialTask.getCaseId());
+        ReviewDecisionView decision = persistDecision(taskId, command, actor, null);
+        ReviewTaskEntity task = taskRepository.findByIdForUpdate(taskId)
+                .orElseThrow(() -> notFound("review task", taskId));
+        ReviewPacketEntity packet = packetRepository.findById(task.getPacketId())
+                .orElseThrow(() -> notFound("review packet", task.getPacketId()));
+        ApprovalRecordEntity record = approvalRepository.findById(decision.approvalRecordId())
+                .orElseThrow(() -> notFound("approval record", decision.approvalRecordId()));
+
+        String commandId = targetCommandId(taskId, command.idempotencyKey());
+        Map<String, Object> frozenDecision = frozenTargetDecision(record, task, packet, target, commandId);
+        JsonNode frozenNode = objectMapper.valueToTree(frozenDecision);
+        String frozenHash = ContractJson.sha256Hex(frozenNode);
+        var event = caseEventService.recordLifecycleEvent(
+                task.getCaseId(), target.epoch().getRoomId(), "TARGET_REVIEW_DECISION_COMMITTED",
+                frozenDecision, "target-review-decision:" + record.getId(), actor.actorId());
+        PayloadRef payloadRef = new PayloadRef(
+                "target-e2e-review-human-decision-event.v1",
+                "urn:target-e2e:review-decision:" + event.getId(),
+                frozenHash,
+                ContractJson.canonicalize(frozenNode).length);
+
+        TargetReviewHumanDecisionReceipt receipt = targetReceipt(
+                record, task, packet, decision, command, target, frozenHash, event.getSequenceNo());
+        required(targetHandoffWriter, "target Review handoff writer")
+                .record(target.grant(), target.epoch(), commandId, receipt, record, task, packet);
+
+        AcceptCaseCommand caseCommand = new AcceptCaseCommand(
+                CommandType.REVIEW_DECISION, RoomType.REVIEW, target.epoch().getRoomEpoch(), payloadRef,
+                target.epoch().getProcessRevision(), reviewDeadline(task, packet).toInstant());
+        String traceId = targetTraceId(frozenHash);
+        CaseCommandService commands = required(caseCommandService, "target Review case command service");
+        commands.accept(task.getCaseId(), commandId, caseCommand, actor, traceId,
+                "review:" + commandId, null);
+        commands.flushAcceptanceForMaterialization();
+        TargetRoomCommandIngress ingress = exactTargetIngress();
+        ingress.materialize(task.getCaseId(), commandId, caseCommand, actor, traceId);
+        return decision;
+    }
+
+    private TargetReviewRoute targetRoute(String caseId) {
+        CaseRoomEpochEntity epoch = targetEpoch(caseId);
+        if (epoch == null || targetAuthorityProvider == null) {
+            throw new IllegalStateException("target Review activation authority is unavailable");
+        }
+        List<TargetRoomEpochSelectionAuthority> authorities = targetAuthorityProvider.stream().toList();
+        if (authorities.size() != 1) {
+            throw new IllegalStateException("target Review requires exactly one activation authority");
+        }
+        var request = new TargetRoomEpochSelectionAuthority.Request(
+                TargetRoomEpochSelectionAuthority.PROFILE,
+                TargetRoomEpochSelectionAuthority.EXECUTION_LANE,
+                epoch.getTenantSurrogate(), caseId, RoomType.REVIEW,
+                TrafficSource.AUTHENTICATED_SIGNED_SYNTHETIC);
+        var grant = authorities.getFirst().authorize(request)
+                .orElseThrow(() -> new IllegalStateException("target Review activation authority rejected command"));
+        if (!epoch.getTenantSurrogate().equals(grant.request().tenantSurrogate())
+                || !epoch.getCaseId().equals(grant.request().caseId())
+                || !epoch.getTemporalBuildId().equals(grant.roomWorkflowBuildId())
+                || !epoch.getGraphVersion().equals(grant.graphVersion())
+                || !epoch.getCheckpointSchemaVersion().equals(grant.checkpointSchemaVersion())) {
+            throw new IllegalStateException("target Review activation grant differs from the active epoch");
+        }
+        return new TargetReviewRoute(epoch, grant);
+    }
+
+    private CaseRoomEpochEntity targetEpoch(String caseId) {
+        if (roomEpochRepository == null) return null;
+        CaseRoomEpochEntity epoch = roomEpochRepository
+                .findTopByCaseIdAndRoomTypeAndLifecycleStatusOrderByRoomEpochDesc(
+                        caseId, RoomType.REVIEW, EpochLifecycleStatus.ACTIVE)
+                .orElse(null);
+        if (epoch == null
+                || epoch.getWriterMode() != WriterMode.TEMPORAL
+                || epoch.getProvisioningStatus() != EpochProvisioningStatus.READY
+                || !TargetTypedRoomProtocol.GRAPH_KEY.equals(epoch.getGraphKey())) {
+            return null;
+        }
+        return epoch;
+    }
+
+    private TargetRoomCommandIngress exactTargetIngress() {
+        if (targetIngressProvider == null) {
+            throw new IllegalStateException("target Review command ingress is unavailable");
+        }
+        List<TargetRoomCommandIngress> ingresses = targetIngressProvider.stream().toList();
+        if (ingresses.size() != 1) {
+            throw new IllegalStateException("target Review requires exactly one command ingress");
+        }
+        return ingresses.getFirst();
+    }
+
+    private Map<String, Object> frozenTargetDecision(
+            ApprovalRecordEntity record,
+            ReviewTaskEntity task,
+            ReviewPacketEntity packet,
+            TargetReviewRoute target,
+            String commandId) {
+        TargetReviewFrozenExecutionContract execution =
+                TargetReviewFrozenExecutionContract.fromFrozenPacket(
+                        packet, objectMapper, target.epoch().getRoomRevision());
+        Map<String, Object> value = new TreeMap<>();
+        value.put("schema_version", "target-e2e-review-human-decision-event.v1");
+        value.put("approval_record_id", record.getId());
+        value.put("approval_hash", record.getApprovalHash());
+        value.put("approved_plan", read(record.getApprovedPlanJson()));
+        value.put("original_plan", read(record.getOriginalPlanJson()));
+        value.put("case_id", task.getCaseId());
+        value.put("command_id", commandId);
+        value.put("decision", record.getDecisionType().name());
+        value.put("decision_reason", record.getDecisionReason());
+        value.put("fencing_token", target.epoch().getFencingToken());
+        value.put("packet_content_hash", packetContentHash(packet));
+        value.put("packet_id", packet.getId());
+        value.put("packet_version", packet.getPacketVersion());
+        value.put("case_process_revision", target.epoch().getProcessRevision());
+        value.put("kernel_revision", execution.kernelRevision());
+        value.put("decision_source_revision", execution.decisionSourceRevision());
+        value.put("decision_revision", execution.decisionRevision());
+        value.put("policy_version", record.getPolicyVersion());
+        value.put("recorded_at", record.getCreatedAt().toInstant().toString());
+        value.put("request_hash", read(task.getDecisionJson()).path("request_hash").asText());
+        value.put("review_task_id", task.getId());
+        value.put("reviewer_id", record.getReviewerId());
+        value.put("room_epoch", target.epoch().getRoomEpoch());
+        value.put("frozen_action_snapshot_ref", execution.actionSnapshotRef());
+        value.put("frozen_action_snapshot_hash", execution.actionSnapshotHash());
+        value.put("required_operation_set_ref", execution.requiredOperationSetRef());
+        value.put("required_operation_set_hash", execution.requiredOperationSetHash());
+        value.put("required_operation_count", execution.requiredOperationCount());
+        value.put("approved_action_snapshot_hash", record.getActionSnapshotHash());
+        return Map.copyOf(value);
+    }
+
+    private TargetReviewHumanDecisionReceipt targetReceipt(
+            ApprovalRecordEntity record,
+            ReviewTaskEntity task,
+            ReviewPacketEntity packet,
+            ReviewDecisionView decision,
+            ReviewDecisionCommand command,
+            TargetReviewRoute target,
+            String decisionRecordHash,
+            long committedEventSequence) {
+        TargetReviewFrozenExecutionContract execution =
+                TargetReviewFrozenExecutionContract.fromFrozenPacket(
+                        packet, objectMapper, target.epoch().getRoomRevision());
+        boolean approved = decision.executionAllowed();
+        String operationKeyHash = approved
+                ? sha256("target-review-operation:" + task.getCaseId() + ":" + record.getId()
+                        + ":" + record.getActionSnapshotHash())
+                : null;
+        var outcome = new com.example.dispute.workflow.contract.outcome.v1.OutcomeReviewDecisionReceipt(
+                com.example.dispute.workflow.contract.outcome.v1.OutcomeReviewDecisionReceipt.SCHEMA_VERSION,
+                target.epoch().getRoomTemporalWorkflowId(), task.getCaseId(), record.getId(), decisionRecordHash,
+                task.getId(), "reviewer-authority:" + sha256("reviewer-authority:v1:" + record.getReviewerId()),
+                packet.getId(), packetContentHash(packet), execution.actionSnapshotRef(),
+                execution.actionSnapshotHash(), approved ? "approval:" + record.getId() + ":action" : null,
+                approved ? record.getActionSnapshotHash() : null, record.getId(), decisionRecordHash,
+                "review-decision:" + record.getId() + ":reason", sha256(record.getDecisionReason()), operationKeyHash,
+                execution.requiredOperationSetRef(), execution.requiredOperationSetHash(),
+                execution.requiredOperationCount(),
+                com.example.dispute.workflow.contract.outcome.v1.OutcomeWireTypes.ReviewDecision
+                        .valueOf(record.getDecisionType().name()),
+                approved, read(task.getDecisionJson()).path("request_hash").asText(),
+                sha256(command.idempotencyKey()),
+                record.getPolicyVersion(), target.epoch().getRoomEpoch(), execution.decisionSourceRevision(),
+                execution.decisionRevision(),
+                target.epoch().getFencingToken(), committedEventSequence, record.getCreatedAt().toInstant(), false);
+        return new TargetReviewHumanDecisionReceipt(
+                TargetReviewHumanDecisionReceipt.SCHEMA_VERSION,
+                TargetReviewHumanDecisionReceipt.DECISION_AUTHORITY,
+                record.getId(), decisionRecordHash, outcome);
+    }
+
+    private static String targetCommandId(String taskId, String idempotencyKey) {
+        return "review-decision:" + sha256(taskId + "\n" + idempotencyKey);
+    }
+
+    private static String targetTraceId(String frozenHash) {
+        return frozenHash.substring(0, 32);
+    }
+
+    private static <T> T required(T value, String name) {
+        if (value == null) throw new IllegalStateException(name + " is unavailable");
+        return value;
+    }
+
+    private record TargetReviewRoute(
+            CaseRoomEpochEntity epoch, TargetRoomEpochSelectionAuthority.Grant grant) {}
 
     /**
      * Trusted non-HTTP entry for a server-minted Outcome context. This method emits a typed receipt

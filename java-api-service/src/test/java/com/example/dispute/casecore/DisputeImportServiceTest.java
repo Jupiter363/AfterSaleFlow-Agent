@@ -49,6 +49,7 @@ import com.example.dispute.room.infrastructure.persistence.repository.CasePhaseC
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import com.example.dispute.workflow.application.epoch.RoomEpochAllocator;
 import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.ActivateRoomEpoch;
+import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.RoomEpochAllocation;
 import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.TerminalRoomEpoch;
 import com.example.dispute.workflow.contract.v1.ContractTypes;
 import java.time.Clock;
@@ -241,6 +242,31 @@ class DisputeImportServiceTest {
         } finally {
             TransactionSynchronizationManager.clearSynchronization();
         }
+    }
+
+    @Test
+    void temporalIntakeEpochDoesNotScheduleTheLegacyInitialTurn() {
+        when(repository.findBySourceSystemAndExternalCaseRef("OMS", "EXT-TEMPORAL-INTAKE"))
+                .thenReturn(Optional.empty());
+        when(repository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        RoomEpochAllocation temporalIntakeEpoch = mock(RoomEpochAllocation.class);
+        when(temporalIntakeEpoch.roomType()).thenReturn(ContractTypes.RoomType.INTAKE);
+        when(temporalIntakeEpoch.writerMode()).thenReturn(ContractTypes.WriterMode.TEMPORAL);
+        when(roomEpochAllocator.activate(any(ActivateRoomEpoch.class))).thenReturn(temporalIntakeEpoch);
+
+        service.importDispute(
+                command("EXT-TEMPORAL-INTAKE"),
+                new AuthenticatedActor("external-adapter", ActorRole.SYSTEM),
+                "import-temporal-intake");
+
+        verify(roomEpochAllocator).activate(any(ActivateRoomEpoch.class));
+        verify(intakeAgentTurnService, never())
+                .startInitialTurn(
+                        any(String.class),
+                        any(AuthenticatedActor.class),
+                        any(IntakeLobbySeed.class),
+                        any(String.class),
+                        any(String.class));
     }
 
     // 所属模块：【案件核心与导入 / 自动化测试层】「DisputeImportServiceTest.intakePersistenceFailureAfterCommitDoesNotRollBackTheImportedCase()」。

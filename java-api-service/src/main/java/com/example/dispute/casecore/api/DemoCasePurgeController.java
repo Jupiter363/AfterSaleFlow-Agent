@@ -54,7 +54,7 @@ public class DemoCasePurgeController {
     @DeleteMapping("/{caseId}")
     public ApiResponse<DemoCasePurgeView> purge(
             @PathVariable
-                    @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}")
+                    @Pattern(regexp = "CASE_[A-Za-z0-9_]{1,59}")
                     String caseId,
             Authentication authentication,
             HttpServletRequest servletRequest) {

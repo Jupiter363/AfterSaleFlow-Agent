@@ -209,6 +209,44 @@ class RoomMessageAndEventServiceTest {
                 .ensureOpeningOrStart(any(), any(), any(), any(), any());
     }
 
+    @Test
+    void targetIntakeOpeningDoesNotInvokeTheLegacyWriterOrAgentTurn() {
+        FulfillmentCaseEntity dispute = intakeCase();
+        AuthenticatedActor respondent =
+                new AuthenticatedActor("merchant-local", ActorRole.MERCHANT);
+        TargetIntakeActivationGrant grant =
+                new TargetIntakeActivationGrant(
+                        TargetIntakeActivationGrant.TARGET_LANE,
+                        "p9act.v1." + "a".repeat(32),
+                        "b".repeat(64),
+                        "tenant-target",
+                        dispute.getId(),
+                        3L,
+                        5L,
+                        7L,
+                        "case/tenant-target/" + dispute.getId(),
+                        "target-control-build",
+                        Instant.parse("2026-07-03T01:00:00Z"));
+        when(caseRepository.findById(dispute.getId())).thenReturn(Optional.of(dispute));
+        when(intakeMessageIngressRouter.select(dispute.getId()))
+                .thenReturn(IntakeIngressSelection.target(grant));
+
+        Object opening =
+                messageService.ensureOpening(
+                        dispute.getId(),
+                        RoomType.INTAKE,
+                        respondent,
+                        "TRACE_TARGET_OPENING",
+                        "REQ_TARGET_OPENING");
+
+        assertThat(opening).isNull();
+        verify(intakeProgressService).assertIntakePost(dispute, respondent);
+        verify(intakeMessageIngressRouter).select(dispute.getId());
+        verifyNoInteractions(legacyIntakeWriterGuard, intakeAgentTurnService);
+        verify(evidenceAgentTurnService, never())
+                .ensureOpeningOrStart(any(), any(), any(), any(), any());
+    }
+
     // 所属模块：【房间协作与权限 / 自动化测试层】「RoomMessageAndEventServiceTest.roomMessageViewCarriesTheHearingRoundForCourtTimelineGrouping()」。
     // 具体功能：「RoomMessageAndEventServiceTest.roomMessageViewCarriesTheHearingRoundForCourtTimelineGrouping()」：复现“核对完整业务行为（场景方法「roomMessageViewCarriesTheHearingRoundForCourtTimelineGrouping」）”场景：驱动 「caseRepository.findById」、「roomRepository.findByCaseIdAndRoomType」、「messageRepository.findAllByRoomIdOrderBySequenceNoAsc」、「messageService.list」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「MESSAGE_JUDGE_ROUND_1」、「CASE_ROOM_TEST」、「ROOM_HEARING」、「JUDGE」。
     // 上游调用：「RoomMessageAndEventServiceTest.roomMessageViewCarriesTheHearingRoundForCourtTimelineGrouping()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。

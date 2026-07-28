@@ -5,10 +5,13 @@ import com.example.dispute.common.trace.TraceIdFilter;
 import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.workflow.application.command.CaseCommandAcceptance;
 import com.example.dispute.workflow.application.command.CaseCommandService;
+import com.example.dispute.workflow.targete2e.ingress.rooms.TargetRoomCommandIngress;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Pattern;
 import java.time.Clock;
+import java.util.List;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -32,15 +35,19 @@ public class CaseCommandController {
 
     private final CaseCommandService service;
     private final Clock clock;
+    private final List<TargetRoomCommandIngress> targetIngresses;
 
-    public CaseCommandController(CaseCommandService service, Clock clock) {
+    public CaseCommandController(
+            CaseCommandService service, Clock clock, List<TargetRoomCommandIngress> targetIngresses) {
         this.service = service;
         this.clock = clock;
+        this.targetIngresses = List.copyOf(targetIngresses);
     }
 
     @PostMapping
+    @Transactional
     public ResponseEntity<ApiResponse<CaseCommandAcceptance>> accept(
-            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
+            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9_]{1,59}") String caseId,
             @RequestHeader("Idempotency-Key")
                     @Pattern(regexp = "[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
                     String commandId,
@@ -50,11 +57,15 @@ public class CaseCommandController {
             HttpServletRequest servletRequest) {
         String traceId = correlationId(servletRequest, TraceIdFilter.TRACE_ATTRIBUTE);
         String requestId = correlationId(servletRequest, TraceIdFilter.REQUEST_ATTRIBUTE);
+        var command = request.toCommand();
+        for (TargetRoomCommandIngress ingress : targetIngresses) {
+            ingress.materialize(caseId, commandId, command, actor(authentication), traceId);
+        }
         CaseCommandAcceptance accepted =
                 service.accept(
                         caseId,
                         commandId,
-                        request.toCommand(),
+                        command,
                         actor(authentication),
                         traceId,
                         requestId,

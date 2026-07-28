@@ -1,5 +1,12 @@
 package com.example.dispute.workflow.temporal.room.evidence;
 
+import com.example.dispute.workflow.targete2e.temporal.room.TargetRoomAgentRunFinalizationReceipt;
+import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceTerminalActivities;
+import com.example.dispute.workflow.temporal.caseprocess.CaseProcessWorkflow;
+import com.example.dispute.workflow.temporal.caseprocess.TargetRoomProgressReceipt;
+import com.example.dispute.workflow.contract.v1.CaseProcessWorkflowProtocol;
+import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
+import io.temporal.activity.ActivityOptions;
 import io.temporal.failure.CanceledFailure;
 import io.temporal.workflow.Async;
 import io.temporal.workflow.CancellationScope;
@@ -21,9 +28,20 @@ public final class EvidenceRoomWorkflowImpl implements EvidenceRoomWorkflow {
       "evidence-history-ordered-timer-arbitration";
   private static final int HISTORY_ORDERED_TIMER_ARBITRATION = 1;
   private static final int ACCEPTED_TIME_TIMER_ARBITRATION = 2;
+  private static final int MAX_AGENT_RUN_FINALIZATION_RECEIPTS = 64;
+  private final TargetEvidenceTerminalActivities terminalActivities =
+      Workflow.newActivityStub(
+          TargetEvidenceTerminalActivities.class,
+          ActivityOptions.newBuilder()
+              .setTaskQueue(CaseProcessWorkflowProtocol.CASE_CONTROL_TASK_QUEUE)
+              .setStartToCloseTimeout(Duration.ofSeconds(30))
+              .setScheduleToCloseTimeout(Duration.ofMinutes(5))
+              .build());
 
   private final ArrayDeque<WorkflowEvent> inbox = new ArrayDeque<>();
   private final Map<String, EvidenceRoomSignal> observedRequests = new LinkedHashMap<>();
+  private final Map<String, TargetRoomAgentRunFinalizationReceipt> agentRunReceipts =
+      new LinkedHashMap<>();
   private final List<String> orderedOperationKeys = new ArrayList<>();
 
   private EvidenceRoomStart start;
@@ -42,6 +60,7 @@ public final class EvidenceRoomWorkflowImpl implements EvidenceRoomWorkflow {
   private long rejectedSignalCount;
   private String protocolErrorCode;
   private int timerArbitrationVersion;
+  private TargetRoomProgressReceipt terminalProgressReceipt;
   private CancellationScope activeTimerScope;
   private Promise<Void> activeTimer;
   private Promise<Void> activeTimerContinuation;
@@ -131,6 +150,13 @@ public final class EvidenceRoomWorkflowImpl implements EvidenceRoomWorkflow {
   }
 
   @Override
+  public void agentRunFinalized(TargetRoomAgentRunFinalizationReceipt receipt) {
+    inbox.addLast(
+        WorkflowEvent.agentRunReceipt(
+            Objects.requireNonNull(receipt, "receipt must not be null")));
+  }
+
+  @Override
   public EvidenceRoomSnapshot state() {
     return new EvidenceRoomSnapshot(
         "evidence-room-snapshot.v1",
@@ -158,7 +184,8 @@ public final class EvidenceRoomWorkflowImpl implements EvidenceRoomWorkflow {
         roomRevision,
         duplicateSignalCount,
         rejectedSignalCount,
-        protocolErrorCode);
+        protocolErrorCode,
+        new ArrayList<>(agentRunReceipts.values()));
   }
 
   private void drainHistoryOrderedInbox() {
@@ -181,8 +208,11 @@ public final class EvidenceRoomWorkflowImpl implements EvidenceRoomWorkflow {
     if (event.completion() != null) {
       processSignal(event.completion());
       if (bothPartiesCompleted()) {
+        finalizeTargetTerminalOnce();
         complete("BOTH_PARTIES_COMPLETED");
       }
+    } else if (event.agentRunReceipt() != null) {
+      processAgentRunReceipt(event.agentRunReceipt());
     } else {
       processTimer(event.timerBoundary());
     }
@@ -200,6 +230,7 @@ public final class EvidenceRoomWorkflowImpl implements EvidenceRoomWorkflow {
         .anyMatch(
             event ->
                 event.timerBoundary() != null
+                    || event.agentRunReceipt() != null
                     || (event.completion() != null
                         && acceptedBefore(event.completion(), boundaryAt)));
   }
@@ -213,6 +244,10 @@ public final class EvidenceRoomWorkflowImpl implements EvidenceRoomWorkflow {
     for (Iterator<WorkflowEvent> iterator = inbox.iterator(); iterator.hasNext(); ) {
       WorkflowEvent event = iterator.next();
       if (event.completion() != null && acceptedBefore(event.completion(), boundaryAt)) {
+        iterator.remove();
+        return event;
+      }
+      if (event.agentRunReceipt() != null) {
         iterator.remove();
         return event;
       }
@@ -306,10 +341,70 @@ public final class EvidenceRoomWorkflowImpl implements EvidenceRoomWorkflow {
       return;
     }
     appendOperation(signal.operationKey());
+    advanceAcceptedCoordinates();
+  }
+
+  private void processAgentRunReceipt(TargetRoomAgentRunFinalizationReceipt receipt) {
+    TargetRoomAgentRunFinalizationReceipt previous = agentRunReceipts.get(receipt.commandId());
+    if (previous != null) {
+      if (previous.equals(receipt)) {
+        duplicateSignalCount++;
+      } else {
+        reject("EVIDENCE_AGENT_RUN_RECEIPT_COMMAND_CONFLICT");
+      }
+      return;
+    }
+    if (!receipt.matchesEvidenceRoom(
+        start.tenantSurrogate(), start.caseId(), start.roomEpoch(), start.fencingToken())) {
+      reject("EVIDENCE_AGENT_RUN_RECEIPT_AUTHORITY_MISMATCH");
+      return;
+    }
+    if (receipt.processRevision() != processRevision || receipt.roomRevision() != roomRevision) {
+      reject("EVIDENCE_AGENT_RUN_RECEIPT_STALE_REVISION");
+      return;
+    }
+    if (agentRunReceipts.size() >= MAX_AGENT_RUN_FINALIZATION_RECEIPTS) {
+      reject("EVIDENCE_AGENT_RUN_RECEIPT_LIMIT");
+      return;
+    }
+    agentRunReceipts.put(receipt.commandId(), receipt);
+    advanceAcceptedCoordinates();
+  }
+
+  private void advanceAcceptedCoordinates() {
+    processRevision = Math.incrementExact(processRevision);
+    roomRevision = Math.incrementExact(roomRevision);
   }
 
   private boolean bothPartiesCompleted() {
     return initiatorCompletion != null && respondentCompletion != null;
+  }
+
+  private void finalizeTargetTerminalOnce() {
+    if (!isTargetE2eStart() || terminalProgressReceipt != null) {
+      return;
+    }
+    TargetRoomProgressReceipt receipt = terminalActivities.finalizeTerminal(
+        new TargetEvidenceTerminalActivities.TerminalRequest(
+            start, processRevision, roomRevision, initiatorCompletion.completionRequestId(),
+            respondentCompletion.completionRequestId())).progressReceipt();
+    if (receipt.roomType() != RoomType.EVIDENCE || receipt.roomEpoch() != start.roomEpoch()
+        || receipt.fencingToken() != start.fencingToken()
+        || receipt.processRevision() != Math.incrementExact(processRevision)
+        || receipt.roomRevision() != Math.incrementExact(roomRevision)) {
+      throw new IllegalStateException("target Evidence terminal receipt does not match child authority");
+    }
+    terminalProgressReceipt = receipt;
+    processRevision = receipt.processRevision();
+    roomRevision = receipt.roomRevision();
+    CaseProcessWorkflow parent = Workflow.newExternalWorkflowStub(
+        CaseProcessWorkflow.class,
+        CaseProcessWorkflowProtocol.caseWorkflowId(start.tenantSurrogate(), start.caseId()));
+    parent.targetRoomProgressed(receipt);
+  }
+
+  private boolean isTargetE2eStart() {
+    return start.workflowBuildId().startsWith("target-e2e");
   }
 
   private boolean awaitLegacyInputBefore(Instant boundary) {
@@ -392,21 +487,32 @@ public final class EvidenceRoomWorkflowImpl implements EvidenceRoomWorkflow {
     DEADLINE
   }
 
-  private record WorkflowEvent(EvidenceRoomSignal completion, TimerBoundary timerBoundary) {
+  private record WorkflowEvent(
+      EvidenceRoomSignal completion,
+      TargetRoomAgentRunFinalizationReceipt agentRunReceipt,
+      TimerBoundary timerBoundary) {
 
     private WorkflowEvent {
-      if ((completion == null) == (timerBoundary == null)) {
+      int populated =
+          (completion == null ? 0 : 1)
+              + (agentRunReceipt == null ? 0 : 1)
+              + (timerBoundary == null ? 0 : 1);
+      if (populated != 1) {
         throw new IllegalArgumentException(
-            "Workflow event must contain exactly one completion or timer boundary");
+            "Workflow event must contain exactly one completion, AgentRun receipt, or timer boundary");
       }
     }
 
     private static WorkflowEvent completion(EvidenceRoomSignal signal) {
-      return new WorkflowEvent(signal, null);
+      return new WorkflowEvent(signal, null, null);
+    }
+
+    private static WorkflowEvent agentRunReceipt(TargetRoomAgentRunFinalizationReceipt receipt) {
+      return new WorkflowEvent(null, receipt, null);
     }
 
     private static WorkflowEvent timer(TimerBoundary boundary) {
-      return new WorkflowEvent(null, boundary);
+      return new WorkflowEvent(null, null, boundary);
     }
   }
 }

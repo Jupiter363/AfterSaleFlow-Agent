@@ -12,6 +12,10 @@ import com.example.dispute.workflow.contract.outcome.v1.OutcomeReviewDecisionRec
 import com.example.dispute.workflow.contract.outcome.v1.OutcomeSlaEscalationReceipt;
 import com.example.dispute.workflow.contract.outcome.v1.OutcomeWireTypes;
 import com.example.dispute.workflow.contract.outcome.v1.OutcomeWorkflowStart;
+import com.example.dispute.workflow.targete2e.rooms.outcome.TargetOutcomeCompletionActivities;
+import com.example.dispute.workflow.targete2e.rooms.outcome.TargetOutcomeCompletionActivities.CompletionRequest;
+import com.example.dispute.workflow.targete2e.rooms.outcome.TargetOutcomeCompletionActivities.CompletionResult;
+import io.temporal.activity.ActivityOptions;
 import io.temporal.workflow.CancellationScope;
 import io.temporal.workflow.Promise;
 import io.temporal.workflow.Workflow;
@@ -23,7 +27,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
-/** Deterministic, receipt-driven Outcome kernel with no Activities or external reads. */
+/** Deterministic, receipt-driven Outcome kernel; formal target completion is activity-relayed. */
 public final class OutcomeRoomWorkflowImpl implements OutcomeRoomWorkflow {
 
   static final int MAX_INBOX_EVENTS = OutcomeWorkflowKernel.MAX_UNIQUE_RECEIPTS;
@@ -38,6 +42,10 @@ public final class OutcomeRoomWorkflowImpl implements OutcomeRoomWorkflow {
   private Promise<Void> reviewTimer;
   private Promise<Void> reviewTimerCallback;
   private boolean inboxCapacityExceeded;
+  private OutcomeReviewDecisionReceipt acceptedDecision;
+  private TargetOutcomeCompletionActivities targetCompletionActivities;
+  private OutcomeCompletionRequest completionRequest;
+  private OutcomeCompletionResult completionResult;
 
   @Override
   public OutcomeProjection run(OutcomeWorkflowStart start) {
@@ -59,6 +67,11 @@ public final class OutcomeRoomWorkflowImpl implements OutcomeRoomWorkflow {
         start.reviewDeadlineAt(),
         start.runtimeMode(),
         start.syntheticOnly()));
+    if (start.runtimeMode() == OutcomeWireTypes.RuntimeMode.TEMPORAL) {
+      targetCompletionActivities = Workflow.newActivityStub(
+          TargetOutcomeCompletionActivities.class,
+          ActivityOptions.newBuilder().setStartToCloseTimeout(Duration.ofMinutes(2)).build());
+    }
 
     if (inboxCapacityExceeded) {
       kernel.failCapacity("OUTCOME_SIGNAL_INBOX_LIMIT");
@@ -88,6 +101,74 @@ public final class OutcomeRoomWorkflowImpl implements OutcomeRoomWorkflow {
   @Override
   public void reviewDecisionCommitted(OutcomeReviewDecisionReceipt receipt) {
     enqueue(EventType.REVIEW_DECISION, Objects.requireNonNull(receipt));
+  }
+
+  @Override
+  public OutcomeReviewDecisionAcceptance reviewDecisionAccepted(OutcomeReviewDecisionReceipt receipt) {
+    OutcomeReviewDecisionReceipt value = Objects.requireNonNull(receipt, "receipt");
+    if (kernel == null || start == null) {
+      return OutcomeReviewDecisionAcceptance.rejected(
+          value.receiptId(), value.receiptHash(), value.sourceRevision());
+    }
+    try {
+      submitDecision(value);
+    } catch (IllegalArgumentException | ClassCastException exception) {
+      return OutcomeReviewDecisionAcceptance.rejected(
+          value.receiptId(), value.receiptHash(), value.sourceRevision());
+    }
+    OutcomeWorkflowKernel.Snapshot state = kernel.snapshot();
+    boolean accepted =
+        value.receiptId().equals(state.decisionReceiptId())
+            && value.receiptHash().equals(state.decisionReceiptHash())
+            && state.revision() >= value.revision();
+    return new OutcomeReviewDecisionAcceptance(
+        value.receiptId(),
+        value.receiptHash(),
+        value.sourceRevision(),
+        accepted ? value.revision() : value.sourceRevision(),
+        accepted);
+  }
+
+  @Override
+  public OutcomeCompletionResult completeTargetOutcomeAfterRouting(OutcomeCompletionRequest request) {
+    OutcomeCompletionRequest value = Objects.requireNonNull(request, "request");
+    if (completionResult != null) {
+      if (!completionRequest.equals(value)) {
+        throw new IllegalArgumentException("target Outcome completion request conflicts with durable terminal receipt");
+      }
+      return completionResult;
+    }
+    if (kernel == null
+        || start == null
+        || targetCompletionActivities == null
+        || acceptedDecision == null
+        || !acceptedDecision.executionAuthorized()) {
+      throw new IllegalStateException("target Outcome completion requires an accepted executable Review receipt");
+    }
+    requireCompletionAuthority(value);
+    OutcomeWorkflowKernel.Snapshot before = kernel.snapshot();
+    if (before.phase() != OutcomeWorkflowKernel.Phase.EXECUTION_INTENT
+        && before.phase() != OutcomeWorkflowKernel.Phase.EXECUTING
+        && before.phase() != OutcomeWorkflowKernel.Phase.CLOSURE_PENDING
+        && before.phase() != OutcomeWorkflowKernel.Phase.CLOSED) {
+      throw new IllegalStateException("target Outcome completion is not in an executable phase");
+    }
+    CompletionResult durable = targetCompletionActivities.complete(
+        new CompletionRequest(
+            start,
+            acceptedDecision,
+            before.revision(),
+            before.lastCommittedEventSequence(),
+            value));
+    applyTargetCompletionFacts(durable);
+    OutcomeWorkflowKernel.Snapshot terminal = kernel.snapshot();
+    if (terminal.phase() != OutcomeWorkflowKernel.Phase.EVALUATED) {
+      throw new IllegalStateException("target Outcome completion did not reach EVALUATED");
+    }
+    requireTerminalProgress(value, durable.terminalProgressReceipt());
+    completionRequest = value;
+    completionResult = new OutcomeCompletionResult(projection(), durable.terminalProgressReceipt());
+    return completionResult;
   }
 
   @Override
@@ -273,6 +354,52 @@ public final class OutcomeRoomWorkflowImpl implements OutcomeRoomWorkflow {
         decision.authorizesExecution() ? boundedOperationCount(value.requiredOperationCount()) : 0,
         value.committedAt(),
         value.syntheticOnly()));
+    OutcomeWorkflowKernel.Snapshot state = kernel.snapshot();
+    if (value.receiptId().equals(state.decisionReceiptId())
+        && value.receiptHash().equals(state.decisionReceiptHash())) {
+      acceptedDecision = value;
+    }
+  }
+
+  /** Applies the activity's already durable facts in the only legal causal order. */
+  private void applyTargetCompletionFacts(CompletionResult result) {
+    result = Objects.requireNonNull(result, "target Outcome completion result");
+    for (OutcomeOperationCommand command : result.operationCommands()) {
+      submitOperationCommand(command);
+    }
+    for (OutcomeOperationReceipt receipt : result.operationReceipts()) {
+      submitOperationReceipt(receipt);
+    }
+    if (result.closureReceipt() == null || result.evaluationReceipt() == null) {
+      throw new IllegalStateException("target Outcome completion is missing terminal facts");
+    }
+    submitClosure(result.closureReceipt());
+    submitEvaluation(result.evaluationReceipt());
+  }
+
+  private void requireCompletionAuthority(OutcomeCompletionRequest request) {
+    if (request.roomEpoch() != start.epoch() || request.fencingToken() != start.fence()) {
+      throw new IllegalArgumentException("target Outcome completion crossed fenced Review authority");
+    }
+    if (!request.reviewReceiptId().equals(acceptedDecision.receiptId())
+        || !request.reviewReceiptHash().equals(acceptedDecision.receiptHash())
+        || request.reviewReceiptRevision() != acceptedDecision.revision()) {
+      throw new IllegalArgumentException("target Outcome completion is not bound to the accepted Review receipt");
+    }
+  }
+
+  private static void requireTerminalProgress(
+      OutcomeCompletionRequest request,
+      com.example.dispute.workflow.temporal.caseprocess.TargetRoomProgressReceipt receipt) {
+    if (receipt == null
+        || receipt.roomType()
+            != com.example.dispute.workflow.contract.v1.ContractTypes.RoomType.REVIEW
+        || receipt.roomEpoch() != request.roomEpoch()
+        || receipt.fencingToken() != request.fencingToken()
+        || receipt.processRevision() <= request.expectedProcessRevision()
+        || receipt.roomRevision() <= request.expectedRoomRevision()) {
+      throw new IllegalStateException("target Outcome terminal progress receipt is not a forward exact coordinate");
+    }
   }
 
   private void submitSla(OutcomeSlaEscalationReceipt value) {

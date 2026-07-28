@@ -70,7 +70,7 @@ public class CaseAgentRunController {
     // Java 语法：Optional 表示结果可能不存在；orElseThrow 会把空值分支转换为明确异常。
     @GetMapping("/active")
     public ApiResponse<List<AgentRunView>> active(
-            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
+            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9_]{1,59}") String caseId,
             @PathVariable RoomType roomType,
             Authentication authentication,
             HttpServletRequest request) {

@@ -17,6 +17,7 @@ import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleAct
 import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.RecordCaseCommandRouted;
 import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.RecordCaseCommandRoutedResult;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.ActiveChildDescriptor;
+import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewOutcomeStartBindingPort.Binding;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.ActiveChildKind;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.ClosedRoomTuple;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.ProvisionedRoomEpochHighWater;
@@ -182,6 +183,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
   private TargetTypedRoomChildHandle activeTargetTypedChild;
   private ActiveChildDescriptor activeChildDescriptor;
   private long observedProcessRevision;
+  private TargetRoomProgressReceipt lastTargetRoomProgress;
   private long nextCommandSequence = 1;
   private long nextCaseEventSequence = 1;
   private long processedCommandCount;
@@ -200,6 +202,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
   private boolean eventRecoveryForced;
   private boolean retrySequenceGapRequested;
   private boolean continueAsNewRequested;
+  private boolean terminalTargetReviewCompleted;
   private Boolean futureRoomEventRetentionEnabled;
   private Boolean provisioningEnabled;
   private boolean authorityCheckpointEnabled;
@@ -267,6 +270,11 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
       drainCommandInbox();
       drainEventInbox();
       applyManualRecoveryRequest();
+
+      if (terminalTargetReviewCompleted) {
+        Workflow.await(Workflow::isEveryHandlerFinished);
+        return;
+      }
 
       if (processReplayCheck()) {
         continue;
@@ -385,6 +393,29 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
   }
 
   @Override
+  public void targetRoomProgressed(TargetRoomProgressReceipt receipt) {
+    if (receipt == null
+        || activeChildDescriptor == null
+        || activeChildDescriptor.kind() != ActiveChildKind.TARGET_TYPED_ROOM
+        || receipt.roomType() != activeRoomType
+        || receipt.roomEpoch() != activeRoomEpoch
+        || receipt.fencingToken() != activeFencingToken) {
+      recordProtocolError("TARGET_ROOM_PROGRESS_AUTHORITY_INVALID", RecoveryErrorOrigin.DOMAIN_EVENT);
+      return;
+    }
+    if (receipt.equals(lastTargetRoomProgress)) return;
+    if (receipt.processRevision() <= observedProcessRevision
+        || receipt.roomRevision() <= activeRoomRevision) {
+      recordProtocolError("TARGET_ROOM_PROGRESS_REVISION_INVALID", RecoveryErrorOrigin.DOMAIN_EVENT);
+      return;
+    }
+    observedProcessRevision = receipt.processRevision();
+    activeRoomRevision = receipt.roomRevision();
+    activeChildDescriptor = activeChildDescriptor.withCurrentRevisions(observedProcessRevision, activeRoomRevision);
+    lastTargetRoomProgress = receipt;
+  }
+
+  @Override
   public void retrySequenceGap() {
     retrySequenceGapRequested = true;
   }
@@ -484,6 +515,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
     eventManualRecoveryRequired = carry.eventManualRecoveryRequired();
     provisioningManualRecoveryRequired = carry.provisioningManualRecoveryRequired();
     unreconciledChildren.addAll(carry.unreconciledChildren());
+    lastTargetRoomProgress = carry.lastTargetRoomProgress();
     protocolErrorCode = carry.protocolErrorCode();
     protocolErrorOrigin =
         carry.protocolErrorOrigin() == null
@@ -502,6 +534,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
             highWater -> highestProvisionedEpochs.put(highWater.roomType(), highWater.roomEpoch()));
     normalizeAndValidateActiveChildDescriptor();
     activeRoomRevision = restoreActiveRoomRevision(carry.activeRoomRevision());
+    validateTargetTypedActiveRevisions();
     if (tenantSurrogate != null) {
       requireWorkflowIdentity(tenantSurrogate, caseId);
     }
@@ -661,11 +694,34 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
         || !SELECTION_V2.equals(descriptor.selectionSchemaVersion())
         || descriptor.writerMode() != WriterMode.TEMPORAL
         || descriptor.fencingToken() < 1
-        || descriptor.hasPartyScopePins()
+        || (descriptor.roomType() == RoomType.INTAKE && !descriptor.hasPartyScopePins())
+        || (descriptor.roomType() != RoomType.INTAKE && descriptor.hasPartyScopePins())
         || !CaseProcessWorkflowProtocol.CASE_WORKFLOW_TYPE.equals(descriptor.caseWorkflowType())) {
       throw protocolFailure(
           "TARGET_TYPED_ROOM_ACTIVE_BINDING_INVALID",
           "persisted target typed room binding is invalid");
+    }
+  }
+
+  private void validateTargetTypedActiveRevisions() {
+    if (activeChildDescriptor == null
+        || activeChildDescriptor.kind() != ActiveChildKind.TARGET_TYPED_ROOM) {
+      return;
+    }
+    validateTargetTypedDescriptor(activeChildDescriptor);
+    ProvisioningCommitment commitment = currentProvisioningCommitment();
+    if (commitment == null
+        || !Objects.equals(
+            activeChildDescriptor.initialProcessRevision(),
+            commitment.request().initialProcessRevision())
+        || !Objects.equals(
+            activeChildDescriptor.initialRoomRevision(), commitment.request().initialRoomRevision())
+        || !Objects.equals(activeChildDescriptor.currentProcessRevision(), observedProcessRevision)
+        || activeRoomRevision < 0
+        || !Objects.equals(activeChildDescriptor.currentRoomRevision(), activeRoomRevision)) {
+      throw protocolFailure(
+          "TARGET_TYPED_ROOM_ACTIVE_BINDING_INVALID",
+          "target typed child revision pins do not match active authority");
     }
   }
 
@@ -690,6 +746,8 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
     }
     observedProcessRevision = receipt.processRevision();
     activeRoomRevision = receipt.roomRevision();
+    activeChildDescriptor =
+        activeChildDescriptor.withCurrentRevisions(observedProcessRevision, activeRoomRevision);
   }
 
   private void validateCarriedProvisioningCommitments() {
@@ -833,9 +891,15 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
           descriptor(
               request,
               childKind,
-              activeChildWorkflowRunId,
-              started.initiatorActorScopeHash(),
-              started.respondentActorScopeHash());
+           activeChildWorkflowRunId,
+           started.initiatorActorScopeHash(),
+           started.respondentActorScopeHash(),
+           started.targetTypedChild() == null
+               ? null
+               : started.targetTypedChild().reviewOutcomeStartBinding(),
+           started.targetTypedChild() == null
+               ? null
+               : started.targetTypedChild().evidenceParticipantBinding());
       observedProcessRevision = request.initialProcessRevision();
       provisioningCommitments.put(pending.updateId(), commitment);
       highestProvisionedEpochs.merge(request.roomType(), request.roomEpoch(), Math::max);
@@ -928,6 +992,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
     }
     if (activeChildDescriptor.kind() == ActiveChildKind.TARGET_TYPED_ROOM) {
       validateTargetTypedDescriptor(activeChildDescriptor);
+      validateTargetTypedActiveRevisions();
       if (activeTargetTypedChild == null) {
         throw new TypedChildOperationFailure(
             "TARGET_TYPED_ROOM_ACTIVE_BINDING_INVALID",
@@ -978,6 +1043,100 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
           "typed Intake child could not accept the command",
           failure);
     }
+  }
+
+  /**
+   * Completes target-only work after CompleteCaseCommandRouting has committed. This ordering keeps
+   * Review receipt acceptance separate from the Activity that mutates the terminal DB revision.
+   */
+  private void completeTargetChildAfterDurableRouting(CaseCommandRef command) {
+    if (activeChildDescriptor == null
+        || activeChildDescriptor.kind() != ActiveChildKind.TARGET_TYPED_ROOM) {
+      return;
+    }
+    validateTargetTypedDescriptor(activeChildDescriptor);
+    validateTargetTypedActiveRevisions();
+    if (activeTargetTypedChild == null) {
+      throw new TypedChildOperationFailure(
+          "TARGET_TYPED_ROOM_ACTIVE_BINDING_INVALID",
+          "target typed child handle is missing for post-routing completion",
+          null);
+    }
+    try {
+      TargetTypedRoomDispatchReceipt receipt = activeTargetTypedChild.postRouting(command);
+      if (activeTargetTypedChild.terminalAfterPostRouting()) {
+        adoptTargetTerminalReceipt(receipt, activeTargetTypedChild.terminalProgressReceipt());
+      } else if (receipt != null) {
+        applyTargetTypedRoomReceipt(receipt);
+      }
+    } catch (TypedChildOperationFailure failure) {
+      throw failure;
+    } catch (CanceledFailure failure) {
+      throw failure;
+    } catch (RuntimeException failure) {
+      throw new TypedChildOperationFailure(
+          "TARGET_TYPED_ROOM_POST_ROUTING_COMPLETION_FAILED",
+          "target typed child post-routing completion failed",
+          failure);
+    }
+  }
+
+  /** Replays B's exact terminal receipt when command routing was committed before parent progress. */
+  private void recoverAppliedTargetTerminal(CaseCommandRef command) {
+    if (activeChildDescriptor == null
+        || activeChildDescriptor.kind() != ActiveChildKind.TARGET_TYPED_ROOM
+        || activeRoomType != RoomType.REVIEW) {
+      return;
+    }
+    validateTargetTypedDescriptor(activeChildDescriptor);
+    validateTargetTypedActiveRevisions();
+    if (activeTargetTypedChild == null) {
+      throw new TypedChildOperationFailure(
+          "TARGET_TYPED_ROOM_ACTIVE_BINDING_INVALID",
+          "target typed child handle is missing for APPLIED recovery",
+          null);
+    }
+    try {
+      TargetTypedRoomDispatchReceipt receipt = activeTargetTypedChild.recoverAppliedTerminal(command);
+      if (activeTargetTypedChild.terminalAfterPostRouting()) {
+        adoptTargetTerminalReceipt(receipt, activeTargetTypedChild.terminalProgressReceipt());
+      }
+    } catch (TypedChildOperationFailure failure) {
+      throw failure;
+    } catch (CanceledFailure failure) {
+      throw failure;
+    } catch (RuntimeException failure) {
+      throw new TypedChildOperationFailure(
+          "TARGET_TYPED_ROOM_APPLIED_RECOVERY_FAILED",
+          "target Review APPLIED recovery could not load its terminal receipt",
+          failure);
+    }
+  }
+
+  private void adoptTargetTerminalReceipt(
+      TargetTypedRoomDispatchReceipt receipt, TargetRoomProgressReceipt terminal) {
+    if (terminal == null
+        || receipt == null
+        || terminal.roomType() != receipt.roomType()
+        || terminal.roomEpoch() != receipt.roomEpoch()
+        || terminal.fencingToken() != receipt.fencingToken()
+        || terminal.processRevision() != receipt.processRevision()
+        || terminal.roomRevision() != receipt.roomRevision()) {
+      throw new TypedChildOperationFailure(
+          "TARGET_TYPED_ROOM_TERMINAL_RECEIPT_INVALID",
+          "target terminal completion is missing its exact durable progress receipt",
+          null);
+    }
+    if (activeRoomType != RoomType.REVIEW) {
+      throw new TypedChildOperationFailure(
+          "TARGET_TYPED_ROOM_TERMINAL_TYPE_INVALID",
+          "only target Review may complete the case process",
+          null);
+    }
+    applyTargetTypedRoomReceipt(receipt);
+    lastTargetRoomProgress = terminal;
+    rememberClosedRoom(activeRoomType, activeRoomEpoch);
+    terminalTargetReviewCompleted = true;
   }
 
   private ActiveChildKind selectProvisionedChildKind(ProvisionRoomEpoch request) {
@@ -1162,7 +1321,13 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
             "TARGET_TYPED_ROOM_DISPATCHER_UNAVAILABLE",
             "target typed room start requires a target-only dispatcher");
       }
-      return new StartedChild(null, null, child, child.execution(), null, null);
+      return new StartedChild(
+          null,
+          null,
+          child,
+          child.execution(),
+          child.initiatorActorScopeHash(),
+          child.respondentActorScopeHash());
     }
     if (childKind == ActiveChildKind.TYPED_INTAKE) {
       return startTypedIntakeChild(request, provisioningHash);
@@ -1479,9 +1644,51 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
   private static ActiveChildDescriptor descriptor(
       ProvisionRoomEpoch request,
       ActiveChildKind kind,
-      String startedRunId,
-      String initiatorActorScopeHash,
-      String respondentActorScopeHash) {
+       String startedRunId,
+       String initiatorActorScopeHash,
+       String respondentActorScopeHash) {
+     return descriptor(
+         request,
+         kind,
+         startedRunId,
+         initiatorActorScopeHash,
+         respondentActorScopeHash,
+         null,
+         null);
+   }
+
+   private static ActiveChildDescriptor descriptor(
+       ProvisionRoomEpoch request,
+       ActiveChildKind kind,
+       String startedRunId,
+       String initiatorActorScopeHash,
+       String respondentActorScopeHash,
+       Binding reviewOutcomeStartBinding,
+       com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceParticipantBindingActivities.Binding
+           evidenceParticipantBinding) {
+    if (kind == ActiveChildKind.TARGET_TYPED_ROOM) {
+      return new ActiveChildDescriptor(
+          kind,
+          request.selectionSchemaVersion(),
+          request.writerMode(),
+          request.caseWorkflowType(),
+          request.caseWorkflowBuildId(),
+          request.roomWorkflowType(),
+          request.roomWorkflowBuildId(),
+          request.roomType(),
+          request.roomEpoch(),
+          request.fencingToken(),
+          request.roomWorkflowId(),
+          startedRunId,
+          initiatorActorScopeHash,
+          respondentActorScopeHash,
+           request.initialProcessRevision(),
+           request.initialRoomRevision(),
+           request.initialProcessRevision(),
+           request.initialRoomRevision(),
+           reviewOutcomeStartBinding,
+           evidenceParticipantBinding);
+    }
     return new ActiveChildDescriptor(
         kind,
         request.selectionSchemaVersion(),
@@ -1797,6 +2004,9 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
       validateProvisionedCommand(command, pending.authoritativeLedgerState());
       boolean commandLifecycleEnabled = commandLifecycleEnabled();
       if (!pending.ledgerState().routable()) {
+        if (pending.ledgerState() == CaseCommandLedgerState.APPLIED) {
+          recoverAppliedTargetTerminal(command);
+        }
         consumeTerminalCommand(pending);
         return true;
       }
@@ -1811,6 +2021,9 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
             commandLifecycleActivities.recordCaseCommandRouted(routing);
         CaseCommandLedgerState admissionTerminal = terminalLedgerState(admission.outcome());
         if (admissionTerminal != null) {
+          if (admissionTerminal == CaseCommandLedgerState.APPLIED) {
+            recoverAppliedTargetTerminal(command);
+          }
           consumeTerminalCommand(pending, admissionTerminal);
           return true;
         }
@@ -1825,6 +2038,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
           consumeTerminalCommand(pending, completionTerminal);
           return true;
         }
+        completeTargetChildAfterDurableRouting(command);
       }
       observedProcessRevision =
           Math.max(observedProcessRevision, Math.incrementExact(command.expectedProcessRevision()));
@@ -2055,6 +2269,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
     }
     if (activeChildDescriptor.kind() == ActiveChildKind.TARGET_TYPED_ROOM) {
       validateTargetTypedDescriptor(activeChildDescriptor);
+      validateTargetTypedActiveRevisions();
       if (activeTargetTypedChild == null) {
         throw new TypedChildOperationFailure(
             "TARGET_TYPED_ROOM_ACTIVE_BINDING_INVALID",
@@ -2838,7 +3053,8 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
             hasActiveChild() ? activeRoomRevision : null,
             protocolErrorOrigin,
             provisioningManualRecoveryRequired,
-            new ArrayList<>(unreconciledChildren));
+            new ArrayList<>(unreconciledChildren),
+            lastTargetRoomProgress);
     ContinueAsNewOptions options =
         ContinueAsNewOptions.newBuilder()
             .setTaskQueue(CASE_CONTROL_TASK_QUEUE)
@@ -3081,6 +3297,39 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
     TargetTypedRoomDispatchReceipt commandAccepted(CaseCommandRef command);
 
     TargetTypedRoomDispatchReceipt domainEventCommitted(CaseDomainEventRef event);
+
+    /** Runs only after the parent has durably completed command routing. */
+    default TargetTypedRoomDispatchReceipt postRouting(CaseCommandRef command) {
+      return null;
+    }
+
+    /** Recovers a B-owned terminal target receipt after the command ledger already says APPLIED. */
+    default TargetTypedRoomDispatchReceipt recoverAppliedTerminal(CaseCommandRef command) {
+      return null;
+    }
+
+    /** A target room may close its child as the durable result of its post-routing hook. */
+    default boolean terminalAfterPostRouting() {
+      return false;
+    }
+
+    /** Exact durable DB receipt for a terminal post-routing transition, if one occurred. */
+    default TargetRoomProgressReceipt terminalProgressReceipt() {
+      return null;
+    }
+
+    String initiatorActorScopeHash();
+
+    String respondentActorScopeHash();
+
+    default Binding reviewOutcomeStartBinding() {
+      return null;
+    }
+
+    default com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceParticipantBindingActivities.Binding
+        evidenceParticipantBinding() {
+      return null;
+    }
 
     void close(String reason);
   }

@@ -94,6 +94,70 @@ public final class JdbcHearingFormalFinalizer implements HearingFormalFinalizer 
     }
 
     @Override
+    public HearingDomainReceipt adoptPartyAction(AdoptPartyActionCommand command) {
+        Objects.requireNonNull(command, "command");
+        return authorityLedger.commitOrReplay(command.authorityCommit(), () -> {
+            HearingAuthorityExpectation authority = command.authorityCommit().authority();
+            requireSourceStage(authority, command.transition(), null, command.authorityCommit().committedAt());
+            MapSqlParameterSource parameters = common(authority, command.transition(), command.authorityCommit().committedAt())
+                    .addValue("actionId", command.actionId()).addValue("actionType", command.actionType().name())
+                    .addValue("schemaVersion", command.schemaVersion()).addValue("participantId", command.participantId())
+                    .addValue("participantRole", command.participantRole()).addValue("submissionStatus", command.submissionStatus().name())
+                    .addValue("payloadJson", command.payloadJson()).addValue("contentHash", command.contentHash());
+            requireLockedPartyAction(parameters);
+            if (command.transition().advances()) {
+                requireCount("""
+                    select count(*) from hearing_flow_action where flow_instance_id = :flowId and stage_id = :sourceStageId
+                     and case_id = :caseId and action_type = :actionType and submission_status in ('SUBMITTED','AUTO_TIMEOUT')
+                    """, parameters, 2, "HEARING_PARTY_ACTIONS_NOT_TERMINAL");
+            }
+            applyTransition(authority, command.transition(), command.authorityCommit().committedAt());
+            return result(authority, command.transition(), "urn:hearing:party-action:" + command.actionId(), command.contentHash());
+        });
+    }
+
+    private void requireLockedPartyAction(MapSqlParameterSource parameters) {
+        var rows = jdbc.queryForList("""
+                select id from hearing_flow_action where id = :actionId and flow_instance_id = :flowId
+                 and stage_id = :sourceStageId and case_id = :caseId and action_type = :actionType
+                 and schema_version = :schemaVersion and participant_id = :participantId
+                 and participant_role = :participantRole and submission_status = :submissionStatus
+                 and payload_json = cast(:payloadJson as jsonb) and content_hash = :contentHash and agent_run_id is null
+                for update
+                """, parameters);
+        if (rows.size() != 1) {
+            throw rejected("HEARING_PARTY_ACTION_NOT_EXACT");
+        }
+    }
+
+    @Override
+    public HearingDomainReceipt advanceStage(StageCommand command) {
+        Objects.requireNonNull(command, "command");
+        return authorityLedger.commitOrReplay(command.authorityCommit(), () -> {
+            HearingAuthorityExpectation authority = command.authorityCommit().authority();
+            requireSourceStage(authority, command.transition(), null, command.authorityCommit().committedAt());
+            applyTransition(authority, command.transition(), command.authorityCommit().committedAt());
+            return result(authority, command.transition(),
+                    "urn:hearing:stage:" + authority.stageSequence() + ':' + authority.stage().name(),
+                    command.stageOutputHash());
+        });
+    }
+
+    @Override
+    public HearingDomainReceipt finalizeMatrixSynthesis(MatrixSynthesisCommand command) {
+        Objects.requireNonNull(command, "command");
+        return authorityLedger.commitOrReplay(command.authorityCommit(), () -> {
+            HearingAuthorityExpectation authority = command.authorityCommit().authority();
+            requireSourceStage(authority, command.transition(), command.agentRunId(), command.authorityCommit().committedAt());
+            requireTerminalAgentRun(authority, command.agentRunId(), command.agentResultHash());
+            applyTransition(authority, command.transition(), command.authorityCommit().committedAt());
+            return result(authority, command.transition(),
+                    "urn:hearing:matrix:" + command.matrixKind().name().toLowerCase() + ':' + command.agentRunId(),
+                    command.contentHash());
+        });
+    }
+
+    @Override
     public HearingDomainReceipt freezeDossier(DossierCommand command) {
         Objects.requireNonNull(command, "command");
         return authorityLedger.commitOrReplay(command.authorityCommit(), () -> {
@@ -695,6 +759,14 @@ public final class JdbcHearingFormalFinalizer implements HearingFormalFinalizer 
             String failureCode) {
         Integer count = jdbc.queryForObject(sql, parameters, Integer.class);
         if (!Integer.valueOf(1).equals(count)) {
+            throw rejected(failureCode);
+        }
+    }
+
+    private void requireCount(
+            String sql, MapSqlParameterSource parameters, int expected, String failureCode) {
+        Integer count = jdbc.queryForObject(sql, parameters, Integer.class);
+        if (count == null || count != expected) {
             throw rejected(failureCode);
         }
     }

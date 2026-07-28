@@ -21,6 +21,7 @@ from cryptography.hazmat.primitives import hashes
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import common
 import ledger
+import teardown
 
 SYNTHETIC_FIXTURE_SET_ID = "p9-synthetic-all-rooms-001"
 SYNTHETIC_FIXTURE_SOURCE = (
@@ -35,6 +36,24 @@ SYNTHETIC_FIXTURE_SOURCE = (
 )
 TARGET_E2E_JAVA_ARTIFACT = "/home/app/app-target-e2e.jar"
 CONTAINER_ID = re.compile(r"^[0-9a-f]{12,64}$")
+POSTGRES_IDENTITY_PREFIXES = {
+    "clusterIdentity": ("pg-system-id/", 18_446_744_073_709_551_615),
+    "databaseIdentity": ("pg-database-oid/", 4_294_967_295),
+    "runtimePrincipalIdentity": ("pg-role-oid/", 4_294_967_295),
+}
+
+DATABASE_IDENTITY_SQL = """
+select json_build_object(
+    'clusterIdentity', 'pg-system-id/' || control.system_identifier::text,
+    'databaseIdentity', 'pg-database-oid/' || database.oid::text,
+    'runtimePrincipalIdentity', 'pg-role-oid/' || role.oid::text,
+    'databaseName', current_database(),
+    'roleName', current_user
+)::text
+from pg_control_system() control
+join pg_database database on database.datname = current_database()
+join pg_roles role on role.rolname = current_user
+""".strip()
 
 
 def _tool(name: str) -> str:
@@ -84,6 +103,139 @@ def _write_private(path: Path, payload: str) -> None:
     path.write_text(payload, encoding="ascii", newline="\n")
     if os.name != "nt":
         path.chmod(0o600)
+
+
+def _write_environment(path: Path, values: dict[str, str]) -> None:
+    _write_private(
+        path,
+        "\n".join(
+            f"{key}={common.env_quote(value)}" for key, value in sorted(values.items())
+        )
+        + "\n",
+    )
+
+
+def _parse_database_identity(
+    output: str, *, expected_database: str, expected_role: str
+) -> dict[str, str]:
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if len(lines) != 1:
+        raise common.TargetE2EError(
+            "database identity measurement did not return exactly one row"
+        )
+    try:
+        document = json.loads(lines[0])
+    except json.JSONDecodeError as error:
+        raise common.TargetE2EError(
+            "database identity measurement did not return strict JSON"
+        ) from error
+    expected_fields = {
+        "clusterIdentity",
+        "databaseIdentity",
+        "runtimePrincipalIdentity",
+        "databaseName",
+        "roleName",
+    }
+    if not isinstance(document, dict) or set(document) != expected_fields:
+        raise common.TargetE2EError("database identity measurement fields drifted")
+    if (
+        document["databaseName"] != expected_database
+        or document["roleName"] != expected_role
+    ):
+        raise common.TargetE2EError(
+            "database identity measurement used the wrong database or runtime role"
+        )
+    identity = {
+        key: document[key]
+        for key in (
+            "clusterIdentity",
+            "databaseIdentity",
+            "runtimePrincipalIdentity",
+        )
+    }
+    for key, value in identity.items():
+        prefix, maximum = POSTGRES_IDENTITY_PREFIXES[key]
+        if not isinstance(value, str) or not value.startswith(prefix):
+            raise common.TargetE2EError("database identity measurement is malformed")
+        number = value[len(prefix) :]
+        if (
+            not number.isascii()
+            or not number.isdecimal()
+            or number.startswith("0")
+            or int(number) > maximum
+        ):
+            raise common.TargetE2EError("database identity measurement is malformed")
+    return identity
+
+
+def _measure_database_identity(
+    env_path: Path, *, service: str, database: str, runtime_role: str
+) -> dict[str, str]:
+    result = common.run_command(
+        common.compose_argv(
+            env_path,
+            "exec",
+            "--no-TTY",
+            service,
+            "psql",
+            "--set=ON_ERROR_STOP=1",
+            "--quiet",
+            "--tuples-only",
+            "--no-align",
+            "--username",
+            runtime_role,
+            "--dbname",
+            database,
+            "--command",
+            DATABASE_IDENTITY_SQL,
+        ),
+        timeout=30,
+    )
+    return _parse_database_identity(
+        result.stdout, expected_database=database, expected_role=runtime_role
+    )
+
+
+def _bootstrap_database_identities(
+    env_path: Path, lock: dict[str, Any]
+) -> tuple[dict[str, str], dict[str, str]]:
+    teardown.assert_no_locked_resources(lock)
+    common.run_command(
+        common.compose_argv(
+            env_path,
+            "up",
+            "--detach",
+            "--wait",
+            "--wait-timeout",
+            "120",
+            "--pull",
+            "never",
+            "domain-db",
+            "graph-db",
+        ),
+        timeout=180,
+    )
+    domain = _measure_database_identity(
+        env_path,
+        service="domain-db",
+        database="target_domain",
+        runtime_role="domain_app",
+    )
+    graph = _measure_database_identity(
+        env_path,
+        service="graph-db",
+        database="target_graph",
+        runtime_role="graph_runtime",
+    )
+    if (
+        domain["clusterIdentity"] == graph["clusterIdentity"]
+        or domain["databaseIdentity"] == graph["databaseIdentity"]
+        or domain["runtimePrincipalIdentity"] == graph["runtimePrincipalIdentity"]
+    ):
+        raise common.TargetE2EError(
+            "bootstrap measured non-isolated Domain and Graph database identities"
+        )
+    return domain, graph
 
 
 def _reject_duplicate_members(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -268,6 +420,8 @@ def _generate_p256_key_pair(
             str(public_path),
         ]
     )
+    if os.name != "nt":
+        public_path.chmod(0o444)
 
 
 def _generate_mtls(
@@ -539,6 +693,19 @@ def _target_binding(candidate: str) -> tuple[dict[str, Any], str]:
     return {**binding, "binding_hash": binding_hash}, binding_hash
 
 
+def _activation_graph_binding(
+    target_binding: dict[str, Any],
+) -> tuple[dict[str, Any], str]:
+    binding = {
+        "key": target_binding["graph_key"],
+        "version": target_binding["graph_version"],
+        "checkpointSchemaVersion": target_binding["checkpoint_schema_version"],
+        "codeBuildId": target_binding["code_build_id"],
+    }
+    binding_hash = common.canonical_sha256(binding)
+    return {**binding, "bindingHash": binding_hash}, binding_hash
+
+
 def _current_shadow_binding(candidate: str, binding_hash: str) -> dict[str, Any]:
     return {
         "graph_key": "intake.v2",
@@ -803,6 +970,9 @@ def provision(
         ca_fingerprint = ca_certificate.fingerprint(hashes.SHA256()).hex()
 
         target_binding, binding_hash = _target_binding(candidate)
+        activation_graph_binding, activation_graph_binding_hash = (
+            _activation_graph_binding(target_binding)
+        )
         current_shadow_binding = _current_shadow_binding(candidate, binding_hash)
         registry_seed = common.seal_self_hash(
             {
@@ -815,18 +985,16 @@ def provision(
         )
         common.write_json(activation_dir / "registry-seed.json", registry_seed)
 
-        now = common.utc_now()
-        expires = now + dt.timedelta(minutes=30)
         activation_id = f"p9act.v1.{secrets.token_hex(16)}"
         run_nonce = f"p9-nonce-{secrets.token_hex(16)}"
         environment_id = f"p9-isolated-{selected_run_id}"
-        environment_generation = int(now.timestamp())
         tenant_surrogate = f"tenant-{selected_run_id}"
         project_name = run_lock["project_name"]
         temporal_namespace = f"after-sale-flow-p9-{selected_run_id}"
+        control_build_id = f"p9-control-{candidate[:8]}"
         build_bindings = {
-            "caseBuildId": f"p9-case-{candidate[:8]}",
-            "controlBuildId": f"p9-control-{candidate[:8]}",
+            "caseBuildId": control_build_id,
+            "controlBuildId": control_build_id,
             "agentBuildId": f"p9-agent-{candidate[:8]}",
         }
         image_digests = {
@@ -835,16 +1003,6 @@ def provision(
             "temporalAgentWorker": _manifest_digest(images, "java"),
             "pythonAgent": _manifest_digest(images, "python"),
             "frontend": _manifest_digest(images, "frontend"),
-        }
-        domain_identity = {
-            "clusterIdentity": f"{selected_run_id}-domain-cluster",
-            "databaseIdentity": f"{selected_run_id}-domain-db",
-            "runtimePrincipalIdentity": f"{selected_run_id}-java-domain-runtime",
-        }
-        graph_identity = {
-            "clusterIdentity": f"{selected_run_id}-graph-cluster",
-            "databaseIdentity": f"{selected_run_id}-graph-db",
-            "runtimePrincipalIdentity": f"{selected_run_id}-python-graph-runtime",
         }
         fixture_document, fixture_bytes, fixture_hash = _canonical_fixture(
             SYNTHETIC_FIXTURE_SOURCE
@@ -862,6 +1020,138 @@ def provision(
             "containsRealCaseOrPartyData": False,
             "externalEffectsAllowed": False,
         }
+        restore_hash = hashlib.sha256(
+            f"{selected_run_id}:{candidate}:restore".encode("ascii")
+        ).hexdigest()
+        artifact_digest = _java_artifact_digest(
+            docker, images["java"]["reference"], root
+        )
+        credentials = {
+            "TARGET_E2E_DOMAIN_ADMIN_PASSWORD": _secret(),
+            "TARGET_E2E_DOMAIN_APP_PASSWORD": _secret(),
+            "TARGET_E2E_GRAPH_ADMIN_PASSWORD": _secret(),
+            "TARGET_E2E_GRAPH_MIGRATOR_PASSWORD": _secret(),
+            "TARGET_E2E_GRAPH_RUNTIME_PASSWORD": _secret(),
+            "TARGET_E2E_GRAPH_RETENTION_PASSWORD": _secret(),
+            "TARGET_E2E_TEMPORAL_ADMIN_PASSWORD": _secret(),
+            "TARGET_E2E_TEMPORAL_DB_PASSWORD": _secret(),
+            "TARGET_E2E_REDIS_PASSWORD": _secret(),
+            "TARGET_E2E_MINIO_ROOT_USER": f"e2e{secrets.token_hex(8)}",
+            "TARGET_E2E_MINIO_ROOT_PASSWORD": _secret(),
+            "TARGET_E2E_JAVA_SERVICE_SECRET": _secret(),
+            "TARGET_E2E_PYTHON_SERVICE_SECRET": _secret(),
+            "TARGET_E2E_OCR_SERVICE_SECRET": _secret(),
+            "TARGET_E2E_LOCAL_MODEL_KEY": _secret(),
+            "TARGET_E2E_LOCAL_OBSERVABILITY_KEY": _secret(),
+        }
+        environment = {
+            "TARGET_E2E_RUN_ID": selected_run_id,
+            "TARGET_E2E_PROJECT_NAME": project_name,
+            "TARGET_E2E_BUILD_ID": candidate,
+            "TARGET_E2E_CASE_BUILD_ID": build_bindings["caseBuildId"],
+            "TARGET_E2E_CONTROL_BUILD_ID": build_bindings["controlBuildId"],
+            "TARGET_E2E_AGENT_BUILD_ID": build_bindings["agentBuildId"],
+            "TARGET_E2E_SOURCE_COMMIT": candidate,
+            "TARGET_E2E_LOCK_NONCE": run_lock["lock_nonce"],
+            "TARGET_E2E_IMAGE_LOCK_HASH": image_lock_document["self_hash"],
+            "TARGET_E2E_SECRETS_DIR": secrets_dir.as_posix(),
+            "TARGET_E2E_PUBLIC_DIR": public_dir.as_posix(),
+            "TARGET_E2E_ACTIVATION_DIR": activation_dir.as_posix(),
+            "TARGET_E2E_EVIDENCE_DIR": evidence_dir.as_posix(),
+            "TARGET_E2E_SOCKET_DIR": socket_dir.as_posix(),
+            "TARGET_E2E_GATEWAY_PORT": str(gateway_port),
+            "TARGET_E2E_TEMPORAL_NAMESPACE": temporal_namespace,
+            "TARGET_E2E_ENVIRONMENT_ID": environment_id,
+            "TARGET_E2E_ENVIRONMENT_GENERATION": "1",
+            "TARGET_E2E_ACTIVATION_ID": activation_id,
+            "TARGET_E2E_ACTIVATION_KEY_ID": activation_key_id,
+            "TARGET_E2E_ISOLATION_ATTESTATION_KEY_ID": isolation_key_id,
+            "TARGET_E2E_JAVA_ARTIFACT_SHA256": artifact_digest,
+            "TARGET_E2E_SYNTHETIC_FIXTURE_SHA256": fixture_hash,
+            "TARGET_E2E_RUN_NONCE": run_nonce,
+            "TARGET_E2E_TENANT_SURROGATE": tenant_surrogate,
+            "TARGET_E2E_DOMAIN_CLUSTER_IDENTITY": "BOOTSTRAP_PENDING",
+            "TARGET_E2E_DOMAIN_DATABASE_IDENTITY": "BOOTSTRAP_PENDING",
+            "TARGET_E2E_DOMAIN_PRINCIPAL_IDENTITY": "BOOTSTRAP_PENDING",
+            "TARGET_E2E_GRAPH_CLUSTER_IDENTITY": "BOOTSTRAP_PENDING",
+            "TARGET_E2E_GRAPH_DATABASE_IDENTITY": "BOOTSTRAP_PENDING",
+            "TARGET_E2E_GRAPH_PRINCIPAL_IDENTITY": "BOOTSTRAP_PENDING",
+            "TARGET_E2E_GRAPH_ENVIRONMENT_GENERATION": "1",
+            "TARGET_E2E_GRAPH_RESTORE_HASH": restore_hash,
+            "TARGET_E2E_GRAPH_SIGNING_KEY_ID": graph_key_id,
+            "TARGET_E2E_GRAPH_REGISTRY_HASH": binding_hash,
+            "TARGET_E2E_GRAPH_ACTIVATION_BINDING_HASH": activation_graph_binding_hash,
+            "TARGET_E2E_GRAPH_VERSION": target_binding["graph_version"],
+            "TARGET_E2E_GRAPH_CHECKPOINT_SCHEMA_VERSION": target_binding[
+                "checkpoint_schema_version"
+            ],
+            "TARGET_E2E_GRAPH_CODE_BUILD_ID": target_binding["code_build_id"],
+            "TARGET_E2E_GRAPH_SHADOW_BINDINGS": json.dumps(
+                [current_shadow_binding], separators=(",", ":"), sort_keys=True
+            ),
+            "GRAPH_TARGET_E2E_RUNTIME_CONTEXT": "{}",
+            "GRAPH_TARGET_E2E_BINDINGS": json.dumps(
+                [target_binding], separators=(",", ":"), sort_keys=True
+            ),
+            "TARGET_E2E_MTLS_CLIENT_CERT_SHA256": client_fingerprint,
+            "TARGET_E2E_MTLS_CA_CERT_SHA256": ca_fingerprint,
+            "TARGET_E2E_MTLS_KEYSTORE_PASSWORD": key_password,
+            "TARGET_E2E_MTLS_TRUSTSTORE_PASSWORD": trust_password,
+            **credentials,
+        }
+        for key, record in images.items():
+            environment[f"TARGET_E2E_{key.upper()}_IMAGE"] = record["reference"]
+            environment[f"TARGET_E2E_{key.upper()}_IMAGE_DIGEST"] = record[
+                "manifest_digest"
+            ]
+
+        bootstrap_env_path = root / ".bootstrap.env"
+        _write_environment(bootstrap_env_path, environment)
+        domain_identity, graph_identity = _bootstrap_database_identities(
+            bootstrap_env_path, run_lock
+        )
+        now = common.utc_now()
+        expires = now + dt.timedelta(minutes=30)
+        environment_generation = int(now.timestamp())
+        graph_generation = environment_generation
+        environment.update(
+            {
+                "TARGET_E2E_ENVIRONMENT_GENERATION": str(environment_generation),
+                "TARGET_E2E_GRAPH_ENVIRONMENT_GENERATION": str(graph_generation),
+                "TARGET_E2E_DOMAIN_CLUSTER_IDENTITY": domain_identity[
+                    "clusterIdentity"
+                ],
+                "TARGET_E2E_DOMAIN_DATABASE_IDENTITY": domain_identity[
+                    "databaseIdentity"
+                ],
+                "TARGET_E2E_DOMAIN_PRINCIPAL_IDENTITY": domain_identity[
+                    "runtimePrincipalIdentity"
+                ],
+                "TARGET_E2E_GRAPH_CLUSTER_IDENTITY": graph_identity[
+                    "clusterIdentity"
+                ],
+                "TARGET_E2E_GRAPH_DATABASE_IDENTITY": graph_identity[
+                    "databaseIdentity"
+                ],
+                "TARGET_E2E_GRAPH_PRINCIPAL_IDENTITY": graph_identity[
+                    "runtimePrincipalIdentity"
+                ],
+                "TARGET_E2E_ISOLATED_DOMAIN_DB_BINDING_HASH": common.canonical_sha256(
+                    {
+                        "schema_version": "target-e2e-isolated-domain-db-binding.v1",
+                        "environment_id": environment_id,
+                        "environment_generation": environment_generation,
+                        "activation_id": activation_id,
+                        "binding_kind": "ISOLATED_DOMAIN_POSTGRESQL",
+                        "cluster_identity": domain_identity["clusterIdentity"],
+                        "database_identity": domain_identity["databaseIdentity"],
+                        "runtime_principal_identity": domain_identity[
+                            "runtimePrincipalIdentity"
+                        ],
+                    }
+                ),
+            }
+        )
         activation_manifest: dict[str, Any] = {
             "contractVersion": "target-e2e-activation.v1",
             "activationId": activation_id,
@@ -876,13 +1166,7 @@ def provision(
             "caseScope": case_scope,
             "allowedRoomTypes": ["INTAKE", "EVIDENCE", "HEARING", "REVIEW"],
             "buildBindings": build_bindings,
-            "graphBinding": {
-                "key": target_binding["graph_key"],
-                "version": target_binding["graph_version"],
-                "checkpointSchemaVersion": target_binding["checkpoint_schema_version"],
-                "bindingHash": binding_hash,
-                "codeBuildId": target_binding["code_build_id"],
-            },
+            "graphBinding": activation_graph_binding,
             "imageDigests": image_digests,
             "temporalNamespace": temporal_namespace,
             "databaseIdentities": {"domain": domain_identity, "graph": graph_identity},
@@ -915,11 +1199,10 @@ def provision(
             key_id=activation_key_id,
             typ="target-e2e-activation+jwt",
         )
-        _write_private(activation_dir / "activation.jws", activation_jws + "\n")
-
-        artifact_digest = _java_artifact_digest(
-            docker, images["java"]["reference"], root
+        _write_public_bytes(
+            activation_dir / "activation.jws", (activation_jws + "\n").encode("ascii")
         )
+
         isolation_nonce = f"p9-isolation-nonce-{secrets.token_hex(16)}"
         isolation_payload = _isolation_attestation_payload(
             now=now,
@@ -946,10 +1229,6 @@ def provision(
             (isolation_jws + "\n").encode("ascii"),
         )
 
-        graph_generation = environment_generation
-        restore_hash = hashlib.sha256(
-            f"{selected_run_id}:{candidate}:restore".encode("ascii")
-        ).hexdigest()
         runtime_context = {
             "schemaVersion": "graph-target-e2e-runtime-context.v1",
             "executionLane": "TARGET_E2E_CANDIDATE",
@@ -1012,89 +1291,26 @@ def provision(
         run_context_path = root / "run-context.json"
         common.write_json(run_context_path, run_context)
 
-        environment = {
-            "TARGET_E2E_RUN_ID": selected_run_id,
-            "TARGET_E2E_PROJECT_NAME": project_name,
-            "TARGET_E2E_BUILD_ID": candidate,
-            "TARGET_E2E_SOURCE_COMMIT": candidate,
-            "TARGET_E2E_LOCK_PATH": run_lock_path.as_posix(),
-            "TARGET_E2E_LOCK_NONCE": run_lock["lock_nonce"],
-            "TARGET_E2E_IMAGE_LOCK_PATH": image_lock_snapshot.as_posix(),
-            "TARGET_E2E_IMAGE_LOCK_HASH": image_lock_document["self_hash"],
-            "TARGET_E2E_RUN_CONTEXT_PATH": run_context_path.as_posix(),
-            "TARGET_E2E_RUN_CONTEXT_HASH": run_context["self_hash"],
-            "TARGET_E2E_SECRETS_DIR": secrets_dir.as_posix(),
-            "TARGET_E2E_PUBLIC_DIR": public_dir.as_posix(),
-            "TARGET_E2E_ACTIVATION_DIR": activation_dir.as_posix(),
-            "TARGET_E2E_EVIDENCE_DIR": evidence_dir.as_posix(),
-            "TARGET_E2E_SOCKET_DIR": socket_dir.as_posix(),
-            "TARGET_E2E_GATEWAY_PORT": str(gateway_port),
-            "TARGET_E2E_TEMPORAL_NAMESPACE": temporal_namespace,
-            "TARGET_E2E_ENVIRONMENT_ID": environment_id,
-            "TARGET_E2E_ENVIRONMENT_GENERATION": str(environment_generation),
-            "TARGET_E2E_ACTIVATION_ID": activation_id,
-            "TARGET_E2E_ACTIVATION_KEY_ID": activation_key_id,
-            "TARGET_E2E_ISOLATION_ATTESTATION_KEY_ID": isolation_key_id,
-            "TARGET_E2E_ISOLATION_ATTESTATION_JWS_SHA256": hashlib.sha256(
-                isolation_jws.encode("ascii")
-            ).hexdigest(),
-            "TARGET_E2E_JAVA_ARTIFACT_SHA256": artifact_digest,
-            "TARGET_E2E_SYNTHETIC_FIXTURE_SHA256": fixture_hash,
-            "TARGET_E2E_RUN_NONCE": run_nonce,
-            "TARGET_E2E_TENANT_SURROGATE": tenant_surrogate,
-            "TARGET_E2E_DOMAIN_CLUSTER_IDENTITY": domain_identity["clusterIdentity"],
-            "TARGET_E2E_DOMAIN_DATABASE_IDENTITY": domain_identity["databaseIdentity"],
-            "TARGET_E2E_DOMAIN_PRINCIPAL_IDENTITY": domain_identity[
-                "runtimePrincipalIdentity"
-            ],
-            "TARGET_E2E_GRAPH_CLUSTER_IDENTITY": graph_identity["clusterIdentity"],
-            "TARGET_E2E_GRAPH_DATABASE_IDENTITY": graph_identity["databaseIdentity"],
-            "TARGET_E2E_GRAPH_PRINCIPAL_IDENTITY": graph_identity[
-                "runtimePrincipalIdentity"
-            ],
-            "TARGET_E2E_DOMAIN_ADMIN_PASSWORD": _secret(),
-            "TARGET_E2E_DOMAIN_APP_PASSWORD": _secret(),
-            "TARGET_E2E_GRAPH_ADMIN_PASSWORD": _secret(),
-            "TARGET_E2E_GRAPH_MIGRATOR_PASSWORD": _secret(),
-            "TARGET_E2E_GRAPH_RUNTIME_PASSWORD": _secret(),
-            "TARGET_E2E_GRAPH_RETENTION_PASSWORD": _secret(),
-            "TARGET_E2E_TEMPORAL_ADMIN_PASSWORD": _secret(),
-            "TARGET_E2E_TEMPORAL_DB_PASSWORD": _secret(),
-            "TARGET_E2E_REDIS_PASSWORD": _secret(),
-            "TARGET_E2E_MINIO_ROOT_USER": f"e2e{secrets.token_hex(8)}",
-            "TARGET_E2E_MINIO_ROOT_PASSWORD": _secret(),
-            "TARGET_E2E_JAVA_SERVICE_SECRET": _secret(),
-            "TARGET_E2E_PYTHON_SERVICE_SECRET": _secret(),
-            "TARGET_E2E_OCR_SERVICE_SECRET": _secret(),
-            "TARGET_E2E_LOCAL_MODEL_KEY": _secret(),
-            "TARGET_E2E_LOCAL_OBSERVABILITY_KEY": _secret(),
-            "TARGET_E2E_GRAPH_ENVIRONMENT_GENERATION": str(graph_generation),
-            "TARGET_E2E_GRAPH_RESTORE_HASH": restore_hash,
-            "TARGET_E2E_GRAPH_SIGNING_KEY_ID": graph_key_id,
-            "TARGET_E2E_GRAPH_REGISTRY_HASH": binding_hash,
-            "TARGET_E2E_GRAPH_SHADOW_BINDINGS": json.dumps(
-                [current_shadow_binding], separators=(",", ":"), sort_keys=True
-            ),
-            "GRAPH_TARGET_E2E_RUNTIME_CONTEXT": json.dumps(
-                runtime_context, separators=(",", ":"), sort_keys=True
-            ),
-            "GRAPH_TARGET_E2E_BINDINGS": json.dumps(
-                executor_bindings, separators=(",", ":"), sort_keys=True
-            ),
-            "TARGET_E2E_MTLS_CLIENT_CERT_SHA256": client_fingerprint,
-            "TARGET_E2E_MTLS_CA_CERT_SHA256": ca_fingerprint,
-            "TARGET_E2E_MTLS_KEYSTORE_PASSWORD": key_password,
-            "TARGET_E2E_MTLS_TRUSTSTORE_PASSWORD": trust_password,
-        }
-        for key, record in images.items():
-            environment[f"TARGET_E2E_{key.upper()}_IMAGE"] = record["reference"]
-
+        environment.update(
+            {
+                "TARGET_E2E_LOCK_PATH": run_lock_path.as_posix(),
+                "TARGET_E2E_IMAGE_LOCK_PATH": image_lock_snapshot.as_posix(),
+                "TARGET_E2E_RUN_CONTEXT_PATH": run_context_path.as_posix(),
+                "TARGET_E2E_RUN_CONTEXT_HASH": run_context["self_hash"],
+                "TARGET_E2E_ISOLATION_ATTESTATION_JWS_SHA256": hashlib.sha256(
+                    isolation_jws.encode("ascii")
+                ).hexdigest(),
+                "GRAPH_TARGET_E2E_RUNTIME_CONTEXT": json.dumps(
+                    runtime_context, separators=(",", ":"), sort_keys=True
+                ),
+                "GRAPH_TARGET_E2E_BINDINGS": json.dumps(
+                    executor_bindings, separators=(",", ":"), sort_keys=True
+                ),
+            }
+        )
         env_path = root / "target-e2e.env"
-        env_lines = [
-            f"{key}={common.env_quote(value)}"
-            for key, value in sorted(environment.items())
-        ]
-        _write_private(env_path, "\n".join(env_lines) + "\n")
+        _write_environment(env_path, environment)
+        bootstrap_env_path.unlink(missing_ok=True)
 
         ledger_context = {
             "run_context_hash": run_context["self_hash"],
@@ -1146,7 +1362,18 @@ def provision(
         )
         common.write_json(run_lock_path, active_lock)
         return env_path
-    except BaseException:
+    except BaseException as failure:
+        try:
+            teardown.remove_exact_locked_resources(run_lock)
+            (root / ".bootstrap.env").unlink(missing_ok=True)
+        except BaseException as cleanup_failure:
+            cleanup_required_lock = common.seal_self_hash(
+                {**run_lock, "state": "FAILED_CLEANUP_REQUIRED"}
+            )
+            common.write_json(run_lock_path, cleanup_required_lock)
+            raise common.TargetE2EError(
+                "provisioning failed and exact locked-resource cleanup is required"
+            ) from cleanup_failure
         failed_lock = common.seal_self_hash({**run_lock, "state": "FAILED"})
         common.write_json(run_lock_path, failed_lock)
         port_document = common.load_json(_port_lock_path)
@@ -1160,7 +1387,7 @@ def provision(
                 }
             ),
         )
-        raise
+        raise failure
 
 
 def main(argv: list[str] | None = None) -> int:

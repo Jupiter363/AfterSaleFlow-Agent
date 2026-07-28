@@ -11,6 +11,8 @@ import com.example.dispute.workflow.temporal.room.hearing.HearingRoomWorkflow;
 import com.example.dispute.workflow.temporal.room.hearing.HearingRoomWorkflowImpl;
 import com.example.dispute.workflow.temporal.room.hearing.HearingStageReceipt;
 import com.example.dispute.workflow.temporal.room.hearing.HearingWorkflowStage;
+import com.example.dispute.workflow.targete2e.temporal.room.TargetRoomAgentRunFinalizationReceipt;
+import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowOptions;
 import io.temporal.client.WorkflowStub;
@@ -184,6 +186,39 @@ class HearingRoomWorkflowTest {
 
     WorkflowExecutionHistory history = client.fetchHistory(started.workflowId());
     WorkflowReplayer.replayWorkflowExecution(history, HearingRoomWorkflowImpl.class);
+  }
+
+  @Test
+  void completedTargetAgentRunReceiptIsPersistedOnlyAtItsExactAgentStage() {
+    Started started = start("agent-run-receipt", Duration.ofSeconds(3));
+    HearingRoomSnapshot current = started.workflow().state();
+    TargetRoomAgentRunFinalizationReceipt receipt =
+        new TargetRoomAgentRunFinalizationReceipt(
+            TargetRoomAgentRunFinalizationReceipt.SCHEMA_VERSION,
+            current.tenantSurrogate(),
+            current.caseId(),
+            RoomType.HEARING,
+            current.roomEpoch(),
+            current.fencingToken(),
+            current.processRevision(),
+            current.roomRevision(),
+            current.stageSequence(),
+            "CMD_HEARING_AGENT",
+            "RUN_HEARING_AGENT",
+            "ATTEMPT_HEARING_AGENT",
+            1,
+            "a".repeat(64));
+
+    started.workflow().agentRunFinalized(receipt);
+    started.workflow().agentRunFinalized(receipt);
+
+    HearingRoomSnapshot observed =
+        awaitState(
+            started.workflow(), state -> state.agentRunFinalizationReceipts().size() == 1);
+    assertThat(observed.agentRunFinalizationReceipts()).containsExactly(receipt);
+    assertThat(observed.duplicateSignalCount()).isEqualTo(current.duplicateSignalCount() + 1);
+    assertThat(observed.processRevision()).isEqualTo(current.processRevision());
+    assertThat(observed.roomRevision()).isEqualTo(current.roomRevision());
   }
 
   @Test

@@ -51,7 +51,7 @@ public class HearingFlowController {
 
     @GetMapping
     public ApiResponse<Map<String, Object>> hearing(
-            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
+            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9_]{1,59}") String caseId,
             Authentication authentication,
             HttpServletRequest request) {
         AuthenticatedActor actor = actor(authentication);
@@ -61,7 +61,7 @@ public class HearingFlowController {
 
     @PostMapping("/answers")
     public ApiResponse<HearingPartyActionView> answers(
-            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
+            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9_]{1,59}") String caseId,
             @Valid @RequestBody HearingAnswerBundleRequest body,
             Authentication authentication,
             HttpServletRequest request) {
@@ -70,26 +70,39 @@ public class HearingFlowController {
 
     @PostMapping("/statements")
     public ApiResponse<HearingPartyActionView> statements(
-            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
+            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9_]{1,59}") String caseId,
             @Valid @RequestBody HearingPartyStatementRequest body,
             Authentication authentication,
             HttpServletRequest request) {
-        return success(runtimeService.submitStatement(caseId, body, actor(authentication)), request);
+        return success(
+                runtimeService.submitStatement(
+                        caseId,
+                        body,
+                        actor(authentication),
+                        correlationId(request, TraceIdFilter.TRACE_ATTRIBUTE),
+                        correlationId(request, TraceIdFilter.REQUEST_ATTRIBUTE)),
+                request);
     }
 
     @PostMapping("/evidence-batches")
     public ApiResponse<HearingPartyActionView> evidenceBatches(
-            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
+            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9_]{1,59}") String caseId,
             @Valid @RequestBody HearingEvidenceBatchRequest body,
             Authentication authentication,
             HttpServletRequest request) {
         return success(
-                runtimeService.submitEvidenceBatch(caseId, body, actor(authentication)), request);
+                runtimeService.submitEvidenceBatch(
+                        caseId,
+                        body,
+                        actor(authentication),
+                        correlationId(request, TraceIdFilter.TRACE_ATTRIBUTE),
+                        correlationId(request, TraceIdFilter.REQUEST_ATTRIBUTE)),
+                request);
     }
 
     @PostMapping("/complete")
     public ApiResponse<Map<String, Object>> complete(
-            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
+            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9_]{1,59}") String caseId,
             Authentication authentication,
             HttpServletRequest request) {
         AuthenticatedActor actor = actor(authentication);
@@ -99,7 +112,7 @@ public class HearingFlowController {
 
     @GetMapping("/settlements")
     public ApiResponse<List<SettlementView>> settlements(
-            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
+            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9_]{1,59}") String caseId,
             Authentication authentication,
             HttpServletRequest request) {
         return success(settlementService.list(caseId, actor(authentication)), request);
@@ -107,7 +120,7 @@ public class HearingFlowController {
 
     @PostMapping("/settlements")
     public ApiResponse<SettlementView> proposeSettlement(
-            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
+            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9_]{1,59}") String caseId,
             @Valid @RequestBody SettlementProposalRequest body,
             Authentication authentication,
             HttpServletRequest request) {
@@ -122,7 +135,7 @@ public class HearingFlowController {
 
     @PostMapping("/settlements/{version}/confirm")
     public ApiResponse<SettlementView> confirmSettlement(
-            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
+            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9_]{1,59}") String caseId,
             @PathVariable int version,
             @RequestHeader("Idempotency-Key") String idempotencyKey,
             Authentication authentication,

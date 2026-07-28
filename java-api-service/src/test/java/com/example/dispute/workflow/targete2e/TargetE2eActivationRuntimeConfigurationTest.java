@@ -1,0 +1,122 @@
+package com.example.dispute.workflow.targete2e;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
+import java.security.spec.ECGenParameterSpec;
+import java.util.Base64;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.mock.env.MockEnvironment;
+
+class TargetE2eActivationRuntimeConfigurationTest {
+
+  @TempDir Path temporaryDirectory;
+
+  @Test
+  void loadsIndependentTrustSetsFixtureAndGraphMeasurementDataSource() throws Exception {
+    KeyPair activation = p256();
+    KeyPair attestation = p256();
+    Path activationKey = writePem("activation.pem", activation);
+    Path attestationKey = writePem("attestation.pem", attestation);
+    Path fixture = temporaryDirectory.resolve("fixture.json");
+    byte[] fixtureBytes = "{\"schemaVersion\":\"test\"}".getBytes(StandardCharsets.US_ASCII);
+    Files.write(fixture, fixtureBytes);
+    MockEnvironment environment =
+        new MockEnvironment()
+            .withProperty("app.target-e2e.activation-public-keys", "activation-key=" + activationKey)
+            .withProperty(
+                "app.target-e2e.isolation-attestation-public-keys",
+                "attestation-key=" + attestationKey)
+            .withProperty(
+                "app.target-e2e.measurement.graph-datasource.url",
+                "jdbc:postgresql://graph-db:5432/target_graph")
+            .withProperty(
+                "app.target-e2e.measurement.graph-datasource.username", "graph_measurement")
+            .withProperty(
+                "app.target-e2e.measurement.graph-datasource.password", "measurement-secret")
+            .withProperty(
+                "app.target-e2e.measurement.case-scope.fixture-set-id", "fixture-set-1")
+            .withProperty(
+                "app.target-e2e.measurement.case-scope.fixture-read-only-path",
+                fixture.toString());
+    TargetE2eActivationRuntimeConfiguration configuration =
+        new TargetE2eActivationRuntimeConfiguration();
+
+    assertThat(configuration.targetE2eActivationPublicKeySet(environment).resolve("activation-key"))
+        .isPresent();
+    assertThat(
+            configuration
+                .targetE2eIsolationAttestationPublicKeySet(environment)
+                .resolve("attestation-key"))
+        .isPresent();
+    DriverManagerDataSource graphDataSource =
+        (DriverManagerDataSource) configuration.targetE2eGraphMeasurementDataSource(environment);
+    assertThat(graphDataSource.getUrl()).isEqualTo("jdbc:postgresql://graph-db:5432/target_graph");
+    TargetE2eSyntheticFixtureSource.ConfiguredFixture loaded =
+        configuration.targetE2eSyntheticFixtureSource(environment).loadConfigured("fixture-set-1");
+    assertThat(loaded.readOnlyPathBinding()).isEqualTo(fixture.toString());
+    assertThat(loaded.bytes()).isEqualTo(fixtureBytes);
+  }
+
+  @Test
+  void rejectsNonEcTrustMaterial() throws Exception {
+    KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
+    generator.initialize(2048);
+    Path rsaKey = writePem("rsa.pem", generator.generateKeyPair());
+    MockEnvironment environment =
+        new MockEnvironment()
+            .withProperty("app.target-e2e.activation-public-keys", "activation-key=" + rsaKey);
+
+    assertThatThrownBy(
+            () ->
+                new TargetE2eActivationRuntimeConfiguration()
+                    .targetE2eActivationPublicKeySet(environment))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("activation public key is invalid");
+  }
+
+  @Test
+  void fixtureSourceRejectsAnUnconfiguredFixtureSet() throws Exception {
+    Path fixture = temporaryDirectory.resolve("fixture.json");
+    Files.writeString(fixture, "{}");
+    MockEnvironment environment =
+        new MockEnvironment()
+            .withProperty(
+                "app.target-e2e.measurement.case-scope.fixture-set-id", "fixture-set-1")
+            .withProperty(
+                "app.target-e2e.measurement.case-scope.fixture-read-only-path",
+                fixture.toString());
+    TargetE2eSyntheticFixtureSource source =
+        new TargetE2eActivationRuntimeConfiguration()
+            .targetE2eSyntheticFixtureSource(environment);
+
+    assertThatThrownBy(() -> source.loadConfigured("fixture-set-2"))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("not deployment-configured");
+  }
+
+  private KeyPair p256() throws Exception {
+    KeyPairGenerator generator = KeyPairGenerator.getInstance("EC");
+    generator.initialize(new ECGenParameterSpec("secp256r1"));
+    return generator.generateKeyPair();
+  }
+
+  private Path writePem(String name, KeyPair keyPair) throws Exception {
+    String body =
+        Base64.getMimeEncoder(64, "\n".getBytes(StandardCharsets.US_ASCII))
+            .encodeToString(keyPair.getPublic().getEncoded());
+    Path path = temporaryDirectory.resolve(name);
+    Files.writeString(
+        path,
+        "-----BEGIN PUBLIC KEY-----\n" + body + "\n-----END PUBLIC KEY-----\n",
+        StandardCharsets.US_ASCII);
+    return path;
+  }
+}

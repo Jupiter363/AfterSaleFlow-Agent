@@ -62,7 +62,7 @@ public class CaseOutcomeController {
     @GetMapping
     public ApiResponse<CaseOutcomeView> get(
             @PathVariable
-                    @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}")
+                    @Pattern(regexp = "CASE_[A-Za-z0-9_]{1,59}")
                     String caseId,
             Authentication authentication,
             HttpServletRequest request) {
@@ -81,7 +81,7 @@ public class CaseOutcomeController {
     @PostMapping("/review/confirm")
     public ApiResponse<LegacyDecisionResponse> confirmDraft(
             @PathVariable
-                    @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}")
+                    @Pattern(regexp = "CASE_[A-Za-z0-9_]{1,59}")
                     String caseId,
             @RequestHeader("Idempotency-Key") @NotBlank String idempotencyKey,
             @Valid @RequestBody OutcomeReviewDecisionRequest body,
@@ -107,7 +107,7 @@ public class CaseOutcomeController {
     @PostMapping("/review/modify")
     public ApiResponse<LegacyDecisionResponse> modifyDraft(
             @PathVariable
-                    @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}")
+                    @Pattern(regexp = "CASE_[A-Za-z0-9_]{1,59}")
                     String caseId,
             @RequestHeader("Idempotency-Key") @NotBlank String idempotencyKey,
             @Valid @RequestBody OutcomeReviewDecisionRequest body,

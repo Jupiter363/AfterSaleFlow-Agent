@@ -58,7 +58,7 @@ public class Mig001ScenarioController {
 
     @GetMapping("/{caseId}")
     public ApiResponse<Mig001ScenarioView> status(
-            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
+            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9_]{1,59}") String caseId,
             Authentication authentication,
             HttpServletRequest servletRequest) {
         String traceId = correlationId(servletRequest, TraceIdFilter.TRACE_ATTRIBUTE);

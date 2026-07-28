@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.annotation.JsonNaming;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 /** Exact Java mirror of the frozen Python Intake exchange wire DTOs. */
@@ -20,6 +21,8 @@ public final class IntakeExchangeContract {
             Pattern.compile("[A-Za-z0-9][A-Za-z0-9._:-]{0,127}");
     private static final Pattern SHA256 = Pattern.compile("[0-9a-f]{64}");
     private static final Pattern THREAD_ID = Pattern.compile("grt\\.v1\\.[0-9a-f]{32}");
+    private static final Set<String> EXCHANGE_GRAPH_KEYS =
+            Set.of("intake.v2", "all-rooms.target-e2e.v1");
 
     private IntakeExchangeContract() {}
 
@@ -76,7 +79,9 @@ public final class IntakeExchangeContract {
             identifier(logicalRunId, "logicalRunId");
             identifier(attemptId, "attemptId");
             requireSha256(requestHash, "requestHash");
-            exact(graphKey, "intake.v2", "graphKey");
+            if (!EXCHANGE_GRAPH_KEYS.contains(graphKey)) {
+                throw invalid("graphKey is not an allowed Intake exchange graph");
+            }
             identifier(graphVersion, "graphVersion");
             identifier(checkpointSchemaVersion, "checkpointSchemaVersion");
             nonNegative(processRevision, "processRevision");

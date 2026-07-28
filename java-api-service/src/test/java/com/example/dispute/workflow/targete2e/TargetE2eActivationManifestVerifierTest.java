@@ -741,6 +741,18 @@ class TargetE2eActivationManifestVerifierTest {
             observation(domainIdentity(), "domain_runtime", true),
             observation(graphIdentity(), "graph_runtime", false)),
         Reason.RUNTIME_MEASUREMENT_FAILED);
+    assertMeasuredProviderDenied(
+        environment -> {},
+        databaseProbe(
+            observation(
+                new DatabaseIdentity(
+                    "pg-system-id/unprovisioned-domain",
+                    domainIdentity().databaseIdentity(),
+                    domainIdentity().runtimePrincipalIdentity()),
+                "domain_runtime",
+                false),
+            observation(graphIdentity(), "graph_runtime", false)),
+        Reason.RUNTIME_MEASUREMENT_FAILED);
   }
 
   @Test
@@ -954,14 +966,14 @@ class TargetE2eActivationManifestVerifierTest {
 
   private static MockEnvironment safeEnvironment() {
     MockEnvironment environment = new MockEnvironment();
-    environment.setActiveProfiles("target-e2e", "agent-worker");
+    environment.setActiveProfiles("target-e2e", "control-worker");
     environment.setProperty(
         "app.target-e2e.measurement.artifact-marker",
         SpringJdbcTargetE2eRuntimeMeasurementProvider.ARTIFACT_MARKER);
     environment.setProperty("app.temporal.worker.enabled", "true");
-    environment.setProperty("app.temporal.worker.role", "AGENT");
+    environment.setProperty("app.temporal.worker.role", "CONTROL");
     environment.setProperty("app.temporal.worker.versioning-mode", "BUILD_ID");
-    environment.setProperty("app.temporal.worker.build-id", "agent-v9");
+    environment.setProperty("app.temporal.worker.build-id", "control-v9");
     environment.setProperty("app.temporal.namespace", "target-e2e-namespace");
     environment.setProperty("app.target-e2e.measurement.environment-id", "target-e2e-env-01");
     environment.setProperty("app.target-e2e.measurement.environment-generation", "17");
@@ -970,7 +982,7 @@ class TargetE2eActivationManifestVerifierTest {
     environment.setProperty("app.target-e2e.measurement.case-scope.mode", "EXPLICIT_CASE_IDS");
     environment.setProperty("app.target-e2e.measurement.case-scope.allowed-case-ids", CASE_ID);
     environment.setProperty("app.target-e2e.measurement.allowed-room-types", "INTAKE,EVIDENCE");
-    environment.setProperty("app.target-e2e.measurement.build.case", "case-v9");
+    environment.setProperty("app.target-e2e.measurement.build.case", "control-v9");
     environment.setProperty("app.target-e2e.measurement.build.control", "control-v9");
     environment.setProperty("app.target-e2e.measurement.build.agent", "agent-v9");
     environment.setProperty("app.target-e2e.measurement.graph.key", "all-rooms.target-e2e.v1");
@@ -985,6 +997,24 @@ class TargetE2eActivationManifestVerifierTest {
     environment.setProperty("app.target-e2e.measurement.images.temporal-agent-worker", digest('6'));
     environment.setProperty("app.target-e2e.measurement.images.python-agent", digest('7'));
     environment.setProperty("app.target-e2e.measurement.images.frontend", digest('8'));
+    environment.setProperty(
+        "app.target-e2e.measurement.database.domain.cluster-identity",
+        domainIdentity().clusterIdentity());
+    environment.setProperty(
+        "app.target-e2e.measurement.database.domain.database-identity",
+        domainIdentity().databaseIdentity());
+    environment.setProperty(
+        "app.target-e2e.measurement.database.domain.runtime-principal-identity",
+        domainIdentity().runtimePrincipalIdentity());
+    environment.setProperty(
+        "app.target-e2e.measurement.database.graph.cluster-identity",
+        graphIdentity().clusterIdentity());
+    environment.setProperty(
+        "app.target-e2e.measurement.database.graph.database-identity",
+        graphIdentity().databaseIdentity());
+    environment.setProperty(
+        "app.target-e2e.measurement.database.graph.runtime-principal-identity",
+        graphIdentity().runtimePrincipalIdentity());
     environment.setProperty(
         "app.target-e2e.measurement.environment-class", "ISOLATED_PREPRODUCTION");
     environment.setProperty("app.target-e2e.measurement.graph-output-authority", "PROPOSAL_ONLY");
@@ -1080,7 +1110,7 @@ class TargetE2eActivationManifestVerifierTest {
         caseScope instanceof IsolatedSyntheticNewCases
             ? Set.of(RoomType.values())
             : Set.of(RoomType.INTAKE, RoomType.EVIDENCE),
-        new BuildBindings("case-v9", "control-v9", "agent-v9"),
+        new BuildBindings("control-v9", "control-v9", "agent-v9"),
         new GraphBinding(
                 "all-rooms.target-e2e.v1",
             "graph-v9",
@@ -1272,7 +1302,7 @@ class TargetE2eActivationManifestVerifierTest {
     rooms.add("INTAKE");
     rooms.add("EVIDENCE");
     ObjectNode builds = payload.putObject("buildBindings");
-    builds.put("caseBuildId", "case-v9");
+    builds.put("caseBuildId", "control-v9");
     builds.put("controlBuildId", "control-v9");
     builds.put("agentBuildId", "agent-v9");
     ObjectNode graph = payload.putObject("graphBinding");

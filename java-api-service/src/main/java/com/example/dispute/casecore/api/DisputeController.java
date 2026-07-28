@@ -106,7 +106,7 @@ public class DisputeController {
     @GetMapping("/{caseId}")
     public ApiResponse<CaseView> get(
             @PathVariable
-                    @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}")
+                    @Pattern(regexp = "CASE_[A-Za-z0-9_]{1,59}")
                     String caseId,
             Authentication authentication,
             HttpServletRequest servletRequest) {

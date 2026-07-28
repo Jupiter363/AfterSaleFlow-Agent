@@ -1,0 +1,76 @@
+spring:
+  datasource:
+    url: jdbc:postgresql://${POSTGRES_HOST:domain-db}:${POSTGRES_PORT:5432}/${JAVA_DB_NAME:target_domain}
+    username: ${POSTGRES_USER}
+    password: ${POSTGRES_PASSWORD}
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 2
+      connection-timeout: 30000
+  data:
+    redis:
+      host: ${REDIS_HOST:redis}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD}
+      timeout: 3s
+  elasticsearch:
+    uris: ${ELASTICSEARCH_URL:http://elasticsearch:9200}
+
+target:
+  e2e:
+    case-build-id: ${TARGET_E2E_CASE_BUILD_ID:}
+    agent-build-id: ${TARGET_E2E_AGENT_BUILD_ID:}
+    graph-binding-hash: ${TARGET_E2E_GRAPH_BINDING_HASH:}
+    graph-code-build-id: ${TARGET_E2E_GRAPH_CODE_BUILD_ID:}
+    isolated-domain-db-binding-hash: ${TARGET_E2E_ISOLATED_DOMAIN_DB_BINDING_HASH:}
+    intake:
+      prompt-version: ${TARGET_E2E_INTAKE_PROMPT_VERSION:}
+      model-profile-id: ${TARGET_E2E_INTAKE_MODEL_PROFILE_ID:}
+      policy-version: ${TARGET_E2E_INTAKE_POLICY_VERSION:}
+      guardrail-version: ${TARGET_E2E_INTAKE_GUARDRAIL_VERSION:}
+      tool-policy-version: ${TARGET_E2E_INTAKE_TOOL_POLICY_VERSION:}
+      memory-policy-version: ${TARGET_E2E_INTAKE_MEMORY_POLICY_VERSION:}
+      envelope-key-id: ${TARGET_E2E_INTAKE_ENVELOPE_KEY_ID:}
+
+app:
+  env: ${APP_ENV:target-e2e}
+  security:
+    service-secret: ${JAVA_SERVICE_SECRET}
+  agent:
+    base-url: ${PYTHON_AGENT_SERVICE_URL:http://graph-mtls-proxy:8443}
+    service-secret: ${PYTHON_AGENT_SERVICE_SECRET}
+    timeout-ms: ${APP_AGENT_TIMEOUT_MS:300000}
+  ocr:
+    base-url: ${OCR_SERVICE_URL:http://ocr-parser-service:8010}
+    service-secret: ${OCR_SERVICE_SECRET}
+    timeout-ms: 120000
+    callback-base-url: ${OCR_CALLBACK_BASE_URL:${JAVA_API_SERVICE_URL:http://java-api-service:8080}}
+  temporal:
+    address: ${TEMPORAL_ADDRESS:temporal-server:7233}
+    namespace: ${TEMPORAL_NAMESPACE}
+    legacy-task-queue: ${TEMPORAL_TASK_QUEUE:target-e2e-case-dispute}
+    observability:
+      tracing-enabled: ${OTEL_TRACING_ENABLED:false}
+      search-attributes-enabled: ${TEMPORAL_SEARCH_ATTRIBUTES_ENABLED:false}
+    payload-protection:
+      mode: ${TEMPORAL_PAYLOAD_CODEC_MODE:DISABLED}
+      active-key-id: ${TEMPORAL_PAYLOAD_CODEC_ACTIVE_KEY_ID:}
+      active-key-base64: ${TEMPORAL_PAYLOAD_CODEC_ACTIVE_KEY_BASE64:}
+      decryption-keys: {}
+    worker:
+      enabled: ${APP_TEMPORAL_WORKER_ENABLED:false}
+      role: ${TEMPORAL_WORKER_ROLE:API}
+      versioning-mode: ${TEMPORAL_WORKER_VERSIONING_MODE:NONE}
+      deployment-name: ${TEMPORAL_WORKER_DEPLOYMENT_NAME:target-e2e-api}
+      build-id: ${TEMPORAL_WORKER_BUILD_ID:target-e2e-api}
+  minio:
+    endpoint: ${MINIO_ENDPOINT:http://minio:9000}
+    access-key: ${MINIO_ROOT_USER}
+    secret-key: ${MINIO_ROOT_PASSWORD}
+    evidence-original-bucket: ${MINIO_BUCKET_EVIDENCE_ORIGINAL:target-e2e-evidence-original}
+    evidence-desensitized-bucket: ${MINIO_BUCKET_EVIDENCE_DESENSITIZED:target-e2e-evidence-desensitized}
+  elasticsearch:
+    url: ${ELASTICSEARCH_URL:http://elasticsearch:9200}
+  logging:
+    audit-enabled: ${ENABLE_AUDIT_LOG:true}
+    sensitive-masking-enabled: ${ENABLE_SENSITIVE_LOG_MASKING:true}

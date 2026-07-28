@@ -32,6 +32,9 @@ public interface CaseProcessWorkflow {
   @SignalMethod(name = CaseProcessWorkflowProtocol.DOMAIN_EVENT_SIGNAL)
   void domainEventCommitted(CaseDomainEventRef event);
 
+  @SignalMethod(name = CaseProcessWorkflowProtocol.TARGET_ROOM_PROGRESS_SIGNAL)
+  void targetRoomProgressed(TargetRoomProgressReceipt receipt);
+
   @SignalMethod(name = CaseProcessWorkflowProtocol.RETRY_SEQUENCE_GAP_SIGNAL)
   void retrySequenceGap();
 

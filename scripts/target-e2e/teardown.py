@@ -141,6 +141,27 @@ def _locked_resources(lock: dict[str, Any]) -> tuple[list[str], list[str], list[
     return container_ids, existing_networks, existing_volumes
 
 
+def assert_no_locked_resources(lock: dict[str, Any]) -> None:
+    containers, networks, volumes = _locked_resources(lock)
+    if containers or networks or volumes:
+        raise common.TargetE2EError(
+            "locked Docker resources already exist before database bootstrap"
+        )
+
+
+def remove_exact_locked_resources(
+    lock: dict[str, Any],
+) -> tuple[list[str], list[str], list[str]]:
+    container_ids, networks, volumes = _locked_resources(lock)
+    if container_ids:
+        common.run_command(["docker", "rm", "--force", *container_ids], timeout=120)
+    for name in networks:
+        common.run_command(["docker", "network", "rm", name])
+    for name in volumes:
+        common.run_command(["docker", "volume", "rm", name])
+    return container_ids, networks, volumes
+
+
 def _release_port_lock(lock: dict[str, Any], released_at: str) -> None:
     path = Path(lock["port_lock"])
     common.assert_regular_single_link(path, "gateway port lock")
@@ -167,13 +188,7 @@ def _release_port_lock(lock: dict[str, Any], released_at: str) -> None:
 def teardown(env_file: Path) -> dict[str, Any]:
     env, lock = common.validate_env_lock(env_file)
     manifest = export_forensics.export_forensics(env_file)
-    container_ids, networks, volumes = _locked_resources(lock)
-    if container_ids:
-        common.run_command(["docker", "rm", "--force", *container_ids], timeout=120)
-    for name in networks:
-        common.run_command(["docker", "network", "rm", name])
-    for name in volumes:
-        common.run_command(["docker", "volume", "rm", name])
+    container_ids, networks, volumes = remove_exact_locked_resources(lock)
 
     evidence_dir = Path(env["TARGET_E2E_EVIDENCE_DIR"])
     run_context = common.load_json(Path(env["TARGET_E2E_RUN_CONTEXT_PATH"]))
@@ -226,12 +241,42 @@ def teardown(env_file: Path) -> dict[str, Any]:
     return receipt
 
 
+def cleanup_incomplete_provision(lock_path: Path) -> dict[str, Any]:
+    lock = common.load_run_lock(lock_path, require_active=False)
+    if lock["state"] not in {"PROVISIONING", "FAILED_CLEANUP_REQUIRED"}:
+        raise common.TargetE2EError(
+            "incomplete-provision cleanup requires a non-active provisioning lock"
+        )
+    container_ids, networks, volumes = remove_exact_locked_resources(lock)
+    (Path(lock["run_directory"]) / ".bootstrap.env").unlink(missing_ok=True)
+    released_at = common.utc_now().isoformat(timespec="milliseconds")
+    _release_port_lock(lock, released_at)
+    failed_lock = common.seal_self_hash(
+        {**lock, "state": "FAILED", "released_at": released_at}
+    )
+    common.write_json(lock_path, failed_lock)
+    return {
+        "schema_version": "target-e2e-incomplete-provision-cleanup.v1",
+        "status": "PASS",
+        "run_id": lock["run_id"],
+        "removed_container_ids": sorted(container_ids),
+        "removed_networks": sorted(networks),
+        "removed_volumes": sorted(volumes),
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--env-file", type=Path, required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--env-file", type=Path)
+    source.add_argument("--lock-file", type=Path)
     args = parser.parse_args(argv)
     try:
-        receipt = teardown(args.env_file)
+        receipt = (
+            teardown(args.env_file)
+            if args.env_file is not None
+            else cleanup_incomplete_provision(args.lock_file)
+        )
     except (common.TargetE2EError, OSError, json.JSONDecodeError) as error:
         print(
             f"BLOCKED: teardown requires exact lock ownership and forensic export: {error}",

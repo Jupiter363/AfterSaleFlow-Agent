@@ -57,16 +57,21 @@ public record OutcomeProcessProjection(
                 && runtimeMode != RuntimeMode.JAVA_SIGNED_SYNTHETIC_NOOP_SHADOW) {
             throw new IllegalArgumentException("SHADOW Outcome projection must be signed synthetic no-op");
         }
+        if (writerMode == WriterMode.TEMPORAL && runtimeMode != RuntimeMode.TEMPORAL) {
+            throw new IllegalArgumentException("TEMPORAL Outcome projection must remain formal");
+        }
     }
 
     public enum WriterMode {
         LEGACY,
-        SHADOW
+        SHADOW,
+        TEMPORAL
     }
 
     public enum RuntimeMode {
         DISABLED,
-        JAVA_SIGNED_SYNTHETIC_NOOP_SHADOW
+        JAVA_SIGNED_SYNTHETIC_NOOP_SHADOW,
+        TEMPORAL
     }
 
     public enum ProcessState {

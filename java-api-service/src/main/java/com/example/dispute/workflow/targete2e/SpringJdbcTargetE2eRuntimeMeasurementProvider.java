@@ -123,7 +123,12 @@ public final class SpringJdbcTargetE2eRuntimeMeasurementProvider
         graph.privilegesWithPeerConnect(
             databaseProbe.peerPrincipalCanConnect(graphDataSource, domain.roleName()));
     requireSafePrivileges(domainPrivileges, graphPrivileges);
+    requirePhysicalDatabaseIsolation(domain.identity(), graph.identity());
     DatabaseIdentities databases = new DatabaseIdentities(domain.identity(), graph.identity());
+    if (!databases.equals(configuredDatabaseIdentities())) {
+      throw new IllegalStateException(
+          "measured PostgreSQL identities do not match the provisioned activation identities");
+    }
     TargetE2eActivationExpectedRuntime runtime = measuredRuntime(databases);
     requireWorkerBinding(runtime.buildBindings());
     String compactAttestation = readAttestation();
@@ -192,6 +197,18 @@ public final class SpringJdbcTargetE2eRuntimeMeasurementProvider
             false,
             required(PREFIX + "production-formal-selector-default"),
             required(PREFIX + "activation-default")));
+  }
+
+  private DatabaseIdentities configuredDatabaseIdentities() {
+    return new DatabaseIdentities(
+        new DatabaseIdentity(
+            required(PREFIX + "database.domain.cluster-identity"),
+            required(PREFIX + "database.domain.database-identity"),
+            required(PREFIX + "database.domain.runtime-principal-identity")),
+        new DatabaseIdentity(
+            required(PREFIX + "database.graph.cluster-identity"),
+            required(PREFIX + "database.graph.database-identity"),
+            required(PREFIX + "database.graph.runtime-principal-identity")));
   }
 
   private CaseScope caseScope() {
@@ -298,6 +315,16 @@ public final class SpringJdbcTargetE2eRuntimeMeasurementProvider
     }
   }
 
+  private static void requirePhysicalDatabaseIsolation(
+      DatabaseIdentity domain, DatabaseIdentity graph) {
+    if (domain.clusterIdentity().equals(graph.clusterIdentity())
+        || domain.databaseIdentity().equals(graph.databaseIdentity())
+        || domain.runtimePrincipalIdentity().equals(graph.runtimePrincipalIdentity())) {
+      throw new IllegalStateException(
+          "target E2E Domain and Graph databases are not physically isolated");
+    }
+  }
+
   private static boolean elevated(DatabasePrivilegeEvidence privileges) {
     return privileges.superuser()
         || privileges.createRole()
@@ -308,8 +335,8 @@ public final class SpringJdbcTargetE2eRuntimeMeasurementProvider
 
   private Set<String> measuredProfiles() {
     Set<String> profiles = Set.copyOf(Arrays.asList(environment.getActiveProfiles()));
-    if (!profiles.equals(Set.of("target-e2e", "agent-worker"))) {
-      throw new IllegalStateException("only target-e2e and agent-worker profiles may be active");
+    if (!profiles.equals(Set.of("target-e2e", "control-worker"))) {
+      throw new IllegalStateException("only target-e2e and control-worker profiles may be active");
     }
     return profiles;
   }

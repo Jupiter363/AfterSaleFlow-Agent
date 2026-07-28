@@ -47,7 +47,7 @@ public class SignedSyntheticIntakeIngressController {
 
     @PostMapping
     public ResponseEntity<ApiResponse<CaseCommandAcceptance>> accept(
-            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
+            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9_]{1,59}") String caseId,
             @RequestHeader("X-Tenant-Surrogate")
                     @Pattern(regexp = "[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
                     String tenantSurrogate,

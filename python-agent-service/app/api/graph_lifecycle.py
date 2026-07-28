@@ -55,7 +55,9 @@ from app.graph_runtime.registry import PostgresGraphVersionRegistry
 from app.graph_runtime.target_e2e import (
     PostgresTargetE2EActivationRepository,
     TargetE2EGraphCommandEnvelope,
+    TargetE2EInputAuthorizer,
     TargetE2ERoomProposalSource,
+    TargetE2EThreadIdentityResolver,
     TargetE2EInvocationVerifier,
     TargetE2ERuntimeAuthority,
     VerifiedTargetE2EInvocation,
@@ -170,7 +172,7 @@ class GraphRuntimeInstance(Protocol):
 
 
 RuntimeFactory = Callable[
-    [Settings, GraphRuntimeBindings],
+    [Settings, GraphRuntimeBindings | None],
     Awaitable[GraphRuntimeInstance],
 ]
 
@@ -217,14 +219,20 @@ class GraphApplicationRuntime:
     async def open(
         cls,
         settings: Settings,
-        bindings: GraphRuntimeBindings,
+        bindings: GraphRuntimeBindings | None,
     ) -> GraphApplicationRuntime:
         mode = GraphGatewayMode(settings.graph_gateway_mode)
         if mode is GraphGatewayMode.DISABLED:
             raise ValueError("Graph application runtime opens only in an active mode")
         if settings.graph_database_dsn is None or settings.graph_jwks_url is None:
             raise ValueError("active Graph dependencies are incomplete")
-        if not callable(bindings.executor_registry_factory):
+        if bindings is None and mode is not GraphGatewayMode.TARGET_E2E_CANDIDATE:
+            raise ValueError("active Graph runtime requires trusted runtime bindings")
+        if bindings is not None and mode is GraphGatewayMode.TARGET_E2E_CANDIDATE:
+            raise ValueError(
+                "target-E2E runtime bindings must be assembled after Graph security readiness"
+            )
+        if bindings is not None and not callable(bindings.executor_registry_factory):
             raise ValueError("active Graph runtime requires an executor registry factory")
 
         pool_config = GraphPoolConfig(
@@ -259,10 +267,19 @@ class GraphApplicationRuntime:
             report = await probe.check()
             if not report.ready:
                 raise RuntimeError(report.code)
+            # Candidate endpoint dependencies do not need an executor registry
+            # before JWKS is live.  Keep this bootstrap capability local to the
+            # opening transaction; the real binding is assembled below only
+            # after the security runtime has proven ready.
+            input_authorizer = (
+                TargetE2EInputAuthorizer()
+                if mode is GraphGatewayMode.TARGET_E2E_CANDIDATE
+                else bindings.input_authorizer
+            )
             gateway = GraphCommandGateway(
                 mode=mode,
                 pool=checkpoint_runtime.pool,
-                input_authorizer=bindings.input_authorizer,
+                input_authorizer=input_authorizer,
                 acquire_timeout_seconds=settings.graph_pool_acquire_timeout_seconds,
             )
             durable_bulkhead = PostgresGraphFanoutBulkhead(
@@ -319,6 +336,14 @@ class GraphApplicationRuntime:
                     key_resolver=security_runtime.resolver,
                     authority=authority,
                 )
+                if not security_runtime.readiness().ready:
+                    raise RuntimeError("target-E2E Graph security runtime is not ready")
+                bindings = _build_target_e2e_runtime_bindings(
+                    settings=settings,
+                    security_runtime=security_runtime,
+                )
+            if bindings is None:
+                raise RuntimeError("active Graph runtime bindings were not assembled")
             executors = bindings.executor_registry_factory(
                 GraphExecutorKernel(
                     saver=checkpoint_runtime.saver,
@@ -483,6 +508,38 @@ class GraphApplicationRuntime:
             return self._drained
 
 
+def _build_target_e2e_runtime_bindings(
+    *,
+    settings: Settings,
+    security_runtime: GraphSecurityRuntime,
+) -> GraphRuntimeBindings:
+    """Assemble the candidate executor only from this opened JWKS runtime.
+
+    This is deliberately lifecycle-local.  The specialized providers retain
+    the exact security runtime that accepted the candidate activation, and
+    their factory cannot be reconstructed from settings before JWKS readiness.
+    """
+
+    if type(security_runtime) is not GraphSecurityRuntime or not security_runtime.readiness().ready:
+        raise RuntimeError("target-E2E Graph security runtime is not ready")
+    from app.graph_runtime.executor import TargetE2ESpecializedRoomProviderFactory
+    from app.graph_runtime.production_bindings import build_graph_runtime_bindings
+    from app.graph_runtime.target_e2e_room_exchange import JavaTargetE2ERoomExchange
+
+    room_exchange = JavaTargetE2ERoomExchange(
+        java_api_service_url=settings.java_api_service_url,
+        java_service_secret=settings.java_service_secret,
+    )
+    provider_factory = TargetE2ESpecializedRoomProviderFactory(
+        security_runtime=security_runtime,
+        room_exchange=room_exchange,
+    )
+    return build_graph_runtime_bindings(
+        settings,
+        target_e2e_specialized_provider_factory=provider_factory,
+    )
+
+
 class GraphRuntimeHandle:
     """Stable route dependencies whose SHADOW implementation exists only inside lifespan."""
 
@@ -496,6 +553,10 @@ class GraphRuntimeHandle:
     ) -> None:
         self._settings = settings
         self._mode = GraphGatewayMode(settings.graph_gateway_mode)
+        if self._mode is GraphGatewayMode.TARGET_E2E_CANDIDATE and bindings is not None:
+            raise ValueError(
+                "target-E2E runtime bindings must be assembled inside the Graph lifecycle"
+            )
         self._bindings = bindings
         self._runtime_factory = runtime_factory or GraphApplicationRuntime.open
         self._transport_identity_resolver = transport_identity_resolver or AsgiMtlsIdentityResolver(
@@ -510,6 +571,8 @@ class GraphRuntimeHandle:
         self._thread_resolver = (
             bindings.thread_identity_resolver
             if bindings is not None
+            else TargetE2EThreadIdentityResolver()
+            if self._mode is GraphGatewayMode.TARGET_E2E_CANDIDATE
             else _FailClosedThreadResolver()
         )
 
@@ -563,12 +626,9 @@ class GraphRuntimeHandle:
             yield
             return
         bindings = self._bindings
-        if bindings is None and self._mode is GraphGatewayMode.TARGET_E2E_CANDIDATE:
-            from app.graph_runtime.production_bindings import build_graph_runtime_bindings
-
-            bindings = build_graph_runtime_bindings(self._settings)
         if bindings is None:
-            raise RuntimeError("active Graph mode requires trusted runtime bindings")
+            if self._mode is not GraphGatewayMode.TARGET_E2E_CANDIDATE:
+                raise RuntimeError("active Graph mode requires trusted runtime bindings")
         runtime = await self._runtime_factory(self._settings, bindings)
         try:
             if not runtime.ready:

@@ -5,6 +5,7 @@ import static com.example.dispute.workflow.temporal.room.intake.IntakeProtocolVa
 
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.BranchOperation;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.RetryBudget;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import java.util.Objects;
 
 /** Reference-only metadata that opts an admitted command into the Temporal Activity path. */
@@ -54,6 +55,7 @@ public record IntakeCommandExecutionContext(
     }
   }
 
+  @JsonIgnore
   public boolean isTargetAgentRun() {
     return targetAgentRun != null;
   }

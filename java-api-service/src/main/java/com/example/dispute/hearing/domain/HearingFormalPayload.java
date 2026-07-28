@@ -123,6 +123,27 @@ final class HearingFormalPayload {
         return canonicalJson(object(json));
     }
 
+    static String hashCanonical(String json) {
+        return sha256(canonicalJson(json));
+    }
+
+    static ObjectNode requireMatrixSynthesis(
+            String payloadJson,
+            HearingFormalFinalizer.MatrixKind kind,
+            String contentHash) {
+        ObjectNode payload = object(payloadJson);
+        requireText(payload, "schema_version", kind.schemaVersion());
+        JsonNode matrixNode = payload.path(kind.matrixField());
+        if (!(matrixNode instanceof ObjectNode matrix)) {
+            throw new IllegalArgumentException("matrix synthesis matrix must be a JSON object");
+        }
+        requireText(matrix, "schema_version", kind.matrixSchemaVersion());
+        if (!hashCanonical(payloadJson).equals(contentHash)) {
+            throw new IllegalArgumentException("matrix synthesis contentHash is not canonical");
+        }
+        return payload;
+    }
+
     private static void requireHashWithoutField(
             ObjectNode payload, String field, String expected, String label) {
         ObjectNode copy = payload.deepCopy();

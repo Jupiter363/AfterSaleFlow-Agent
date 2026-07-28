@@ -1,5 +1,6 @@
 package com.example.dispute.workflow.temporal.room.evidence;
 
+import com.example.dispute.workflow.targete2e.temporal.room.TargetRoomAgentRunFinalizationReceipt;
 import java.time.Instant;
 import java.util.List;
 
@@ -29,12 +30,15 @@ public record EvidenceRoomSnapshot(
     long roomRevision,
     long duplicateSignalCount,
     long rejectedSignalCount,
-    String protocolErrorCode) {
+    String protocolErrorCode,
+    List<TargetRoomAgentRunFinalizationReceipt> agentRunFinalizationReceipts) {
 
   public EvidenceRoomSnapshot {
     if (!"evidence-room-snapshot.v1".equals(schemaVersion)) {
       throw new IllegalArgumentException("schemaVersion must be evidence-room-snapshot.v1");
     }
     orderedOperationKeys = orderedOperationKeys == null ? List.of() : List.copyOf(orderedOperationKeys);
+    agentRunFinalizationReceipts =
+        agentRunFinalizationReceipts == null ? List.of() : List.copyOf(agentRunFinalizationReceipts);
   }
 }

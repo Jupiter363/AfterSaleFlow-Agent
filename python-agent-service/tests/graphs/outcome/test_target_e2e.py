@@ -8,10 +8,17 @@ import pytest
 from app.contracts.v1.codec import canonical_sha256, canonical_sha256_omitting, canonicalize
 from app.contracts.v1.models import RoomGraphCommand
 from app.graph_runtime.gateway import GatewayExecution
-from app.graph_runtime.persistence_models import GraphFenceContext
+from app.graph_runtime.persistence_models import GraphFenceContext, GraphGatewayMode
 from app.graph_runtime.registry import VersionBinding
+from app.graph_runtime.target_e2e_composite import (
+    TARGET_E2E_CHECKPOINT_SCHEMA_VERSION,
+    TARGET_E2E_GRAPH_KEY,
+    TARGET_E2E_GRAPH_VERSION,
+    TARGET_E2E_OUTPUT_SCHEMA_VERSION,
+)
 from app.graphs.outcome.contracts import OUTCOME_REVIEW_IDENTITY
 from app.graphs.outcome.errors import OutcomeReviewContractError
+from app.graphs.outcome.state import new_outcome_review_state, version_pins
 from app.graphs.outcome.target_e2e import (
     DeterministicOutcomeTargetE2EModel,
     OutcomeTargetE2EExecutionContext,
@@ -23,21 +30,20 @@ from app.schemas import ReviewCopilotAnswer, ReviewCopilotRequest
 
 
 def _registry_binding(**updates: str) -> VersionBinding:
-    identity = OUTCOME_REVIEW_IDENTITY
     values = {
-        "graph_key": identity.gateway_graph_key,
-        "graph_version": identity.graph_version,
-        "checkpoint_schema_version": identity.checkpoint_schema_version,
-        "state_schema_version": identity.state_schema_version,
+        "graph_key": TARGET_E2E_GRAPH_KEY,
+        "graph_version": TARGET_E2E_GRAPH_VERSION,
+        "checkpoint_schema_version": TARGET_E2E_CHECKPOINT_SCHEMA_VERSION,
+        "state_schema_version": "target-e2e-composite-state.v1",
         "state_schema_hash": "1" * 64,
-        "command_schema_version": identity.gateway_command_schema_version,
-        "result_schema_version": identity.gateway_result_schema_version,
-        "prompt_version": identity.prompt_version,
-        "model_profile_id": identity.model_profile_id,
-        "output_schema_version": identity.output_schema_version,
-        "policy_version": identity.policy_version,
-        "guardrail_version": identity.guardrail_version,
-        "tool_policy_version": identity.tool_policy_version,
+        "command_schema_version": "room-graph-command.v1",
+        "result_schema_version": "room-graph-result.v1",
+        "prompt_version": "target-e2e.all-rooms.prompt.v1",
+        "model_profile_id": "target-e2e.all-rooms.model.v1",
+        "output_schema_version": TARGET_E2E_OUTPUT_SCHEMA_VERSION,
+        "policy_version": "target-e2e.proposal-only.v1",
+        "guardrail_version": "target-e2e.guardrails.v1",
+        "tool_policy_version": "target-e2e.no-tools.v1",
         "binding_hash": "2" * 64,
         "code_build_id": "p9-review-build-1",
     }
@@ -46,7 +52,6 @@ def _registry_binding(**updates: str) -> VersionBinding:
 
 
 def _graph_command() -> RoomGraphCommand:
-    identity = OUTCOME_REVIEW_IDENTITY
     payload = {
         "schema_version": "room-graph-command.v1",
         "command_id": "command-review-001",
@@ -56,9 +61,9 @@ def _graph_command() -> RoomGraphCommand:
         "case_id": "CASE_P9_SYNTHETIC_1",
         "room_type": "REVIEW",
         "room_epoch": 4,
-        "graph_key": identity.gateway_graph_key,
-        "graph_version": identity.graph_version,
-        "checkpoint_schema_version": identity.checkpoint_schema_version,
+        "graph_key": TARGET_E2E_GRAPH_KEY,
+        "graph_version": TARGET_E2E_GRAPH_VERSION,
+        "checkpoint_schema_version": TARGET_E2E_CHECKPOINT_SCHEMA_VERSION,
         "thread_id": "grt.v1.0123456789abcdef0123456789abcdef",
         "actor_scope": {
             "actor_id": "reviewer-p9",
@@ -85,11 +90,11 @@ def _graph_command() -> RoomGraphCommand:
         },
         "invocation_context": {
             "agent_profile_id": "outcome.review.agent.v1",
-            "prompt_profile_id": identity.prompt_version,
-            "model_profile_id": identity.model_profile_id,
-            "output_schema_version": identity.output_schema_version,
-            "policy_version": identity.policy_version,
-            "guardrail_version": identity.guardrail_version,
+            "prompt_profile_id": "target-e2e.all-rooms.prompt.v1",
+            "model_profile_id": "target-e2e.all-rooms.model.v1",
+            "output_schema_version": TARGET_E2E_OUTPUT_SCHEMA_VERSION,
+            "policy_version": "target-e2e.proposal-only.v1",
+            "guardrail_version": "target-e2e.guardrails.v1",
             "tool_capabilities": [],
             "envelope_key_id": "target-key-1",
             "envelope_nonce": "target-nonce-1",
@@ -107,7 +112,54 @@ def _graph_command() -> RoomGraphCommand:
     return RoomGraphCommand.model_validate(payload)
 
 
-def test_registry_binding_is_exact_and_keeps_tools_empty() -> None:
+def _target_execution(command: RoomGraphCommand) -> GatewayExecution:
+    registry = _registry_binding()
+    command_hash = canonical_sha256(command.model_dump(mode="json", exclude_none=True))
+    activation_id = "p9act.v1." + "a" * 32
+    envelope_hash = "3" * 64
+    fence = GraphFenceContext(
+        thread_id=command.thread_id,
+        command_id=command.command_id,
+        owner_id="owner-review-1",
+        fencing_token=3,
+        request_hash=command.request_hash,
+        room_epoch=command.room_epoch,
+        graph_key=command.graph_key,
+        graph_version=command.graph_version,
+        checkpoint_schema_version=command.checkpoint_schema_version,
+        execution_lane=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+        activation_id=activation_id,
+        room_fencing_token=5,
+        command_hash=command_hash,
+        command_envelope_hash=envelope_hash,
+        environment_id="target-e2e-review",
+        environment_generation=1,
+        tenant_surrogate=command.tenant_surrogate,
+        case_id=command.case_id,
+        room_type=command.room_type,
+        binding_hash=registry.binding_hash,
+        code_build_id=registry.code_build_id,
+    )
+    return GatewayExecution(
+        admission=SimpleNamespace(
+            command=command,
+            binding=SimpleNamespace(
+                execution_lane=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+                activation_id=activation_id,
+                room_fencing_token=5,
+                command_hash=command_hash,
+                command_envelope_hash=envelope_hash,
+            ),
+            registry=SimpleNamespace(binding=registry),
+            candidate_authority=SimpleNamespace(activation_id=activation_id),
+        ),
+        attempt=None,  # type: ignore[arg-type]
+        lease=None,  # type: ignore[arg-type]
+        fence=fence,
+    )
+
+
+def test_registry_binding_requires_the_unified_outer_target_e2e_binding() -> None:
     binding = _registry_binding()
 
     require_exact_outcome_target_e2e_registry_binding(binding)
@@ -117,8 +169,54 @@ def test_registry_binding_is_exact_and_keeps_tools_empty() -> None:
         match="OUTCOME_TARGET_E2E_REGISTRY_BINDING_MISMATCH",
     ):
         require_exact_outcome_target_e2e_registry_binding(
-            _registry_binding(tool_policy_version="tools.none.v1")
+            _registry_binding(graph_key=OUTCOME_REVIEW_IDENTITY.gateway_graph_key)
         )
+
+
+def test_target_context_accepts_the_unified_outer_binding() -> None:
+    context = OutcomeTargetE2EExecutionContext.from_gateway_execution(
+        _target_execution(_graph_command())
+    )
+
+    assert context.registry_binding_hash == "2" * 64
+    assert context.code_build_id == "p9-review-build-1"
+
+
+def test_target_context_rejects_a_room_specific_outer_binding() -> None:
+    command = _graph_command().model_copy(
+        update={"graph_key": OUTCOME_REVIEW_IDENTITY.gateway_graph_key}
+    )
+    payload = command.model_dump(mode="json")
+    payload["request_hash"] = canonical_sha256_omitting(payload, "request_hash")
+    room_specific = RoomGraphCommand.model_validate(payload)
+
+    with pytest.raises(
+        OutcomeReviewContractError,
+        match="OUTCOME_TARGET_E2E_COMMAND_BINDING_MISMATCH",
+    ):
+        OutcomeTargetE2EExecutionContext.from_gateway_execution(
+            _target_execution(room_specific)
+        )
+
+
+def test_private_outcome_version_pins_remain_strict(
+    private_command,
+    review_request: ReviewCopilotRequest,
+) -> None:
+    drifted = private_command.model_copy(
+        update={
+            "version_pins": {
+                **version_pins(),
+                "prompt_version": "target-e2e.all-rooms.prompt.v1",
+            }
+        }
+    )
+
+    with pytest.raises(
+        OutcomeReviewContractError,
+        match="OUTCOME_REVIEW_VERSION_PINS_MISMATCH",
+    ):
+        new_outcome_review_state(command=drifted, request=review_request)
 
 
 def test_normalized_review_proposal_uses_only_proposal_as_hash_source() -> None:

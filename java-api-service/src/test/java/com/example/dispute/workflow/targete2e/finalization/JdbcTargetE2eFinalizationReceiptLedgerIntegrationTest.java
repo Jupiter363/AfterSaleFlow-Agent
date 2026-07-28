@@ -382,7 +382,10 @@ class JdbcTargetE2eFinalizationReceiptLedgerIntegrationTest {
 
     private static IntakeGraphThreadBinding targetThread(String caseId, String suffix) {
         var actor = new IntakePrivateThreadRegistration.ActorScope(
-                "user-p9", ActorRole.USER, Audience.USER, List.of("graph.command.execute"));
+                "user-p9",
+                ActorRole.USER,
+                Audience.USER,
+                List.of("case:" + caseId + ":command:INTAKE_MESSAGE"));
         String actorScopeHash = IntakeContractHashes.actorScopeHash(actor);
         var unsigned = new IntakePrivateThreadRegistration(
                 "graph-private-thread-registration.v1",
@@ -401,7 +404,7 @@ class JdbcTargetE2eFinalizationReceiptLedgerIntegrationTest {
                 "intake-graph-state.v2",
                 "intake-prompt.v2",
                 "intake-model.target-e2e.v1",
-                "intake-turn-proposal.v2",
+                "target-e2e-room-proposal-source.v1",
                 "intake-policy.v2",
                 "intake-guardrail.v2",
                 "no-tools.v1",

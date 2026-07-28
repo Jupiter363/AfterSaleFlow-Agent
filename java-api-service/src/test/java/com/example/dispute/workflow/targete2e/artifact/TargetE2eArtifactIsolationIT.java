@@ -25,6 +25,10 @@ class TargetE2eArtifactIsolationIT {
             TARGET_CLASS_PREFIX + "TargetE2eEnvironmentPostProcessor.class";
     private static final String CONFIGURATION_CLASS =
             TARGET_CLASS_PREFIX + "TargetE2eArtifactConfiguration.class";
+    private static final String API_CONFIGURATION_CLASS =
+            TARGET_CLASS_PREFIX + "TargetE2eApiConfiguration.class";
+    private static final String TARGET_APPLICATION_CONFIGURATION =
+            "BOOT-INF/classes/application-target-e2e.yml";
     private static final String MARKER_RESOURCE =
             "META-INF/after-sale-flow/target-e2e-artifact.marker";
     private static final String SPRING_FACTORIES = "META-INF/spring.factories";
@@ -48,7 +52,9 @@ class TargetE2eArtifactIsolationIT {
                     .contains(
                             PROCESSOR_CLASS,
                             CONFIGURATION_CLASS,
+                            API_CONFIGURATION_CLASS,
                             MARKER_RESOURCE,
+                            TARGET_APPLICATION_CONFIGURATION,
                             SPRING_FACTORIES,
                             NON_DISCOVERABLE_FINALIZER_LIBRARY)
                     .contains("BOOT-INF/classes/com/example/dispute/DisputeApplication.class")
@@ -82,7 +88,7 @@ class TargetE2eArtifactIsolationIT {
                 "TARGET_E2E_WORKER_DISABLED",
                 "--spring.profiles.active=target-e2e,agent-worker",
                 "--app.temporal.worker.enabled=false",
-                "--app.target-e2e.activation.manifest-jws=" + activation);
+                "--app.temporal.worker.role=AGENT");
         assertStartupRejected(
                 targetJar,
                 tempDirectory.resolve("wrong-worker-role.log"),
@@ -94,21 +100,30 @@ class TargetE2eArtifactIsolationIT {
                 targetJar,
                 tempDirectory.resolve("missing-activation.log"),
                 "TARGET_E2E_ACTIVATION_REQUIRED",
-                "--spring.profiles.active=target-e2e,agent-worker",
+                "--spring.profiles.active=target-e2e,control-worker",
+                "--app.temporal.worker.enabled=true",
+                "--app.temporal.worker.role=CONTROL",
+                "--app.temporal.worker.versioning-mode=BUILD_ID",
+                "--app.agent-run-v2.protocol-default=V2",
+                "--app.agent-run-v2.scheduler-mode=DETECTOR",
                 "--app.target-e2e.activation.manifest-jws=");
         assertStartupRejected(
                 targetJar,
                 tempDirectory.resolve("missing-versioning.log"),
                 "TARGET_E2E_WORKER_VERSIONING_REQUIRED",
                 "--spring.profiles.active=target-e2e,agent-worker",
-                "--app.target-e2e.activation.manifest-jws=" + activation);
+                "--app.temporal.worker.enabled=true",
+                "--app.temporal.worker.role=AGENT");
         assertStartupRejected(
                 targetJar,
                 tempDirectory.resolve("disabled-agent-run-v2.log"),
                 "TARGET_E2E_AGENT_RUN_V2_REQUIRED",
                 "--spring.profiles.active=target-e2e,agent-worker",
+                "--app.temporal.worker.enabled=true",
+                "--app.temporal.worker.role=AGENT",
                 "--app.temporal.worker.versioning-mode=BUILD_ID",
-                "--app.target-e2e.activation.manifest-jws=" + activation);
+                "--app.agent-run-v2.protocol-default=V2",
+                "--app.agent-run-v2.scheduler-mode=DETECTOR");
     }
 
     private static void assertStartupRejected(

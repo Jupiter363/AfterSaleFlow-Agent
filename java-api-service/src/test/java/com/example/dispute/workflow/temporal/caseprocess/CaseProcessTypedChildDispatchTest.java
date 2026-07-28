@@ -1254,7 +1254,8 @@ class CaseProcessTypedChildDispatchTest {
         null,
         RecoveryErrorOrigin.PROVISIONING,
         true,
-        unreconciledChildren);
+        unreconciledChildren,
+        null);
   }
 
   private static ProvisionRoomEpochReceipt committedReceipt(

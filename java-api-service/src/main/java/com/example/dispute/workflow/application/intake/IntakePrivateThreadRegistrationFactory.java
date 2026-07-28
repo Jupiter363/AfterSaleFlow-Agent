@@ -37,13 +37,13 @@ public final class IntakePrivateThreadRegistrationFactory {
                         actorScope,
                         actorScopeHash,
                         request.agentSessionId(),
-                        "intake.v2",
+                        pins.graphKey(),
                         pins.graphVersion(),
                         pins.checkpointSchemaVersion(),
-                        "intake-graph-state.v2",
+                        pins.stateSchemaVersion(),
                         pins.promptVersion(),
                         pins.modelProfileId(),
-                        "intake-turn-proposal.v2",
+                        pins.outputSchemaVersion(),
                         pins.policyVersion(),
                         pins.guardrailVersion(),
                         pins.toolPolicyVersion(),
@@ -108,25 +108,55 @@ public final class IntakePrivateThreadRegistrationFactory {
     }
 
     public record VersionPins(
+            String graphKey,
             String graphVersion,
             String checkpointSchemaVersion,
+            String stateSchemaVersion,
             String promptVersion,
             String modelProfileId,
+            String outputSchemaVersion,
             String policyVersion,
             String guardrailVersion,
             String toolPolicyVersion) {
 
         public VersionPins {
+            graphKey = IntakeContractSupport.identifier(graphKey, "graphKey");
             graphVersion = IntakeContractSupport.identifier(graphVersion, "graphVersion");
             checkpointSchemaVersion = IntakeContractSupport.identifier(
                     checkpointSchemaVersion, "checkpointSchemaVersion");
+            stateSchemaVersion = IntakeContractSupport.identifier(
+                    stateSchemaVersion, "stateSchemaVersion");
             promptVersion = IntakeContractSupport.identifier(promptVersion, "promptVersion");
             modelProfileId = IntakeContractSupport.identifier(modelProfileId, "modelProfileId");
+            outputSchemaVersion = IntakeContractSupport.identifier(
+                    outputSchemaVersion, "outputSchemaVersion");
             policyVersion = IntakeContractSupport.identifier(policyVersion, "policyVersion");
             guardrailVersion = IntakeContractSupport.identifier(
                     guardrailVersion, "guardrailVersion");
             toolPolicyVersion = IntakeContractSupport.identifier(
                     toolPolicyVersion, "toolPolicyVersion");
+        }
+
+        /** Preserves the original legacy Intake registration contract. */
+        public VersionPins(
+                String graphVersion,
+                String checkpointSchemaVersion,
+                String promptVersion,
+                String modelProfileId,
+                String policyVersion,
+                String guardrailVersion,
+                String toolPolicyVersion) {
+            this(
+                    "intake.v2",
+                    graphVersion,
+                    checkpointSchemaVersion,
+                    "intake-graph-state.v2",
+                    promptVersion,
+                    modelProfileId,
+                    "intake-turn-proposal.v2",
+                    policyVersion,
+                    guardrailVersion,
+                    toolPolicyVersion);
         }
     }
 }

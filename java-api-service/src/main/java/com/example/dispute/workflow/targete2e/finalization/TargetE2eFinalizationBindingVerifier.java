@@ -18,6 +18,8 @@ import java.util.Set;
 public final class TargetE2eFinalizationBindingVerifier {
 
     private static final String LANE = TargetE2eExecutionLaneVerifier.EXECUTION_LANE;
+    private static final String INTAKE_ARTIFACT_ID_PREFIX = "intake.proposal.";
+    private static final String TARGET_PROPOSAL_ID_PREFIX = "target-proposal.";
     private static final long MAX_SAFE_INTEGER = 9_007_199_254_740_991L;
     private static final Set<String> COMMAND_ENVELOPE_FIELDS = Set.of(
             "schema_version", "execution_lane", "activation_id", "room_fencing_token",
@@ -92,15 +94,27 @@ public final class TargetE2eFinalizationBindingVerifier {
         if (payloadRef.length() > 512 || !payloadRef.startsWith("urn:target-e2e:proposal:")) {
             throw rejected("TARGET_E2E_SOURCE_SCHEMA_INVALID", "payload_ref is invalid");
         }
-        sha256(proposal, "payload_hash");
+        String payloadHash = sha256(proposal, "payload_hash");
         JsonNode formalAuthority = proposal.required("formal_authority");
         if (!formalAuthority.isBoolean() || formalAuthority.booleanValue()) {
             throw rejected("TARGET_E2E_GRAPH_AUTHORITY_INVALID", "proposal grants formal authority");
         }
         var artifact = proposalArtifact(result);
-        text(proposal, "proposal_id", artifact.artifactId());
-        text(proposal, "payload_ref", artifact.uri());
-        text(proposal, "payload_hash", artifact.sha256());
+        requireEqual(artifact.sha256(), payloadHash, "proposal artifact sha256");
+        String hashPrefix = artifact.sha256().substring(0, 32);
+        text(proposal, "proposal_id", TARGET_PROPOSAL_ID_PREFIX + hashPrefix);
+        requireEqual(
+                artifact.artifactId(),
+                INTAKE_ARTIFACT_ID_PREFIX + hashPrefix,
+                "proposal artifact_id");
+        requireEqual(
+                artifact.schemaVersion(),
+                text(proposal, "payload_schema_version"),
+                "proposal artifact schema_version");
+        requireEqual(
+                payloadRef,
+                "urn:target-e2e:proposal:intake:" + artifact.sha256(),
+                "proposal source payload_ref");
         String proposalHash = ContractJson.sha256Hex(proposal);
 
         JsonNode resultEnvelope = evidence.resultEnvelope();

@@ -59,7 +59,7 @@ public class IntakeRoomController {
     @GetMapping("/status")
     public ApiResponse<IntakeStatusView> status(
             @PathVariable
-                    @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}")
+                    @Pattern(regexp = "CASE_[A-Za-z0-9_]{1,59}")
                     String caseId,
             Authentication authentication,
             HttpServletRequest servletRequest) {
@@ -81,7 +81,7 @@ public class IntakeRoomController {
     @PostMapping("/confirm")
     public ApiResponse<IntakeConfirmationView> confirm(
             @PathVariable
-                    @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}")
+                    @Pattern(regexp = "CASE_[A-Za-z0-9_]{1,59}")
                     String caseId,
             @Valid @RequestBody IntakeConfirmationRequest request,
             Authentication authentication,
@@ -106,7 +106,7 @@ public class IntakeRoomController {
     @PostMapping("/cancel")
     public ApiResponse<IntakeConfirmationView> cancel(
             @PathVariable
-                    @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}")
+                    @Pattern(regexp = "CASE_[A-Za-z0-9_]{1,59}")
                     String caseId,
             @Valid @RequestBody(required = false) IntakeCancelRequest request,
             Authentication authentication,

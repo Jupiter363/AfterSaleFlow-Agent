@@ -34,6 +34,14 @@ public final class HearingFormalReceiptService {
                         command.submissionStatus().name()));
     }
 
+    public HearingPartyTerminalReceipt adoptPartyAction(
+            HearingFormalFinalizer.AdoptPartyActionCommand command) {
+        Objects.requireNonNull(command, "command");
+        HearingDomainReceipt receipt = finalizer.adoptPartyAction(command);
+        return HearingDomainReceiptAdapter.party(receipt, command.requestId(), command.participantId(),
+                HearingPartyTerminalReceipt.TerminalStatus.valueOf(command.submissionStatus().name()));
+    }
+
     public HearingStageReceipt appendGeneratedAction(
             HearingFormalFinalizer.ActionCommand command) {
         Objects.requireNonNull(command, "command");
@@ -41,6 +49,15 @@ public final class HearingFormalReceiptService {
             throw new IllegalArgumentException("generated receipt cannot use a party action command");
         }
         return stage(finalizer.appendAction(command));
+    }
+
+    public HearingStageReceipt advanceStage(HearingFormalFinalizer.StageCommand command) {
+        return stage(finalizer.advanceStage(Objects.requireNonNull(command, "command")));
+    }
+
+    public HearingStageReceipt finalizeMatrixSynthesis(
+            HearingFormalFinalizer.MatrixSynthesisCommand command) {
+        return stage(finalizer.finalizeMatrixSynthesis(Objects.requireNonNull(command, "command")));
     }
 
     public HearingStageReceipt freezeDossier(HearingFormalFinalizer.DossierCommand command) {

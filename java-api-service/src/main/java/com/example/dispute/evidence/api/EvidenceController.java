@@ -113,7 +113,7 @@ public class EvidenceController {
             value = "/evidence",
             consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public ResponseEntity<ApiResponse<EvidenceView>> upload(
-            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
+            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9_]{1,59}") String caseId,
             @RequestPart("file") MultipartFile file,
             @RequestParam("evidence_type") @Pattern(regexp = "[A-Z][A-Z0-9_]{1,63}")
                     String evidenceType,
@@ -156,7 +156,7 @@ public class EvidenceController {
     // 系统意义：「EvidenceController.catalog(String,Authentication,HttpServletRequest)」是外部请求进入业务事实源的边界，必须先完成身份/参数校验，再由应用服务决定事务和权限。
     @GetMapping("/evidence")
     public ApiResponse<RoleScopedEvidenceView> catalog(
-            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
+            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9_]{1,59}") String caseId,
             Authentication authentication,
             HttpServletRequest request) {
         return success(
@@ -170,7 +170,7 @@ public class EvidenceController {
     // 系统意义：「EvidenceController.submitBatch(String,EvidenceSubmissionRequest,String,Authentication,HttpServletRequest)」是外部请求进入业务事实源的边界，必须先完成身份/参数校验，再由应用服务决定事务和权限。
     @PostMapping("/evidence/submissions")
     public ApiResponse<EvidenceSubmissionView> submitBatch(
-            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
+            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9_]{1,59}") String caseId,
             @Valid @RequestBody EvidenceSubmissionRequest command,
             @RequestHeader("Idempotency-Key") String idempotencyKey,
             Authentication authentication,
@@ -192,7 +192,7 @@ public class EvidenceController {
     // 系统意义：「EvidenceController.deletePending(String,String,Authentication,HttpServletRequest)」是外部请求进入业务事实源的边界，必须先完成身份/参数校验，再由应用服务决定事务和权限。
     @DeleteMapping("/evidence/{evidenceId}")
     public ApiResponse<Void> deletePending(
-            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
+            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9_]{1,59}") String caseId,
             @PathVariable
                     @Pattern(regexp = "EVIDENCE_[A-Za-z0-9_-]{1,119}")
                     String evidenceId,
@@ -210,7 +210,7 @@ public class EvidenceController {
     // 系统意义：「EvidenceController.content(String,String,Authentication)」是外部请求进入业务事实源的边界，必须先完成身份/参数校验，再由应用服务决定事务和权限。
     @GetMapping("/evidence/{evidenceId}/content")
     public ResponseEntity<byte[]> content(
-            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
+            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9_]{1,59}") String caseId,
             @PathVariable
                     @Pattern(regexp = "EVIDENCE_[A-Za-z0-9_-]{1,119}")
                     String evidenceId,
@@ -244,7 +244,7 @@ public class EvidenceController {
     // 系统意义：「EvidenceController.verify(String,String,EvidenceVerificationCommand,Authentication,HttpServletRequest)」是外部请求进入业务事实源的边界，必须先完成身份/参数校验，再由应用服务决定事务和权限。
     @PostMapping("/evidence/{evidenceId}/verify")
     public ApiResponse<EvidenceVerificationView> verify(
-            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
+            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9_]{1,59}") String caseId,
             @PathVariable
                     @Pattern(regexp = "EVIDENCE_[A-Za-z0-9_-]{1,119}")
                     String evidenceId,
@@ -268,7 +268,7 @@ public class EvidenceController {
     // 系统意义：「EvidenceController.complete(String,String,Authentication,HttpServletRequest)」是外部请求进入业务事实源的边界，必须先完成身份/参数校验，再由应用服务决定事务和权限。
     @PostMapping("/evidence/complete")
     public ApiResponse<EvidenceCompletionView> complete(
-            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
+            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9_]{1,59}") String caseId,
             @RequestHeader("Idempotency-Key") String idempotencyKey,
             Authentication authentication,
             HttpServletRequest request) {
@@ -285,7 +285,7 @@ public class EvidenceController {
     // 系统意义：「EvidenceController.completion(String,Authentication,HttpServletRequest)」是外部请求进入业务事实源的边界，必须先完成身份/参数校验，再由应用服务决定事务和权限。
     @GetMapping("/evidence/completion")
     public ApiResponse<EvidenceCompletionStatusView> completion(
-            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
+            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9_]{1,59}") String caseId,
             Authentication authentication,
             HttpServletRequest request) {
         return success(
@@ -295,7 +295,7 @@ public class EvidenceController {
 
     @GetMapping("/evidence/process-projection")
     public ResponseEntity<ApiResponse<EvidenceProcessProjectionView>> processProjection(
-            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
+            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9_]{1,59}") String caseId,
             @RequestParam(name = "view", required = false, defaultValue = "active") String view,
             Authentication authentication,
             HttpServletRequest request) {
@@ -320,7 +320,7 @@ public class EvidenceController {
     // 系统意义：「EvidenceController.frozenDossier(String,int,Authentication,HttpServletRequest)」是外部请求进入业务事实源的边界，必须先完成身份/参数校验，再由应用服务决定事务和权限。
     @GetMapping("/evidence-dossiers/{version}")
     public ApiResponse<FrozenEvidenceDossierView> frozenDossier(
-            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
+            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9_]{1,59}") String caseId,
             @PathVariable int version,
             Authentication authentication,
             HttpServletRequest request) {
@@ -337,7 +337,7 @@ public class EvidenceController {
     // 系统意义：「EvidenceController.latestDossier(String,Authentication,HttpServletRequest)」是外部请求进入业务事实源的边界，必须先完成身份/参数校验，再由应用服务决定事务和权限。
     @GetMapping("/evidence-dossiers/latest")
     public ApiResponse<FrozenEvidenceDossierView> latestDossier(
-            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
+            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9_]{1,59}") String caseId,
             Authentication authentication,
             HttpServletRequest request) {
         return success(

@@ -645,6 +645,19 @@ class IntakeExchangeP0Test {
     }
 
     private static Authority authority() {
+        return authority("intake.v2");
+    }
+
+    @Test
+    void authorityDtoAllowsOnlyThePinnedShadowAndTargetGraphs() {
+        assertThat(authority("all-rooms.target-e2e.v1").graphKey())
+                .isEqualTo("all-rooms.target-e2e.v1");
+        assertThatThrownBy(() -> authority("other-graph.v1"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("allowed Intake exchange graph");
+    }
+
+    private static Authority authority(String graphKey) {
         return new Authority(
                 "intake-exchange-authority.v1",
                 "TENANT_SYNTHETIC",
@@ -662,7 +675,7 @@ class IntakeExchangeP0Test {
                 "RUN_P4_USER_2",
                 "ATTEMPT_P4_USER_2_1",
                 "1111111111111111111111111111111111111111111111111111111111111111",
-                "intake.v2",
+                graphKey,
                 "2.0.0",
                 "intake-checkpoint.v2",
                 7,

@@ -53,12 +53,22 @@ import com.example.dispute.room.domain.MessageSource;
 import com.example.dispute.room.domain.MessageType;
 import com.example.dispute.room.domain.RoomType;
 import com.example.dispute.room.application.CaseEventService;
+import com.example.dispute.room.infrastructure.persistence.entity.CaseTimelineEventEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseIntakeDossierEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.RoomMessageEntity;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseIntakeDossierRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.RoomMessageRepository;
+import com.example.dispute.workflow.application.command.AcceptCaseCommand;
+import com.example.dispute.workflow.application.command.CaseCommandService;
+import com.example.dispute.workflow.contract.v1.ContractTypes.CommandType;
+import com.example.dispute.workflow.contract.v1.ContractTypes.PayloadRef;
+import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
+import com.example.dispute.workflow.infrastructure.persistence.entity.CaseRoomEpochEntity;
+import com.example.dispute.workflow.infrastructure.persistence.repository.CaseRoomEpochRepository;
+import com.example.dispute.workflow.targete2e.ingress.rooms.TargetRoomCommandIngress;
+import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -84,6 +94,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -120,7 +132,72 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
     private final DisputeProperties properties;
     private final ObjectMapper objectMapper;
     private final Clock clock;
+    private final CaseRoomEpochRepository roomEpochRepository;
+    private final CaseCommandService caseCommandService;
+    private final ObjectProvider<TargetRoomCommandIngress> targetRoomCommandIngress;
 
+    @Autowired
+    public HearingFlowRuntimeService(
+            FulfillmentCaseRepository caseRepository,
+            HearingStateRepository hearingStateRepository,
+            HearingFlowInstanceRepository instanceRepository,
+            HearingFlowStageRepository stageRepository,
+            HearingFlowActionRepository actionRepository,
+            HearingFlowArtifactRepository artifactRepository,
+            AdjudicationDraftRepository adjudicationDraftRepository,
+            HearingTrialDossierRepository trialDossierRepository,
+            CaseIntakeDossierRepository intakeDossierRepository,
+            EvidenceDossierRepository evidenceDossierRepository,
+            EvidenceItemRepository evidenceItemRepository,
+            CaseRoomRepository roomRepository,
+            RoomMessageRepository messageRepository,
+            CaseEventService caseEventService,
+            AgentRunRepository agentRunRepository,
+            AgentRunCoordinator agentRunCoordinator,
+            HearingTrialDossierService trialDossierService,
+            HearingReviewHandoffService reviewHandoffService,
+            PostCommitSideEffectExecutor postCommitSideEffects,
+            RemedyPlanRepository remedyPlanRepository,
+            ReviewTaskRepository reviewTaskRepository,
+            DisputeProperties properties,
+            ObjectMapper objectMapper,
+            Clock clock,
+            CaseRoomEpochRepository roomEpochRepository,
+            CaseCommandService caseCommandService,
+            ObjectProvider<TargetRoomCommandIngress> targetRoomCommandIngress) {
+        this.caseRepository = caseRepository;
+        this.hearingStateRepository = hearingStateRepository;
+        this.instanceRepository = instanceRepository;
+        this.stageRepository = stageRepository;
+        this.actionRepository = actionRepository;
+        this.artifactRepository = artifactRepository;
+        this.adjudicationDraftRepository = adjudicationDraftRepository;
+        this.trialDossierRepository = trialDossierRepository;
+        this.intakeDossierRepository = intakeDossierRepository;
+        this.evidenceDossierRepository = evidenceDossierRepository;
+        this.evidenceItemRepository = evidenceItemRepository;
+        this.roomRepository = roomRepository;
+        this.messageRepository = messageRepository;
+        this.caseEventService = caseEventService;
+        this.agentRunRepository = agentRunRepository;
+        this.agentRunCoordinator = agentRunCoordinator;
+        this.trialDossierService = trialDossierService;
+        this.reviewHandoffService = reviewHandoffService;
+        this.postCommitSideEffects = postCommitSideEffects;
+        this.remedyPlanRepository = remedyPlanRepository;
+        this.reviewTaskRepository = reviewTaskRepository;
+        this.properties = properties;
+        this.objectMapper = objectMapper;
+        this.clock = clock;
+        this.roomEpochRepository = roomEpochRepository;
+        this.caseCommandService = caseCommandService;
+        this.targetRoomCommandIngress = targetRoomCommandIngress;
+    }
+
+    /**
+     * Compatibility constructor for focused unit tests that exercise the legacy Hearing flow
+     * without constructing the target Temporal command boundary.
+     */
     public HearingFlowRuntimeService(
             FulfillmentCaseRepository caseRepository,
             HearingStateRepository hearingStateRepository,
@@ -146,39 +223,48 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
             DisputeProperties properties,
             ObjectMapper objectMapper,
             Clock clock) {
-        this.caseRepository = caseRepository;
-        this.hearingStateRepository = hearingStateRepository;
-        this.instanceRepository = instanceRepository;
-        this.stageRepository = stageRepository;
-        this.actionRepository = actionRepository;
-        this.artifactRepository = artifactRepository;
-        this.adjudicationDraftRepository = adjudicationDraftRepository;
-        this.trialDossierRepository = trialDossierRepository;
-        this.intakeDossierRepository = intakeDossierRepository;
-        this.evidenceDossierRepository = evidenceDossierRepository;
-        this.evidenceItemRepository = evidenceItemRepository;
-        this.roomRepository = roomRepository;
-        this.messageRepository = messageRepository;
-        this.caseEventService = caseEventService;
-        this.agentRunRepository = agentRunRepository;
-        this.agentRunCoordinator = agentRunCoordinator;
-        this.trialDossierService = trialDossierService;
-        this.reviewHandoffService = reviewHandoffService;
-        this.postCommitSideEffects = postCommitSideEffects;
-        this.remedyPlanRepository = remedyPlanRepository;
-        this.reviewTaskRepository = reviewTaskRepository;
-        this.properties = properties;
-        this.objectMapper = objectMapper;
-        this.clock = clock;
+        this(
+                caseRepository,
+                hearingStateRepository,
+                instanceRepository,
+                stageRepository,
+                actionRepository,
+                artifactRepository,
+                adjudicationDraftRepository,
+                trialDossierRepository,
+                intakeDossierRepository,
+                evidenceDossierRepository,
+                evidenceItemRepository,
+                roomRepository,
+                messageRepository,
+                caseEventService,
+                agentRunRepository,
+                agentRunCoordinator,
+                trialDossierService,
+                reviewHandoffService,
+                postCommitSideEffects,
+                remedyPlanRepository,
+                reviewTaskRepository,
+                properties,
+                objectMapper,
+                clock,
+                null,
+                null,
+                null);
     }
 
     @Transactional
     public HearingFlowView get(String caseId, AuthenticatedActor actor) {
         FulfillmentCaseEntity dispute = lockedCase(caseId);
         assertCanAccess(dispute, actor);
-        HearingFlowInstanceEntity instance = ensureStarted(dispute);
-        reconcileFailedAgentRun(instance, dispute);
-        expireIfDue(instance, dispute);
+        CaseRoomEpochEntity targetEpoch = targetHearingEpoch(caseId);
+        HearingFlowInstanceEntity instance = targetEpoch == null
+                ? ensureStarted(dispute)
+                : requireTargetBootstrappedInstance(caseId);
+        if (targetEpoch == null) {
+            reconcileFailedAgentRun(instance, dispute);
+            expireIfDue(instance, dispute);
+        }
         return project(instance, dispute);
     }
 
@@ -192,7 +278,9 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
     @Transactional
     public HearingFlowView startAfterEvidenceSealed(String caseId) {
         FulfillmentCaseEntity dispute = lockedCase(caseId);
-        HearingFlowInstanceEntity instance = ensureStarted(dispute);
+        HearingFlowInstanceEntity instance = targetHearingEpoch(caseId) == null
+                ? ensureStarted(dispute)
+                : requireTargetBootstrappedInstance(caseId);
         return project(instance, dispute);
     }
 
@@ -206,7 +294,10 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
         }
         FulfillmentCaseEntity dispute = lockedCase(caseId);
         assertCaseParty(dispute, actor);
-        HearingFlowInstanceEntity instance = ensureStarted(dispute);
+        CaseRoomEpochEntity targetEpoch = targetHearingEpoch(caseId);
+        HearingFlowInstanceEntity instance = targetEpoch == null
+                ? ensureStarted(dispute)
+                : requireTargetBootstrappedInstance(caseId);
 
         HearingFlowStageEntity answerStage =
                 requireStage(instance, HearingFlowStage.PARTY_ANSWERS_OPEN);
@@ -219,7 +310,9 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
         }
 
         requireCurrentStage(instance, HearingFlowStage.PARTY_ANSWERS_OPEN);
-        expireIfDue(instance, dispute);
+        if (targetEpoch == null) {
+            expireIfDue(instance, dispute);
+        }
         requireCurrentStage(instance, HearingFlowStage.PARTY_ANSWERS_OPEN);
         assertDeadlineOpen(instance);
 
@@ -267,13 +360,27 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
                         objectMapper.valueToTree(attachmentRefs(request)),
                         saved.getId(),
                         now);
-        recordPartySubmissionEvent(dispute, answerStage, saved, actor, false);
-        afterPartyActionsIfComplete(
-                dispute,
-                instance,
-                answerStage,
-                HearingFlowActionType.ANSWER_BUNDLE,
-                HearingFlowStage.INTAKE_SYNTHESIZING);
+        CaseTimelineEventEntity event =
+                recordPartySubmissionEvent(dispute, answerStage, saved, actor, false, targetEpoch != null);
+        if (targetEpoch != null) {
+            admitTargetHearingCommand(
+                    dispute,
+                    answerStage,
+                    targetEpoch,
+                    saved,
+                    event,
+                    actor,
+                    CommandType.HEARING_STATEMENT,
+                    null,
+                    null);
+        } else {
+            afterPartyActionsIfComplete(
+                    dispute,
+                    instance,
+                    answerStage,
+                    HearingFlowActionType.ANSWER_BUNDLE,
+                    HearingFlowStage.INTAKE_SYNTHESIZING);
+        }
         return partyActionView(saved, acknowledgement);
     }
 
@@ -282,9 +389,22 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
             String caseId,
             HearingPartyStatementRequest request,
             AuthenticatedActor actor) {
+        return submitStatement(caseId, request, actor, null, null);
+    }
+
+    @Transactional
+    public HearingPartyActionView submitStatement(
+            String caseId,
+            HearingPartyStatementRequest request,
+            AuthenticatedActor actor,
+            String traceId,
+            String requestId) {
         FulfillmentCaseEntity dispute = lockedCase(caseId);
         assertCaseParty(dispute, actor);
-        HearingFlowInstanceEntity instance = ensureStarted(dispute);
+        CaseRoomEpochEntity targetEpoch = targetHearingEpoch(caseId);
+        HearingFlowInstanceEntity instance = targetEpoch == null
+                ? ensureStarted(dispute)
+                : requireTargetBootstrappedInstance(caseId);
         HearingFlowStageEntity answerStage =
                 requireStage(instance, HearingFlowStage.PARTY_ANSWERS_OPEN);
         var existing =
@@ -296,7 +416,9 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
         }
 
         requireCurrentStage(instance, HearingFlowStage.PARTY_ANSWERS_OPEN);
-        expireIfDue(instance, dispute);
+        if (targetEpoch == null) {
+            expireIfDue(instance, dispute);
+        }
         requireCurrentStage(instance, HearingFlowStage.PARTY_ANSWERS_OPEN);
         assertDeadlineOpen(instance);
 
@@ -350,13 +472,28 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
                         objectMapper.createArrayNode(),
                         saved.getId(),
                         now);
-        recordPartySubmissionEvent(dispute, answerStage, saved, actor, false);
-        afterPartyActionsIfComplete(
-                dispute,
-                instance,
-                answerStage,
-                HearingFlowActionType.ANSWER_BUNDLE,
-                HearingFlowStage.INTAKE_SYNTHESIZING);
+        CaseTimelineEventEntity event =
+                recordPartySubmissionEvent(
+                        dispute, answerStage, saved, actor, false, targetEpoch != null);
+        if (targetEpoch != null) {
+            admitTargetHearingCommand(
+                    dispute,
+                    answerStage,
+                    targetEpoch,
+                    saved,
+                    event,
+                    actor,
+                    CommandType.HEARING_STATEMENT,
+                    traceId,
+                    requestId);
+        } else {
+            afterPartyActionsIfComplete(
+                    dispute,
+                    instance,
+                    answerStage,
+                    HearingFlowActionType.ANSWER_BUNDLE,
+                    HearingFlowStage.INTAKE_SYNTHESIZING);
+        }
         return partyActionView(saved, acknowledgement);
     }
 
@@ -365,9 +502,22 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
             String caseId,
             HearingEvidenceBatchRequest request,
             AuthenticatedActor actor) {
+        return submitEvidenceBatch(caseId, request, actor, null, null);
+    }
+
+    @Transactional
+    public HearingPartyActionView submitEvidenceBatch(
+            String caseId,
+            HearingEvidenceBatchRequest request,
+            AuthenticatedActor actor,
+            String traceId,
+            String requestId) {
         FulfillmentCaseEntity dispute = lockedCase(caseId);
         assertCaseParty(dispute, actor);
-        HearingFlowInstanceEntity instance = ensureStarted(dispute);
+        CaseRoomEpochEntity targetEpoch = targetHearingEpoch(caseId);
+        HearingFlowInstanceEntity instance = targetEpoch == null
+                ? ensureStarted(dispute)
+                : requireTargetBootstrappedInstance(caseId);
         HearingFlowStageEntity evidenceStage =
                 requireStage(instance, HearingFlowStage.PARTY_EVIDENCE_OPEN);
         var existing =
@@ -381,7 +531,9 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
         }
 
         requireCurrentStage(instance, HearingFlowStage.PARTY_EVIDENCE_OPEN);
-        expireIfDue(instance, dispute);
+        if (targetEpoch == null) {
+            expireIfDue(instance, dispute);
+        }
         requireCurrentStage(instance, HearingFlowStage.PARTY_EVIDENCE_OPEN);
         assertDeadlineOpen(instance);
 
@@ -434,13 +586,28 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
                         objectMapper.valueToTree(request.evidenceIds()),
                         saved.getId(),
                         now);
-        recordPartySubmissionEvent(dispute, evidenceStage, saved, actor, true);
-        afterPartyActionsIfComplete(
-                dispute,
-                instance,
-                evidenceStage,
-                HearingFlowActionType.EVIDENCE_BATCH,
-                HearingFlowStage.EVIDENCE_SYNTHESIZING);
+        CaseTimelineEventEntity event =
+                recordPartySubmissionEvent(
+                        dispute, evidenceStage, saved, actor, true, targetEpoch != null);
+        if (targetEpoch != null) {
+            admitTargetHearingCommand(
+                    dispute,
+                    evidenceStage,
+                    targetEpoch,
+                    saved,
+                    event,
+                    actor,
+                    CommandType.HEARING_EVIDENCE_BATCH,
+                    traceId,
+                    requestId);
+        } else {
+            afterPartyActionsIfComplete(
+                    dispute,
+                    instance,
+                    evidenceStage,
+                    HearingFlowActionType.EVIDENCE_BATCH,
+                    HearingFlowStage.EVIDENCE_SYNTHESIZING);
+        }
         return partyActionView(saved, acknowledgement);
     }
 
@@ -2650,25 +2817,175 @@ public class HearingFlowRuntimeService implements AgentRunFinalizer {
         return saved;
     }
 
-    private void recordPartySubmissionEvent(
+    private CaseTimelineEventEntity recordPartySubmissionEvent(
             FulfillmentCaseEntity dispute,
             HearingFlowStageEntity stage,
             HearingFlowActionEntity action,
             AuthenticatedActor actor,
-            boolean evidenceBatch) {
-        caseEventService.recordLifecycleEvent(
+            boolean evidenceBatch,
+            boolean includeImmutableAction) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("stage_code", stage.getStageCode().name());
+        payload.put("participant_id", actor.actorId());
+        payload.put("participant_role", actor.role().name());
+        payload.put("submission_status", "SUBMITTED");
+        if (includeImmutableAction) {
+            payload.put("action_id", action.getId());
+            payload.put("action_schema_version", action.getSchemaVersion());
+            payload.put("action_content_hash", action.getContentHash());
+            payload.put("action_payload", object(read(action.getPayloadJson())));
+        }
+        return caseEventService.recordLifecycleEvent(
                 dispute.getId(),
                 requireHearingRoom(dispute.getId()).getId(),
                 evidenceBatch
                         ? "HEARING_EVIDENCE_BATCH_SUBMITTED"
                         : "HEARING_ANSWER_BUNDLE_SUBMITTED",
-                Map.of(
-                        "stage_code", stage.getStageCode().name(),
-                        "participant_id", actor.actorId(),
-                        "participant_role", actor.role().name(),
-                        "submission_status", "SUBMITTED"),
+                payload,
                 "hearing-party-submission:" + action.getId(),
                 actor.actorId());
+    }
+
+    private CaseRoomEpochEntity targetHearingEpoch(String caseId) {
+        if (roomEpochRepository == null) {
+            return null;
+        }
+        CaseRoomEpochEntity active = roomEpochRepository
+                .findTopByCaseIdAndRoomTypeAndLifecycleStatusOrderByRoomEpochDesc(
+                        caseId,
+                        com.example.dispute.workflow.contract.v1.ContractTypes.RoomType.HEARING,
+                        com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes
+                                .EpochLifecycleStatus.ACTIVE)
+                .orElse(null);
+        if (isTargetHearingEpoch(active)) {
+            return active;
+        }
+
+        for (var status : List.of(
+                com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes
+                        .EpochLifecycleStatus.PREPARING,
+                com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes
+                        .EpochLifecycleStatus.PROVISIONING)) {
+            CaseRoomEpochEntity pending = roomEpochRepository
+                    .findTopByCaseIdAndRoomTypeAndLifecycleStatusOrderByRoomEpochDesc(
+                            caseId,
+                            com.example.dispute.workflow.contract.v1.ContractTypes.RoomType.HEARING,
+                            status)
+                    .orElse(null);
+            if (isTargetHearingEpoch(pending)) {
+                return pending;
+            }
+        }
+
+        if (caseRepository.findById(caseId)
+                        .map(FulfillmentCaseEntity::getCaseStatus)
+                        .filter(status -> status == CaseStatus.HEARING_OPEN)
+                        .isPresent()
+                && hasTargetEvidenceTerminal(caseId)) {
+            throw new IllegalStateException(
+                    "target Hearing epoch is absent or does not retain its target selection pins");
+        }
+        return null;
+    }
+
+    private boolean hasTargetEvidenceTerminal(String caseId) {
+        return roomEpochRepository
+                .findTopByCaseIdAndRoomTypeAndLifecycleStatusOrderByRoomEpochDesc(
+                        caseId,
+                        com.example.dispute.workflow.contract.v1.ContractTypes.RoomType.EVIDENCE,
+                        com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes
+                                .EpochLifecycleStatus.TERMINAL)
+                .map(epoch -> isTargetEvidenceEpoch(epoch))
+                .orElse(false);
+    }
+
+    private static boolean isTargetEvidenceEpoch(CaseRoomEpochEntity epoch) {
+        return epoch != null
+                && epoch.getWriterMode() == WriterMode.TEMPORAL
+                && TargetTypedRoomProtocol.GRAPH_KEY.equals(epoch.getGraphKey())
+                && TargetTypedRoomProtocol.EVIDENCE_WORKFLOW_TYPE.equals(epoch.getRoomWorkflowType());
+    }
+
+    private static boolean isTargetHearingEpoch(CaseRoomEpochEntity epoch) {
+        return epoch != null
+                && epoch.getWriterMode() == WriterMode.TEMPORAL
+                && TargetTypedRoomProtocol.SELECTION_SCHEMA_VERSION.equals(
+                        epoch.getSelectionSchemaVersion())
+                && TargetTypedRoomProtocol.PROCESS_CONTRACT_VERSION.equals(
+                        epoch.getProcessContractVersion())
+                && TargetTypedRoomProtocol.CASE_WORKFLOW_TYPE.equals(epoch.getWorkflowType())
+                && TargetTypedRoomProtocol.HEARING_WORKFLOW_TYPE.equals(epoch.getRoomWorkflowType())
+                && TargetTypedRoomProtocol.GRAPH_KEY.equals(epoch.getGraphKey())
+                && TargetTypedRoomProtocol.GRAPH_VERSION.equals(epoch.getGraphVersion())
+                && TargetTypedRoomProtocol.CHECKPOINT_SCHEMA_VERSION.equals(
+                        epoch.getCheckpointSchemaVersion())
+                && TargetTypedRoomProtocol.STREAM_PROTOCOL.equals(epoch.getStreamProtocol());
+    }
+
+    /** Target rooms are bootstrapped by CONTROL; API reads and party writes never create legacy state. */
+    private HearingFlowInstanceEntity requireTargetBootstrappedInstance(String caseId) {
+        return instanceRepository
+                .findByCaseIdForUpdate(caseId)
+                .orElseThrow(
+                        () -> new IllegalStateException(
+                                "target Hearing projection has not been bootstrapped by CONTROL"));
+    }
+
+    /**
+     * The target lane consumes the persisted party action through the same admitted command
+     * boundary as the public command API. It intentionally runs before any legacy stage
+     * advancement, so a target Hearing epoch cannot emit a second legacy Agent turn.
+     */
+    private void admitTargetHearingCommand(
+            FulfillmentCaseEntity dispute,
+            HearingFlowStageEntity stage,
+            CaseRoomEpochEntity epoch,
+            HearingFlowActionEntity action,
+            CaseTimelineEventEntity event,
+            AuthenticatedActor actor,
+            CommandType commandType,
+            String traceId,
+            String requestId) {
+        if (targetRoomCommandIngress == null || caseCommandService == null) {
+            throw new IllegalStateException("target Hearing command ingress is unavailable");
+        }
+        TargetRoomCommandIngress ingress = targetRoomCommandIngress.getIfUnique();
+        if (ingress == null) {
+            throw new IllegalStateException("target Hearing command ingress is not uniquely configured");
+        }
+        if (stage.getSharedDeadlineAt() == null) {
+            throw new IllegalStateException("target Hearing command requires a shared deadline");
+        }
+
+        String canonicalEvent = canonicalJson(read(event.getEventJson()));
+        PayloadRef payloadRef =
+                new PayloadRef(
+                        "case-timeline-event.v1",
+                        "urn:case-timeline-event:" + event.getId(),
+                        sha256(canonicalEvent),
+                        canonicalEvent.getBytes(StandardCharsets.UTF_8).length);
+        String commandId = "hearing-action:" + action.getId();
+        String resolvedTraceId =
+                traceId != null && traceId.matches("[0-9a-f]{32}") && !"0".repeat(32).equals(traceId)
+                        ? traceId
+                        : sha256("target-hearing-trace\\n" + commandId).substring(0, 32);
+        AcceptCaseCommand command =
+                new AcceptCaseCommand(
+                        commandType,
+                        com.example.dispute.workflow.contract.v1.ContractTypes.RoomType.HEARING,
+                        epoch.getRoomEpoch(),
+                        payloadRef,
+                        epoch.getProcessRevision(),
+                        stage.getSharedDeadlineAt());
+        ingress.materialize(dispute.getId(), commandId, command, actor, resolvedTraceId);
+        caseCommandService.accept(
+                dispute.getId(),
+                commandId,
+                command,
+                actor,
+                resolvedTraceId,
+                nonBlank(requestId, commandId),
+                null);
     }
 
     private HearingPartyActionView partyActionView(HearingFlowActionEntity action) {

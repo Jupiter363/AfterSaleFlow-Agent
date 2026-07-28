@@ -28,6 +28,11 @@ import com.example.dispute.workflow.application.intake.LegacyIntakeWriterGuard;
 import com.example.dispute.workflow.targete2e.ingress.IntakeIngressSelection;
 import com.example.dispute.workflow.targete2e.ingress.IntakeMessageIngressRouter;
 import com.example.dispute.workflow.targete2e.ingress.TargetIntakeMessageRequest;
+import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
+import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
+import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.EpochLifecycleStatus;
+import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.EpochProvisioningStatus;
+import com.example.dispute.workflow.infrastructure.persistence.repository.CaseRoomEpochRepository;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -35,6 +40,7 @@ import java.time.Clock;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -58,6 +64,7 @@ public class RoomMessageService {
     private final IntakeProgressService intakeProgressService;
     private final IntakeMessageIngressRouter intakeMessageIngressRouter;
     private final LegacyIntakeWriterGuard legacyIntakeWriterGuard;
+    private final CaseRoomEpochRepository roomEpochRepository;
     private final Clock clock;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -81,6 +88,39 @@ public class RoomMessageService {
             IntakeMessageIngressRouter intakeMessageIngressRouter,
             LegacyIntakeWriterGuard legacyIntakeWriterGuard,
             Clock clock) {
+        this(
+                caseRepository,
+                roomRepository,
+                participantRepository,
+                messageRepository,
+                eventService,
+                intakeAgentTurnService,
+                evidenceAgentTurnService,
+                accessSessionResolver,
+                permissionService,
+                intakeProgressService,
+                intakeMessageIngressRouter,
+                legacyIntakeWriterGuard,
+                clock,
+                null);
+    }
+
+    @Autowired
+    public RoomMessageService(
+            FulfillmentCaseRepository caseRepository,
+            CaseRoomRepository roomRepository,
+            CaseParticipantRepository participantRepository,
+            RoomMessageRepository messageRepository,
+            CaseEventService eventService,
+            IntakeAgentTurnService intakeAgentTurnService,
+            EvidenceAgentTurnService evidenceAgentTurnService,
+            AccessSessionResolver accessSessionResolver,
+            SessionPermissionService permissionService,
+            IntakeProgressService intakeProgressService,
+            IntakeMessageIngressRouter intakeMessageIngressRouter,
+            LegacyIntakeWriterGuard legacyIntakeWriterGuard,
+            Clock clock,
+            CaseRoomEpochRepository roomEpochRepository) {
         this.caseRepository = caseRepository;
         this.roomRepository = roomRepository;
         this.participantRepository = participantRepository;
@@ -94,6 +134,7 @@ public class RoomMessageService {
         this.intakeMessageIngressRouter = intakeMessageIngressRouter;
         this.legacyIntakeWriterGuard = legacyIntakeWriterGuard;
         this.clock = clock;
+        this.roomEpochRepository = roomEpochRepository;
     }
 
     // 所属模块：【房间协作与权限 / 应用编排层】「RoomMessageService.post(String,RoomType,RoomMessageCommand,AuthenticatedActor,String,String)」。
@@ -110,6 +151,54 @@ public class RoomMessageService {
             AuthenticatedActor actor,
             String idempotencyKey,
             String traceId) {
+        return post(
+                caseId, roomType, command, actor, idempotencyKey, traceId, false);
+    }
+
+    /** Persists the submission fact while the target Evidence command bridge owns agent dispatch. */
+    @Transactional
+    public RoomMessageView postTargetEvidenceSubmission(
+            String caseId,
+            RoomMessageCommand command,
+            AuthenticatedActor actor,
+            String idempotencyKey,
+            String traceId) {
+        return post(
+                caseId,
+                RoomType.EVIDENCE,
+                command,
+                actor,
+                idempotencyKey,
+                traceId,
+                true);
+    }
+
+    /** Records the durable, idempotent browser fact that the target Evidence command references. */
+    @Transactional
+    public com.example.dispute.room.infrastructure.persistence.entity.CaseTimelineEventEntity
+            recordTargetEvidenceSubmissionEvent(
+                    String caseId,
+                    String roomId,
+                    java.util.Map<String, Object> fact,
+                    String batchId,
+                    String actorId) {
+        return eventService.recordLifecycleEvent(
+                caseId,
+                roomId,
+                "EVIDENCE_BATCH_SUBMISSION_INTENT",
+                fact,
+                "target-evidence-submission:" + batchId,
+                actorId);
+    }
+
+    private RoomMessageView post(
+            String caseId,
+            RoomType roomType,
+            RoomMessageCommand command,
+            AuthenticatedActor actor,
+            String idempotencyKey,
+            String traceId,
+            boolean suppressLegacyEvidenceAgent) {
         FulfillmentCaseEntity dispute =
                 caseRepository
                         .findByIdForUpdate(caseId)
@@ -126,6 +215,7 @@ public class RoomMessageService {
                 roomRepository
                         .findByCaseIdAndRoomType(dispute.getId(), roomType)
                         .orElseThrow(() -> new IllegalArgumentException("room not found"));
+        boolean targetEvidence = roomType == RoomType.EVIDENCE && isTargetEvidenceEpoch(caseId);
         return messageRepository
                 .findByCaseIdAndIdempotencyKey(caseId, idempotencyKey)
                 .map(
@@ -143,7 +233,8 @@ public class RoomMessageService {
                                         actor,
                                         idempotencyKey,
                                         traceId,
-                                        intakeIngressSelection));
+                                        intakeIngressSelection,
+                                        suppressLegacyEvidenceAgent || targetEvidence));
     }
 
     // 所属模块：【房间协作与权限 / 应用编排层】「RoomMessageService.list(String,RoomType,AuthenticatedActor)」。
@@ -193,11 +284,19 @@ public class RoomMessageService {
             String traceId,
             String requestId) {
         if (roomType == RoomType.INTAKE) {
-            legacyIntakeWriterGuard.assertLegacyWriteAllowed(caseId);
             FulfillmentCaseEntity dispute =
                     caseRepository.findById(caseId)
                             .orElseThrow(() -> new IllegalArgumentException("case not found"));
             intakeProgressService.assertIntakePost(dispute, actor);
+            IntakeIngressSelection selection =
+                    Objects.requireNonNull(
+                            intakeMessageIngressRouter.select(caseId),
+                            "Intake opening writer was not selected");
+            if (selection.isTarget()) {
+                // The target workflow owns its opening event; the UI refreshes the room afterward.
+                return null;
+            }
+            legacyIntakeWriterGuard.assertLegacyWriteAllowed(caseId);
             return intakeAgentTurnService.ensureRespondentOpening(
                     caseId, roomType, actor, traceId, requestId);
         }
@@ -206,10 +305,32 @@ public class RoomMessageService {
                     caseRepository.findById(caseId)
                             .orElseThrow(() -> new IllegalArgumentException("case not found"));
             intakeProgressService.assertEvidenceAccess(dispute, actor);
+            if (isTargetEvidenceEpoch(caseId)) {
+                return null;
+            }
             return evidenceAgentTurnService.ensureOpeningOrStart(
                     caseId, roomType, actor, traceId, requestId);
         }
         throw new IllegalArgumentException("room opening is not supported for " + roomType);
+    }
+
+    private boolean isTargetEvidenceEpoch(String caseId) {
+        if (roomEpochRepository == null) {
+            return false;
+        }
+        return roomEpochRepository
+                .findTopByCaseIdAndRoomTypeAndLifecycleStatusOrderByRoomEpochDesc(
+                        caseId,
+                        com.example.dispute.workflow.contract.v1.ContractTypes.RoomType.EVIDENCE,
+                        EpochLifecycleStatus.ACTIVE)
+                .map(
+                        epoch ->
+                                epoch.getWriterMode() == WriterMode.TEMPORAL
+                                        && epoch.getProvisioningStatus()
+                                                == EpochProvisioningStatus.READY
+                                        && TargetTypedRoomProtocol.GRAPH_KEY.equals(
+                                                epoch.getGraphKey()))
+                .orElse(false);
     }
 
     // 所属模块：【房间协作与权限 / 应用编排层】「RoomMessageService.create(FulfillmentCaseEntity,CaseRoomEntity,RoomMessageCommand,AuthenticatedActor,String,String)」。
@@ -224,7 +345,8 @@ public class RoomMessageService {
             AuthenticatedActor actor,
             String idempotencyKey,
             String traceId,
-            IntakeIngressSelection intakeIngressSelection) {
+            IntakeIngressSelection intakeIngressSelection,
+            boolean suppressLegacyEvidenceAgent) {
         if (room.getRoomStatus() != RoomStatus.OPEN) {
             throw new IllegalStateException("room is not open");
         }
@@ -265,7 +387,7 @@ public class RoomMessageService {
                                 traceId,
                                 traceId);
         AgentRunAcceptedView evidenceRun =
-                targetIntake
+                targetIntake || suppressLegacyEvidenceAgent
                         ? null
                         : evidenceAgentTurnService.continueFromParticipantMessage(
                                 dispute.getId(),

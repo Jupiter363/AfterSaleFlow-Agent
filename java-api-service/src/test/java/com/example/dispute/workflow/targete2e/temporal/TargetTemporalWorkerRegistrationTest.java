@@ -136,6 +136,16 @@ class TargetTemporalWorkerRegistrationTest {
       }
 
       @Override
+      public String initiatorActorScopeHash() {
+        return null;
+      }
+
+      @Override
+      public String respondentActorScopeHash() {
+        return null;
+      }
+
+      @Override
       public void close(String reason) {}
     }
   }

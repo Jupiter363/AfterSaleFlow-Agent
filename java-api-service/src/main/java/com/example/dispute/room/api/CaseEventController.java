@@ -59,7 +59,7 @@ public class CaseEventController {
     // 系统意义：「CaseEventController.subscribe(String,Long,Long,Authentication)」是外部请求进入业务事实源的边界，必须先完成身份/参数校验，再由应用服务决定事务和权限。
     @GetMapping(produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter subscribe(
-            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
+            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9_]{1,59}") String caseId,
             @RequestHeader(value = "Last-Event-ID", required = false) @Min(0)
                     Long lastEventId,
             @RequestParam(value = "last_event_id", required = false) @Min(0)
@@ -82,7 +82,7 @@ public class CaseEventController {
     // 系统意义：「CaseEventController.replay(String,long,Authentication,HttpServletRequest)」是外部请求进入业务事实源的边界，必须先完成身份/参数校验，再由应用服务决定事务和权限。
     @GetMapping("/replay")
     public ApiResponse<List<CaseEventView>> replay(
-            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9]{1,59}") String caseId,
+            @PathVariable @Pattern(regexp = "CASE_[A-Za-z0-9_]{1,59}") String caseId,
             @RequestParam(value = "after_sequence", defaultValue = "0") @Min(0)
                     long afterSequence,
             Authentication authentication,

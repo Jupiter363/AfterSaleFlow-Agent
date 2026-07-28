@@ -29,6 +29,7 @@ public final class TargetE2eIntakeOuterFinalizer {
     private final AgentRunV2ManifestFactory manifestFactory;
     private final AgentRunFormalResultCommitter formalCommitter;
     private final TargetE2eFinalizationReceiptLedger receiptLedger;
+    private final CommandCompletionWriter completionWriter;
 
     public TargetE2eIntakeOuterFinalizer(
             TransactionTemplate transactions,
@@ -36,7 +37,8 @@ public final class TargetE2eIntakeOuterFinalizer {
             TargetE2eAgentRunV2FinalizationFactsProvider factsProvider,
             AgentRunV2ManifestFactory manifestFactory,
             AgentRunFormalResultCommitter formalCommitter,
-            TargetE2eFinalizationReceiptLedger receiptLedger) {
+            TargetE2eFinalizationReceiptLedger receiptLedger,
+            CommandCompletionWriter completionWriter) {
         this.transactions = Objects.requireNonNull(transactions, "transactions");
         if (transactions.getPropagationBehavior() != TransactionDefinition.PROPAGATION_REQUIRED
                 || transactions.getIsolationLevel()
@@ -50,17 +52,30 @@ public final class TargetE2eIntakeOuterFinalizer {
         this.manifestFactory = Objects.requireNonNull(manifestFactory, "manifestFactory");
         this.formalCommitter = Objects.requireNonNull(formalCommitter, "formalCommitter");
         this.receiptLedger = Objects.requireNonNull(receiptLedger, "receiptLedger");
+        this.completionWriter = Objects.requireNonNull(completionWriter, "completionWriter");
     }
 
     public StoredReceipt finalizeResult(
             ExecuteAgentRunRequest request, ExecuteAgentRunResult result) {
-        Objects.requireNonNull(request, "request");
-        Objects.requireNonNull(result, "result");
-        StoredReceipt stored = transactions.execute(ignored -> finalizeInTransaction(request, result));
-        return Objects.requireNonNull(stored, "target finalization transaction returned null");
+        return finalizeAgentRunResult(request, result).targetReceipt();
     }
 
-    private StoredReceipt finalizeInTransaction(
+    /**
+     * Finalizes one target Intake result and returns the ordinary receipt consumed by Temporal.
+     *
+     * <p>The target receipt append and admitted-command completion are deliberately inside the
+     * same caller-owned transaction as the Java formal commit.
+     */
+    public FinalizationOutcome finalizeAgentRunResult(
+            ExecuteAgentRunRequest request, ExecuteAgentRunResult result) {
+        Objects.requireNonNull(request, "request");
+        Objects.requireNonNull(result, "result");
+        FinalizationOutcome finalized =
+                transactions.execute(ignored -> finalizeInTransaction(request, result));
+        return Objects.requireNonNull(finalized, "target finalization transaction returned null");
+    }
+
+    private FinalizationOutcome finalizeInTransaction(
             ExecuteAgentRunRequest request, ExecuteAgentRunResult result) {
         if (request.command().roomType() != RoomType.INTAKE
                 || !TargetE2eExecutionLaneVerifier.GRAPH_KEY.equals(
@@ -87,7 +102,9 @@ public final class TargetE2eIntakeOuterFinalizer {
         AppendCommand append = new AppendCommand(
                 authorized.evidence().activationManifestHash(), targetReceipt);
         if (domainReceipt.commitStatus() == CommitStatus.COMMITTED) {
-            return receiptLedger.append(append);
+            StoredReceipt stored = receiptLedger.append(append);
+            completionWriter.complete(request, stored.receipt());
+            return new FinalizationOutcome(stored, domainReceipt);
         }
         if (domainReceipt.commitStatus() == CommitStatus.ALREADY_COMMITTED) {
             StoredReceipt original = receiptLedger
@@ -96,7 +113,8 @@ public final class TargetE2eIntakeOuterFinalizer {
                             "TARGET_E2E_ORIGINAL_RECEIPT_MISSING",
                             "committed AgentRun has no atomically persisted target receipt"));
             TargetE2eFinalizationReceiptLedger.requireExact(original, append);
-            return original;
+            completionWriter.complete(request, original.receipt());
+            return new FinalizationOutcome(original, domainReceipt);
         }
         throw rejected(
                 "TARGET_E2E_DOMAIN_COMMIT_STATUS_INVALID",
@@ -150,5 +168,20 @@ public final class TargetE2eIntakeOuterFinalizer {
     private static TargetE2eFinalizationRejectedException rejected(
             String code, String message) {
         return new TargetE2eFinalizationRejectedException(code, message);
+    }
+
+    /** Writes the immutable completion row using the active outer transaction only. */
+    @FunctionalInterface
+    public interface CommandCompletionWriter {
+
+        void complete(ExecuteAgentRunRequest request, TargetE2eFinalizationReceipt receipt);
+    }
+
+    public record FinalizationOutcome(
+            StoredReceipt targetReceipt, AgentRunFinalizationReceipt agentRunReceipt) {
+        public FinalizationOutcome {
+            targetReceipt = Objects.requireNonNull(targetReceipt, "targetReceipt");
+            agentRunReceipt = Objects.requireNonNull(agentRunReceipt, "agentRunReceipt");
+        }
     }
 }
