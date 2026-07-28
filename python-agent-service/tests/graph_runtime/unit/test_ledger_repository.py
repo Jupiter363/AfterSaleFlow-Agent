@@ -272,6 +272,36 @@ async def test_candidate_reconcile_requires_read_only_pre_cutoff_jws_admission_p
 
 
 @pytest.mark.asyncio
+async def test_candidate_reconcile_uses_historical_admission_for_fresh_credential() -> None:
+    binding = replace(
+        _binding(),
+        execution_lane=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+        activation_id=f"p9act.v1.{'a' * 32}",
+        room_fencing_token=11,
+        command_hash="b" * 64,
+        command_envelope_hash="c" * 64,
+    )
+    connection = _Connection([None])
+
+    with pytest.raises(GraphTerminalBindingError, match="pre-cutoff"):
+        await PostgresCommandLedger().load_candidate_reconciliation_proof(
+            connection,
+            binding=binding,
+            issuer="java-api-service",
+            key_id="java-key-1",
+        )
+
+    query = connection.calls[0][0]
+    assert "exists ( select 1 from agent_graph_invocation_nonce nonce" in query
+    assert "nonce.issued_at <= command.registered_at" in query
+    assert "nonce.token_expires_at >= command.registered_at" in query
+    assert "nonce.jti =" not in query
+    assert "nonce.issued_at =" not in query
+    assert "nonce.token_expires_at =" not in query
+    assert "insert " not in query and "update " not in query and "delete " not in query
+
+
+@pytest.mark.asyncio
 async def test_repeated_identical_infrastructure_termination_is_idempotent() -> None:
     binding = _binding()
     terminal = _command_row(binding, status="ABORTED")

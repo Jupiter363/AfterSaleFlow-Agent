@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
 from enum import StrEnum
 import hmac
 from typing import Any, Final, Protocol
@@ -652,20 +651,11 @@ class GraphCommandGateway:
                     command_envelope_hash=verified_invocation.command_envelope_hash,
                 )
                 registry.binding.require_profile(binding.profile)
-                _, result = await self._ledger.load_candidate_terminal_proof(
+                _, result = await self._ledger.load_candidate_reconciliation_proof(
                     connection,
                     binding=binding,
                     issuer=verified_invocation.claims.iss,
                     key_id=verified_invocation.key_id,
-                    jti=verified_invocation.claims.jti,
-                    issued_at=datetime.fromtimestamp(
-                        verified_invocation.claims.iat,
-                        tz=timezone.utc,
-                    ),
-                    token_expires_at=datetime.fromtimestamp(
-                        verified_invocation.claims.exp,
-                        tz=timezone.utc,
-                    ),
                 )
         return result
 

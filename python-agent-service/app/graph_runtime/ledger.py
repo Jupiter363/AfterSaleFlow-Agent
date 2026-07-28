@@ -389,6 +389,41 @@ select {', '.join(f'command.{column.strip()}' for column in COMMAND_COLUMNS.spli
    and command.status in ('RESULT_CHECKPOINTED', 'COMPLETED')
 """
 
+# A reconciliation request is deliberately a new, short-lived credential.  It
+# must not be looked up by that credential's delivery nonce: doing so makes a
+# worker restart unrecoverable because the original admission nonce is the one
+# that was consumed when the command was registered.  The query below instead
+# proves that the immutable command was admitted by a nonce that was valid at
+# registration time.  The fresh credential is still verified by the envelope
+# verifier and binds the same command/envelope hashes before this query runs.
+LOAD_CANDIDATE_RECONCILIATION_PROOF_SQL: Final[str] = f"""
+select {', '.join(f'command.{column.strip()}' for column in COMMAND_COLUMNS.split(','))}
+  from agent_graph_command command
+  join agent_graph_target_e2e_activation activation
+    on activation.activation_id = command.activation_id
+ where command.thread_id = %s
+   and command.command_id = %s
+   and command.request_hash = %s
+   and command.execution_mode = 'TARGET_E2E_CANDIDATE'
+   and command.activation_id = %s
+   and command.room_fencing_token = %s
+   and command.command_hash = %s
+   and command.command_envelope_hash = %s
+   and command.registered_at < activation.expires_at
+   and command.status in ('RESULT_CHECKPOINTED', 'COMPLETED')
+   and exists (
+       select 1
+         from agent_graph_invocation_nonce nonce
+        where nonce.thread_id = command.thread_id
+          and nonce.command_id = command.command_id
+          and nonce.request_hash = command.request_hash
+          and nonce.issuer = %s
+          and nonce.key_id = %s
+          and nonce.issued_at <= command.registered_at
+          and nonce.token_expires_at >= command.registered_at
+   )
+"""
+
 INSERT_NONCE_SQL: Final[str] = """
 insert into agent_graph_invocation_nonce (
     issuer, key_id, jti, thread_id, command_id, request_hash,
@@ -932,6 +967,53 @@ class PostgresCommandLedger:
         if row is None:
             raise GraphTerminalBindingError(
                 "candidate command has no exact pre-cutoff terminal admission proof"
+            )
+        command = self._command_from_row(row)
+        self.require_same_binding(command.binding, binding)
+        result = await self.load_result(
+            connection,
+            thread_id=binding.thread_id,
+            command_id=binding.command_id,
+        )
+        self.require_result_matches_command(command, result)
+        return command, result
+
+    async def load_candidate_reconciliation_proof(
+        self,
+        connection: Any,
+        *,
+        binding: CommandBinding,
+        issuer: str,
+        key_id: str,
+    ) -> tuple[CommandRecord, ResultRecord]:
+        """Load a terminal candidate through a fresh read-only credential.
+
+        ``issuer`` and ``key_id`` identify the trusted credential family.  The
+        credential's JTI and time claims are intentionally not used as the
+        durable admission selector: those claims belong to the new
+        reconciliation request.  Admission is proven by an historical nonce
+        that was valid when this exact immutable command was registered.
+        """
+
+        row = await (
+            await connection.execute(
+                LOAD_CANDIDATE_RECONCILIATION_PROOF_SQL,
+                (
+                    binding.thread_id,
+                    binding.command_id,
+                    binding.request_hash,
+                    binding.activation_id,
+                    binding.room_fencing_token,
+                    binding.command_hash,
+                    binding.command_envelope_hash,
+                    issuer,
+                    key_id,
+                ),
+            )
+        ).fetchone()
+        if row is None:
+            raise GraphTerminalBindingError(
+                "candidate command has no pre-cutoff terminal admission proof"
             )
         command = self._command_from_row(row)
         self.require_same_binding(command.binding, binding)
