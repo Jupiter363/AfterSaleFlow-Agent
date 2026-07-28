@@ -50,7 +50,6 @@ public class TargetE2eActivationRuntimeConfiguration {
             "isolation attestation"));
   }
 
-  @Bean(name = "targetE2eGraphMeasurementDataSource")
   DataSource targetE2eGraphMeasurementDataSource(ConfigurableEnvironment environment) {
     String url = required(environment, "app.target-e2e.measurement.graph-datasource.url");
     if (!url.startsWith("jdbc:postgresql://")) {
@@ -89,12 +88,11 @@ public class TargetE2eActivationRuntimeConfiguration {
   TargetE2eRuntimeMeasurementProvider targetE2eRuntimeMeasurementProvider(
       ConfigurableEnvironment environment,
       @Qualifier("dataSource") DataSource dataSource,
-      @Qualifier("targetE2eGraphMeasurementDataSource") DataSource graphMeasurementDataSource,
       TargetE2eIsolationAttestationPublicKeySet isolationAttestationPublicKeys) {
     return new SpringJdbcTargetE2eRuntimeMeasurementProvider(
         environment,
         dataSource,
-        graphMeasurementDataSource,
+        targetE2eGraphMeasurementDataSource(environment),
         isolationAttestationPublicKeys,
         Clock.systemUTC());
   }

@@ -12,6 +12,8 @@ import java.security.spec.ECGenParameterSpec;
 import java.util.Base64;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.springframework.context.annotation.Bean;
+import org.springframework.core.env.ConfigurableEnvironment;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.mock.env.MockEnvironment;
 
@@ -59,6 +61,12 @@ class TargetE2eActivationRuntimeConfigurationTest {
     DriverManagerDataSource graphDataSource =
         (DriverManagerDataSource) configuration.targetE2eGraphMeasurementDataSource(environment);
     assertThat(graphDataSource.getUrl()).isEqualTo("jdbc:postgresql://graph-db:5432/target_graph");
+    assertThat(
+            TargetE2eActivationRuntimeConfiguration.class
+                .getDeclaredMethod(
+                    "targetE2eGraphMeasurementDataSource", ConfigurableEnvironment.class)
+                .isAnnotationPresent(Bean.class))
+        .isFalse();
     TargetE2eSyntheticFixtureSource.ConfiguredFixture loaded =
         configuration.targetE2eSyntheticFixtureSource(environment).loadConfigured("fixture-set-1");
     assertThat(loaded.readOnlyPathBinding()).isEqualTo(fixture.toString());
