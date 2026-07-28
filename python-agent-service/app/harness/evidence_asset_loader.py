@@ -25,7 +25,13 @@ SUPPORTED_IMAGE_TYPES = {
     "image/png",
     "image/webp",
 }
-SAFE_JAVA_HOSTS = {"java-api-service", "host.docker.internal", "127.0.0.1", "localhost"}
+SAFE_JAVA_HOSTS = {
+    "graph-exchange-proxy",
+    "java-api-service",
+    "host.docker.internal",
+    "127.0.0.1",
+    "localhost",
+}
 SAFE_EVIDENCE_ID = re.compile(r"^EVIDENCE_[A-Za-z0-9_-]{1,119}$")
 SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
 _DATA_IMAGE_URL = re.compile(
