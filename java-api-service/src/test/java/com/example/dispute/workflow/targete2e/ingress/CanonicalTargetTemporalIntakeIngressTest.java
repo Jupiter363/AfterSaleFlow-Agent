@@ -38,20 +38,7 @@ class CanonicalTargetTemporalIntakeIngressTest {
 
     @Test
     void acceptsOneTemporalCommandBoundToTheMaterializedEvent() {
-        TargetIntakeActivationGrant grant =
-                new TargetIntakeActivationGrant(
-                        TargetIntakeActivationGrant.TARGET_LANE,
-                        "p9act.v1." + "d".repeat(32),
-                        HASH,
-                        "tenant-target",
-                        "CASE_TARGET_INGRESS",
-                        7L,
-                        11L,
-                        13L,
-                        17L,
-                        "case/tenant-target/CASE_TARGET_INGRESS",
-                        "target-control-build",
-                        Instant.parse("2026-07-27T02:00:00Z"));
+        TargetIntakeActivationGrant grant = grant();
         TargetIntakeMessageRequest request = TestRequests.message(grant);
         SnapshotRef event =
                 new SnapshotRef(
@@ -92,11 +79,30 @@ class CanonicalTargetTemporalIntakeIngressTest {
         assertThat(command.getValue().roomType()).isEqualTo(RoomType.INTAKE);
         assertThat(command.getValue().roomEpoch()).isEqualTo(7L);
         assertThat(command.getValue().expectedProcessRevision()).isEqualTo(13L);
+        assertThat(command.getValue().deadlineAt())
+                .isEqualTo(request.commandDeadlineAt())
+                .isEqualTo(Instant.parse("2026-07-27T02:00:00.123456Z"));
         assertThat(command.getValue().payloadRef().uri()).isEqualTo(event.uri());
         assertThat(command.getValue().payloadRef().sha256()).isEqualTo(event.sha256());
         assertThat(receipt.commandId()).isEqualTo(COMMAND_ID);
         assertThat(receipt.payloadSha256()).isEqualTo(HASH);
         assertThat(receipt.admittedAt()).isEqualTo(ADMITTED_AT);
+    }
+
+    private static TargetIntakeActivationGrant grant() {
+        return new TargetIntakeActivationGrant(
+                TargetIntakeActivationGrant.TARGET_LANE,
+                "p9act.v1." + "d".repeat(32),
+                HASH,
+                "tenant-target",
+                "CASE_TARGET_INGRESS",
+                7L,
+                11L,
+                13L,
+                17L,
+                "case/tenant-target/CASE_TARGET_INGRESS",
+                "target-control-build",
+                Instant.parse("2026-07-27T03:00:00Z"));
     }
 
     private static CaseCommandAcceptance acceptance(

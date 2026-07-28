@@ -38,7 +38,6 @@ import com.example.dispute.workflow.temporal.room.intake.IntakeCommandExecutionC
 import com.example.dispute.workflow.temporal.room.intake.IntakeTargetAgentRunContext;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import java.time.Clock;
-import java.time.Duration;
 import java.time.Instant;
 import java.nio.charset.StandardCharsets;
 import java.util.UUID;
@@ -50,7 +49,6 @@ import java.util.Objects;
  * v2 context is the sole hand-off to the control worker.
  */
 public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMaterializer {
-    private static final Duration DEADLINE = Duration.ofHours(1);
     private static final int ATTEMPT_LIMIT = 3;
     private static final String OPERATION = "INTAKE_MESSAGE";
 
@@ -143,7 +141,7 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
 
         String logicalRunId = "target-intake-run:" + messageIdentity;
         String attemptId = "target-intake-attempt:" + messageIdentity + ":1";
-        Instant deadline = request.createdAt().plus(DEADLINE);
+        Instant deadline = request.commandDeadlineAt();
         RoomGraphCommand graph = commands.create(new IntakeGraphCommandFactory.CommandRequest(
                 commandId, logicalRunId, attemptId, thread, snapshot, event, activation.processRevision(),
                 "INTAKE", activation.processRevision(), session.getPromptProfileId(), 2, 3, 1, deadline,

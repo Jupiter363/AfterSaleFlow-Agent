@@ -6,14 +6,11 @@ import com.example.dispute.workflow.application.command.CaseCommandService;
 import com.example.dispute.workflow.contract.v1.ContractTypes.CommandType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.PayloadRef;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
-import java.time.Duration;
 import com.example.dispute.workflow.targete2e.ingress.materialization.TargetIntakeMaterializer;
 import org.springframework.transaction.annotation.Transactional;
 
 /** Target-only adapter. It is deliberately not component-scanned; target assembly must opt in. */
 public class CanonicalTargetTemporalIntakeIngress implements TargetTemporalIntakeIngress {
-
-    private static final Duration COMMAND_DEADLINE = Duration.ofHours(1);
 
     private final CaseCommandService commandService;
     private final TargetIntakeMaterializer materializer;
@@ -43,7 +40,7 @@ public class CanonicalTargetTemporalIntakeIngress implements TargetTemporalIntak
                                         material.eventPayload().sha256(),
                                         material.eventPayload().sizeBytes()),
                                 request.activation().processRevision(),
-                                request.createdAt().plus(COMMAND_DEADLINE)),
+                                request.commandDeadlineAt()),
                         request.actor(),
                         request.traceId(),
                         request.idempotencyKey(),

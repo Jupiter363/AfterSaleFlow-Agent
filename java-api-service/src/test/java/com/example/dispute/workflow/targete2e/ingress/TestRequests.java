@@ -21,7 +21,7 @@ final class TestRequests {
                 new AuthenticatedActor("user-local", ActorRole.USER),
                 "intake-message-key",
                 "TRACE_TARGET_INTAKE",
-                Instant.parse("2026-07-27T01:00:00Z"),
+                Instant.parse("2026-07-27T01:00:00.123456789Z"),
                 grant);
     }
 }

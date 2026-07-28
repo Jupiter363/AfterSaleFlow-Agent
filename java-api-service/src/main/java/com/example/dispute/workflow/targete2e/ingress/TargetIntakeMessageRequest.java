@@ -2,7 +2,9 @@ package com.example.dispute.workflow.targete2e.ingress;
 
 import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.room.domain.MessageType;
+import java.time.Duration;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Objects;
 
@@ -19,6 +21,8 @@ public record TargetIntakeMessageRequest(
         Instant createdAt,
         TargetIntakeActivationGrant activation) {
 
+    private static final Duration COMMAND_DEADLINE = Duration.ofHours(1);
+
     public TargetIntakeMessageRequest {
         requireText(caseId, "caseId", 128);
         requireText(roomId, "roomId", 128);
@@ -33,6 +37,10 @@ public record TargetIntakeMessageRequest(
         if (!caseId.equals(activation.caseId())) {
             throw new IllegalArgumentException("message case does not match activation");
         }
+    }
+
+    public Instant commandDeadlineAt() {
+        return createdAt.plus(COMMAND_DEADLINE).truncatedTo(ChronoUnit.MICROS);
     }
 
     private static void requireText(String value, String field, int maximumLength) {
