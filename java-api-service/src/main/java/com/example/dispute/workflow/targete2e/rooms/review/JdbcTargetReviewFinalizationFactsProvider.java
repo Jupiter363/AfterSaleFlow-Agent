@@ -1,7 +1,7 @@
 package com.example.dispute.workflow.targete2e.rooms.review;
 
 import com.example.dispute.agentstream.application.AgentRunV2ManifestFactory;
-import com.example.dispute.workflow.application.TemporalAgentRunV2WorkflowLauncher;
+import com.example.dispute.workflow.contract.v1.AgentRunWorkflowIds;
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ArtifactPointer;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
@@ -82,7 +82,7 @@ public final class JdbcTargetReviewFinalizationFactsProvider implements TargetRe
         : finalization.executionProvider().equals(value.provider)
             && finalization.executionModel().equals(value.model),
         "execution identity");
-    require(TemporalAgentRunV2WorkflowLauncher.workflowId(request.logicalRunId()).equals(context.workflowId()),
+    require(AgentRunWorkflowIds.forLogicalRun(request.logicalRunId()).equals(context.workflowId()),
         "runtime workflow id");
     ArtifactPointer output = new ArtifactPointer(value.snapshotId, value.snapshotSchema, value.snapshotUri, value.snapshotHash);
     return new AgentRunV2ManifestFactory.FinalizationFacts(value.fence, value.logicalIdempotencyKey,

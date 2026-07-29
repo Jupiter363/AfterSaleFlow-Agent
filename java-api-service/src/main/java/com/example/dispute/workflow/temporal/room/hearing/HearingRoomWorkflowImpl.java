@@ -6,6 +6,7 @@ import static io.temporal.api.enums.v1.ParentClosePolicy.PARENT_CLOSE_POLICY_ABA
 import static io.temporal.api.enums.v1.WorkflowIdReusePolicy.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE;
 
 import com.example.dispute.hearing.domain.HearingAuthorityCommit;
+import com.example.dispute.workflow.contract.v1.AgentRunWorkflowIds;
 import com.example.dispute.workflow.contract.v1.ContractTypes.CommandType;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
@@ -326,7 +327,7 @@ public final class HearingRoomWorkflowImpl implements HearingRoomWorkflow {
   }
 
   private boolean isTargetChild() {
-    return Workflow.getInfo().getParentWorkflowId() != null;
+    return Workflow.getInfo().getParentWorkflowId().filter(id -> !id.isBlank()).isPresent();
   }
 
   private void executeFormalization() {
@@ -384,8 +385,7 @@ public final class HearingRoomWorkflowImpl implements HearingRoomWorkflow {
             AgentRunWorkflow.class,
             ChildWorkflowOptions.newBuilder()
                 .setWorkflowId(
-                    com.example.dispute.workflow.application.TemporalAgentRunV2WorkflowLauncher.workflowId(
-                        request.logicalRunId()))
+                    AgentRunWorkflowIds.forLogicalRun(request.logicalRunId()))
                 .setTaskQueue(AGENT_EXECUTION)
                 .setWorkflowExecutionTimeout(Duration.ofMillis(remainingMillis))
                 .setWorkflowRunTimeout(Duration.ofMillis(remainingMillis))

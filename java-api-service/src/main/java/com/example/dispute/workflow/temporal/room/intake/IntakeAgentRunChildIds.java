@@ -1,6 +1,6 @@
 package com.example.dispute.workflow.temporal.room.intake;
 
-import com.example.dispute.workflow.application.TemporalAgentRunV2WorkflowLauncher;
+import com.example.dispute.workflow.contract.v1.AgentRunWorkflowIds;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -23,7 +23,7 @@ public final class IntakeAgentRunChildIds {
     }
     IntakeCommandExecutionContext context = command.executionContext();
     if (context != null && context.isTargetAgentRun()) {
-      return TemporalAgentRunV2WorkflowLauncher.workflowId(
+      return AgentRunWorkflowIds.forLogicalRun(
           context.targetAgentRun().request().logicalRunId());
     }
     String identity = command.caseId() + ":" + command.roomEpoch() + ":" + command.commandId();

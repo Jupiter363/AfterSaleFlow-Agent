@@ -10,6 +10,7 @@ import com.example.dispute.hearing.domain.HearingWriterMode;
 import com.example.dispute.workflow.contract.outcome.v1.OutcomeWireTypes.RuntimeMode;
 import com.example.dispute.workflow.contract.outcome.v1.OutcomeWorkflowStart;
 import com.example.dispute.workflow.contract.v1.CaseCommandRef;
+import com.example.dispute.workflow.contract.v1.AgentRunWorkflowIds;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
@@ -917,7 +918,6 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
   }
 
   private static String targetAgentRunWorkflowId(ExecuteAgentRunRequest request) {
-    return com.example.dispute.workflow.application.TemporalAgentRunV2WorkflowLauncher.workflowId(
-        request.logicalRunId());
+    return AgentRunWorkflowIds.forLogicalRun(request.logicalRunId());
   }
 }

@@ -35,6 +35,15 @@ class OutcomeUnregisteredAssemblyGuardTest {
       JAVA_MAIN + "/com/example/dispute/workflow/temporal/room/outcome/OutcomeWorkflowKernel.java";
   private static final String OUTCOME_PROTOCOL_SOURCE =
       JAVA_MAIN + "/com/example/dispute/workflow/contract/outcome/v1/OutcomeRoomProtocol.java";
+  private static final String TARGET_TYPED_DISPATCHER_SOURCE =
+      JAVA_MAIN
+          + "/com/example/dispute/workflow/targete2e/temporal/"
+          + "TargetTypedRoomCaseProcessDispatcher.java";
+  private static final String TARGET_TYPED_PROTOCOL_SOURCE =
+      JAVA_MAIN
+          + "/com/example/dispute/workflow/targete2e/temporal/TargetTypedRoomProtocol.java";
+  private static final String TARGET_E2E_OUTCOME_GRAPH_ADAPTER =
+      PYTHON_APP + "/graph_runtime/target_e2e_room_adapters.py";
 
   private static final List<String> ENGINEERING_BOUNDARY_SOURCES =
       List.of(
@@ -69,6 +78,8 @@ class OutcomeUnregisteredAssemblyGuardTest {
           OUTCOME_WORKFLOW_IMPL_SOURCE,
           OUTCOME_KERNEL_SOURCE,
           OUTCOME_PROTOCOL_SOURCE);
+  private static final Set<String> ALLOWED_TARGET_OUTCOME_RUNTIME_SOURCES =
+      Set.of(TARGET_TYPED_DISPATCHER_SOURCE, TARGET_TYPED_PROTOCOL_SOURCE);
 
   private static final Pattern OUTCOME_RUNTIME_REFERENCE =
       Pattern.compile(
@@ -232,6 +243,52 @@ class OutcomeUnregisteredAssemblyGuardTest {
               JAVA_MAIN + "/com/example/dispute/agentstream/application/AgentRunV2Coordinator.java",
               "Agent Run workflow launcher",
               "\\bworkflowLauncher\\s*\\.\\s*start\\s*\\(\\s*request\\s*\\)",
+              1),
+          temporalAllowance(
+              TARGET_TYPED_DISPATCHER_SOURCE,
+              "target-only Intake child stub",
+              "\\bWorkflow\\s*\\.\\s*newChildWorkflowStub\\s*\\(\\s*"
+                  + "IntakeRoomWorkflow\\s*\\.\\s*class\\s*,",
+              1),
+          temporalAllowance(
+              TARGET_TYPED_DISPATCHER_SOURCE,
+              "target-only Evidence child stub",
+              "\\bWorkflow\\s*\\.\\s*newChildWorkflowStub\\s*\\(\\s*"
+                  + "EvidenceRoomWorkflow\\s*\\.\\s*class\\s*,",
+              1),
+          temporalAllowance(
+              TARGET_TYPED_DISPATCHER_SOURCE,
+              "target-only Hearing child stub",
+              "\\bWorkflow\\s*\\.\\s*newChildWorkflowStub\\s*\\(\\s*"
+                  + "HearingRoomWorkflow\\s*\\.\\s*class\\s*,",
+              1),
+          temporalAllowance(
+              TARGET_TYPED_DISPATCHER_SOURCE,
+              "target-only Review/Outcome child stub",
+              "\\bWorkflow\\s*\\.\\s*newChildWorkflowStub\\s*\\(\\s*"
+                  + "OutcomeRoomWorkflow\\s*\\.\\s*class\\s*,",
+              1),
+          temporalAllowance(
+              TARGET_TYPED_DISPATCHER_SOURCE,
+              "target-only Agent Run child stub",
+              "\\bWorkflow\\s*\\.\\s*newChildWorkflowStub\\s*\\(\\s*"
+                  + "AgentRunWorkflow\\s*\\.\\s*class\\s*,",
+              1),
+          temporalAllowance(
+              JAVA_MAIN
+                  + "/com/example/dispute/workflow/temporal/room/hearing/"
+                  + "HearingRoomWorkflowImpl.java",
+              "target Hearing Agent Run child stub",
+              "\\bWorkflow\\s*\\.\\s*newChildWorkflowStub\\s*\\(\\s*"
+                  + "AgentRunWorkflow\\s*\\.\\s*class\\s*,",
+              1),
+          temporalAllowance(
+              JAVA_MAIN
+                  + "/com/example/dispute/workflow/temporal/room/intake/"
+                  + "IntakeRoomWorkflowImpl.java",
+              "target Intake Agent Run child stub",
+              "\\bWorkflow\\s*\\.\\s*newChildWorkflowStub\\s*\\(\\s*"
+                  + "AgentRunWorkflow\\s*\\.\\s*class\\s*,",
               1));
 
   private static final List<ForbiddenPattern> FORBIDDEN_PYTHON_ASSEMBLY =
@@ -415,7 +472,8 @@ class OutcomeUnregisteredAssemblyGuardTest {
       String content = read(source);
       String code = javaCode(content);
       String structure = javaStructure(code);
-      if (!ALLOWED_OUTCOME_DEFINITION_SOURCES.contains(relative)) {
+      if (!ALLOWED_OUTCOME_DEFINITION_SOURCES.contains(relative)
+          && !ALLOWED_TARGET_OUTCOME_RUNTIME_SOURCES.contains(relative)) {
         addMatches(violations, relative, structure, OUTCOME_RUNTIME_REFERENCE);
       }
       violations.addAll(temporalStarterViolations(relative, content));
@@ -868,7 +926,14 @@ class OutcomeUnregisteredAssemblyGuardTest {
   }
 
   private static List<String> pythonAssemblyViolations(String source, String content) {
-    return forbiddenViolations(source, pythonCode(content), FORBIDDEN_PYTHON_ASSEMBLY);
+    List<ForbiddenPattern> patterns = FORBIDDEN_PYTHON_ASSEMBLY;
+    if (TARGET_E2E_OUTCOME_GRAPH_ADAPTER.equals(source)) {
+      patterns =
+          patterns.stream()
+              .filter(pattern -> !pattern.description().equals("Outcome graph import"))
+              .toList();
+    }
+    return forbiddenViolations(source, pythonCode(content), patterns);
   }
 
   private static List<String> forbiddenViolations(

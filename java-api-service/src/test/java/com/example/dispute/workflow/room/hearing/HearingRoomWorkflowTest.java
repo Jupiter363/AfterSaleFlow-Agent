@@ -191,6 +191,7 @@ class HearingRoomWorkflowTest {
   @Test
   void completedTargetAgentRunReceiptIsPersistedOnlyAtItsExactAgentStage() {
     Started started = start("agent-run-receipt", Duration.ofSeconds(3));
+    advanceTo(started, HearingWorkflowStage.INTAKE_QUESTIONS_GENERATING);
     HearingRoomSnapshot current = started.workflow().state();
     TargetRoomAgentRunFinalizationReceipt receipt =
         new TargetRoomAgentRunFinalizationReceipt(

@@ -5,7 +5,6 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hmac
-from importlib import import_module
 import inspect
 import re
 from typing import Any, Protocol, cast
@@ -28,6 +27,7 @@ from app.graph_runtime.errors import GraphContractError
 from app.graph_runtime.persistence_models import GraphFenceContext
 from app.graph_runtime.postgres_bulkhead import PostgresGraphFanoutBulkhead
 from app.graph_runtime.result import ResultBindings
+from app.graph_runtime.target_e2e import TargetE2ERoomProposalSource
 from app.graphs.evidence.contracts import (
     EVIDENCE_STATE_SCHEMA_VERSION,
     TARGET_E2E_CHECKPOINT_SCHEMA_VERSION,
@@ -576,10 +576,8 @@ def _wire_enum(value: Any) -> str | None:
 
 def _target_proposal_source(value: JsonObject) -> Any:
     try:
-        module = import_module("app.graph_runtime.target_e2e")
-        source_type = getattr(module, "TargetE2ERoomProposalSource")
-        source = source_type.model_validate(value)
-    except (AttributeError, ImportError, TypeError, ValueError) as error:
+        source = TargetE2ERoomProposalSource.model_validate(value)
+    except (TypeError, ValueError) as error:
         raise EvidenceGraphContractError(
             "EVIDENCE_TARGET_SHARED_PROPOSAL_SOURCE_REQUIRED"
         ) from error

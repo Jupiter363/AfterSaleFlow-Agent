@@ -4,6 +4,7 @@ import static com.example.dispute.workflow.contract.v1.TemporalTaskQueues.AGENT_
 
 import static io.temporal.api.enums.v1.WorkflowIdReusePolicy.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE;
 
+import com.example.dispute.workflow.contract.v1.AgentRunWorkflowIds;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
 import com.example.dispute.workflow.temporal.agentrun.AgentRunWorkflow;
@@ -21,23 +22,13 @@ import io.temporal.client.WorkflowUpdateStage;
 
 import org.springframework.stereotype.Component;
 
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.HexFormat;
 import java.util.Objects;
-import java.util.regex.Pattern;
 
 /**
  * Temporal SDK adapter with a stable logical-run workflow identity and duplicate-start recovery.
  */
 @Component
 public final class TemporalAgentRunV2WorkflowLauncher implements AgentRunV2WorkflowLauncher {
-
-    private static final String WORKFLOW_ID_PREFIX = "agent-run-v2:";
-    private static final int MANIFEST_IDENTIFIER_MAX_LENGTH = 128;
-    private static final Pattern MANIFEST_IDENTIFIER =
-            Pattern.compile("^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$");
 
     private final WorkflowClient workflowClient;
 
@@ -97,26 +88,7 @@ public final class TemporalAgentRunV2WorkflowLauncher implements AgentRunV2Workf
     }
 
     public static String workflowId(String logicalRunId) {
-        if (logicalRunId == null || logicalRunId.isBlank()) {
-            throw new IllegalArgumentException("logicalRunId is required");
-        }
-        String readable = WORKFLOW_ID_PREFIX + logicalRunId;
-        if (readable.length() <= MANIFEST_IDENTIFIER_MAX_LENGTH
-                && MANIFEST_IDENTIFIER.matcher(readable).matches()) {
-            return readable;
-        }
-        return WORKFLOW_ID_PREFIX + sha256(logicalRunId);
-    }
-
-    private static String sha256(String value) {
-        try {
-            byte[] digest =
-                    MessageDigest.getInstance("SHA-256")
-                            .digest(value.getBytes(StandardCharsets.UTF_8));
-            return HexFormat.of().formatHex(digest);
-        } catch (NoSuchAlgorithmException impossible) {
-            throw new IllegalStateException("SHA-256 is not available", impossible);
-        }
+        return AgentRunWorkflowIds.forLogicalRun(logicalRunId);
     }
 
     private static StartReceipt receipt(

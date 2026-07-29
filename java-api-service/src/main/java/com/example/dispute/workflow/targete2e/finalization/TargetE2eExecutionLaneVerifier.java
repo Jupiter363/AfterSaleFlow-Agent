@@ -1,6 +1,6 @@
 package com.example.dispute.workflow.targete2e.finalization;
 
-import com.example.dispute.workflow.application.TemporalAgentRunV2WorkflowLauncher;
+import com.example.dispute.workflow.contract.v1.AgentRunWorkflowIds;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunExecutorKind;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
@@ -105,7 +105,7 @@ public final class TargetE2eExecutionLaneVerifier {
                 CHECKPOINT_SCHEMA_VERSION,
                 "activation checkpoint schema");
         requireEqual(
-                TemporalAgentRunV2WorkflowLauncher.workflowId(request.logicalRunId()),
+                    AgentRunWorkflowIds.forLogicalRun(request.logicalRunId()),
                 runtime.workflowId(),
                 "AgentRun workflow id");
 
