@@ -37,6 +37,10 @@ import com.example.dispute.room.application.IntakeAgentTurnService;
 import com.example.dispute.room.application.IntakeProgressService;
 import com.example.dispute.room.application.IntakeLobbySeed;
 import com.example.dispute.room.application.IntakeStatusView;
+import com.example.dispute.room.application.RoomMessageCommand;
+import com.example.dispute.room.application.RoomMessageService;
+import com.example.dispute.room.domain.MessageType;
+import com.example.dispute.room.domain.RoomType;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import com.example.dispute.workflow.application.epoch.RoomEpochAllocator;
@@ -79,6 +83,7 @@ class CaseApplicationServiceTest {
     @Mock private IntakeProgressService intakeProgressService;
     @Mock private RoomEpochAllocator roomEpochAllocator;
     @Mock private LegacyIntakeWriterGuard legacyIntakeWriterGuard;
+    @Mock private RoomMessageService roomMessageService;
     @Mock private ObjectProvider<ImportedCaseIdFactory> caseIdFactoryProvider;
 
     private CaseApplicationService service;
@@ -122,6 +127,7 @@ class CaseApplicationServiceTest {
                         intakeProgressService,
                         roomEpochAllocator,
                         legacyIntakeWriterGuard,
+                        roomMessageService,
                         properties,
                         clock,
                         objectMapper);
@@ -203,7 +209,7 @@ class CaseApplicationServiceTest {
         assertThat(lobbySeed.getValue().initiatorRole()).isEqualTo("USER");
         assertThat(lobbySeed.getValue().rawText()).contains("order-1");
         assertThat(result.description()).isEqualTo("订单 order-1 显示签收，但我没有收到");
-        verifyNoInteractions(agentServiceClient);
+        verifyNoInteractions(agentServiceClient, roomMessageService);
 
         ArgumentCaptor<AuditLogEntity> audit = ArgumentCaptor.forClass(AuditLogEntity.class);
         verify(auditLogRepository).save(audit.capture());
@@ -226,6 +232,7 @@ class CaseApplicationServiceTest {
                         intakeProgressService,
                         roomEpochAllocator,
                         legacyIntakeWriterGuard,
+                        roomMessageService,
                         properties,
                         clock,
                         objectMapper,
@@ -290,11 +297,12 @@ class CaseApplicationServiceTest {
                 participantService,
                 intakeAgentTurnService,
                 roomEpochAllocator,
-                legacyIntakeWriterGuard);
+                legacyIntakeWriterGuard,
+                roomMessageService);
     }
 
     @Test
-    void temporalIntakeEpochSkipsLegacyWriterAndInitialTurnButPersistsInitiator() {
+    void temporalIntakeEpochDispatchesInitialDescriptionThroughTargetIngress() {
         when(roomEpochAllocator.activate(any()))
                 .thenReturn(
                         new RoomEpochAllocation(
@@ -313,16 +321,33 @@ class CaseApplicationServiceTest {
                                 "run-1",
                                 null));
 
+        AuthenticatedActor initiator =
+                new AuthenticatedActor("user-1", ActorRole.USER);
         CaseView result =
                 service.create(
                         command("Temporal intake is started by the first room message", "order-temporal"),
-                        new AuthenticatedActor("user-1", ActorRole.USER),
+                        initiator,
                         "idem-temporal-intake",
                         "TRACE_temporal",
                         "REQ_temporal");
 
-        verify(participantService)
+        ArgumentCaptor<RoomMessageCommand> initialMessage =
+                ArgumentCaptor.forClass(RoomMessageCommand.class);
+        InOrder targetDispatchOrder = inOrder(participantService, roomMessageService);
+        targetDispatchOrder.verify(participantService)
                 .addInitiator(any(FulfillmentCaseEntity.class), any(AuthenticatedActor.class), any());
+        targetDispatchOrder.verify(roomMessageService)
+                .post(
+                        eq(result.id()),
+                        eq(RoomType.INTAKE),
+                        initialMessage.capture(),
+                        eq(initiator),
+                        eq("idem-temporal-intake"),
+                        eq("TRACE_temporal"));
+        assertThat(initialMessage.getValue().messageType()).isEqualTo(MessageType.PARTY_TEXT);
+        assertThat(initialMessage.getValue().text())
+                .isEqualTo("Temporal intake is started by the first room message");
+        assertThat(initialMessage.getValue().attachmentRefs()).isEmpty();
         verifyNoInteractions(legacyIntakeWriterGuard, intakeAgentTurnService);
         assertThat(result.id()).startsWith("CASE_");
     }
