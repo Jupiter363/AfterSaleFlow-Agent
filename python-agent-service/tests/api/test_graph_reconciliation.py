@@ -1016,6 +1016,8 @@ def test_target_reconciliation_returns_exact_result_envelope_without_proposal_by
         "room_fencing_token": 19,
         "command_hash": command_hash,
         "command_envelope_hash": command_envelope.command_envelope_hash,
+        "execution_provider": "target-e2e-composite",
+        "execution_model": "room-provider-dispatch",
         "result_hash": nested.output_hash,
         "proposal_hash": "7" * 64,
         "graph_output_authority": "PROPOSAL_ONLY",

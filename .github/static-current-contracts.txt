@@ -77,6 +77,9 @@ tests/static/test_phase8_stream_compatibility.py
 tests/static/test_phase8_stream_retention.py
 tests/static/test_phase8_test_runtime_supply_chain.py
 tests/static/test_phase8_v046_migration.py
+tests/static/test_phase9_target_e2e_contract.py
+tests/static/test_phase9_target_e2e_deployment.py
+tests/static/test_phase9_target_e2e_provisioning.py
 tests/static/test_phase9_temporal_contract.py
 tests/static/test_quality_gate_static_manifests.py
 tests/static/test_repository_contract.py

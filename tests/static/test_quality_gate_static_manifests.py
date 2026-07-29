@@ -17,6 +17,7 @@ SAFE_NODE = re.compile(
 
 EXPECTED_HISTORICAL_NODES = {
     "tests/static/test_phase5_r2_migration_contract_gate.py::test_r2_gate_authenticates_current_candidate",
+    "tests/static/test_phase6_hearing_contracts.py::test_source_snapshot_hashes_are_exact_raw_git_blob_pins",
     "tests/static/test_phase7_outcome_contracts.py::test_source_snapshot_is_bound_to_exact_accepted_a6_git_blobs",
     "tests/static/test_phase8_p8_0_entry_checkpoint.py::test_e8_manifest_attempt_and_junit_are_exact_candidate_all_green",
     "tests/static/test_phase8_p8_0_entry_checkpoint.py::test_superseded_a8_chain_remains_reachable_but_has_historical_authority_only",

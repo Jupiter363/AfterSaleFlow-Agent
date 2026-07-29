@@ -1,4 +1,4 @@
--- TARGET_E2E_CANDIDATE durable relay facts. These rows are append-only evidence; the Temporal
+-- V055: TARGET_E2E_CANDIDATE durable relay facts. These rows are append-only evidence; the Temporal
 -- workflow only applies exact facts read back from this ledger.
 create table target_e2e_outcome_completion_fact (
     workflow_id varchar(128) not null,

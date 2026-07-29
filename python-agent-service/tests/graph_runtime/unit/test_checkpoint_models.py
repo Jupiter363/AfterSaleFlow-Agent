@@ -52,6 +52,8 @@ def test_fence_context_binds_graph_key_into_checkpoint_metadata() -> None:
         "graph_room_fencing_token": None,
         "graph_command_hash": None,
         "graph_command_envelope_hash": None,
+        "graph_execution_provider": None,
+        "graph_execution_model": None,
         "graph_environment_id": None,
         "graph_environment_generation": None,
         "graph_tenant_surrogate": None,

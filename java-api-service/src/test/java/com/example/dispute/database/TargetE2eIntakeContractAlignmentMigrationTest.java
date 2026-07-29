@@ -13,7 +13,7 @@ class TargetE2eIntakeContractAlignmentMigrationTest {
 
     private static final Path MIGRATION = Path.of(
             "src", "main", "resources", "db", "migration",
-            "V057__target_e2e_intake_contract_alignment.sql");
+            "V056__target_e2e_intake_contract_alignment.sql");
     private static final Path V048 = Path.of(
             "src", "main", "resources", "db", "migration",
             "V048__target_e2e_intake_thread_binding.sql");
@@ -24,19 +24,19 @@ class TargetE2eIntakeContractAlignmentMigrationTest {
         String sql = normalizedSql();
 
         assertThat(sql)
-                .contains("add constraint ck_intake_graph_thread_constants_v057")
+                .contains("add constraint ck_intake_graph_thread_constants_v056")
                 .contains("not valid")
-                .contains("validate constraint ck_intake_graph_thread_constants_v057")
+                .contains("validate constraint ck_intake_graph_thread_constants_v056")
                 .contains("drop constraint ck_intake_graph_thread_constants")
                 .contains(
-                        "rename constraint ck_intake_graph_thread_constants_v057 to "
+                        "rename constraint ck_intake_graph_thread_constants_v056 to "
                                 + "ck_intake_graph_thread_constants");
-        assertThat(sql.indexOf("add constraint ck_intake_graph_thread_constants_v057"))
-                .isLessThan(sql.indexOf("validate constraint ck_intake_graph_thread_constants_v057"));
-        assertThat(sql.indexOf("validate constraint ck_intake_graph_thread_constants_v057"))
+        assertThat(sql.indexOf("add constraint ck_intake_graph_thread_constants_v056"))
+                .isLessThan(sql.indexOf("validate constraint ck_intake_graph_thread_constants_v056"));
+        assertThat(sql.indexOf("validate constraint ck_intake_graph_thread_constants_v056"))
                 .isLessThan(sql.indexOf("drop constraint ck_intake_graph_thread_constants"));
         assertThat(sql.indexOf("drop constraint ck_intake_graph_thread_constants"))
-                .isLessThan(sql.indexOf("rename constraint ck_intake_graph_thread_constants_v057"));
+                .isLessThan(sql.indexOf("rename constraint ck_intake_graph_thread_constants_v056"));
     }
 
     @Test

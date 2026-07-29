@@ -2,7 +2,7 @@
 -- historical Intake wire contract. Keep the replacement additive until the
 -- existing rows have been proven compatible with the stronger constraint.
 alter table case_intake_graph_thread_binding
-    add constraint ck_intake_graph_thread_constants_v057
+    add constraint ck_intake_graph_thread_constants_v056
     check (
         schema_version = 'graph-private-thread-registration.v1'
         and room_type = 'INTAKE'
@@ -26,11 +26,11 @@ alter table case_intake_graph_thread_binding
     ) not valid;
 
 alter table case_intake_graph_thread_binding
-    validate constraint ck_intake_graph_thread_constants_v057;
+    validate constraint ck_intake_graph_thread_constants_v056;
 
 alter table case_intake_graph_thread_binding
     drop constraint ck_intake_graph_thread_constants;
 
 alter table case_intake_graph_thread_binding
-    rename constraint ck_intake_graph_thread_constants_v057
+    rename constraint ck_intake_graph_thread_constants_v056
         to ck_intake_graph_thread_constants;

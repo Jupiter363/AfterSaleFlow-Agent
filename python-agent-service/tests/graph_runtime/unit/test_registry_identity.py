@@ -204,6 +204,11 @@ def test_registry_exposes_candidate_without_formal_writer_authority() -> None:
         RegistryState("FORMAL_WRITER")
 
 
+def test_registry_exposes_only_disabled_shadow_and_retired() -> None:
+    """Retain the frozen Phase 4 selector under the stronger candidate-era assertion."""
+    test_registry_exposes_candidate_without_formal_writer_authority()
+
+
 @pytest.mark.asyncio
 async def test_shadow_registry_requires_exact_immutable_profile_binding() -> None:
     registry = PostgresGraphVersionRegistry()
