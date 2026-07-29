@@ -32,6 +32,7 @@ import com.example.dispute.workflow.contract.v1.RoomGraphResult;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
@@ -59,6 +60,88 @@ class IntakeGraphResultFinalizerTest {
                 .isEqualTo("intake-turn-proposal.v2");
         assertThat(fixture.authority().executionOutputSchemaVersion())
                 .isEqualTo(fixture.authority().profileVersions().outputSchemaVersion());
+    }
+
+    @Test
+    void targetOuterToolPolicyMapsOnlyTheProposalLoaderAuthority() throws Exception {
+        Fixture fixture = fixture(
+                WriterMode.TEMPORAL,
+                IntakeGraphResultFinalizer.TARGET_E2E_GRAPH_KEY,
+                "tools.none.v1");
+        RecordingCommitPort port = new RecordingCommitPort();
+
+        IntakeFinalizationReceipt receipt = finalizer(
+                        fixture, port, IntakeGraphResultFinalizer.TARGET_E2E_GRAPH_KEY)
+                .finalizeResult(fixture.request());
+
+        assertThat(receipt.operationKey()).isEqualTo(fixture.request().operationKey());
+        assertThat(port.calls).isOne();
+        assertThat(port.commands.get(0).request().authority().profileVersions().toolPolicyVersion())
+                .isEqualTo("tools.none.v1");
+    }
+
+    @Test
+    void targetRejectsAnUnexpectedOuterToolPolicyBeforePreflight() throws Exception {
+        Fixture fixture = fixture(
+                WriterMode.TEMPORAL,
+                IntakeGraphResultFinalizer.TARGET_E2E_GRAPH_KEY,
+                "unexpected-tools.v1");
+        RecordingCommitPort port = new RecordingCommitPort();
+
+        assertRejected(
+                "INTAKE_AUTHORITY_MISMATCH",
+                () -> finalizer(fixture, port, IntakeGraphResultFinalizer.TARGET_E2E_GRAPH_KEY)
+                        .finalizeResult(fixture.request()));
+        assertThat(port.preflightCalls).isZero();
+        assertThat(port.calls).isZero();
+    }
+
+    @Test
+    void targetToolPolicyMappingDoesNotRelaxOtherAuthorityProfiles() throws Exception {
+        Fixture fixture = fixture(
+                WriterMode.TEMPORAL,
+                IntakeGraphResultFinalizer.TARGET_E2E_GRAPH_KEY,
+                "tools.none.v1");
+        IntakeGraphFinalizationRequest.Authority authority = fixture.authority();
+        IntakeTurnProposal.ProfileVersions profiles = authority.profileVersions();
+        IntakeGraphFinalizationRequest.Authority mismatchedAuthority = new IntakeGraphFinalizationRequest.Authority(
+                authority.tenantSurrogate(),
+                authority.caseId(),
+                authority.roomEpoch(),
+                authority.fencingToken(),
+                authority.threadId(),
+                authority.actorScopeHash(),
+                authority.agentSessionId(),
+                authority.commandId(),
+                authority.logicalRunId(),
+                authority.attemptId(),
+                authority.resultHash(),
+                authority.proposalHash(),
+                authority.checkpointId(),
+                authority.cognitiveRevision(),
+                authority.processRevision(),
+                authority.roomRevision(),
+                authority.stageCode(),
+                authority.stageSequence(),
+                new IntakeTurnProposal.ProfileVersions(
+                        profiles.graphVersion(),
+                        profiles.checkpointSchemaVersion(),
+                        profiles.promptVersion(),
+                        profiles.modelProfileId(),
+                        profiles.outputSchemaVersion(),
+                        "unexpected-policy.v1",
+                        profiles.guardrailVersion(),
+                        profiles.toolPolicyVersion()));
+        IntakeGraphFinalizationRequest mismatched = fixture.requestWithAuthority(mismatchedAuthority);
+        RecordingCommitPort port = new RecordingCommitPort();
+
+        assertRejected(
+                "INTAKE_AUTHORITY_MISMATCH",
+                () -> finalizer(fixture.withRequest(mismatched), port,
+                                IntakeGraphResultFinalizer.TARGET_E2E_GRAPH_KEY)
+                        .finalizeResult(mismatched));
+        assertThat(port.preflightCalls).isZero();
+        assertThat(port.calls).isZero();
     }
 
     @Test
@@ -338,12 +421,34 @@ class IntakeGraphResultFinalizerTest {
     }
 
     private static IntakeGraphResultFinalizer finalizer(Fixture fixture, RecordingCommitPort port) {
+        return finalizer(fixture, port, IntakeGraphResultFinalizer.LEGACY_GRAPH_KEY);
+    }
+
+    private static IntakeGraphResultFinalizer finalizer(
+            Fixture fixture, RecordingCommitPort port, String expectedGraphKey) {
         IntakeImmutableProposalReader reader = ignored -> fixture.storedProposal();
-        return new IntakeGraphResultFinalizer(new IntakeTurnProposalLoader(reader), port);
+        return new IntakeGraphResultFinalizer(
+                new IntakeTurnProposalLoader(reader), port, null, expectedGraphKey);
     }
 
     private static Fixture fixture(WriterMode writerMode) throws Exception {
+        return fixture(writerMode, IntakeGraphResultFinalizer.LEGACY_GRAPH_KEY, "no-tools.v1");
+    }
+
+    private static Fixture fixture(
+            WriterMode writerMode, String graphKey, String outerToolPolicyVersion) throws Exception {
+        IntakeGraphThreadBinding binding = binding(writerMode, graphKey, outerToolPolicyVersion);
         JsonNode document = MAPPER.readTree(PROPOSAL_FIXTURE.toFile());
+        if (IntakeGraphResultFinalizer.TARGET_E2E_GRAPH_KEY.equals(graphKey)) {
+            ObjectNode profiles = (ObjectNode) document.required("profile_versions");
+            profiles.put("graph_version", "target-e2e-graph.2026-07-27.1");
+            profiles.put("checkpoint_schema_version", "target-e2e-checkpoint.v1");
+            ((ObjectNode) document)
+                    .put("actor_scope_hash", binding.registration().actorScopeHash());
+            ((ObjectNode) document).put(
+                    "proposal_hash",
+                    IntakeContractHashes.canonicalHashExcluding(document, "proposal_hash"));
+        }
         byte[] payload = ContractJson.canonicalize(document);
         IntakeProposalReference proposalReference = new IntakeProposalReference(
                 "PROPOSAL_P4_USER_2",
@@ -352,7 +457,6 @@ class IntakeGraphResultFinalizerTest {
                 "version-1",
                 document.required("proposal_hash").asText(),
                 payload.length);
-        IntakeGraphThreadBinding binding = binding(writerMode);
         IntakeSnapshotReference snapshot = IntakeTestFixtures.snapshot(binding);
         IntakeEventReference event = IntakeTestFixtures.event(binding);
         RoomGraphCommand command = new com.example.dispute.workflow.application.intake.IntakeGraphCommandFactory()
@@ -375,7 +479,7 @@ class IntakeGraphResultFinalizerTest {
                         "graph-envelope.synthetic.v1",
                         "nonce-p4-user-2"));
         RoomGraphResult result = result(command, proposalReference, document);
-        IntakeTurnProposal.ProfileVersions profiles = profiles(document);
+        IntakeTurnProposal.ProfileVersions profiles = profiles(document, outerToolPolicyVersion);
         IntakeGraphFinalizationRequest.Authority authority = new IntakeGraphFinalizationRequest.Authority(
                 command.tenantSurrogate(),
                 command.caseId(),
@@ -397,7 +501,8 @@ class IntakeGraphResultFinalizerTest {
                 3,
                 command.stageCode(),
                 command.stageSequence(),
-                profiles);
+                profiles,
+                command.invocationContext().outputSchemaVersion());
         String operationKey = "intake.turn.finalize:"
                 + authority.caseId() + ":" + authority.roomEpoch() + ":"
                 + authority.threadId() + ":" + authority.commandId() + ":"
@@ -431,11 +536,19 @@ class IntakeGraphResultFinalizerTest {
     }
 
     private static IntakeGraphThreadBinding binding(WriterMode writerMode) {
+        return binding(writerMode, IntakeGraphResultFinalizer.LEGACY_GRAPH_KEY, "no-tools.v1");
+    }
+
+    private static IntakeGraphThreadBinding binding(
+            WriterMode writerMode, String graphKey, String toolPolicyVersion) {
+        boolean targetGraph = IntakeGraphResultFinalizer.TARGET_E2E_GRAPH_KEY.equals(graphKey);
         var actor = new IntakePrivateThreadRegistration.ActorScope(
                 "user-synthetic",
                 ActorRole.USER,
                 Audience.USER,
-                List.of("graph.command.execute"));
+                targetGraph
+                        ? List.of("case:CASE_P4_SYNTHETIC_1:command:INTAKE_MESSAGE")
+                        : List.of("graph.command.execute"));
         return new IntakePrivateThreadRegistrationFactory(() -> IntakeTestFixtures.THREAD_ID)
                 .issue(new IntakePrivateThreadRegistrationFactory.IssueRequest(
                         "REG_P4_INTAKE_USER_1",
@@ -446,13 +559,18 @@ class IntakeGraphResultFinalizerTest {
                         actor,
                         "AGENT_SESSION_P4_USER_1",
                         new IntakePrivateThreadRegistrationFactory.VersionPins(
-                                "2.0.0",
-                                "intake-checkpoint.v2",
+                                graphKey,
+                                targetGraph ? "target-e2e-graph.2026-07-27.1" : "2.0.0",
+                                targetGraph ? "target-e2e-checkpoint.v1" : "intake-checkpoint.v2",
+                                "intake-graph-state.v2",
                                 "intake-prompt.v2",
                                 "intake-model.synthetic.v1",
+                                targetGraph
+                                        ? "target-e2e-room-proposal-source.v1"
+                                        : "intake-turn-proposal.v2",
                                 "intake-policy.v2",
                                 "intake-guardrail.v2",
-                                "no-tools.v1"),
+                                toolPolicyVersion),
                         writerMode,
                         IntakeTestFixtures.ISSUED_AT));
     }
@@ -485,7 +603,7 @@ class IntakeGraphResultFinalizerTest {
                 new RoomGraphResult.ExecutionMetadata(
                         "intake-prompt.v2",
                         "intake-model.synthetic.v1",
-                        "intake-turn-proposal.v2",
+                        command.invocationContext().outputSchemaVersion(),
                         "intake-policy.v2",
                         "intake-guardrail.v2"));
         return new RoomGraphResult(
@@ -508,7 +626,8 @@ class IntakeGraphResultFinalizerTest {
                 unsigned.executionMetadata());
     }
 
-    private static IntakeTurnProposal.ProfileVersions profiles(JsonNode document) {
+    private static IntakeTurnProposal.ProfileVersions profiles(
+            JsonNode document, String toolPolicyVersion) {
         JsonNode p = document.required("profile_versions");
         return new IntakeTurnProposal.ProfileVersions(
                 p.required("graph_version").asText(),
@@ -518,7 +637,7 @@ class IntakeGraphResultFinalizerTest {
                 p.required("output_schema_version").asText(),
                 p.required("policy_version").asText(),
                 p.required("guardrail_version").asText(),
-                p.required("tool_policy_version").asText());
+                toolPolicyVersion);
     }
 
     private static RoomGraphResult copyResult(RoomGraphResult source, String outputHash) {

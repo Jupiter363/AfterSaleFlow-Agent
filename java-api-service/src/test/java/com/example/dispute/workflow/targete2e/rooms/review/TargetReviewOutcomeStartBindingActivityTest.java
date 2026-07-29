@@ -21,7 +21,9 @@ class TargetReviewOutcomeStartBindingActivityTest {
 
     assertThatThrownBy(() -> activity.bind(null))
         .isInstanceOf(ApplicationFailure.class)
-        .hasMessageContaining("provision");
+        .hasMessageContaining("provision")
+        .satisfies(failure -> org.assertj.core.api.Assertions.assertThat(
+            ((ApplicationFailure) failure).isNonRetryable()).isTrue());
   }
 
   @Test

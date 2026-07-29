@@ -23,6 +23,8 @@ public final class IntakeGraphResultFinalizer {
 
     public static final String LEGACY_GRAPH_KEY = "intake.v2";
     public static final String TARGET_E2E_GRAPH_KEY = "all-rooms.target-e2e.v1";
+    private static final String TARGET_OUTER_TOOL_POLICY_VERSION = "tools.none.v1";
+    private static final String INTAKE_PROPOSAL_TOOL_POLICY_VERSION = "no-tools.v1";
 
     private final IntakeTurnProposalLoader proposalLoader;
     private final IntakeFormalCommitPort commitPort;
@@ -117,7 +119,7 @@ public final class IntakeGraphResultFinalizer {
                 authority.cognitiveRevision(),
                 request.initialSnapshot().payloadRef().sha256(),
                 request.event() == null ? null : request.event().payloadRef().sha256(),
-                authority.profileVersions());
+                proposalProfileVersions(authority.profileVersions()));
 
         // The object is loaded only after every envelope and graph hash check and before any
         // formal transaction can begin.
@@ -245,6 +247,13 @@ public final class IntakeGraphResultFinalizer {
                 registration.toolPolicyVersion(),
                 authority.profileVersions().toolPolicyVersion(),
                 "tool policy version");
+        if (TARGET_E2E_GRAPH_KEY.equals(expectedGraphKey)
+                && !TARGET_OUTER_TOOL_POLICY_VERSION.equals(
+                        authority.profileVersions().toolPolicyVersion())) {
+            throw rejected(
+                    "INTAKE_AUTHORITY_MISMATCH",
+                    "target Intake authority must retain the registered outer tool policy");
+        }
 
         RoomGraphCommand command = request.command();
         if (command.roomType() != com.example.dispute.workflow.contract.v1.ContractTypes.RoomType.INTAKE) {
@@ -443,6 +452,22 @@ public final class IntakeGraphResultFinalizer {
         if (!Objects.equals(actual, expected)) {
             throw rejected("INTAKE_AUTHORITY_MISMATCH", field + " does not match trusted authority");
         }
+    }
+
+    private IntakeTurnProposal.ProfileVersions proposalProfileVersions(
+            IntakeTurnProposal.ProfileVersions outerProfiles) {
+        if (!TARGET_E2E_GRAPH_KEY.equals(expectedGraphKey)) {
+            return outerProfiles;
+        }
+        return new IntakeTurnProposal.ProfileVersions(
+                outerProfiles.graphVersion(),
+                outerProfiles.checkpointSchemaVersion(),
+                outerProfiles.promptVersion(),
+                outerProfiles.modelProfileId(),
+                outerProfiles.outputSchemaVersion(),
+                outerProfiles.policyVersion(),
+                outerProfiles.guardrailVersion(),
+                INTAKE_PROPOSAL_TOOL_POLICY_VERSION);
     }
 
     private static void requireEqual(long actual, long expected, String field) {

@@ -123,20 +123,30 @@ public final class JdbcTargetEvidenceTerminalActivities implements TargetEvidenc
         Math.incrementExact(request.expectedRoomRevision()), receiptId, receiptHash));
   }
 
-  private void requireAgentRunReceipts(Connection connection, TerminalRequest request) throws SQLException {
+  void requireAgentRunReceipts(Connection connection, TerminalRequest request) throws SQLException {
     try (PreparedStatement statement = connection.prepareStatement("""
         select count(*)
           from target_e2e_evidence_command_material material
          where material.tenant_surrogate = ? and material.case_id = ? and material.room_epoch = ?
-           and material.material_canonical_json::jsonb #>> '{request,command,command_type}'
-                 = 'EVIDENCE_SUBMIT'
            and not exists (
              select 1 from target_e2e_finalization_receipt receipt
-              where receipt.activation_id = material.activation_id
+              where receipt.execution_lane = 'TARGET_E2E_CANDIDATE'
+                and receipt.activation_id = material.activation_id
+                and receipt.tenant_surrogate = material.tenant_surrogate
+                and receipt.case_id = material.case_id
                 and receipt.room_type = 'EVIDENCE'
                 and receipt.room_epoch = material.room_epoch
                 and receipt.room_fencing_token = material.room_fencing_token
                 and receipt.logical_run_id = material.material_canonical_json::jsonb #>> '{request,agent_run_id}'
+                and receipt.attempt_id = material.material_canonical_json::jsonb #>> '{request,command,attempt_id}'
+                and receipt.command_hash = material.command_hash
+                and receipt.command_envelope_hash = material.command_envelope_hash
+                and receipt.process_revision::text = material.material_canonical_json::jsonb #>> '{request,command,process_revision}'
+                and receipt.stage_sequence::text = material.material_canonical_json::jsonb #>> '{request,command,stage_sequence}'
+                and receipt.graph_key = material.material_canonical_json::jsonb #>> '{request,command,graph_key}'
+                and receipt.graph_version = material.material_canonical_json::jsonb #>> '{request,command,graph_version}'
+                and receipt.checkpoint_schema_version = material.material_canonical_json::jsonb #>> '{request,command,checkpoint_schema_version}'
+                and receipt.formal_writer = 'JAVA_FINALIZER_ONLY'
                 and receipt.domain_commit_status = 'COMMITTED'
            )
         """)) {

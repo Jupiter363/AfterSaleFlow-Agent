@@ -1,6 +1,5 @@
 package com.example.dispute.workflow.targete2e.rooms.hearing;
 
-import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.temporal.room.hearing.HearingRoomStart;
 import com.example.dispute.workflow.temporal.room.hearing.HearingWorkflowStage;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -8,6 +7,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
@@ -125,11 +127,42 @@ public final class JdbcTargetHearingAgentStageInputFactory {
   }
   private ObjectNode judgeV2(HearingRoomStart start, HearingWorkflowStage stage, ObjectNode dossier, JsonNode judge, JsonNode jury) {
     String fact = dossier.path("case_fact_matrix").path("fact_rows").path(0).path("fact_id").asText(null); require(fact != null, "judge fact parent"); JsonNode rule = dossier.path("policy_rules").path(0); require(rule.isObject(), "judge policy parent");
-    ObjectNode value = result("hearing_judge_v2.v1", start, stage); value.put("trial_dossier_id", dossier.path("trial_dossier_id").asText()); value.put("trial_dossier_hash", dossier.path("content_hash").asText()); value.put("judge_v2_id", id("JUDGE_V2", start, stage, judge.path("proposal_hash").asText(), jury.path("review_hash").asText())); value.put("judge_v2_hash", "0".repeat(64)); value.put("parent_proposal_id", judge.path("proposal_id").asText()); value.put("parent_proposal_hash", judge.path("proposal_hash").asText()); value.put("jury_review_id", jury.path("review_id").asText()); value.put("jury_review_hash", jury.path("review_hash").asText()); ObjectNode draft = value.putObject("draft"); draft.put("recommended_decision", "HUMAN_REVIEW"); draft.put("confidence", 0.0); draft.put("draft_text", "Synthetic advisory draft."); ObjectNode finding = draft.putArray("fact_findings").addObject(); finding.put("fact_id", fact); finding.put("finding", "Synthetic finding."); finding.putArray("evidence_ids"); finding.put("evidence_gap", "No synthetic evidence assessment."); finding.put("confidence", 0.0); ObjectNode assessment = draft.putArray("evidence_assessment").addObject(); assessment.put("assessment_type", "EVIDENCE_GAP"); assessment.putNull("evidence_id"); assessment.putArray("fact_ids").add(fact); assessment.put("assessment", "Synthetic evidence gap."); assessment.put("weight", "NONE"); assessment.put("confidence", 0.0); ObjectNode policy = draft.putArray("policy_application").addObject(); policy.put("rule_code", rule.path("rule_code").asText()); policy.put("rule_version", rule.path("rule_version").asInt()); policy.put("rule_name", rule.path("rule_name").asText()); policy.putArray("fact_ids").add(fact); policy.put("applicable", false); policy.put("rationale", "Synthetic policy review."); policy.putArray("limitations"); draft.putArray("reviewer_attention").add("Human review required."); draft.put("draft_status", "PENDING_HUMAN_REVIEW"); draft.put("requires_human_review", true); draft.put("is_final_decision", false); value.put("public_message", "Synthetic advisory draft."); hash(value, "judge_v2_hash"); return value;
+    ObjectNode value = result("hearing_judge_v2.v1", start, stage); value.put("trial_dossier_id", dossier.path("trial_dossier_id").asText()); value.put("trial_dossier_hash", dossier.path("content_hash").asText()); value.put("judge_v2_id", id("JUDGE_V2", start, stage, judge.path("proposal_hash").asText(), jury.path("review_hash").asText())); value.put("judge_v2_hash", "0".repeat(64)); value.put("parent_proposal_id", judge.path("proposal_id").asText()); value.put("parent_proposal_hash", judge.path("proposal_hash").asText()); value.put("jury_review_id", jury.path("review_id").asText()); value.put("jury_review_hash", jury.path("review_hash").asText()); ObjectNode draft = value.putObject("draft"); draft.put("recommended_decision", "HUMAN_REVIEW"); draft.put("confidence", 0.0); draft.put("draft_text", "Synthetic advisory draft."); ObjectNode finding = draft.putArray("fact_findings").addObject(); finding.put("fact_id", fact); finding.put("finding", "Synthetic finding."); finding.putArray("evidence_ids"); finding.put("evidence_gap", "No synthetic evidence assessment."); finding.put("confidence", 0.0); ObjectNode assessment = draft.putArray("evidence_assessment").addObject(); assessment.put("assessment_type", "EVIDENCE_GAP"); assessment.putNull("evidence_id"); assessment.putArray("fact_ids").add(fact); assessment.put("assessment", "Synthetic evidence gap."); assessment.put("weight", "NONE"); assessment.put("confidence", 0.0); assessment.putArray("limitations"); ObjectNode policy = draft.putArray("policy_application").addObject(); policy.put("rule_code", rule.path("rule_code").asText()); policy.put("rule_version", rule.path("rule_version").asInt()); policy.put("rule_name", rule.path("rule_name").asText()); policy.putArray("fact_ids").add(fact); policy.put("applicable", false); policy.put("rationale", "Synthetic policy review."); policy.putArray("limitations"); draft.putArray("reviewer_attention").add("Human review required."); draft.put("draft_status", "PENDING_HUMAN_REVIEW"); draft.put("requires_human_review", true); draft.put("is_final_decision", false); value.put("public_message", "Synthetic advisory draft."); hash(value, "judge_v2_hash"); return value;
   }
 
   private ObjectNode result(String schema, HearingRoomStart start, HearingWorkflowStage stage) { ObjectNode value = mapper.createObjectNode(); value.put("schema_version", schema); value.put("case_id", start.caseId()); value.put("workflow_id", start.flowInstanceId()); value.put("stage_sequence", stage.sequence()); return value; }
-  private void hash(ObjectNode value, String field) { ObjectNode unsigned = value.deepCopy(); unsigned.remove(field); value.put(field, ContractJson.sha256Hex(unsigned)); }
+  private void hash(ObjectNode value, String field) {
+    value.put(field, pythonContentHash(mapper, value, field));
+  }
+
+  static String pythonContentHash(ObjectMapper mapper, ObjectNode value, String field) {
+    ObjectNode unsigned = value.deepCopy();
+    unsigned.remove(field);
+    try {
+      byte[] canonical = mapper.writeValueAsBytes(sortObjectMembers(mapper, unsigned));
+      return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(canonical));
+    } catch (Exception failure) {
+      throw new IllegalStateException("target Hearing fixture self-hash failed", failure);
+    }
+  }
+
+  /** Mirrors the frozen Python Hearing content_hash contract (sorted json.dumps, not RFC 8785). */
+  private static JsonNode sortObjectMembers(ObjectMapper mapper, JsonNode value) {
+    if (value.isObject()) {
+      ObjectNode sorted = mapper.createObjectNode();
+      ArrayList<String> fields = new ArrayList<>();
+      value.fieldNames().forEachRemaining(fields::add);
+      fields.sort(String::compareTo);
+      fields.forEach(field -> sorted.set(field, sortObjectMembers(mapper, value.get(field))));
+      return sorted;
+    }
+    if (value.isArray()) {
+      ArrayNode sorted = mapper.createArrayNode();
+      value.forEach(item -> sorted.add(sortObjectMembers(mapper, item)));
+      return sorted;
+    }
+    return value.deepCopy();
+  }
   private ArrayNode partySubmissions(ObjectNode hearing, String actionType) { ArrayNode result = mapper.createArrayNode(); for (JsonNode action : actions(hearing, actionType)) { JsonNode p = action.path("payload"); ObjectNode item = result.addObject(); item.put("participant_id", p.path("participant_id").asText()); item.put("participant_role", p.path("participant_role").asText()); boolean submitted = "SUBMITTED".equals(p.path("submission_status").asText()); item.put("terminal_status", submitted ? "COMPLETED" : "TIMED_OUT"); item.put("submission_source", submitted ? "PARTY_ACTION" : "AUTO_TIMEOUT"); item.set("source_refs", p.path("source_message_ids").deepCopy()); item.set("submission", p.deepCopy()); } require(result.size() == 2, "two answer parents"); return result; }
   private ArrayNode partyBatches(ObjectNode hearing) { ArrayNode result = mapper.createArrayNode(); for (JsonNode action : actions(hearing, "EVIDENCE_BATCH")) { JsonNode p = action.path("payload"); ObjectNode item = result.addObject(); item.put("participant_role", p.path("participant_role").asText()); boolean submitted = "SUBMITTED".equals(p.path("submission_status").asText()); item.put("terminal_status", submitted ? "COMPLETED" : "TIMED_OUT"); item.put("submission_source", submitted ? "PARTY_ACTION" : "AUTO_TIMEOUT"); item.put("batch_id", p.path("batch_id").asText()); item.set("request_ids", p.path("request_ids").deepCopy()); item.put("batch_note", p.path("batch_note").asText("")); item.set("source_refs", p.path("evidence_ids").deepCopy()); item.putArray("evidence"); } require(result.size() == 2, "two evidence batch parents"); return result; }
   private JsonNode completed(HearingRoomStart start, String stageCode) { return one("select output_json from hearing_flow_stage where flow_instance_id = ? and case_id = ? and stage_code = ? and stage_status = 'COMPLETED' for update", "completed Hearing parent " + stageCode, start.flowInstanceId(), start.caseId(), stageCode); }

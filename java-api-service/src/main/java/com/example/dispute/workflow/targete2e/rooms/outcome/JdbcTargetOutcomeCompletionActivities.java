@@ -39,6 +39,14 @@ import org.springframework.transaction.support.TransactionTemplate;
  */
 public final class JdbcTargetOutcomeCompletionActivities implements TargetOutcomeCompletionActivities {
   private static final String WRITER = "target-e2e-outcome-completion";
+  static final String FACTS_SQL = """
+      select fact_kind, revision, committed_event_sequence, payload_json::text, payload_hash
+        from target_e2e_outcome_completion_fact
+       where workflow_id = ? and case_id = ? and outcome_epoch = ? and fencing_token = ?
+         and human_receipt_id = ? and human_receipt_hash = ?
+       order by revision
+       for update
+      """;
   private final DataSource dataSource;
   private final TransactionTemplate transactions;
   private final ObjectMapper mapper;
@@ -215,7 +223,7 @@ public final class JdbcTargetOutcomeCompletionActivities implements TargetOutcom
     try {
       if (connection.getAutoCommit()) throw new IllegalStateException("target Outcome completion requires a transaction");
       List<Fact> facts = facts(connection, request);
-      verifyAuthority(connection, request.start(), request.humanDecision(), facts.isEmpty());
+      verifyAuthority(connection, request, facts.isEmpty());
       if (!request.humanDecision().executionAuthorized()) {
         throw new IllegalStateException("rejected target Outcome must not invoke completion");
       }
@@ -238,7 +246,7 @@ public final class JdbcTargetOutcomeCompletionActivities implements TargetOutcom
     try {
       if (connection.getAutoCommit()) throw new IllegalStateException("target Outcome completion requires a transaction");
       List<Fact> facts = facts(connection, request);
-      verifyAuthority(connection, request.start(), request.humanDecision(), false);
+      verifyAuthority(connection, request, false);
       if (facts.size() < 2) throw new IllegalStateException("target Outcome operation facts are incomplete");
       if (facts.size() == 2) {
         facts = appendTerminalFacts(connection, facts, request, closure, evaluation);
@@ -254,8 +262,12 @@ public final class JdbcTargetOutcomeCompletionActivities implements TargetOutcom
     }
   }
 
-  private void verifyAuthority(Connection connection, OutcomeWorkflowStart start,
-      OutcomeReviewDecisionReceipt decision, boolean initialBinding) throws java.sql.SQLException {
+  private void verifyAuthority(Connection connection, CompletionRequest request,
+      boolean initialBinding) throws java.sql.SQLException {
+    OutcomeWorkflowStart start = request.start();
+    OutcomeReviewDecisionReceipt decision = request.humanDecision();
+    com.example.dispute.workflow.temporal.room.outcome.OutcomeCompletionRequest completion =
+        request.completionRequest();
     if (!start.workflowId().equals(decision.workflowId()) || !start.caseId().equals(decision.caseId())
         || start.epoch() != decision.epoch() || start.fence() != decision.fence()
         || start.revision() != decision.sourceRevision() || decision.revision() != start.revision() + 1
@@ -264,7 +276,14 @@ public final class JdbcTargetOutcomeCompletionActivities implements TargetOutcom
         || !start.frozenReviewPacketHash().equals(decision.frozenReviewPacketHash())
         || !start.requiredOperationSetHash().equals(decision.requiredOperationSetHash())
         || start.requiredOperationCount() != decision.requiredOperationCount()
-        || !start.policyVersion().equals(decision.policyVersion()) || decision.syntheticOnly()) {
+        || !start.policyVersion().equals(decision.policyVersion()) || decision.syntheticOnly()
+        || completion.roomType() != RoomType.REVIEW
+        || completion.roomEpoch() != start.epoch()
+        || completion.fencingToken() != start.fence()
+        || completion.expectedRoomRevision() != decision.revision()
+        || !completion.reviewReceiptId().equals(decision.receiptId())
+        || !completion.reviewReceiptHash().equals(decision.receiptHash())
+        || completion.reviewReceiptRevision() != decision.revision()) {
       throw new IllegalStateException("target Outcome start or human receipt is stale");
     }
     try (PreparedStatement statement = connection.prepareStatement("""
@@ -280,9 +299,12 @@ public final class JdbcTargetOutcomeCompletionActivities implements TargetOutcom
       try (ResultSet rows = statement.executeQuery()) {
         if (!rows.next()) throw new IllegalStateException("target Outcome epoch authority is absent or ambiguous");
         long processRevision = rows.getLong(2); long roomRevision = rows.getLong(3);
-        if (rows.next() || (initialBinding && (processRevision != start.revision()
-            || roomRevision != start.revision()))) {
+        if (rows.next()) {
           throw new IllegalStateException("target Outcome epoch revision is stale");
+        }
+        if (initialBinding) {
+          requireInitialEpochCoordinates(
+              completion, start.revision(), decision.revision(), processRevision, roomRevision);
         }
       }
     }
@@ -304,16 +326,12 @@ public final class JdbcTargetOutcomeCompletionActivities implements TargetOutcom
 
   private List<Fact> facts(Connection connection, CompletionRequest request) throws java.sql.SQLException {
     List<Fact> result = new ArrayList<>();
-    try (PreparedStatement statement = connection.prepareStatement("""
-        select fact_kind, revision, committed_event_sequence, payload_json::text, payload_hash
-          from target_e2e_outcome_completion_fact
-         where workflow_id = ? and case_id = ? and outcome_epoch = ? and fencing_token = ?
-         order by revision
-         for update
-        """)) {
+    try (PreparedStatement statement = connection.prepareStatement(FACTS_SQL)) {
       OutcomeWorkflowStart start = request.start();
       statement.setString(1, start.workflowId()); statement.setString(2, start.caseId());
       statement.setLong(3, start.epoch()); statement.setLong(4, start.fence());
+      statement.setString(5, request.humanDecision().receiptId());
+      statement.setString(6, request.humanDecision().receiptHash());
       try (ResultSet rows = statement.executeQuery()) {
         while (rows.next()) {
           Fact fact = new Fact(rows.getString(1), rows.getLong(2), rows.getLong(3), rows.getString(4), rows.getString(5));
@@ -325,6 +343,20 @@ public final class JdbcTargetOutcomeCompletionActivities implements TargetOutcom
       }
     }
     return result;
+  }
+
+  static void requireInitialEpochCoordinates(
+      com.example.dispute.workflow.temporal.room.outcome.OutcomeCompletionRequest completion,
+      long startRevision,
+      long decisionRevision,
+      long persistedProcessRevision,
+      long persistedRoomRevision) {
+    if (completion.expectedProcessRevision() != Math.incrementExact(persistedProcessRevision)
+        || startRevision != persistedRoomRevision
+        || decisionRevision != Math.incrementExact(persistedRoomRevision)
+        || completion.expectedRoomRevision() != decisionRevision) {
+      throw new IllegalStateException("target Outcome epoch revision is stale");
+    }
   }
 
   private ClosureView closeNoEffectCase(CompletionRequest request) {

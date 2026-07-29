@@ -18,7 +18,10 @@ public final class TargetReviewOutcomeStartBindingActivity
   @Override
   public Result bind(ProvisionRoomEpoch provision) {
     try {
-      return new Result(port.bind(Objects.requireNonNull(provision, "provision")));
+      if (provision == null) {
+        throw new IllegalArgumentException("provision must not be null");
+      }
+      return new Result(port.bind(provision));
     } catch (ApplicationFailure failure) {
       throw failure;
     } catch (IllegalArgumentException | IllegalStateException failure) {

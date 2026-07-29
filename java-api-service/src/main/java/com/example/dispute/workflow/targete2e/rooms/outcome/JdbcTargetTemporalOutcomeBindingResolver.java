@@ -14,6 +14,19 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 /** Locks the pre-existing Java review facts required by the shared Outcome ledger. */
 public final class JdbcTargetTemporalOutcomeBindingResolver {
+  static final String BINDING_SQL = """
+      select epoch.id as epoch_id, epoch.tenant_surrogate, epoch.process_revision, epoch.room_revision,
+             packet.id as packet_id, packet.packet_version, packet.action_hash as packet_action_hash,
+             approval.id as approval_id,
+             approval.action_snapshot_hash as approval_action_hash
+        from case_room_epoch epoch
+        join human_review_record approval on approval.id = ? and approval.case_id = epoch.case_id
+        join review_packet packet on packet.id = approval.review_packet_id and packet.case_id = epoch.case_id
+       where epoch.case_id = ? and epoch.room_type = 'REVIEW' and epoch.room_epoch = ?
+         and epoch.fencing_token = ? and epoch.writer_mode = 'TEMPORAL'
+         and epoch.lifecycle_status = 'ACTIVE' and approval.decision_type in ('APPROVE', 'MODIFY_AND_APPROVE')
+       for update of epoch, approval, packet
+      """;
   private final JdbcTemplate jdbc;
   private final TransactionTemplate transactions;
   private final Clock clock;
@@ -33,18 +46,7 @@ public final class JdbcTargetTemporalOutcomeBindingResolver {
 
   private TargetTemporalOutcomeLedgerAdapter.Binding bindLocked(
       OutcomeWorkflowStart start, OutcomeReviewDecisionReceipt decision) {
-    List<Row> rows = jdbc.query("""
-        select epoch.id as epoch_id, epoch.tenant_surrogate, epoch.process_revision, epoch.room_revision,
-               packet.id as packet_id, packet.packet_version, packet.action_hash as packet_action_hash,
-               approval.id as approval_id, approval.action_hash as approval_action_hash
-          from case_room_epoch epoch
-          join human_review_record approval on approval.id = ? and approval.case_id = epoch.case_id
-          join review_packet packet on packet.id = approval.review_packet_id and packet.case_id = epoch.case_id
-         where epoch.case_id = ? and epoch.room_type = 'REVIEW' and epoch.room_epoch = ?
-           and epoch.fencing_token = ? and epoch.writer_mode = 'TEMPORAL'
-           and epoch.lifecycle_status = 'ACTIVE' and approval.decision_type in ('APPROVE', 'MODIFY_AND_APPROVE')
-         for update of epoch, approval, packet
-        """, (row, ignored) -> new Row(row.getString("epoch_id"), row.getString("tenant_surrogate"),
+    List<Row> rows = jdbc.query(BINDING_SQL, (row, ignored) -> new Row(row.getString("epoch_id"), row.getString("tenant_surrogate"),
         row.getLong("process_revision"), row.getLong("room_revision"), row.getString("packet_id"),
         row.getInt("packet_version"), row.getString("packet_action_hash"), row.getString("approval_id"),
         row.getString("approval_action_hash")), decision.decisionRecordRef(),
