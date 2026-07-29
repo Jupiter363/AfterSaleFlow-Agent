@@ -9,6 +9,7 @@ import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalization
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -45,7 +46,8 @@ public final class TargetE2eFinalizationBindingVerifier {
     public TargetE2eFinalizationBindingVerifier(ObjectMapper objectMapper) {
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper")
                 .copy()
-                .setSerializationInclusion(JsonInclude.Include.NON_NULL);
+                .setSerializationInclusion(JsonInclude.Include.NON_NULL)
+                .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
     }
 
     public VerifiedEvidence verify(

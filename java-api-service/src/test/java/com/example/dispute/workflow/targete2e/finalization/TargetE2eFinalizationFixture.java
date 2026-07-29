@@ -26,6 +26,7 @@ import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalization
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationRuntimeContextProvider.RuntimeContext;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.time.Instant;
@@ -47,7 +48,8 @@ final class TargetE2eFinalizationFixture {
     private static final ObjectMapper MAPPER = JsonMapper.builder()
             .findAndAddModules()
             .build()
-            .setSerializationInclusion(JsonInclude.Include.NON_NULL);
+            .setSerializationInclusion(JsonInclude.Include.NON_NULL)
+            .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
 
     private TargetE2eFinalizationFixture() {}
 
