@@ -113,6 +113,8 @@ class GraphFenceContext:
     room_fencing_token: int | None = None
     command_hash: str | None = None
     command_envelope_hash: str | None = None
+    execution_provider: str | None = None
+    execution_model: str | None = None
     environment_id: str | None = None
     environment_generation: int | None = None
     tenant_surrogate: str | None = None
@@ -192,6 +194,13 @@ class GraphFenceContext:
             raise GraphPersistenceConfigurationError(
                 "SHADOW fence cannot carry candidate activation authority"
             )
+        if (self.execution_provider is None) != (self.execution_model is None):
+            raise GraphPersistenceConfigurationError(
+                "execution provider and model must be bound together"
+            )
+        if self.execution_provider is not None:
+            require_bounded_text(self.execution_provider, "execution_provider", 64)
+            require_bounded_text(self.execution_model, "execution_model", 128)
         if self.result_hash is not None:
             require_sha256(self.result_hash, "result_hash")
             require_bounded_text(self.result_ref, "result_ref", 512)
@@ -221,6 +230,8 @@ class GraphFenceContext:
             "graph_room_fencing_token": self.room_fencing_token,
             "graph_command_hash": self.command_hash,
             "graph_command_envelope_hash": self.command_envelope_hash,
+            "graph_execution_provider": self.execution_provider,
+            "graph_execution_model": self.execution_model,
             "graph_environment_id": self.environment_id,
             "graph_environment_generation": self.environment_generation,
             "graph_tenant_surrogate": self.tenant_surrogate,

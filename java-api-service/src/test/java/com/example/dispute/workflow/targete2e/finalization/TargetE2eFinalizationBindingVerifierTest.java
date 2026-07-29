@@ -40,6 +40,26 @@ class TargetE2eFinalizationBindingVerifierTest {
                 .isEqualTo("urn:target-e2e:proposal:intake:" + fixture.proposal().sha256())
                 .isNotEqualTo(fixture.proposal().uri());
         assertThat(verified.proposalHash()).hasSize(64);
+        assertThat(verified.executionProvider()).isEqualTo("target-e2e-provider");
+        assertThat(verified.executionModel()).isEqualTo("target-e2e-model-1");
+    }
+
+    @Test
+    void rejectsMissingBlankAndOversizedExecutionIdentity() {
+        var fixture = TargetE2eFinalizationFixture.valid();
+        ObjectNode missingProvider = fixture.evidence().resultEnvelope().deepCopy();
+        missingProvider.remove("execution_provider");
+        assertExecutionEvidenceRejected(fixture, missingProvider, "fields are not exact");
+
+        ObjectNode blankProvider = fixture.evidence().resultEnvelope().deepCopy();
+        blankProvider.put("execution_provider", " ");
+        putSelfHash(blankProvider, "result_envelope_hash");
+        assertExecutionEvidenceRejected(blankProvider, fixture, "execution_provider");
+
+        ObjectNode oversizedModel = fixture.evidence().resultEnvelope().deepCopy();
+        oversizedModel.put("execution_model", "m".repeat(129));
+        putSelfHash(oversizedModel, "result_envelope_hash");
+        assertExecutionEvidenceRejected(oversizedModel, fixture, "execution_model");
     }
 
     @Test
@@ -154,6 +174,35 @@ class TargetE2eFinalizationBindingVerifierTest {
     private static TargetE2eFinalizationBindingVerifier verifier() {
         return new TargetE2eFinalizationBindingVerifier(
                 JsonMapper.builder().findAndAddModules().build());
+    }
+
+    private static void assertExecutionEvidenceRejected(
+            TargetE2eFinalizationFixture.Fixture fixture,
+            ObjectNode resultEnvelope,
+            String message) {
+        assertExecutionEvidenceRejected(resultEnvelope, fixture, message);
+    }
+
+    private static void assertExecutionEvidenceRejected(
+            ObjectNode resultEnvelope,
+            TargetE2eFinalizationFixture.Fixture fixture,
+            String message) {
+        var evidence = new TargetE2eFinalizationEvidence(
+                fixture.evidence().activationManifestHash(),
+                fixture.evidence().commandEnvelope(),
+                resultEnvelope,
+                fixture.evidence().proposalSource(),
+                fixture.evidence().isolatedDomainDbBinding());
+        assertThatThrownBy(() -> verifier()
+                        .verify(fixture.request(), fixture.result(), fixture.state(), evidence))
+                .isInstanceOf(TargetE2eFinalizationRejectedException.class)
+                .hasMessageContaining(message);
+    }
+
+    private static void putSelfHash(ObjectNode value, String field) {
+        ObjectNode preimage = value.deepCopy();
+        preimage.remove(field);
+        value.put(field, ContractJson.sha256Hex(preimage));
     }
 
     private static ExecuteAgentRunResult withProposal(

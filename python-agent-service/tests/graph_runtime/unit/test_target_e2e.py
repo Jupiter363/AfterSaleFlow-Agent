@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import base64
+from dataclasses import replace
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,6 +24,7 @@ from app.graph_runtime.gateway import GraphCommandGateway
 from app.graph_runtime.ledger import PostgresCommandLedger
 from app.graph_runtime.persistence_models import (
     GraphFenceContext,
+    GraphBindingError,
     GraphGatewayMode,
     GraphPersistenceConfigurationError,
 )
@@ -393,6 +395,8 @@ def test_result_envelope_binds_candidate_lane_command_result_and_proposal() -> N
         "room_fencing_token": 11,
         "command_hash": "d" * 64,
         "command_envelope_hash": "e" * 64,
+        "execution_provider": "target-e2e-composite",
+        "execution_model": "room-provider-dispatch",
         "result_hash": fixture["output_hash"],
         "proposal_hash": canonical_sha256(proposal),
         "result": fixture,
@@ -423,6 +427,8 @@ def test_candidate_terminal_materializer_atomically_binds_proposal_and_result_en
         room_fencing_token=11,
         command_hash=target_e2e_command_hash(command),
         command_envelope_hash=_command_envelope(command).command_envelope_hash,
+        execution_provider="target-e2e-composite",
+        execution_model="room-provider-dispatch",
         environment_id="target-e2e-local",
         environment_generation=7,
         tenant_surrogate=command.tenant_surrogate,
@@ -447,7 +453,7 @@ def test_candidate_terminal_materializer_atomically_binds_proposal_and_result_en
             formal_authority=False,
         ),
     )
-    result = TerminalResultMaterializer(
+    materializer = TerminalResultMaterializer(
         thread_id=command.thread_id,
         request_hash=command.request_hash,
         draft=CompletedDraft(status="COMPLETED"),
@@ -471,13 +477,22 @@ def test_candidate_terminal_materializer_atomically_binds_proposal_and_result_en
             ),
         ),
         target_proposal_source=source,
-    ).materialize("intake", "checkpoint-1", fence=fence)
+    )
+    result = materializer.materialize("intake", "checkpoint-1", fence=fence)
 
     envelope = TargetE2EGraphResultEnvelope.model_validate(result.result_envelope_json)
     assert result.proposal_hash == source.proposal_hash == envelope.proposal_hash
     assert result.result_envelope_hash == envelope.result_envelope_hash
     assert envelope.room_fencing_token == 11
+    assert envelope.execution_provider == "target-e2e-composite"
+    assert envelope.execution_model == "room-provider-dispatch"
     PostgresCommandLedger._validate_result_record(result)  # noqa: SLF001
+    with pytest.raises(GraphBindingError, match="execution identity"):
+        materializer.materialize(
+            "intake",
+            "checkpoint-identity-missing",
+            fence=replace(fence, execution_provider=None, execution_model=None),
+        )
 
 
 def test_runtime_projection_scope_and_synthetic_slots_fail_closed() -> None:

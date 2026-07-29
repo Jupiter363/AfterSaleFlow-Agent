@@ -98,6 +98,8 @@ class TargetE2EGraphResultEnvelope(BaseModel):
     room_fencing_token: int = Field(ge=1, le=9_007_199_254_740_991)
     command_hash: str = Field(pattern=_SHA256.pattern)
     command_envelope_hash: str = Field(pattern=_SHA256.pattern)
+    execution_provider: str = Field(min_length=1, max_length=64)
+    execution_model: str = Field(min_length=1, max_length=128)
     result_hash: str = Field(pattern=_SHA256.pattern)
     proposal_hash: str = Field(pattern=_SHA256.pattern)
     result_envelope_hash: str = Field(pattern=_SHA256.pattern)
@@ -197,6 +199,8 @@ def build_target_e2e_result_envelope(
     room_fencing_token: int,
     command_hash: str,
     command_envelope_hash: str,
+    execution_provider: str,
+    execution_model: str,
     proposal_hash: str,
 ) -> TargetE2EGraphResultEnvelope:
     values = {
@@ -206,6 +210,8 @@ def build_target_e2e_result_envelope(
         "room_fencing_token": room_fencing_token,
         "command_hash": command_hash,
         "command_envelope_hash": command_envelope_hash,
+        "execution_provider": execution_provider,
+        "execution_model": execution_model,
         "result_hash": result.output_hash,
         "proposal_hash": proposal_hash,
         "graph_output_authority": "PROPOSAL_ONLY",

@@ -225,9 +225,9 @@ final class TargetE2eFinalizationFixture {
                 1,
                 "RESULT_READY",
                 "TEMPORAL_ACTIVITY",
-                "target-e2e-provider",
+                null,
                 graphResult.executionMetadata().modelProfileId(),
-                "target-e2e-model-1",
+                null,
                 graphResult.graphKey(),
                 graphResult.graphVersion(),
                 command.checkpointSchemaVersion(),
@@ -331,6 +331,8 @@ final class TargetE2eFinalizationFixture {
         resultEnvelope.put(
                 "command_envelope_hash",
                 commandEnvelope.required("command_envelope_hash").textValue());
+        resultEnvelope.put("execution_provider", "target-e2e-provider");
+        resultEnvelope.put("execution_model", "target-e2e-model-1");
         resultEnvelope.put("result_hash", result.resultHash());
         resultEnvelope.put("proposal_hash", proposalHash);
         resultEnvelope.put("graph_output_authority", "PROPOSAL_ONLY");

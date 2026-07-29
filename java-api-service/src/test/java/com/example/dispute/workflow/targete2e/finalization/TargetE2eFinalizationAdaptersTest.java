@@ -49,6 +49,8 @@ class TargetE2eFinalizationAdaptersTest {
         assertThat(firstFacts.workflowId()).isEqualTo(fixture.runtime().workflowId());
         assertThat(firstFacts.workflowRunId()).isEqualTo(fixture.runtime().workflowRunId());
         assertThat(firstFacts.workflowBuildId()).isEqualTo(fixture.runtime().workflowBuildId());
+        assertThat(firstFacts.provider()).isEqualTo("target-e2e-provider");
+        assertThat(firstFacts.model()).isEqualTo("target-e2e-model-1");
         assertThat(firstFacts.output().sha256()).isEqualTo(fixture.result().resultHash());
         assertThat(firstFacts.additionalInputs()).containsExactly(fixture.proposal());
 

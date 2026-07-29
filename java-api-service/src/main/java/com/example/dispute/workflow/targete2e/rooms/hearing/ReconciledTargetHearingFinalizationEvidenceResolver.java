@@ -4,10 +4,13 @@ import com.example.dispute.agentstream.application.AgentRunV2ManifestFactory;
 import com.example.dispute.workflow.activity.agent.AgentRunCancellationToken;
 import com.example.dispute.workflow.activity.agent.GraphRegistryBindingPolicy;
 import com.example.dispute.workflow.activity.agent.GraphStreamVisibilityPolicy;
+import com.example.dispute.workflow.contract.v1.AgentPlatformContractCodec;
+import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ArtifactOperationType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ArtifactPointer;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
+import com.example.dispute.workflow.contract.v1.RoomGraphResult;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationRuntimeContextProvider;
 import com.example.dispute.workflow.targete2e.graph.HttpTargetE2EGraphReconciliationClient;
 import com.example.dispute.workflow.targete2e.graph.TargetE2EGraphEnvelopeCodec;
@@ -34,6 +37,9 @@ import org.springframework.jdbc.core.JdbcTemplate;
  */
 public final class ReconciledTargetHearingFinalizationEvidenceResolver
     implements TargetHearingFinalizationEvidenceResolver {
+
+  private static final String RESULT_SCHEMA = "room-graph-result.schema.json";
+  private static final AgentPlatformContractCodec CONTRACT_CODEC = new AgentPlatformContractCodec();
 
   private static final String SQL_RUN = """
       select r.tenant_surrogate, r.case_id, r.room_id, r.room_type, r.room_epoch, r.process_revision,
@@ -127,7 +133,9 @@ public final class ReconciledTargetHearingFinalizationEvidenceResolver
         material.admission().roomFencingToken(), command, expectedBinding, signer);
     var reconciled = reconciliation.reconcileAvailable(sealed, new AgentRunCancellationToken());
     var envelope = reconciled.envelope();
-    require(envelope.result().equals(result.graphResult()), "reconciled Graph result");
+    requireCanonicalResultEqual(envelope.result(), result.graphResult(), "reconciled Graph result");
+    require(durable.executionIdentityMatches(
+        envelope.executionProvider(), envelope.executionModel()), "reconciled execution identity");
     require(envelope.resultHash().equals(result.resultHash()), "reconciled result hash");
     require(envelope.activationId().equals(material.admission().activationId()), "reconciled activation");
     require(envelope.roomFencingToken() == material.admission().roomFencingToken(), "reconciled fence");
@@ -157,8 +165,8 @@ public final class ReconciledTargetHearingFinalizationEvidenceResolver
     var runtimeContext = Objects.requireNonNull(runtime.current(), "target Hearing runtime context");
     AgentRunV2ManifestFactory.FinalizationFacts facts = new AgentRunV2ManifestFactory.FinalizationFacts(
         durable.fencingToken, durable.logicalIdempotencyKey, runtimeContext.workflowId(),
-        runtimeContext.workflowRunId(), runtimeContext.workflowBuildId(), durable.provider,
-        durable.modelVersion, "urn:target-e2e:agent-manifest:" + material.admission().activationId()
+        runtimeContext.workflowRunId(), runtimeContext.workflowBuildId(), envelope.executionProvider(),
+        envelope.executionModel(), "urn:target-e2e:agent-manifest:" + material.admission().activationId()
             + ':' + request.agentRunId() + ':' + request.attemptId() + ':' + result.resultHash(),
         output, List.of(), List.of(), durable.latencyMs, durable.completedAt);
     return new TargetHearingFinalizationEvidence(material.admission().manifestHash(),
@@ -202,6 +210,14 @@ public final class ReconciledTargetHearingFinalizationEvidenceResolver
     if (!condition) throw new IllegalStateException("target Hearing " + label + " is inconsistent");
   }
 
+  private static void requireCanonicalResultEqual(
+      RoomGraphResult actual, RoomGraphResult expected, String label) {
+    require(
+        ContractJson.canonicalString(CONTRACT_CODEC.encode(RESULT_SCHEMA, actual))
+            .equals(ContractJson.canonicalString(CONTRACT_CODEC.encode(RESULT_SCHEMA, expected))),
+        label);
+  }
+
   private record DurableRun(
       String tenant, String caseId, String roomId, String roomType, long roomEpoch, long processRevision,
       long fencingToken, String logicalIdempotencyKey, String protocol, String runExecutor, String runStatus,
@@ -213,11 +229,16 @@ public final class ReconciledTargetHearingFinalizationEvidenceResolver
     boolean matches(TargetHearingCommandMaterialStore.Snapshot material,
         ExecuteAgentRunRequest request, ExecuteAgentRunResult result) {
       var command = request.command();
-      boolean terminal = ("RESULT_READY".equals(runStatus) && "UNCOMMITTED".equals(finalizationStatus)
-          && "RESULT_READY".equals(attemptStatus) && committedAttemptId == null)
-          || ("COMPLETED".equals(runStatus) && "COMMITTED".equals(finalizationStatus)
-          && "COMPLETED".equals(attemptStatus) && attemptId.equals(committedAttemptId));
-      return terminal && "agent-stream.v2".equals(protocol) && "TEMPORAL_ACTIVITY".equals(runExecutor)
+      boolean resultReady = "RESULT_READY".equals(runStatus) && "UNCOMMITTED".equals(finalizationStatus)
+          && "RESULT_READY".equals(attemptStatus) && committedAttemptId == null;
+      boolean completedReplay = "COMPLETED".equals(runStatus) && "COMMITTED".equals(finalizationStatus)
+          && "COMPLETED".equals(attemptStatus) && attemptId.equals(committedAttemptId);
+      boolean executionLifecycle = resultReady
+          ? provider == null && modelVersion == null
+          : completedReplay && provider != null && !provider.isBlank()
+              && modelVersion != null && !modelVersion.isBlank();
+      return (resultReady || completedReplay) && executionLifecycle
+          && "agent-stream.v2".equals(protocol) && "TEMPORAL_ACTIVITY".equals(runExecutor)
           && "TEMPORAL_ACTIVITY".equals(attemptExecutor) && "HEARING".equals(roomType)
           && tenant.equals(command.tenantSurrogate()) && caseId.equals(command.caseId())
           && roomEpoch == command.roomEpoch() && processRevision == command.processRevision()
@@ -229,8 +250,15 @@ public final class ReconciledTargetHearingFinalizationEvidenceResolver
           && checkpointSchemaVersion.equals(command.checkpointSchemaVersion())
           && checkpointId.equals(result.graphResult().checkpointId())
           && requestHash.equals(command.requestHash()) && finalFrameObserved && completedAt != null
-          && latencyMs >= 0 && provider != null && !provider.isBlank()
-          && modelVersion != null && !modelVersion.isBlank() && lastSequenceNo == result.lastSequenceNo();
+          && latencyMs >= 0 && lastSequenceNo == result.lastSequenceNo();
+    }
+
+    boolean executionIdentityMatches(String executionProvider, String executionModel) {
+      if ("RESULT_READY".equals(runStatus)) {
+        return provider == null && modelVersion == null;
+      }
+      return provider != null && !provider.isBlank() && modelVersion != null && !modelVersion.isBlank()
+          && provider.equals(executionProvider) && modelVersion.equals(executionModel);
     }
   }
 }

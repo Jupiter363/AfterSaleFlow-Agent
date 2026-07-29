@@ -28,7 +28,8 @@ public final class TargetE2eFinalizationBindingVerifier {
             "command_hash", "command_envelope_hash", "command");
     private static final Set<String> RESULT_ENVELOPE_FIELDS = Set.of(
             "schema_version", "execution_lane", "activation_id", "room_fencing_token",
-            "command_hash", "command_envelope_hash", "result_hash", "proposal_hash",
+            "command_hash", "command_envelope_hash", "execution_provider", "execution_model",
+            "result_hash", "proposal_hash",
             "result_envelope_hash", "graph_output_authority", "result");
     private static final Set<String> DB_BINDING_FIELDS = Set.of(
             "schema_version", "environment_id", "environment_generation", "activation_id",
@@ -133,6 +134,8 @@ public final class TargetE2eFinalizationBindingVerifier {
                 "result room fence");
         text(resultEnvelope, "command_hash", commandHash);
         text(resultEnvelope, "command_envelope_hash", commandEnvelopeHash);
+        String executionProvider = boundedText(resultEnvelope, "execution_provider", 64);
+        String executionModel = boundedText(resultEnvelope, "execution_model", 128);
         requireEqual(
                 result.resultHash(),
                 IntakeContractHashes.graphResultHash(result.graphResult()),
@@ -162,6 +165,8 @@ public final class TargetE2eFinalizationBindingVerifier {
                 evidence.activationManifestHash(),
                 commandHash,
                 commandEnvelopeHash,
+                executionProvider,
+                executionModel,
                 result.resultHash(),
                 proposalHash,
                 resultEnvelopeHash,
@@ -213,6 +218,14 @@ public final class TargetE2eFinalizationBindingVerifier {
     private static String boundedIdentifier(JsonNode document, String field) {
         String value = text(document, field);
         if (value.length() > 128 || !value.matches("[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}")) {
+            throw rejected("TARGET_E2E_SOURCE_SCHEMA_INVALID", field + " is invalid");
+        }
+        return value;
+    }
+
+    private static String boundedText(JsonNode document, String field, int maximumLength) {
+        String value = text(document, field);
+        if (value.length() > maximumLength) {
             throw rejected("TARGET_E2E_SOURCE_SCHEMA_INVALID", field + " is invalid");
         }
         return value;
@@ -284,6 +297,8 @@ public final class TargetE2eFinalizationBindingVerifier {
             String activationManifestHash,
             String commandHash,
             String commandEnvelopeHash,
+            String executionProvider,
+            String executionModel,
             String resultHash,
             String proposalHash,
             String resultEnvelopeHash,

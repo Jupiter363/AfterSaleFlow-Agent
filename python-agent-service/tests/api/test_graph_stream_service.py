@@ -41,7 +41,7 @@ from app.graph_runtime.ledger import (
     CommandStatus,
     ResultRecord,
 )
-from app.graph_runtime.persistence_models import GraphFenceContext
+from app.graph_runtime.persistence_models import GraphFenceContext, GraphGatewayMode
 from app.graph_runtime.recovery import RecoveryAction, RecoveryDecision
 from app.graph_runtime.registry import RegistryRecord, RegistryState, VersionBinding
 from app.llm import GovernedProviderRequest, LiteLlmProxyClient
@@ -188,6 +188,29 @@ def _execution(admission: GatewayAdmission) -> GatewayExecution:
         checkpoint_schema_version=command.checkpoint_schema_version,
     )
     return GatewayExecution(admission, attempt, lease, fence)
+
+
+def _candidate_execution(admission: GatewayAdmission) -> GatewayExecution:
+    execution = _execution(admission)
+    command = admission.command
+    return replace(
+        execution,
+        fence=replace(
+            execution.fence,
+            execution_lane=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+            activation_id=f"p9act.v1.{'a' * 32}",
+            room_fencing_token=7,
+            command_hash="c" * 64,
+            command_envelope_hash="d" * 64,
+            environment_id="target-e2e-local",
+            environment_generation=1,
+            tenant_surrogate=command.tenant_surrogate,
+            case_id=command.case_id,
+            room_type=command.room_type,
+            binding_hash="e" * 64,
+            code_build_id="candidate-build-1",
+        ),
+    )
 
 
 def _event(command: RoomGraphCommand, sequence: int, event_type: str) -> AgentStreamEvent:
@@ -457,6 +480,7 @@ async def test_committed_terminal_is_reconciled_without_synthetic_stream_replay(
     assert gateway.acquired == 0
     assert executor.calls == 0
     assert await gate.drain(0.01) is True
+    assert await gate.drain(0.01) is True
 
 
 @pytest.mark.asyncio
@@ -603,6 +627,51 @@ async def test_stream_service_rejects_any_request_to_generate_attempt_reset() ->
 
     assert gateway.acquired == 0
     assert executor.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_candidate_execution_freezes_resolved_provider_identity_before_executor() -> None:
+    shadow_admission = _admission(AdmissionAction.ACQUIRE)
+    admission = replace(
+        shadow_admission,
+        registry=replace(
+            shadow_admission.registry,
+            state=RegistryState.ACTIVE_CANDIDATE,
+        ),
+    )
+
+    class CandidateGateway(_Gateway):
+        async def acquire_execution(self, admission: GatewayAdmission, **kwargs: Any):
+            self.acquired += 1
+            return _candidate_execution(admission)
+
+    class CapturingExecutor(_Executor):
+        def __init__(self) -> None:
+            super().__init__()
+            self.execution: GatewayExecution | None = None
+
+        async def stream(self, execution: GatewayExecution):
+            self.execution = execution
+            async for event in super().stream(execution):
+                yield event
+
+    gateway = CandidateGateway(admission)
+    executor = CapturingExecutor()
+    service, gate = await _service(gateway, executor)
+
+    events = [
+        event
+        async for event in await service.open_stream(
+            command=admission.command,
+            verified_invocation=cast(VerifiedInvocation, object()),
+            expected_thread=admission.thread,
+        )
+    ]
+
+    assert [event.event_type for event in events] == ["attempt_started", "final"]
+    assert executor.execution is not None
+    assert executor.execution.fence.execution_provider == "litellm"
+    assert executor.execution.fence.execution_model == "qwen3.7-plus"
     assert await gate.drain(0.01) is True
 
 

@@ -35,13 +35,15 @@ public final class TargetE2eExecutionLaneVerifier {
             ExecuteAgentRunRequest request,
             ExecuteAgentRunResult result,
             RuntimeContext runtime,
-            TargetE2eIntakeFinalizationState state) {
+            TargetE2eIntakeFinalizationState state,
+            TargetE2eFinalizationBindingVerifier.VerifiedEvidence evidence) {
         Objects.requireNonNull(decision, "decision");
         Objects.requireNonNull(authorizationRequest, "authorizationRequest");
         Objects.requireNonNull(request, "request");
         Objects.requireNonNull(result, "result");
         Objects.requireNonNull(runtime, "runtime");
         Objects.requireNonNull(state, "state");
+        Objects.requireNonNull(evidence, "evidence");
         if (decision.decision()
                 != TargetE2eFinalizationActivationPort.Decision.ALLOWED) {
             throw rejected(
@@ -119,7 +121,7 @@ public final class TargetE2eExecutionLaneVerifier {
                 attempt.executorKind(),
                 AgentRunExecutorKind.TEMPORAL_ACTIVITY.name(),
                 "attempt executor");
-        requireTerminalEligibility(run, attempt);
+        boolean committedReplay = requireTerminalEligibility(run, attempt);
 
         requireEqual(run.tenantSurrogate(), command.tenantSurrogate(), "command tenant");
         requireEqual(run.caseId(), command.caseId(), "command case");
@@ -152,8 +154,12 @@ public final class TargetE2eExecutionLaneVerifier {
         requireEqual(attempt.graphKey(), graphResult.graphKey(), "graph key");
         requireEqual(attempt.graphVersion(), graphResult.graphVersion(), "graph version");
         requireEqual(attempt.checkpointId(), graphResult.checkpointId(), "checkpoint id");
-        requireEqual(attempt.provider(), nonBlank(attempt.provider(), "provider"), "provider");
-        requireEqual(attempt.modelVersion(), nonBlank(attempt.modelVersion(), "model version"), "model version");
+        if (committedReplay) {
+            requireEqual(
+                    attempt.provider(), evidence.executionProvider(), "committed execution provider");
+            requireEqual(
+                    attempt.modelVersion(), evidence.executionModel(), "committed execution model");
+        }
         requireEqual(
                 attempt.modelProfileId(),
                 graphResult.executionMetadata().modelProfileId(),
@@ -280,7 +286,7 @@ public final class TargetE2eExecutionLaneVerifier {
                 "DRAINED activation cannot finalize additional work");
     }
 
-    private static void requireTerminalEligibility(
+    private static boolean requireTerminalEligibility(
             TargetE2eIntakeFinalizationState.LogicalRun run,
             TargetE2eIntakeFinalizationState.Attempt attempt) {
         boolean resultReady = "RESULT_READY".equals(run.runStatus())
@@ -297,14 +303,7 @@ public final class TargetE2eExecutionLaneVerifier {
                     "AgentRun is neither result-ready nor an exact committed replay");
         }
         requireEqual(run.resultReadyAttemptId(), attempt.attemptId(), "result-ready attempt");
-    }
-
-    private static String nonBlank(String value, String field) {
-        if (value == null || value.isBlank()) {
-            throw rejected(
-                    "TARGET_E2E_ATTEMPT_FACTS_MISSING", field + " is missing");
-        }
-        return value;
+        return committedReplay;
     }
 
     private static void requireEqual(Object actual, Object expected, String field) {

@@ -22,6 +22,9 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 class TargetE2EGraphEnvelopeCodecTest {
 
+  private static final String EXECUTION_PROVIDER = "target-e2e-composite";
+  private static final String EXECUTION_MODEL = "room-provider-dispatch";
+
   @Test
   void wrapsTheCanonicalFullCommandAndUsesExactSnakeCaseMembers() throws Exception {
     var codec = TargetE2EGraphTestFixtures.codec();
@@ -82,7 +85,9 @@ class TargetE2EGraphEnvelopeCodecTest {
     var codec = TargetE2EGraphTestFixtures.codec();
     var command = codec.wrapCommand(ACTIVATION_ID, 7L, TargetE2EGraphTestFixtures.command());
     JsonNode proposal = TargetE2EGraphTestFixtures.proposalSource();
-    var result = codec.wrapResult(command, TargetE2EGraphTestFixtures.result(), proposal);
+    var result =
+        codec.wrapResult(
+            command, TargetE2EGraphTestFixtures.result(), proposal, EXECUTION_PROVIDER, EXECUTION_MODEL);
     ObjectNode encoded =
         (ObjectNode) MAPPER.readTree(codec.encodeResult(result, command, proposal));
     ObjectNode unhashed = encoded.deepCopy();
@@ -93,6 +98,8 @@ class TargetE2EGraphEnvelopeCodecTest {
         .isEqualTo(ContractJson.sha256Hex(proposal.required("proposal")));
     assertThat(result.resultEnvelopeHash()).isEqualTo(ContractJson.sha256Hex(unhashed));
     assertThat(result.graphOutputAuthority()).isEqualTo("PROPOSAL_ONLY");
+    assertThat(result.executionProvider()).isEqualTo(EXECUTION_PROVIDER);
+    assertThat(result.executionModel()).isEqualTo(EXECUTION_MODEL);
     assertThat(encoded.properties().stream().map(Map.Entry::getKey).toList())
         .containsExactlyInAnyOrder(
             "schema_version",
@@ -101,6 +108,8 @@ class TargetE2EGraphEnvelopeCodecTest {
             "room_fencing_token",
             "command_hash",
             "command_envelope_hash",
+            "execution_provider",
+            "execution_model",
             "result_hash",
             "proposal_hash",
             "result_envelope_hash",
@@ -122,7 +131,12 @@ class TargetE2EGraphEnvelopeCodecTest {
         (ObjectNode)
             MAPPER.readTree(
                 codec.encodeResult(
-                    codec.wrapResult(command, TargetE2EGraphTestFixtures.result(), proposal),
+                    codec.wrapResult(
+                        command,
+                        TargetE2EGraphTestFixtures.result(),
+                        proposal,
+                        EXECUTION_PROVIDER,
+                        EXECUTION_MODEL),
                     command,
                     proposal));
     tamper.accept(encoded);
@@ -143,6 +157,8 @@ class TargetE2EGraphEnvelopeCodecTest {
         Arguments.of((Consumer<ObjectNode>) node -> node.put("command_hash", "0".repeat(64))),
         Arguments.of(
             (Consumer<ObjectNode>) node -> node.put("command_envelope_hash", "0".repeat(64))),
+        Arguments.of((Consumer<ObjectNode>) node -> node.put("execution_provider", " ")),
+        Arguments.of((Consumer<ObjectNode>) node -> node.put("execution_model", "m".repeat(129))),
         Arguments.of((Consumer<ObjectNode>) node -> node.put("result_hash", "0".repeat(64))),
         Arguments.of((Consumer<ObjectNode>) node -> node.put("proposal_hash", "0".repeat(64))),
         Arguments.of(
@@ -169,7 +185,12 @@ class TargetE2EGraphEnvelopeCodecTest {
     JsonNode proposal = TargetE2EGraphTestFixtures.proposalSource();
     byte[] body =
         codec.encodeResult(
-            codec.wrapResult(command, TargetE2EGraphTestFixtures.result(), proposal),
+            codec.wrapResult(
+                command,
+                TargetE2EGraphTestFixtures.result(),
+                proposal,
+                EXECUTION_PROVIDER,
+                EXECUTION_MODEL),
             command,
             proposal);
     JsonNode anotherProposal = proposal.deepCopy();
@@ -189,7 +210,14 @@ class TargetE2EGraphEnvelopeCodecTest {
     ObjectNode source = (ObjectNode) TargetE2EGraphTestFixtures.proposalSource();
     tamper.accept(source);
 
-    assertThatThrownBy(() -> codec.wrapResult(command, TargetE2EGraphTestFixtures.result(), source))
+    assertThatThrownBy(
+            () ->
+                codec.wrapResult(
+                    command,
+                    TargetE2EGraphTestFixtures.result(),
+                    source,
+                    EXECUTION_PROVIDER,
+                    EXECUTION_MODEL))
         .isInstanceOf(IllegalArgumentException.class);
   }
 
@@ -288,7 +316,13 @@ class TargetE2EGraphEnvelopeCodecTest {
             valid.executionMetadata());
 
     assertThatThrownBy(
-            () -> codec.wrapResult(command, wrong, TargetE2EGraphTestFixtures.proposalSource()))
+            () ->
+                codec.wrapResult(
+                    command,
+                    wrong,
+                    TargetE2EGraphTestFixtures.proposalSource(),
+                    EXECUTION_PROVIDER,
+                    EXECUTION_MODEL))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("output_hash");
   }

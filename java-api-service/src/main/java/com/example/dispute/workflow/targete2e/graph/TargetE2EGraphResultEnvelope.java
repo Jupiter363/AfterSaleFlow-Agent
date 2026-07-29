@@ -14,6 +14,8 @@ public record TargetE2EGraphResultEnvelope(
     long roomFencingToken,
     String commandHash,
     String commandEnvelopeHash,
+    String executionProvider,
+    String executionModel,
     String resultHash,
     String proposalHash,
     String resultEnvelopeHash,
@@ -22,6 +24,8 @@ public record TargetE2EGraphResultEnvelope(
 
   public static final String SCHEMA_VERSION = "target-e2e-graph-result-envelope.v1";
   public static final String GRAPH_OUTPUT_AUTHORITY = "PROPOSAL_ONLY";
+  public static final int EXECUTION_PROVIDER_MAX_LENGTH = 64;
+  public static final int EXECUTION_MODEL_MAX_LENGTH = 128;
 
   public TargetE2EGraphResultEnvelope {
     TargetE2EGraphCommandEnvelope.requireConstant(schemaVersion, SCHEMA_VERSION, "schemaVersion");
@@ -36,6 +40,9 @@ public record TargetE2EGraphResultEnvelope(
         commandHash, TargetE2EGraphCommandEnvelope.SHA256, "commandHash");
     TargetE2EGraphCommandEnvelope.requirePattern(
         commandEnvelopeHash, TargetE2EGraphCommandEnvelope.SHA256, "commandEnvelopeHash");
+    requireBoundedNonBlank(
+        executionProvider, EXECUTION_PROVIDER_MAX_LENGTH, "executionProvider");
+    requireBoundedNonBlank(executionModel, EXECUTION_MODEL_MAX_LENGTH, "executionModel");
     TargetE2EGraphCommandEnvelope.requirePattern(
         resultHash, TargetE2EGraphCommandEnvelope.SHA256, "resultHash");
     TargetE2EGraphCommandEnvelope.requirePattern(
@@ -45,5 +52,11 @@ public record TargetE2EGraphResultEnvelope(
     TargetE2EGraphCommandEnvelope.requireConstant(
         graphOutputAuthority, GRAPH_OUTPUT_AUTHORITY, "graphOutputAuthority");
     Objects.requireNonNull(result, "result");
+  }
+
+  static void requireBoundedNonBlank(String value, int maximumLength, String field) {
+    if (value == null || value.isBlank() || value.length() > maximumLength) {
+      throw new IllegalArgumentException(field + " must be nonblank and at most " + maximumLength);
+    }
   }
 }

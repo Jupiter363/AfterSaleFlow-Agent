@@ -22,6 +22,7 @@ import pytest
 from app.contracts.v1.codec import canonical_sha256, canonicalize
 from app.contracts.v1.models import RoomGraphCommand
 from app.graph_runtime.checkpoint import (
+    ExternalTerminalCommit,
     FENCE_CONTEXT_KEY,
     FencedPostgresSaver,
     bind_fence_context,
@@ -39,6 +40,7 @@ from app.graph_runtime.persistence_models import (
     GraphFenceError,
     GraphGatewayMode,
 )
+from app.graph_runtime.target_e2e import TargetE2EGraphResultEnvelope
 from app.graphs.hearing.contracts import (
     HEARING_MODEL_NODE_PROMPTS,
     HEARING_TARGET_E2E_OPERATION_BINDINGS,
@@ -206,6 +208,9 @@ class _MemoryFencedSaver(FencedPostgresSaver):
         BaseCheckpointSaver.__init__(self)
         self._memory = InMemorySaver()
         self.active_fence = fence
+        self.external_terminal_commits: list[
+            tuple[RunnableConfig, ExternalTerminalCommit]
+        ] = []
 
     def _guard(self, config: RunnableConfig) -> GraphFenceContext:
         configurable = config.get("configurable") or {}
@@ -264,6 +269,15 @@ class _MemoryFencedSaver(FencedPostgresSaver):
     ) -> None:
         self._guard(config)
         await self._memory.aput_writes(config, writes, task_id, task_path)
+
+    async def acommit_external_terminal(
+        self,
+        config: RunnableConfig,
+        commit: ExternalTerminalCommit,
+    ) -> RunnableConfig:
+        self._guard(config)
+        self.external_terminal_commits.append((config, commit))
+        return config
 
     def get_next_version(self, current, channel):
         return self._memory.get_next_version(current, channel)
@@ -331,6 +345,8 @@ def _fence(command: RoomGraphCommand) -> GraphFenceContext:
                 "room_fencing_token": ROOM_FENCE,
                 "command_hash": _COMMAND_HASH,
                 "command_envelope_hash": COMMAND_ENVELOPE_HASH,
+                "execution_provider": "hearing-test-provider",
+                "execution_model": "hearing-test-model-v1",
                 "environment_id": "p9-isolated-preprod-01",
                 "environment_generation": 7,
                 "tenant_surrogate": command.tenant_surrogate,
@@ -622,6 +638,40 @@ def test_target_adapter_rejects_shadow_lane_before_provider_or_store() -> None:
     assert store.calls == []
 
 
+@pytest.mark.parametrize(
+    ("identity_field", "identity_value"),
+    (
+        ("execution_provider", " "),
+        ("execution_model", "\t"),
+    ),
+)
+def test_target_adapter_rejects_blank_frozen_execution_identity(
+    identity_field: str,
+    identity_value: str,
+) -> None:
+    operation = HearingOperation.INTAKE_QUESTIONS
+    execution, _ = _execution(operation)
+    execution = replace(
+        execution,
+        fence=replace(execution.fence, **{identity_field: identity_value}),
+    )
+    provider = _InvocationProvider()
+    store = _PayloadStore()
+    adapter = HearingTargetE2ERuntimeAdapter(
+        checkpointer=_MemoryFencedSaver(execution.fence),
+        invocation_provider=provider,
+        payload_store=store,
+    )
+
+    with pytest.raises(
+        HearingGraphContractError,
+        match="HEARING_TARGET_AUTHORITY_BINDING_MISMATCH",
+    ):
+        asyncio.run(adapter.execute(execution))
+    assert provider.calls == []
+    assert store.calls == []
+
+
 def test_target_adapter_rejects_wrong_operation_stage_before_model_execution() -> None:
     operation = HearingOperation.JUDGE_V2
     execution, _ = _execution(operation)
@@ -677,3 +727,31 @@ def test_target_adapter_surface_does_not_accept_activation_jws() -> None:
     assert "activation_jws" not in parameters
     assert "activation_token" not in parameters
     assert "manifest_jws" not in parameters
+
+
+def test_target_stream_binds_frozen_execution_identity_before_external_terminal_commit() -> None:
+    execution, _ = _execution(HearingOperation.JUDGE_V2)
+    saver = _MemoryFencedSaver(execution.fence)
+    adapter = HearingTargetE2ERuntimeAdapter(
+        checkpointer=saver,
+        invocation_provider=_InvocationProvider(),
+        payload_store=_PayloadStore(),
+    )
+
+    async def collect() -> list[Any]:
+        return [event async for event in adapter.stream(execution)]
+
+    events = asyncio.run(collect())
+
+    assert [event.event_type for event in events] == ["attempt_started", "final"]
+    assert len(saver.external_terminal_commits) == 1
+    _, commit = saver.external_terminal_commits[0]
+    result = commit.result
+    assert result.proposal_source_json is not None
+    assert result.result_envelope_json is not None
+    envelope = TargetE2EGraphResultEnvelope.model_validate(result.result_envelope_json)
+
+    assert envelope.execution_provider == execution.fence.execution_provider
+    assert envelope.execution_model == execution.fence.execution_model
+    assert envelope.proposal_hash == result.proposal_hash
+    assert envelope.result_envelope_hash == result.result_envelope_hash

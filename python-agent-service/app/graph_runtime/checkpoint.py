@@ -333,6 +333,8 @@ class TerminalResultMaterializer:
         proposal_source = self.target_proposal_source
         if proposal_source is None:
             raise GraphBindingError("candidate terminal result requires a proposal source")
+        if fence.execution_provider is None or fence.execution_model is None:
+            raise GraphBindingError("candidate terminal result requires execution identity")
         try:
             proposal_source.require_result_binding(result)
             envelope = build_target_e2e_result_envelope(
@@ -341,6 +343,8 @@ class TerminalResultMaterializer:
                 room_fencing_token=fence.room_fencing_token or 0,
                 command_hash=fence.command_hash or "",
                 command_envelope_hash=fence.command_envelope_hash or "",
+                execution_provider=fence.execution_provider,
+                execution_model=fence.execution_model,
                 proposal_hash=proposal_source.proposal_hash,
             )
             envelope.require_proposal_hash(
@@ -1116,6 +1120,8 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
             "graph_room_fencing_token": fence.room_fencing_token,
             "graph_command_hash": fence.command_hash,
             "graph_command_envelope_hash": fence.command_envelope_hash,
+            "graph_execution_provider": fence.execution_provider,
+            "graph_execution_model": fence.execution_model,
             "graph_environment_id": fence.environment_id,
             "graph_environment_generation": fence.environment_generation,
             "graph_tenant_surrogate": fence.tenant_surrogate,

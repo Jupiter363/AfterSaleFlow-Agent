@@ -36,6 +36,8 @@ class HttpTargetE2EGraphProposalClientTest {
           "https://python-agent.internal/base/internal/graphs/target-e2e/commands/reconcile");
   private static final String COMPACT_JWS =
       "e30.e30." + Base64.getUrlEncoder().withoutPadding().encodeToString(new byte[64]);
+  private static final String EXECUTION_PROVIDER = "target-e2e-composite";
+  private static final String EXECUTION_MODEL = "room-provider-dispatch";
 
   @Test
   void usesTargetOnlyPathsAndReusesExactSealedBytesAndJwsForRetryAndReconciliation()
@@ -56,7 +58,9 @@ class HttpTargetE2EGraphProposalClientTest {
         codec.wrapResult(
             sealed.envelope(),
             TargetE2EGraphTestFixtures.result(),
-            TargetE2EGraphTestFixtures.proposalSource());
+            TargetE2EGraphTestFixtures.proposalSource(),
+            EXECUTION_PROVIDER,
+            EXECUTION_MODEL);
     byte[] resultBody =
         codec.encodeResult(
             resultEnvelope, sealed.envelope(), TargetE2EGraphTestFixtures.proposalSource());
@@ -240,7 +244,9 @@ class HttpTargetE2EGraphProposalClientTest {
         codec.wrapResult(
             envelope,
             TargetE2EGraphTestFixtures.result(),
-            TargetE2EGraphTestFixtures.proposalSource());
+            TargetE2EGraphTestFixtures.proposalSource(),
+            EXECUTION_PROVIDER,
+            EXECUTION_MODEL);
     byte[] resultBody =
         codec.encodeResult(result, envelope, TargetE2EGraphTestFixtures.proposalSource());
     GraphTransportSecurityProof proof = mutualTlsProof();

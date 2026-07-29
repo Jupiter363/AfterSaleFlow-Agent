@@ -8,7 +8,9 @@ import java.util.Objects;
 public record TargetReviewFinalizationRequest(
     String executionLane, String activationId, String activationManifestHash, String isolatedDomainDbBindingHash,
     long roomFencingToken, String admissionId, String commandHash,
-    String commandEnvelopeHash, ExecuteAgentRunRequest request, ExecuteAgentRunResult result,
+    String commandEnvelopeHash, String proposalHash, String resultEnvelopeHash,
+    String executionProvider, String executionModel,
+    ExecuteAgentRunRequest request, ExecuteAgentRunResult result,
     TargetReviewHumanDecisionReceipt humanDecision) {
   public TargetReviewFinalizationRequest {
     if (!TargetReviewCommandMaterial.TARGET_LANE.equals(executionLane) || activationId == null || activationId.isBlank()
@@ -16,7 +18,11 @@ public record TargetReviewFinalizationRequest(
         || isolatedDomainDbBindingHash == null || !isolatedDomainDbBindingHash.matches("[0-9a-f]{64}")
         || roomFencingToken < 1
         || admissionId == null || admissionId.isBlank() || commandHash == null || !commandHash.matches("[0-9a-f]{64}")
-        || commandEnvelopeHash == null || !commandEnvelopeHash.matches("[0-9a-f]{64}")) {
+        || commandEnvelopeHash == null || !commandEnvelopeHash.matches("[0-9a-f]{64}")
+        || proposalHash == null || !proposalHash.matches("[0-9a-f]{64}")
+        || resultEnvelopeHash == null || !resultEnvelopeHash.matches("[0-9a-f]{64}")
+        || executionProvider == null || executionProvider.isBlank()
+        || executionModel == null || executionModel.isBlank()) {
       throw new IllegalArgumentException("target Review finalization request is invalid");
     }
     request = Objects.requireNonNull(request, "request");

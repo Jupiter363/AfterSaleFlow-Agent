@@ -66,7 +66,7 @@ public final class TargetE2eAuthorizedIntakeFinalizationSource {
                 activation.authorize(authorizationRequest),
                 "activation authority returned null");
         ActivationGrant grant = verifier.requireAuthorized(
-                decision, authorizationRequest, request, result, runtime, state);
+                decision, authorizationRequest, request, result, runtime, state, evidence);
         bindingVerifier.requireGrantBindings(grant, evidence);
         return new AuthorizedState(grant, runtime, state, evidence);
     }

@@ -63,7 +63,11 @@ public final class JdbcTargetReviewFinalizationFactsProvider implements TargetRe
         && value.processRevision == graph.processRevision(), "run room scope");
     require("agent-stream.v2".equals(value.protocol) && "TEMPORAL_ACTIVITY".equals(value.executorKind)
         && "TEMPORAL_ACTIVITY".equals(value.attemptExecutor), "AgentRun protocol");
-    require("RESULT_READY".equals(value.runStatus) || "COMPLETED".equals(value.runStatus), "run status");
+    boolean resultReady = "RESULT_READY".equals(value.runStatus) && "UNCOMMITTED".equals(value.finalizationStatus)
+        && "RESULT_READY".equals(value.attemptStatus);
+    boolean completedReplay = "COMPLETED".equals(value.runStatus) && "COMMITTED".equals(value.finalizationStatus)
+        && "COMPLETED".equals(value.attemptStatus);
+    require(resultReady || completedReplay, "run status");
     require("UNCOMMITTED".equals(value.finalizationStatus) || "COMMITTED".equals(value.finalizationStatus), "finalization status");
     require("RESULT_READY".equals(value.attemptStatus) || "COMPLETED".equals(value.attemptStatus), "attempt status");
     require(value.attemptId.equals(request.attemptId()) && value.resultHash.equals(result.resultHash()), "attempt result");
@@ -73,11 +77,17 @@ public final class JdbcTargetReviewFinalizationFactsProvider implements TargetRe
     require(value.finalFrame && value.completedAt != null && value.latencyMs >= 0, "attempt completion");
     require(value.snapshotHash.equals(result.resultHash()) && value.snapshotUri != null && !value.snapshotUri.isBlank(),
         "immutable output snapshot");
+    require(resultReady
+        ? value.provider == null && value.model == null
+        : finalization.executionProvider().equals(value.provider)
+            && finalization.executionModel().equals(value.model),
+        "execution identity");
     require(TemporalAgentRunV2WorkflowLauncher.workflowId(request.logicalRunId()).equals(context.workflowId()),
         "runtime workflow id");
     ArtifactPointer output = new ArtifactPointer(value.snapshotId, value.snapshotSchema, value.snapshotUri, value.snapshotHash);
     return new AgentRunV2ManifestFactory.FinalizationFacts(value.fence, value.logicalIdempotencyKey,
-        context.workflowId(), context.workflowRunId(), context.workflowBuildId(), value.provider, value.model,
+        context.workflowId(), context.workflowRunId(), context.workflowBuildId(), finalization.executionProvider(),
+        finalization.executionModel(),
         "urn:target-e2e:agent-manifest:" + sha256(finalization.activationId() + ':' + request.agentRunId()
             + ':' + request.attemptId() + ':' + result.resultHash()), output, List.of(), List.of(),
         value.latencyMs, value.completedAt);

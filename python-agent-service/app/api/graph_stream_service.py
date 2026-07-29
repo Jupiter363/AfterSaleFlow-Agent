@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import Any, Protocol
 
@@ -21,6 +21,7 @@ from app.graph_runtime.gateway import (
     GatewayExecution,
     ShadowGraphExecutor,
 )
+from app.graph_runtime.persistence_models import GraphGatewayMode
 from app.graph_runtime.identity import ThreadIdentity
 from app.graph_runtime.ledger import AttemptStatus, ResultRecord
 from app.graph_runtime.provider_intent import GatewayProviderCallIntentRecorder
@@ -334,6 +335,7 @@ class GatewayBackedGraphCommandStreamService:
         )
         source: AsyncIterator[AgentStreamEvent] | None = None
         try:
+            execution = self._bind_execution_identity(registration, execution)
             source = self._provider_bound_stream(registration, execution)
             validated = self._gateway.execute_stream(
                 execution=execution,
@@ -346,6 +348,36 @@ class GatewayBackedGraphCommandStreamService:
             raise
         async for event in self._renewing_stream(validated, execution):
             yield event
+
+    @staticmethod
+    def _bind_execution_identity(
+        registration: ShadowExecutorRegistration,
+        execution: GatewayExecution,
+    ) -> GatewayExecution:
+        """Freeze the resolved provider identity into candidate execution before streaming."""
+
+        if execution.fence.execution_lane is GraphGatewayMode.SHADOW:
+            return execution
+        if execution.fence.execution_lane is not GraphGatewayMode.TARGET_E2E_CANDIDATE:
+            raise GraphContractError("execution has an invalid Graph lane")
+        expected = (
+            registration.provider_binding.provider,
+            registration.provider_binding.model,
+        )
+        existing = (
+            execution.fence.execution_provider,
+            execution.fence.execution_model,
+        )
+        if existing != (None, None) and existing != expected:
+            raise GraphContractError("execution provider identity conflicts with registry binding")
+        return replace(
+            execution,
+            fence=replace(
+                execution.fence,
+                execution_provider=expected[0],
+                execution_model=expected[1],
+            ),
+        )
 
     def _provider_bound_stream(
         self,

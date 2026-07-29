@@ -25,6 +25,7 @@ import com.example.dispute.workflow.targete2e.rooms.review.JdbcTargetReviewAdvis
 import com.example.dispute.workflow.targete2e.rooms.review.JdbcTargetReviewCommandMaterialStore;
 import com.example.dispute.workflow.targete2e.rooms.review.JdbcTargetReviewFinalizationFactsProvider;
 import com.example.dispute.workflow.targete2e.rooms.review.JdbcTargetReviewOutcomeHandoffStore;
+import com.example.dispute.workflow.targete2e.rooms.review.ReconciledTargetReviewFinalizationEvidenceSource;
 import com.example.dispute.workflow.targete2e.rooms.review.TargetE2eReviewRoomFinalizationStrategy;
 import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewAdvisoryFormalCommitPort;
 import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewAdvisoryProjectionPort;
@@ -35,6 +36,7 @@ import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewCommandMa
 import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewFinalizationAdapter;
 import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewFinalizationFactsProvider;
 import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewFinalizationRequestResolver;
+import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewReconciledFinalizationEvidenceSource;
 import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewFormalCommitPort;
 import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewOutcomeHandoffActivity;
 import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewOutcomeHandoffStore;
@@ -114,12 +116,25 @@ public class TargetE2eEvidenceReviewArtifactConfiguration {
             DataSource dataSource,
             TargetE2EActivationLedger activationLedger,
             ObjectMapper objectMapper,
+            TargetE2EGraphEnvelopeCodec codec,
+            TargetE2EGraphEnvelopeSigner signer,
+            HttpTargetE2EGraphReconciliationClient reconciliation,
+            GraphRegistryBindingPolicy registryBindings,
             TargetE2eFinalizationRuntimeContextProvider runtime) {
         TargetReviewCommandMaterialStore materialStore =
                 new JdbcTargetReviewCommandMaterialStore(dataSource, activationLedger, objectMapper);
         TargetReviewOutcomeHandoffStore handoffStore =
                 new JdbcTargetReviewOutcomeHandoffStore(dataSource, objectMapper);
-        var resolver = new TargetReviewFinalizationRequestResolver(materialStore, handoffStore);
+        TargetReviewReconciledFinalizationEvidenceSource evidenceSource =
+                new ReconciledTargetReviewFinalizationEvidenceSource(
+                        dataSource,
+                        activationLedger,
+                        codec,
+                        signer,
+                        reconciliation,
+                        registryBindings);
+        var resolver = new TargetReviewFinalizationRequestResolver(
+                materialStore, handoffStore, evidenceSource, objectMapper);
         TargetReviewFinalizationFactsProvider factsProvider =
                 new JdbcTargetReviewFinalizationFactsProvider(dataSource, runtime);
         TargetReviewAdvisoryProjectionPort projectionPort =

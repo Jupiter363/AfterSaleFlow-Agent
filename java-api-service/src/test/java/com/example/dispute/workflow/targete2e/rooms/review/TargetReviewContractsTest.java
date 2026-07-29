@@ -30,4 +30,15 @@ class TargetReviewContractsTest {
     assertThrows(IllegalArgumentException.class, () -> new TargetReviewOutcomeHandoffActivities.RelayRequest(
         "p9act.v1." + "b".repeat(32), "bad", "tenant_1", "CASE_1", "CMD_1", 0L, 1L));
   }
+
+  @Test void reconciledEnvelopeFactsRequireCanonicalHashesAndExecutionIdentity() {
+    assertDoesNotThrow(() -> new TargetReviewReconciledFinalizationEvidenceSource.Evidence(
+        HASH, HASH, "openai", "gpt-test"));
+    assertThrows(IllegalArgumentException.class,
+        () -> new TargetReviewReconciledFinalizationEvidenceSource.Evidence(
+            "bad", HASH, "openai", "gpt-test"));
+    assertThrows(IllegalArgumentException.class,
+        () -> new TargetReviewReconciledFinalizationEvidenceSource.Evidence(
+            HASH, HASH, "", "gpt-test"));
+  }
 }

@@ -39,7 +39,6 @@ public final class TargetE2eAgentRunV2FinalizationFactsProvider
         Objects.requireNonNull(request, "request");
         Objects.requireNonNull(result, "result");
         var state = authorized.state();
-        var attempt = state.attempt();
         ArtifactPointer proposal = proposal(result);
         return new AgentRunV2ManifestFactory.FinalizationFacts(
                 state.run().fencingToken(),
@@ -47,8 +46,8 @@ public final class TargetE2eAgentRunV2FinalizationFactsProvider
                 authorized.runtime().workflowId(),
                 authorized.runtime().workflowRunId(),
                 authorized.runtime().workflowBuildId(),
-                attempt.provider(),
-                attempt.modelVersion(),
+                authorized.evidence().executionProvider(),
+                authorized.evidence().executionModel(),
                 manifestUri(
                         authorized.activation().activationId(),
                         request.agentRunId(),
@@ -57,8 +56,8 @@ public final class TargetE2eAgentRunV2FinalizationFactsProvider
                 state.graphOutput(),
                 List.of(proposal),
                 List.of(),
-                attempt.latencyMs(),
-                attempt.completedAt());
+                state.attempt().latencyMs(),
+                state.attempt().completedAt());
     }
 
     static ArtifactPointer proposal(ExecuteAgentRunResult result) {

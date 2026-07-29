@@ -3,7 +3,7 @@ from __future__ import annotations
 import hmac
 import re
 from collections.abc import AsyncIterator, Callable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from types import MappingProxyType
 from typing import Any, Literal, Protocol, cast
@@ -29,8 +29,9 @@ from app.graph_runtime.checkpoint import (
 )
 from app.graph_runtime.gateway import GatewayExecution
 from app.graph_runtime.identity import RoomType, ThreadIdentity
-from app.graph_runtime.persistence_models import GraphFenceContext, GraphGatewayMode
+from app.graph_runtime.persistence_models import GraphFenceContext
 from app.graph_runtime.result import CompletedDraft, ResultBindings
+from app.graph_runtime.target_e2e import TargetE2ERoomProposalSource
 from app.graphs.hearing.contracts import (
     EMPTY_HEARING_TOOL_POLICY,
     HEARING_GRAPH_IDENTITIES,
@@ -211,6 +212,8 @@ class HearingTargetE2EExecutionContext:
     graph_lease_fencing_token: int
     command_hash: str
     command_envelope_hash: str
+    execution_provider: str
+    execution_model: str
     registry_binding_hash: str
     code_build_id: str
 
@@ -251,6 +254,8 @@ class HearingTargetE2EExecutionContext:
         room_fencing_token = getattr(command_binding, "room_fencing_token", None)
         command_hash = getattr(command_binding, "command_hash", None)
         command_envelope_hash = getattr(command_binding, "command_envelope_hash", None)
+        execution_provider = getattr(fence, "execution_provider", None)
+        execution_model = getattr(fence, "execution_model", None)
         registry_binding_hash = getattr(registry_binding, "binding_hash", None)
         code_build_id = getattr(registry_binding, "code_build_id", None)
         authority_activation_id = getattr(authority, "activation_id", None)
@@ -278,6 +283,12 @@ class HearingTargetE2EExecutionContext:
             )
             or not isinstance(command_envelope_hash, str)
             or _SHA256.fullmatch(command_envelope_hash) is None
+            or not isinstance(execution_provider, str)
+            or not 1 <= len(execution_provider) <= 64
+            or not execution_provider.strip()
+            or not isinstance(execution_model, str)
+            or not 1 <= len(execution_model) <= 128
+            or not execution_model.strip()
             or not isinstance(registry_binding_hash, str)
             or _SHA256.fullmatch(registry_binding_hash) is None
             or getattr(fence, "binding_hash", None) != registry_binding_hash
@@ -345,6 +356,8 @@ class HearingTargetE2EExecutionContext:
             graph_lease_fencing_token=fence.fencing_token,
             command_hash=command_hash,
             command_envelope_hash=command_envelope_hash,
+            execution_provider=execution_provider,
+            execution_model=execution_model,
             registry_binding_hash=registry_binding_hash,
             code_build_id=code_build_id,
         )
@@ -684,6 +697,9 @@ class HearingTargetE2ERuntimeAdapter:
             thread_id=execution.fence.thread_id,
             request_hash=command.request_hash,
             draft=CompletedDraft(status="COMPLETED"),
+            target_proposal_source=TargetE2ERoomProposalSource.model_validate(
+                material.source.model_dump(mode="json")
+            ),
             bindings=ResultBindings(
                 command_id=command.command_id,
                 logical_run_id=command.logical_run_id,
@@ -717,8 +733,8 @@ class HearingTargetE2ERuntimeAdapter:
         result = materializer.materialize(
             material.checkpoint_ns,
             material.checkpoint_id,
+            fence=execution.fence,
         )
-        result = _bind_candidate_result(result, execution, material.proposal_hash)
         config = bind_fence_context(
             {
                 "configurable": {
@@ -891,55 +907,6 @@ def build_target_e2e_hearing_provider(
         invocation_provider=invocation_provider,
         payload_store=payload_store,
         clock=clock,
-    )
-
-
-def _bind_candidate_result(
-    result: Any,
-    execution: GatewayExecution,
-    proposal_hash: str,
-) -> Any:
-    context = HearingTargetE2EExecutionContext.from_gateway_execution(execution)
-    candidate_fields = {
-        "execution_lane",
-        "activation_id",
-        "room_fencing_token",
-        "command_hash",
-        "command_envelope_hash",
-        "proposal_hash",
-        "result_envelope_hash",
-    }
-    dataclass_fields = getattr(type(result), "__dataclass_fields__", {})
-    if not candidate_fields <= set(dataclass_fields):
-        raise HearingGraphContractError(
-            "HEARING_TARGET_TERMINAL_MATERIALIZER_UNAVAILABLE"
-        )
-    envelope_values = {
-        "schema_version": "target-e2e-graph-result-envelope.v1",
-        "execution_lane": TARGET_E2E_EXECUTION_LANE,
-        "activation_id": context.activation_id,
-        "room_fencing_token": context.room_fencing_token,
-        "command_hash": context.command_hash,
-        "command_envelope_hash": context.command_envelope_hash,
-        "result_hash": result.result_hash,
-        "proposal_hash": proposal_hash,
-        "graph_output_authority": "PROPOSAL_ONLY",
-        "result": dict(result.result_json),
-    }
-    lane = getattr(GraphGatewayMode, TARGET_E2E_EXECUTION_LANE, None)
-    if lane is None:
-        raise HearingGraphContractError(
-            "HEARING_TARGET_TERMINAL_MATERIALIZER_UNAVAILABLE"
-        )
-    return replace(
-        result,
-        execution_lane=lane,
-        activation_id=context.activation_id,
-        room_fencing_token=context.room_fencing_token,
-        command_hash=context.command_hash,
-        command_envelope_hash=context.command_envelope_hash,
-        proposal_hash=proposal_hash,
-        result_envelope_hash=canonical_sha256(envelope_values),
     )
 
 

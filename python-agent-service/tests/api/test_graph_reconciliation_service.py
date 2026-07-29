@@ -220,6 +220,8 @@ def _candidate_result() -> tuple[ResultRecord, TargetE2ERoomProposalSource]:
         room_fencing_token=19,
         command_hash=command_hash,
         command_envelope_hash=command_envelope_hash,
+        execution_provider="target-e2e-composite",
+        execution_model="room-provider-dispatch",
         proposal_hash=proposal_source.proposal_hash,
     )
     return (

@@ -4,19 +4,23 @@ import com.example.dispute.agentstream.application.AgentRunDomainResultCommitter
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eExecutionLaneVerifier;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.Objects;
 
 /** Rebuilds a Review finalization request solely from admitted material and a Java human receipt. */
 public final class TargetReviewFinalizationRequestResolver {
-  private static final ObjectMapper JSON = new ObjectMapper();
   private final TargetReviewCommandMaterialStore materialStore;
   private final TargetReviewOutcomeHandoffStore handoffStore;
+  private final TargetReviewReconciledFinalizationEvidenceSource evidenceSource;
+  private final com.fasterxml.jackson.databind.ObjectMapper objectMapper;
 
   public TargetReviewFinalizationRequestResolver(
-      TargetReviewCommandMaterialStore materialStore, TargetReviewOutcomeHandoffStore handoffStore) {
+      TargetReviewCommandMaterialStore materialStore, TargetReviewOutcomeHandoffStore handoffStore,
+      TargetReviewReconciledFinalizationEvidenceSource evidenceSource,
+      com.fasterxml.jackson.databind.ObjectMapper objectMapper) {
     this.materialStore = Objects.requireNonNull(materialStore, "materialStore");
     this.handoffStore = Objects.requireNonNull(handoffStore, "handoffStore");
+    this.evidenceSource = Objects.requireNonNull(evidenceSource, "evidenceSource");
+    this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper").copy();
   }
 
   public TargetReviewFinalizationRequest resolve(CommitCommand command) {
@@ -49,7 +53,7 @@ public final class TargetReviewFinalizationRequestResolver {
     require(material.roomFencingToken() == admission.roomFencingToken(), "fence admission");
     require(material.expectedProcessRevision() == graph.processRevision(), "process revision");
     require(material.commandHash().equals(ContractJson.sha256Hex(
-        JSON.valueToTree(graph))), "canonical graph command hash");
+        objectMapper.valueToTree(graph))), "canonical graph command hash");
     require(result.outcome()
         == com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult.Outcome.COMPLETED,
         "completed result");
@@ -68,9 +72,12 @@ public final class TargetReviewFinalizationRequestResolver {
     require(handoff.decision().outcomeReceipt().caseId().equals(graph.caseId()), "outcome case");
     require(handoff.decision().outcomeReceipt().epoch() == graph.roomEpoch(), "outcome epoch");
     require(handoff.decision().outcomeReceipt().fence() == material.roomFencingToken(), "outcome fence");
+    var evidence = evidenceSource.resolve(snapshot, request, result);
     return new TargetReviewFinalizationRequest(material.executionLane(), material.activationId(),
         material.activationManifestHash(), admission.isolatedDomainDbBindingHash(), material.roomFencingToken(), snapshot.admissionId(),
-        material.commandHash(), material.commandEnvelopeHash(), request, result, handoff.decision());
+        material.commandHash(), material.commandEnvelopeHash(), evidence.proposalHash(),
+        evidence.resultEnvelopeHash(), evidence.executionProvider(), evidence.executionModel(),
+        request, result, handoff.decision());
   }
 
   private static void require(boolean value, String binding) {

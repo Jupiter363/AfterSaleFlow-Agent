@@ -42,6 +42,8 @@ public final class TargetE2EGraphEnvelopeCodec {
           "room_fencing_token",
           "command_hash",
           "command_envelope_hash",
+          "execution_provider",
+          "execution_model",
           "result_hash",
           "proposal_hash",
           "result_envelope_hash",
@@ -157,6 +159,8 @@ public final class TargetE2EGraphEnvelopeCodec {
             requiredLong(node, "room_fencing_token"),
             requiredText(node, "command_hash"),
             requiredText(node, "command_envelope_hash"),
+            requiredText(node, "execution_provider"),
+            requiredText(node, "execution_model"),
             requiredText(node, "result_hash"),
             requiredText(node, "proposal_hash"),
             requiredText(node, "result_envelope_hash"),
@@ -202,7 +206,9 @@ public final class TargetE2EGraphEnvelopeCodec {
   public TargetE2EGraphResultEnvelope wrapResult(
       TargetE2EGraphCommandEnvelope commandEnvelope,
       RoomGraphResult result,
-      JsonNode schemaValidatedProposalSource) {
+      JsonNode schemaValidatedProposalSource,
+      String executionProvider,
+      String executionModel) {
     Objects.requireNonNull(commandEnvelope, "commandEnvelope");
     Objects.requireNonNull(result, "result");
     Objects.requireNonNull(schemaValidatedProposalSource, "schemaValidatedProposalSource");
@@ -223,6 +229,8 @@ public final class TargetE2EGraphEnvelopeCodec {
     unhashed.put("room_fencing_token", commandEnvelope.roomFencingToken());
     unhashed.put("command_hash", commandEnvelope.commandHash());
     unhashed.put("command_envelope_hash", commandEnvelope.commandEnvelopeHash());
+    unhashed.put("execution_provider", executionProvider);
+    unhashed.put("execution_model", executionModel);
     unhashed.put("result_hash", resultHash);
     unhashed.put("proposal_hash", proposalHash);
     unhashed.put("graph_output_authority", TargetE2EGraphResultEnvelope.GRAPH_OUTPUT_AUTHORITY);
@@ -236,6 +244,8 @@ public final class TargetE2EGraphEnvelopeCodec {
             commandEnvelope.roomFencingToken(),
             commandEnvelope.commandHash(),
             commandEnvelope.commandEnvelopeHash(),
+            executionProvider,
+            executionModel,
             resultHash,
             proposalHash,
             envelopeHash,

@@ -26,18 +26,41 @@ class TargetE2eExecutionLaneVerifierTest {
                 fixture.request(),
                 fixture.result(),
                 fixture.runtime(),
-                fixture.state());
+                fixture.state(),
+                verified(fixture));
 
-        var replayState = withTerminalState(fixture.state(), true);
+        var replayState = withTerminalState(fixture, true);
         var replay = verifier.requireAuthorized(
                 TargetE2eFinalizationFixture.activeDecision(fixture),
                 fixture.authorizationRequest(),
                 fixture.request(),
                 fixture.result(),
                 fixture.runtime(),
-                replayState);
+                replayState,
+                verified(fixture));
 
         assertThat(grant).isEqualTo(replay);
+    }
+
+    @Test
+    void committedReplayMustRetainTheVerifiedExecutionIdentity() {
+        var fixture = TargetE2eFinalizationFixture.valid();
+        var replay = withTerminalState(fixture, true);
+        var attempt = replay.attempt();
+        var mismatched = withAttempt(
+                replay,
+                copyAttempt(
+                        attempt,
+                        attempt.executorKind(),
+                        attempt.resultHash(),
+                        attempt.attemptStatus(),
+                        "other-provider",
+                        attempt.modelVersion()));
+
+        assertThatThrownBy(() -> verify(
+                        TargetE2eFinalizationFixture.activeDecision(fixture), fixture, mismatched))
+                .isInstanceOf(TargetE2eFinalizationRejectedException.class)
+                .hasMessageContaining("committed execution provider");
     }
 
     @Test
@@ -93,7 +116,8 @@ class TargetE2eExecutionLaneVerifierTest {
                         fixture.request(),
                         fixture.result(),
                         fixture.runtime(),
-                        fixture.state()))
+                        fixture.state(),
+                        verified(fixture)))
                 .isInstanceOf(TargetE2eFinalizationRejectedException.class)
                 .hasMessageContaining("exact target-E2E candidate lane");
 
@@ -191,7 +215,7 @@ class TargetE2eExecutionLaneVerifierTest {
                 Lifecycle.DRAIN_ONLY, proof, active.issuedAt(), drainExpiry, null));
         assertThat(verifier.requireAuthorized(
                         draining, request, fixture.request(), fixture.result(),
-                        fixture.runtime(), fixture.state()))
+                        fixture.runtime(), fixture.state(), verified(fixture)))
                 .isEqualTo(draining.grant());
 
         var wrongProof = new AcceptedCommandProof(
@@ -259,11 +283,22 @@ class TargetE2eExecutionLaneVerifierTest {
                 fixture.request(),
                 fixture.result(),
                 fixture.runtime(),
-                state);
+                state,
+                verified(fixture));
+    }
+
+    private static TargetE2eFinalizationBindingVerifier.VerifiedEvidence verified(
+            TargetE2eFinalizationFixture.Fixture fixture) {
+        return new TargetE2eFinalizationBindingVerifier(
+                        com.fasterxml.jackson.databind.json.JsonMapper.builder()
+                                .findAndAddModules()
+                                .build())
+                .verify(fixture.request(), fixture.result(), fixture.state(), fixture.evidence());
     }
 
     private static TargetE2eIntakeFinalizationState withTerminalState(
-            TargetE2eIntakeFinalizationState state, boolean committed) {
+            TargetE2eFinalizationFixture.Fixture fixture, boolean committed) {
+        var state = fixture.state();
         var run = state.run();
         var terminalRun = new TargetE2eIntakeFinalizationState.LogicalRun(
                 run.agentRunId(), run.tenantSurrogate(), run.caseId(), run.roomId(),
@@ -278,7 +313,9 @@ class TargetE2eExecutionLaneVerifierTest {
                 state.attempt(),
                 state.attempt().executorKind(),
                 state.attempt().resultHash(),
-                committed ? "COMPLETED" : state.attempt().attemptStatus());
+                committed ? "COMPLETED" : state.attempt().attemptStatus(),
+                committed ? verified(fixture).executionProvider() : state.attempt().provider(),
+                committed ? verified(fixture).executionModel() : state.attempt().modelVersion());
         return new TargetE2eIntakeFinalizationState(
                 terminalRun, terminalAttempt, state.epoch(), state.projection(),
                 state.threadRegistrationStatus(),
@@ -321,9 +358,20 @@ class TargetE2eExecutionLaneVerifierTest {
             String executor,
             String resultHash,
             String status) {
+        return copyAttempt(
+                value, executor, resultHash, status, value.provider(), value.modelVersion());
+    }
+
+    private static TargetE2eIntakeFinalizationState.Attempt copyAttempt(
+            TargetE2eIntakeFinalizationState.Attempt value,
+            String executor,
+            String resultHash,
+            String status,
+            String provider,
+            String modelVersion) {
         return new TargetE2eIntakeFinalizationState.Attempt(
                 value.attemptId(), value.agentRunId(), value.attemptNo(), status, executor,
-                value.provider(), value.modelProfileId(), value.modelVersion(), value.graphKey(),
+                provider, value.modelProfileId(), modelVersion, value.graphKey(),
                 value.graphVersion(), value.checkpointSchemaVersion(), value.checkpointId(),
                 value.promptVersion(), value.outputSchemaVersion(), value.policyVersion(),
                 value.guardrailVersion(), value.requestHash(), value.commandId(),
