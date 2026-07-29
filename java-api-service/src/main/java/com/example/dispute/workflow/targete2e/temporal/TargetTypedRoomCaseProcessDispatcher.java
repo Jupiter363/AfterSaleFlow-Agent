@@ -10,7 +10,6 @@ import com.example.dispute.hearing.domain.HearingWriterMode;
 import com.example.dispute.workflow.contract.outcome.v1.OutcomeWireTypes.RuntimeMode;
 import com.example.dispute.workflow.contract.outcome.v1.OutcomeWorkflowStart;
 import com.example.dispute.workflow.contract.v1.CaseCommandRef;
-import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
@@ -25,8 +24,6 @@ import com.example.dispute.workflow.temporal.room.evidence.EvidenceRoomWorkflow;
 import com.example.dispute.workflow.temporal.room.hearing.HearingRoomStart;
 import com.example.dispute.workflow.temporal.room.hearing.HearingRoomWorkflow;
 import com.example.dispute.workflow.temporal.room.hearing.HearingPartyCommand;
-import com.example.dispute.workflow.temporal.room.intake.IntakeCommandType;
-import com.example.dispute.workflow.temporal.room.intake.IntakeOperationKeys;
 import com.example.dispute.workflow.temporal.room.intake.IntakeParty;
 import com.example.dispute.workflow.temporal.room.intake.IntakeRoomStart;
 import com.example.dispute.workflow.temporal.room.intake.IntakeRoomWorkflow;
@@ -411,16 +408,6 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
     }
   }
 
-  private static IntakeParty intakeParty(ActorRole role) {
-    return switch (role) {
-      case USER -> IntakeParty.INITIATOR;
-      case MERCHANT -> IntakeParty.RESPONDENT;
-      default ->
-          throw new IllegalArgumentException(
-              "target Intake command requires a USER or MERCHANT actor");
-    };
-  }
-
   private static class CoordinateHandle implements TargetTypedRoomChildHandle {
 
     private final RoomType roomType;
@@ -575,50 +562,16 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
     @Override
     protected boolean onCommand(CaseCommandRef command) {
       if (command.commandType()
-          == com.example.dispute.workflow.contract.v1.ContractTypes.CommandType.INTAKE_MESSAGE) {
-        IntakeWorkflowCommand bound =
-            targetIntakeCommandBridge.bindCommand(
-                new BindRequest(command, fencingToken, roomRevision()));
-        child.commandAccepted(bound);
-        advanceRoomRevision();
-        return true;
-      }
-      IntakeCommandType commandType =
-          switch (command.commandType()) {
-            case INTAKE_CONFIRM -> IntakeCommandType.INTAKE_CONFIRM;
-            case INTAKE_CANCEL -> IntakeCommandType.INTAKE_CANCEL;
-            default -> null;
-          };
-      if (commandType == null) {
+              != com.example.dispute.workflow.contract.v1.ContractTypes.CommandType.INTAKE_MESSAGE
+          && command.commandType()
+              != com.example.dispute.workflow.contract.v1.ContractTypes.CommandType.INTAKE_CONFIRM
+          && command.commandType()
+              != com.example.dispute.workflow.contract.v1.ContractTypes.CommandType.INTAKE_CANCEL) {
         return false;
       }
-      IntakeParty party = intakeParty(command.actorRef().actorRole());
-      String actorScopeHash =
-          party == IntakeParty.INITIATOR ? initiatorScopeHash : respondentScopeHash;
-      String operationKey =
-          commandType == IntakeCommandType.INTAKE_CANCEL
-              ? IntakeOperationKeys.cancel(command.caseId(), roomEpoch, command.commandId())
-              : party == IntakeParty.INITIATOR
-                  ? IntakeOperationKeys.initiatorAccept(
-                      command.caseId(), roomEpoch, command.commandId())
-                  : IntakeOperationKeys.respondentConfirm(
-                      command.caseId(), roomEpoch, command.commandId());
-      child.commandAccepted(
-          new IntakeWorkflowCommand(
-              "intake-workflow-command.v1",
-              command.commandId(),
-              command.tenantSurrogate(),
-              command.caseId(),
-              roomEpoch,
-              fencingToken,
-              command.caseCommandSequence(),
-              commandType,
-              party,
-              actorScopeHash,
-              command.payloadRef().uri(),
-              command.payloadRef().sha256(),
-              operationKey,
-              command.requestHash()));
+      IntakeWorkflowCommand bound =
+          targetIntakeCommandBridge.bindCommand(new BindRequest(command, fencingToken, roomRevision()));
+      child.commandAccepted(bound);
       advanceRoomRevision();
       return true;
     }

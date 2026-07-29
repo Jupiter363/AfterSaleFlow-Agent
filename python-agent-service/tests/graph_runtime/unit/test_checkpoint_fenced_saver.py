@@ -11,8 +11,6 @@ from app.graph_runtime.checkpoint import (
     BIND_EXTERNAL_TERMINAL_METADATA_SQL,
     ExternalTerminalCommit,
     FENCE_CONTEXT_KEY,
-    PENDING_WRITE_CHECKPOINT_RETRY_ATTEMPTS,
-    PENDING_WRITE_CHECKPOINT_RETRY_DELAY_SECONDS,
     TERMINAL_RESULT_CONTEXT_KEY,
     FencedPostgresSaver,
     TerminalResultMaterializer,
@@ -1089,17 +1087,9 @@ async def test_pending_writes_validate_the_parent_under_the_same_fence() -> None
 
 
 @pytest.mark.asyncio
-async def test_pending_writes_retry_after_releasing_the_lease_until_aput_commits(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_pending_writes_allow_langgraph_precheckpoint_ordering() -> None:
     connection = _Connection(pending_write_checkpoint_unavailable_attempts=1)
     saver, direct_savers = _saver(connection)
-    delays: list[float] = []
-
-    async def sleep(delay: float) -> None:
-        delays.append(delay)
-
-    monkeypatch.setattr("app.graph_runtime.checkpoint.asyncio.sleep", sleep)
 
     await saver.aput_writes(_config(checkpoint=True), [("channel", "value")], "task-1")
 
@@ -1107,49 +1097,45 @@ async def test_pending_writes_retry_after_releasing_the_lease_until_aput_commits
         "transaction:enter",
         "sql:fence",
         "sql:checkpoint-metadata",
-        "transaction:rollback",
+        "saver:writes",
+        "transaction:commit",
+    ]
+    assert saver._pool.connection_calls == 1  # noqa: SLF001
+    assert direct_savers[0].connection is connection
+
+
+@pytest.mark.asyncio
+async def test_pending_writes_allow_a_checkpoint_that_has_not_been_created_yet() -> None:
+    connection = _Connection(
+        pending_write_checkpoint_unavailable_attempts=99
+    )
+    saver, direct_savers = _saver(connection)
+    await saver.aput_writes(_config(checkpoint=True), [("channel", "value")], "task-1")
+
+    assert connection.events == [
         "transaction:enter",
         "sql:fence",
         "sql:checkpoint-metadata",
         "saver:writes",
         "transaction:commit",
     ]
-    assert delays == [PENDING_WRITE_CHECKPOINT_RETRY_DELAY_SECONDS]
-    assert saver._pool.connection_calls == 2  # noqa: SLF001
     assert direct_savers[0].connection is connection
 
 
 @pytest.mark.asyncio
-async def test_pending_writes_fail_closed_after_bounded_checkpoint_retries(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    connection = _Connection(
-        pending_write_checkpoint_unavailable_attempts=PENDING_WRITE_CHECKPOINT_RETRY_ATTEMPTS
-    )
+async def test_pending_writes_reject_an_existing_checkpoint_from_another_fence() -> None:
+    connection = _Connection()
+    connection.checkpoint_metadata["graph_key"] = "outcome_flow"
     saver, direct_savers = _saver(connection)
-    delays: list[float] = []
 
-    async def sleep(delay: float) -> None:
-        delays.append(delay)
-
-    monkeypatch.setattr("app.graph_runtime.checkpoint.asyncio.sleep", sleep)
-
-    with pytest.raises(GraphBindingError, match="pending-write checkpoint does not exist"):
+    with pytest.raises(GraphBindingError, match="graph_key"):
         await saver.aput_writes(_config(checkpoint=True), [("channel", "value")], "task-1")
 
     assert connection.events == [
-        event
-        for _ in range(PENDING_WRITE_CHECKPOINT_RETRY_ATTEMPTS)
-        for event in (
-            "transaction:enter",
-            "sql:fence",
-            "sql:checkpoint-metadata",
-            "transaction:rollback",
-        )
-    ]
-    assert delays == [
-        PENDING_WRITE_CHECKPOINT_RETRY_DELAY_SECONDS * attempt
-        for attempt in range(1, PENDING_WRITE_CHECKPOINT_RETRY_ATTEMPTS)
+        "transaction:enter",
+        "sql:fence",
+        "sql:checkpoint-metadata",
+        "transaction:rollback",
     ]
     assert direct_savers == []
 

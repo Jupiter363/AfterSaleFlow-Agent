@@ -145,6 +145,75 @@ describe("ReviewWorkbenchView", () => {
     expect(readableWorkspace).not.toMatch(/\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b/);
   });
 
+  it("claims an unassigned pending task before letting reviewer-local decide from a direct workbench route", async () => {
+    actor.id = "reviewer-local";
+    actor.role = "PLATFORM_REVIEWER";
+    const start = vi.spyOn(reviewApi, "start").mockResolvedValue({
+      id: "REVIEW_1",
+      status: "IN_REVIEW",
+      assigned_reviewer_id: "reviewer-local",
+    });
+    vi.spyOn(reviewApi, "list").mockImplementation((_actor, status) =>
+      Promise.resolve(
+        status === "PENDING"
+          ? [{ id: "REVIEW_1", status: "PENDING", assigned_reviewer_id: "" }]
+          : [],
+      ),
+    );
+    vi.spyOn(reviewApi, "packet").mockResolvedValue(packet);
+    vi.spyOn(reviewApi, "activeCopilotRuns").mockResolvedValue([]);
+    const decideAction = vi.fn().mockResolvedValue({
+      decision: "APPROVE",
+      status: "APPROVED",
+    });
+
+    const { wrapper } = await mountView({ initialPacket: null, decideAction });
+    await flushPromises();
+
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(start).toHaveBeenCalledWith(actor, "REVIEW_1");
+    expect(wrapper.findAll("[data-decision]")).toHaveLength(5);
+
+    await wrapper.get("[data-review-reason]").setValue("证据与规则已完成核验");
+    await wrapper.get('[data-decision="APPROVE"]').trigger("click");
+    await wrapper.get("[data-decision-confirm]").trigger("click");
+    await flushPromises();
+
+    expect(decideAction).toHaveBeenCalledWith({
+      decision: "APPROVE",
+      reason: "证据与规则已完成核验",
+      approved_plan: null,
+      confirmed: true,
+    });
+  });
+
+  it("does not claim a task that is already assigned to reviewer-local", async () => {
+    actor.id = "reviewer-local";
+    actor.role = "PLATFORM_REVIEWER";
+    const start = vi.spyOn(reviewApi, "start");
+    vi.spyOn(reviewApi, "list").mockImplementation((_actor, status) =>
+      Promise.resolve(
+        status === "IN_REVIEW"
+          ? [
+              {
+                id: "REVIEW_1",
+                status: "IN_REVIEW",
+                assigned_reviewer_id: "reviewer-local",
+              },
+            ]
+          : [],
+      ),
+    );
+    vi.spyOn(reviewApi, "packet").mockResolvedValue(packet);
+    vi.spyOn(reviewApi, "activeCopilotRuns").mockResolvedValue([]);
+
+    const { wrapper } = await mountView({ initialPacket: null });
+    await flushPromises();
+
+    expect(start).not.toHaveBeenCalled();
+    expect(wrapper.findAll("[data-decision]")).toHaveLength(5);
+  });
+
   it("maps uppercase business fields throughout the readable review workspace", async () => {
     const { wrapper } = await mountView({
       initialPacket: {

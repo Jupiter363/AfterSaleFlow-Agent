@@ -1,8 +1,11 @@
 package com.example.dispute.workflow.targete2e.artifact.finalization;
 
 import com.example.dispute.agentstream.application.AgentRunV2StreamStore;
+import com.example.dispute.workflow.application.intake.IntakeContractHashes;
+import com.example.dispute.workflow.application.intake.IntakePrivateThreadRegistration;
 import com.example.dispute.workflow.contract.v1.AgentStreamEvent;
 import com.example.dispute.workflow.contract.v1.ContractJson;
+import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.StreamEventType;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
@@ -58,6 +61,51 @@ public final class TargetE2eGraphOutputSnapshotMaterializer {
                 :resultHash, 0, 'application/json', 'INTERNAL',
                 false, now(), 'target-e2e-agent-output-materializer'
             )
+            """;
+
+    /*
+     * A target Intake thread is admitted provisionally at ingress. It becomes registered only
+     * after this finalizer has verified and persisted the durable FINAL output. The immutable
+     * command tuple prevents a finalization for another epoch, actor, or graph pin from moving
+     * this row.
+     */
+    private static final String LOCK_INTAKE_BINDING_SQL = """
+            select registration_id, registration_status, registered_at
+              from case_intake_graph_thread_binding
+             where tenant_surrogate = :tenantSurrogate
+               and case_id = :caseId
+               and room_type = 'INTAKE'
+               and room_epoch = :roomEpoch
+               and thread_id = :threadId
+               and actor_id = :actorId
+               and actor_role = :actorRole
+               and audience = :audience
+               and actor_scope_hash = :actorScopeHash
+               and graph_key = :graphKey
+               and graph_version = :graphVersion
+               and checkpoint_schema_version = :checkpointSchemaVersion
+             for update
+            """;
+
+    private static final String REGISTER_INTAKE_BINDING_SQL = """
+            update case_intake_graph_thread_binding
+               set registration_status = 'REGISTERED',
+                   registered_at = current_timestamp
+             where registration_id = :registrationId
+               and tenant_surrogate = :tenantSurrogate
+               and case_id = :caseId
+               and room_type = 'INTAKE'
+               and room_epoch = :roomEpoch
+               and thread_id = :threadId
+               and actor_id = :actorId
+               and actor_role = :actorRole
+               and audience = :audience
+               and actor_scope_hash = :actorScopeHash
+               and graph_key = :graphKey
+               and graph_version = :graphVersion
+               and checkpoint_schema_version = :checkpointSchemaVersion
+               and registration_status = 'PENDING'
+               and registered_at is null
             """;
 
     private static final String CREATED_BY = "target-e2e-agent-output-materializer";
@@ -151,11 +199,68 @@ public final class TargetE2eGraphOutputSnapshotMaterializer {
             if (jdbc.update(INSERT_SQL, parameters) != 1) {
                 throw new IllegalStateException("target AgentRun graph output snapshot was not inserted");
             }
-            return;
-        }
-        if (existing.size() != 1 || !existing.getFirst().matches(parameters)) {
+        } else if (existing.size() != 1 || !existing.getFirst().matches(parameters)) {
             throw new IllegalStateException("target AgentRun graph output snapshot conflicts with replay");
         }
+        registerVerifiedIntakeBinding(request);
+    }
+
+    private void registerVerifiedIntakeBinding(ExecuteAgentRunRequest request) {
+        if (request.command().roomType() != RoomType.INTAKE) {
+            return;
+        }
+        Map<String, ?> parameters = intakeBindingParameters(request);
+        List<IntakeBindingRow> rows = jdbc.query(
+                LOCK_INTAKE_BINDING_SQL,
+                parameters,
+                (rs, ignored) -> new IntakeBindingRow(
+                        rs.getString("registration_id"),
+                        rs.getString("registration_status"),
+                        rs.getObject("registered_at")));
+        if (rows.size() != 1) {
+            throw new IllegalStateException(
+                    "target Intake graph output has no exact pending Java thread binding");
+        }
+        IntakeBindingRow binding = rows.getFirst();
+        if ("REGISTERED".equals(binding.registrationStatus())) {
+            if (binding.registeredAt() == null) {
+                throw new IllegalStateException(
+                        "target Intake registered Java thread binding is missing registered_at");
+            }
+            return;
+        }
+        if (!"PENDING".equals(binding.registrationStatus()) || binding.registeredAt() != null) {
+            throw new IllegalStateException(
+                    "target Intake Java thread binding is not pending for final registration");
+        }
+        Map<String, Object> compareAndSet = new java.util.HashMap<>(parameters);
+        compareAndSet.put("registrationId", binding.registrationId());
+        if (jdbc.update(REGISTER_INTAKE_BINDING_SQL, compareAndSet) != 1) {
+            throw new IllegalStateException(
+                    "target Intake Java thread binding registration compare-and-set failed");
+        }
+    }
+
+    private static Map<String, ?> intakeBindingParameters(ExecuteAgentRunRequest request) {
+        var command = request.command();
+        IntakePrivateThreadRegistration.ActorScope scope =
+                new IntakePrivateThreadRegistration.ActorScope(
+                        command.actorScope().actorId(),
+                        command.actorScope().actorRole(),
+                        command.actorScope().audience(),
+                        command.actorScope().capabilities());
+        return Map.ofEntries(
+                Map.entry("tenantSurrogate", command.tenantSurrogate()),
+                Map.entry("caseId", command.caseId()),
+                Map.entry("roomEpoch", command.roomEpoch()),
+                Map.entry("threadId", command.threadId()),
+                Map.entry("actorId", command.actorScope().actorId()),
+                Map.entry("actorRole", command.actorScope().actorRole().name()),
+                Map.entry("audience", command.actorScope().audience().name()),
+                Map.entry("actorScopeHash", IntakeContractHashes.actorScopeHash(scope)),
+                Map.entry("graphKey", command.graphKey()),
+                Map.entry("graphVersion", command.graphVersion()),
+                Map.entry("checkpointSchemaVersion", command.checkpointSchemaVersion()));
     }
 
     private void lockLogicalRun(String agentRunId) {
@@ -249,4 +354,7 @@ public final class TargetE2eGraphOutputSnapshotMaterializer {
                     && CREATED_BY.equals(createdBy);
         }
     }
+
+    private record IntakeBindingRow(
+            String registrationId, String registrationStatus, Object registeredAt) {}
 }

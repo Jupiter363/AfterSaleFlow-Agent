@@ -16,6 +16,9 @@ import com.example.dispute.workflow.application.intake.IntakeFinalizationRejecte
 import com.example.dispute.workflow.application.intake.IntakeFormalBranchCommandResolver;
 import com.example.dispute.workflow.application.intake.IntakeFormalBranchCommandResolver.ResolvedBranchCommand;
 import com.example.dispute.workflow.application.intake.IntakeFormalBranchCommitPort;
+import com.example.dispute.workflow.application.epoch.RoomEpochAllocator;
+import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.TransitionRoomEpoch;
+import com.example.dispute.workflow.contract.v1.ContractTypes;
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.ActivityEnvelope;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.ActivityInvocationMode;
@@ -62,6 +65,8 @@ import org.springframework.transaction.support.TransactionTemplate;
 public final class JdbcIntakeFormalBranchCommitPort implements IntakeFormalBranchCommitPort {
 
     private static final String EVENT_REF_PREFIX = "urn:after-sale-flow:intake-event:";
+    private static final String DEFAULT_GRAPH_KEY = "intake.v2";
+    private static final String TARGET_GRAPH_KEY = "all-rooms.target-e2e.v1";
 
     private final NamedParameterJdbcTemplate jdbc;
     private final TransactionTemplate transactions;
@@ -69,6 +74,8 @@ public final class JdbcIntakeFormalBranchCommitPort implements IntakeFormalBranc
     private final CaseRoomRepository roomRepository;
     private final IntakeBranchDomainService domainService;
     private final IntakeFormalBranchCommandResolver commandResolver;
+    private final RoomEpochAllocator roomEpochAllocator;
+    private final String expectedGraphKey;
     private final ObjectMapper objectMapper;
     private final Clock clock;
 
@@ -81,6 +88,53 @@ public final class JdbcIntakeFormalBranchCommitPort implements IntakeFormalBranc
             IntakeFormalBranchCommandResolver commandResolver,
             ObjectMapper objectMapper,
             Clock clock) {
+        this(
+                jdbc,
+                transactionManager,
+                caseRepository,
+                roomRepository,
+                domainService,
+                commandResolver,
+                null,
+                DEFAULT_GRAPH_KEY,
+                objectMapper,
+                clock);
+    }
+
+    public JdbcIntakeFormalBranchCommitPort(
+            NamedParameterJdbcTemplate jdbc,
+            PlatformTransactionManager transactionManager,
+            FulfillmentCaseRepository caseRepository,
+            CaseRoomRepository roomRepository,
+            IntakeBranchDomainService domainService,
+            IntakeFormalBranchCommandResolver commandResolver,
+            RoomEpochAllocator roomEpochAllocator,
+            ObjectMapper objectMapper,
+            Clock clock) {
+        this(
+                jdbc,
+                transactionManager,
+                caseRepository,
+                roomRepository,
+                domainService,
+                commandResolver,
+                roomEpochAllocator,
+                DEFAULT_GRAPH_KEY,
+                objectMapper,
+                clock);
+    }
+
+    public JdbcIntakeFormalBranchCommitPort(
+            NamedParameterJdbcTemplate jdbc,
+            PlatformTransactionManager transactionManager,
+            FulfillmentCaseRepository caseRepository,
+            CaseRoomRepository roomRepository,
+            IntakeBranchDomainService domainService,
+            IntakeFormalBranchCommandResolver commandResolver,
+            RoomEpochAllocator roomEpochAllocator,
+            String expectedGraphKey,
+            ObjectMapper objectMapper,
+            Clock clock) {
         this.jdbc = Objects.requireNonNull(jdbc, "jdbc");
         this.transactions = new TransactionTemplate(
                 Objects.requireNonNull(transactionManager, "transactionManager"));
@@ -88,6 +142,12 @@ public final class JdbcIntakeFormalBranchCommitPort implements IntakeFormalBranc
         this.roomRepository = Objects.requireNonNull(roomRepository, "roomRepository");
         this.domainService = Objects.requireNonNull(domainService, "domainService");
         this.commandResolver = Objects.requireNonNull(commandResolver, "commandResolver");
+        this.roomEpochAllocator = roomEpochAllocator;
+        if (expectedGraphKey == null
+                || !expectedGraphKey.matches("[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")) {
+            throw new IllegalArgumentException("expectedGraphKey is invalid");
+        }
+        this.expectedGraphKey = expectedGraphKey;
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper");
         this.clock = Objects.requireNonNull(clock, "clock");
     }
@@ -225,7 +285,7 @@ public final class JdbcIntakeFormalBranchCommitPort implements IntakeFormalBranc
 
         BranchResult result = applyBranch(request, resolved, dispute, intakeRoom, actor, now);
         long eventSequence = nextEventSequence(request.envelope().caseId());
-        RevisionRows revisions = advanceProjection(request, dispute, eventSequence, now);
+        RevisionRows revisions = advanceProjection(request, dispute, result, eventSequence, now);
         EventReceipt event = writeCommittedEvent(
                 request, result, authority, revisions, dispute, eventSequence, now);
         markCommandApplied(command, event, now);
@@ -279,10 +339,15 @@ public final class JdbcIntakeFormalBranchCommitPort implements IntakeFormalBranc
                     now,
                     TimelineEventMode.FORMAL_TYPED_ONLY);
             case RESPONDENT_CONFIRM -> {
+                BranchResult result = domainService.confirmRespondent(
+                        dispute,
+                        intakeRoom,
+                        actor,
+                        requiredConfirmation(resolved),
+                        now,
+                        TimelineEventMode.FORMAL_TYPED_ONLY);
                 domainService.requireFormalBilateralMatrix(dispute);
-                throw rejected(
-                        "INTAKE_RESPONDENT_DELTA_GATE_PENDING",
-                        "respondent formal commit remains disabled until the delta contract is re-authenticated");
+                yield result;
             }
         };
     }
@@ -290,11 +355,16 @@ public final class JdbcIntakeFormalBranchCommitPort implements IntakeFormalBranc
     private RevisionRows advanceProjection(
             BranchCommitRequest request,
             FulfillmentCaseEntity dispute,
+            BranchResult result,
             long eventSequence,
             OffsetDateTime now) {
         ActivityEnvelope envelope = request.envelope();
         long processRevision = Math.addExact(envelope.processRevision(), 1);
         long roomRevision = Math.addExact(envelope.roomRevision(), 1);
+        if (request.operation() == BranchOperation.RESPONDENT_CONFIRM) {
+            return transitionRespondentToEvidence(
+                    request, dispute, result, eventSequence, processRevision, roomRevision, now);
+        }
         boolean terminal = request.operation() == BranchOperation.INITIATOR_REJECT
                 || request.operation() == BranchOperation.CANCEL;
         int epochChanged = jdbc.update(
@@ -363,6 +433,75 @@ public final class JdbcIntakeFormalBranchCommitPort implements IntakeFormalBranc
                     "Intake projection changed before the branch transition committed");
         }
         return new RevisionRows(processRevision, roomRevision);
+    }
+
+    private RevisionRows transitionRespondentToEvidence(
+            BranchCommitRequest request,
+            FulfillmentCaseEntity dispute,
+            BranchResult result,
+            long eventSequence,
+            long expectedProcessRevision,
+            long expectedSourceRoomRevision,
+            OffsetDateTime now) {
+        if (roomEpochAllocator == null) {
+            throw rejected(
+                    "INTAKE_RESPONDENT_EPOCH_ALLOCATOR_MISSING",
+                    "respondent formal commit requires the target room epoch allocator");
+        }
+        advanceRespondentProjectionSequence(request, eventSequence, now);
+        RoomEpochAllocator.RoomEpochAllocation allocation = Objects.requireNonNull(
+                roomEpochAllocator.transition(
+                        new TransitionRoomEpoch(
+                                request.envelope().caseId(),
+                                ContractTypes.RoomType.INTAKE,
+                                Objects.requireNonNull(result.evidenceRoomId(), "evidenceRoomId"),
+                                ContractTypes.RoomType.EVIDENCE,
+                                dispute.getCaseStatus().name(),
+                                "OPEN",
+                                result.view().deadlineAt(),
+                                now)),
+                "respondent evidence epoch allocation");
+        if (!request.envelope().caseId().equals(allocation.caseId())
+                || allocation.roomType() != ContractTypes.RoomType.EVIDENCE
+                || allocation.processRevision() != expectedProcessRevision) {
+            throw rejected(
+                    "INTAKE_RESPONDENT_EPOCH_TRANSITION_INVALID",
+                    "respondent formal commit did not create the expected Evidence epoch");
+        }
+        // The allocator terminalizes the source epoch and increments its room revision. The typed
+        // event remains bound to that source Intake epoch, so retain the exact source revisions.
+        return new RevisionRows(expectedProcessRevision, expectedSourceRoomRevision);
+    }
+
+    private void advanceRespondentProjectionSequence(
+            BranchCommitRequest request, long eventSequence, OffsetDateTime now) {
+        int changed = jdbc.update(
+                """
+                update case_process_projection
+                   set last_command_sequence = :commandSequence,
+                       last_case_event_sequence = :eventSequence,
+                       projected_at = :now,
+                       updated_at = :now,
+                       version = version + 1
+                 where tenant_surrogate = :tenantSurrogate
+                   and case_id = :caseId
+                   and current_room = 'INTAKE'
+                   and writer_mode = 'TEMPORAL'
+                   and writer_activation_status = 'READY'
+                   and room_epoch = :roomEpoch
+                   and fencing_token = :fencingToken
+                   and process_revision = :expectedProcessRevision
+                   and last_command_sequence < :commandSequence
+                   and last_case_event_sequence < :eventSequence
+                """,
+                parameters(request)
+                        .addValue("eventSequence", eventSequence)
+                        .addValue("now", now));
+        if (changed != 1) {
+            throw rejected(
+                    "INTAKE_RESPONDENT_PROJECTION_SEQUENCE_STALE",
+                    "respondent branch could not advance the source projection sequence");
+        }
     }
 
     private CommandRow requireCommand(BranchCommitRequest request) {
@@ -461,7 +600,7 @@ public final class JdbcIntakeFormalBranchCommitPort implements IntakeFormalBranc
                    and binding.actor_scope_hash = :actorScopeHash
                    and binding.registration_status = 'REGISTERED'
                    and binding.writer_mode = 'TEMPORAL'
-                   and binding.graph_key = 'intake.v2'
+                   and binding.graph_key = :expectedGraphKey
                    and binding.graph_version = :graphVersion
                    and binding.checkpoint_schema_version = :checkpointSchemaVersion
                    and binding.prompt_version = :promptVersion
@@ -474,6 +613,9 @@ public final class JdbcIntakeFormalBranchCommitPort implements IntakeFormalBranc
                    and epoch.lifecycle_status = 'ACTIVE'
                    and epoch.provisioning_status = 'READY'
                    and epoch.selection_schema_version = 'room-epoch-selection.v2'
+                   and epoch.graph_key = binding.graph_key
+                   and epoch.graph_version = binding.graph_version
+                   and epoch.checkpoint_schema_version = binding.checkpoint_schema_version
                    and epoch.process_revision = :expectedProcessRevision
                    and epoch.room_revision = :expectedRoomRevision
                    and projection.tenant_surrogate = :tenantSurrogate
@@ -519,6 +661,7 @@ public final class JdbcIntakeFormalBranchCommitPort implements IntakeFormalBranc
                     "active TEMPORAL Intake authority, epoch, fence, or revisions are stale");
         }
         AuthorityRows authority = rows.getFirst();
+        requireTargetEpochGraphBinding(request);
         if (rows.stream().anyMatch(candidate -> !candidate.equals(authority))) {
             throw rejected(
                     "INTAKE_BRANCH_AMBIGUOUS_AUTHORITY",
@@ -584,6 +727,38 @@ public final class JdbcIntakeFormalBranchCommitPort implements IntakeFormalBranc
                             "initiator decision requires both parties to be incomplete");
                 }
             }
+        }
+    }
+
+    private void requireTargetEpochGraphBinding(BranchCommitRequest request) {
+        if (!TARGET_GRAPH_KEY.equals(expectedGraphKey)) {
+            return;
+        }
+        Integer matches = jdbc.queryForObject(
+                """
+                select count(*)
+                  from target_e2e_room_epoch_binding target_binding
+                  join target_e2e_activation activation
+                    on activation.activation_id = target_binding.activation_id
+                   and activation.manifest_hash = target_binding.activation_manifest_hash
+                   and activation.execution_lane = target_binding.execution_lane
+                   and activation.isolated_domain_db_binding_hash =
+                       target_binding.isolated_domain_db_binding_hash
+                 where target_binding.tenant_surrogate = :tenantSurrogate
+                   and target_binding.case_id = :caseId
+                   and target_binding.room_type = 'INTAKE'
+                   and target_binding.room_epoch = :roomEpoch
+                   and target_binding.room_fencing_token = :fencingToken
+                   and activation.execution_lane = 'TARGET_E2E_CANDIDATE'
+                   and activation.graph_key = :expectedGraphKey
+                   and activation.lifecycle_status in ('ACTIVE', 'DRAIN_ONLY')
+                """,
+                parameters(request),
+                Integer.class);
+        if (matches == null || matches != 1) {
+            throw rejected(
+                    "INTAKE_BRANCH_TARGET_GRAPH_BINDING_STALE",
+                    "target Intake epoch does not bind the exact registered graph key");
         }
     }
 
@@ -992,6 +1167,7 @@ public final class JdbcIntakeFormalBranchCommitPort implements IntakeFormalBranc
                 .addValue("expectedRoomRevision", envelope.roomRevision())
                 .addValue("requestHash", request.requestHash())
                 .addValue("operationKey", request.operationKey())
+                .addValue("expectedGraphKey", expectedGraphKey)
                 .addValue("graphVersion", versions.graphVersion())
                 .addValue("checkpointSchemaVersion", versions.checkpointSchemaVersion())
                 .addValue("promptVersion", versions.promptVersion())

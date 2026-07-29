@@ -35,8 +35,19 @@ import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.Activat
 import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.TerminateRoomEpoch;
 import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.TransitionRoomEpoch;
 import com.example.dispute.workflow.application.intake.LegacyIntakeWriterGuard;
+import com.example.dispute.workflow.application.authority.epoch.EpochPartyAuthority.Party;
+import com.example.dispute.workflow.application.authority.payload.IntakeBranchCommand;
 import com.example.dispute.workflow.contract.v1.ContractTypes;
+import com.example.dispute.workflow.targete2e.ingress.IntakeIngressSelection;
+import com.example.dispute.workflow.targete2e.ingress.branch.EpochAwareIntakeBranchIngressRouter;
+import com.example.dispute.workflow.targete2e.ingress.branch.TargetIntakeBranchRequest;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.time.Instant;
+import java.util.HexFormat;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -64,6 +75,7 @@ public class IntakeRoomService {
     private final Clock clock;
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final IntakeBranchDomainService branchDomainService;
+    private final EpochAwareIntakeBranchIngressRouter targetBranchIngressRouter;
 
     // 所属模块：【房间协作与权限 / 应用编排层】「IntakeRoomService.IntakeRoomService(FulfillmentCaseRepository,CaseRoomRepository,CasePhaseClockRepository,CaseIntakeDossierRepository,ParticipantService,NotificationService,CaseLifecycleNotificationService,EvidenceWindowCoordinator,CaseEventService,DisputeProperties,Clock)」。
     // 具体功能：「IntakeRoomService.IntakeRoomService(FulfillmentCaseRepository,CaseRoomRepository,CasePhaseClockRepository,CaseIntakeDossierRepository,ParticipantService,NotificationService,CaseLifecycleNotificationService,EvidenceWindowCoordinator,CaseEventService,DisputeProperties,Clock)」：通过构造器接收 「caseRepository」(FulfillmentCaseRepository)、「roomRepository」(CaseRoomRepository)、「phaseClockRepository」(CasePhaseClockRepository)、「intakeDossierRepository」(CaseIntakeDossierRepository)、「participantService」(ParticipantService)、「notificationService」(NotificationService)、「lifecycleNotifications」(CaseLifecycleNotificationService)、「evidenceWindowCoordinator」(EvidenceWindowCoordinator)、「caseEventService」(CaseEventService)、「disputeProperties」(DisputeProperties)、「clock」(Clock) 并保存为「IntakeRoomService」的协作依赖；这里只完成依赖装配，不提前访问数据库或外部服务。
@@ -86,6 +98,41 @@ public class IntakeRoomService {
             LegacyIntakeWriterGuard legacyIntakeWriterGuard,
             DisputeProperties disputeProperties,
             Clock clock) {
+        this(
+                caseRepository,
+                roomRepository,
+                phaseClockRepository,
+                intakeDossierRepository,
+                intakeProgressService,
+                participantService,
+                notificationService,
+                lifecycleNotifications,
+                evidenceWindowCoordinator,
+                caseEventService,
+                roomEpochAllocator,
+                legacyIntakeWriterGuard,
+                disputeProperties,
+                clock,
+                null);
+    }
+
+    @Autowired
+    public IntakeRoomService(
+            FulfillmentCaseRepository caseRepository,
+            CaseRoomRepository roomRepository,
+            CasePhaseClockRepository phaseClockRepository,
+            CaseIntakeDossierRepository intakeDossierRepository,
+            IntakeProgressService intakeProgressService,
+            ParticipantService participantService,
+            NotificationService notificationService,
+            CaseLifecycleNotificationService lifecycleNotifications,
+            EvidenceWindowCoordinator evidenceWindowCoordinator,
+            CaseEventService caseEventService,
+            RoomEpochAllocator roomEpochAllocator,
+            LegacyIntakeWriterGuard legacyIntakeWriterGuard,
+            DisputeProperties disputeProperties,
+            Clock clock,
+            EpochAwareIntakeBranchIngressRouter targetBranchIngressRouter) {
         this.caseRepository = caseRepository;
         this.roomRepository = roomRepository;
         this.phaseClockRepository = phaseClockRepository;
@@ -100,6 +147,7 @@ public class IntakeRoomService {
         this.legacyIntakeWriterGuard = legacyIntakeWriterGuard;
         this.disputeProperties = disputeProperties;
         this.clock = clock;
+        this.targetBranchIngressRouter = targetBranchIngressRouter;
         this.branchDomainService =
                 new IntakeBranchDomainService(
                         caseRepository,
@@ -127,6 +175,21 @@ public class IntakeRoomService {
             String caseId,
             AuthenticatedActor actor,
             IntakeConfirmationCommand command) {
+        return confirm(
+                caseId,
+                actor,
+                command,
+                "legacy-intake-confirm:" + UUID.randomUUID(),
+                "legacy-intake-confirm");
+    }
+
+    @Transactional
+    public IntakeConfirmationView confirm(
+            String caseId,
+            AuthenticatedActor actor,
+            IntakeConfirmationCommand command,
+            String idempotencyKey,
+            String traceId) {
         FulfillmentCaseEntity dispute =
                 caseRepository
                         .findByIdForUpdate(caseId)
@@ -136,9 +199,12 @@ public class IntakeRoomService {
                                                 ErrorCode.CASE_NOT_FOUND,
                                                 "case not found",
                                                 Map.of("case_id", caseId)));
-        legacyIntakeWriterGuard.assertLegacyWriteAllowed(caseId);
         OffsetDateTime now = OffsetDateTime.now(clock);
         ActorRole confirmationRole = confirmationRole(dispute, actor);
+        IntakeIngressSelection targetRoute = selectTargetBranchRoute(caseId);
+        if (!targetRoute.isTarget()) {
+            legacyIntakeWriterGuard.assertLegacyWriteAllowed(caseId);
+        }
         if (confirmationRole != dispute.getInitiatorRole() && !command.admissible()) {
             throw new BadRequestException(
                     "respondent cannot change the intake admissibility decision",
@@ -149,6 +215,17 @@ public class IntakeRoomService {
             return completedReplay(dispute);
         }
         assertIntakeActionAllowed(dispute);
+        if (targetRoute.isTarget()) {
+            dispatchTargetConfirmation(
+                    targetRoute,
+                    dispute,
+                    actor,
+                    confirmationRole,
+                    command,
+                    idempotencyKey,
+                    traceId);
+            return completedReplay(dispute);
+        }
         CaseRoomEntity intakeRoom =
                 roomRepository
                         .findByCaseIdAndRoomType(caseId, RoomType.INTAKE)
@@ -237,6 +314,21 @@ public class IntakeRoomService {
             String caseId,
             AuthenticatedActor actor,
             String reason) {
+        return cancel(
+                caseId,
+                actor,
+                reason,
+                "legacy-intake-cancel:" + UUID.randomUUID(),
+                "legacy-intake-cancel");
+    }
+
+    @Transactional
+    public IntakeConfirmationView cancel(
+            String caseId,
+            AuthenticatedActor actor,
+            String reason,
+            String idempotencyKey,
+            String traceId) {
         FulfillmentCaseEntity dispute =
                 caseRepository
                         .findByIdForUpdate(caseId)
@@ -246,11 +338,19 @@ public class IntakeRoomService {
                                                 ErrorCode.CASE_NOT_FOUND,
                                                 "case not found",
                                                 Map.of("case_id", caseId)));
-        legacyIntakeWriterGuard.assertLegacyWriteAllowed(caseId);
-        if (confirmationRole(dispute, actor) != dispute.getInitiatorRole()) {
+        ActorRole confirmationRole = confirmationRole(dispute, actor);
+        IntakeIngressSelection targetRoute = selectTargetBranchRoute(caseId);
+        if (!targetRoute.isTarget()) {
+            legacyIntakeWriterGuard.assertLegacyWriteAllowed(caseId);
+        }
+        if (confirmationRole != dispute.getInitiatorRole()) {
             throw new ForbiddenException("only the intake initiator can cancel the dispute");
         }
         assertIntakeActionAllowed(dispute);
+        if (targetRoute.isTarget()) {
+            dispatchTargetCancellation(targetRoute, dispute, actor, idempotencyKey, traceId, reason);
+            return completedReplay(dispute);
+        }
         OffsetDateTime now = OffsetDateTime.now(clock);
         CaseRoomEntity intakeRoom =
                 roomRepository
@@ -279,6 +379,116 @@ public class IntakeRoomService {
                         .view();
         terminateIntakeEpoch(dispute, now);
         return result;
+    }
+
+    private IntakeIngressSelection selectTargetBranchRoute(String caseId) {
+        if (targetBranchIngressRouter == null) {
+            return IntakeIngressSelection.legacy();
+        }
+        return targetBranchIngressRouter.select(caseId);
+    }
+
+    private void dispatchTargetConfirmation(
+            IntakeIngressSelection route,
+            FulfillmentCaseEntity dispute,
+            AuthenticatedActor actor,
+            ActorRole confirmationRole,
+            IntakeConfirmationCommand command,
+            String idempotencyKey,
+            String traceId) {
+        Party party =
+                confirmationRole == dispute.getInitiatorRole() ? Party.INITIATOR : Party.RESPONDENT;
+        IntakeBranchCommand.Operation operation =
+                party == Party.RESPONDENT
+                        ? IntakeBranchCommand.Operation.RESPONDENT_CONFIRM
+                        : command.admissible()
+                                ? IntakeBranchCommand.Operation.INITIATOR_ACCEPT
+                                : IntakeBranchCommand.Operation.INITIATOR_REJECT;
+        IntakeBranchCommand branch =
+                new IntakeBranchCommand(
+                        IntakeBranchCommand.SCHEMA_VERSION,
+                        commandId(dispute.getId(), idempotencyKey, operation.name(), actor.actorId()),
+                        ContractTypes.CommandType.INTAKE_CONFIRM,
+                        party,
+                        operation,
+                        command.admissible(),
+                        command.disputeType(),
+                        ContractTypes.RiskLevel.valueOf(command.riskLevel().name()),
+                        command.confirmationNote(),
+                        null);
+        targetBranchIngressRouter.dispatchTarget(
+                route,
+                new TargetIntakeBranchRequest(
+                        dispute.getId(),
+                        actor,
+                        branch,
+                        idempotencyKey,
+                        traceId,
+                        Instant.now(clock),
+                        route.targetGrant()));
+    }
+
+    private void dispatchTargetCancellation(
+            IntakeIngressSelection route,
+            FulfillmentCaseEntity dispute,
+            AuthenticatedActor actor,
+            String idempotencyKey,
+            String traceId,
+            String reason) {
+        IntakeBranchCommand branch =
+                new IntakeBranchCommand(
+                        IntakeBranchCommand.SCHEMA_VERSION,
+                        commandId(
+                                dispute.getId(),
+                                idempotencyKey,
+                                IntakeBranchCommand.Operation.CANCEL.name(),
+                                actor.actorId()),
+                        ContractTypes.CommandType.INTAKE_CANCEL,
+                        Party.INITIATOR,
+                        IntakeBranchCommand.Operation.CANCEL,
+                        null,
+                        null,
+                        null,
+                        null,
+                        reason == null ? "" : reason);
+        targetBranchIngressRouter.dispatchTarget(
+                route,
+                new TargetIntakeBranchRequest(
+                        dispute.getId(),
+                        actor,
+                        branch,
+                        idempotencyKey,
+                        traceId,
+                        Instant.now(clock),
+                        route.targetGrant()));
+    }
+
+    private static String commandId(
+            String caseId, String idempotencyKey, String operation, String actorId) {
+        if (idempotencyKey == null || idempotencyKey.isBlank() || idempotencyKey.length() > 256) {
+            throw new IllegalArgumentException("idempotency key is invalid");
+        }
+        if (operation == null || operation.isBlank() || actorId == null || actorId.isBlank()) {
+            throw new IllegalArgumentException("target Intake branch command identity is invalid");
+        }
+        try {
+            String digest =
+                    HexFormat.of()
+                            .formatHex(
+                                    MessageDigest.getInstance("SHA-256")
+                                            .digest(
+                                                    (caseId
+                                                                    + "\\n"
+                                                                    + operation
+                                                                    + "\\n"
+                                                                    + actorId
+                                                                    + "\\n"
+                                                                    + idempotencyKey)
+                                                            .getBytes(StandardCharsets.UTF_8)));
+            return "intake-branch:" + digest.substring(0, 48);
+        } catch (NoSuchAlgorithmException failure) {
+            throw new IllegalStateException("SHA-256 is unavailable", failure);
+        }
     }
 
     private void assertCompletedReplayState(

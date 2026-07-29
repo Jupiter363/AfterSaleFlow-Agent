@@ -353,9 +353,9 @@ describe("IntakeRoomView", () => {
     actor.id = "merchant-local";
     actor.role = "MERCHANT";
     const confirmAction = vi.fn().mockResolvedValue({
-      case_status: "EVIDENCE_OPEN",
-      current_room: "EVIDENCE",
-      deadline_at: "2026-07-15T02:00:00Z",
+      case_status: "INTAKE_COMPLETED",
+      current_room: "INTAKE",
+      deadline_at: null,
     });
     const bilateralMemory = structuredClone(readyTurnMemory);
     bilateralMemory.case_intake_dossier.dossier.case_fact_matrix = {
@@ -504,6 +504,17 @@ describe("IntakeRoomView", () => {
         can_enter_evidence: false,
       },
       confirmAction,
+      intakeStatusLoader: vi.fn().mockResolvedValue({
+        initiator_role: "USER",
+        respondent_role: "MERCHANT",
+        initiator_status: "COMPLETED",
+        respondent_status: "LOCKED",
+        current_actor_completed: true,
+        can_use_intake: false,
+        can_enter_evidence: false,
+      }),
+      evidenceReadyPollAttempts: 1,
+      evidenceReadyPollDelayMs: 0,
       eventStreamer: vi.fn(async () => {}),
     });
 

@@ -32,6 +32,16 @@ class TargetE2eApiConfigurationAssemblyTest {
         .contains("new IntakePrivateObjectStoreExchangeAdapter(payloadReader, proposalStore)");
   }
 
+  @Test
+  void intakeMaterializationAssemblyActivatesOnlyTheAuthenticatedParty() throws IOException {
+    String source = Files.readString(CONFIGURATION_SOURCE);
+    String materializer = method(source, "targetIntakeMaterializer");
+
+    assertThat(materializer)
+        .contains("ParticipantService participants")
+        .contains("accessSessions, agentSessions, participants");
+  }
+
   private static String method(String source, String methodName) {
     int start = source.indexOf(methodName);
     int end = source.indexOf("\n  @Bean", start + methodName.length());

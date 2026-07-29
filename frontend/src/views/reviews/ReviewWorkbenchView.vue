@@ -20,6 +20,7 @@ import { evidenceApi } from "../../api/evidence";
 import {
   ACTIVE_REVIEW_STATUSES,
   normalizeReviewPacket as normalizeReviewApiPacket,
+  normalizeReviewTask,
   reviewApi,
 } from "../../api/review";
 import DigitalHuman from "../../components/avatar/DigitalHuman.vue";
@@ -1111,6 +1112,25 @@ const clockTimer = setInterval(() => {
   clockNow.value = Date.now();
 }, 1000);
 
+function applyTaskAccess(task) {
+  taskOpen.value = Boolean(
+    task && ACTIVE_REVIEW_STATUSES.includes(task.status),
+  );
+  taskStatus.value = task?.status || "";
+  taskAssignedReviewerId.value = task?.assigned_reviewer_id || "";
+}
+
+function shouldStartTask(task) {
+  const reviewerRole = props.viewerRole || actor.role;
+  return (
+    !historyMode.value &&
+    reviewerRole === "PLATFORM_REVIEWER" &&
+    Boolean(actor.id) &&
+    task?.status === "PENDING" &&
+    !task.assigned_reviewer_id
+  );
+}
+
 async function loadTaskAccess() {
   taskLookupError.value = "";
   try {
@@ -1118,16 +1138,13 @@ async function loadTaskAccess() {
     const groups = await Promise.all(
       statuses.map((status) => reviewApi.list(actor, status)),
     );
-    const task = groups.flat().find((item) => item.id === reviewId.value);
-    taskOpen.value = Boolean(
-      task && ACTIVE_REVIEW_STATUSES.includes(task.status),
-    );
-    taskStatus.value = task?.status || "";
-    taskAssignedReviewerId.value = task?.assigned_reviewer_id || "";
+    let task = groups.flat().find((item) => item.id === reviewId.value);
+    if (shouldStartTask(task)) {
+      task = normalizeReviewTask(await reviewApi.start(actor, reviewId.value));
+    }
+    applyTaskAccess(task);
   } catch (failure) {
-    taskOpen.value = false;
-    taskStatus.value = "";
-    taskAssignedReviewerId.value = "";
+    applyTaskAccess(null);
     taskLookupError.value = failure?.message || "审核任务状态查询失败";
   } finally {
     taskStateKnown.value = true;

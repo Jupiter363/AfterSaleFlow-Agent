@@ -4,10 +4,13 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.dispute.agentstream.application.AgentRunV2StreamStore;
+import com.example.dispute.workflow.application.intake.IntakeContractHashes;
+import com.example.dispute.workflow.application.intake.IntakePrivateThreadRegistration;
 import com.example.dispute.workflow.contract.v1.AgentStreamEvent;
 import com.example.dispute.workflow.contract.v1.ContractTypes.StreamEventType;
 import com.example.dispute.workflow.targete2e.artifact.finalization.TargetE2eGraphOutputSnapshotMaterializer;
 import java.time.Instant;
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.BeforeEach;
@@ -32,6 +35,25 @@ class TargetE2eGraphOutputSnapshotMaterializerTest {
         jdbc.execute("create table agent_run (id varchar(128) primary key)");
         jdbc.update("insert into agent_run (id) values (?)", fixture.request().agentRunId());
         jdbc.execute("""
+                create table case_intake_graph_thread_binding (
+                    registration_id varchar(128) primary key,
+                    tenant_surrogate varchar(128) not null,
+                    case_id varchar(64) not null,
+                    room_type varchar(32) not null,
+                    room_epoch bigint not null,
+                    thread_id varchar(128) not null,
+                    actor_id varchar(128) not null,
+                    actor_role varchar(32) not null,
+                    audience varchar(32) not null,
+                    actor_scope_hash varchar(64) not null,
+                    graph_key varchar(128) not null,
+                    graph_version varchar(128) not null,
+                    checkpoint_schema_version varchar(128) not null,
+                    registration_status varchar(24) not null,
+                    registered_at timestamp with time zone
+                )
+                """);
+        jdbc.execute("""
                 create table immutable_payload_snapshot (
                     id varchar(64) primary key,
                     tenant_surrogate varchar(128) not null,
@@ -46,6 +68,7 @@ class TargetE2eGraphOutputSnapshotMaterializerTest {
                     unique (tenant_surrogate, source_type, source_id)
                 )
                 """);
+        insertBinding("PENDING");
     }
 
     @Test
@@ -71,9 +94,14 @@ class TargetE2eGraphOutputSnapshotMaterializerTest {
         assertThat(jdbc.queryForObject(
                         "select content_sha256 from immutable_payload_snapshot", String.class))
                 .isEqualTo(fixture.result().resultHash());
+        assertThat(registrationStatus()).isEqualTo("REGISTERED");
+        OffsetDateTime registeredAt = registeredAt();
+        assertThat(registeredAt).isNotNull();
 
         materializer.materializeThen(fixture.request(), fixture.result(), () -> "replayed");
         assertThat(countSnapshots()).isEqualTo(1);
+        assertThat(registrationStatus()).isEqualTo("REGISTERED");
+        assertThat(registeredAt()).isEqualTo(registeredAt);
     }
 
     @Test
@@ -88,6 +116,23 @@ class TargetE2eGraphOutputSnapshotMaterializerTest {
                 .materializeThen(fixture.request(), fixture.result(), () -> "drift"))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("conflicts with replay");
+    }
+
+    @Test
+    void rejectsFailedOrRetiredBindingsAndRollsBackTheOutputSnapshot() {
+        jdbc.update(
+                "update case_intake_graph_thread_binding set registration_status = 'FAILED' where registration_id = ?",
+                registrationId());
+
+        assertThatThrownBy(() -> materializer(
+                        "urn:target-e2e:result:" + fixture.result().resultHash(),
+                        fixture.result().resultHash())
+                .materializeThen(fixture.request(), fixture.result(), () -> "unexpected"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("not pending for final registration");
+
+        assertThat(countSnapshots()).isZero();
+        assertThat(registrationStatus()).isEqualTo("FAILED");
     }
 
     private TargetE2eGraphOutputSnapshotMaterializer materializer(
@@ -127,5 +172,53 @@ class TargetE2eGraphOutputSnapshotMaterializerTest {
 
     private long countSnapshots() {
         return jdbc.queryForObject("select count(*) from immutable_payload_snapshot", Long.class);
+    }
+
+    private void insertBinding(String status) {
+        var command = fixture.request().command();
+        var scope = new IntakePrivateThreadRegistration.ActorScope(
+                command.actorScope().actorId(),
+                command.actorScope().actorRole(),
+                command.actorScope().audience(),
+                command.actorScope().capabilities());
+        jdbc.update("""
+                insert into case_intake_graph_thread_binding (
+                    registration_id, tenant_surrogate, case_id, room_type, room_epoch,
+                    thread_id, actor_id, actor_role, audience, actor_scope_hash,
+                    graph_key, graph_version, checkpoint_schema_version,
+                    registration_status, registered_at
+                ) values (?, ?, ?, 'INTAKE', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, null)
+                """,
+                registrationId(),
+                command.tenantSurrogate(),
+                command.caseId(),
+                command.roomEpoch(),
+                command.threadId(),
+                command.actorScope().actorId(),
+                command.actorScope().actorRole().name(),
+                command.actorScope().audience().name(),
+                IntakeContractHashes.actorScopeHash(scope),
+                command.graphKey(),
+                command.graphVersion(),
+                command.checkpointSchemaVersion(),
+                status);
+    }
+
+    private String registrationId() {
+        return "target-registration-" + fixture.request().command().threadId();
+    }
+
+    private String registrationStatus() {
+        return jdbc.queryForObject(
+                "select registration_status from case_intake_graph_thread_binding where registration_id = ?",
+                String.class,
+                registrationId());
+    }
+
+    private OffsetDateTime registeredAt() {
+        return jdbc.queryForObject(
+                "select registered_at from case_intake_graph_thread_binding where registration_id = ?",
+                OffsetDateTime.class,
+                registrationId());
     }
 }

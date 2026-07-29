@@ -2,13 +2,29 @@ package com.example.dispute.workflow.targete2e.artifact;
 
 import com.example.dispute.workflow.config.TemporalWorkerProperties;
 import com.example.dispute.config.AppProperties;
+import com.example.dispute.config.DisputeProperties;
 import com.example.dispute.agentstream.application.AgentRunCommandBindingFactory;
 import com.example.dispute.agentstream.application.AgentRunLedger;
+import com.example.dispute.evidence.application.EvidenceDossierFreezer;
 import com.example.dispute.hearing.application.finalization.HearingFormalReceiptService;
 import com.example.dispute.hearing.domain.HearingAuthorityLedger;
 import com.example.dispute.hearing.infrastructure.persistence.JdbcHearingAuthorityLedger;
 import com.example.dispute.hearing.infrastructure.persistence.JdbcHearingFormalFinalizer;
+import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
+import com.example.dispute.room.application.CaseEventService;
+import com.example.dispute.room.application.IntakeBranchDomainService;
+import com.example.dispute.room.application.IntakeProgressService;
+import com.example.dispute.room.application.ParticipantService;
+import com.example.dispute.room.infrastructure.persistence.JdbcIntakeFormalBranchCommitPort;
+import com.example.dispute.room.infrastructure.persistence.repository.CaseIntakeDossierRepository;
+import com.example.dispute.room.infrastructure.persistence.repository.CasePhaseClockRepository;
+import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
+import com.example.dispute.notification.application.CaseLifecycleNotificationService;
+import com.example.dispute.notification.application.NotificationService;
+import com.example.dispute.workflow.application.EvidenceWindowCoordinator;
 import com.example.dispute.workflow.application.epoch.RoomEpochAllocator;
+import com.example.dispute.workflow.application.intake.IntakeFormalBranchCommandResolver;
+import com.example.dispute.workflow.application.intake.IntakeFormalBranchCommitPort;
 import com.example.dispute.workflow.targete2e.persistence.TargetE2EActivationLedger;
 import com.example.dispute.workflow.targete2e.persistence.material.JdbcTargetIntakeCommandMaterialStore;
 import com.example.dispute.workflow.targete2e.persistence.material.TargetIntakeCommandMaterialStore;
@@ -16,10 +32,15 @@ import com.example.dispute.workflow.targete2e.temporal.TargetTemporalWorkerRegis
 import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomCaseProcessDispatcher;
 import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
 import com.example.dispute.workflow.targete2e.temporal.intake.TargetIntakeCommandBridgeActivity;
+import com.example.dispute.workflow.targete2e.temporal.intake.JdbcTargetIntakeBranchContextSource;
+import com.example.dispute.workflow.targete2e.temporal.intake.TargetIntakeBranchContextSource;
+import com.example.dispute.workflow.targete2e.rooms.intake.TargetE2eIntakeFormalBranchCommandResolver;
+import com.example.dispute.workflow.targete2e.rooms.intake.TargetE2eIntakeRoomActivities;
 import com.example.dispute.workflow.targete2e.temporal.intake.finalizationread.JdbcTargetIntakeAgentRunFinalizationReceiptReadPort;
 import com.example.dispute.workflow.temporal.room.intake.IntakeAgentRunFinalizationReadActivities;
 import com.example.dispute.workflow.temporal.room.intake.IntakeAgentRunFinalizationReadActivitiesAdapter;
 import com.example.dispute.workflow.temporal.room.intake.IntakeAgentRunFinalizationReceiptReadPort;
+import com.example.dispute.workflow.temporal.room.intake.IntakeRoomActivities;
 import com.example.dispute.workflow.targete2e.rooms.evidence.JdbcTargetEvidenceCommandMaterialStore;
 import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceCommandBridgeActivities;
 import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceCommandBridgeActivity;
@@ -30,7 +51,6 @@ import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceParti
 import com.example.dispute.workflow.targete2e.rooms.evidence.JdbcTargetEvidenceParticipantBindingActivities;
 import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidencePartyCompletionActivities;
 import com.example.dispute.workflow.targete2e.rooms.evidence.JdbcTargetEvidencePartyCompletionActivities;
-import com.example.dispute.evidence.application.EvidenceDossierFreezer;
 import com.example.dispute.workflow.targete2e.rooms.hearing.JdbcTargetHearingCommandMaterialStore;
 import com.example.dispute.workflow.targete2e.rooms.hearing.TargetHearingCommandBridgeActivities;
 import com.example.dispute.workflow.targete2e.rooms.hearing.TargetHearingCommandBridgeActivitiesImpl;
@@ -144,9 +164,91 @@ public class TargetE2eControlConfiguration {
   }
 
   @Bean
+  TargetIntakeBranchContextSource targetIntakeBranchContextSource(
+      MinioClient minioClient, ObjectMapper objectMapper, DataSource dataSource) {
+    return new JdbcTargetIntakeBranchContextSource(
+        minioClient,
+        objectMapper,
+        dataSource,
+        TargetE2eIntakeFormalBranchCommandResolver.TARGET_INTAKE_BUCKET,
+        TargetE2eIntakeFormalBranchCommandResolver.TARGET_INTAKE_PREFIX);
+  }
+
+  @Bean
   TargetIntakeCommandBridgeActivity targetIntakeCommandBridgeActivity(
-      TargetIntakeCommandMaterialStore targetIntakeCommandMaterialStore, ObjectMapper objectMapper) {
-    return new TargetIntakeCommandBridgeActivity(targetIntakeCommandMaterialStore, objectMapper);
+      TargetIntakeCommandMaterialStore targetIntakeCommandMaterialStore,
+      ObjectMapper objectMapper,
+      TargetIntakeBranchContextSource targetIntakeBranchContextSource) {
+    return new TargetIntakeCommandBridgeActivity(
+        targetIntakeCommandMaterialStore, objectMapper, targetIntakeBranchContextSource);
+  }
+
+  @Bean
+  IntakeFormalBranchCommandResolver targetE2eIntakeFormalBranchCommandResolver(
+      MinioClient minioClient, ObjectMapper objectMapper) {
+    return new TargetE2eIntakeFormalBranchCommandResolver(
+        minioClient,
+        objectMapper,
+        TargetE2eIntakeFormalBranchCommandResolver.TARGET_INTAKE_BUCKET,
+        TargetE2eIntakeFormalBranchCommandResolver.TARGET_INTAKE_PREFIX);
+  }
+
+  @Bean
+  IntakeBranchDomainService targetE2eIntakeBranchDomainService(
+      FulfillmentCaseRepository caseRepository,
+      CaseRoomRepository roomRepository,
+      CasePhaseClockRepository phaseClockRepository,
+      CaseIntakeDossierRepository intakeDossierRepository,
+      IntakeProgressService intakeProgressService,
+      ParticipantService participantService,
+      NotificationService notificationService,
+      CaseLifecycleNotificationService lifecycleNotifications,
+      EvidenceWindowCoordinator evidenceWindowCoordinator,
+      CaseEventService caseEventService,
+      DisputeProperties disputeProperties,
+      ObjectMapper objectMapper) {
+    return new IntakeBranchDomainService(
+        caseRepository,
+        roomRepository,
+        phaseClockRepository,
+        intakeDossierRepository,
+        intakeProgressService,
+        participantService,
+        notificationService,
+        lifecycleNotifications,
+        evidenceWindowCoordinator,
+        caseEventService,
+        disputeProperties,
+        objectMapper);
+  }
+
+  @Bean
+  IntakeFormalBranchCommitPort targetE2eIntakeFormalBranchCommitPort(
+      DataSource dataSource,
+      PlatformTransactionManager transactionManager,
+      FulfillmentCaseRepository caseRepository,
+      CaseRoomRepository roomRepository,
+      IntakeBranchDomainService targetE2eIntakeBranchDomainService,
+      IntakeFormalBranchCommandResolver targetE2eIntakeFormalBranchCommandResolver,
+      RoomEpochAllocator roomEpochAllocator,
+      ObjectMapper objectMapper) {
+    return new JdbcIntakeFormalBranchCommitPort(
+        new NamedParameterJdbcTemplate(dataSource),
+        transactionManager,
+        caseRepository,
+        roomRepository,
+        targetE2eIntakeBranchDomainService,
+        targetE2eIntakeFormalBranchCommandResolver,
+        roomEpochAllocator,
+        "all-rooms.target-e2e.v1",
+        objectMapper,
+        Clock.systemUTC());
+  }
+
+  @Bean
+  IntakeRoomActivities targetE2eIntakeRoomActivities(
+      IntakeFormalBranchCommitPort targetE2eIntakeFormalBranchCommitPort) {
+    return new TargetE2eIntakeRoomActivities(targetE2eIntakeFormalBranchCommitPort);
   }
 
   @Bean
@@ -348,6 +450,7 @@ public class TargetE2eControlConfiguration {
       Environment environment,
       TemporalWorkerProperties workerProperties,
       TargetIntakeCommandBridgeActivity targetIntakeCommandBridgeActivity,
+      IntakeRoomActivities targetE2eIntakeRoomActivities,
       IntakeAgentRunFinalizationReadActivities targetIntakeAgentRunFinalizationReadActivities,
       TargetEvidenceCommandBridgeActivities targetEvidenceCommandBridgeActivity,
       TargetEvidenceParticipantBindingActivities targetEvidenceParticipantBindingActivities,
@@ -371,6 +474,7 @@ public class TargetE2eControlConfiguration {
             TargetTypedRoomProtocol.additionalWorkflowImplementations(),
             List.of(
                 targetIntakeCommandBridgeActivity,
+                targetE2eIntakeRoomActivities,
                 targetIntakeAgentRunFinalizationReadActivities,
                 targetEvidenceCommandBridgeActivity,
                 targetEvidenceParticipantBindingActivities,

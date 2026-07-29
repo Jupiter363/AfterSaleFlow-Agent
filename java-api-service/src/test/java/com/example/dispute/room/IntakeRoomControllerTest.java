@@ -8,6 +8,7 @@ package com.example.dispute.room;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -134,7 +135,7 @@ class IntakeRoomControllerTest {
     // 系统意义：「IntakeRoomControllerTest.confirmsAdmissionWithoutLegacyConfirmationNoteInput()」守住「房间协作与权限」的可执行规格，尤其防止 「CASE_test」、「2026-07-06T02:00:00Z」、「merchant-local」、「MERCHANT」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void confirmsAdmissionWithoutLegacyConfirmationNoteInput() throws Exception {
-        when(service.confirm(eq("CASE_test"), any(), any()))
+        when(service.confirm(eq("CASE_test"), any(), any(), anyString(), anyString()))
                 .thenReturn(
                         new IntakeConfirmationView(
                                 "CASE_test",
@@ -161,7 +162,7 @@ class IntakeRoomControllerTest {
 
         ArgumentCaptor<IntakeConfirmationCommand> command =
                 ArgumentCaptor.forClass(IntakeConfirmationCommand.class);
-        verify(service).confirm(eq("CASE_test"), any(), command.capture());
+        verify(service).confirm(eq("CASE_test"), any(), command.capture(), anyString(), anyString());
         assertThat(command.getValue().confirmationNote()).isNull();
     }
 }

@@ -15,6 +15,7 @@ import com.example.dispute.room.domain.PermissionLevel;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseAccessSessionEntity;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseAccessSessionRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseParticipantRepository;
+import java.util.Objects;
 import java.util.Optional;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -66,9 +67,26 @@ public class AccessSessionResolver {
                         .orElseThrow(() -> new IllegalArgumentException("case not found"));
         PermissionLevel permissionLevel = permissionLevelFor(dispute, actor);
         return find(dispute.getId(), actor, permissionLevel)
+                .orElseGet(() -> initialize(dispute.getId(), actor, permissionLevel));
+    }
+
+    /**
+     * Resolves a case access session in an explicit tenant scope. Target-runtime callers must use
+     * their activation tenant so downstream agent sessions and graph bindings share one scope.
+     */
+    @Transactional
+    public CaseAccessSessionEntity resolve(
+            String tenantId, String caseId, AuthenticatedActor actor) {
+        requireTenantId(tenantId);
+        FulfillmentCaseEntity dispute =
+                caseRepository
+                        .findById(caseId)
+                        .orElseThrow(() -> new IllegalArgumentException("case not found"));
+        PermissionLevel permissionLevel = permissionLevelFor(dispute, actor);
+        return find(tenantId, dispute.getId(), actor, permissionLevel)
                 .orElseGet(
                         () ->
-                                initialize(dispute.getId(), actor, permissionLevel));
+                                initialize(tenantId, dispute.getId(), actor, permissionLevel));
     }
 
     // 所属模块：【房间协作与权限 / 应用编排层】「AccessSessionResolver.initialize(String,AuthenticatedActor,PermissionLevel)」。
@@ -86,6 +104,16 @@ public class AccessSessionResolver {
                 caseId, actor, permissionLevel);
     }
 
+    private CaseAccessSessionEntity initialize(
+            String tenantId, String caseId, AuthenticatedActor actor, PermissionLevel permissionLevel) {
+        if (TransactionSynchronizationManager.isCurrentTransactionReadOnly()) {
+            return accessSessionInitializer.initializeInNewTransaction(
+                    tenantId, caseId, actor, permissionLevel);
+        }
+        return accessSessionInitializer.initializeInCurrentTransaction(
+                tenantId, caseId, actor, permissionLevel);
+    }
+
     // 所属模块：【房间协作与权限 / 应用编排层】「AccessSessionResolver.find(String,AuthenticatedActor,PermissionLevel)」。
     // 具体功能：「AccessSessionResolver.find(String,AuthenticatedActor,PermissionLevel)」：查找可选；实际协作者为 「findByTenantIdAndCaseIdAndActorIdAndActorRoleAndPermissionLevel」、「actor.actorId」、「actor.role」，最终返回「Optional<CaseAccessSessionEntity>」。
     // 上游调用：「AccessSessionResolver.find(String,AuthenticatedActor,PermissionLevel)」的上游调用点包括 「AccessSessionResolver.resolve」。
@@ -94,13 +122,24 @@ public class AccessSessionResolver {
     // Java 语法：Optional 表示结果可能不存在；orElseThrow 会把空值分支转换为明确异常。
     private Optional<CaseAccessSessionEntity> find(
             String caseId, AuthenticatedActor actor, PermissionLevel permissionLevel) {
+        return find(DEFAULT_TENANT, caseId, actor, permissionLevel);
+    }
+
+    private Optional<CaseAccessSessionEntity> find(
+            String tenantId, String caseId, AuthenticatedActor actor, PermissionLevel permissionLevel) {
         return accessSessionRepository
                 .findByTenantIdAndCaseIdAndActorIdAndActorRoleAndPermissionLevel(
-                        DEFAULT_TENANT,
+                        tenantId,
                         caseId,
                         actor.actorId(),
                         actor.role(),
                         permissionLevel);
+    }
+
+    private static void requireTenantId(String tenantId) {
+        if (Objects.requireNonNull(tenantId, "tenantId").isBlank()) {
+            throw new IllegalArgumentException("tenantId must not be blank");
+        }
     }
 
     // 所属模块：【房间协作与权限 / 应用编排层】「AccessSessionResolver.permissionLevelFor(FulfillmentCaseEntity,AuthenticatedActor)」。

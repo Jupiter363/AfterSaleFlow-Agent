@@ -37,9 +37,10 @@ public record IntakeCommandExecutionContext(
 
   public IntakeCommandExecutionContext {
     if (!"intake-command-execution-context.v1".equals(schemaVersion)
-        && !"intake-command-execution-context.v2".equals(schemaVersion)) {
+        && !"intake-command-execution-context.v2".equals(schemaVersion)
+        && !"intake-command-execution-context.v3".equals(schemaVersion)) {
       throw new IllegalArgumentException(
-          "schemaVersion must be intake-command-execution-context.v1 or v2");
+          "schemaVersion must be intake-command-execution-context.v1, v2, or v3");
     }
     requireThreadId(threadId, "threadId");
     requireIdentifier(agentSessionId, "agentSessionId");
@@ -53,11 +54,24 @@ public record IntakeCommandExecutionContext(
     if ("intake-command-execution-context.v2".equals(schemaVersion) && targetAgentRun == null) {
       throw new IllegalArgumentException("v2 execution context requires target AgentRun state");
     }
+    if ("intake-command-execution-context.v3".equals(schemaVersion)) {
+      if (targetAgentRun != null) {
+        throw new IllegalArgumentException("v3 execution context cannot carry target AgentRun state");
+      }
+      if (branchOperation == null) {
+        throw new IllegalArgumentException("v3 execution context requires a branch operation");
+      }
+    }
   }
 
   @JsonIgnore
   public boolean isTargetAgentRun() {
     return targetAgentRun != null;
+  }
+
+  @JsonIgnore
+  public boolean isTargetBranch() {
+    return "intake-command-execution-context.v3".equals(schemaVersion);
   }
 
   void requireCompatible(IntakeCommandType commandType, IntakeParty party) {

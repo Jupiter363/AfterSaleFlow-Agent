@@ -25,6 +25,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RestController;
 
 // 所属模块：【房间协作与权限 / HTTP 接口层】类型「IntakeRoomController」。
@@ -83,16 +84,19 @@ public class IntakeRoomController {
             @PathVariable
                     @Pattern(regexp = "CASE_[A-Za-z0-9_]{1,59}")
                     String caseId,
-            @Valid @RequestBody IntakeConfirmationRequest request,
-            Authentication authentication,
+             @Valid @RequestBody IntakeConfirmationRequest request,
+             @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+             Authentication authentication,
             HttpServletRequest servletRequest) {
         String traceId = correlationId(servletRequest, TraceIdFilter.TRACE_ATTRIBUTE);
         String requestId = correlationId(servletRequest, TraceIdFilter.REQUEST_ATTRIBUTE);
         return ApiResponse.success(
                 service.confirm(
-                        caseId,
-                        (AuthenticatedActor) authentication.getPrincipal(),
-                        request.toCommand()),
+                         caseId,
+                         (AuthenticatedActor) authentication.getPrincipal(),
+                         request.toCommand(),
+                         idempotencyKey(idempotencyKey, requestId),
+                         traceId),
                 requestId,
                 traceId,
                 Instant.now(clock));
@@ -108,16 +112,19 @@ public class IntakeRoomController {
             @PathVariable
                     @Pattern(regexp = "CASE_[A-Za-z0-9_]{1,59}")
                     String caseId,
-            @Valid @RequestBody(required = false) IntakeCancelRequest request,
-            Authentication authentication,
+             @Valid @RequestBody(required = false) IntakeCancelRequest request,
+             @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+             Authentication authentication,
             HttpServletRequest servletRequest) {
         String traceId = correlationId(servletRequest, TraceIdFilter.TRACE_ATTRIBUTE);
         String requestId = correlationId(servletRequest, TraceIdFilter.REQUEST_ATTRIBUTE);
         return ApiResponse.success(
                 service.cancel(
-                        caseId,
-                        (AuthenticatedActor) authentication.getPrincipal(),
-                        request == null ? "" : request.reason()),
+                         caseId,
+                         (AuthenticatedActor) authentication.getPrincipal(),
+                         request == null ? "" : request.reason(),
+                         idempotencyKey(idempotencyKey, requestId),
+                         traceId),
                 requestId,
                 traceId,
                 Instant.now(clock));
@@ -134,5 +141,12 @@ public class IntakeRoomController {
             return id;
         }
         throw new IllegalStateException("correlation id filter did not run");
+    }
+
+    private static String idempotencyKey(String supplied, String requestId) {
+        if (supplied != null && !supplied.isBlank()) {
+            return supplied.trim();
+        }
+        return requestId;
     }
 }

@@ -1,6 +1,5 @@
 package com.example.dispute.workflow.targete2e.ingress.materialization;
 
-import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -11,7 +10,6 @@ import org.junit.jupiter.api.Test;
 
 class CanonicalTargetIntakeMaterializerTest {
 
-    private static final String DOMAIN_TENANT = "default";
     private static final String TARGET_TENANT_SURROGATE = "tenant-target-activation";
     private static final String CASE_ID = "CASE_TARGET_001";
     private static final String ACTOR_ID = "user-local";
@@ -24,34 +22,39 @@ class CanonicalTargetIntakeMaterializerTest {
     }
 
     @Test
-    void acceptsDomainAccessTenantThatDiffersFromTargetActivationTenantSurrogate() {
-        CaseAccessSessionEntity access = access(DOMAIN_TENANT, CASE_ID, ACTOR_ID, ActorRole.USER);
-        assertThat(access.getTenantId()).isNotEqualTo(TARGET_TENANT_SURROGATE);
+    void requiresAccessSessionToUseTheActivationTenantSurrogate() {
+        CaseAccessSessionEntity access = access(TARGET_TENANT_SURROGATE, CASE_ID, ACTOR_ID, ActorRole.USER);
 
-        assertThatCode(() -> CanonicalTargetIntakeMaterializer.requireActor(
-                        access, CASE_ID, ACTOR_ID, ActorRole.USER))
-                .doesNotThrowAnyException();
+        CanonicalTargetIntakeMaterializer.requireActor(
+                access, TARGET_TENANT_SURROGATE, CASE_ID, ACTOR_ID, ActorRole.USER);
     }
 
     @Test
     void rejectsARequestForAnotherCase() {
-        CaseAccessSessionEntity access = access(DOMAIN_TENANT, CASE_ID, ACTOR_ID, ActorRole.USER);
+        CaseAccessSessionEntity access = access(TARGET_TENANT_SURROGATE, CASE_ID, ACTOR_ID, ActorRole.USER);
 
-        assertRejected(access, "CASE_TARGET_002", ACTOR_ID, ActorRole.USER);
+        assertRejected(access, TARGET_TENANT_SURROGATE, "CASE_TARGET_002", ACTOR_ID, ActorRole.USER);
     }
 
     @Test
     void rejectsAnotherActor() {
-        CaseAccessSessionEntity access = access(DOMAIN_TENANT, CASE_ID, ACTOR_ID, ActorRole.USER);
+        CaseAccessSessionEntity access = access(TARGET_TENANT_SURROGATE, CASE_ID, ACTOR_ID, ActorRole.USER);
 
-        assertRejected(access, CASE_ID, "merchant-local", ActorRole.USER);
+        assertRejected(access, TARGET_TENANT_SURROGATE, CASE_ID, "merchant-local", ActorRole.USER);
     }
 
     @Test
     void rejectsAnotherRole() {
-        CaseAccessSessionEntity access = access(DOMAIN_TENANT, CASE_ID, ACTOR_ID, ActorRole.USER);
+        CaseAccessSessionEntity access = access(TARGET_TENANT_SURROGATE, CASE_ID, ACTOR_ID, ActorRole.USER);
 
-        assertRejected(access, CASE_ID, ACTOR_ID, ActorRole.MERCHANT);
+        assertRejected(access, TARGET_TENANT_SURROGATE, CASE_ID, ACTOR_ID, ActorRole.MERCHANT);
+    }
+
+    @Test
+    void rejectsAnAccessSessionFromAnotherTenant() {
+        CaseAccessSessionEntity access = access("default", CASE_ID, ACTOR_ID, ActorRole.USER);
+
+        assertRejected(access, TARGET_TENANT_SURROGATE, CASE_ID, ACTOR_ID, ActorRole.USER);
     }
 
     private static CaseAccessSessionEntity access(
@@ -62,9 +65,13 @@ class CanonicalTargetIntakeMaterializerTest {
     }
 
     private static void assertRejected(
-            CaseAccessSessionEntity access, String caseId, String actorId, ActorRole actorRole) {
+            CaseAccessSessionEntity access,
+            String tenantId,
+            String caseId,
+            String actorId,
+            ActorRole actorRole) {
         assertThatThrownBy(() -> CanonicalTargetIntakeMaterializer.requireActor(
-                        access, caseId, actorId, actorRole))
+                        access, tenantId, caseId, actorId, actorRole))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessage("target Intake access session does not match the active authority");
     }

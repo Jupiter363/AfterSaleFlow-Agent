@@ -104,6 +104,39 @@ class AgentSessionInitializerTest {
         verify(repository, never()).saveAndFlush(any(AgentConversationSessionEntity.class));
     }
 
+    @Test
+    void inheritsTheTenantFromTheTargetAccessSession() {
+        CaseAccessSessionEntity accessSession = CaseAccessSessionEntity.create(
+                "ACCESS_TARGET_AGENT_SESSION",
+                "tenant-target-activation",
+                CASE_ID,
+                "user-local",
+                ActorRole.USER,
+                PermissionLevel.PARTY_USER,
+                "system");
+        when(repository
+                        .findByTenantIdAndCaseIdAndRoomTypeAndActorIdAndActorRoleAndAgentKeyAndPromptProfileId(
+                                "tenant-target-activation",
+                                CASE_ID,
+                                RoomType.INTAKE,
+                                "user-local",
+                                ActorRole.USER,
+                                "DISPUTE_INTAKE_OFFICER",
+                                "DISPUTE_INTAKE_OFFICER:USER:v1"))
+                .thenReturn(Optional.empty());
+        when(repository.saveAndFlush(any(AgentConversationSessionEntity.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        AgentConversationSessionEntity result = initializer.initializeInCurrentTransaction(
+                accessSession,
+                RoomType.INTAKE,
+                "DISPUTE_INTAKE_OFFICER",
+                "DISPUTE_INTAKE_OFFICER:USER:v1",
+                "MEMEO_DEFAULT");
+
+        assertThat(result.getTenantId()).isEqualTo("tenant-target-activation");
+    }
+
     private static CaseAccessSessionEntity accessSession() {
         return CaseAccessSessionEntity.create(
                 "ACCESS_USER_AGENT_SESSION",

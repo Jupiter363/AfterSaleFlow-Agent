@@ -1,6 +1,7 @@
 package com.example.dispute.workflow.temporal.room.intake;
 
 import static com.example.dispute.workflow.contract.v1.TemporalTaskQueues.AGENT_EXECUTION;
+import static com.example.dispute.workflow.contract.v1.TemporalTaskQueues.CASE_CONTROL;
 
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.RetryBudget;
 import io.temporal.activity.ActivityCancellationType;
@@ -20,19 +21,27 @@ public final class IntakeActivityTemporalPolicy {
   private IntakeActivityTemporalPolicy() {}
 
   public static ActivityOptions options(RetryBudget retryBudget) {
-    return options(retryBudget, SCHEDULE_TO_CLOSE_TIMEOUT);
+    return options(retryBudget, SCHEDULE_TO_CLOSE_TIMEOUT, AGENT_EXECUTION);
   }
 
   public static ActivityOptions options(RetryBudget retryBudget, Duration remaining) {
+    return options(retryBudget, remaining, AGENT_EXECUTION);
+  }
+
+  public static ActivityOptions options(
+      RetryBudget retryBudget, Duration remaining, String taskQueue) {
     Objects.requireNonNull(retryBudget, "retryBudget must not be null");
     if (remaining == null || remaining.isZero() || remaining.isNegative()) {
       throw new IllegalArgumentException("remaining Activity deadline must be positive");
+    }
+    if (!AGENT_EXECUTION.equals(taskQueue) && !CASE_CONTROL.equals(taskQueue)) {
+      throw new IllegalArgumentException("taskQueue must be agent-execution or case-control");
     }
     Duration scheduleToClose = min(SCHEDULE_TO_CLOSE_TIMEOUT, remaining);
     Duration startToClose = min(START_TO_CLOSE_TIMEOUT, scheduleToClose);
     Duration heartbeat = min(HEARTBEAT_TIMEOUT, startToClose);
     return ActivityOptions.newBuilder()
-        .setTaskQueue(AGENT_EXECUTION)
+        .setTaskQueue(taskQueue)
         .setStartToCloseTimeout(startToClose)
         .setScheduleToCloseTimeout(scheduleToClose)
         .setHeartbeatTimeout(heartbeat)

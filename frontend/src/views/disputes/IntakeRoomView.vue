@@ -1852,6 +1852,13 @@ function startEventStream(snapshot = currentWorkspaceSnapshot()) {
     snapshotLoader: () => refreshRoomSnapshot(snapshot),
     applyEvent: async (event) => {
       if (!isCurrentWorkspace(snapshot)) return;
+      if (event.event === "RESPONDENT_CONFIRMED") {
+        const evidenceReady = await verifyEvidenceReady(snapshot);
+        if (evidenceReady && isCurrentWorkspace(snapshot)) {
+          await router.push(`/disputes/${snapshot.caseId}/evidence`);
+        }
+        return;
+      }
       if (event.event === "EVIDENCE_OPENED") {
         if (props.initialIntakeStatus === null && props.initialDispute === null) {
           await refreshIntakeStatus(snapshot);
@@ -2001,8 +2008,6 @@ async function confirmAdmission() {
     const result = await confirm(command);
     if (!isCurrentWorkspace(snapshot)) return;
     if (result) {
-      const currentRoom = String(result.current_room || result.currentRoom || "").toUpperCase();
-      const evidenceOpened = currentRoom === "EVIDENCE";
       intakeStatus.value = {
         ...(intakeStatus.value || {}),
         current_actor_completed: true,
@@ -2012,11 +2017,9 @@ async function confirmAdmission() {
       };
       admitted.value = true;
       agentState.value = "HANDOFF";
-      if (evidenceOpened) {
-        const evidenceReady = await verifyEvidenceReady(snapshot);
-        if (evidenceReady && isCurrentWorkspace(snapshot)) {
-          await router.push(`/disputes/${snapshot.caseId}/evidence`);
-        }
+      const evidenceReady = await verifyEvidenceReady(snapshot);
+      if (evidenceReady && isCurrentWorkspace(snapshot)) {
+        await router.push(`/disputes/${snapshot.caseId}/evidence`);
       }
     }
   } catch (failure) {

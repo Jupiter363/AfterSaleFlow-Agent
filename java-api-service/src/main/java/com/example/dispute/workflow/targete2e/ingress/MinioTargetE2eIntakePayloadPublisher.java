@@ -2,6 +2,7 @@ package com.example.dispute.workflow.targete2e.ingress;
 
 import com.example.dispute.workflow.activity.intake.IntakeImmutablePayloadPublisher;
 import com.example.dispute.workflow.application.intake.IntakeContractHashes;
+import com.example.dispute.workflow.application.authority.payload.IntakeBranchCommand;
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -45,11 +46,15 @@ public final class MinioTargetE2eIntakePayloadPublisher
   public StoredPayload publish(PublishRequest request) {
     Objects.requireNonNull(request, "request");
     String hashField = HASH_FIELDS.get(request.schemaVersion());
-    if (hashField == null) {
+    if (hashField == null && !IntakeBranchCommand.SCHEMA_VERSION.equals(request.schemaVersion())) {
       throw new IllegalArgumentException("target Intake payload schema is invalid");
     }
     byte[] payload = request.canonicalPayload();
-    requireCanonicalSelfHash(payload, hashField, request.contentSha256());
+    if (hashField == null) {
+      requireCanonicalBranchHash(payload, request.contentSha256());
+    } else {
+      requireCanonicalSelfHash(payload, hashField, request.contentSha256());
+    }
     String objectKey =
         prefix
             + "/"
@@ -101,6 +106,24 @@ public final class MinioTargetE2eIntakePayloadPublisher
         throw argumentFailure;
       }
       throw new IllegalArgumentException("target Intake payload hash is invalid", failure);
+    }
+  }
+
+  static void requireCanonicalBranchHash(byte[] payload, String expectedHash) {
+    try {
+      JsonNode document = MAPPER.readTree(payload);
+      if (document == null
+          || !IntakeBranchCommand.SCHEMA_VERSION.equals(document.path("schema_version").asText())
+          || !expectedHash.equals(ContractJson.sha256Hex(document))
+          || !Arrays.equals(payload, ContractJson.canonicalize(document))) {
+        throw new IllegalArgumentException("target Intake branch payload hash is invalid");
+      }
+    } catch (IOException | IllegalArgumentException failure) {
+      if (failure instanceof IllegalArgumentException argumentFailure
+          && "target Intake branch payload hash is invalid".equals(argumentFailure.getMessage())) {
+        throw argumentFailure;
+      }
+      throw new IllegalArgumentException("target Intake branch payload hash is invalid", failure);
     }
   }
 }

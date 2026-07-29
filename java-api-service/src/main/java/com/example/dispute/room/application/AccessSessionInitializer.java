@@ -11,6 +11,7 @@ import com.example.dispute.infrastructure.persistence.repository.FulfillmentCase
 import com.example.dispute.room.domain.PermissionLevel;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseAccessSessionEntity;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseAccessSessionRepository;
+import java.util.Objects;
 import java.util.UUID;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
@@ -49,7 +50,14 @@ public class AccessSessionInitializer {
     @Transactional(propagation = Propagation.MANDATORY)
     public CaseAccessSessionEntity initializeInCurrentTransaction(
             String caseId, AuthenticatedActor actor, PermissionLevel permissionLevel) {
-        return initialize(caseId, actor, permissionLevel);
+        return initializeInCurrentTransaction(
+                AccessSessionResolver.DEFAULT_TENANT, caseId, actor, permissionLevel);
+    }
+
+    @Transactional(propagation = Propagation.MANDATORY)
+    public CaseAccessSessionEntity initializeInCurrentTransaction(
+            String tenantId, String caseId, AuthenticatedActor actor, PermissionLevel permissionLevel) {
+        return initialize(tenantId, caseId, actor, permissionLevel);
     }
 
     // 所属模块：【房间协作与权限 / 应用编排层】「AccessSessionInitializer.initializeInNewTransaction(String,AuthenticatedActor,PermissionLevel)」。
@@ -61,7 +69,13 @@ public class AccessSessionInitializer {
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public CaseAccessSessionEntity initializeInNewTransaction(
             String caseId, AuthenticatedActor actor, PermissionLevel permissionLevel) {
-        return initialize(caseId, actor, permissionLevel);
+        return initializeInNewTransaction(AccessSessionResolver.DEFAULT_TENANT, caseId, actor, permissionLevel);
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public CaseAccessSessionEntity initializeInNewTransaction(
+            String tenantId, String caseId, AuthenticatedActor actor, PermissionLevel permissionLevel) {
+        return initialize(tenantId, caseId, actor, permissionLevel);
     }
 
     // 所属模块：【房间协作与权限 / 应用编排层】「AccessSessionInitializer.initialize(String,AuthenticatedActor,PermissionLevel)」。
@@ -71,13 +85,14 @@ public class AccessSessionInitializer {
     // 系统意义：「AccessSessionInitializer.initialize(String,AuthenticatedActor,PermissionLevel)」负责主链路中的“案件访问会话”；每次读取和写入都要绑定案件参与关系、角色、房间和受众范围
     // Java 语法：Optional 表示结果可能不存在；orElseThrow 会把空值分支转换为明确异常。
     private CaseAccessSessionEntity initialize(
-            String caseId, AuthenticatedActor actor, PermissionLevel permissionLevel) {
+            String tenantId, String caseId, AuthenticatedActor actor, PermissionLevel permissionLevel) {
+        requireTenantId(tenantId);
         caseRepository
                 .findByIdForUpdate(caseId)
                 .orElseThrow(() -> new IllegalArgumentException("case not found"));
         return accessSessionRepository
                 .findByTenantIdAndCaseIdAndActorIdAndActorRoleAndPermissionLevel(
-                        AccessSessionResolver.DEFAULT_TENANT,
+                        tenantId,
                         caseId,
                         actor.actorId(),
                         actor.role(),
@@ -87,12 +102,18 @@ public class AccessSessionInitializer {
                                 accessSessionRepository.save(
                                         CaseAccessSessionEntity.create(
                                                 "ACCESS_" + compactUuid(),
-                                                AccessSessionResolver.DEFAULT_TENANT,
+                                                tenantId,
                                                 caseId,
                                                 actor.actorId(),
                                                 actor.role(),
                                                 permissionLevel,
                                                 actor.actorId())));
+    }
+
+    private static void requireTenantId(String tenantId) {
+        if (Objects.requireNonNull(tenantId, "tenantId").isBlank()) {
+            throw new IllegalArgumentException("tenantId must not be blank");
+        }
     }
 
     // 所属模块：【房间协作与权限 / 应用编排层】「AccessSessionInitializer.compactUuid()」。

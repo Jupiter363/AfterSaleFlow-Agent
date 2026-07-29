@@ -1,6 +1,7 @@
 package com.example.dispute.workflow.room.intake;
 
 import static com.example.dispute.workflow.contract.v1.TemporalTaskQueues.AGENT_EXECUTION;
+import static com.example.dispute.workflow.contract.v1.TemporalTaskQueues.CASE_CONTROL;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -16,6 +17,7 @@ import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.GraphExecutionRequest;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.ImmutablePayloadRef;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.OperationReceipt;
+import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.PinnedVersions;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.SnapshotPublicationReceipt;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.SnapshotPublicationRequest;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.TurnFinalizationReceipt;
@@ -165,6 +167,120 @@ class IntakeRoomWorkflowActivityTest {
             Duration.ofSeconds(2));
     assertThat(deadlineBounded.getStartToCloseTimeout()).isEqualTo(Duration.ofSeconds(2));
     assertThat(deadlineBounded.getScheduleToCloseTimeout()).isEqualTo(Duration.ofSeconds(2));
+
+    ActivityOptions targetBranchOptions =
+        IntakeActivityTemporalPolicy.options(
+            new com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.RetryBudget(
+                "intake-retry-budget.v1", 2, 2, 1),
+            Duration.ofSeconds(2),
+            CASE_CONTROL);
+    assertThat(targetBranchOptions.getTaskQueue()).isEqualTo(CASE_CONTROL);
+    assertThatThrownBy(
+            () ->
+                IntakeActivityTemporalPolicy.options(
+                    new com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.RetryBudget(
+                        "intake-retry-budget.v1", 2, 2, 1),
+                    Duration.ofSeconds(2),
+                    "unapproved-queue"))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("taskQueue");
+  }
+
+  @Test
+  void targetBranchV3UsesTheCaseControlQueueAndFixedTargetBindingSchema() {
+    try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+      String workflowQueue = "phase8-intake-target-branch";
+      FakeActivities agentActivities = new FakeActivities();
+      FakeActivities caseControlActivities = new FakeActivities();
+      Worker workflowWorker = environment.newWorker(workflowQueue);
+      workflowWorker.registerWorkflowImplementationTypes(IntakeRoomWorkflowImpl.class);
+      Worker agentWorker = environment.newWorker(AGENT_EXECUTION);
+      agentWorker.registerActivitiesImplementations(agentActivities);
+      Worker caseControlWorker = environment.newWorker(CASE_CONTROL);
+      caseControlWorker.registerActivitiesImplementations(caseControlActivities);
+      environment.start();
+
+      IntakeRoomWorkflow workflow = workflow(environment, workflowQueue, "target-branch");
+      WorkflowClient.start(workflow::run, start());
+      IntakeWorkflowCommand cancel =
+          command(
+              1,
+              "CMD_TARGET_BRANCH_CANCEL",
+              IntakeCommandType.INTAKE_CANCEL,
+              BranchOperation.CANCEL,
+              2,
+              "intake-command-execution-context.v3");
+
+      assertThat(cancel.executionContext().isTargetBranch()).isTrue();
+      assertThat(cancel.executionContext().isTargetAgentRun()).isFalse();
+      workflow.commandAccepted(cancel);
+
+      IntakeRoomSnapshot completed =
+          awaitState(workflow, state -> state.roomPhase() == IntakeRoomPhase.COMPLETED);
+      assertThat(completed.terminalReason()).isEqualTo(IntakeTerminalReason.CANCELLED);
+      assertThat(caseControlActivities.cancelRequests).hasSize(1);
+      assertThat(agentActivities.cancelRequests).isEmpty();
+      assertThat(
+              caseControlActivities
+                  .cancelRequests
+                  .getFirst()
+                  .envelope()
+                  .pinnedVersions()
+                  .schemaVersion())
+          .isEqualTo("intake-pinned-versions.v2");
+      assertThat(
+              caseControlActivities
+                  .cancelRequests
+                  .getFirst()
+                  .envelope()
+                  .pinnedVersions()
+                  .outputSchemaVersion())
+          .isEqualTo("target-e2e-room-proposal-source.v1");
+    }
+  }
+
+  @Test
+  void targetBranchV3RequiresABranchOperationWhileV1DefaultsRemainUnchanged() {
+    IntakeCommandExecutionContext v1 =
+        new IntakeCommandExecutionContext(
+            "intake-command-execution-context.v1",
+            THREAD_ID,
+            AGENT_SESSION,
+            Long.MAX_VALUE,
+            new com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.RetryBudget(
+                "intake-retry-budget.v1", 2, 2, 1),
+            null);
+    assertThat(v1.isTargetBranch()).isFalse();
+    assertThat(v1.isTargetAgentRun()).isFalse();
+
+    assertThatThrownBy(
+            () ->
+                new PinnedVersions(
+                    "intake-pinned-versions.v1",
+                    "intake-workflow.synthetic.v1",
+                    "2.0.0",
+                    "intake-checkpoint.v2",
+                    "intake-prompt.v2",
+                    "intake-model.synthetic.v1",
+                    "target-e2e-room-proposal-source.v1",
+                    "intake-policy.v2",
+                    "intake-guardrail.v2",
+                    "no-tools.v1"))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("intake-turn-proposal.v2");
+
+    assertThatThrownBy(
+            () ->
+                new IntakeCommandExecutionContext(
+                    "intake-command-execution-context.v3",
+                    THREAD_ID,
+                    AGENT_SESSION,
+                    Long.MAX_VALUE,
+                    new com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.RetryBudget(
+                        "intake-retry-budget.v1", 2, 2, 1),
+                    null))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("v3 execution context requires a branch operation");
   }
 
   @Test
@@ -1013,6 +1129,22 @@ class IntakeRoomWorkflowActivityTest {
       IntakeCommandType type,
       BranchOperation branchOperation,
       int activityAttemptsRemaining) {
+    return command(
+        sequence,
+        commandId,
+        type,
+        branchOperation,
+        activityAttemptsRemaining,
+        "intake-command-execution-context.v1");
+  }
+
+  private static IntakeWorkflowCommand command(
+      long sequence,
+      String commandId,
+      IntakeCommandType type,
+      BranchOperation branchOperation,
+      int activityAttemptsRemaining,
+      String executionContextSchemaVersion) {
     return new IntakeWorkflowCommand(
         "intake-workflow-command.v1",
         commandId,
@@ -1029,7 +1161,7 @@ class IntakeRoomWorkflowActivityTest {
         "intake.operation:" + CASE_ID + ":" + commandId,
         hash(sequence + 1),
         new IntakeCommandExecutionContext(
-            "intake-command-execution-context.v1",
+            executionContextSchemaVersion,
             THREAD_ID,
             AGENT_SESSION,
             Long.MAX_VALUE,

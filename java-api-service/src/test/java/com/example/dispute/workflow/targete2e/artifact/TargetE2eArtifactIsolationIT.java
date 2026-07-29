@@ -27,6 +27,14 @@ class TargetE2eArtifactIsolationIT {
             TARGET_CLASS_PREFIX + "TargetE2eArtifactConfiguration.class";
     private static final String API_CONFIGURATION_CLASS =
             TARGET_CLASS_PREFIX + "TargetE2eApiConfiguration.class";
+    private static final String CONTROL_CONFIGURATION_CLASS =
+            TARGET_CLASS_PREFIX + "TargetE2eControlConfiguration.class";
+    private static final String TARGET_INTAKE_BRANCH_ACTIVITY =
+            "BOOT-INF/classes/com/example/dispute/workflow/targete2e/rooms/intake/"
+                    + "TargetE2eIntakeRoomActivities.class";
+    private static final String TARGET_INTAKE_BRANCH_RESOLVER =
+            "BOOT-INF/classes/com/example/dispute/workflow/targete2e/rooms/intake/"
+                    + "TargetE2eIntakeFormalBranchCommandResolver.class";
     private static final String TARGET_APPLICATION_CONFIGURATION =
             "BOOT-INF/classes/application-target-e2e.yml";
     private static final String MARKER_RESOURCE =
@@ -53,6 +61,9 @@ class TargetE2eArtifactIsolationIT {
                             PROCESSOR_CLASS,
                             CONFIGURATION_CLASS,
                             API_CONFIGURATION_CLASS,
+                            CONTROL_CONFIGURATION_CLASS,
+                            TARGET_INTAKE_BRANCH_ACTIVITY,
+                            TARGET_INTAKE_BRANCH_RESOLVER,
                             MARKER_RESOURCE,
                             TARGET_APPLICATION_CONFIGURATION,
                             SPRING_FACTORIES,

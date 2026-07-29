@@ -41,16 +41,28 @@ export const disputeApi = {
     }),
   actions: (actor, caseId) =>
     apiRequest(`/disputes/${caseId}/actions`, actor),
-  confirmIntake: (actor, caseId, command) =>
+  confirmIntake: (
+    actor,
+    caseId,
+    command,
+    idempotencyKey = newIdempotencyKey("intake-confirm"),
+  ) =>
     apiRequest(`/disputes/${caseId}/intake/confirm`, actor, {
       method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey },
       body: JSON.stringify(command),
     }),
   intakeStatus: (actor, caseId) =>
     apiRequest(`/disputes/${caseId}/intake/status`, actor),
-  cancelIntake: (actor, caseId, reason = "") =>
+  cancelIntake: (
+    actor,
+    caseId,
+    reason = "",
+    idempotencyKey = newIdempotencyKey("intake-cancel"),
+  ) =>
     apiRequest(`/disputes/${caseId}/intake/cancel`, actor, {
       method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey },
       body: JSON.stringify({ reason }),
     }),
   simulateExternalImport: (actor, command) => {

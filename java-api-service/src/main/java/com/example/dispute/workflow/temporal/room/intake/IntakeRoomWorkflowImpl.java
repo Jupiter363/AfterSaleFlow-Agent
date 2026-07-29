@@ -1,6 +1,7 @@
 package com.example.dispute.workflow.temporal.room.intake;
 
 import static com.example.dispute.workflow.contract.v1.TemporalTaskQueues.AGENT_EXECUTION;
+import static com.example.dispute.workflow.contract.v1.TemporalTaskQueues.CASE_CONTROL;
 import static io.temporal.api.enums.v1.ParentClosePolicy.PARENT_CLOSE_POLICY_REQUEST_CANCEL;
 import static io.temporal.api.enums.v1.WorkflowIdReusePolicy.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE;
 
@@ -48,6 +49,8 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
   private static final String CANCELLATION_RECONCILIATION_CHANGE_ID =
       "intake-room-cancellation-reconciliation-v1";
   private static final String AGENT_RUN_CHILD_CHANGE_ID = "intake-room-agent-run-v2-child-v1";
+  private static final String TARGET_BRANCH_OUTPUT_SCHEMA_VERSION =
+      "target-e2e-room-proposal-source.v1";
   private static final long HISTORY_EVENT_LIMIT = 2_000;
   private static final Duration RUN_MAX_AGE = Duration.ofHours(24);
 
@@ -1329,13 +1332,17 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
       ActivityInvocation invocation) {
     PinnedVersions versions =
         new PinnedVersions(
-            "intake-pinned-versions.v1",
+            context.isTargetBranch()
+                ? "intake-pinned-versions.v2"
+                : "intake-pinned-versions.v1",
             start.workflowBuildId(),
             start.graphVersion(),
             start.checkpointSchemaVersion(),
             start.promptVersion(),
             start.modelProfileId(),
-            start.outputSchemaVersion(),
+            context.isTargetBranch()
+                ? TARGET_BRANCH_OUTPUT_SCHEMA_VERSION
+                : start.outputSchemaVersion(),
             start.policyVersion(),
             start.guardrailVersion(),
             start.toolPolicyVersion());
@@ -1374,7 +1381,9 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
     return Workflow.newActivityStub(
         IntakeRoomActivities.class,
         IntakeActivityTemporalPolicy.options(
-            context.retryBudget(), Duration.ofMillis(remainingMillis)));
+            context.retryBudget(),
+            Duration.ofMillis(remainingMillis),
+            context.isTargetBranch() ? CASE_CONTROL : AGENT_EXECUTION));
   }
 
   private void setActivityStage(

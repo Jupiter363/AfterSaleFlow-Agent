@@ -11,6 +11,7 @@ import com.example.dispute.workflow.targete2e.persistence.material.TargetIntakeC
 import com.example.dispute.workflow.targete2e.persistence.material.TargetIntakeCommandMaterialStore.MaterialSnapshot;
 import com.example.dispute.workflow.temporal.room.intake.IntakeCommandExecutionContext;
 import com.example.dispute.workflow.temporal.room.intake.IntakeCommandType;
+import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.RetryBudget;
 import com.example.dispute.workflow.temporal.room.intake.IntakeOperationKeys;
 import com.example.dispute.workflow.temporal.room.intake.IntakeParty;
 import com.example.dispute.workflow.temporal.room.intake.IntakeTargetAgentRunContext;
@@ -29,11 +30,20 @@ public final class TargetIntakeCommandBridgeActivity implements TargetIntakeComm
 
   private final TargetIntakeCommandMaterialStore materialStore;
   private final ObjectMapper objectMapper;
+  private final TargetIntakeBranchContextSource branchContextSource;
 
   public TargetIntakeCommandBridgeActivity(
       TargetIntakeCommandMaterialStore materialStore, ObjectMapper objectMapper) {
+    this(materialStore, objectMapper, null);
+  }
+
+  public TargetIntakeCommandBridgeActivity(
+      TargetIntakeCommandMaterialStore materialStore,
+      ObjectMapper objectMapper,
+      TargetIntakeBranchContextSource branchContextSource) {
     this.materialStore = Objects.requireNonNull(materialStore, "materialStore");
     this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper");
+    this.branchContextSource = branchContextSource;
   }
 
   @Override
@@ -42,9 +52,9 @@ public final class TargetIntakeCommandBridgeActivity implements TargetIntakeComm
       Objects.requireNonNull(request, "request");
       CaseCommandRef command = request.command();
       require(command.roomType() == RoomType.INTAKE, "command is not routed to Intake");
-      require(
-          command.commandType() == CommandType.INTAKE_MESSAGE,
-          "target Intake material is valid only for Intake messages");
+      if (command.commandType() != CommandType.INTAKE_MESSAGE) {
+        return bindBranch(command, request);
+      }
 
       MaterialSnapshot material =
           materialStore
@@ -63,6 +73,63 @@ public final class TargetIntakeCommandBridgeActivity implements TargetIntakeComm
       throw ApplicationFailure.newNonRetryableFailure(
           failure.getMessage(), BINDING_INVALID);
     }
+  }
+
+  private IntakeWorkflowCommand bindBranch(CaseCommandRef command, BindRequest request) {
+    require(
+        command.commandType() == CommandType.INTAKE_CONFIRM
+            || command.commandType() == CommandType.INTAKE_CANCEL,
+        "target Intake bridge command type is unsupported");
+    IntakeParty party = party(command.actorRef().actorRole());
+    String actorScopeHash = TargetIntakeActorScopes.hash(command.caseId(), party);
+    TargetIntakeBranchContextSource source =
+        Objects.requireNonNull(branchContextSource, "target Intake branch context source is not configured");
+    TargetIntakeBranchContextSource.ResolvedBranchContext resolved =
+        source.resolve(
+            new TargetIntakeBranchContextSource.Request(
+                command, request.roomFencingToken(), actorScopeHash));
+    IntakeCommandType type =
+        command.commandType() == CommandType.INTAKE_CONFIRM
+            ? IntakeCommandType.INTAKE_CONFIRM
+            : IntakeCommandType.INTAKE_CANCEL;
+    IntakeCommandExecutionContext context =
+        new IntakeCommandExecutionContext(
+            "intake-command-execution-context.v3",
+            resolved.threadId(),
+            resolved.agentSessionId(),
+            command.deadlineAt().toEpochMilli(),
+            new RetryBudget("intake-retry-budget.v1", 0, 3, 0),
+            resolved.operation());
+    return new IntakeWorkflowCommand(
+        "intake-workflow-command.v1",
+        command.commandId(),
+        command.tenantSurrogate(),
+        command.caseId(),
+        command.roomEpoch(),
+        request.roomFencingToken(),
+        command.caseCommandSequence(),
+        type,
+        party,
+        actorScopeHash,
+        command.payloadRef().uri(),
+        command.payloadRef().sha256(),
+        operationKey(command, resolved.operation()),
+        command.requestHash(),
+        context);
+  }
+
+  private static String operationKey(
+      CaseCommandRef command,
+      com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.BranchOperation operation) {
+    return switch (operation) {
+      case INITIATOR_ACCEPT ->
+          IntakeOperationKeys.initiatorAccept(command.caseId(), command.roomEpoch(), command.commandId());
+      case INITIATOR_REJECT ->
+          IntakeOperationKeys.initiatorReject(command.caseId(), command.roomEpoch(), command.commandId());
+      case CANCEL -> IntakeOperationKeys.cancel(command.caseId(), command.roomEpoch(), command.commandId());
+      case RESPONDENT_CONFIRM ->
+          IntakeOperationKeys.respondentConfirm(command.caseId(), command.roomEpoch(), command.commandId());
+    };
   }
 
   private IntakeWorkflowCommand bind(

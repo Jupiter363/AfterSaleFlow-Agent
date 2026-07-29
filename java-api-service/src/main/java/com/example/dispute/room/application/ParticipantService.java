@@ -10,6 +10,7 @@ import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseParticipantEntity;
+import com.example.dispute.room.domain.ParticipantStatus;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseParticipantRepository;
 import java.time.OffsetDateTime;
 import java.util.List;
@@ -122,6 +123,30 @@ public class ParticipantService {
                             ActorRole.MERCHANT,
                             now,
                             systemActor.actorId()));
+        }
+    }
+
+    /**
+     * Activates exactly one existing external-case party after that party has authenticated into a
+     * target Intake command. The method intentionally never creates or changes the counterparty.
+     */
+    public void activateExistingParty(
+            String caseId, AuthenticatedActor actor, OffsetDateTime now) {
+        if (actor.role() != ActorRole.USER && actor.role() != ActorRole.MERCHANT) {
+            throw new SecurityException("target Intake activation requires a case party");
+        }
+        CaseParticipantEntity participant = repository
+                .findByCaseIdAndActorIdAndParticipantRole(
+                        caseId, actor.actorId(), actor.role())
+                .orElseThrow(
+                        () -> new IllegalStateException(
+                                "target Intake party participant is missing"));
+        if (participant.getParticipantStatus() == ParticipantStatus.INVITED) {
+            participant.activate(now, actor.actorId());
+            return;
+        }
+        if (participant.getParticipantStatus() != ParticipantStatus.ACTIVE) {
+            throw new IllegalStateException("target Intake party participant is not active");
         }
     }
 

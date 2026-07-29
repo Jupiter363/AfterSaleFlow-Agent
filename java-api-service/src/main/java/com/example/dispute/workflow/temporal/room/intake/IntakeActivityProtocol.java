@@ -97,14 +97,23 @@ public final class IntakeActivityProtocol {
       String toolPolicyVersion) {
 
     public PinnedVersions {
-      requireSchema(schemaVersion, "intake-pinned-versions.v1");
+      if (!"intake-pinned-versions.v1".equals(schemaVersion)
+          && !"intake-pinned-versions.v2".equals(schemaVersion)) {
+        throw new IllegalArgumentException(
+            "schemaVersion must be intake-pinned-versions.v1 or intake-pinned-versions.v2");
+      }
       requireIdentifier(workflowBuildId, "workflowBuildId");
       requireIdentifier(graphVersion, "graphVersion");
       requireIdentifier(checkpointSchemaVersion, "checkpointSchemaVersion");
       requireIdentifier(promptVersion, "promptVersion");
       requireIdentifier(modelProfileId, "modelProfileId");
-      if (!"intake-turn-proposal.v2".equals(outputSchemaVersion)) {
-        throw new IllegalArgumentException("outputSchemaVersion must be intake-turn-proposal.v2");
+      String expectedOutputSchemaVersion =
+          "intake-pinned-versions.v2".equals(schemaVersion)
+              ? "target-e2e-room-proposal-source.v1"
+              : "intake-turn-proposal.v2";
+      if (!expectedOutputSchemaVersion.equals(outputSchemaVersion)) {
+        throw new IllegalArgumentException(
+            "outputSchemaVersion must be " + expectedOutputSchemaVersion);
       }
       requireIdentifier(policyVersion, "policyVersion");
       requireIdentifier(guardrailVersion, "guardrailVersion");

@@ -41,8 +41,10 @@ import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import com.example.dispute.workflow.application.epoch.RoomEpochAllocator;
 import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.ActivateRoomEpoch;
+import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.RoomEpochAllocation;
 import com.example.dispute.workflow.application.intake.LegacyIntakeWriterGuard;
 import com.example.dispute.workflow.contract.v1.ContractTypes;
+import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.EpochLifecycleStatus;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.time.Clock;
@@ -249,7 +251,7 @@ class CaseApplicationServiceTest {
     }
 
     @Test
-    void creationReplayChecksWriterAuthorityBeforeReturningTheExistingCase() {
+    void creationReplayDoesNotAttemptLegacyWritesBeforeReturningTheExistingCase() {
         FulfillmentCaseEntity existing =
                 FulfillmentCaseEntity.create(
                         "CASE_CREATE_REPLAY",
@@ -283,8 +285,46 @@ class CaseApplicationServiceTest {
                         "REQ_replay");
 
         assertThat(replay.id()).isEqualTo(existing.getId());
-        verify(legacyIntakeWriterGuard).assertLegacyWriteAllowed(existing.getId());
-        verifyNoInteractions(roomRepository, participantService, intakeAgentTurnService, roomEpochAllocator);
+        verifyNoInteractions(
+                roomRepository,
+                participantService,
+                intakeAgentTurnService,
+                roomEpochAllocator,
+                legacyIntakeWriterGuard);
+    }
+
+    @Test
+    void temporalIntakeEpochSkipsLegacyWriterAndInitialTurnButPersistsInitiator() {
+        when(roomEpochAllocator.activate(any()))
+                .thenReturn(
+                        new RoomEpochAllocation(
+                                "EPOCH_TARGET_INTAKE",
+                                "target-e2e",
+                                "CASE_TARGET_INTAKE",
+                                "ROOM_TARGET_INTAKE",
+                                ContractTypes.RoomType.INTAKE,
+                                1L,
+                                1L,
+                                1L,
+                                1L,
+                                ContractTypes.WriterMode.TEMPORAL,
+                                EpochLifecycleStatus.ACTIVE,
+                                "case-workflow",
+                                "run-1",
+                                null));
+
+        CaseView result =
+                service.create(
+                        command("Temporal intake is started by the first room message", "order-temporal"),
+                        new AuthenticatedActor("user-1", ActorRole.USER),
+                        "idem-temporal-intake",
+                        "TRACE_temporal",
+                        "REQ_temporal");
+
+        verify(participantService)
+                .addInitiator(any(FulfillmentCaseEntity.class), any(AuthenticatedActor.class), any());
+        verifyNoInteractions(legacyIntakeWriterGuard, intakeAgentTurnService);
+        assertThat(result.id()).startsWith("CASE_");
     }
 
     // 所属模块：【案件受理兼容链路 / 自动化测试层】「CaseApplicationServiceTest.structuredClaimResolutionSeedIsPassedToTheIntakeAgentWithoutExecutingTools()」。

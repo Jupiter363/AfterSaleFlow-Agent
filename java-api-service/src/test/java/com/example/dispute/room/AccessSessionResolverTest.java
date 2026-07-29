@@ -108,6 +108,41 @@ class AccessSessionResolverTest {
                         PermissionLevel.PARTY_USER);
     }
 
+    @Test
+    void resolvesTargetTenantAccessSessionWithoutChangingDefaultTenantResolution() {
+        FulfillmentCaseEntity dispute = dispute();
+        AuthenticatedActor actor = new AuthenticatedActor("user-local", ActorRole.USER);
+        String targetTenant = "tenant-target-activation";
+        CaseAccessSessionEntity created =
+                CaseAccessSessionEntity.create(
+                        "ACCESS_TARGET_TENANT",
+                        targetTenant,
+                        dispute.getId(),
+                        actor.actorId(),
+                        actor.role(),
+                        PermissionLevel.PARTY_USER,
+                        actor.actorId());
+        when(caseRepository.findById(dispute.getId())).thenReturn(Optional.of(dispute));
+        when(accessSessionRepository
+                        .findByTenantIdAndCaseIdAndActorIdAndActorRoleAndPermissionLevel(
+                                targetTenant,
+                                dispute.getId(),
+                                actor.actorId(),
+                                actor.role(),
+                                PermissionLevel.PARTY_USER))
+                .thenReturn(Optional.empty());
+        when(accessSessionInitializer.initializeInCurrentTransaction(
+                        targetTenant, dispute.getId(), actor, PermissionLevel.PARTY_USER))
+                .thenReturn(created);
+
+        CaseAccessSessionEntity session = resolver.resolve(targetTenant, dispute.getId(), actor);
+
+        assertThat(session.getTenantId()).isEqualTo(targetTenant);
+        verify(accessSessionInitializer)
+                .initializeInCurrentTransaction(
+                        targetTenant, dispute.getId(), actor, PermissionLevel.PARTY_USER);
+    }
+
     // 所属模块：【房间协作与权限 / 自动化测试层】「AccessSessionResolverTest.initializesMissingSessionInIndependentTransactionWhenCallerIsReadOnly()」。
     // 具体功能：「AccessSessionResolverTest.initializesMissingSessionInIndependentTransactionWhenCallerIsReadOnly()」：复现“核对完整业务行为（场景方法「initializesMissingSessionInIndependentTransactionWhenCallerIsReadOnly」）”场景：驱动 「caseRepository.findById」、「accessSessionRepository.findByTenantIdAndCaseIdAndActorIdAndActorRoleAndPermissionLevel」，再用 「assertThat」、「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「user-local」、「ACCESS_CREATED_READ_ONLY」、「default」。
     // 上游调用：「AccessSessionResolverTest.initializesMissingSessionInIndependentTransactionWhenCallerIsReadOnly()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。

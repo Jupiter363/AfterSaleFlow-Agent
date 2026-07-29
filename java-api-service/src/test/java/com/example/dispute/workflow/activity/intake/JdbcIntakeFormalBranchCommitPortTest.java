@@ -28,6 +28,8 @@ import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRe
 import com.example.dispute.workflow.application.intake.IntakeFinalizationPersistenceException;
 import com.example.dispute.workflow.application.intake.IntakeFinalizationRejectedException;
 import com.example.dispute.workflow.application.intake.IntakeFormalBranchCommandResolver.ResolvedBranchCommand;
+import com.example.dispute.workflow.application.epoch.RoomEpochAllocator;
+import com.example.dispute.workflow.contract.v1.ContractTypes;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.ActivityEnvelope;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.ActivityInvocation;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.ActivityInvocationMode;
@@ -420,43 +422,67 @@ class JdbcIntakeFormalBranchCommitPortTest {
     }
 
     @Test
-    void respondentConfirmationRemainsFailClosedBehindTheErratumGate() {
+    void respondentConfirmationCommitsTheFormalReceiptAndTransitionsToEvidence() {
         Fixture fixture = fixture("RESPONDENT", BranchOperation.RESPONDENT_CONFIRM);
         insertFixture(fixture);
         insertInitiatorCompletion(fixture);
+        Harness harness = harness(fixture);
+        RoomEpochAllocator.RoomEpochAllocation allocation = mock(RoomEpochAllocator.RoomEpochAllocation.class);
+        when(allocation.caseId()).thenReturn(fixture.caseId());
+        when(allocation.roomType()).thenReturn(ContractTypes.RoomType.EVIDENCE);
+        when(allocation.processRevision()).thenReturn(fixture.envelope().processRevision() + 1);
+        doAnswer(ignored -> {
+                    assertThat(number(
+                                    "select last_command_sequence from case_process_projection where case_id = ?",
+                                    fixture.caseId()))
+                            .isEqualTo(fixture.envelope().commandSequence());
+                    assertThat(number(
+                                    "select last_case_event_sequence from case_process_projection where case_id = ?",
+                                    fixture.caseId()))
+                            .isEqualTo(1);
+                    return allocation;
+                })
+                .when(harness.roomEpochAllocator())
+                .transition(any());
 
-        assertThatThrownBy(() -> harness(fixture).port().commit(fixture.request()))
-                .isInstanceOf(IntakeFinalizationRejectedException.class)
-                .satisfies(failure -> assertThat(
-                                ((IntakeFinalizationRejectedException) failure).code())
-                        .isEqualTo("INTAKE_RESPONDENT_DELTA_GATE_PENDING"));
+        BranchCommitReceipt receipt = harness.port().commit(fixture.request());
 
+        assertThat(receipt.operation().processRevision())
+                .isEqualTo(fixture.envelope().processRevision() + 1);
+        assertThat(receipt.operation().roomRevision())
+                .isEqualTo(fixture.envelope().roomRevision() + 1);
+        verify(harness.domainService()).confirmRespondent(
+                any(), any(), any(), any(), any(), eq(TimelineEventMode.FORMAL_TYPED_ONLY));
+        verify(harness.roomEpochAllocator()).transition(any());
         assertThat(count("select count(*) from domain_operation where case_id = ?", fixture.caseId()))
-                .isZero();
+                .isEqualTo(1);
         assertThat(count("select count(*) from case_timeline_event where case_id = ?",
                         fixture.caseId()))
-                .isZero();
+                .isEqualTo(1);
         assertThat(scalar("select command_status from case_command where command_id = ?",
                         fixture.envelope().commandId()))
-                .isEqualTo("ORCHESTRATION_ACCEPTED");
+                .isEqualTo("APPLIED");
     }
 
     private static Harness harness(Fixture fixture) {
         FulfillmentCaseRepository caseRepository = mock(FulfillmentCaseRepository.class);
         CaseRoomRepository roomRepository = mock(CaseRoomRepository.class);
         IntakeBranchDomainService domainService = mock(IntakeBranchDomainService.class);
+        RoomEpochAllocator roomEpochAllocator = mock(RoomEpochAllocator.class);
         FulfillmentCaseEntity dispute = mock(FulfillmentCaseEntity.class);
         CaseRoomEntity room = mock(CaseRoomEntity.class);
         when(caseRepository.findByIdForUpdate(fixture.caseId())).thenReturn(Optional.of(dispute));
         when(roomRepository.findByCaseIdAndRoomType(fixture.caseId(), RoomType.INTAKE))
                 .thenReturn(Optional.of(room));
         CaseStatus resultStatus = switch (fixture.operation()) {
-            case INITIATOR_ACCEPT, RESPONDENT_CONFIRM -> CaseStatus.INTAKE_COMPLETED;
+            case INITIATOR_ACCEPT -> CaseStatus.INTAKE_COMPLETED;
+            case RESPONDENT_CONFIRM -> CaseStatus.EVIDENCE_OPEN;
             case INITIATOR_REJECT -> CaseStatus.NOT_ADMISSIBLE;
             case CANCEL -> CaseStatus.CANCELLED;
         };
         String currentRoom = switch (fixture.operation()) {
-            case INITIATOR_ACCEPT, RESPONDENT_CONFIRM -> RoomType.INTAKE.name();
+            case INITIATOR_ACCEPT -> RoomType.INTAKE.name();
+            case RESPONDENT_CONFIRM -> RoomType.EVIDENCE.name();
             case INITIATOR_REJECT, CANCEL -> null;
         };
         when(dispute.getCaseStatus()).thenReturn(resultStatus);
@@ -464,9 +490,16 @@ class JdbcIntakeFormalBranchCommitPortTest {
         when(dispute.getCurrentDeadlineAt()).thenReturn(null);
         BranchResult result = new BranchResult(
                 new IntakeConfirmationView(
-                        fixture.caseId(), resultStatus, currentRoom == null ? null : RoomType.INTAKE, null),
+                        fixture.caseId(),
+                        resultStatus,
+                        currentRoom == null ? null : RoomType.valueOf(currentRoom),
+                        fixture.operation() == BranchOperation.RESPONDENT_CONFIRM
+                                ? NOW.plusSeconds(7_200).atOffset(ZoneOffset.UTC)
+                                : null),
                 fixture.roomId(),
-                null,
+                fixture.operation() == BranchOperation.RESPONDENT_CONFIRM
+                        ? "ROOM_EVIDENCE_" + fixture.caseId()
+                        : null,
                 fixture.operation() == BranchOperation.INITIATOR_ACCEPT
                         ? "INITIATOR_FROZEN"
                         : null,
@@ -497,9 +530,17 @@ class JdbcIntakeFormalBranchCommitPortTest {
                     })
                     .when(domainService)
                     .cancel(any(), any(), any(), any(), any(), any());
-            case RESPONDENT_CONFIRM -> when(domainService.requireFormalBilateralMatrix(dispute))
-                    .thenReturn(new IntakeBranchDomainService.ObjectNodeAuthority(
-                            "BILATERAL_FROZEN", "e".repeat(64)));
+            case RESPONDENT_CONFIRM -> {
+                doAnswer(ignored -> {
+                            applyDomainMutation(fixture, resultStatus, currentRoom);
+                            return result;
+                        })
+                        .when(domainService)
+                        .confirmRespondent(any(), any(), any(), any(), any(), any());
+                when(domainService.requireFormalBilateralMatrix(dispute))
+                        .thenReturn(new IntakeBranchDomainService.ObjectNodeAuthority(
+                                "BILATERAL_FROZEN", "e".repeat(64)));
+            }
         }
         JdbcIntakeFormalBranchCommitPort port = new JdbcIntakeFormalBranchCommitPort(
                 namedJdbc,
@@ -508,9 +549,10 @@ class JdbcIntakeFormalBranchCommitPortTest {
                 roomRepository,
                 domainService,
                 request -> fixture.resolved(),
+                roomEpochAllocator,
                 objectMapper,
                 Clock.fixed(NOW, ZoneOffset.UTC));
-        return new Harness(port, domainService, dispute);
+        return new Harness(port, domainService, dispute, roomEpochAllocator);
     }
 
     private static void applyDomainMutation(
@@ -950,5 +992,6 @@ class JdbcIntakeFormalBranchCommitPortTest {
     private record Harness(
             JdbcIntakeFormalBranchCommitPort port,
             IntakeBranchDomainService domainService,
-            FulfillmentCaseEntity dispute) {}
+            FulfillmentCaseEntity dispute,
+            RoomEpochAllocator roomEpochAllocator) {}
 }

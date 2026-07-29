@@ -9,6 +9,7 @@ import com.example.dispute.agentstream.application.AgentRunLedger.LogicalRun;
 import com.example.dispute.room.application.AccessSessionResolver;
 import com.example.dispute.room.application.AgentSessionResolver;
 import com.example.dispute.room.application.IntakeAgentTurnService;
+import com.example.dispute.room.application.ParticipantService;
 import com.example.dispute.room.domain.RoomType;
 import com.example.dispute.room.infrastructure.persistence.entity.AgentConversationSessionEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseAccessSessionEntity;
@@ -39,6 +40,8 @@ import com.example.dispute.workflow.temporal.room.intake.IntakeTargetAgentRunCon
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import java.time.Clock;
 import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.nio.charset.StandardCharsets;
 import java.util.UUID;
 import java.util.List;
@@ -54,6 +57,7 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
 
     private final AccessSessionResolver accessSessions;
     private final AgentSessionResolver agentSessions;
+    private final ParticipantService participants;
     private final IntakePrivateThreadRegistrar threadRegistrar;
     private final IntakeDomainSnapshotPublisher snapshots;
     private final IntakeTurnEventPublisher events;
@@ -69,6 +73,7 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
     public CanonicalTargetIntakeMaterializer(
             AccessSessionResolver accessSessions,
             AgentSessionResolver agentSessions,
+            ParticipantService participants,
             IntakePrivateThreadRegistrar threadRegistrar,
             IntakeDomainSnapshotPublisher snapshots,
             IntakeTurnEventPublisher events,
@@ -82,6 +87,7 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
             Clock clock) {
         this.accessSessions = Objects.requireNonNull(accessSessions, "accessSessions");
         this.agentSessions = Objects.requireNonNull(agentSessions, "agentSessions");
+        this.participants = Objects.requireNonNull(participants, "participants");
         this.threadRegistrar = Objects.requireNonNull(threadRegistrar, "threadRegistrar");
         this.snapshots = Objects.requireNonNull(snapshots, "snapshots");
         this.events = Objects.requireNonNull(events, "events");
@@ -104,8 +110,16 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
             throw new IllegalStateException("target Intake activation has expired");
         }
         TargetIntakeRuntimePins activePins = activationAuthority.resolveIntakeRuntimePins(activation, pins);
-        CaseAccessSessionEntity access = accessSessions.resolve(request.caseId(), request.actor());
-        requireActor(access, request.caseId(), request.actor().actorId(), request.actor().role());
+        CaseAccessSessionEntity access = accessSessions.resolve(
+                activation.tenantSurrogate(), request.caseId(), request.actor());
+        requireActor(
+                access,
+                activation.tenantSurrogate(),
+                request.caseId(),
+                request.actor().actorId(),
+                request.actor().role());
+        participants.activateExistingParty(
+                request.caseId(), request.actor(), OffsetDateTime.ofInstant(now, ZoneOffset.UTC));
         AgentConversationSessionEntity session = agentSessions.resolve(
                 access, RoomType.INTAKE, IntakeAgentTurnService.AGENT_ROLE,
                 activePins.promptVersion(), activePins.memoryPolicyVersion());
@@ -188,9 +202,10 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
         return new MaterializedIntake(commandId, event.payloadRef(), appended.admittedAt());
     }
 
-    static void requireActor(CaseAccessSessionEntity access, String caseId, String actorId,
+    static void requireActor(CaseAccessSessionEntity access, String tenantId, String caseId, String actorId,
             com.example.dispute.config.ActorRole actorRole) {
-        if (!caseId.equals(access.getCaseId())
+        if (!tenantId.equals(access.getTenantId())
+                || !caseId.equals(access.getCaseId())
                 || !actorId.equals(access.getActorId())
                 || actorRole != access.getActorRole()) {
             throw new IllegalStateException("target Intake access session does not match the active authority");

@@ -16,6 +16,7 @@ import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import com.example.dispute.workflow.targete2e.persistence.TargetE2EActivationLedger.CommandAdmission;
 import com.example.dispute.workflow.targete2e.persistence.material.TargetIntakeCommandMaterialStore;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.RetryBudget;
+import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.BranchOperation;
 import com.example.dispute.workflow.temporal.room.intake.IntakeCommandExecutionContext;
 import com.example.dispute.workflow.temporal.room.intake.IntakeTargetAgentRunContext;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -33,6 +34,8 @@ class TargetIntakeCommandBridgeActivityTest {
   private static final String HASH_D = "d".repeat(64);
   private static final String HASH_E = "e".repeat(64);
   private static final String HASH_F = "f".repeat(64);
+  private static final String INITIATOR_THREAD_ID = "grt.v1." + HASH_A.substring(0, 32);
+  private static final String RESPONDENT_THREAD_ID = "grt.v1." + HASH_B.substring(0, 32);
   private static final Instant DEADLINE = Instant.parse("2026-07-28T10:00:00Z");
 
   @Test
@@ -101,6 +104,105 @@ class TargetIntakeCommandBridgeActivityTest {
             failure ->
                 assertThat(failure.getType())
                     .isEqualTo(TargetIntakeCommandBridgeActivity.BINDING_INVALID));
+  }
+
+  @Test
+  void bindsInitiatorRejectFromTheImmutableBranchSourceWithV3ActivityContext() {
+    Fixture fixture = fixture();
+    CaseCommandRef command = branchCommand(CommandType.INTAKE_CONFIRM, ActorRole.USER);
+    TargetIntakeCommandBridgeActivity activity =
+        new TargetIntakeCommandBridgeActivity(
+            new FixedMaterialStore(null),
+            new ObjectMapper(),
+            request ->
+                new TargetIntakeBranchContextSource.ResolvedBranchContext(
+                    INITIATOR_THREAD_ID,
+                    "session-initiator",
+                    BranchOperation.INITIATOR_REJECT));
+
+    var bound =
+        activity.bindCommand(new TargetIntakeCommandBridgeActivities.BindRequest(command, 17, 3));
+
+    assertThat(bound.executionContext()).isNotNull();
+    assertThat(bound.executionContext().schemaVersion()).isEqualTo("intake-command-execution-context.v3");
+    assertThat(bound.executionContext().branchOperation()).isEqualTo(BranchOperation.INITIATOR_REJECT);
+    assertThat(bound.executionContext().threadId()).isEqualTo(INITIATOR_THREAD_ID);
+    assertThat(bound.operationKey()).contains("initiator.reject");
+  }
+
+  @Test
+  void bindsRespondentConfirmationToTheRespondentRegisteredThread() {
+    CaseCommandRef command = branchCommand(CommandType.INTAKE_CONFIRM, ActorRole.MERCHANT);
+    TargetIntakeCommandBridgeActivity activity =
+        new TargetIntakeCommandBridgeActivity(
+            new FixedMaterialStore(null),
+            new ObjectMapper(),
+            request -> {
+              assertThat(request.actorScopeHash())
+                  .isEqualTo(TargetIntakeActorScopes.hash("case-1", com.example.dispute.workflow.temporal.room.intake.IntakeParty.RESPONDENT));
+              return new TargetIntakeBranchContextSource.ResolvedBranchContext(
+                  RESPONDENT_THREAD_ID,
+                  "session-respondent",
+                  BranchOperation.RESPONDENT_CONFIRM);
+            });
+
+    var bound =
+        activity.bindCommand(new TargetIntakeCommandBridgeActivities.BindRequest(command, 17, 3));
+
+    assertThat(bound.party()).isEqualTo(com.example.dispute.workflow.temporal.room.intake.IntakeParty.RESPONDENT);
+    assertThat(bound.executionContext().threadId()).isEqualTo(RESPONDENT_THREAD_ID);
+    assertThat(bound.executionContext().agentSessionId()).isEqualTo("session-respondent");
+  }
+
+  @Test
+  void failsClosedWhenTheBranchSourceRejectsAnExactBindingMismatch() {
+    CaseCommandRef command = branchCommand(CommandType.INTAKE_CANCEL, ActorRole.USER);
+    TargetIntakeCommandBridgeActivity activity =
+        new TargetIntakeCommandBridgeActivity(
+            new FixedMaterialStore(null),
+            new ObjectMapper(),
+            request -> {
+              throw new IllegalArgumentException("registered private-thread binding mismatch");
+            });
+
+    assertThatThrownBy(
+            () ->
+                activity.bindCommand(
+                    new TargetIntakeCommandBridgeActivities.BindRequest(command, 17, 3)))
+        .isInstanceOfSatisfying(
+            ApplicationFailure.class,
+            failure ->
+                assertThat(failure.getType())
+                    .isEqualTo(TargetIntakeCommandBridgeActivity.BINDING_INVALID));
+  }
+
+  private static CaseCommandRef branchCommand(CommandType type, ActorRole role) {
+    String hash = type == CommandType.INTAKE_CANCEL ? HASH_D : HASH_E;
+    return new CaseCommandRef(
+        "case-command-ref.v1",
+        "branch-command-1",
+        "tenant-1",
+        "case-1",
+        5,
+        type,
+        RoomType.INTAKE,
+        2,
+        new ActorRef(
+            role == ActorRole.USER ? "user-local" : "merchant-local",
+            role,
+            List.of("case:case-1:command:INTAKE_MESSAGE")),
+        new PayloadRef(
+            "intake-branch-command.v1",
+            "minio://target-e2e-intake-activation/browser-messages/intake-branch-command.v1/branch-command-1/"
+                + hash
+                + ".json",
+            hash,
+            1),
+        9,
+        DEADLINE.minusSeconds(60),
+        DEADLINE,
+        "00-" + HASH_A.substring(0, 32) + "-" + HASH_B.substring(0, 16) + "-01",
+        HASH_A);
   }
 
   private static Fixture fixture() {

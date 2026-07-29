@@ -32,6 +32,7 @@ import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import com.example.dispute.workflow.application.epoch.RoomEpochAllocator;
 import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.ActivateRoomEpoch;
+import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.RoomEpochAllocation;
 import com.example.dispute.workflow.application.intake.LegacyIntakeWriterGuard;
 import com.example.dispute.workflow.contract.v1.ContractTypes;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -179,7 +180,6 @@ public class CaseApplicationService {
                 .findByCreationIdempotencyKey(idempotencyKey)
                 .map(
                         entity -> {
-                            legacyIntakeWriterGuard.assertLegacyWriteAllowed(entity.getId());
                             assertCanRead(entity, actor);
                             return toView(
                                     entity,
@@ -350,34 +350,39 @@ public class CaseApplicationService {
                         RoomType.INTAKE,
                         now,
                         actor.actorId()));
-        roomEpochAllocator.activate(
-                new ActivateRoomEpoch(
-                        saved.getId(),
-                        intakeRoom.getId(),
-                        ContractTypes.RoomType.INTAKE,
-                        saved.getCaseStatus().name(),
-                        intakeRoom.getRoomStatus().name(),
-                        saved.getCurrentDeadlineAt(),
-                        now));
-        legacyIntakeWriterGuard.assertLegacyWriteAllowed(saved.getId());
+        RoomEpochAllocation roomEpoch =
+                roomEpochAllocator.activate(
+                        new ActivateRoomEpoch(
+                                saved.getId(),
+                                intakeRoom.getId(),
+                                ContractTypes.RoomType.INTAKE,
+                                saved.getCaseStatus().name(),
+                                intakeRoom.getRoomStatus().name(),
+                                saved.getCurrentDeadlineAt(),
+                                now));
+        if (!isTemporalIntakeEpoch(roomEpoch)) {
+            legacyIntakeWriterGuard.assertLegacyWriteAllowed(saved.getId());
+        }
         if (actor.role() == ActorRole.USER
                 || actor.role() == ActorRole.MERCHANT) {
             participantService.addInitiator(saved, actor, now);
         }
-        intakeAgentTurnService.startInitialTurn(
-                saved.getId(),
-                actor,
-                new IntakeLobbySeed(
-                        command.orderId(),
-                        command.afterSaleId(),
-                        command.logisticsId(),
-                        intakeInitiatorRole(actor.role(), command.initiatorRole()),
-                        command.description(),
-                        null,
-                        command.claimResolutionSeed(),
-                        command.respondentAttitudeSeed()),
-                traceId,
-                requestId);
+        if (!isTemporalIntakeEpoch(roomEpoch)) {
+            intakeAgentTurnService.startInitialTurn(
+                    saved.getId(),
+                    actor,
+                    new IntakeLobbySeed(
+                            command.orderId(),
+                            command.afterSaleId(),
+                            command.logisticsId(),
+                            intakeInitiatorRole(actor.role(), command.initiatorRole()),
+                            command.description(),
+                            null,
+                            command.claimResolutionSeed(),
+                            command.respondentAttitudeSeed()),
+                    traceId,
+                    requestId);
+        }
 
         if (properties.logging().auditEnabled()) {
             auditLogRepository.save(
@@ -391,6 +396,12 @@ public class CaseApplicationService {
                             writeJson(Map.of("case_status", status.name()))));
         }
         return toView(saved, snapshot, actor);
+    }
+
+    private static boolean isTemporalIntakeEpoch(RoomEpochAllocation roomEpoch) {
+        return roomEpoch != null
+                && roomEpoch.roomType() == ContractTypes.RoomType.INTAKE
+                && roomEpoch.writerMode() == ContractTypes.WriterMode.TEMPORAL;
     }
 
     // 所属模块：【案件受理兼容链路 / 应用编排层】「CaseApplicationService.initialIntakeShell(CreateCaseCommand)」。

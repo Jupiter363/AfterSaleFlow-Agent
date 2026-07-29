@@ -17,6 +17,8 @@ import com.example.dispute.workflow.targete2e.finalization.TargetE2eIntakePropos
 import com.example.dispute.workflow.targete2e.ingress.CanonicalTargetTemporalIntakeIngress;
 import com.example.dispute.workflow.targete2e.ingress.MinioTargetE2eIntakePayloadPublisher;
 import com.example.dispute.workflow.targete2e.ingress.TargetTemporalIntakeIngress;
+import com.example.dispute.workflow.targete2e.ingress.branch.CanonicalTargetIntakeBranchIngress;
+import com.example.dispute.workflow.targete2e.ingress.branch.TargetIntakeBranchIngress;
 import com.example.dispute.workflow.targete2e.ingress.materialization.CanonicalTargetIntakeMaterializer;
 import com.example.dispute.workflow.targete2e.ingress.materialization.TargetIntakeMaterializer;
 import com.example.dispute.workflow.targete2e.ingress.materialization.TargetIntakeRuntimePins;
@@ -51,6 +53,7 @@ import com.example.dispute.workflow.application.intake.IntakePrivateThreadRegist
 import com.example.dispute.workflow.application.intake.IntakeTurnEventPublisher;
 import com.example.dispute.room.application.AccessSessionResolver;
 import com.example.dispute.room.application.AgentSessionResolver;
+import com.example.dispute.room.application.ParticipantService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.minio.MinioClient;
 import java.nio.file.Path;
@@ -272,6 +275,7 @@ public class TargetE2eApiConfiguration {
       IntakeGraphBindingStore bindingStore,
       AccessSessionResolver accessSessions,
       AgentSessionResolver agentSessions,
+      ParticipantService participants,
       AgentRunLedger ledger,
       TargetIntakeCommandMaterialStore materialStore,
       JdbcTargetE2eApiAuthority activationAuthority,
@@ -279,7 +283,7 @@ public class TargetE2eApiConfiguration {
       ObjectMapper objectMapper,
       Clock clock) {
     return new CanonicalTargetIntakeMaterializer(
-        accessSessions, agentSessions, new IntakePrivateThreadRegistrar(bindingStore),
+        accessSessions, agentSessions, participants, new IntakePrivateThreadRegistrar(bindingStore),
         new IntakeDomainSnapshotPublisher(payloadPublisher, bindingStore),
         new IntakeTurnEventPublisher(payloadPublisher, bindingStore), new IntakeGraphCommandFactory(),
         new AgentRunCommandBindingFactory(objectMapper), ledger,
@@ -290,6 +294,14 @@ public class TargetE2eApiConfiguration {
   TargetTemporalIntakeIngress targetTemporalIntakeIngress(
       CaseCommandService commandService, TargetIntakeMaterializer materializer) {
     return new CanonicalTargetTemporalIntakeIngress(commandService, materializer);
+  }
+
+  @Bean
+  TargetIntakeBranchIngress targetIntakeBranchIngress(
+      CaseCommandService commandService,
+      @Qualifier("targetE2eIntakePayloadPublisher") IntakeImmutablePayloadPublisher payloadPublisher,
+      ObjectMapper objectMapper) {
+    return new CanonicalTargetIntakeBranchIngress(commandService, payloadPublisher, objectMapper);
   }
 
   @Bean

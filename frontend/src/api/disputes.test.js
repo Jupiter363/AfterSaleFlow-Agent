@@ -39,6 +39,27 @@ describe("dispute API", () => {
     expect(status.can_enter_evidence).toBe(false);
   });
 
+  it("forwards a caller-stable idempotency key for Intake confirmation retries", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      json: async () => ({ success: true, data: { case_id: "CASE_confirm" } }),
+    });
+
+    await disputeApi.confirmIntake(
+      actor,
+      "CASE_confirm",
+      { admissible: true, dispute_type: "MISSING_DELIVERY", risk_level: "MEDIUM" },
+      "retry-confirm-1",
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/disputes/CASE_confirm/intake/confirm",
+      expect.objectContaining({
+        headers: expect.objectContaining({ "Idempotency-Key": "retry-confirm-1" }),
+      }),
+    );
+  });
+
   // 业务位置：【前端 API/SSE 适配】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面操作和访问令牌 正确进入 Java HTTP 请求或 Agent 流事件。上游：页面操作和访问令牌。下游：Java HTTP 请求或 Agent 流事件。边界：统一处理错误和取消，不能伪造服务端状态。
   it("loads the aggregated final outcome from the case endpoint", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue({
