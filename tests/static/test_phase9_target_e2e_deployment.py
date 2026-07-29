@@ -604,6 +604,23 @@ def test_readiness_tcp_listener_ownership_scan_fails_closed() -> None:
         readiness._owned_socket_inodes(InaccessibleProc())
 
 
+def test_readiness_tcp_listener_ownership_scan_skips_inaccessible_process() -> None:
+    class InaccessibleProcess:
+        name = "92"
+
+        def __truediv__(self, _part: str):
+            return self
+
+        def iterdir(self):
+            raise PermissionError("process descriptors denied")
+
+    class VisibleProc:
+        def iterdir(self):
+            return iter((InaccessibleProcess(),))
+
+    assert readiness._owned_socket_inodes(VisibleProc()) == set()
+
+
 def test_readiness_tcp_listener_probe_reads_visible_process_ownership_and_resolver() -> (
     None
 ):

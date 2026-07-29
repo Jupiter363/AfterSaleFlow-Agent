@@ -100,11 +100,11 @@ def _owned_socket_inodes(proc_root: Path = Path("/proc")) -> set[str]:
             for descriptor in descriptors:
                 try:
                     target = str(descriptor.readlink())
-                except FileNotFoundError:
+                except (FileNotFoundError, PermissionError):
                     continue
                 if target.startswith("socket:[") and target.endswith("]"):
                     inodes.add(target[8:-1])
-        except FileNotFoundError:
+        except (FileNotFoundError, PermissionError):
             continue
     return inodes
 
