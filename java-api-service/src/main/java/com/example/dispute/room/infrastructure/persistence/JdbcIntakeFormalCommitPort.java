@@ -1148,7 +1148,7 @@ public final class JdbcIntakeFormalCommitPort
                 .addValue("checkpointSchemaVersion", profiles.checkpointSchemaVersion())
                 .addValue("promptVersion", profiles.promptVersion())
                 .addValue("modelProfileId", profiles.modelProfileId())
-                .addValue("outputSchemaVersion", profiles.outputSchemaVersion())
+                .addValue("outputSchemaVersion", authority.executionOutputSchemaVersion())
                 .addValue("policyVersion", profiles.policyVersion())
                 .addValue("guardrailVersion", profiles.guardrailVersion())
                 .addValue("toolPolicyVersion", profiles.toolPolicyVersion());

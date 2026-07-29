@@ -51,6 +51,7 @@ import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -271,6 +272,19 @@ class JdbcIntakeFormalCommitPortTest {
                 .isInstanceOf(
                         com.example.dispute.workflow.application.intake.IntakeFinalizationRejectedException.class)
                 .hasMessageContaining("no longer active");
+    }
+
+    @Test
+    void authorityParametersUseExecutionOutputSchemaWhenProposalAndExecutionSchemasDiffer() {
+        Fixture fixture = fixture("PREFLIGHT_EXECUTION_SCHEMA_" + SEQUENCE.incrementAndGet());
+        String executionSchema = "target-e2e-room-proposal-source.v1";
+        IntakeGraphFinalizationRequest request = requestWithExecutionOutputSchema(fixture, executionSchema);
+
+        MapSqlParameterSource parameters = authorityParameters(request);
+
+        assertThat(request.authority().profileVersions().outputSchemaVersion())
+                .isEqualTo("intake-turn-proposal.v2");
+        assertThat(parameters.getValue("outputSchemaVersion")).isEqualTo(executionSchema);
     }
 
     @Test
@@ -725,6 +739,64 @@ class JdbcIntakeFormalCommitPortTest {
                 unsigned.initialSnapshot(),
                 unsigned.event(),
                 unsigned.proposalReference());
+    }
+
+    private static IntakeGraphFinalizationRequest requestWithExecutionOutputSchema(
+            Fixture fixture, String executionOutputSchemaVersion) {
+        IntakeGraphFinalizationRequest.Authority source = fixture.authority();
+        IntakeGraphFinalizationRequest.Authority authority =
+                new IntakeGraphFinalizationRequest.Authority(
+                        source.tenantSurrogate(),
+                        source.caseId(),
+                        source.roomEpoch(),
+                        source.fencingToken(),
+                        source.threadId(),
+                        source.actorScopeHash(),
+                        source.agentSessionId(),
+                        source.commandId(),
+                        source.logicalRunId(),
+                        source.attemptId(),
+                        source.resultHash(),
+                        source.proposalHash(),
+                        source.checkpointId(),
+                        source.cognitiveRevision(),
+                        source.processRevision(),
+                        source.roomRevision(),
+                        source.stageCode(),
+                        source.stageSequence(),
+                        source.profileVersions(),
+                        executionOutputSchemaVersion);
+        IntakeGraphFinalizationRequest unsigned = new IntakeGraphFinalizationRequest(
+                fixture.request().operationKey(),
+                "0".repeat(64),
+                authority,
+                fixture.command(),
+                fixture.result(),
+                fixture.binding(),
+                fixture.snapshot(),
+                fixture.event(),
+                fixture.proposalReference());
+        return new IntakeGraphFinalizationRequest(
+                unsigned.operationKey(),
+                unsigned.canonicalRequestHash(),
+                unsigned.authority(),
+                unsigned.command(),
+                unsigned.result(),
+                unsigned.threadBinding(),
+                unsigned.initialSnapshot(),
+                unsigned.event(),
+                unsigned.proposalReference());
+    }
+
+    private static MapSqlParameterSource authorityParameters(IntakeGraphFinalizationRequest request) {
+        try {
+            var method = JdbcIntakeFormalCommitPort.class.getDeclaredMethod(
+                    "authorityParameters", IntakeGraphFinalizationRequest.class);
+            method.setAccessible(true);
+            return (MapSqlParameterSource) method.invoke(port, request);
+        } catch (ReflectiveOperationException failure) {
+            throw new AssertionError("unable to inspect formal-commit authority parameters", failure);
+        }
     }
 
     private static void insertPartyCompletion(
