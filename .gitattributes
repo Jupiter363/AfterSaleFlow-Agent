@@ -5,10 +5,10 @@ mvnw text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
 Dockerfile text eol=lf
+java-api-service/src/main/resources/db/migration/*.sql text eol=lf
 python-agent-service/migrations/graph/*.sql text eol=lf
 test-reports/temporal-first/** text eol=lf
 
 *.ps1 text eol=crlf
 *.bat text eol=crlf
 *.cmd text eol=crlf
-
