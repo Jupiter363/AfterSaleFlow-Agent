@@ -157,10 +157,10 @@ select metadata
 BIND_EXTERNAL_TERMINAL_METADATA_SQL: Final[str] = """
 update checkpoints
    set metadata = metadata || jsonb_build_object(
-           'graph_result_hash', %s,
-           'graph_result_ref', %s,
-           'graph_proposal_hash', %s,
-           'graph_result_envelope_hash', %s
+           'graph_result_hash', %s::text,
+           'graph_result_ref', %s::text,
+           'graph_proposal_hash', %s::text,
+           'graph_result_envelope_hash', %s::text
        )
  where thread_id = %s
    and checkpoint_ns = %s

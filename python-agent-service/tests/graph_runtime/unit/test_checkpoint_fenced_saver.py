@@ -8,6 +8,7 @@ import pytest
 
 from app.contracts.v1.models import ExecutionMetadata, Usage
 from app.graph_runtime.checkpoint import (
+    BIND_EXTERNAL_TERMINAL_METADATA_SQL,
     ExternalTerminalCommit,
     FENCE_CONTEXT_KEY,
     PENDING_WRITE_CHECKPOINT_RETRY_ATTEMPTS,
@@ -193,6 +194,7 @@ class _Connection:
         terminal_metadata_current: bool = True,
     ) -> None:
         self.events: list[str] = []
+        self.executed_queries: list[tuple[str, Any]] = []
         self.fence_current = fence_current
         self.binding_current = binding_current
         self.thread_current = thread_current
@@ -208,6 +210,7 @@ class _Connection:
         return _Transaction(self.events)
 
     async def execute(self, query: str, params: Any = None) -> _Cursor:
+        self.executed_queries.append((query, params))
         normalized = " ".join(query.split()).lower()
         if "from agent_graph_lease" in normalized:
             self.events.append("sql:fence")
@@ -637,6 +640,27 @@ async def test_external_terminal_commit_binds_terminal_metadata_without_rewritin
         graph_result_ref=result.result_ref,
         graph_proposal_hash=result.proposal_hash,
         graph_result_envelope_hash=result.result_envelope_hash,
+    )
+    bound_query, bound_params = next(
+        (query, params)
+        for query, params in connection.executed_queries
+        if query == BIND_EXTERNAL_TERMINAL_METADATA_SQL
+    )
+    normalized_bound_query = " ".join(bound_query.split())
+    assert normalized_bound_query == (
+        "update checkpoints set metadata = metadata || jsonb_build_object( "
+        "'graph_result_hash', %s::text, "
+        "'graph_result_ref', %s::text, "
+        "'graph_proposal_hash', %s::text, "
+        "'graph_result_envelope_hash', %s::text ) "
+        "where thread_id = %s and checkpoint_ns = %s and checkpoint_id = %s "
+        "returning metadata"
+    )
+    assert bound_params[:4] == (
+        result.result_hash,
+        result.result_ref,
+        result.proposal_hash,
+        result.result_envelope_hash,
     )
 
 

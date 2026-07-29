@@ -9,6 +9,7 @@ package com.example.dispute.caseintake.application;
 import com.example.dispute.common.api.ErrorCode;
 import com.example.dispute.common.exception.ForbiddenException;
 import com.example.dispute.common.exception.NotFoundException;
+import com.example.dispute.casecore.application.ImportedCaseIdFactory;
 import com.example.dispute.casecore.domain.CasePartyAssignment;
 import com.example.dispute.casecore.domain.CasePartyPosition;
 import com.example.dispute.casecore.domain.CaseSourceType;
@@ -39,7 +40,10 @@ import java.time.Clock;
 import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
@@ -66,6 +70,7 @@ public class CaseApplicationService {
     private final AppProperties properties;
     private final Clock clock;
     private final ObjectMapper objectMapper;
+    private final ImportedCaseIdFactory caseIdFactory;
 
     // 所属模块：【案件受理兼容链路 / 应用编排层】「CaseApplicationService.CaseApplicationService(FulfillmentCaseRepository,AuditLogRepository,CaseRoomRepository,ParticipantService,IntakeAgentTurnService,AppProperties,Clock,ObjectMapper)」。
     // 具体功能：「CaseApplicationService.CaseApplicationService(FulfillmentCaseRepository,AuditLogRepository,CaseRoomRepository,ParticipantService,IntakeAgentTurnService,AppProperties,Clock,ObjectMapper)」：通过构造器接收 「caseRepository」(FulfillmentCaseRepository)、「auditLogRepository」(AuditLogRepository)、「roomRepository」(CaseRoomRepository)、「participantService」(ParticipantService)、「intakeAgentTurnService」(IntakeAgentTurnService)、「properties」(AppProperties)、「clock」(Clock)、「objectMapper」(ObjectMapper) 并保存为「CaseApplicationService」的协作依赖；这里只完成依赖装配，不提前访问数据库或外部服务。
@@ -73,6 +78,35 @@ public class CaseApplicationService {
     // 下游影响：「CaseApplicationService.CaseApplicationService(FulfillmentCaseRepository,AuditLogRepository,CaseRoomRepository,ParticipantService,IntakeAgentTurnService,AppProperties,Clock,ObjectMapper)」只产生当前对象的返回值或字段变化，不访问额外基础设施。
     // 系统意义：「CaseApplicationService.CaseApplicationService(FulfillmentCaseRepository,AuditLogRepository,CaseRoomRepository,ParticipantService,IntakeAgentTurnService,AppProperties,Clock,ObjectMapper)」负责主链路中的“案件应用服务”；接待分析只是非最终建议，不能越权决定赔付或执行动作
     // Java 语法：构造器名称与类名相同且没有返回类型；参数通常由 Spring 按类型注入。
+    @Autowired
+    public CaseApplicationService(
+            FulfillmentCaseRepository caseRepository,
+            AuditLogRepository auditLogRepository,
+            CaseRoomRepository roomRepository,
+            ParticipantService participantService,
+            IntakeAgentTurnService intakeAgentTurnService,
+            IntakeProgressService intakeProgressService,
+            RoomEpochAllocator roomEpochAllocator,
+            LegacyIntakeWriterGuard legacyIntakeWriterGuard,
+            AppProperties properties,
+            Clock clock,
+            ObjectMapper objectMapper,
+            ObjectProvider<ImportedCaseIdFactory> caseIdFactoryProvider) {
+        this(
+                caseRepository,
+                auditLogRepository,
+                roomRepository,
+                participantService,
+                intakeAgentTurnService,
+                intakeProgressService,
+                roomEpochAllocator,
+                legacyIntakeWriterGuard,
+                properties,
+                clock,
+                objectMapper,
+                caseIdFactoryProvider.getIfUnique(() -> () -> "CASE_" + compactUuid()));
+    }
+
     public CaseApplicationService(
             FulfillmentCaseRepository caseRepository,
             AuditLogRepository auditLogRepository,
@@ -85,6 +119,34 @@ public class CaseApplicationService {
             AppProperties properties,
             Clock clock,
             ObjectMapper objectMapper) {
+        this(
+                caseRepository,
+                auditLogRepository,
+                roomRepository,
+                participantService,
+                intakeAgentTurnService,
+                intakeProgressService,
+                roomEpochAllocator,
+                legacyIntakeWriterGuard,
+                properties,
+                clock,
+                objectMapper,
+                () -> "CASE_" + compactUuid());
+    }
+
+    private CaseApplicationService(
+            FulfillmentCaseRepository caseRepository,
+            AuditLogRepository auditLogRepository,
+            CaseRoomRepository roomRepository,
+            ParticipantService participantService,
+            IntakeAgentTurnService intakeAgentTurnService,
+            IntakeProgressService intakeProgressService,
+            RoomEpochAllocator roomEpochAllocator,
+            LegacyIntakeWriterGuard legacyIntakeWriterGuard,
+            AppProperties properties,
+            Clock clock,
+            ObjectMapper objectMapper,
+            ImportedCaseIdFactory caseIdFactory) {
         this.caseRepository = caseRepository;
         this.auditLogRepository = auditLogRepository;
         this.roomRepository = roomRepository;
@@ -96,6 +158,7 @@ public class CaseApplicationService {
         this.properties = properties;
         this.clock = clock;
         this.objectMapper = objectMapper;
+        this.caseIdFactory = Objects.requireNonNull(caseIdFactory, "caseIdFactory");
     }
 
     // 所属模块：【案件受理兼容链路 / 应用编排层】「CaseApplicationService.create(CreateCaseCommand,AuthenticatedActor,String,String,String)」。
@@ -255,7 +318,7 @@ public class CaseApplicationService {
                 new IntakeSnapshot(
                         analysis.potentialDispute(), missingSlots, false, clock.instant());
         String snapshotJson = writeJson(snapshot);
-        String caseId = "CASE_" + compactUuid();
+        String caseId = caseIdFactory.nextCaseId();
         FulfillmentCaseEntity entity =
                 FulfillmentCaseEntity.create(
                         caseId,

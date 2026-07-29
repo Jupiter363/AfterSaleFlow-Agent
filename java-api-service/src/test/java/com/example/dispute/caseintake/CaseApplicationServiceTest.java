@@ -20,6 +20,7 @@ import com.example.dispute.caseintake.application.AgentServiceClient;
 import com.example.dispute.caseintake.application.CaseApplicationService;
 import com.example.dispute.caseintake.application.CaseView;
 import com.example.dispute.caseintake.application.CreateCaseCommand;
+import com.example.dispute.casecore.application.ImportedCaseIdFactory;
 import com.example.dispute.casecore.domain.CasePartyPosition;
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AppProperties;
@@ -57,6 +58,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.beans.factory.ObjectProvider;
 
 // 所属模块：【案件受理兼容链路 / 自动化测试层】类型「CaseApplicationServiceTest」。
 // 类型职责：集中验证案件应用的业务场景、权限边界和持久化/外部协作契约；本类型显式提供 「setUp」、「createsDeterministicShellAndStartsTheSingleIntakeAgentTurn」、「structuredClaimResolutionSeedIsPassedToTheIntakeAgentWithoutExecutingTools」、「missingOrderIdEntersWaitingSlotCompletionWithoutPromisingAnOutcome」、「creationDoesNotPrecomputeAnAgentSummary」、「userCannotCreateCaseForAnotherUser」。
@@ -75,8 +77,12 @@ class CaseApplicationServiceTest {
     @Mock private IntakeProgressService intakeProgressService;
     @Mock private RoomEpochAllocator roomEpochAllocator;
     @Mock private LegacyIntakeWriterGuard legacyIntakeWriterGuard;
+    @Mock private ObjectProvider<ImportedCaseIdFactory> caseIdFactoryProvider;
 
     private CaseApplicationService service;
+    private AppProperties properties;
+    private Clock clock;
+    private ObjectMapper objectMapper;
 
     // 所属模块：【案件受理兼容链路 / 自动化测试层】「CaseApplicationServiceTest.setUp()」。
     // 具体功能：「CaseApplicationServiceTest.setUp()」：在每个测试场景运行前创建「caseRepository.findByCreationIdempotencyKey」、「caseRepository.save」、「Clock.fixed」、「Instant.parse」，统一准备后续断言依赖的初始状态，避免各用例重复搭建且保持彼此隔离。
@@ -85,7 +91,7 @@ class CaseApplicationServiceTest {
     // 系统意义：「CaseApplicationServiceTest.setUp()」守住「案件受理兼容链路」的可执行规格，尤其防止 「test」、「secret」、「localhost:7233」、「default」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @BeforeEach
     void setUp() {
-        AppProperties properties =
+        properties =
                 new AppProperties(
                         "test",
                         new AppProperties.Security("secret"),
@@ -102,6 +108,8 @@ class CaseApplicationServiceTest {
                         new AppProperties.Elasticsearch("http://elasticsearch"),
                         new AppProperties.Feature(true, true, true, true, true, true, false),
                         new AppProperties.Logging(true, true));
+        clock = Clock.fixed(Instant.parse("2026-06-28T00:00:00Z"), ZoneOffset.UTC);
+        objectMapper = new ObjectMapper().findAndRegisterModules();
         service =
                 new CaseApplicationService(
                         caseRepository,
@@ -113,8 +121,8 @@ class CaseApplicationServiceTest {
                         roomEpochAllocator,
                         legacyIntakeWriterGuard,
                         properties,
-                        Clock.fixed(Instant.parse("2026-06-28T00:00:00Z"), ZoneOffset.UTC),
-                        new ObjectMapper().findAndRegisterModules());
+                        clock,
+                        objectMapper);
         lenient()
                 .when(caseRepository.findByCreationIdempotencyKey(any()))
                 .thenReturn(Optional.empty());
@@ -142,6 +150,7 @@ class CaseApplicationServiceTest {
                         "REQ_test");
 
         assertThat(result.caseStatus()).isEqualTo(CaseStatus.INTAKE_COMPLETED);
+        assertThat(result.id()).startsWith("CASE_");
         assertThat(result.initiatorRole()).isEqualTo(ActorRole.USER);
         assertThat(result.initiatorId()).isEqualTo("user-1");
         assertThat(result.respondentRole()).isEqualTo(ActorRole.MERCHANT);
@@ -198,6 +207,45 @@ class CaseApplicationServiceTest {
         verify(auditLogRepository).save(audit.capture());
         assertThat(audit.getValue().getAction()).isEqualTo("CASE_CREATED");
         assertThat(audit.getValue().getTraceId()).isEqualTo("TRACE_test");
+    }
+
+    @Test
+    void persistsAndAllocatesEpochForTheInjectedCaseId() {
+        String expectedCaseId = "CASE_P9_SYNTHETIC_7";
+        ImportedCaseIdFactory caseIdFactory = () -> expectedCaseId;
+        when(caseIdFactoryProvider.getIfUnique(any())).thenReturn(caseIdFactory);
+        service =
+                new CaseApplicationService(
+                        caseRepository,
+                        auditLogRepository,
+                        roomRepository,
+                        participantService,
+                        intakeAgentTurnService,
+                        intakeProgressService,
+                        roomEpochAllocator,
+                        legacyIntakeWriterGuard,
+                        properties,
+                        clock,
+                        objectMapper,
+                        caseIdFactoryProvider);
+
+        CaseView result =
+                service.create(
+                        command("Injected case ID is reserved before persistence", "order-7"),
+                        new AuthenticatedActor("user-1", ActorRole.USER),
+                        "idem-injected-case-id",
+                        "TRACE_injected",
+                        "REQ_injected");
+
+        ArgumentCaptor<FulfillmentCaseEntity> persistedCase =
+                ArgumentCaptor.forClass(FulfillmentCaseEntity.class);
+        ArgumentCaptor<ActivateRoomEpoch> activation =
+                ArgumentCaptor.forClass(ActivateRoomEpoch.class);
+        verify(caseRepository).save(persistedCase.capture());
+        verify(roomEpochAllocator).activate(activation.capture());
+        assertThat(result.id()).isEqualTo(expectedCaseId);
+        assertThat(persistedCase.getValue().getId()).isEqualTo(expectedCaseId);
+        assertThat(activation.getValue().caseId()).isEqualTo(expectedCaseId);
     }
 
     @Test
