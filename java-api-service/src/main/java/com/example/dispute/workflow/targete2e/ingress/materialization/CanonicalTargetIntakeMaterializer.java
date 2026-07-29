@@ -27,6 +27,10 @@ import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
 import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
+import com.example.dispute.workflow.infrastructure.persistence.entity.CaseRoomEpochEntity;
+import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.EpochLifecycleStatus;
+import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.EpochProvisioningStatus;
+import com.example.dispute.workflow.infrastructure.persistence.repository.CaseRoomEpochRepository;
 import com.example.dispute.workflow.targete2e.graph.TargetE2EGraphCommandEnvelope;
 import com.example.dispute.workflow.targete2e.graph.TargetE2EGraphEnvelopeCodec;
 import com.example.dispute.workflow.targete2e.ingress.TargetIntakeActivationGrant;
@@ -67,6 +71,7 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
     private final TargetE2EGraphEnvelopeCodec envelopes;
     private final TargetIntakeCommandMaterialStore materialStore;
     private final JdbcTargetE2eApiAuthority activationAuthority;
+    private final CaseRoomEpochRepository epochs;
     private final TargetIntakeRuntimePins pins;
     private final Clock clock;
 
@@ -83,6 +88,7 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
             TargetE2EGraphEnvelopeCodec envelopes,
             TargetIntakeCommandMaterialStore materialStore,
             JdbcTargetE2eApiAuthority activationAuthority,
+            CaseRoomEpochRepository epochs,
             TargetIntakeRuntimePins pins,
             Clock clock) {
         this.accessSessions = Objects.requireNonNull(accessSessions, "accessSessions");
@@ -97,6 +103,7 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
         this.envelopes = Objects.requireNonNull(envelopes, "envelopes");
         this.materialStore = Objects.requireNonNull(materialStore, "materialStore");
         this.activationAuthority = Objects.requireNonNull(activationAuthority, "activationAuthority");
+        this.epochs = Objects.requireNonNull(epochs, "epochs");
         this.pins = Objects.requireNonNull(pins, "pins");
         this.clock = Objects.requireNonNull(clock, "clock");
     }
@@ -110,6 +117,14 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
             throw new IllegalStateException("target Intake activation has expired");
         }
         TargetIntakeRuntimePins activePins = activationAuthority.resolveIntakeRuntimePins(activation, pins);
+        CaseRoomEpochEntity epoch = epochs
+                .findByCaseIdAndRoomTypeAndRoomEpochForUpdate(
+                        request.caseId(),
+                        com.example.dispute.workflow.contract.v1.ContractTypes.RoomType.INTAKE,
+                        activation.roomEpoch())
+                .orElseThrow(() -> new IllegalStateException(
+                        "target Intake activation has no persisted room epoch authority"));
+        String roomEpochId = requireEpochAuthority(epoch, request, activation, activePins);
         CaseAccessSessionEntity access = accessSessions.resolve(
                 activation.tenantSurrogate(), request.caseId(), request.actor());
         requireActor(
@@ -163,12 +178,12 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
         TargetE2EGraphCommandEnvelope envelope = envelopes.wrapCommand(
                 activation.activationId(), activation.roomFencingToken(), graph);
         AgentRunCommandBindingFactory.Binding binding = bindings.bind(
-                new AgentRunCommandBindingFactory.Context(request.roomId(),
-                        request.caseId() + ":" + activation.roomEpoch(), OPERATION, request.idempotencyKey()), graph);
+                new AgentRunCommandBindingFactory.Context(
+                        request.roomId(), roomEpochId, OPERATION, request.idempotencyKey()), graph);
         LogicalRun logical = ledger.createOrLoad(new CreateLogicalRun(
                 logicalRunId, activation.tenantSurrogate(), request.caseId(), request.roomId(), OPERATION,
                 request.idempotencyKey(), AgentRunProtocol.V2, AgentRunExecutorKind.TEMPORAL_ACTIVITY,
-                request.caseId() + ":" + activation.roomEpoch(), graph.roomType(), graph.roomEpoch(),
+                roomEpochId, graph.roomType(), graph.roomEpoch(),
                 graph.processRevision(), activation.roomFencingToken(), graph.requestHash(),
                 binding.logicalInputHash(), ATTEMPT_LIMIT, deadline, now));
         if (!logical.agentRunId().equals(logicalRunId)) {
@@ -210,6 +225,38 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
                 || actorRole != access.getActorRole()) {
             throw new IllegalStateException("target Intake access session does not match the active authority");
         }
+    }
+
+    static String requireEpochAuthority(
+            CaseRoomEpochEntity epoch,
+            TargetIntakeMessageRequest request,
+            TargetIntakeActivationGrant activation,
+            TargetIntakeRuntimePins pins) {
+        if (epoch == null
+                || !activation.tenantSurrogate().equals(epoch.getTenantSurrogate())
+                || !request.caseId().equals(epoch.getCaseId())
+                || !request.roomId().equals(epoch.getRoomId())
+                || epoch.getRoomType()
+                        != com.example.dispute.workflow.contract.v1.ContractTypes.RoomType.INTAKE
+                || epoch.getWriterMode() != WriterMode.TEMPORAL
+                || epoch.getLifecycleStatus() != EpochLifecycleStatus.ACTIVE
+                || epoch.getProvisioningStatus() != EpochProvisioningStatus.READY
+                || epoch.getRoomEpoch() != activation.roomEpoch()
+                || epoch.getFencingToken() != activation.roomFencingToken()
+                || epoch.getProcessRevision() != activation.processRevision()
+                || epoch.getRoomRevision() != activation.roomRevision()
+                || !activation.temporalWorkflowId().equals(epoch.getTemporalWorkflowId())
+                || !activation.temporalBuildId().equals(epoch.getTemporalBuildId())
+                || !pins.registrationPins().graphKey().equals(epoch.getGraphKey())
+                || !pins.registrationPins().graphVersion().equals(epoch.getGraphVersion())
+                || !pins.registrationPins().checkpointSchemaVersion()
+                        .equals(epoch.getCheckpointSchemaVersion())
+                || epoch.getId() == null
+                || epoch.getId().isBlank()) {
+            throw new IllegalStateException(
+                    "target Intake activation conflicts with persisted room epoch authority");
+        }
+        return epoch.getId();
     }
 
     private static Audience audience(TargetIntakeMessageRequest request) {

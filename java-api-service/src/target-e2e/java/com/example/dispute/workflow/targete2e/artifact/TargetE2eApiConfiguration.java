@@ -279,6 +279,7 @@ public class TargetE2eApiConfiguration {
       AgentRunLedger ledger,
       TargetIntakeCommandMaterialStore materialStore,
       JdbcTargetE2eApiAuthority activationAuthority,
+      CaseRoomEpochRepository epochs,
       TargetIntakeRuntimePins pins,
       ObjectMapper objectMapper,
       Clock clock) {
@@ -287,7 +288,7 @@ public class TargetE2eApiConfiguration {
         new IntakeDomainSnapshotPublisher(payloadPublisher, bindingStore),
         new IntakeTurnEventPublisher(payloadPublisher, bindingStore), new IntakeGraphCommandFactory(),
         new AgentRunCommandBindingFactory(objectMapper), ledger,
-        new TargetE2EGraphEnvelopeCodec(objectMapper), materialStore, activationAuthority, pins, clock);
+        new TargetE2EGraphEnvelopeCodec(objectMapper), materialStore, activationAuthority, epochs, pins, clock);
   }
 
   @Bean

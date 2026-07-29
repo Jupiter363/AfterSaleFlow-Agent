@@ -374,16 +374,8 @@ public class CaseProcessLedgerActivitiesImpl
     }
 
     private CaseCommandEntity lockedCommand(String tenantSurrogate, String commandId) {
-        CaseCommandEntity identified =
-                commandRepository
-                        .findByTenantSurrogateAndCommandId(tenantSurrogate, commandId)
-                        .orElseThrow(
-                                () ->
-                                        permanentFailure(
-                                                "CASE_COMMAND_LEDGER_MISSING",
-                                                "case command is unavailable"));
         return commandRepository
-                .findByIdForUpdate(identified.getId())
+                .findByTenantSurrogateAndCommandIdForUpdate(tenantSurrogate, commandId)
                 .orElseThrow(
                         () ->
                                 permanentFailure(

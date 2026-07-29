@@ -83,7 +83,11 @@ public class AgentRunController {
     // 系统意义：「AgentRunController.events(String,Long,Long,Authentication)」是外部请求进入业务事实源的边界，必须先完成身份/参数校验，再由应用服务决定事务和权限。
     @GetMapping(value = "/events", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public ResponseEntity<SseEmitter> events(
-            @PathVariable @Pattern(regexp = "AGENT_RUN_[A-Za-z0-9]{1,54}") String runId,
+            @PathVariable
+                    @Pattern(
+                            regexp =
+                                    "AGENT_RUN_[A-Za-z0-9]{1,54}|target-(?:intake|evidence|hearing|review)-run:[0-9a-f]{32}")
+                    String runId,
             @RequestHeader(value = "Last-Event-ID", required = false)
                     String lastEventId,
             @RequestParam(value = "last_event_id", required = false)

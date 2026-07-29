@@ -16,6 +16,15 @@ public interface CaseCommandRepository extends JpaRepository<CaseCommandEntity, 
     Optional<CaseCommandEntity> findByTenantSurrogateAndCommandId(
             String tenantSurrogate, String commandId);
 
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query(
+            "select command from CaseCommandEntity command "
+                    + "where command.tenantSurrogate = :tenantSurrogate "
+                    + "and command.commandId = :commandId")
+    Optional<CaseCommandEntity> findByTenantSurrogateAndCommandIdForUpdate(
+            @Param("tenantSurrogate") String tenantSurrogate,
+            @Param("commandId") String commandId);
+
     Optional<CaseCommandEntity> findFirstByCaseIdOrderByCaseCommandSequenceDesc(String caseId);
 
     boolean existsByCaseIdAndExpectedProcessRevisionAndCommandStatusIn(
