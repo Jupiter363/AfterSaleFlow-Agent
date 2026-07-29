@@ -293,8 +293,20 @@ public class RoomMessageService {
                             intakeMessageIngressRouter.select(caseId),
                             "Intake opening writer was not selected");
             if (selection.isTarget()) {
-                // The target workflow owns its opening event; the UI refreshes the room afterward.
-                return null;
+                if (actor.role() != dispute.getInitiatorRole()) {
+                    return null;
+                }
+                return post(
+                        caseId,
+                        RoomType.INTAKE,
+                        new RoomMessageCommand(
+                                MessageType.PARTY_TEXT,
+                                dispute.getDescription(),
+                                List.of()),
+                        actor,
+                        "target-intake-opening:" + caseId,
+                        traceId,
+                        false);
             }
             legacyIntakeWriterGuard.assertLegacyWriteAllowed(caseId);
             return intakeAgentTurnService.ensureRespondentOpening(

@@ -645,23 +645,58 @@ describe("IntakeRoomView", () => {
     expect(wrapper.get("[data-dossier-status-rail]").text()).not.toContain("完善度 88%");
   });
 
-  it("does not create a respondent opening for the initiating party", async () => {
-    const openingAction = vi.fn();
-    await mountInteractiveView({
+  it("creates one opening when a TEMPORAL initiator enters an empty intake room", async () => {
+    const openingAction = vi.fn().mockResolvedValue({
+      id: "MESSAGE_INITIATOR_OPENING",
+      sequence_no: 1,
+    });
+    const messagesLoader = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          id: "MESSAGE_INITIATOR_OPENING",
+          sequence_no: 1,
+          sender_role: "CUSTOMER_SERVICE",
+          message_text: "请说明争议经过和处理诉求。",
+        },
+      ]);
+
+    const wrapper = await mountInteractiveView({
       initialMessages: null,
-      initialIntakeStatus: {
-        initiator_role: "USER",
-        respondent_role: "MERCHANT",
-        initiator_status: "OPEN",
-        respondent_status: "LOCKED",
-        current_actor_completed: false,
-        can_use_intake: true,
-        can_enter_evidence: false,
-      },
-      messagesLoader: vi.fn().mockResolvedValue([]),
+      initialIntakeStatus: intakeStatusWithProjection(
+        currentProcessProjection({ writer_mode: "TEMPORAL" }),
+      ),
+      messagesLoader,
       openingAction,
       eventStreamer: vi.fn(async () => {}),
     });
+
+    expect(openingAction).toHaveBeenCalledTimes(1);
+    expect(openingAction).toHaveBeenCalledWith(
+      { id: "user-local", role: "USER" },
+      "CASE_INTAKE_1",
+      "INTAKE",
+    );
+    expect(messagesLoader).toHaveBeenCalledTimes(2);
+    wrapper.unmount();
+  });
+
+  it("does not create an opening for LEGACY or SHADOW initiators", async () => {
+    const openingAction = vi.fn();
+    for (const initialIntakeStatus of [
+      intakeStatusWithProjection(undefined),
+      intakeStatusWithProjection(currentProcessProjection()),
+    ]) {
+      const wrapper = await mountInteractiveView({
+        initialMessages: null,
+        initialIntakeStatus,
+        messagesLoader: vi.fn().mockResolvedValue([]),
+        openingAction,
+        eventStreamer: vi.fn(async () => {}),
+      });
+      wrapper.unmount();
+    }
 
     expect(openingAction).not.toHaveBeenCalled();
   });
@@ -1124,7 +1159,7 @@ describe("IntakeRoomView", () => {
     }
   });
 
-  it("bounds projection retries and ignores a stale refresh after the actor changes", async () => {
+  it("continues projection retries after the fast window and ignores a stale refresh after the actor changes", async () => {
     vi.useFakeTimers();
     const processingStatus = intakeStatusWithProjection({
       schema_version: "intake-process-projection.v1",
@@ -1138,8 +1173,8 @@ describe("IntakeRoomView", () => {
       intakeStatusLoader: retryLoader,
     });
 
-    await vi.advanceTimersByTimeAsync(2_000);
-    expect(retryLoader).toHaveBeenCalledTimes(4);
+    await vi.advanceTimersByTimeAsync(11_000);
+    expect(retryLoader).toHaveBeenCalledTimes(41);
     retryWrapper.unmount();
 
     let resolveStaleStatus;
@@ -1173,6 +1208,222 @@ describe("IntakeRoomView", () => {
     expect(staleStatusLoader.mock.calls[0][0].actor.id).toBe("user-local");
     expect(staleStatusLoader.mock.calls[1][0].actor.id).toBe("user-other");
     wrapper.unmount();
+  });
+
+  it("requests the TEMPORAL initiator opening when readiness arrives after the fast retry window", async () => {
+    vi.useFakeTimers();
+    const processingStatus = intakeStatusWithProjection({
+      schema_version: "intake-process-projection.v1",
+      projection_state: "PROCESSING",
+      writer_mode: "TEMPORAL",
+      room_phase: "PROCESSING",
+    });
+    const currentStatus = intakeStatusWithProjection(
+      currentProcessProjection({ writer_mode: "TEMPORAL" }),
+    );
+    const intakeStatusLoader = vi.fn();
+    intakeStatusLoader.mockImplementation(() => (
+      intakeStatusLoader.mock.calls.length > 40 ? currentStatus : processingStatus
+    ));
+    const openingAction = vi.fn().mockResolvedValue({
+      id: "MESSAGE_INITIATOR_OPENING",
+      sequence_no: 1,
+    });
+    const messagesLoader = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          id: "MESSAGE_INITIATOR_OPENING",
+          sequence_no: 1,
+          sender_role: "CUSTOMER_SERVICE",
+          message_text: "请说明争议经过和处理诉求。",
+        },
+      ]);
+
+    const wrapper = await mountInteractiveView({
+      initialMessages: null,
+      initialIntakeStatus: processingStatus,
+      intakeStatusLoader,
+      messagesLoader,
+      openingAction,
+      eventStreamer: vi.fn(async () => {}),
+    });
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    await flushPromises();
+    expect(intakeStatusLoader).toHaveBeenCalledTimes(40);
+    expect(openingAction).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await flushPromises();
+    expect(intakeStatusLoader).toHaveBeenCalledTimes(41);
+    expect(openingAction).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+  });
+
+  it("reloads messages and requests the TEMPORAL initiator opening after processing resolves", async () => {
+    vi.useFakeTimers();
+    const processingStatus = intakeStatusWithProjection({
+      schema_version: "intake-process-projection.v1",
+      projection_state: "PROCESSING",
+      writer_mode: "TEMPORAL",
+      room_phase: "PROCESSING",
+    });
+    const openingAction = vi.fn().mockResolvedValue({
+      id: "MESSAGE_INITIATOR_OPENING",
+      sequence_no: 1,
+    });
+    const messagesLoader = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          id: "MESSAGE_INITIATOR_OPENING",
+          sequence_no: 1,
+          sender_role: "CUSTOMER_SERVICE",
+          message_text: "请说明争议经过和处理诉求。",
+        },
+      ]);
+    const intakeStatusLoader = vi.fn().mockResolvedValue(
+      intakeStatusWithProjection(
+        currentProcessProjection({ writer_mode: "TEMPORAL" }),
+      ),
+    );
+
+    const wrapper = await mountInteractiveView({
+      initialMessages: null,
+      initialIntakeStatus: processingStatus,
+      intakeStatusLoader,
+      messagesLoader,
+      openingAction,
+      eventStreamer: vi.fn(async () => {}),
+    });
+
+    expect(openingAction).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(250);
+    await flushPromises();
+
+    expect(intakeStatusLoader).toHaveBeenCalledTimes(1);
+    expect(messagesLoader).toHaveBeenCalledTimes(3);
+    expect(openingAction).toHaveBeenCalledTimes(1);
+    expect(openingAction).toHaveBeenCalledWith(
+      { id: "user-local", role: "USER" },
+      "CASE_INTAKE_1",
+      "INTAKE",
+    );
+    wrapper.unmount();
+  });
+
+  it("resumes the active TEMPORAL run once the opening status publishes its logical run", async () => {
+    vi.useFakeTimers();
+    const noRunStatus = intakeStatusWithProjection(
+      currentProcessProjection({ writer_mode: "TEMPORAL" }),
+    );
+    const activeRunStatus = intakeStatusWithProjection(
+      currentProcessProjection({
+        writer_mode: "TEMPORAL",
+        room_phase: "AGENT_RUNNING",
+        active_logical_run_id: "run-temporal-opening",
+        active_attempt_id: null,
+        active_run_status: "PENDING",
+        stream_cursor: "-1",
+      }),
+    );
+    const fetchMock = installIntakeApiFetch({
+      status: activeRunStatus,
+      activeRuns: [{
+        run_id: "run-temporal-opening",
+        stream_url: "/api/private-agent-streams/run-temporal-opening/events",
+      }],
+    });
+    const openingAction = vi.fn().mockResolvedValue({
+      id: "MESSAGE_INITIATOR_OPENING",
+      sequence_no: 1,
+    });
+    const wrapper = await mountInteractiveView({
+      initialMessages: null,
+      initialIntakeStatus: noRunStatus,
+      intakeStatusLoader: vi.fn().mockResolvedValue(activeRunStatus),
+      messagesLoader: vi
+        .fn()
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([
+          {
+            id: "MESSAGE_INITIATOR_OPENING",
+            sequence_no: 1,
+            sender_role: "CUSTOMER_SERVICE",
+            message_text: "请说明争议经过和处理诉求。",
+          },
+        ]),
+      openingAction,
+      eventStreamer: vi.fn(async () => {}),
+    });
+
+    await vi.advanceTimersByTimeAsync(250);
+    await flushPromises();
+
+    expect(openingAction).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls.map(([input]) => String(input))).toContain(
+      "/api/disputes/CASE_INTAKE_1/rooms/INTAKE/agent-runs/active",
+    );
+    wrapper.unmount();
+    fetchMock.mockRestore();
+  });
+
+  it("resumes a TEMPORAL run after reload finds a persisted opening before its run projection", async () => {
+    vi.useFakeTimers();
+    const noRunStatus = intakeStatusWithProjection(
+      currentProcessProjection({ writer_mode: "TEMPORAL" }),
+    );
+    const activeRunStatus = intakeStatusWithProjection(
+      currentProcessProjection({
+        writer_mode: "TEMPORAL",
+        room_phase: "AGENT_RUNNING",
+        active_logical_run_id: "run-reloaded-opening",
+        active_attempt_id: null,
+        active_run_status: "PENDING",
+        stream_cursor: "-1",
+      }),
+    );
+    const fetchMock = installIntakeApiFetch({
+      status: activeRunStatus,
+      activeRuns: [{
+        run_id: "run-reloaded-opening",
+        stream_url: "/api/private-agent-streams/run-reloaded-opening/events",
+      }],
+    });
+    const openingAction = vi.fn();
+    const intakeStatusLoader = vi.fn().mockResolvedValue(activeRunStatus);
+    const wrapper = await mountInteractiveView({
+      initialMessages: null,
+      initialIntakeStatus: noRunStatus,
+      intakeStatusLoader,
+      messagesLoader: vi.fn().mockResolvedValue([
+        {
+          id: "MESSAGE_PERSISTED_INITIATOR_OPENING",
+          sequence_no: 1,
+          sender_role: "CUSTOMER_SERVICE",
+          message_text: "请说明争议经过和处理诉求。",
+        },
+      ]),
+      openingAction,
+      eventStreamer: vi.fn(async () => {}),
+    });
+
+    expect(openingAction).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(250);
+    await flushPromises();
+
+    expect(intakeStatusLoader).toHaveBeenCalledTimes(1);
+    expect(openingAction).not.toHaveBeenCalled();
+    expect(fetchMock.mock.calls.map(([input]) => String(input))).toContain(
+      "/api/disputes/CASE_INTAKE_1/rooms/INTAKE/agent-runs/active",
+    );
+    wrapper.unmount();
+    fetchMock.mockRestore();
   });
 
   // 业务位置：【前端接待室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。

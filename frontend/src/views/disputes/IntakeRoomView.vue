@@ -67,8 +67,9 @@ const INTAKE_PENDING_STATE_BY_PHASE = {
 };
 const PROJECTION_FIELD_CONFLICT = Symbol("projection-field-conflict");
 const PROJECTION_MISSING = Symbol("projection-missing");
-const PROJECTION_STATUS_RETRY_LIMIT = 4;
-const PROJECTION_STATUS_RETRY_DELAY_MS = 250;
+const READINESS_RETRY_FAST_ATTEMPTS = 40;
+const READINESS_RETRY_FAST_DELAY_MS = 250;
+const READINESS_RETRY_SLOW_DELAY_MS = 1_000;
 
 function projectionValuesEqual(left, right) {
   if (Object.is(left, right)) return true;
@@ -135,6 +136,7 @@ function projectionEnum(value) {
 function processingProjection() {
   return {
     mode: "PROCESSING",
+    writerMode: "",
     roomPhase: "",
     pendingState: "",
     activeLogicalRunId: "",
@@ -144,6 +146,7 @@ function processingProjection() {
 function legacyProjection() {
   return {
     mode: "LEGACY",
+    writerMode: "LEGACY",
     roomPhase: "",
     pendingState: "",
     activeLogicalRunId: "",
@@ -256,6 +259,7 @@ function normalizeIntakeProcessProjection(status) {
     }
     return {
       mode: "CURRENT",
+      writerMode,
       roomPhase,
       pendingState,
       activeLogicalRunId: "",
@@ -282,6 +286,7 @@ function normalizeIntakeProcessProjection(status) {
     }
     return {
       mode: "CURRENT",
+      writerMode,
       roomPhase,
       pendingState,
       activeLogicalRunId: normalizedRunId,
@@ -297,6 +302,7 @@ function normalizeIntakeProcessProjection(status) {
   }
   return {
     mode: "CURRENT",
+    writerMode,
     roomPhase,
     pendingState,
     activeLogicalRunId: normalizedRunId,
@@ -348,6 +354,10 @@ let modelHealthInFlight = null;
 let projectionStatusRetryTimer = null;
 let projectionStatusRetryInFlight = null;
 let projectionStatusRetryAttempts = 0;
+let openingRunRetryTimer = null;
+let openingRunRetryInFlight = null;
+let openingRunRetryAttempts = 0;
+let awaitingTemporalInitiatorRun = false;
 let componentUnmounted = false;
 
 const caseId = computed(() => dispute.value?.id || route.params.caseId);
@@ -1223,6 +1233,8 @@ function isCurrentWorkspace(snapshot) {
 // 业务位置：【前端接待室】resetWorkspaceForActorChange：更新 页面工作区和业务快照 的消息、缓存或持久记录，避免旧回合数据影响当前处理。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 function resetWorkspaceForActorChange() {
   clearProjectionStatusRetry();
+  clearOpeningRunRetry();
+  awaitingTemporalInitiatorRun = false;
   clearAgentStreams({ caseId: caseId.value, roomType: "INTAKE" });
   workspaceGeneration.value += 1;
   messages.value = [];
@@ -1379,8 +1391,9 @@ async function load(snapshot = currentWorkspaceSnapshot()) {
     const privateIntakeReadable = !intakeRecipientView.value;
     if (props.initialMessages === null && privateIntakeReadable) {
       const firstMessages = await refreshMessages(snapshot);
-      if (shouldRequestRespondentOpening(firstMessages)) {
-        await ensureRespondentOpening(snapshot);
+      awaitTemporalInitiatorRunForMessages(firstMessages, snapshot);
+      if (shouldRequestIntakeOpening(firstMessages)) {
+        await ensureIntakeOpening(snapshot);
       }
     }
     if (
@@ -1409,12 +1422,17 @@ async function refreshMessages(snapshot = currentWorkspaceSnapshot()) {
   return loadedMessages;
 }
 
-function shouldRequestRespondentOpening(firstMessages) {
+function shouldRequestIntakeOpening(firstMessages) {
   const respondentStatus = String(
     intakeStatus.value?.respondent_status ||
     intakeStatus.value?.respondentStatus ||
     "",
   ).toUpperCase();
+  const openingContextIsEligible =
+    (!currentActorIsInitiator.value &&
+      partyCanChat.value &&
+      respondentStatus === "OPEN") ||
+    isTemporalInitiatorOpening();
   return (
     props.initialMessages === null &&
     !historyMode.value &&
@@ -1422,21 +1440,66 @@ function shouldRequestRespondentOpening(firstMessages) {
     Array.isArray(firstMessages) &&
     firstMessages.length === 0 &&
     ["USER", "MERCHANT"].includes(actor.role) &&
-    !currentActorIsInitiator.value &&
-    partyCanChat.value &&
-    respondentStatus === "OPEN" &&
+    openingContextIsEligible &&
     !currentActorIntakeCompleted.value
   );
 }
 
-async function ensureRespondentOpening(snapshot = currentWorkspaceSnapshot()) {
+function isTemporalInitiatorOpening() {
+  const projection = intakeProcessProjection.value;
+  return (
+    ["USER", "MERCHANT"].includes(actor.role) &&
+    currentActorIsInitiator.value &&
+    partyCanChat.value &&
+    projection.mode === "CURRENT" &&
+    projection.writerMode === "TEMPORAL"
+  );
+}
+
+function awaitTemporalInitiatorRunForMessages(
+  loadedMessages,
+  snapshot = currentWorkspaceSnapshot(),
+) {
+  const projection = intakeProcessProjection.value;
+  if (
+    props.initialMessages === null &&
+    !historyMode.value &&
+    Array.isArray(loadedMessages) &&
+    loadedMessages.length > 0 &&
+    isTemporalInitiatorOpening() &&
+    !projection.activeLogicalRunId &&
+    !currentActorIntakeCompleted.value
+  ) {
+    awaitingTemporalInitiatorRun = true;
+    scheduleOpeningRunRetry(snapshot);
+  }
+}
+
+async function ensureIntakeOpening(snapshot = currentWorkspaceSnapshot()) {
+  const awaitTemporalInitiatorRun = isTemporalInitiatorOpening();
   const ensure =
     props.openingAction ||
     ((openingActor, openingCaseId, roomType) =>
       roomApi.ensureOpening(openingActor, openingCaseId, roomType));
   await ensure(snapshot.actor, snapshot.caseId, "INTAKE");
-  if (isCurrentWorkspace(snapshot)) {
+  if (!isCurrentWorkspace(snapshot)) return;
+  if (awaitTemporalInitiatorRun) awaitingTemporalInitiatorRun = true;
+  try {
     await refreshMessages(snapshot);
+  } finally {
+    if (awaitTemporalInitiatorRun && isCurrentWorkspace(snapshot)) {
+      scheduleOpeningRunRetry(snapshot);
+    }
+  }
+}
+
+async function refreshMessagesAndRequestIntakeOpening(
+  snapshot = currentWorkspaceSnapshot(),
+) {
+  const refreshedMessages = await refreshMessages(snapshot);
+  awaitTemporalInitiatorRunForMessages(refreshedMessages, snapshot);
+  if (shouldRequestIntakeOpening(refreshedMessages)) {
+    await ensureIntakeOpening(snapshot);
   }
 }
 
@@ -1484,6 +1547,12 @@ function clearProjectionStatusRetry({ resetAttempts = true } = {}) {
   if (resetAttempts) projectionStatusRetryAttempts = 0;
 }
 
+function readinessRetryDelay(attempts) {
+  return attempts < READINESS_RETRY_FAST_ATTEMPTS
+    ? READINESS_RETRY_FAST_DELAY_MS
+    : READINESS_RETRY_SLOW_DELAY_MS;
+}
+
 function scheduleProjectionStatusRetry(
   snapshot = currentWorkspaceSnapshot(),
 ) {
@@ -1493,15 +1562,14 @@ function scheduleProjectionStatusRetry(
     !isCurrentWorkspace(snapshot) ||
     intakeProcessProjection.value.mode !== "PROCESSING" ||
     projectionStatusRetryTimer !== null ||
-    projectionStatusRetryInFlight !== null ||
-    projectionStatusRetryAttempts >= PROJECTION_STATUS_RETRY_LIMIT
+    projectionStatusRetryInFlight !== null
   ) {
     return;
   }
   projectionStatusRetryTimer = window.setTimeout(() => {
     projectionStatusRetryTimer = null;
     void retryProjectionStatus(snapshot);
-  }, PROJECTION_STATUS_RETRY_DELAY_MS);
+  }, readinessRetryDelay(projectionStatusRetryAttempts));
 }
 
 async function retryProjectionStatus(snapshot) {
@@ -1509,8 +1577,7 @@ async function retryProjectionStatus(snapshot) {
     componentUnmounted ||
     historyMode.value ||
     !isCurrentWorkspace(snapshot) ||
-    intakeProcessProjection.value.mode !== "PROCESSING" ||
-    projectionStatusRetryAttempts >= PROJECTION_STATUS_RETRY_LIMIT
+    intakeProcessProjection.value.mode !== "PROCESSING"
   ) {
     return;
   }
@@ -1535,6 +1602,75 @@ async function retryProjectionStatus(snapshot) {
   ) {
     scheduleProjectionStatusRetry(snapshot);
   }
+}
+
+function clearOpeningRunRetry({ resetAttempts = true } = {}) {
+  if (openingRunRetryTimer !== null) {
+    window.clearTimeout(openingRunRetryTimer);
+    openingRunRetryTimer = null;
+  }
+  openingRunRetryInFlight = null;
+  if (resetAttempts) openingRunRetryAttempts = 0;
+}
+
+function isTemporalInitiatorAwaitingRun(snapshot) {
+  const projection = intakeProcessProjection.value;
+  return (
+    !componentUnmounted &&
+    !historyMode.value &&
+    isCurrentWorkspace(snapshot) &&
+    !intakeRecipientView.value &&
+    awaitingTemporalInitiatorRun &&
+    currentActorIsInitiator.value &&
+    projection.mode === "CURRENT" &&
+    projection.writerMode === "TEMPORAL" &&
+    !projection.activeLogicalRunId
+  );
+}
+
+function scheduleOpeningRunRetry(snapshot = currentWorkspaceSnapshot()) {
+  if (
+    !isTemporalInitiatorAwaitingRun(snapshot) ||
+    openingRunRetryTimer !== null ||
+    openingRunRetryInFlight !== null
+  ) {
+    return;
+  }
+  openingRunRetryTimer = window.setTimeout(() => {
+    openingRunRetryTimer = null;
+    void retryOpeningRun(snapshot);
+  }, readinessRetryDelay(openingRunRetryAttempts));
+}
+
+async function retryOpeningRun(snapshot) {
+  if (!isTemporalInitiatorAwaitingRun(snapshot)) return;
+
+  openingRunRetryAttempts += 1;
+  const request = refreshIntakeStatus(snapshot);
+  openingRunRetryInFlight = request;
+  try {
+    await request;
+  } catch (_failure) {
+    // The orchestrator can publish the run after the opening message commits.
+  } finally {
+    if (openingRunRetryInFlight === request) {
+      openingRunRetryInFlight = null;
+    }
+  }
+  if (!isCurrentWorkspace(snapshot)) return;
+
+  if (intakeProcessProjection.value.activeLogicalRunId) {
+    const resumed = await resumeActiveIntakeRuns(snapshot);
+    if (resumed) {
+      awaitingTemporalInitiatorRun = false;
+      return;
+    }
+  }
+  if (currentActorIntakeCompleted.value) {
+    awaitingTemporalInitiatorRun = false;
+    return;
+  }
+  scheduleOpeningRunRetry(snapshot);
 }
 
 function intakeStatusAllowsEvidence(status) {
@@ -1680,9 +1816,9 @@ async function resumeActiveIntakeRuns(snapshot = currentWorkspaceSnapshot()) {
     actorPartyPosition.value === "OBSERVER" ||
     intakeRecipientView.value
   ) {
-    return;
+    return false;
   }
-  if (projection.mode === "CURRENT" && !projection.activeLogicalRunId) return;
+  if (projection.mode === "CURRENT" && !projection.activeLogicalRunId) return false;
   if (
     projection.mode === "CURRENT" &&
     intakeStreamingRuns.value.some((run) =>
@@ -1712,7 +1848,7 @@ async function resumeActiveIntakeRuns(snapshot = currentWorkspaceSnapshot()) {
       latestProjection.activeLogicalRunId !== projection.activeLogicalRunId
     )
   ) {
-    return;
+    return false;
   }
   const projectedRun = latestProjection.mode === "CURRENT"
     ? activeRuns
@@ -1724,7 +1860,7 @@ async function resumeActiveIntakeRuns(snapshot = currentWorkspaceSnapshot()) {
   const recoverableRuns = latestProjection.mode === "CURRENT"
     ? projectedRun ? [projectedRun.descriptor] : []
     : activeRuns;
-  if (!recoverableRuns.length) return;
+  if (!recoverableRuns.length) return false;
   resetStreamedCaseDetail();
   agentState.value = "STREAMING";
   await Promise.all(recoverableRuns.map((descriptor) => consumeAgentRun({
@@ -1753,6 +1889,7 @@ async function resumeActiveIntakeRuns(snapshot = currentWorkspaceSnapshot()) {
   ) {
     agentState.value = "SPEAKING";
   }
+  return true;
 }
 
 // 业务位置：【前端接待室】fetchModelHealth：读取 模型请求和结构化结果，并依据当前案件、角色和会话权限裁剪成可用输入。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
@@ -2072,6 +2209,7 @@ watch(
     if (mode === "PROCESSING") {
       if (previousMode !== "PROCESSING") {
         projectionStatusRetryAttempts = 0;
+        clearOpeningRunRetry();
         clearAgentStreams({
           caseId: caseId.value,
           roomType: "INTAKE",
@@ -2086,6 +2224,12 @@ watch(
     }
 
     clearProjectionStatusRetry();
+    if (mode !== "CURRENT") {
+      clearOpeningRunRetry();
+      awaitingTemporalInitiatorRun = false;
+    } else if (awaitingTemporalInitiatorRun) {
+      scheduleOpeningRunRetry(currentWorkspaceSnapshot());
+    }
     if (
       previousMode === "PROCESSING" &&
       ["CURRENT", "LEGACY"].includes(mode) &&
@@ -2094,6 +2238,18 @@ watch(
       !intakeRecipientView.value
     ) {
       void resumeActiveIntakeRuns(currentWorkspaceSnapshot());
+    }
+    if (
+      previousMode === "PROCESSING" &&
+      mode === "CURRENT" &&
+      props.initialMessages === null &&
+      !intakeRecipientView.value
+    ) {
+      if (awaitingTemporalInitiatorRun) {
+        scheduleOpeningRunRetry(currentWorkspaceSnapshot());
+      } else {
+        void refreshMessagesAndRequestIntakeOpening(currentWorkspaceSnapshot());
+      }
     }
   },
   { immediate: true },
@@ -2109,6 +2265,8 @@ watch(historyMode, (historical) => {
   }
   stopModelHealthPolling();
   clearProjectionStatusRetry();
+  clearOpeningRunRetry();
+  awaitingTemporalInitiatorRun = false;
   workspaceGeneration.value += 1;
   submitting.value = false;
   eventAbortController.abort();
@@ -2120,6 +2278,8 @@ watch(historyMode, (historical) => {
 onBeforeUnmount(() => {
   componentUnmounted = true;
   clearProjectionStatusRetry();
+  clearOpeningRunRetry();
+  awaitingTemporalInitiatorRun = false;
   stopModelHealthPolling();
   eventAbortController.abort();
   clearAgentStreams({ caseId: caseId.value, roomType: "INTAKE" });

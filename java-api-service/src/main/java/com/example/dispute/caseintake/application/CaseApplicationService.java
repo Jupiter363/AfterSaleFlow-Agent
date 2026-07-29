@@ -27,9 +27,6 @@ import com.example.dispute.room.application.IntakeAgentTurnService;
 import com.example.dispute.room.application.IntakeProgressService;
 import com.example.dispute.room.application.IntakeLobbySeed;
 import com.example.dispute.room.application.IntakeStatusView;
-import com.example.dispute.room.application.RoomMessageCommand;
-import com.example.dispute.room.application.RoomMessageService;
-import com.example.dispute.room.domain.MessageType;
 import com.example.dispute.room.domain.RoomType;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
@@ -71,7 +68,6 @@ public class CaseApplicationService {
     private final IntakeProgressService intakeProgressService;
     private final RoomEpochAllocator roomEpochAllocator;
     private final LegacyIntakeWriterGuard legacyIntakeWriterGuard;
-    private final RoomMessageService roomMessageService;
     private final AppProperties properties;
     private final Clock clock;
     private final ObjectMapper objectMapper;
@@ -93,7 +89,6 @@ public class CaseApplicationService {
             IntakeProgressService intakeProgressService,
             RoomEpochAllocator roomEpochAllocator,
             LegacyIntakeWriterGuard legacyIntakeWriterGuard,
-            RoomMessageService roomMessageService,
             AppProperties properties,
             Clock clock,
             ObjectMapper objectMapper,
@@ -107,7 +102,6 @@ public class CaseApplicationService {
                 intakeProgressService,
                 roomEpochAllocator,
                 legacyIntakeWriterGuard,
-                roomMessageService,
                 properties,
                 clock,
                 objectMapper,
@@ -123,7 +117,6 @@ public class CaseApplicationService {
             IntakeProgressService intakeProgressService,
             RoomEpochAllocator roomEpochAllocator,
             LegacyIntakeWriterGuard legacyIntakeWriterGuard,
-            RoomMessageService roomMessageService,
             AppProperties properties,
             Clock clock,
             ObjectMapper objectMapper) {
@@ -136,7 +129,6 @@ public class CaseApplicationService {
                 intakeProgressService,
                 roomEpochAllocator,
                 legacyIntakeWriterGuard,
-                roomMessageService,
                 properties,
                 clock,
                 objectMapper,
@@ -152,7 +144,6 @@ public class CaseApplicationService {
             IntakeProgressService intakeProgressService,
             RoomEpochAllocator roomEpochAllocator,
             LegacyIntakeWriterGuard legacyIntakeWriterGuard,
-            RoomMessageService roomMessageService,
             AppProperties properties,
             Clock clock,
             ObjectMapper objectMapper,
@@ -165,7 +156,6 @@ public class CaseApplicationService {
         this.intakeProgressService = intakeProgressService;
         this.roomEpochAllocator = roomEpochAllocator;
         this.legacyIntakeWriterGuard = legacyIntakeWriterGuard;
-        this.roomMessageService = roomMessageService;
         this.properties = properties;
         this.clock = clock;
         this.objectMapper = objectMapper;
@@ -378,18 +368,7 @@ public class CaseApplicationService {
                 || actor.role() == ActorRole.MERCHANT) {
             participantService.addInitiator(saved, actor, now);
         }
-        if (temporalIntake) {
-            roomMessageService.post(
-                    saved.getId(),
-                    RoomType.INTAKE,
-                    new RoomMessageCommand(
-                            MessageType.PARTY_TEXT,
-                            command.description(),
-                            List.of()),
-                    actor,
-                    idempotencyKey,
-                    traceId);
-        } else {
+        if (!temporalIntake) {
             intakeAgentTurnService.startInitialTurn(
                     saved.getId(),
                     actor,
