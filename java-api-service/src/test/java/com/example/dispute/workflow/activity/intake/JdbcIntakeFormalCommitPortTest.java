@@ -242,6 +242,38 @@ class JdbcIntakeFormalCommitPortTest {
     }
 
     @Test
+    void preflightSeesRegisteredBindingCreatedByTheCurrentWritableTransaction() {
+        Fixture fixture = fixture("PREFLIGHT_CURRENT_TX_" + SEQUENCE.incrementAndGet());
+        insertFixture(fixture, false);
+        TransactionTemplate outer = new TransactionTemplate(transactions);
+
+        outer.executeWithoutResult(status -> {
+            jdbc.update(
+                    "update case_intake_graph_thread_binding"
+                            + " set registration_status = 'REGISTERED', registered_at = current_timestamp"
+                            + " where registration_id = ?",
+                    fixture.binding().registration().registrationId());
+            port.preflight(fixture.request());
+        });
+        assertThat(scalar(
+                        "select registration_status from case_intake_graph_thread_binding"
+                                + " where registration_id = ?",
+                        fixture.binding().registration().registrationId()))
+                .isEqualTo("REGISTERED");
+    }
+
+    @Test
+    void independentPreflightStillRejectsAnUnregisteredBinding() {
+        Fixture fixture = fixture("PREFLIGHT_INDEPENDENT_" + SEQUENCE.incrementAndGet());
+        insertFixture(fixture, false);
+
+        assertThatThrownBy(() -> port.preflight(fixture.request()))
+                .isInstanceOf(
+                        com.example.dispute.workflow.application.intake.IntakeFinalizationRejectedException.class)
+                .hasMessageContaining("no longer active");
+    }
+
+    @Test
     void preflightRejectsAnActorNoLongerAssignedAsTheExplicitCaseParty() {
         Fixture fixture = fixture("PARTY_REBOUND_" + SEQUENCE.incrementAndGet());
         insertFixture(fixture);
@@ -757,6 +789,10 @@ class JdbcIntakeFormalCommitPortTest {
     }
 
     private static void insertFixture(Fixture fixture) {
+        insertFixture(fixture, true);
+    }
+
+    private static void insertFixture(Fixture fixture, boolean registerBinding) {
         String c = fixture.caseId();
         String tenant = fixture.tenant();
         String roomId = "ROOM_" + c;
@@ -815,9 +851,13 @@ class JdbcIntakeFormalCommitPortTest {
         NamedParameterJdbcTemplate named = new NamedParameterJdbcTemplate(jdbc.getDataSource());
         JdbcIntakeGraphBindingStore bindings = new JdbcIntakeGraphBindingStore(named);
         bindings.register(fixture.binding());
-        jdbc.update(
-                "update case_intake_graph_thread_binding set registration_status = 'REGISTERED', registered_at = created_at where registration_id = ?",
-                fixture.binding().registration().registrationId());
+        if (registerBinding) {
+            jdbc.update(
+                    "update case_intake_graph_thread_binding"
+                            + " set registration_status = 'REGISTERED', registered_at = created_at"
+                            + " where registration_id = ?",
+                    fixture.binding().registration().registrationId());
+        }
         bindings.bindInitialSnapshot(fixture.snapshot());
         bindings.bindEvent(fixture.event());
 

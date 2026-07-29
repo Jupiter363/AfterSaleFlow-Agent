@@ -43,6 +43,7 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.TransactionException;
 import org.springframework.transaction.support.TransactionTemplate;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 /**
  * PostgreSQL-backed formal Intake writer.
@@ -122,11 +123,12 @@ public final class JdbcIntakeFormalCommitPort
         Objects.requireNonNull(request, "request");
         request.requireCanonicalRequestHash();
         try {
-            preflightTransactions.executeWithoutResult(ignored -> {
-                CurrentRows current = requireCurrentAuthority(request, false);
-                requirePersistedPrivateReferences(request, false);
-                requireSoleResultReadyAttempt(request, current.roomId(), false);
-            });
+            if (TransactionSynchronizationManager.isActualTransactionActive()
+                    && !TransactionSynchronizationManager.isCurrentTransactionReadOnly()) {
+                performPreflight(request);
+            } else {
+                preflightTransactions.executeWithoutResult(ignored -> performPreflight(request));
+            }
         } catch (IntakeFinalizationRejectedException failure) {
             throw failure;
         } catch (DataAccessException failure) {
@@ -145,6 +147,12 @@ public final class JdbcIntakeFormalCommitPort
             throw new IntakeFinalizationPersistenceException(
                     "Intake authority preflight transaction outcome was unknown", failure);
         }
+    }
+
+    private void performPreflight(IntakeGraphFinalizationRequest request) {
+        CurrentRows current = requireCurrentAuthority(request, false);
+        requirePersistedPrivateReferences(request, false);
+        requireSoleResultReadyAttempt(request, current.roomId(), false);
     }
 
     @Override
