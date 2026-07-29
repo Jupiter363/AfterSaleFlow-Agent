@@ -21,6 +21,12 @@ class TargetE2eArtifactIsolationIT {
     private static final String NON_DISCOVERABLE_FINALIZER_LIBRARY =
             "BOOT-INF/classes/com/example/dispute/workflow/targete2e/finalization/"
                     + "TargetE2eExecutionLaneVerifier.class";
+    private static final String NON_DISCOVERABLE_OUTPUT_MATERIALIZER_LIBRARY =
+            "BOOT-INF/classes/com/example/dispute/workflow/targete2e/finalization/"
+                    + "TargetE2eGraphOutputSnapshotMaterializer.class";
+    private static final String NON_DISCOVERABLE_MULTI_ROOM_FINALIZER_LIBRARY =
+            "BOOT-INF/classes/com/example/dispute/workflow/targete2e/finalization/"
+                    + "TargetE2eMultiRoomOuterFinalizer.class";
     private static final String PROCESSOR_CLASS =
             TARGET_CLASS_PREFIX + "TargetE2eEnvironmentPostProcessor.class";
     private static final String CONFIGURATION_CLASS =
@@ -54,7 +60,10 @@ class TargetE2eArtifactIsolationIT {
             assertThat(ordinary.stream().map(entry -> entry.getName()))
                     .noneMatch(name -> name.startsWith(TARGET_CLASS_PREFIX))
                     .doesNotContain(MARKER_RESOURCE)
-                    .contains(NON_DISCOVERABLE_FINALIZER_LIBRARY);
+                    .contains(
+                            NON_DISCOVERABLE_FINALIZER_LIBRARY,
+                            NON_DISCOVERABLE_OUTPUT_MATERIALIZER_LIBRARY,
+                            NON_DISCOVERABLE_MULTI_ROOM_FINALIZER_LIBRARY);
 
             assertThat(target.stream().map(entry -> entry.getName()))
                     .contains(
@@ -67,7 +76,9 @@ class TargetE2eArtifactIsolationIT {
                             MARKER_RESOURCE,
                             TARGET_APPLICATION_CONFIGURATION,
                             SPRING_FACTORIES,
-                            NON_DISCOVERABLE_FINALIZER_LIBRARY)
+                            NON_DISCOVERABLE_FINALIZER_LIBRARY,
+                            NON_DISCOVERABLE_OUTPUT_MATERIALIZER_LIBRARY,
+                            NON_DISCOVERABLE_MULTI_ROOM_FINALIZER_LIBRARY)
                     .contains("BOOT-INF/classes/com/example/dispute/DisputeApplication.class")
                     .contains("org/springframework/boot/loader/launch/JarLauncher.class");
 

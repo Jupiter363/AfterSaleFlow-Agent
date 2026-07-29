@@ -4,6 +4,7 @@ import com.example.dispute.workflow.activity.agent.AgentRunFinalizationGateway;
 import com.example.dispute.workflow.contract.v1.AgentRunFinalizationReceipt;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
+import com.example.dispute.workflow.targete2e.finalization.TargetE2eGraphOutputSnapshotMaterializer;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eIntakeOuterFinalizer;
 import java.util.Objects;
 

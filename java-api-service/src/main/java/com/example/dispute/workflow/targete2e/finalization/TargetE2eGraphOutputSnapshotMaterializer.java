@@ -1,4 +1,4 @@
-package com.example.dispute.workflow.targete2e.artifact.finalization;
+package com.example.dispute.workflow.targete2e.finalization;
 
 import com.example.dispute.agentstream.application.AgentRunV2StreamStore;
 import com.example.dispute.workflow.application.intake.IntakeContractHashes;

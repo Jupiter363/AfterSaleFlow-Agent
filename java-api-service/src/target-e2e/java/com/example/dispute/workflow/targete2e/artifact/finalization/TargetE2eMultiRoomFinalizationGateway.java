@@ -4,6 +4,7 @@ import com.example.dispute.workflow.activity.agent.AgentRunFinalizationGateway;
 import com.example.dispute.workflow.contract.v1.AgentRunFinalizationReceipt;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
+import com.example.dispute.workflow.targete2e.finalization.TargetE2eMultiRoomOuterFinalizer;
 import java.util.Objects;
 
 /** The sole target-artifact AgentRun finalization gateway, shared by all room strategies. */

@@ -8,7 +8,6 @@ import com.example.dispute.workflow.application.intake.IntakeContractHashes;
 import com.example.dispute.workflow.application.intake.IntakePrivateThreadRegistration;
 import com.example.dispute.workflow.contract.v1.AgentStreamEvent;
 import com.example.dispute.workflow.contract.v1.ContractTypes.StreamEventType;
-import com.example.dispute.workflow.targete2e.artifact.finalization.TargetE2eGraphOutputSnapshotMaterializer;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.util.List;

@@ -1,4 +1,4 @@
-package com.example.dispute.workflow.targete2e.artifact.finalization;
+package com.example.dispute.workflow.targete2e.finalization;
 
 import com.example.dispute.agentstream.application.AgentRunFormalResultCommitter;
 import com.example.dispute.agentstream.application.AgentRunFormalResultCommitter.FormalResultCommit;
@@ -7,18 +7,11 @@ import com.example.dispute.workflow.contract.v1.AgentRunFinalizationReceipt;
 import com.example.dispute.workflow.contract.v1.AgentRunFinalizationReceipt.CommitStatus;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
-import com.example.dispute.workflow.targete2e.finalization.TargetE2eCommandCompletionWriter;
-import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationReceipt;
-import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationReceiptCodec;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationReceipt.CommitFacts;
-import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationReceiptLedger;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationReceiptLedger.AppendCommand;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationReceiptLedger.StoredReceipt;
-import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationRejectedException;
-import com.example.dispute.workflow.targete2e.finalization.TargetE2eRoomFinalizationStrategy;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eRoomFinalizationStrategy.PreparedFinalization;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eRoomFinalizationStrategy.ReceiptBindings;
-import com.example.dispute.workflow.targete2e.finalization.TargetE2eRoomFinalizationStrategyRegistry;
 import java.util.Objects;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
