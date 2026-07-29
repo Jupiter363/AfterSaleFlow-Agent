@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -189,6 +190,7 @@ class _Connection:
         thread_current: bool = True,
         checkpoint_revision: int = 1,
         pending_write_checkpoint_unavailable_attempts: int = 0,
+        terminal_metadata_current: bool = True,
     ) -> None:
         self.events: list[str] = []
         self.fence_current = fence_current
@@ -199,6 +201,8 @@ class _Connection:
             pending_write_checkpoint_unavailable_attempts
         )
         self.pending_write_checkpoint_reads = 0
+        self.terminal_metadata_current = terminal_metadata_current
+        self.checkpoint_metadata = _metadata(graph_cognitive_revision=checkpoint_revision)
 
     def transaction(self) -> _Transaction:
         return _Transaction(self.events)
@@ -216,9 +220,19 @@ class _Connection:
                 <= self.pending_write_checkpoint_unavailable_attempts
             ):
                 return _Cursor()
-            return _Cursor(
-                {"metadata": _metadata(graph_cognitive_revision=self.checkpoint_revision)}
-            )
+            return _Cursor({"metadata": self.checkpoint_metadata})
+        if "update checkpoints" in normalized:
+            self.events.append("sql:bind-terminal-metadata")
+            if not self.terminal_metadata_current:
+                return _Cursor(None)
+            self.checkpoint_metadata = {
+                **self.checkpoint_metadata,
+                "graph_result_hash": params[0],
+                "graph_result_ref": params[1],
+                "graph_proposal_hash": params[2],
+                "graph_result_envelope_hash": params[3],
+            }
+            return _Cursor({"metadata": self.checkpoint_metadata})
         if "update agent_graph_command" in normalized:
             self.events.append("sql:bind-command")
             result_hash = params[0]
@@ -593,7 +607,7 @@ async def test_terminal_checkpoint_result_and_command_commit_on_one_connection()
 
 
 @pytest.mark.asyncio
-async def test_external_terminal_commit_locks_exact_checkpoint_without_rewriting_it() -> None:
+async def test_external_terminal_commit_binds_terminal_metadata_without_rewriting_state() -> None:
     connection = _Connection(checkpoint_revision=4)
     ledger = _TerminalLedger(connection.events)
     saver, direct_savers = _saver(connection, ledger=ledger)
@@ -608,6 +622,7 @@ async def test_external_terminal_commit_locks_exact_checkpoint_without_rewriting
         "transaction:enter",
         "sql:fence",
         "sql:checkpoint-metadata",
+        "sql:bind-terminal-metadata",
         "sql:bind-command",
         "sql:advance-thread",
         "ledger:store-result",
@@ -616,6 +631,95 @@ async def test_external_terminal_commit_locks_exact_checkpoint_without_rewriting
     assert direct_savers == []
     assert ledger.calls[0][2] == result
     assert saved["configurable"][FENCE_CONTEXT_KEY].result_hash == result.result_hash
+    assert connection.checkpoint_metadata == _metadata(
+        graph_cognitive_revision=4,
+        graph_result_hash=result.result_hash,
+        graph_result_ref=result.result_ref,
+        graph_proposal_hash=result.proposal_hash,
+        graph_result_envelope_hash=result.result_envelope_hash,
+    )
+
+
+@pytest.mark.asyncio
+async def test_external_terminal_commit_is_idempotent_after_terminal_metadata_is_bound() -> None:
+    connection = _Connection(checkpoint_revision=4)
+    ledger = _TerminalLedger(connection.events)
+    saver, direct_savers = _saver(connection, ledger=ledger)
+    commit = ExternalTerminalCommit(result=_result(checkpoint_id="cp-parent"), cognitive_revision=4)
+
+    await saver.acommit_external_terminal(_config(checkpoint=True), commit)
+    saved = await saver.acommit_external_terminal(_config(checkpoint=True), commit)
+
+    assert connection.events.count("sql:bind-terminal-metadata") == 1
+    assert direct_savers == []
+    assert len(ledger.calls) == 2
+    assert saved["configurable"][FENCE_CONTEXT_KEY].result_hash == commit.result.result_hash
+
+
+def test_external_terminal_metadata_requires_the_exact_candidate_fence_projection() -> None:
+    initial_fence = _candidate_fence()
+    terminal_fence = replace(
+        initial_fence,
+        result_hash=SHA_A,
+        result_ref="urn:after-sale-flow:graph-result:" + SHA_A,
+        proposal_hash=SHA_A,
+        result_envelope_hash=SHA_B,
+    )
+    metadata = initial_fence.checkpoint_metadata()
+    metadata["graph_cognitive_revision"] = 4
+
+    assert not FencedPostgresSaver._validate_external_terminal_checkpoint_metadata(  # noqa: SLF001
+        metadata,
+        initial_fence,
+        terminal_fence,
+        cognitive_revision=4,
+    )
+
+    metadata.update(
+        {
+            "graph_result_hash": terminal_fence.result_hash,
+            "graph_result_ref": terminal_fence.result_ref,
+            "graph_proposal_hash": terminal_fence.proposal_hash,
+            "graph_result_envelope_hash": terminal_fence.result_envelope_hash,
+        }
+    )
+    assert FencedPostgresSaver._validate_external_terminal_checkpoint_metadata(  # noqa: SLF001
+        metadata,
+        initial_fence,
+        terminal_fence,
+        cognitive_revision=4,
+    )
+
+    metadata["graph_result_envelope_hash"] = SHA_A
+    with pytest.raises(GraphBindingError, match="conflicts with its result fence"):
+        FencedPostgresSaver._validate_external_terminal_checkpoint_metadata(  # noqa: SLF001
+            metadata,
+            initial_fence,
+            terminal_fence,
+            cognitive_revision=4,
+        )
+
+
+@pytest.mark.asyncio
+async def test_external_terminal_commit_rolls_back_when_metadata_bind_is_not_durable() -> None:
+    connection = _Connection(checkpoint_revision=4, terminal_metadata_current=False)
+    ledger = _TerminalLedger(connection.events)
+    saver, _ = _saver(connection, ledger=ledger)
+
+    with pytest.raises(GraphBindingError, match="metadata was not durably bound"):
+        await saver.acommit_external_terminal(
+            _config(checkpoint=True),
+            ExternalTerminalCommit(result=_result(checkpoint_id="cp-parent"), cognitive_revision=4),
+        )
+
+    assert connection.events == [
+        "transaction:enter",
+        "sql:fence",
+        "sql:checkpoint-metadata",
+        "sql:bind-terminal-metadata",
+        "transaction:rollback",
+    ]
+    assert ledger.calls == []
 
 
 @pytest.mark.asyncio

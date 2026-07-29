@@ -10,7 +10,7 @@ from uuid import uuid4
 
 import psycopg
 from psycopg import AsyncConnection, sql
-from psycopg.errors import InsufficientPrivilege
+from psycopg.errors import CheckViolation, InsufficientPrivilege
 from psycopg.rows import dict_row
 import pytest
 from testcontainers.postgres import PostgresContainer
@@ -119,11 +119,13 @@ async def test_real_migrations_restore_readiness_and_runtime_acl(
         "G003",
         "G004",
         "G005",
+        "G006",
+        "G007",
     }
 
     second = await _migration_runner(graph_database).run()
     assert second.applied == ()
-    assert second.already_current == ("G001", "G002", "G003", "G004", "G005")
+    assert second.already_current == ("G001", "G002", "G003", "G004", "G005", "G006", "G007")
 
     restore = await GraphRestoreValidationRunner(
         graph_database.migration_dsn,
@@ -184,6 +186,152 @@ async def test_real_migrations_restore_readiness_and_runtime_acl(
         with pytest.raises(InsufficientPrivilege):
             connection.execute(
                 "insert into agent_graph_fanout_permit (request_id) values ('forbidden')"
+            )
+
+
+@pytest.mark.asyncio
+async def test_real_g007_allows_only_bound_same_revision_checkpoint_children(
+    graph_database: _Database,
+) -> None:
+    await _migration_runner(graph_database).run()
+    thread_id = f"grt.v1.{uuid4().hex}"
+    graph_key = f"checkpoint_parent_{uuid4().hex[:12]}"
+    graph_version = "checkpoint_parent.v1"
+    checkpoint_schema_version = "checkpoint_parent.v1"
+    parent_checkpoint_id = "checkpoint-parent"
+    child_checkpoint_id = "checkpoint-child"
+    unbound_checkpoint_id = "checkpoint-unbound"
+    invalid_checkpoint_id = "checkpoint-invalid"
+    metadata = {
+        "graph_thread_id": thread_id,
+        "graph_room_epoch": 3,
+        "graph_key": graph_key,
+        "graph_version": graph_version,
+        "graph_checkpoint_schema_version": checkpoint_schema_version,
+        "graph_cognitive_revision": 1,
+    }
+
+    async with await AsyncConnection.connect(
+        graph_database.migration_dsn,
+        autocommit=True,
+        prepare_threshold=0,
+        row_factory=dict_row,
+    ) as connection:
+        await connection.execute(sql.SQL("set role {}").format(sql.Identifier(OWNER)))
+        await connection.execute(
+            sql.SQL("set search_path to {}, pg_catalog, pg_temp").format(sql.Identifier(SCHEMA))
+        )
+        await connection.execute(
+            """
+            insert into agent_graph_version_registry (
+                graph_key, graph_version, checkpoint_schema_version,
+                registry_state, state_schema_version, state_schema_hash,
+                command_schema_version, result_schema_version,
+                prompt_version, model_profile_id, output_schema_version,
+                policy_version, guardrail_version, tool_policy_version,
+                binding_hash, code_build_id, loadable, activated_at
+            ) values (
+                %s, %s, %s,
+                'SHADOW', 'checkpoint_parent.state.v1', %s,
+                'room-graph-command.v1', 'room-graph-result.v1',
+                'prompt.v1', 'model.v1', 'output.v1',
+                'policy.v1', 'guardrail.v1', 'tools.v1',
+                %s, 'integration-build', true, clock_timestamp()
+            )
+            """,
+            (graph_key, graph_version, checkpoint_schema_version, STATE_SCHEMA_HASH, BINDING_HASH),
+        )
+        await connection.execute(
+            """
+            insert into graph_thread_registry (
+                thread_id, tenant_surrogate, case_id, room_type, room_epoch,
+                actor_scope_json, actor_scope_hash, agent_session_id,
+                graph_key, graph_version, checkpoint_schema_version,
+                cognitive_revision, last_checkpoint_ns, last_checkpoint_id
+            ) values (
+                %s, 'tenant-checkpoint-parent', 'case-checkpoint-parent', 'INTAKE', 3,
+                '{"audience":"PUBLIC"}'::jsonb, %s, 'session-checkpoint-parent',
+                %s, %s, %s,
+                1, 'intake', %s
+            )
+            """,
+            (
+                thread_id,
+                "e" * 64,
+                graph_key,
+                graph_version,
+                checkpoint_schema_version,
+                parent_checkpoint_id,
+            ),
+        )
+        await connection.execute(
+            """
+            insert into checkpoints (
+                thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id,
+                checkpoint, metadata
+            ) values (%s, 'intake', %s, %s, '{}'::jsonb, %s::jsonb)
+            """,
+            (
+                thread_id,
+                unbound_checkpoint_id,
+                child_checkpoint_id,
+                json.dumps({"graph_cognitive_revision": 1}),
+            ),
+        )
+        with pytest.raises(CheckViolation, match="durable parent chain"):
+            await connection.execute(
+                """
+                update graph_thread_registry
+                   set last_checkpoint_ns = 'intake', last_checkpoint_id = %s
+                 where thread_id = %s
+                """,
+                (unbound_checkpoint_id, thread_id),
+            )
+
+        await connection.execute(
+            """
+            insert into checkpoints (
+                thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id,
+                checkpoint, metadata
+            ) values (%s, 'intake', %s, %s, '{}'::jsonb, %s::jsonb)
+            """,
+            (thread_id, child_checkpoint_id, parent_checkpoint_id, json.dumps(metadata)),
+        )
+        await connection.execute(
+            """
+            update graph_thread_registry
+               set last_checkpoint_ns = 'intake', last_checkpoint_id = %s
+             where thread_id = %s
+            """,
+            (child_checkpoint_id, thread_id),
+        )
+
+        await connection.execute(
+            """
+            insert into checkpoints (
+                thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id,
+                checkpoint, metadata
+            ) values (%s, 'intake', %s, 'not-the-current-parent', '{}'::jsonb, %s::jsonb)
+            """,
+            (thread_id, invalid_checkpoint_id, json.dumps(metadata)),
+        )
+        with pytest.raises(CheckViolation, match="durable parent chain"):
+            await connection.execute(
+                """
+                update graph_thread_registry
+                   set last_checkpoint_ns = 'intake', last_checkpoint_id = %s
+                 where thread_id = %s
+                """,
+                (invalid_checkpoint_id, thread_id),
+            )
+        with pytest.raises(CheckViolation, match="cognitive revision cannot jump"):
+            await connection.execute(
+                """
+                update graph_thread_registry
+                   set cognitive_revision = 3
+                 where thread_id = %s
+                """,
+                (thread_id,),
             )
 
 
@@ -829,7 +977,7 @@ async def test_real_schema_advisory_lock_rejects_a_competing_migrator(
 
     recovered = await _migration_runner(graph_database).run()
     assert recovered.applied == ()
-    assert recovered.already_current == ("G001", "G002", "G003", "G004", "G005")
+    assert recovered.already_current == ("G001", "G002", "G003", "G004", "G005", "G006", "G007")
 
 
 @pytest.mark.asyncio

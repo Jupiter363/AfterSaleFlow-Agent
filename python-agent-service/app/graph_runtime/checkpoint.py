@@ -154,6 +154,20 @@ select metadata
  for update
 """
 
+BIND_EXTERNAL_TERMINAL_METADATA_SQL: Final[str] = """
+update checkpoints
+   set metadata = metadata || jsonb_build_object(
+           'graph_result_hash', %s,
+           'graph_result_ref', %s,
+           'graph_proposal_hash', %s,
+           'graph_result_envelope_hash', %s
+       )
+ where thread_id = %s
+   and checkpoint_ns = %s
+   and checkpoint_id = %s
+ returning metadata
+"""
+
 ADVANCE_THREAD_CHECKPOINT_SQL: Final[str] = """
 update graph_thread_registry
    set cognitive_revision = %s,
@@ -591,12 +605,21 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
         async with self._connection() as connection:
             async with connection.transaction():
                 await self._lock_fence(connection, fence)
-                await self._lock_external_terminal_checkpoint(
+                checkpoint_is_terminal_bound = await self._lock_external_terminal_checkpoint(
                     connection,
                     config,
                     fence,
                     cognitive_revision=commit.cognitive_revision,
+                    terminal_fence=effective_fence,
                 )
+                if not checkpoint_is_terminal_bound:
+                    await self._bind_external_terminal_checkpoint_metadata(
+                        connection,
+                        checkpoint_ns=checkpoint_ns,
+                        checkpoint_id=checkpoint_id,
+                        fence=effective_fence,
+                        cognitive_revision=commit.cognitive_revision,
+                    )
                 await self._bind_command_checkpoint(
                     connection,
                     effective_fence,
@@ -916,7 +939,8 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
         fence: GraphFenceContext,
         *,
         cognitive_revision: int,
-    ) -> None:
+        terminal_fence: GraphFenceContext | None = None,
+    ) -> bool:
         configurable = config.get("configurable") or {}
         checkpoint_ns = str(configurable.get("checkpoint_ns") or "")
         checkpoint_id = str(configurable.get("checkpoint_id") or "")
@@ -937,11 +961,96 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
         ).fetchone()
         if row is None:
             raise GraphBindingError("external terminal checkpoint does not exist")
-        self._validate_exact_checkpoint_metadata(
+        if terminal_fence is None:
+            self._validate_exact_checkpoint_metadata(
+                row["metadata"],
+                fence,
+                cognitive_revision=cognitive_revision,
+            )
+            return False
+        return self._validate_external_terminal_checkpoint_metadata(
             row["metadata"],
+            fence,
+            terminal_fence,
+            cognitive_revision=cognitive_revision,
+        )
+
+    async def _bind_external_terminal_checkpoint_metadata(
+        self,
+        connection: Any,
+        *,
+        checkpoint_ns: str,
+        checkpoint_id: str,
+        fence: GraphFenceContext,
+        cognitive_revision: int,
+    ) -> None:
+        cursor = await connection.execute(
+            BIND_EXTERNAL_TERMINAL_METADATA_SQL,
+            (
+                fence.result_hash,
+                fence.result_ref,
+                fence.proposal_hash,
+                fence.result_envelope_hash,
+                fence.thread_id,
+                checkpoint_ns,
+                checkpoint_id,
+            ),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            raise GraphBindingError("terminal checkpoint metadata was not durably bound")
+        bound = self._validate_external_terminal_checkpoint_metadata(
+            row["metadata"],
+            replace(
+                fence,
+                result_hash=None,
+                result_ref=None,
+                proposal_hash=None,
+                result_envelope_hash=None,
+            ),
             fence,
             cognitive_revision=cognitive_revision,
         )
+        if not bound:
+            raise GraphBindingError("terminal checkpoint metadata was not durably bound")
+
+    @classmethod
+    def _validate_external_terminal_checkpoint_metadata(
+        cls,
+        metadata: Any,
+        fence: GraphFenceContext,
+        terminal_fence: GraphFenceContext,
+        *,
+        cognitive_revision: int,
+    ) -> bool:
+        """Accept only the original metadata or its exact terminal-fence projection."""
+
+        if not isinstance(metadata, dict):
+            raise GraphBindingError("checkpoint metadata is not an object")
+        terminal_fields = (
+            "graph_result_hash",
+            "graph_result_ref",
+            "graph_proposal_hash",
+            "graph_result_envelope_hash",
+        )
+        original = fence.checkpoint_metadata()
+        expected = terminal_fence.checkpoint_metadata()
+        normalized = dict(metadata)
+        for field in terminal_fields:
+            normalized[field] = original[field]
+        cls._validate_exact_checkpoint_metadata(
+            normalized,
+            fence,
+            cognitive_revision=cognitive_revision,
+        )
+        actual_terminal = {field: metadata.get(field) for field in terminal_fields}
+        original_terminal = {field: original[field] for field in terminal_fields}
+        expected_terminal = {field: expected[field] for field in terminal_fields}
+        if actual_terminal == original_terminal:
+            return False
+        if actual_terminal == expected_terminal:
+            return True
+        raise GraphBindingError("terminal checkpoint metadata conflicts with its result fence")
 
     @staticmethod
     def _require_fence(config: RunnableConfig) -> GraphFenceContext:
