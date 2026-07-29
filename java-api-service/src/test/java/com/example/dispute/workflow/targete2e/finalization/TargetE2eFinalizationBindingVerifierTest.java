@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.dispute.workflow.application.intake.IntakeContractHashes;
+import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ArtifactOperationType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ArtifactPointer;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
@@ -112,6 +113,42 @@ class TargetE2eFinalizationBindingVerifierTest {
                         .verify(fixture.request(), invalidResult, fixture.state(), fixture.evidence()))
                 .isInstanceOf(TargetE2eFinalizationRejectedException.class)
                 .hasMessageContaining("artifact_id");
+    }
+
+    @Test
+    void acceptsRfc8785EquivalentIntegerAndLongNodesInGraphEnvelopes() throws Exception {
+        var fixture = TargetE2eFinalizationFixture.valid();
+        var mapper = JsonMapper.builder().findAndAddModules().build();
+        ObjectNode commandEnvelope = (ObjectNode) mapper.readTree(
+                ContractJson.canonicalString(fixture.evidence().commandEnvelope()));
+        ObjectNode resultEnvelope = (ObjectNode) mapper.readTree(
+                ContractJson.canonicalString(fixture.evidence().resultEnvelope()));
+        var evidence = new TargetE2eFinalizationEvidence(
+                fixture.evidence().activationManifestHash(),
+                commandEnvelope,
+                resultEnvelope,
+                fixture.evidence().proposalSource(),
+                fixture.evidence().isolatedDomainDbBinding());
+
+        assertThat(commandEnvelope.required("command").required("room_epoch").getClass())
+                .isNotEqualTo(fixture.evidence()
+                        .commandEnvelope()
+                        .required("command")
+                        .required("room_epoch")
+                        .getClass());
+        assertThat(resultEnvelope.required("result").required("cognitive_revision").getClass())
+                .isNotEqualTo(fixture.evidence()
+                        .resultEnvelope()
+                        .required("result")
+                        .required("cognitive_revision")
+                        .getClass());
+        var verified = verifier()
+                .verify(fixture.request(), fixture.result(), fixture.state(), evidence);
+
+        assertThat(verified.commandHash()).isEqualTo(
+                fixture.evidence().commandEnvelope().required("command_hash").textValue());
+        assertThat(verified.resultHash()).isEqualTo(
+                fixture.evidence().resultEnvelope().required("result_hash").textValue());
     }
 
     private static TargetE2eFinalizationBindingVerifier verifier() {

@@ -72,7 +72,7 @@ public final class TargetE2eFinalizationBindingVerifier {
                 "embedded command request hash");
         String commandHash = ContractJson.sha256Hex(objectMapper.valueToTree(request.command()));
         text(commandEnvelope, "command_hash", commandHash);
-        requireEqual(
+        requireCanonicalJsonEqual(
                 commandEnvelope.required("command"),
                 objectMapper.valueToTree(request.command()),
                 "embedded graph command");
@@ -140,7 +140,7 @@ public final class TargetE2eFinalizationBindingVerifier {
         text(resultEnvelope, "result_hash", result.resultHash());
         text(resultEnvelope, "proposal_hash", proposalHash);
         text(resultEnvelope, "graph_output_authority", "PROPOSAL_ONLY");
-        requireEqual(
+        requireCanonicalJsonEqual(
                 resultEnvelope.required("result"),
                 objectMapper.valueToTree(result.graphResult()),
                 "embedded graph result");
@@ -267,6 +267,11 @@ public final class TargetE2eFinalizationBindingVerifier {
             throw rejected(
                     "TARGET_E2E_BINDING_MISMATCH", field + " conflicts with its hash source");
         }
+    }
+
+    private static void requireCanonicalJsonEqual(
+            JsonNode actual, JsonNode expected, String field) {
+        requireEqual(ContractJson.canonicalString(actual), ContractJson.canonicalString(expected), field);
     }
 
     private static TargetE2eFinalizationRejectedException rejected(
