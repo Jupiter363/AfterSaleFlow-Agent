@@ -6,6 +6,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.times;
 
 import com.example.dispute.agentstream.application.AgentRunCommandBindingFactory;
 import com.example.dispute.agentstream.application.AgentRunLedger;
@@ -33,9 +34,12 @@ import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import com.example.dispute.workflow.infrastructure.persistence.entity.CaseRoomEpochEntity;
+import com.example.dispute.workflow.infrastructure.persistence.entity.CaseProcessProjectionEntity;
 import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.EpochLifecycleStatus;
 import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.EpochProvisioningStatus;
+import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.WriterActivationStatus;
 import com.example.dispute.workflow.infrastructure.persistence.repository.CaseRoomEpochRepository;
+import com.example.dispute.workflow.infrastructure.persistence.repository.CaseProcessProjectionRepository;
 import com.example.dispute.workflow.targete2e.graph.TargetE2EGraphCommandEnvelope;
 import com.example.dispute.workflow.targete2e.graph.TargetE2EGraphEnvelopeCodec;
 import com.example.dispute.workflow.targete2e.ingress.TargetIntakeActivationGrant;
@@ -130,6 +134,8 @@ class CanonicalTargetIntakeMaterializerTest {
         TargetIntakeCommandMaterialStore materialStore = Mockito.mock(TargetIntakeCommandMaterialStore.class);
         JdbcTargetE2eApiAuthority activationAuthority = Mockito.mock(JdbcTargetE2eApiAuthority.class);
         CaseRoomEpochRepository epochs = Mockito.mock(CaseRoomEpochRepository.class);
+        CaseProcessProjectionRepository projections = Mockito.mock(CaseProcessProjectionRepository.class);
+        CaseProcessProjectionEntity projection = matchingProjection("OPEN", 0L);
         TargetIntakeRuntimePins pins = pins();
         String requestHash = "c".repeat(64);
         String logicalInputHash = "d".repeat(64);
@@ -138,6 +144,7 @@ class CanonicalTargetIntakeMaterializerTest {
         when(epochs.findByCaseIdAndRoomTypeAndRoomEpochForUpdate(
                         CASE_ID, RoomType.INTAKE, activation.roomEpoch()))
                 .thenReturn(Optional.of(epoch));
+        when(projections.findByIdForUpdate(CASE_ID)).thenReturn(Optional.of(projection));
         when(accessSessions.resolve(activation.tenantSurrogate(), CASE_ID, request.actor()))
                 .thenReturn(access(TARGET_TENANT_SURROGATE, CASE_ID, ACTOR_ID, ActorRole.USER));
         AgentConversationSessionEntity session = Mockito.mock(AgentConversationSessionEntity.class);
@@ -204,14 +211,27 @@ class CanonicalTargetIntakeMaterializerTest {
 
         CanonicalTargetIntakeMaterializer materializer = new CanonicalTargetIntakeMaterializer(
                 accessSessions, agentSessions, participants, threadRegistrar, snapshots, events, commands,
-                bindings, ledger, envelopes, materialStore, activationAuthority, epochs, pins,
+                bindings, ledger, envelopes, materialStore, activationAuthority, epochs, projections, pins,
                 Clock.fixed(request.createdAt(), ZoneOffset.UTC));
 
         materializer.materialize(request);
+        when(projection.getRoomPhase()).thenReturn("WAITING_PARTY");
+        when(projection.getLastCommandSequence()).thenReturn(7L);
+        materializer.materialize(request);
 
         ArgumentCaptor<CreateLogicalRun> logicalRun = ArgumentCaptor.forClass(CreateLogicalRun.class);
-        verify(ledger).createOrLoad(logicalRun.capture());
+        verify(ledger, times(2)).createOrLoad(logicalRun.capture());
         assertThat(logicalRun.getValue().roomEpochId()).isEqualTo("CRE_1");
+        ArgumentCaptor<IntakeGraphCommandFactory.CommandRequest> graphRequest =
+                ArgumentCaptor.forClass(IntakeGraphCommandFactory.CommandRequest.class);
+        verify(commands, times(2)).create(graphRequest.capture());
+        assertThat(graphRequest.getAllValues())
+                .extracting(
+                        IntakeGraphCommandFactory.CommandRequest::stageCode,
+                        IntakeGraphCommandFactory.CommandRequest::stageSequence)
+                .containsExactly(
+                        org.assertj.core.groups.Tuple.tuple("OPEN", 0L),
+                        org.assertj.core.groups.Tuple.tuple("WAITING_PARTY", 7L));
     }
 
     @Test
@@ -225,6 +245,18 @@ class CanonicalTargetIntakeMaterializerTest {
                         epoch, request, activation, pins()))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessage("target Intake activation conflicts with persisted room epoch authority");
+    }
+
+    @Test
+    void rejectsAProjectionThatDoesNotMatchTheIntakeActivationAuthority() {
+        TargetIntakeActivationGrant activation = activation();
+        CaseProcessProjectionEntity projection = matchingProjection("OPEN", 0L);
+        when(projection.getTemporalBuildId()).thenReturn("another-build");
+
+        assertThatThrownBy(() -> CanonicalTargetIntakeMaterializer.requireProjectionAuthority(
+                        projection, request(activation), activation))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("target Intake activation conflicts with persisted process projection authority");
     }
 
     private static CaseAccessSessionEntity access(
@@ -315,5 +347,23 @@ class CanonicalTargetIntakeMaterializerTest {
         when(epoch.getGraphVersion()).thenReturn("target-e2e-graph.2026-07-27.1");
         when(epoch.getCheckpointSchemaVersion()).thenReturn("target-e2e-checkpoint.v1");
         return epoch;
+    }
+
+    private static CaseProcessProjectionEntity matchingProjection(String roomPhase, long lastCommandSequence) {
+        CaseProcessProjectionEntity projection = Mockito.mock(CaseProcessProjectionEntity.class);
+        when(projection.getTenantSurrogate()).thenReturn(TARGET_TENANT_SURROGATE);
+        when(projection.getCaseId()).thenReturn(CASE_ID);
+        when(projection.getCurrentRoom()).thenReturn(RoomType.INTAKE.name());
+        when(projection.getWriterMode()).thenReturn(WriterMode.TEMPORAL);
+        when(projection.getWriterActivationStatus()).thenReturn(WriterActivationStatus.READY);
+        when(projection.getProcessRevision()).thenReturn(0L);
+        when(projection.getRoomEpoch()).thenReturn(0L);
+        when(projection.getFencingToken()).thenReturn(1L);
+        when(projection.getTemporalWorkflowId())
+                .thenReturn("case-process:tenant-target-activation:CASE_TARGET_001");
+        when(projection.getTemporalBuildId()).thenReturn("p9-control-build");
+        when(projection.getRoomPhase()).thenReturn(roomPhase);
+        when(projection.getLastCommandSequence()).thenReturn(lastCommandSequence);
+        return projection;
     }
 }

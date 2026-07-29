@@ -28,9 +28,12 @@ import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import com.example.dispute.workflow.infrastructure.persistence.entity.CaseRoomEpochEntity;
+import com.example.dispute.workflow.infrastructure.persistence.entity.CaseProcessProjectionEntity;
 import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.EpochLifecycleStatus;
 import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.EpochProvisioningStatus;
+import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.WriterActivationStatus;
 import com.example.dispute.workflow.infrastructure.persistence.repository.CaseRoomEpochRepository;
+import com.example.dispute.workflow.infrastructure.persistence.repository.CaseProcessProjectionRepository;
 import com.example.dispute.workflow.targete2e.graph.TargetE2EGraphCommandEnvelope;
 import com.example.dispute.workflow.targete2e.graph.TargetE2EGraphEnvelopeCodec;
 import com.example.dispute.workflow.targete2e.ingress.TargetIntakeActivationGrant;
@@ -72,6 +75,7 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
     private final TargetIntakeCommandMaterialStore materialStore;
     private final JdbcTargetE2eApiAuthority activationAuthority;
     private final CaseRoomEpochRepository epochs;
+    private final CaseProcessProjectionRepository projections;
     private final TargetIntakeRuntimePins pins;
     private final Clock clock;
 
@@ -89,6 +93,7 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
             TargetIntakeCommandMaterialStore materialStore,
             JdbcTargetE2eApiAuthority activationAuthority,
             CaseRoomEpochRepository epochs,
+            CaseProcessProjectionRepository projections,
             TargetIntakeRuntimePins pins,
             Clock clock) {
         this.accessSessions = Objects.requireNonNull(accessSessions, "accessSessions");
@@ -104,6 +109,7 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
         this.materialStore = Objects.requireNonNull(materialStore, "materialStore");
         this.activationAuthority = Objects.requireNonNull(activationAuthority, "activationAuthority");
         this.epochs = Objects.requireNonNull(epochs, "epochs");
+        this.projections = Objects.requireNonNull(projections, "projections");
         this.pins = Objects.requireNonNull(pins, "pins");
         this.clock = Objects.requireNonNull(clock, "clock");
     }
@@ -125,6 +131,10 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
                 .orElseThrow(() -> new IllegalStateException(
                         "target Intake activation has no persisted room epoch authority"));
         String roomEpochId = requireEpochAuthority(epoch, request, activation, activePins);
+        CaseProcessProjectionEntity projection = projections.findByIdForUpdate(request.caseId())
+                .orElseThrow(() -> new IllegalStateException(
+                        "target Intake activation has no persisted process projection authority"));
+        ProjectionStage stage = requireProjectionAuthority(projection, request, activation);
         CaseAccessSessionEntity access = accessSessions.resolve(
                 activation.tenantSurrogate(), request.caseId(), request.actor());
         requireActor(
@@ -173,7 +183,7 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
         Instant deadline = request.commandDeadlineAt();
         RoomGraphCommand graph = commands.create(new IntakeGraphCommandFactory.CommandRequest(
                 commandId, logicalRunId, attemptId, thread, snapshot, event, activation.processRevision(),
-                OPERATION, activation.processRevision(), activePins.agentProfileId(), 2, 3, 1, deadline,
+                stage.code(), stage.sequence(), activePins.agentProfileId(), 2, 3, 1, deadline,
                 traceparent(request.traceId()), activePins.envelopeKeyId(), nonce(request)));
         TargetE2EGraphCommandEnvelope envelope = envelopes.wrapCommand(
                 activation.activationId(), activation.roomFencingToken(), graph);
@@ -258,6 +268,33 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
         }
         return epoch.getId();
     }
+
+    static ProjectionStage requireProjectionAuthority(
+            CaseProcessProjectionEntity projection,
+            TargetIntakeMessageRequest request,
+            TargetIntakeActivationGrant activation) {
+        if (projection == null
+                || !activation.tenantSurrogate().equals(projection.getTenantSurrogate())
+                || !request.caseId().equals(projection.getCaseId())
+                || !com.example.dispute.workflow.contract.v1.ContractTypes.RoomType.INTAKE.name()
+                        .equals(projection.getCurrentRoom())
+                || projection.getWriterMode() != WriterMode.TEMPORAL
+                || projection.getWriterActivationStatus() != WriterActivationStatus.READY
+                || projection.getProcessRevision() != activation.processRevision()
+                || projection.getRoomEpoch() != activation.roomEpoch()
+                || projection.getFencingToken() != activation.roomFencingToken()
+                || !activation.temporalWorkflowId().equals(projection.getTemporalWorkflowId())
+                || !activation.temporalBuildId().equals(projection.getTemporalBuildId())
+                || projection.getRoomPhase() == null
+                || projection.getRoomPhase().isBlank()
+                || projection.getLastCommandSequence() < 0) {
+            throw new IllegalStateException(
+                    "target Intake activation conflicts with persisted process projection authority");
+        }
+        return new ProjectionStage(projection.getRoomPhase(), projection.getLastCommandSequence());
+    }
+
+    record ProjectionStage(String code, long sequence) {}
 
     private static Audience audience(TargetIntakeMessageRequest request) {
         return request.actor().role() == com.example.dispute.config.ActorRole.USER ? Audience.USER : Audience.MERCHANT;

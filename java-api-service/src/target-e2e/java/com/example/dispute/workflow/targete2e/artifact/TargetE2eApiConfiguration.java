@@ -45,6 +45,7 @@ import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewCommandMa
 import com.example.dispute.agentstream.application.AgentRunCommandBindingFactory;
 import com.example.dispute.agentstream.application.AgentRunLedger;
 import com.example.dispute.workflow.infrastructure.persistence.repository.CaseRoomEpochRepository;
+import com.example.dispute.workflow.infrastructure.persistence.repository.CaseProcessProjectionRepository;
 import com.example.dispute.workflow.targete2e.graph.TargetE2EGraphEnvelopeCodec;
 import com.example.dispute.workflow.application.intake.IntakeDomainSnapshotPublisher;
 import com.example.dispute.workflow.application.intake.IntakeGraphBindingStore;
@@ -280,6 +281,7 @@ public class TargetE2eApiConfiguration {
       TargetIntakeCommandMaterialStore materialStore,
       JdbcTargetE2eApiAuthority activationAuthority,
       CaseRoomEpochRepository epochs,
+      CaseProcessProjectionRepository projections,
       TargetIntakeRuntimePins pins,
       ObjectMapper objectMapper,
       Clock clock) {
@@ -288,7 +290,7 @@ public class TargetE2eApiConfiguration {
         new IntakeDomainSnapshotPublisher(payloadPublisher, bindingStore),
         new IntakeTurnEventPublisher(payloadPublisher, bindingStore), new IntakeGraphCommandFactory(),
         new AgentRunCommandBindingFactory(objectMapper), ledger,
-        new TargetE2EGraphEnvelopeCodec(objectMapper), materialStore, activationAuthority, epochs, pins, clock);
+        new TargetE2EGraphEnvelopeCodec(objectMapper), materialStore, activationAuthority, epochs, projections, pins, clock);
   }
 
   @Bean
