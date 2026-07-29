@@ -2,6 +2,7 @@
 
 from functools import lru_cache
 from datetime import datetime
+from pathlib import Path
 import re
 from typing import Annotated, ClassVar, Literal, Self
 from urllib.parse import parse_qs, unquote, urlsplit
@@ -178,6 +179,7 @@ class GraphTargetE2ERuntimeContextSettings(BaseModel):
     schemaVersion: Literal["graph-target-e2e-runtime-context.v1"]
     executionLane: Literal["TARGET_E2E_CANDIDATE"]
     activationId: str = Field(pattern=r"^p9act\.v1\.[0-9a-f]{32}$")
+    activationManifestHash: str = Field(pattern=r"^[0-9a-f]{64}$")
     environmentId: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
     environmentGeneration: int = Field(ge=1, le=9_007_199_254_740_991)
     candidateSha: str = Field(pattern=r"^[0-9a-f]{40}$")
@@ -397,6 +399,27 @@ class Settings(BaseSettings):
         max_length=64,
     )
     graph_target_e2e_isolated: bool = False
+    graph_target_e2e_checkpoint_barrier_enabled: bool = False
+    graph_target_e2e_checkpoint_barrier_directory: Path | None = None
+    graph_target_e2e_checkpoint_barrier_maximum_wait_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        le=30,
+    )
+    graph_target_e2e_checkpoint_barrier_durability_timeout_seconds: float = Field(
+        default=2.0,
+        gt=0,
+        le=5,
+    )
+    graph_target_e2e_checkpoint_barrier_poll_interval_seconds: float = Field(
+        default=0.05,
+        gt=0,
+        le=1,
+    )
+    target_e2e_activation_manifest_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
     graph_target_e2e_runtime_context: GraphTargetE2ERuntimeContextSettings | None = None
     graph_target_e2e_bindings: tuple[GraphTargetE2EBindingSettings, ...] = Field(
         default=(),
@@ -443,6 +466,14 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "TARGET_E2E_CANDIDATE requires an isolated non-secret runtime context"
                 )
+            if self.target_e2e_activation_manifest_hash is None:
+                raise ValueError(
+                    "TARGET_E2E_CANDIDATE requires the exact activation manifest hash"
+                )
+            if context.activationManifestHash != self.target_e2e_activation_manifest_hash:
+                raise ValueError(
+                    "TARGET_E2E_CANDIDATE manifest hash differs from the runtime context"
+                )
             if not self.graph_target_e2e_bindings:
                 raise ValueError("TARGET_E2E_CANDIDATE requires exact target-E2E bindings")
             if self.graph_shadow_bindings or self.graph_shadow_threads:
@@ -486,6 +517,23 @@ class Settings(BaseSettings):
                 != frozenset({"INTAKE", "EVIDENCE", "HEARING", "REVIEW"})
             ):
                 raise ValueError("target-E2E shared executor differs from the frozen binding")
+            if self.graph_target_e2e_checkpoint_barrier_enabled:
+                expected_directory = Path("/run/target-e2e/python/recovery-barrier")
+                if (
+                    self.app_env.lower() != "target-e2e"
+                    or not self.graph_target_e2e_isolated
+                    or self.graph_target_e2e_checkpoint_barrier_directory
+                    != expected_directory
+                ):
+                    raise ValueError(
+                        "checkpoint recovery barrier requires the isolated target-E2E mount"
+                    )
+            elif self.graph_target_e2e_checkpoint_barrier_directory is not None:
+                raise ValueError(
+                    "checkpoint recovery barrier directory requires the barrier to be enabled"
+                )
+        elif self.graph_target_e2e_checkpoint_barrier_enabled:
+            raise ValueError("checkpoint recovery barrier requires TARGET_E2E_CANDIDATE")
         binding_keys = {
             (
                 binding.graph_key,

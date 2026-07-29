@@ -963,16 +963,19 @@ def provision(
         evidence_dir = root / "evidence"
         public_dir = root / "public"
         socket_dir = root / "python-socket"
+        checkpoint_barrier_dir = socket_dir / "recovery-barrier"
         for directory in (
             secrets_dir,
             activation_dir,
             evidence_dir / "inbox",
             public_dir,
             socket_dir,
+            checkpoint_barrier_dir,
         ):
             directory.mkdir(parents=True, exist_ok=False)
         if os.name != "nt":
             socket_dir.chmod(0o777)
+            checkpoint_barrier_dir.chmod(0o777)
 
         graph_key_id = f"p9-graph-{candidate[:12]}"
         graph_private = (
@@ -1103,6 +1106,7 @@ def provision(
             "TARGET_E2E_MINIO_ROOT_USER": f"e2e{secrets.token_hex(8)}",
             "TARGET_E2E_MINIO_ROOT_PASSWORD": _secret(),
             "TARGET_E2E_JAVA_SERVICE_SECRET": _secret(),
+            "TARGET_E2E_LIFECYCLE_SERVICE_SECRET": _secret(),
             "TARGET_E2E_PYTHON_SERVICE_SECRET": _secret(),
             "TARGET_E2E_OCR_SERVICE_SECRET": _secret(),
             "TARGET_E2E_LOCAL_MODEL_KEY": _secret(),
@@ -1128,8 +1132,12 @@ def provision(
             "TARGET_E2E_ENVIRONMENT_ID": environment_id,
             "TARGET_E2E_ENVIRONMENT_GENERATION": "1",
             "TARGET_E2E_ACTIVATION_ID": activation_id,
+            "TARGET_E2E_ACTIVATION_MANIFEST_HASH": "BOOTSTRAP_PENDING",
+            "TARGET_E2E_GRAPH_RUNTIME_CONTEXT_HASH": "BOOTSTRAP_PENDING",
             "TARGET_E2E_ACTIVATION_KEY_ID": activation_key_id,
             "TARGET_E2E_ISOLATION_ATTESTATION_KEY_ID": isolation_key_id,
+            "TARGET_E2E_HARNESS_KEY_ID": harness_key_id,
+            "TARGET_E2E_HARNESS_PUBLIC_KEY_SHA256": harness_fingerprint,
             "TARGET_E2E_JAVA_ARTIFACT_SHA256": artifact_digest,
             "TARGET_E2E_SYNTHETIC_FIXTURE_SHA256": fixture_hash,
             "TARGET_E2E_RUN_NONCE": run_nonce,
@@ -1255,6 +1263,7 @@ def provision(
         activation_manifest["manifestHash"] = common.canonical_sha256(
             activation_manifest
         )
+        environment["TARGET_E2E_ACTIVATION_MANIFEST_HASH"] = activation_manifest["manifestHash"]
         common.write_json(
             activation_dir / "activation-manifest.json", activation_manifest
         )
@@ -1298,11 +1307,16 @@ def provision(
             "schemaVersion": "graph-target-e2e-runtime-context.v1",
             "executionLane": "TARGET_E2E_CANDIDATE",
             "activationId": activation_id,
+            "activationManifestHash": activation_manifest["manifestHash"],
             "environmentId": environment_id,
             "environmentGeneration": environment_generation,
             "candidateSha": candidate,
-            "issuedAt": activation_manifest["issuedAt"],
-            "expiresAt": activation_manifest["expiresAt"],
+            # Pydantic's JSON projection canonicalizes UTC as ``Z``. Keep the
+            # provisioned bytes identical so Java and Graph bind the same hash.
+            "issuedAt": now.isoformat(timespec="seconds").replace("+00:00", "Z"),
+            "expiresAt": expires.isoformat(timespec="seconds").replace(
+                "+00:00", "Z"
+            ),
             "runNonce": run_nonce,
             "tenantSurrogate": tenant_surrogate,
             "caseScope": case_scope,
@@ -1330,6 +1344,9 @@ def provision(
             "trustedSigningKeyIds": [graph_key_id],
             "perCommandManifestAllowed": False,
         }
+        environment["TARGET_E2E_GRAPH_RUNTIME_CONTEXT_HASH"] = common.canonical_sha256(
+            runtime_context
+        )
         executor_bindings = [target_binding]
         image_lock_snapshot = root / "image-lock.snapshot.json"
         common.write_json(image_lock_snapshot, image_lock_document)

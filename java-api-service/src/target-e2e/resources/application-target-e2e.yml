@@ -18,6 +18,18 @@ spring:
 
 target:
   e2e:
+    environment:
+      id: ${TARGET_E2E_ENVIRONMENT_ID:}
+      generation: ${TARGET_E2E_ENVIRONMENT_GENERATION:}
+    activation:
+      id: ${TARGET_E2E_ACTIVATION_ID:}
+      manifest-hash: ${TARGET_E2E_ACTIVATION_MANIFEST_HASH:}
+    runtime-context-hash: ${TARGET_E2E_GRAPH_RUNTIME_CONTEXT_HASH:}
+    lifecycle:
+      service-capability: ${TARGET_E2E_LIFECYCLE_SERVICE_SECRET:}
+      harness-key-id: ${TARGET_E2E_HARNESS_KEY_ID:}
+      harness-public-key-path: ${TARGET_E2E_HARNESS_PUBLIC_KEY_PATH:}
+      harness-public-key-sha256: ${TARGET_E2E_HARNESS_PUBLIC_KEY_SHA256:}
     case-build-id: ${TARGET_E2E_CASE_BUILD_ID:}
     agent-build-id: ${TARGET_E2E_AGENT_BUILD_ID:}
     graph-binding-hash: ${TARGET_E2E_GRAPH_BINDING_HASH:}

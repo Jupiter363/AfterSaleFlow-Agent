@@ -24,6 +24,9 @@ from app.api.graph_commands import (
     TrustedThreadIdentityResolver,
     TargetE2EInvocationEnvelopeVerifierPort,
 )
+from app.api.target_e2e_lifecycle import (
+    TargetE2ELifecycleEndpointDependencies,
+)
 from app.api.graph_reconciliation_service import (
     GatewayBackedGraphReconciliationService,
     GraphReconciliationService,
@@ -62,6 +65,17 @@ from app.graph_runtime.target_e2e import (
     TargetE2ERuntimeAuthority,
     VerifiedTargetE2EInvocation,
 )
+from app.graph_runtime.target_e2e_lifecycle import (
+    FilesystemTargetE2ECheckpointBarrierControl,
+    PostgresTargetE2ELifecycleRepository,
+    TargetE2ECheckpointGatewayBarrier,
+    TargetE2ECheckpointRecoveryBarrier,
+    TargetE2ELifecycleBinding,
+    TargetE2ELifecycleReceiptVerifier,
+    TargetE2ELifecycleReconciler,
+    TargetE2ELifecycleReconciliation,
+    VerifiedTargetE2ELifecycleReceipt,
+)
 from app.security.graph_runtime import (
     GraphSecurityRuntime,
     _open_for_lifecycle as _open_graph_security_runtime_for_lifecycle,
@@ -71,6 +85,7 @@ from app.security.invocation_envelope import (
     InvocationEnvelopeVerifier,
     ReconciliationEnvelopeVerifier,
     TransportIdentity,
+    VerificationKeyResolver,
     VerifiedInvocation,
     VerifiedReconciliation,
 )
@@ -162,6 +177,12 @@ class GraphRuntimeInstance(Protocol):
     stream_service: GraphCommandStreamService
     reconciliation_service: GraphReconciliationService
     target_e2e_verifier: TargetE2EInvocationEnvelopeVerifierPort | None
+
+    @property
+    def target_e2e_lifecycle_key_resolver(self) -> VerificationKeyResolver: ...
+
+    @property
+    def target_e2e_lifecycle_pool(self) -> Any: ...
 
     @property
     def ready(self) -> bool: ...
@@ -276,10 +297,54 @@ class GraphApplicationRuntime:
                 if mode is GraphGatewayMode.TARGET_E2E_CANDIDATE
                 else bindings.input_authorizer
             )
+            terminal_result_barrier = None
+            if mode is GraphGatewayMode.TARGET_E2E_CANDIDATE:
+                lifecycle_binding = _build_target_e2e_lifecycle_binding(settings)
+                barrier_control = None
+                if settings.graph_target_e2e_checkpoint_barrier_enabled:
+                    barrier_directory = (
+                        settings.graph_target_e2e_checkpoint_barrier_directory
+                    )
+                    if barrier_directory is None:
+                        raise ValueError(
+                            "enabled checkpoint recovery barrier has no control directory"
+                        )
+                    barrier_control = FilesystemTargetE2ECheckpointBarrierControl(
+                        barrier_directory,
+                        poll_interval_seconds=(
+                            settings.graph_target_e2e_checkpoint_barrier_poll_interval_seconds
+                        ),
+                    )
+                recovery_barrier = TargetE2ECheckpointRecoveryBarrier(
+                    expected_binding=lifecycle_binding,
+                    enabled=settings.graph_target_e2e_checkpoint_barrier_enabled,
+                    isolated_synthetic_environment=settings.graph_target_e2e_isolated,
+                    maximum_wait_seconds=(
+                        settings.graph_target_e2e_checkpoint_barrier_maximum_wait_seconds
+                    ),
+                    durability_timeout_seconds=(
+                        settings.graph_target_e2e_checkpoint_barrier_durability_timeout_seconds
+                    ),
+                    arming_policy=(
+                        barrier_control.is_armed if barrier_control is not None else None
+                    ),
+                    release_waiter=(
+                        barrier_control.wait_for_release
+                        if barrier_control is not None
+                        else None
+                    ),
+                )
+                terminal_result_barrier = TargetE2ECheckpointGatewayBarrier(
+                    pool=checkpoint_runtime.pool,
+                    expected_binding=lifecycle_binding,
+                    barrier=recovery_barrier,
+                    acquire_timeout_seconds=settings.graph_pool_acquire_timeout_seconds,
+                )
             gateway = GraphCommandGateway(
                 mode=mode,
                 pool=checkpoint_runtime.pool,
                 input_authorizer=input_authorizer,
+                terminal_result_barrier=terminal_result_barrier,
                 acquire_timeout_seconds=settings.graph_pool_acquire_timeout_seconds,
             )
             durable_bulkhead = PostgresGraphFanoutBulkhead(
@@ -416,6 +481,18 @@ class GraphApplicationRuntime:
         except Exception:
             return False
 
+    @property
+    def target_e2e_lifecycle_key_resolver(self) -> VerificationKeyResolver:
+        if self._mode is not GraphGatewayMode.TARGET_E2E_CANDIDATE:
+            raise GraphGatewayDisabledError("TARGET_E2E_LIFECYCLE_DISABLED")
+        return self._security_runtime.resolver
+
+    @property
+    def target_e2e_lifecycle_pool(self) -> Any:
+        if self._mode is not GraphGatewayMode.TARGET_E2E_CANDIDATE:
+            raise GraphGatewayDisabledError("TARGET_E2E_LIFECYCLE_DISABLED")
+        return self._checkpoint_runtime.pool
+
     async def check_readiness(self) -> GraphRuntimeReadiness:
         if self._closed:
             return GraphRuntimeReadiness(
@@ -540,6 +617,28 @@ def _build_target_e2e_runtime_bindings(
     )
 
 
+def _build_target_e2e_lifecycle_binding(
+    settings: Settings,
+) -> TargetE2ELifecycleBinding:
+    if settings.graph_gateway_mode != "TARGET_E2E_CANDIDATE":
+        raise ValueError("target-E2E lifecycle binding requires candidate mode")
+    context = settings.graph_target_e2e_runtime_context
+    manifest_hash = settings.target_e2e_activation_manifest_hash
+    if context is None or manifest_hash is None:
+        raise ValueError("target-E2E lifecycle deployment binding is incomplete")
+    authority = TargetE2ERuntimeAuthority.from_context(
+        context,
+        settings.graph_target_e2e_bindings,
+    )
+    return TargetE2ELifecycleBinding(
+        activation_id=context.activationId,
+        environment_id=context.environmentId,
+        environment_generation=context.environmentGeneration,
+        manifest_hash=manifest_hash,
+        runtime_context_hash=authority.context_hash,
+    )
+
+
 class GraphRuntimeHandle:
     """Stable route dependencies whose SHADOW implementation exists only inside lifespan."""
 
@@ -568,6 +667,13 @@ class GraphRuntimeHandle:
         self._reconciliation_verifier = _RuntimeReconciliationVerifier(self)
         self._stream_service = _RuntimeStreamService(self)
         self._reconciliation_service = _RuntimeReconciliationService(self)
+        self._target_e2e_lifecycle_binding = (
+            _build_target_e2e_lifecycle_binding(settings)
+            if self._mode is GraphGatewayMode.TARGET_E2E_CANDIDATE
+            else None
+        )
+        self._target_e2e_lifecycle_verifier = _RuntimeTargetE2ELifecycleVerifier(self)
+        self._target_e2e_lifecycle_reconciler = _RuntimeTargetE2ELifecycleReconciler(self)
         self._thread_resolver = (
             bindings.thread_identity_resolver
             if bindings is not None
@@ -618,6 +724,22 @@ class GraphRuntimeHandle:
                 TrustedThreadIdentityResolver,
                 self._thread_resolver,
             ),
+        )
+
+    def target_e2e_lifecycle_endpoint_dependencies(
+        self,
+    ) -> TargetE2ELifecycleEndpointDependencies:
+        if (
+            self._mode is not GraphGatewayMode.TARGET_E2E_CANDIDATE
+            or self._target_e2e_lifecycle_binding is None
+        ):
+            raise ValueError("target-E2E lifecycle route is not available in this mode")
+        return TargetE2ELifecycleEndpointDependencies(
+            mode=self._mode.value,
+            ready=lambda: self.ready,
+            transport_identity_resolver=self._transport_identity_resolver,
+            receipt_verifier=self._target_e2e_lifecycle_verifier,
+            reconciler=self._target_e2e_lifecycle_reconciler,
         )
 
     @asynccontextmanager
@@ -686,6 +808,48 @@ class GraphRuntimeHandle:
         if not ready:
             raise GraphGatewayDisabledError("GRAPH_GATEWAY_NOT_READY")
         return runtime
+
+    def require_target_e2e_lifecycle_binding(self) -> TargetE2ELifecycleBinding:
+        binding = self._target_e2e_lifecycle_binding
+        if self._mode is not GraphGatewayMode.TARGET_E2E_CANDIDATE or binding is None:
+            raise GraphGatewayDisabledError("TARGET_E2E_LIFECYCLE_DISABLED")
+        return binding
+
+
+class _RuntimeTargetE2ELifecycleVerifier:
+    def __init__(self, handle: GraphRuntimeHandle) -> None:
+        self._handle = handle
+
+    def verify(
+        self,
+        *,
+        token: str,
+        transport_identity: TransportIdentity,
+    ) -> VerifiedTargetE2ELifecycleReceipt:
+        runtime = self._handle.require_runtime()
+        verifier = TargetE2ELifecycleReceiptVerifier(
+            key_resolver=runtime.target_e2e_lifecycle_key_resolver,
+            expected_binding=self._handle.require_target_e2e_lifecycle_binding(),
+        )
+        return verifier.verify(token=token, transport_identity=transport_identity)
+
+
+class _RuntimeTargetE2ELifecycleReconciler:
+    def __init__(self, handle: GraphRuntimeHandle) -> None:
+        self._handle = handle
+        self._repository = PostgresTargetE2ELifecycleRepository()
+
+    async def reconcile(
+        self,
+        verified: VerifiedTargetE2ELifecycleReceipt,
+    ) -> TargetE2ELifecycleReconciliation:
+        runtime = self._handle.require_runtime()
+        reconciler = TargetE2ELifecycleReconciler(
+            pool=runtime.target_e2e_lifecycle_pool,
+            repository=self._repository,
+            expected_binding=self._handle.require_target_e2e_lifecycle_binding(),
+        )
+        return await reconciler.reconcile(verified)
 
 
 class _RuntimeExecutionVerifier:

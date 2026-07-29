@@ -217,7 +217,7 @@ public final class TargetE2eActivationManifestVerifier {
       ActivationIdentity identity = identity(grant);
       LifecycleState state;
       try {
-        state = lifecycleStore.refresh(identity, grant.expiresAt(), clock.instant());
+            state = lifecycleStore.refresh(identity, grant.expiresAt(), clock.instant()).state();
       } catch (RuntimeException failure) {
         return denied(Reason.REPLAY_STORE_FAILURE);
       }
@@ -895,7 +895,7 @@ public final class TargetE2eActivationManifestVerifier {
       LifecycleState state;
       Instant now = clock.instant();
       try {
-        state = lifecycleStore.refresh(identity(grant), grant.expiresAt(), now);
+            state = lifecycleStore.refresh(identity(grant), grant.expiresAt(), now).state();
       } catch (RuntimeException failure) {
         return ActivationDecision.denied(Reason.REPLAY_STORE_FAILURE);
       }

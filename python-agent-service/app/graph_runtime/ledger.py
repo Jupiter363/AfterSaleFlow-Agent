@@ -355,6 +355,19 @@ on conflict (thread_id, command_id) do nothing
 returning {COMMAND_COLUMNS}
 """
 
+LOCK_TARGET_E2E_ADMISSION_SQL: Final[str] = """
+select lifecycle.lifecycle_state
+  from agent_graph_target_e2e_activation activation
+  join agent_graph_target_e2e_activation_lifecycle lifecycle
+    on lifecycle.activation_id = activation.activation_id
+  join agent_graph_target_e2e_environment_generation generation
+    on generation.environment_id = activation.environment_id
+ where activation.activation_id = %s
+   and generation.activation_id = activation.activation_id
+   and generation.environment_generation = activation.environment_generation
+ for share of lifecycle
+"""
+
 LOAD_COMMAND_SQL: Final[str] = f"""
 select {COMMAND_COLUMNS}
   from agent_graph_command
@@ -657,6 +670,8 @@ class PostgresCommandLedger:
         binding: CommandBinding,
         nonce: InvocationNonce,
     ) -> CommandRegistration:
+        if binding.execution_lane is GraphGatewayMode.TARGET_E2E_CANDIDATE:
+            await self._lock_target_e2e_admission(connection, binding)
         params = self._insert_params(binding)
         row = await (await connection.execute(INSERT_COMMAND_SQL, params)).fetchone()
         created = row is not None
@@ -673,6 +688,23 @@ class PostgresCommandLedger:
         self.require_same_binding(record.binding, binding)
         await self._consume_nonce(connection, binding=binding, nonce=nonce)
         return CommandRegistration(record, created)
+
+    @staticmethod
+    async def _lock_target_e2e_admission(
+        connection: Any,
+        binding: CommandBinding,
+    ) -> None:
+        activation_id = binding.activation_id
+        if activation_id is None:
+            raise GraphCommandBindingError("candidate activation binding is absent")
+        row = await (
+            await connection.execute(
+                LOCK_TARGET_E2E_ADMISSION_SQL,
+                (activation_id,),
+            )
+        ).fetchone()
+        if row is None:
+            raise GraphCommandBindingError("candidate activation binding is not registered")
 
     async def consume_nonce_for_existing(
         self,

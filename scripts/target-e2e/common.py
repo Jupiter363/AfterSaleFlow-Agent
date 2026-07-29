@@ -65,6 +65,7 @@ RUNTIME_PROJECTION_KEYS = {
     "schemaVersion",
     "executionLane",
     "activationId",
+    "activationManifestHash",
     "environmentId",
     "environmentGeneration",
     "candidateSha",
@@ -558,6 +559,13 @@ def ledger_context_from_run_context(run_context: dict[str, Any]) -> dict[str, An
         projection["candidateSha"]
     ):
         raise TargetE2EError("runtime projection candidate SHA is invalid")
+    if (
+        not isinstance(projection["activationManifestHash"], str)
+        or not SHA256.fullmatch(projection["activationManifestHash"])
+        or projection["activationManifestHash"]
+        != run_context["activation_manifest_hash"]
+    ):
+        raise TargetE2EError("runtime projection activation manifest hash is invalid")
     parse_timestamp(projection["issuedAt"], "runtime projection issuedAt")
     parse_timestamp(projection["expiresAt"], "runtime projection expiresAt")
     if projection["allowedRoomTypes"] != ["INTAKE", "EVIDENCE", "HEARING", "REVIEW"]:
@@ -778,6 +786,15 @@ def validate_run_context_bindings(
         for key, value in expected_projection_bindings.items()
     ):
         raise TargetE2EError("runtime projection does not match the locked environment")
+    runtime_context_hash = canonical_sha256(projection)
+    if (
+        env.get("TARGET_E2E_ACTIVATION_MANIFEST_HASH")
+        != run_context["activation_manifest_hash"]
+        or env.get("TARGET_E2E_GRAPH_RUNTIME_CONTEXT_HASH") != runtime_context_hash
+    ):
+        raise TargetE2EError(
+            "runtime projection hashes differ from the signed run context"
+        )
     expected_image_digests = {
         "javaApi": images["java"]["manifest_digest"],
         "temporalControlWorker": images["java"]["manifest_digest"],

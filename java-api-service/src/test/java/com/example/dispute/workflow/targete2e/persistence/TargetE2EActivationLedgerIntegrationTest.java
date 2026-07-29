@@ -197,12 +197,12 @@ class TargetE2EActivationLedgerIntegrationTest {
                 select lifecycle_status from target_e2e_activation
                  where activation_id = 'p9act.v1.44444444444444444444444444444444'
                 """)).isEqualTo("DRAIN_ONLY");
-        assertCode(
-                () -> ledger.transition(
+        assertThatThrownBy(() -> ledger.transition(
                         expiring.activationId(),
                         ActivationLifecycle.DRAIN_ONLY,
-                        ActivationLifecycle.DRAINED),
-                "ACTIVATION_TRANSITION_FAILED");
+                        ActivationLifecycle.DRAINED))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("attested lifecycle store");
         ledger.completeCommand(new CommandCompletion(
                 acceptedResult.admissionId(),
                 accepted.activationId(),
@@ -216,22 +216,16 @@ class TargetE2EActivationLedgerIntegrationTest {
                 .orElseThrow();
         assertThat(completedEvidence.completed()).isTrue();
         assertThat(completedEvidence.completionHash()).isEqualTo("7".repeat(64));
-        assertThat(ledger.transition(
+        assertThatThrownBy(() -> ledger.transition(
                         expiring.activationId(),
                         ActivationLifecycle.DRAIN_ONLY,
                         ActivationLifecycle.DRAINED))
-                .isEqualTo(ActivationLifecycle.DRAINED);
-        assertCode(() -> ledger.admitCommand(accepted), "COMMAND_ADMISSION_TERMINAL");
-        assertCode(
-                () -> ledger.revokeTerminal(expiring.activationId(), true, false),
-                "ACTIVATION_REVOKE_PRECONDITION");
-        assertThat(ledger.revokeTerminal(expiring.activationId(), true, true))
-                .isEqualTo(ActivationLifecycle.REVOKED_TERMINAL);
-        assertCode(() -> ledger.admitCommand(accepted), "COMMAND_ADMISSION_TERMINAL");
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("attested lifecycle store");
         assertCode(
                 () -> ledger.transition(
                         expiring.activationId(),
-                        ActivationLifecycle.REVOKED_TERMINAL,
+                        ActivationLifecycle.DRAIN_ONLY,
                         ActivationLifecycle.ACTIVE),
                 "ACTIVATION_TRANSITION_FAILED");
         assertSqlFails(

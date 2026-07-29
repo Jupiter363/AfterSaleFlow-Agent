@@ -12,6 +12,7 @@ import com.example.dispute.workflow.targete2e.TargetE2eActivationExpectedRuntime
 import com.example.dispute.workflow.targete2e.TargetE2eActivationExpectedRuntime.MeasuredAuthorityFacts;
 import com.example.dispute.workflow.targete2e.TargetE2eActivationExpectedRuntime.SyntheticFixtureDeployment;
 import com.example.dispute.workflow.targete2e.TargetE2eActivationLifecycleStore;
+import com.example.dispute.workflow.targete2e.TargetE2eActivationLifecycleStore.LifecycleObservation;
 import com.example.dispute.workflow.targete2e.TargetE2eActivationReplayStore;
 import com.example.dispute.workflow.targete2e.TargetE2eIsolatedDomainDbBinding;
 import java.nio.ByteBuffer;
@@ -25,6 +26,7 @@ import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HexFormat;
@@ -44,7 +46,10 @@ public final class JdbcTargetE2eActivationStores
       """
       select environment_id, environment_generation, activation_id, manifest_hash,
              expires_at, lifecycle_status, lifecycle_changed_at, registered_at,
-             drain_only_at, drained_at
+             activated_at, drain_only_at, drained_at, revoked_at,
+             all_replicas_detached, evidence_sealed,
+             drain_completion_proof_hash, drain_evidence_ledger_head_hash,
+             drain_forensic_manifest_hash, drain_attestation_key_sha256
         from target_e2e_activation
        where activation_id = ?
        for update
@@ -241,7 +246,8 @@ public final class JdbcTargetE2eActivationStores
   }
 
   @Override
-  public LifecycleState refresh(ActivationIdentity identity, Instant expiresAt, Instant now) {
+  public LifecycleObservation refresh(
+      ActivationIdentity identity, Instant expiresAt, Instant now) {
     Objects.requireNonNull(identity, "identity");
     Objects.requireNonNull(expiresAt, "expiresAt");
     Objects.requireNonNull(now, "now");
@@ -250,6 +256,7 @@ public final class JdbcTargetE2eActivationStores
       try {
         LifecycleActivation activation = lockActivation(connection, identity, expiresAt);
         LifecycleState state = activation.state();
+        Instant effectiveAt = activation.effectiveAt();
         if (state == LifecycleState.REGISTERED) {
           Instant activatedAt = activation.lifecycleChangedAt();
           transition(
@@ -260,9 +267,10 @@ public final class JdbcTargetE2eActivationStores
               "activated_at",
               activatedAt);
           state = LifecycleState.ACTIVE;
+          effectiveAt = activatedAt;
         }
         if (state == LifecycleState.ACTIVE && !now.isBefore(expiresAt)) {
-          Instant drainOnlyAt = latest(now, expiresAt, activation.lifecycleChangedAt());
+          Instant drainOnlyAt = expiresAt;
           transition(
               connection,
               identity.activationId(),
@@ -271,9 +279,10 @@ public final class JdbcTargetE2eActivationStores
               "drain_only_at",
               drainOnlyAt);
           state = LifecycleState.DRAIN_ONLY;
+          effectiveAt = drainOnlyAt;
         }
         connection.commit();
-        return state;
+        return new LifecycleObservation(state, effectiveAt);
       } catch (RuntimeException | SQLException failure) {
         rollback(connection, failure);
         if (failure instanceof TargetE2EPersistenceException persistenceFailure) {
@@ -337,6 +346,7 @@ public final class JdbcTargetE2eActivationStores
   public TransitionResult markDrained(ActivationIdentity identity, DrainCompletionProof proof) {
     Objects.requireNonNull(identity, "identity");
     Objects.requireNonNull(proof, "proof");
+    Instant completedAt = proof.completedAt().truncatedTo(ChronoUnit.MICROS);
     if (proof.unresolvedAcceptedWork() != 0) {
       return TransitionResult.REJECTED_UNRESOLVED_WORK;
     }
@@ -352,15 +362,18 @@ public final class JdbcTargetE2eActivationStores
         LifecycleActivation activation = lockActivation(connection, identity, null);
         if (activation.state() == LifecycleState.DRAINED) {
           connection.commit();
-          return TransitionResult.ALREADY_IN_TARGET_STATE;
+          return completedAt.equals(activation.drainedAt())
+                  && activation.matches(proof)
+              ? TransitionResult.ALREADY_IN_TARGET_STATE
+              : TransitionResult.REJECTED_TIMESTAMP_ORDER;
         }
         if (activation.state() != LifecycleState.DRAIN_ONLY) {
           connection.commit();
           return TransitionResult.REJECTED_WRONG_STATE;
         }
         if (activation.drainOnlyAt() == null
-            || proof.completedAt().isBefore(activation.drainOnlyAt())
-            || proof.completedAt().isBefore(activation.lifecycleChangedAt())) {
+            || completedAt.isBefore(activation.drainOnlyAt())
+            || completedAt.isBefore(activation.lifecycleChangedAt())) {
           connection.commit();
           return TransitionResult.REJECTED_TIMESTAMP_ORDER;
         }
@@ -368,13 +381,7 @@ public final class JdbcTargetE2eActivationStores
           connection.commit();
           return TransitionResult.REJECTED_UNRESOLVED_WORK;
         }
-        transition(
-            connection,
-            identity.activationId(),
-            LifecycleState.DRAIN_ONLY,
-            LifecycleState.DRAINED,
-            "drained_at",
-            proof.completedAt());
+        transitionDrained(connection, identity.activationId(), completedAt, proof);
         connection.commit();
         return TransitionResult.TRANSITIONED;
       } catch (RuntimeException | SQLException failure) {
@@ -393,21 +400,28 @@ public final class JdbcTargetE2eActivationStores
   public TransitionResult revokeTerminal(ActivationIdentity identity, Instant revokedAt) {
     Objects.requireNonNull(identity, "identity");
     Objects.requireNonNull(revokedAt, "revokedAt");
+    Instant normalizedRevokedAt = revokedAt.truncatedTo(ChronoUnit.MICROS);
     try (Connection connection = dataSource.getConnection()) {
       connection.setAutoCommit(false);
       try {
         LifecycleActivation activation = lockActivation(connection, identity, null);
         if (activation.state() == LifecycleState.REVOKED_TERMINAL) {
           connection.commit();
-          return TransitionResult.ALREADY_IN_TARGET_STATE;
+          return normalizedRevokedAt.equals(activation.revokedAt())
+              ? TransitionResult.ALREADY_IN_TARGET_STATE
+              : TransitionResult.REJECTED_TIMESTAMP_ORDER;
         }
         if (activation.state() != LifecycleState.DRAINED) {
           connection.commit();
           return TransitionResult.REJECTED_WRONG_STATE;
         }
+        if (!activation.hasDurableDrainProof()) {
+          connection.commit();
+          return TransitionResult.REJECTED_EVIDENCE_NOT_SEALED;
+        }
         if (activation.drainedAt() == null
-            || !revokedAt.isAfter(activation.drainedAt())
-            || revokedAt.isBefore(activation.lifecycleChangedAt())) {
+            || !normalizedRevokedAt.isAfter(activation.drainedAt())
+            || normalizedRevokedAt.isBefore(activation.lifecycleChangedAt())) {
           connection.commit();
           return TransitionResult.REJECTED_TIMESTAMP_ORDER;
         }
@@ -420,8 +434,8 @@ public final class JdbcTargetE2eActivationStores
                        all_replicas_detached = true, evidence_sealed = true
                  where activation_id = ? and lifecycle_status = 'DRAINED'
                 """)) {
-          statement.setTimestamp(1, Timestamp.from(revokedAt));
-          statement.setTimestamp(2, Timestamp.from(revokedAt));
+          statement.setTimestamp(1, Timestamp.from(normalizedRevokedAt));
+          statement.setTimestamp(2, Timestamp.from(normalizedRevokedAt));
           statement.setString(3, identity.activationId());
           requireUpdated(statement, "activation is no longer DRAINED");
         }
@@ -712,9 +726,48 @@ public final class JdbcTargetE2eActivationStores
             LifecycleState.valueOf(result.getString("lifecycle_status")),
             expiresAt,
             result.getTimestamp("lifecycle_changed_at").toInstant(),
+            instant(result, "registered_at"),
+            instant(result, "activated_at"),
             instant(result, "drain_only_at"),
-            instant(result, "drained_at"));
+            instant(result, "drained_at"),
+            instant(result, "revoked_at"),
+            result.getBoolean("all_replicas_detached"),
+            result.getBoolean("evidence_sealed"),
+            result.getString("drain_completion_proof_hash"),
+            result.getString("drain_evidence_ledger_head_hash"),
+            result.getString("drain_forensic_manifest_hash"),
+            result.getString("drain_attestation_key_sha256"));
       }
+    }
+  }
+
+  private static void transitionDrained(
+      Connection connection,
+      String activationId,
+      Instant completedAt,
+      DrainCompletionProof proof)
+      throws SQLException {
+    try (PreparedStatement statement =
+        connection.prepareStatement(
+            """
+            update target_e2e_activation
+               set lifecycle_status = 'DRAINED',
+                   lifecycle_changed_at = ?, drained_at = ?,
+                   all_replicas_detached = true, evidence_sealed = true,
+                   drain_completion_proof_hash = ?,
+                   drain_evidence_ledger_head_hash = ?,
+                   drain_forensic_manifest_hash = ?,
+                   drain_attestation_key_sha256 = ?
+             where activation_id = ? and lifecycle_status = 'DRAIN_ONLY'
+            """)) {
+      statement.setTimestamp(1, Timestamp.from(completedAt));
+      statement.setTimestamp(2, Timestamp.from(completedAt));
+      statement.setString(3, proof.proofHash());
+      statement.setString(4, proof.evidenceLedgerHeadHash());
+      statement.setString(5, proof.forensicManifestHash());
+      statement.setString(6, proof.attestationKeySha256());
+      statement.setString(7, activationId);
+      requireUpdated(statement, "activation lifecycle changed concurrently");
     }
   }
 
@@ -856,11 +909,6 @@ public final class JdbcTargetE2eActivationStores
     return digest.finish();
   }
 
-  private static Instant latest(Instant first, Instant second, Instant third) {
-    Instant latest = first.isAfter(second) ? first : second;
-    return latest.isAfter(third) ? latest : third;
-  }
-
   private static Instant instant(ResultSet result, String column) throws SQLException {
     Timestamp value = result.getTimestamp(column);
     return value == null ? null : value.toInstant();
@@ -942,8 +990,46 @@ public final class JdbcTargetE2eActivationStores
       LifecycleState state,
       Instant expiresAt,
       Instant lifecycleChangedAt,
+      Instant registeredAt,
+      Instant activatedAt,
       Instant drainOnlyAt,
-      Instant drainedAt) {}
+      Instant drainedAt,
+      Instant revokedAt,
+      boolean allReplicasDetached,
+      boolean evidenceSealed,
+      String drainCompletionProofHash,
+      String drainEvidenceLedgerHeadHash,
+      String drainForensicManifestHash,
+      String drainAttestationKeySha256) {
+
+    Instant effectiveAt() {
+      return switch (state) {
+        case REGISTERED -> registeredAt;
+        case ACTIVE -> activatedAt;
+        case DRAIN_ONLY -> drainOnlyAt;
+        case DRAINED -> drainedAt;
+        case REVOKED_TERMINAL -> revokedAt;
+      };
+    }
+
+    boolean matches(DrainCompletionProof proof) {
+      return allReplicasDetached
+          && evidenceSealed
+          && Objects.equals(drainCompletionProofHash, proof.proofHash())
+          && Objects.equals(drainEvidenceLedgerHeadHash, proof.evidenceLedgerHeadHash())
+          && Objects.equals(drainForensicManifestHash, proof.forensicManifestHash())
+          && Objects.equals(drainAttestationKeySha256, proof.attestationKeySha256());
+    }
+
+    boolean hasDurableDrainProof() {
+      return allReplicasDetached
+          && evidenceSealed
+          && drainCompletionProofHash != null
+          && drainEvidenceLedgerHeadHash != null
+          && drainForensicManifestHash != null
+          && drainAttestationKeySha256 != null;
+    }
+  }
 
   private static final class DigestWriter {
 

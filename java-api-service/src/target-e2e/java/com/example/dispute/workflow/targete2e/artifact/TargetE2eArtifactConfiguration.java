@@ -59,6 +59,10 @@ import com.example.dispute.workflow.targete2e.graph.TargetE2EAgentSessionResolve
 import com.example.dispute.workflow.targete2e.graph.TargetE2EGraphEnvelopeCodec;
 import com.example.dispute.workflow.targete2e.graph.TargetE2EGraphEnvelopeSigner;
 import com.example.dispute.workflow.targete2e.graph.TargetE2EGraphProposalClient;
+import com.example.dispute.workflow.targete2e.TargetE2eActivationLifecycleStore;
+import com.example.dispute.workflow.targete2e.lifecycle.TargetE2eActivationLifecycleControl;
+import com.example.dispute.workflow.targete2e.lifecycle.TargetE2eActivationLifecycleControl.DeploymentBinding;
+import com.example.dispute.workflow.targete2e.persistence.JdbcTargetE2eActivationStores;
 import com.example.dispute.workflow.targete2e.persistence.TargetE2EActivationLedger;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.minio.MinioClient;
@@ -70,6 +74,7 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Profile;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.core.env.Environment;
+import org.springframework.core.env.Profiles;
 import org.springframework.transaction.PlatformTransactionManager;
 
 /** Target-only AgentRun and proposal Graph assembly, absent from the ordinary Java artifact. */
@@ -331,6 +336,27 @@ public class TargetE2eArtifactConfiguration {
     }
 
     @Bean
+    TargetE2eActivationLifecycleStore targetE2eAgentLifecycleStore(
+            DataSource dataSource, Clock clock) {
+        return new JdbcTargetE2eActivationStores(dataSource, clock);
+    }
+
+    @Bean
+    TargetE2eActivationLifecycleControl targetE2eActivationLifecycleControl(
+            TargetE2eActivationLifecycleStore lifecycleStore,
+            Environment environment,
+            Clock clock) {
+        DeploymentBinding binding = new DeploymentBinding(
+                environment.acceptsProfiles(Profiles.of("target-e2e")),
+                required(environment, "target.e2e.environment.id"),
+                requiredPositiveLong(environment, "target.e2e.environment.generation"),
+                required(environment, "target.e2e.activation.id"),
+                required(environment, "target.e2e.activation.manifest-hash"),
+                required(environment, "target.e2e.runtime-context-hash"));
+        return TargetE2eActivationLifecycleControl.bind(lifecycleStore, binding, clock);
+    }
+
+    @Bean
     TargetE2eFinalizationReceiptLedger targetE2eFinalizationReceiptLedger(DataSource dataSource) {
         return new JdbcTargetE2eFinalizationReceiptLedger(dataSource);
     }
@@ -417,5 +443,20 @@ public class TargetE2eArtifactConfiguration {
                     "required target E2E property is absent: " + property);
         }
         return value.trim();
+    }
+
+    private static long requiredPositiveLong(Environment environment, String property) {
+        String value = required(environment, property);
+        try {
+            long parsed = Long.parseLong(value);
+            if (parsed < 1 || parsed > 9_007_199_254_740_991L) {
+                throw new NumberFormatException("outside positive safe integer range");
+            }
+            return parsed;
+        } catch (NumberFormatException failure) {
+            throw new IllegalStateException(
+                    "required target E2E property is not a positive safe integer: " + property,
+                    failure);
+        }
     }
 }

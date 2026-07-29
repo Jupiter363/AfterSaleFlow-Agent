@@ -134,6 +134,17 @@ class GatewayAuditSink(Protocol):
     async def emit(self, event: GatewayAuditEvent) -> None: ...
 
 
+class GraphTerminalResultBarrier(Protocol):
+    """Optional post-commit hook that runs before a durable final reaches HTTP/SSE."""
+
+    async def wait_after_durable_commit(
+        self,
+        *,
+        admission: GatewayAdmission,
+        result: ResultRecord,
+    ) -> None: ...
+
+
 class ImmutableInputAuthorizer(Protocol):
     """Validates immutable references and rejects private input for shared Hearing."""
 
@@ -154,6 +165,16 @@ class ShadowGraphExecutor(Protocol):
 class _NullAuditSink:
     async def emit(self, event: GatewayAuditEvent) -> None:
         return None
+
+
+class _NullTerminalResultBarrier:
+    async def wait_after_durable_commit(
+        self,
+        *,
+        admission: GatewayAdmission,
+        result: ResultRecord,
+    ) -> None:
+        del admission, result
 
 
 class _FailClosedInputAuthorizer:
@@ -181,6 +202,7 @@ class GraphCommandGateway:
         leases: PostgresLeaseRepository | None = None,
         input_authorizer: ImmutableInputAuthorizer | None = None,
         audit_sink: GatewayAuditSink | None = None,
+        terminal_result_barrier: GraphTerminalResultBarrier | None = None,
         acquire_timeout_seconds: float = 3.0,
     ) -> None:
         if not isinstance(mode, GraphGatewayMode):
@@ -207,6 +229,9 @@ class GraphCommandGateway:
         )
         self._input_authorizer = input_authorizer or _FailClosedInputAuthorizer()
         self._audit = audit_sink or _NullAuditSink()
+        self._terminal_result_barrier = (
+            terminal_result_barrier or _NullTerminalResultBarrier()
+        )
         self._acquire_timeout_seconds = acquire_timeout_seconds
 
     async def admit(
@@ -817,6 +842,10 @@ class GraphCommandGateway:
                     or payload.final_result_hash != result.result_hash
                 ):
                     raise GraphTerminalBindingError("final stream event conflicts with ledger")
+                await self._terminal_result_barrier.wait_after_durable_commit(
+                    admission=execution.admission,
+                    result=result,
+                )
                 terminal_seen = True
             elif event.event_type == "attempt_aborted":
                 execution = await self.finish_execution_attempt(

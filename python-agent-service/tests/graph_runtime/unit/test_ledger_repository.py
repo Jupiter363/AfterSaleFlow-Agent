@@ -164,6 +164,36 @@ async def test_register_inserts_command_then_nonce_on_one_connection() -> None:
 
 
 @pytest.mark.asyncio
+async def test_candidate_registration_locks_lifecycle_before_admission() -> None:
+    binding = replace(
+        _binding(),
+        execution_lane=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+        activation_id=f"p9act.v1.{'a' * 32}",
+        room_fencing_token=11,
+        command_hash="b" * 64,
+        command_envelope_hash="c" * 64,
+    )
+    connection = _Connection(
+        [
+            {"lifecycle_state": "ACTIVE"},
+            _command_row(binding),
+            {"jti": "jti-1"},
+        ]
+    )
+
+    registration = await PostgresCommandLedger().register_with_nonce(
+        connection,
+        binding=binding,
+        nonce=_nonce(),
+    )
+
+    assert registration.created is True
+    assert "for share of lifecycle" in connection.calls[0][0]
+    assert connection.calls[0][1] == (binding.activation_id,)
+    assert "insert into agent_graph_command" in connection.calls[1][0]
+
+
+@pytest.mark.asyncio
 async def test_same_command_and_hash_joins_with_a_fresh_transport_nonce() -> None:
     binding = _binding()
     connection = _Connection([None, _command_row(binding), {"jti": "jti-2"}])

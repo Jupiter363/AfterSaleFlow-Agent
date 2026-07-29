@@ -965,11 +965,12 @@ class _Executor:
 
 
 class _StreamGateway(GraphCommandGateway):
-    def __init__(self) -> None:
+    def __init__(self, *, terminal_result_barrier: Any | None = None) -> None:
         super().__init__(
             mode=GraphGatewayMode.SHADOW,
             pool=object(),
             input_authorizer=_InputAuthorizer([]),
+            terminal_result_barrier=terminal_result_barrier,
         )
         self.reconciled = False
         self.finished = False
@@ -1398,6 +1399,37 @@ async def test_stream_reconciles_durable_result_before_yielding_final() -> None:
 
     assert [event.event_type for event in events] == ["attempt_started", "final"]
     assert gateway.reconciled is True
+
+
+@pytest.mark.asyncio
+async def test_stream_waits_at_post_commit_barrier_before_yielding_final() -> None:
+    events: list[str] = []
+
+    class Barrier:
+        async def wait_after_durable_commit(self, **kwargs: Any) -> None:
+            assert kwargs["result"].checkpoint_id == "checkpoint-1"
+            events.append("barrier")
+
+    gateway = _StreamGateway(terminal_result_barrier=Barrier())
+    executor = _Executor(
+        [
+            _event(0, "attempt_started", {"node": "intake.start"}),
+            _event(
+                1,
+                "final",
+                {
+                    "final_result_ref": "s3://graph-results/result-1.json",
+                    "final_result_hash": "f" * 64,
+                },
+            ),
+        ]
+    )
+
+    stream = gateway.execute_stream(execution=_execution(), executor=executor)
+    assert (await anext(stream)).event_type == "attempt_started"
+    assert events == []
+    assert (await anext(stream)).event_type == "final"
+    assert events == ["barrier"]
 
 
 @pytest.mark.asyncio

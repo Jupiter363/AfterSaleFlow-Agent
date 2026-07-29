@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
@@ -140,11 +142,13 @@ def _target_settings(**overrides) -> Settings:
         "graph_expected_environment_generation": "7",
         "graph_expected_restore_verification_hash": "a" * 64,
         "graph_target_e2e_isolated": True,
+        "target_e2e_activation_manifest_hash": "e" * 64,
         "graph_target_e2e_bindings": (_target_binding(),),
         "graph_target_e2e_runtime_context": {
             "schemaVersion": "graph-target-e2e-runtime-context.v1",
             "executionLane": "TARGET_E2E_CANDIDATE",
             "activationId": f"p9act.v1.{'1' * 32}",
+            "activationManifestHash": "e" * 64,
             "environmentId": "target-e2e-local",
             "environmentGeneration": 7,
             "candidateSha": "d" * 40,
@@ -206,7 +210,39 @@ def test_target_e2e_mode_is_explicit_isolated_and_fully_bound() -> None:
         _target_settings(app_env="production")
     with pytest.raises(ValidationError, match="isolated non-secret runtime context"):
         _target_settings(graph_target_e2e_isolated=False)
+    with pytest.raises(ValidationError, match="exact activation manifest hash"):
+        _target_settings(target_e2e_activation_manifest_hash=None)
     with pytest.raises(ValidationError, match="cannot relabel SHADOW"):
         _target_settings(graph_shadow_bindings=(_target_binding(),))
     with pytest.raises(ValidationError, match="Graph DB settings"):
         _target_settings(graph_expected_environment_generation="8")
+
+
+def test_checkpoint_recovery_barrier_is_target_only_and_uses_the_fixed_mount() -> None:
+    with pytest.raises(ValidationError, match="directory requires"):
+        _target_settings(
+            graph_target_e2e_checkpoint_barrier_directory=(
+                "/run/target-e2e/python/recovery-barrier"
+            )
+        )
+    with pytest.raises(ValidationError, match="isolated target-E2E mount"):
+        _target_settings(
+            graph_target_e2e_checkpoint_barrier_enabled=True,
+            graph_target_e2e_checkpoint_barrier_directory=(
+                "/run/target-e2e/python/recovery-barrier"
+            ),
+        )
+    with pytest.raises(ValidationError, match="TARGET_E2E_CANDIDATE"):
+        settings(graph_target_e2e_checkpoint_barrier_enabled=True)
+
+    configured = _target_settings(
+        app_env="target-e2e",
+        graph_target_e2e_checkpoint_barrier_enabled=True,
+        graph_target_e2e_checkpoint_barrier_directory=(
+            "/run/target-e2e/python/recovery-barrier"
+        ),
+    )
+    assert configured.graph_target_e2e_checkpoint_barrier_enabled is True
+    assert configured.graph_target_e2e_checkpoint_barrier_directory == Path(
+        "/run/target-e2e/python/recovery-barrier"
+    )

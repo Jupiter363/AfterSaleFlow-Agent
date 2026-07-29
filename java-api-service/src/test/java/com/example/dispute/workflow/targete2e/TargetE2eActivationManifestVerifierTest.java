@@ -19,6 +19,7 @@ import com.example.dispute.workflow.targete2e.TargetE2eActivationExpectedRuntime
 import com.example.dispute.workflow.targete2e.TargetE2eActivationLifecycleStore.ActivationIdentity;
 import com.example.dispute.workflow.targete2e.TargetE2eActivationLifecycleStore.DrainCompletionProof;
 import com.example.dispute.workflow.targete2e.TargetE2eActivationLifecycleStore.LifecycleState;
+import com.example.dispute.workflow.targete2e.TargetE2eActivationLifecycleStore.LifecycleObservation;
 import com.example.dispute.workflow.targete2e.TargetE2eActivationLifecycleStore.TransitionResult;
 import com.example.dispute.workflow.targete2e.TargetE2eActivationReplayStore.Registration;
 import com.example.dispute.workflow.targete2e.TargetE2eActivationReplayStore.RegistrationResult;
@@ -595,13 +596,13 @@ class TargetE2eActivationManifestVerifierTest {
             grant.manifestHash());
     assertThat(
             lifecycle.markDrained(
-                identity, new DrainCompletionProof(1, 0, true, NOW.plusSeconds(61))))
+                identity, drainProof(1, 0, true, NOW.plusSeconds(61))))
         .isEqualTo(TransitionResult.REJECTED_UNRESOLVED_WORK);
     assertThat(lifecycle.revokeTerminal(identity, NOW.plusSeconds(62)))
         .isEqualTo(TransitionResult.REJECTED_WRONG_STATE);
     assertThat(
             lifecycle.markDrained(
-                identity, new DrainCompletionProof(0, 0, true, NOW.plusSeconds(63))))
+                identity, drainProof(0, 0, true, NOW.plusSeconds(63))))
         .isEqualTo(TransitionResult.TRANSITIONED);
     assertThat(authority.authorize(drainRequest).reason()).isEqualTo(Reason.DRAINED);
     assertThat(lifecycle.revokeTerminal(identity, NOW.plusSeconds(64)))
@@ -1548,6 +1549,19 @@ class TargetE2eActivationManifestVerifierTest {
     }
   }
 
+  private static DrainCompletionProof drainProof(
+      long unresolved, long replicas, boolean sealed, Instant completedAt) {
+    return new DrainCompletionProof(
+        unresolved,
+        replicas,
+        sealed,
+        completedAt,
+        "a".repeat(64),
+        "b".repeat(64),
+        "c".repeat(64),
+        "d".repeat(64));
+  }
+
   private static final class RecordingLifecycleStore implements TargetE2eActivationLifecycleStore {
 
     private LifecycleState state = LifecycleState.REGISTERED;
@@ -1555,7 +1569,7 @@ class TargetE2eActivationManifestVerifierTest {
     private Instant drainedAt;
 
     @Override
-    public synchronized LifecycleState refresh(
+    public synchronized LifecycleObservation refresh(
         ActivationIdentity identity, Instant expiresAt, Instant now) {
       if (state == LifecycleState.ACTIVE && !now.isBefore(expiresAt)) {
         state = LifecycleState.DRAIN_ONLY;
@@ -1563,7 +1577,7 @@ class TargetE2eActivationManifestVerifierTest {
       if (state == LifecycleState.REGISTERED) {
         state = now.isBefore(expiresAt) ? LifecycleState.ACTIVE : LifecycleState.DRAIN_ONLY;
       }
-      return state;
+      return new LifecycleObservation(state, now);
     }
 
     @Override

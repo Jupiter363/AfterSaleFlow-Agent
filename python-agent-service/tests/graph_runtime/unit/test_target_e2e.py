@@ -126,6 +126,7 @@ def _context_values(**overrides: Any) -> dict[str, Any]:
         "schemaVersion": "graph-target-e2e-runtime-context.v1",
         "executionLane": "TARGET_E2E_CANDIDATE",
         "activationId": ACTIVATION_ID,
+        "activationManifestHash": "f" * 64,
         "environmentId": "target-e2e-local",
         "environmentGeneration": 7,
         "candidateSha": "c" * 40,

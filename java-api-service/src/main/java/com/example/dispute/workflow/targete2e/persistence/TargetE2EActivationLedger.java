@@ -314,17 +314,18 @@ public final class TargetE2EActivationLedger {
         requireText(activationId, "activationId");
         Objects.requireNonNull(expected, "expected must not be null");
         Objects.requireNonNull(target, "target must not be null");
-        if (target == ActivationLifecycle.REVOKED_TERMINAL) {
-            throw new IllegalArgumentException("use revokeTerminal with explicit sealed/detached proof");
+        if (target == ActivationLifecycle.DRAINED
+                || target == ActivationLifecycle.REVOKED_TERMINAL) {
+            throw new IllegalArgumentException(
+                    "terminal lifecycle transitions require the attested lifecycle store");
         }
         String timestampColumn = switch (target) {
             case ACTIVE -> "activated_at";
             case DRAIN_ONLY -> "drain_only_at";
-            case DRAINED -> "drained_at";
             default -> throw new IllegalArgumentException("unsupported lifecycle target " + target);
         };
         String timestampValue = target == ActivationLifecycle.DRAIN_ONLY
-                ? "greatest(clock_timestamp(), expires_at)"
+                ? "expires_at"
                 : "clock_timestamp()";
         String sql = "update target_e2e_activation set lifecycle_status = ?, "
                 + "lifecycle_changed_at = clock_timestamp(), " + timestampColumn + " = "
@@ -341,35 +342,6 @@ public final class TargetE2EActivationLedger {
             return target;
         } catch (SQLException failure) {
             throw sqlFailure("ACTIVATION_TRANSITION_FAILED", failure);
-        }
-    }
-
-    public ActivationLifecycle revokeTerminal(
-            String activationId, boolean allReplicasDetached, boolean evidenceSealed) {
-        requireText(activationId, "activationId");
-        if (!allReplicasDetached || !evidenceSealed) {
-            throw new TargetE2EPersistenceException(
-                    "ACTIVATION_REVOKE_PRECONDITION",
-                    "terminal revoke requires detached replicas and sealed evidence");
-        }
-        try (Connection connection = dataSource.getConnection();
-                PreparedStatement statement = connection.prepareStatement("""
-                        update target_e2e_activation
-                           set lifecycle_status = 'REVOKED_TERMINAL',
-                               lifecycle_changed_at = clock_timestamp(),
-                               revoked_at = clock_timestamp(),
-                               all_replicas_detached = true,
-                               evidence_sealed = true
-                         where activation_id = ? and lifecycle_status = 'DRAINED'
-                        """)) {
-            statement.setString(1, activationId);
-            if (statement.executeUpdate() != 1) {
-                throw new TargetE2EPersistenceException(
-                        "ACTIVATION_STATE_CONFLICT", "activation is not DRAINED");
-            }
-            return ActivationLifecycle.REVOKED_TERMINAL;
-        } catch (SQLException failure) {
-            throw sqlFailure("ACTIVATION_REVOKE_FAILED", failure);
         }
     }
 
@@ -916,7 +888,7 @@ public final class TargetE2EActivationLedger {
                 update target_e2e_activation
                    set lifecycle_status = 'DRAIN_ONLY',
                        lifecycle_changed_at = clock_timestamp(),
-                       drain_only_at = greatest(clock_timestamp(), expires_at)
+                       drain_only_at = expires_at
                  where activation_id = ? and lifecycle_status = 'ACTIVE'
                 """)) {
             statement.setString(1, activationId);

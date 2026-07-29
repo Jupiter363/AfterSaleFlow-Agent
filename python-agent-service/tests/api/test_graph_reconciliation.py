@@ -931,6 +931,7 @@ def test_target_reconciliation_returns_exact_result_envelope_without_proposal_by
             "schemaVersion": "graph-target-e2e-runtime-context.v1",
             "executionLane": "TARGET_E2E_CANDIDATE",
             "activationId": activation_id,
+            "activationManifestHash": "f" * 64,
             "environmentId": "target-e2e-test",
             "environmentGeneration": 7,
             "candidateSha": "3" * 40,

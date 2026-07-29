@@ -87,7 +87,7 @@ class JdbcTargetE2eActivationStoresIntegrationTest {
     assertThat(stores.registerOrAttach(registration))
         .isEqualTo(RegistrationResult.ATTACHED_EXISTING);
     ActivationIdentity identity = identity(registration);
-    assertThat(stores.refresh(identity, registration.expiresAt(), now))
+    assertThat(stores.refresh(identity, registration.expiresAt(), now).state())
         .isEqualTo(LifecycleState.ACTIVE);
 
     Reservation reservation = reservation(registration, 2, CASE_PREFIX + "2");
@@ -109,7 +109,8 @@ class JdbcTargetE2eActivationStoresIntegrationTest {
         registration("2", "environment-store-b", 1, now.minusSeconds(10), now.plusSeconds(600));
     assertThat(stores.registerOrAttach(otherEnvironment))
         .isEqualTo(RegistrationResult.REGISTERED);
-    assertThat(stores.refresh(identity(otherEnvironment), otherEnvironment.expiresAt(), now))
+    assertThat(
+            stores.refresh(identity(otherEnvironment), otherEnvironment.expiresAt(), now).state())
         .isEqualTo(LifecycleState.ACTIVE);
     assertThat(
             stores.apply(
@@ -118,22 +119,37 @@ class JdbcTargetE2eActivationStoresIntegrationTest {
         .isEqualTo(ReservationResult.GENERATED_CASE_ID_GLOBAL_CONFLICT);
 
     assertThat(
-            stores.refresh(identity, registration.expiresAt(), registration.expiresAt()))
+            stores.refresh(identity, registration.expiresAt(), registration.expiresAt()).state())
         .isEqualTo(LifecycleState.DRAIN_ONLY);
-    Instant completedAt = registration.expiresAt().plusSeconds(1);
-    assertThat(stores.markDrained(identity, new DrainCompletionProof(1, 0, true, completedAt)))
+    Instant completedAt = registration.expiresAt().plusSeconds(1).plusNanos(789);
+    assertThat(stores.markDrained(identity, drainProof(1, 0, true, completedAt)))
         .isEqualTo(TransitionResult.REJECTED_UNRESOLVED_WORK);
-    assertThat(stores.markDrained(identity, new DrainCompletionProof(0, 1, true, completedAt)))
+    assertThat(stores.markDrained(identity, drainProof(0, 1, true, completedAt)))
         .isEqualTo(TransitionResult.REJECTED_REPLICAS_ATTACHED);
-    assertThat(stores.markDrained(identity, new DrainCompletionProof(0, 0, false, completedAt)))
+    assertThat(stores.markDrained(identity, drainProof(0, 0, false, completedAt)))
         .isEqualTo(TransitionResult.REJECTED_EVIDENCE_NOT_SEALED);
-    assertThat(stores.markDrained(identity, new DrainCompletionProof(0, 0, true, completedAt)))
+    assertThat(stores.markDrained(identity, drainProof(0, 0, true, completedAt)))
         .isEqualTo(TransitionResult.TRANSITIONED);
+    assertThat(stores.markDrained(identity, drainProof(0, 0, true, completedAt)))
+        .isEqualTo(TransitionResult.ALREADY_IN_TARGET_STATE);
+    assertThat(
+            stores.markDrained(
+                identity,
+                drainProof(0, 0, true, completedAt.plusNanos(1_000))))
+        .isEqualTo(TransitionResult.REJECTED_TIMESTAMP_ORDER);
     assertThat(stores.revokeTerminal(identity, completedAt))
         .isEqualTo(TransitionResult.REJECTED_TIMESTAMP_ORDER);
-    assertThat(stores.revokeTerminal(identity, completedAt.plusSeconds(1)))
+    Instant revokedAt = completedAt.plusSeconds(1).plusNanos(456);
+    assertThat(stores.revokeTerminal(identity, revokedAt))
         .isEqualTo(TransitionResult.TRANSITIONED);
-    assertThat(stores.refresh(identity, registration.expiresAt(), completedAt.plusSeconds(2)))
+    assertThat(stores.revokeTerminal(identity, revokedAt))
+        .isEqualTo(TransitionResult.ALREADY_IN_TARGET_STATE);
+    assertThat(stores.revokeTerminal(identity, revokedAt.plusNanos(1_000)))
+        .isEqualTo(TransitionResult.REJECTED_TIMESTAMP_ORDER);
+    assertThat(
+            stores
+                .refresh(identity, registration.expiresAt(), completedAt.plusSeconds(2))
+                .state())
         .isEqualTo(LifecycleState.REVOKED_TERMINAL);
   }
 
@@ -256,6 +272,19 @@ class JdbcTargetE2eActivationStoresIntegrationTest {
         registration.environmentGeneration(),
         registration.activationId(),
         registration.manifestHash());
+  }
+
+  private static DrainCompletionProof drainProof(
+      long unresolved, long replicas, boolean sealed, Instant completedAt) {
+    return new DrainCompletionProof(
+        unresolved,
+        replicas,
+        sealed,
+        completedAt,
+        "a".repeat(64),
+        "b".repeat(64),
+        "c".repeat(64),
+        "d".repeat(64));
   }
 
   private static Reservation reservation(

@@ -13,7 +13,7 @@ public interface TargetE2eActivationLifecycleStore {
    * advancing REGISTERED through ACTIVE to DRAIN_ONLY, or ACTIVE to DRAIN_ONLY. They never move a
    * later state backward.
    */
-  LifecycleState refresh(ActivationIdentity identity, Instant expiresAt, Instant now);
+  LifecycleObservation refresh(ActivationIdentity identity, Instant expiresAt, Instant now);
 
   /**
    * Proves an immutable admission row with every supplied command/fence/hash field and an admission
@@ -24,20 +24,23 @@ public interface TargetE2eActivationLifecycleStore {
 
   /**
    * Transitions DRAIN_ONLY to DRAINED only when the supplied closure proof is durable and exact.
+   * An idempotent replay must carry the exact timestamp persisted by the original transition.
    */
   TransitionResult markDrained(ActivationIdentity identity, DrainCompletionProof proof);
 
   /**
    * Transitions DRAINED to REVOKED_TERMINAL; no earlier state may be revoked terminal and {@code
-   * revokedAt} must be strictly after the durable drained timestamp.
+   * revokedAt} must be strictly after the durable drained timestamp. An idempotent replay must
+   * carry the exact timestamp persisted by the original transition.
    */
   TransitionResult revokeTerminal(ActivationIdentity identity, Instant revokedAt);
 
   static TargetE2eActivationLifecycleStore denyAll() {
     return new TargetE2eActivationLifecycleStore() {
       @Override
-      public LifecycleState refresh(ActivationIdentity identity, Instant expiresAt, Instant now) {
-        return LifecycleState.REVOKED_TERMINAL;
+      public LifecycleObservation refresh(
+          ActivationIdentity identity, Instant expiresAt, Instant now) {
+        return new LifecycleObservation(LifecycleState.REVOKED_TERMINAL, now);
       }
 
       @Override
@@ -76,6 +79,13 @@ public interface TargetE2eActivationLifecycleStore {
     REJECTED_TIMESTAMP_ORDER
   }
 
+  record LifecycleObservation(LifecycleState state, Instant effectiveAt) {
+    public LifecycleObservation {
+      Objects.requireNonNull(state, "state");
+      Objects.requireNonNull(effectiveAt, "effectiveAt");
+    }
+  }
+
   record ActivationIdentity(
       String environmentId, long environmentGeneration, String activationId, String manifestHash) {
 
@@ -91,13 +101,22 @@ public interface TargetE2eActivationLifecycleStore {
       long unresolvedAcceptedWork,
       long attachedReplicas,
       boolean evidenceSealed,
-      Instant completedAt) {
+      Instant completedAt,
+      String proofHash,
+      String evidenceLedgerHeadHash,
+      String forensicManifestHash,
+      String attestationKeySha256) {
 
     public DrainCompletionProof {
       if (unresolvedAcceptedWork < 0 || attachedReplicas < 0) {
         throw new IllegalArgumentException("drain counters cannot be negative");
       }
       Objects.requireNonNull(completedAt, "completedAt");
+      TargetE2eActivationContract.sha256(proofHash, "proofHash");
+      TargetE2eActivationContract.sha256(
+          evidenceLedgerHeadHash, "evidenceLedgerHeadHash");
+      TargetE2eActivationContract.sha256(forensicManifestHash, "forensicManifestHash");
+      TargetE2eActivationContract.sha256(attestationKeySha256, "attestationKeySha256");
     }
 
     public boolean complete() {

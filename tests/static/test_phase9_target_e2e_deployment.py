@@ -106,6 +106,7 @@ def _run_context(now: dt.datetime) -> dict[str, Any]:
                 "schemaVersion": "graph-target-e2e-runtime-context.v1",
                 "executionLane": "TARGET_E2E_CANDIDATE",
                 "activationId": "p9act.v1." + "a" * 32,
+                "activationManifestHash": "a" * 64,
                 "environmentId": "p9-isolated-run001",
                 "environmentGeneration": 7,
                 "candidateSha": "b" * 40,
