@@ -1,17 +1,29 @@
 package com.example.dispute.workflow.targete2e.finalization;
 
+import com.example.dispute.workflow.application.intake.IntakeContractHashes;
 import com.example.dispute.workflow.application.intake.IntakeFinalizationRejectedException;
 import com.example.dispute.workflow.application.intake.IntakeImmutableProposalReader;
 import com.example.dispute.workflow.application.intake.IntakeProposalReference;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ArtifactPointer;
+import com.example.dispute.workflow.contract.v1.ContractJson;
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.core.StreamReadFeature;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.json.JsonMapper;
+import java.io.IOException;
 import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.HexFormat;
 import java.util.Objects;
+import java.util.regex.Pattern;
 
 /** Resolves and reads an exact immutable proposal, checking every receipt field and its bytes. */
 public final class TargetE2eIntakeProposalReader
         implements IntakeImmutableProposalReader, TargetE2eIntakeProposalReferenceResolver {
+
+    private static final Pattern SHA256 = Pattern.compile("^[0-9a-f]{64}$");
+    private static final ObjectMapper JSON_MAPPER = JsonMapper.builder()
+            .enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION)
+            .build();
 
     private final TargetE2eIntakeProposalStore store;
 
@@ -59,12 +71,7 @@ public final class TargetE2eIntakeProposalReader
                     "INTAKE_PROPOSAL_OBJECT_MISMATCH",
                     "proposal object differs from its immutable reference");
         }
-        String calculated = sha256(payload);
-        if (!reference.sha256().equals(calculated)) {
-            throw rejected(
-                    "INTAKE_PROPOSAL_OBJECT_HASH_MISMATCH",
-                    "proposal bytes differ from the immutable content hash");
-        }
+        requireCanonicalSelfHash(reference, payload);
         return new StoredProposal(
                 stored.artifactId(),
                 stored.schemaVersion(),
@@ -75,15 +82,74 @@ public final class TargetE2eIntakeProposalReader
                 payload);
     }
 
-    private static String sha256(byte[] value) {
+    private static void requireCanonicalSelfHash(IntakeProposalReference reference, byte[] payload) {
+        JsonNode document = parseObject(payload);
+        byte[] canonical;
         try {
-            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(value));
-        } catch (NoSuchAlgorithmException impossible) {
-            throw new IllegalStateException("SHA-256 is unavailable", impossible);
+            canonical = ContractJson.canonicalize(document);
+        } catch (RuntimeException failure) {
+            throw rejected(
+                    "INTAKE_PROPOSAL_OBJECT_HASH_MISMATCH",
+                    "proposal bytes cannot be canonicalized",
+                    failure);
+        }
+        if (!MessageDigest.isEqual(payload, canonical)) {
+            throw rejected(
+                    "INTAKE_PROPOSAL_OBJECT_HASH_MISMATCH",
+                    "proposal bytes are not RFC 8785 canonical");
+        }
+
+        JsonNode embeddedHash = document.get("proposal_hash");
+        if (embeddedHash == null
+                || !embeddedHash.isTextual()
+                || !SHA256.matcher(embeddedHash.textValue()).matches()
+                || !reference.sha256().equals(embeddedHash.textValue())) {
+            throw rejected(
+                    "INTAKE_PROPOSAL_OBJECT_HASH_MISMATCH",
+                    "proposal self-hash differs from the immutable content hash");
+        }
+
+        String calculated;
+        try {
+            calculated = IntakeContractHashes.canonicalHashExcluding(document, "proposal_hash");
+        } catch (RuntimeException failure) {
+            throw rejected(
+                    "INTAKE_PROPOSAL_OBJECT_HASH_MISMATCH",
+                    "proposal self-hash cannot be computed",
+                    failure);
+        }
+        if (!calculated.equals(embeddedHash.textValue())) {
+            throw rejected(
+                    "INTAKE_PROPOSAL_OBJECT_HASH_MISMATCH",
+                    "proposal bytes differ from the immutable content hash");
+        }
+    }
+
+    private static JsonNode parseObject(byte[] payload) {
+        try (JsonParser parser = JSON_MAPPER.createParser(payload)) {
+            JsonNode document = JSON_MAPPER.readTree(parser);
+            if (document == null || !document.isObject() || parser.nextToken() != null) {
+                throw rejected(
+                        "INTAKE_PROPOSAL_OBJECT_HASH_MISMATCH",
+                        "proposal payload must be one JSON object");
+            }
+            return document;
+        } catch (IntakeFinalizationRejectedException failure) {
+            throw failure;
+        } catch (IOException failure) {
+            throw rejected(
+                    "INTAKE_PROPOSAL_OBJECT_HASH_MISMATCH",
+                    "proposal payload is not unique-member JSON",
+                    failure);
         }
     }
 
     private static IntakeFinalizationRejectedException rejected(String code, String message) {
         return new IntakeFinalizationRejectedException(code, message);
+    }
+
+    private static IntakeFinalizationRejectedException rejected(
+            String code, String message, Throwable cause) {
+        return new IntakeFinalizationRejectedException(code, message, cause);
     }
 }

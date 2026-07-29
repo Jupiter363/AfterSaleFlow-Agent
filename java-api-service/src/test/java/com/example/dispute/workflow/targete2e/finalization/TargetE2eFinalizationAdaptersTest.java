@@ -87,17 +87,10 @@ class TargetE2eFinalizationAdaptersTest {
     }
 
     @Test
-    void proposalReaderRequiresExactMetadataAndContentHash() {
-        byte[] payload = "{\"schema_version\":\"intake-turn-proposal.v2\"}"
-                .getBytes(StandardCharsets.UTF_8);
-        String hash = sha256(payload);
-        var pointer = new ArtifactPointer(
-                "PROPOSAL_EXACT",
-                "intake-turn-proposal.v2",
-                "minio://target-e2e/intake/intake-turn-proposal.v2/PROPOSAL_EXACT/"
-                        + hash
-                        + ".json",
-                hash);
+    void proposalReaderAcceptsCanonicalSelfHashedProposalInsteadOfRawPayloadHash() {
+        byte[] payload = canonicalSelfHashedProposal();
+        String hash = proposalHash(payload);
+        var pointer = pointer(hash);
         var store = new StubStore(pointer, payload);
         var reader = new TargetE2eIntakeProposalReader(store);
 
@@ -105,12 +98,94 @@ class TargetE2eFinalizationAdaptersTest {
         var loaded = reader.load(reference);
 
         assertThat(reference.objectVersion()).isEqualTo(hash);
+        assertThat(sha256(payload)).isNotEqualTo(hash);
         assertThat(loaded.payload()).containsExactly(payload);
+    }
 
-        store.payload = "changed".getBytes(StandardCharsets.UTF_8);
+    @Test
+    void proposalReaderRejectsTamperedCanonicalPayloadWithUnchangedSelfHash() {
+        byte[] payload = canonicalSelfHashedProposal();
+        String hash = proposalHash(payload);
+        var store = new StubStore(pointer(hash), payload);
+        var reader = new TargetE2eIntakeProposalReader(store);
+        IntakeProposalReference reference = reader.resolve(pointer(hash));
+
+        store.payload = new String(payload, StandardCharsets.UTF_8)
+                .replace("intake-turn-proposal.v2", "intake-turn-proposal.v3")
+                .getBytes(StandardCharsets.UTF_8);
         assertThatThrownBy(() -> reader.load(reference))
                 .isInstanceOf(IntakeFinalizationRejectedException.class)
-                .hasMessageContaining("immutable reference");
+                .extracting(failure -> ((IntakeFinalizationRejectedException) failure).code())
+                .isEqualTo("INTAKE_PROPOSAL_OBJECT_HASH_MISMATCH");
+    }
+
+    @Test
+    void proposalReaderRejectsNonCanonicalOrDuplicateMemberPayloads() {
+        byte[] canonical = canonicalSelfHashedProposal();
+        String hash = proposalHash(canonical);
+        byte[] noncanonical = ("{\"schema_version\":\"intake-turn-proposal.v2\",\"proposal_hash\":\""
+                        + hash
+                        + "\"}")
+                .getBytes(StandardCharsets.UTF_8);
+        var noncanonicalStore = new StubStore(pointer(hash), noncanonical);
+        var noncanonicalReader = new TargetE2eIntakeProposalReader(noncanonicalStore);
+        IntakeProposalReference noncanonicalReference = noncanonicalReader.resolve(pointer(hash));
+        assertThatThrownBy(() -> noncanonicalReader.load(noncanonicalReference))
+                .isInstanceOf(IntakeFinalizationRejectedException.class)
+                .extracting(failure -> ((IntakeFinalizationRejectedException) failure).code())
+                .isEqualTo("INTAKE_PROPOSAL_OBJECT_HASH_MISMATCH");
+
+        String duplicate = new String(canonical, StandardCharsets.UTF_8)
+                .replace("\"schema_version\"", "\"proposal_hash\":\"" + hash + "\",\"schema_version\"");
+        var duplicateStore = new StubStore(pointer(hash), duplicate.getBytes(StandardCharsets.UTF_8));
+        var duplicateReader = new TargetE2eIntakeProposalReader(duplicateStore);
+        IntakeProposalReference duplicateReference = duplicateReader.resolve(pointer(hash));
+        assertThatThrownBy(() -> duplicateReader.load(duplicateReference))
+                .isInstanceOf(IntakeFinalizationRejectedException.class)
+                .extracting(failure -> ((IntakeFinalizationRejectedException) failure).code())
+                .isEqualTo("INTAKE_PROPOSAL_OBJECT_HASH_MISMATCH");
+    }
+
+    @Test
+    void proposalReaderRejectsEmbeddedHashThatDiffersFromReference() {
+        byte[] payload = canonicalSelfHashedProposal();
+        String hash = proposalHash(payload);
+        var store = new StubStore(pointer(hash), payload);
+        var reader = new TargetE2eIntakeProposalReader(store);
+        IntakeProposalReference reference = reader.resolve(pointer(hash));
+
+        store.payload = new String(payload, StandardCharsets.UTF_8)
+                .replace(hash, "0".repeat(64))
+                .getBytes(StandardCharsets.UTF_8);
+        assertThatThrownBy(() -> reader.load(reference))
+                .isInstanceOf(IntakeFinalizationRejectedException.class)
+                .extracting(failure -> ((IntakeFinalizationRejectedException) failure).code())
+                .isEqualTo("INTAKE_PROPOSAL_OBJECT_HASH_MISMATCH");
+    }
+
+    private static ArtifactPointer pointer(String hash) {
+        return new ArtifactPointer(
+                "PROPOSAL_EXACT",
+                "intake-turn-proposal.v2",
+                "minio://target-e2e/intake/intake-turn-proposal.v2/PROPOSAL_EXACT/"
+                        + hash
+                        + ".json",
+                hash);
+    }
+
+    private static byte[] canonicalSelfHashedProposal() {
+        String preimage = "{\"schema_version\":\"intake-turn-proposal.v2\"}";
+        String hash = sha256(preimage.getBytes(StandardCharsets.UTF_8));
+        return ("{\"proposal_hash\":\"" + hash
+                        + "\",\"schema_version\":\"intake-turn-proposal.v2\"}")
+                .getBytes(StandardCharsets.UTF_8);
+    }
+
+    private static String proposalHash(byte[] payload) {
+        String document = new String(payload, StandardCharsets.UTF_8);
+        String prefix = "\"proposal_hash\":\"";
+        int start = document.indexOf(prefix) + prefix.length();
+        return document.substring(start, document.indexOf('"', start));
     }
 
     private static String sha256(byte[] value) {
