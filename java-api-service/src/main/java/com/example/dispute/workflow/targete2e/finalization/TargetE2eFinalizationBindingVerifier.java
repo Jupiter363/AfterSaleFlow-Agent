@@ -6,6 +6,7 @@ import com.example.dispute.workflow.contract.v1.ContractTypes.ArtifactOperationT
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationActivationPort.ActivationGrant;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -42,7 +43,9 @@ public final class TargetE2eFinalizationBindingVerifier {
     private final ObjectMapper objectMapper;
 
     public TargetE2eFinalizationBindingVerifier(ObjectMapper objectMapper) {
-        this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper");
+        this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper")
+                .copy()
+                .setSerializationInclusion(JsonInclude.Include.NON_NULL);
     }
 
     public VerifiedEvidence verify(

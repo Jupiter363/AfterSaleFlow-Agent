@@ -92,8 +92,10 @@ public final class ReconciledTargetE2eFinalizationEvidenceProvider
         }
         return new TargetE2eFinalizationEvidence(
                 bindings.manifestHash(),
-                objectMapper.valueToTree(sealed.envelope()),
-                objectMapper.valueToTree(reconciled.envelope()),
+                readObject(codec.encodeCommand(sealed.envelope()), "command envelope"),
+                readObject(
+                        codec.encodeResult(reconciled.envelope(), sealed.envelope(), proposal),
+                        "result envelope"),
                 proposal,
                 domainBinding);
     }

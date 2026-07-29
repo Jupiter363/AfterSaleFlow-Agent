@@ -24,6 +24,7 @@ import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalization
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationActivationPort.AuthorizationDecision;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationActivationPort.Lifecycle;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationRuntimeContextProvider.RuntimeContext;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -43,7 +44,10 @@ final class TargetE2eFinalizationFixture {
     static final String BUILD_ID = "target-e2e-agent-build";
     static final String ACTIVATION_ID = "p9act.v1." + "1".repeat(32);
     static final String ACTIVATION_MANIFEST_HASH = "9".repeat(64);
-    private static final ObjectMapper MAPPER = JsonMapper.builder().findAndAddModules().build();
+    private static final ObjectMapper MAPPER = JsonMapper.builder()
+            .findAndAddModules()
+            .build()
+            .setSerializationInclusion(JsonInclude.Include.NON_NULL);
 
     private TargetE2eFinalizationFixture() {}
 
