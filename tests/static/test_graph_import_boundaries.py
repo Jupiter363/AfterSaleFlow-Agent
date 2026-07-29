@@ -36,6 +36,15 @@ JAVA_INTAKE_EXCHANGE_ENDPOINTS = {
     "INTAKE_PAYLOAD_LOAD_PATH": "/internal/graph/intake/v2/payload:load",
     "INTAKE_PROPOSAL_PUT_PATH": "/internal/graph/intake/v2/proposals:put",
 }
+JAVA_TARGET_E2E_ROOM_EXCHANGE = GRAPH_RUNTIME / "target_e2e_room_exchange.py"
+JAVA_TARGET_E2E_ROOM_EXCHANGE_ENDPOINTS = {
+    "TARGET_E2E_ROOM_OBJECT_LOAD_PATH": "/internal/graph/target-e2e/rooms/object:load",
+    "TARGET_E2E_ROOM_PROPOSAL_PUT_PATH": "/internal/graph/target-e2e/rooms/proposal:put",
+}
+NON_MODEL_HTTP_EXCHANGES = {
+    JAVA_INTAKE_EXCHANGE,
+    JAVA_TARGET_E2E_ROOM_EXCHANGE,
+}
 STATE_KERNEL_FORBIDDEN_MODULES = {
     *MODEL_HTTP_MODULES,
     "app.llm",
@@ -138,7 +147,7 @@ def test_graph_runtime_cannot_bypass_governed_model_transport() -> None:
             for module in _imports(path)
             if _matches_prefix(module, MODEL_HTTP_MODULES)
         )
-        if imported and path != JAVA_INTAKE_EXCHANGE:
+        if imported and path not in NON_MODEL_HTTP_EXCHANGES:
             violations[path.relative_to(ROOT).as_posix()] = imported
 
     assert not violations, (
@@ -202,6 +211,102 @@ def test_non_model_http_is_confined_to_fixed_java_intake_exchange_endpoints() ->
         and node.func.value.id == "client"
     ]
     assert http_client_calls == ["stream"]
+
+
+def test_target_e2e_non_model_http_is_confined_to_fixed_java_exchange_endpoints() -> None:
+    tree = ast.parse(
+        JAVA_TARGET_E2E_ROOM_EXCHANGE.read_text(encoding="utf-8"),
+        filename=str(JAVA_TARGET_E2E_ROOM_EXCHANGE),
+    )
+    assert {
+        module
+        for module in _imports(JAVA_TARGET_E2E_ROOM_EXCHANGE)
+        if _matches_prefix(module, MODEL_HTTP_MODULES)
+    } == {"httpx"}
+    assignments = {
+        target.id: node.value.value
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and isinstance(node.value, ast.Constant)
+        and isinstance(node.value.value, str)
+        for target in node.targets
+        if isinstance(target, ast.Name)
+        and target.id in JAVA_TARGET_E2E_ROOM_EXCHANGE_ENDPOINTS
+    }
+    assert assignments == JAVA_TARGET_E2E_ROOM_EXCHANGE_ENDPOINTS
+
+    allowed_assignment = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "_ALLOWED_EXCHANGE_PATHS"
+            for target in node.targets
+        )
+    )
+    assert isinstance(allowed_assignment.value, ast.Call)
+    assert isinstance(allowed_assignment.value.func, ast.Name)
+    assert allowed_assignment.value.func.id == "frozenset"
+    assert len(allowed_assignment.value.args) == 1
+    allowed_paths = allowed_assignment.value.args[0]
+    assert isinstance(allowed_paths, ast.Set)
+    assert {
+        element.id
+        for element in allowed_paths.elts
+        if isinstance(element, ast.Name)
+    } == set(JAVA_TARGET_E2E_ROOM_EXCHANGE_ENDPOINTS)
+
+    post_function = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "_post"
+    )
+    assert any(
+        isinstance(node, ast.Compare)
+        and isinstance(node.left, ast.Name)
+        and node.left.id == "path"
+        and len(node.ops) == 1
+        and isinstance(node.ops[0], ast.NotIn)
+        and len(node.comparators) == 1
+        and isinstance(node.comparators[0], ast.Name)
+        and node.comparators[0].id == "_ALLOWED_EXCHANGE_PATHS"
+        for node in ast.walk(post_function)
+    )
+
+    exchange_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Attribute)
+        and isinstance(node.func.value.value, ast.Name)
+        and node.func.value.value.id == "self"
+        and node.func.value.attr == "_exchange"
+        and node.func.attr == "_post"
+    ]
+    assert {
+        node.args[0].id
+        for node in exchange_calls
+        if node.args and isinstance(node.args[0], ast.Name)
+    } == set(JAVA_TARGET_E2E_ROOM_EXCHANGE_ENDPOINTS)
+    assert len(exchange_calls) == len(JAVA_TARGET_E2E_ROOM_EXCHANGE_ENDPOINTS)
+
+    assert [
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "httpx"
+    ] == ["AsyncClient"]
+    assert [
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "client"
+    ] == ["post"]
 
 
 def test_compose_does_not_share_bootstrap_or_graph_credentials_with_services() -> None:

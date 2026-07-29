@@ -31,7 +31,7 @@ public final class ReconciledTargetReviewFinalizationEvidenceSource
   private static final String RESULT_SCHEMA = "room-graph-result.schema.json";
   private static final AgentPlatformContractCodec CONTRACT_CODEC = new AgentPlatformContractCodec();
   private static final String SQL_RUN = """
-      select r.tenant_surrogate, r.case_id, r.room_type, r.room_epoch, r.process_revision,
+      select r.tenant_surrogate, r.case_id, r.room_id, r.room_type, r.room_epoch, r.process_revision,
              r.fencing_token, r.protocol, r.executor_kind as run_executor_kind, r.run_status,
              r.finalization_status, r.result_ready_attempt_id, r.committed_attempt_id,
              r.final_result_hash, a.id, a.attempt_no, a.attempt_status,
@@ -101,14 +101,15 @@ public final class ReconciledTargetReviewFinalizationEvidenceSource
         "reconciled command envelope hash");
     require(durable.executionIdentityMatches(envelope.executionProvider(), envelope.executionModel()),
         "reconciled execution identity");
-    return new Evidence(envelope.proposalHash(), envelope.resultEnvelopeHash(),
+    return new Evidence(durable.roomId(), envelope.proposalHash(), envelope.resultEnvelopeHash(),
         envelope.executionProvider(), envelope.executionModel());
   }
 
   private static DurableRun run(ResultSet row, int ignored) throws SQLException {
     OffsetDateTime completed = row.getObject("completed_at", OffsetDateTime.class);
     Long latency = row.getObject("latency_ms", Long.class);
-    return new DurableRun(row.getString("tenant_surrogate"), row.getString("case_id"), row.getString("room_type"),
+    return new DurableRun(row.getString("tenant_surrogate"), row.getString("case_id"),
+        row.getString("room_id"), row.getString("room_type"),
         row.getLong("room_epoch"), row.getLong("process_revision"), row.getLong("fencing_token"),
         row.getString("protocol"), row.getString("run_executor_kind"), row.getString("run_status"),
         row.getString("finalization_status"), row.getString("result_ready_attempt_id"),
@@ -135,7 +136,7 @@ public final class ReconciledTargetReviewFinalizationEvidenceSource
     if (!condition) throw new IllegalStateException("target Review " + label + " is inconsistent");
   }
 
-  private record DurableRun(String tenant, String caseId, String roomType, long roomEpoch,
+  private record DurableRun(String tenant, String caseId, String roomId, String roomType, long roomEpoch,
       long processRevision, long fencingToken, String protocol, String runExecutor, String runStatus,
       String finalizationStatus, String resultReadyAttemptId, String committedAttemptId,
       String finalResultHash, String attemptId, long attemptNo, String attemptStatus,
@@ -155,6 +156,7 @@ public final class ReconciledTargetReviewFinalizationEvidenceSource
       return (resultReady || completedReplay) && executionLifecycle
           && "agent-stream.v2".equals(protocol) && "TEMPORAL_ACTIVITY".equals(runExecutor)
           && "TEMPORAL_ACTIVITY".equals(attemptExecutor) && "REVIEW".equals(roomType)
+          && roomId != null && !roomId.isBlank()
           && tenant.equals(command.tenantSurrogate()) && caseId.equals(command.caseId())
           && roomEpoch == command.roomEpoch() && processRevision == command.processRevision()
           && fencingToken == material.admission().roomFencingToken()

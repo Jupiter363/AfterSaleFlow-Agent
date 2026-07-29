@@ -453,7 +453,7 @@ class DisputeControllerTest {
     // 系统意义：「DisputeControllerTest.confirmsTheIntakeDecisionThroughTheRoomBasedApi()」守住「案件核心与导入」的可执行规格，尤其防止 「CASE_test」、「2026-07-03T02:00:00Z」、「user-1」、「USER」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void confirmsTheIntakeDecisionThroughTheRoomBasedApi() throws Exception {
-        when(intakeRoomService.confirm(eq("CASE_test"), any(), any()))
+        when(intakeRoomService.confirm(eq("CASE_test"), any(), any(), any(), any()))
                 .thenReturn(
                         new IntakeConfirmationView(
                                 "CASE_test",
@@ -487,7 +487,12 @@ class DisputeControllerTest {
     // 系统意义：「DisputeControllerTest.cancelsTheIntakeWhenTheIssueIsResolvedBeforeAdmission()」守住「案件核心与导入」的可执行规格，尤其防止 「CASE_test」、「user-1」、「USER」、「$.data.case_status」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void cancelsTheIntakeWhenTheIssueIsResolvedBeforeAdmission() throws Exception {
-        when(intakeRoomService.cancel(eq("CASE_test"), any(), eq("resolved before admission")))
+        when(intakeRoomService.cancel(
+                        eq("CASE_test"),
+                        any(),
+                        eq("resolved before admission"),
+                        any(),
+                        any()))
                 .thenReturn(
                         new IntakeConfirmationView(
                                 "CASE_test",

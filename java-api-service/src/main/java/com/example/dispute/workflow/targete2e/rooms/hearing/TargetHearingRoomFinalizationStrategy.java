@@ -7,6 +7,7 @@ import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationRejectedException;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationActivationPort;
+import com.example.dispute.workflow.targete2e.finalization.TargetE2eCrossRoomActivationVerifier;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationRuntimeContextProvider;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eExecutionLaneVerifier;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eRoomFinalizationStrategy;
@@ -92,20 +93,12 @@ public final class TargetHearingRoomFinalizationStrategy
         runtimeContext.workflowBuildId(), command.commandId(), material.admission().commandHash(),
         material.admission().commandEnvelopeHash(), command.roomEpoch(),
         material.admission().roomFencingToken());
-    var decision = activation.authorize(authorization);
-    if (decision == null || decision.decision() != TargetE2eFinalizationActivationPort.Decision.ALLOWED
-        || decision.grant() == null) {
-      throw rejected("TARGET_E2E_HEARING_ACTIVATION_DENIED", "Hearing activation is not authorized");
-    }
-    var grant = decision.grant();
-    if (!grant.activationId().equals(material.admission().activationId())
-        || !grant.activationManifestHash().equals(material.admission().manifestHash())
-        || !grant.isolatedDomainDbBindingHash().equals(evidence.isolatedDomainDbBindingHash())
-        || !grant.allowedCaseIds().contains(command.caseId())
-        || !grant.allowedRoomTypes().contains(RoomType.HEARING)) {
-      throw rejected("TARGET_E2E_HEARING_ACTIVATION_BINDING_MISMATCH",
-          "Hearing activation grant differs from durable evidence");
-    }
+    var grant = TargetE2eCrossRoomActivationVerifier.requireAuthorized(
+        activation.authorize(authorization),
+        authorization,
+        material.admission().activationId(),
+        material.admission().manifestHash(),
+        material.admission().isolatedDomainDbBindingHash());
     requireExactEvidence(request, result, material, evidence);
     var graph = result.graphResult();
     return new PreparedFinalization(evidence.activationManifestHash(), new ReceiptBindings(

@@ -139,6 +139,12 @@ def test_target_admission_is_separate_from_public_shadow_verifier(
     manifest["profile_versions"]["checkpoint_schema_version"] = (
         TARGET_E2E_CHECKPOINT_SCHEMA_VERSION
     )
+    for item in manifest["items"]:
+        item["parse_ref"] = (
+            f"urn:target-e2e:object:{item['evidence_id']}:{item['parse_hash']}"
+        )
+        item_preimage = {key: value for key, value in item.items() if key != "item_hash"}
+        item["item_hash"] = canonical_sha256(item_preimage)
     target_request = admission_refresher(
         request,
         command=command,
@@ -158,7 +164,7 @@ def test_target_admission_is_separate_from_public_shadow_verifier(
 
     with pytest.raises(
         EvidenceGraphContractError,
-        match="EVIDENCE_SYNTHETIC_SHADOW_SCOPE_REQUIRED",
+        match="EVIDENCE_COMMAND_GRAPH_KEY_INVALID",
     ):
         verifier.verify(target_request)
 

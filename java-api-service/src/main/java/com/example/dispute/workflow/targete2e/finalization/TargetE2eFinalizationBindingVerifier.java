@@ -106,7 +106,7 @@ public final class TargetE2eFinalizationBindingVerifier {
             throw rejected("TARGET_E2E_GRAPH_AUTHORITY_INVALID", "proposal grants formal authority");
         }
         var artifact = proposalArtifact(result);
-        requireEqual(artifact.sha256(), payloadHash, "proposal artifact sha256");
+        requireEqual(artifact.sha256(), payloadHash, "proposal payload_hash / artifact sha256");
         String hashPrefix = artifact.sha256().substring(0, 32);
         text(proposal, "proposal_id", TARGET_PROPOSAL_ID_PREFIX + hashPrefix);
         requireEqual(

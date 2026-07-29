@@ -7,7 +7,7 @@ import java.util.Objects;
 /** Bindings required before an advisory Review AgentRun can acknowledge its Java-owned decision. */
 public record TargetReviewFinalizationRequest(
     String executionLane, String activationId, String activationManifestHash, String isolatedDomainDbBindingHash,
-    long roomFencingToken, String admissionId, String commandHash,
+    String roomId, long roomFencingToken, String admissionId, String commandHash,
     String commandEnvelopeHash, String proposalHash, String resultEnvelopeHash,
     String executionProvider, String executionModel,
     ExecuteAgentRunRequest request, ExecuteAgentRunResult result,
@@ -16,6 +16,7 @@ public record TargetReviewFinalizationRequest(
     if (!TargetReviewCommandMaterial.TARGET_LANE.equals(executionLane) || activationId == null || activationId.isBlank()
         || activationManifestHash == null || !activationManifestHash.matches("[0-9a-f]{64}")
         || isolatedDomainDbBindingHash == null || !isolatedDomainDbBindingHash.matches("[0-9a-f]{64}")
+        || roomId == null || roomId.isBlank()
         || roomFencingToken < 1
         || admissionId == null || admissionId.isBlank() || commandHash == null || !commandHash.matches("[0-9a-f]{64}")
         || commandEnvelopeHash == null || !commandEnvelopeHash.matches("[0-9a-f]{64}")

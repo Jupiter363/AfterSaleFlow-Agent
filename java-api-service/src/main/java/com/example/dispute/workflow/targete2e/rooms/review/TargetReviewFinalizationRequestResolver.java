@@ -74,7 +74,8 @@ public final class TargetReviewFinalizationRequestResolver {
     require(handoff.decision().outcomeReceipt().fence() == material.roomFencingToken(), "outcome fence");
     var evidence = evidenceSource.resolve(snapshot, request, result);
     return new TargetReviewFinalizationRequest(material.executionLane(), material.activationId(),
-        material.activationManifestHash(), admission.isolatedDomainDbBindingHash(), material.roomFencingToken(), snapshot.admissionId(),
+        material.activationManifestHash(), admission.isolatedDomainDbBindingHash(), evidence.roomId(),
+        material.roomFencingToken(), snapshot.admissionId(),
         material.commandHash(), material.commandEnvelopeHash(), evidence.proposalHash(),
         evidence.resultEnvelopeHash(), evidence.executionProvider(), evidence.executionModel(),
         request, result, handoff.decision());

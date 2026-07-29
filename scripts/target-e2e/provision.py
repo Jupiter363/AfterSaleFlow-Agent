@@ -65,13 +65,16 @@ def _tool(name: str) -> str:
     return found
 
 
-def _run(arguments: list[str]) -> None:
+def _run(
+    arguments: list[str], *, environment: dict[str, str] | None = None
+) -> None:
     completed = subprocess.run(
         arguments,
         check=False,
         capture_output=True,
         text=True,
         shell=False,
+        env=environment,
     )
     if completed.returncode:
         raise common.TargetE2EError(
@@ -299,6 +302,48 @@ def _write_public_bytes(path: Path, payload: bytes) -> None:
         path.chmod(0o444)
 
 
+def _openssl_environment(openssl: str) -> dict[str, str]:
+    """Discover one real OpenSSL config and override broken compiled host defaults."""
+
+    executable = Path(openssl).expanduser().resolve()
+    candidates: list[Path] = []
+    configured = os.environ.get("OPENSSL_CONF")
+    if configured:
+        candidates.append(Path(configured).expanduser())
+    # Conda installs the executable under ``Library/bin`` but its usable config
+    # under ``Library/ssl``.  The binary's compiled OPENSSLDIR can point at a
+    # machine-global path that does not exist, so this relative candidate must
+    # be considered without relying on an activated Conda shell.
+    candidates.extend(
+        (
+            executable.parent.parent / "ssl" / "openssl.cnf",
+            executable.parent / "openssl.cnf",
+            Path("/etc/ssl/openssl.cnf"),
+        )
+    )
+    selected: Path | None = None
+    seen: set[Path] = set()
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        try:
+            payload = resolved.read_bytes()
+        except OSError:
+            continue
+        if resolved.is_file() and 0 < len(payload) <= 1024 * 1024 and b"\x00" not in payload:
+            selected = resolved
+            break
+    if selected is None:
+        raise common.TargetE2EError(
+            "no bounded readable OpenSSL config was found beside the selected executable"
+        )
+    environment = dict(os.environ)
+    environment["OPENSSL_CONF"] = str(selected)
+    return environment
+
+
 def _java_artifact_digest(
     docker: str, image_reference: str, runtime_directory: Path
 ) -> str:
@@ -397,6 +442,7 @@ def _generate_p256_key_pair(
 ) -> None:
     private_path.parent.mkdir(parents=True, exist_ok=True)
     public_path.parent.mkdir(parents=True, exist_ok=True)
+    environment = _openssl_environment(openssl)
     _run(
         [
             openssl,
@@ -407,7 +453,8 @@ def _generate_p256_key_pair(
             "ec_paramgen_curve:P-256",
             "-out",
             str(private_path),
-        ]
+        ],
+        environment=environment,
     )
     _run(
         [
@@ -418,7 +465,8 @@ def _generate_p256_key_pair(
             "-pubout",
             "-out",
             str(public_path),
-        ]
+        ],
+        environment=environment,
     )
     if os.name != "nt":
         public_path.chmod(0o444)
@@ -432,6 +480,7 @@ def _generate_mtls(
     trust_password: str,
 ) -> None:
     directory.mkdir(parents=True, exist_ok=True)
+    openssl_environment = _openssl_environment(openssl)
     ca_key = directory / "ca.key"
     ca_crt = directory / "ca.crt"
     server_key = directory / "server.key"
@@ -453,7 +502,8 @@ def _generate_mtls(
             "-noout",
             "-out",
             str(ca_key),
-        ]
+        ],
+        environment=openssl_environment,
     )
     _run(
         [
@@ -474,7 +524,8 @@ def _generate_mtls(
             "keyUsage=critical,keyCertSign,cRLSign",
             "-out",
             str(ca_crt),
-        ]
+        ],
+        environment=openssl_environment,
     )
     _run(
         [
@@ -486,7 +537,8 @@ def _generate_mtls(
             "-noout",
             "-out",
             str(server_key),
-        ]
+        ],
+        environment=openssl_environment,
     )
     _run(
         [
@@ -500,7 +552,8 @@ def _generate_mtls(
             "/CN=graph-mtls-proxy",
             "-out",
             str(server_csr),
-        ]
+        ],
+        environment=openssl_environment,
     )
     _write_private(
         server_ext,
@@ -525,7 +578,8 @@ def _generate_mtls(
             str(server_ext),
             "-out",
             str(server_crt),
-        ]
+        ],
+        environment=openssl_environment,
     )
     _run(
         [
@@ -537,7 +591,8 @@ def _generate_mtls(
             "-noout",
             "-out",
             str(client_key),
-        ]
+        ],
+        environment=openssl_environment,
     )
     _run(
         [
@@ -551,7 +606,8 @@ def _generate_mtls(
             "/CN=java-api-service",
             "-out",
             str(client_csr),
-        ]
+        ],
+        environment=openssl_environment,
     )
     _write_private(
         client_ext,
@@ -576,7 +632,8 @@ def _generate_mtls(
             str(client_ext),
             "-out",
             str(client_crt),
-        ]
+        ],
+        environment=openssl_environment,
     )
     _run(
         [
@@ -595,7 +652,8 @@ def _generate_mtls(
             str(directory / "client.p12"),
             "-passout",
             f"pass:{key_password}",
-        ]
+        ],
+        environment=openssl_environment,
     )
     _run(
         [

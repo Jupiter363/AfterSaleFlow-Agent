@@ -120,6 +120,7 @@ public class TargetE2eEvidenceReviewArtifactConfiguration {
             TargetE2EGraphEnvelopeSigner signer,
             HttpTargetE2EGraphReconciliationClient reconciliation,
             GraphRegistryBindingPolicy registryBindings,
+            TargetE2eFinalizationActivationPort targetE2eFinalizationAuthority,
             TargetE2eFinalizationRuntimeContextProvider runtime) {
         TargetReviewCommandMaterialStore materialStore =
                 new JdbcTargetReviewCommandMaterialStore(dataSource, activationLedger, objectMapper);
@@ -142,7 +143,7 @@ public class TargetE2eEvidenceReviewArtifactConfiguration {
         TargetReviewFormalCommitPort formalCommitPort =
                 new TargetReviewAdvisoryFormalCommitPort(handoffStore, projectionPort);
         TargetE2eRoomFinalizationStrategy strategy = new TargetE2eReviewRoomFinalizationStrategy(
-                resolver, factsProvider);
+                resolver, factsProvider, targetE2eFinalizationAuthority);
         AgentRunDomainResultCommitter committer = new TargetReviewAgentRunDomainResultCommitter(
                 dataSource,
                 resolver,

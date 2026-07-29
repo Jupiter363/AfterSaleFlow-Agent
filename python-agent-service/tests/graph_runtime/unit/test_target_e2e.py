@@ -30,6 +30,7 @@ from app.graph_runtime.persistence_models import (
 )
 from app.graph_runtime.result import CompletedDraft, ResultBindings
 from app.graph_runtime.target_e2e import (
+    ADVANCE_ROOM_AUTHORITY_SQL,
     PostgresTargetE2EActivationRepository,
     TargetE2EGraphCommandEnvelope,
     TargetE2EGraphResultEnvelope,
@@ -627,6 +628,22 @@ async def test_runtime_projection_registration_rejects_stale_generation() -> Non
             _StaleGenerationConnection(),
             _authority(),
         )
+
+
+def test_equal_room_fence_is_idempotent_only_for_the_same_activation() -> None:
+    normalized = " ".join(ADVANCE_ROOM_AUTHORITY_SQL.split())
+
+    assert (
+        "excluded.room_fencing_token > "
+        "agent_graph_target_e2e_room_authority.room_fencing_token"
+    ) in normalized
+    assert (
+        "excluded.room_fencing_token = "
+        "agent_graph_target_e2e_room_authority.room_fencing_token "
+        "and excluded.activation_id = "
+        "agent_graph_target_e2e_room_authority.activation_id"
+    ) in normalized
+    assert "room_fencing_token >=" not in normalized
 
 
 @pytest.mark.asyncio

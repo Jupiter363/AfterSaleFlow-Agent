@@ -14,6 +14,7 @@ import binascii
 from collections.abc import Mapping
 import hashlib
 import json
+import re
 from typing import Any, cast
 from urllib.parse import urlsplit
 
@@ -51,8 +52,14 @@ from app.schemas import (
 
 TARGET_E2E_ROOM_OBJECT_LOAD_PATH = "/internal/graph/target-e2e/rooms/object:load"
 TARGET_E2E_ROOM_PROPOSAL_PUT_PATH = "/internal/graph/target-e2e/rooms/proposal:put"
+_ALLOWED_EXCHANGE_PATHS = frozenset(
+    {TARGET_E2E_ROOM_OBJECT_LOAD_PATH, TARGET_E2E_ROOM_PROPOSAL_PUT_PATH}
+)
 _MAX_LOAD_BYTES = 512 * 1024
 _MAX_PUT_BYTES = 64 * 1024
+_PROPOSAL_REF = re.compile(
+    r"^urn:target-e2e:proposal:(?:evidence|hearing|review):[0-9a-f]{64}$"
+)
 
 _HEARING_TYPES = {
     HearingOperation.INTAKE_QUESTIONS: (
@@ -117,8 +124,11 @@ class JavaTargetE2ERoomExchange:
         *,
         maximum_bytes: int,
     ) -> dict[str, Any]:
+        if path not in _ALLOWED_EXCHANGE_PATHS:
+            raise GraphContractError("TARGET_E2E_ROOM_EXCHANGE_PATH_REJECTED")
         headers = {
             "Accept": "application/json",
+            "Accept-Encoding": "identity",
             "Content-Type": "application/json",
             "X-Service-Secret": self._secret,
         }
@@ -138,6 +148,8 @@ class JavaTargetE2ERoomExchange:
             raise GraphContractError("TARGET_E2E_ROOM_EXCHANGE_TRANSPORT_FAILED") from error
         if response.status_code != 200:
             raise GraphContractError("TARGET_E2E_ROOM_EXCHANGE_REJECTED")
+        if response.headers.get("content-encoding", "identity").lower() != "identity":
+            raise GraphContractError("TARGET_E2E_ROOM_EXCHANGE_CONTENT_ENCODING_INVALID")
         if response.headers.get("content-type", "").split(";", 1)[0].lower() != "application/json":
             raise GraphContractError("TARGET_E2E_ROOM_EXCHANGE_MEDIA_TYPE_INVALID")
         if len(response.content) > maximum_bytes:
@@ -386,9 +398,7 @@ class _ScopedJavaTargetE2ERoomExchange:
         ) != (proposal_id, schema_version, payload_hash, len(payload)):
             raise GraphContractError("TARGET_E2E_ROOM_PROPOSAL_RECEIPT_INVALID")
         payload_ref = receipt.get("payload_ref")
-        if not isinstance(payload_ref, str) or not payload_ref.startswith(
-            "urn:target-e2e:proposal:"
-        ):
+        if not isinstance(payload_ref, str) or _PROPOSAL_REF.fullmatch(payload_ref) is None:
             raise GraphContractError("TARGET_E2E_ROOM_PROPOSAL_RECEIPT_INVALID")
         return payload_ref
 

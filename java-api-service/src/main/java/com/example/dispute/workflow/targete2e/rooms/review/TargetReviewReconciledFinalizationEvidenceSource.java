@@ -9,9 +9,10 @@ public interface TargetReviewReconciledFinalizationEvidenceSource {
   Evidence resolve(TargetReviewCommandMaterialStore.Snapshot material,
       ExecuteAgentRunRequest request, ExecuteAgentRunResult result);
 
-  record Evidence(String proposalHash, String resultEnvelopeHash, String executionProvider,
-      String executionModel) {
+  record Evidence(String roomId, String proposalHash, String resultEnvelopeHash,
+      String executionProvider, String executionModel) {
     public Evidence {
+      required(roomId, "roomId");
       hash(proposalHash, "proposalHash");
       hash(resultEnvelopeHash, "resultEnvelopeHash");
       required(executionProvider, "executionProvider");

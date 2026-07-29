@@ -703,7 +703,7 @@ def test_python_to_java_graph_exchange_uses_only_the_restricted_proxy() -> None:
     assert not any(name.startswith("java-") for name in python_members)
 
 
-def test_graph_exchange_proxy_has_exact_allowlist_and_no_catch_all_proxy() -> None:
+def test_graph_exchange_proxy_has_exact_post_allowlist_and_no_catch_all_proxy() -> None:
     config = (DEPLOY / "nginx" / "exchange.conf").read_text(encoding="utf-8")
     routes = {
         "/internal/graph/intake/v2/payload:load",
@@ -723,19 +723,8 @@ def test_graph_exchange_proxy_has_exact_allowlist_and_no_catch_all_proxy() -> No
         assert "proxy_pass_request_body on" in block
         assert "proxy_pass http://target_e2e_java_graph_exchange" in block
 
-    evidence_location = (
-        'location ~ "^/internal/evidence/CASE_[A-Za-z0-9_]{1,59}/'
-        'EVIDENCE_[A-Za-z0-9_-]{1,119}/content$" {'
-    )
-    evidence_block = config.split(evidence_location, 1)[1].split("\n    }", 1)[0]
-    assert "if ($request_method != GET)" in evidence_block
-    assert "return 404" in evidence_block
-    assert "proxy_set_header X-Service-Identity python-agent-service" in evidence_block
-    assert "proxy_set_header X-Service-Secret $http_x_service_secret" in evidence_block
-    assert "proxy_pass_request_body off" in evidence_block
-    assert "proxy_pass http://target_e2e_java_graph_exchange" in evidence_block
-
-    assert config.count("proxy_pass http://target_e2e_java_graph_exchange") == len(routes) + 1
+    assert "/internal/evidence/" not in config
+    assert config.count("proxy_pass http://target_e2e_java_graph_exchange") == len(routes)
     assert "location / {\n        return 404;\n    }" in config
 
 

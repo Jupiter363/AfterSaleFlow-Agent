@@ -745,8 +745,16 @@ set activation_id = excluded.activation_id,
 where excluded.room_epoch > agent_graph_target_e2e_room_authority.room_epoch
    or (
        excluded.room_epoch = agent_graph_target_e2e_room_authority.room_epoch
-       and excluded.room_fencing_token
-           >= agent_graph_target_e2e_room_authority.room_fencing_token
+       and (
+           excluded.room_fencing_token
+               > agent_graph_target_e2e_room_authority.room_fencing_token
+           or (
+               excluded.room_fencing_token
+                   = agent_graph_target_e2e_room_authority.room_fencing_token
+               and excluded.activation_id
+                   = agent_graph_target_e2e_room_authority.activation_id
+           )
+       )
    )
 returning activation_id, room_epoch, room_fencing_token
 """

@@ -4,6 +4,7 @@ import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationActivationPort;
+import com.example.dispute.workflow.targete2e.finalization.TargetE2eCrossRoomActivationVerifier;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationRejectedException;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationRuntimeContextProvider;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eRoomFinalizationStrategy;
@@ -58,8 +59,12 @@ public final class TargetE2eEvidenceRoomFinalizationStrategy
       throw rejected("TARGET_E2E_EVIDENCE_MATERIAL_MISMATCH", "Evidence material is not an exact admission");
     }
     var evidence = evidenceSource.resolve(material, request, result);
-    if (evidence.roomFencingToken() != material.material().roomFencingToken()) {
-      throw rejected("TARGET_E2E_EVIDENCE_FENCE_MISMATCH", "durable Evidence fence differs from admission");
+    if (evidence.roomFencingToken() != material.material().roomFencingToken()
+        || !evidence.isolatedDomainDbBindingHash().equals(
+            material.admission().isolatedDomainDbBindingHash())) {
+      throw rejected(
+          "TARGET_E2E_EVIDENCE_FENCE_MISMATCH",
+          "durable Evidence fence or isolated database differs from admission");
     }
     var runtimeContext = runtime.current();
     if (!runtimeContext.workflowId().equals(evidence.workflowId())
@@ -72,19 +77,12 @@ public final class TargetE2eEvidenceRoomFinalizationStrategy
         request.agentRunId(), runtimeContext.workflowId(), runtimeContext.workflowRunId(),
         runtimeContext.workflowBuildId(), graph.commandId(), material.material().commandHash(),
         material.material().commandEnvelopeHash(), graph.roomEpoch(), material.material().roomFencingToken());
-    var decision = activation.authorize(authorization);
-    if (decision == null || decision.decision() != TargetE2eFinalizationActivationPort.Decision.ALLOWED
-        || decision.grant() == null) {
-      throw rejected("TARGET_E2E_EVIDENCE_ACTIVATION_DENIED", "Evidence activation is not authorized");
-    }
-    var grant = decision.grant();
-    if (!grant.activationId().equals(material.material().activationId())
-        || !grant.activationManifestHash().equals(material.material().activationManifestHash())
-        || !grant.isolatedDomainDbBindingHash().equals(evidence.isolatedDomainDbBindingHash())
-        || !grant.allowedCaseIds().contains(graph.caseId())
-        || !grant.allowedRoomTypes().contains(RoomType.EVIDENCE)) {
-      throw rejected("TARGET_E2E_EVIDENCE_ACTIVATION_BINDING_MISMATCH", "Evidence activation bindings differ");
-    }
+    var grant = TargetE2eCrossRoomActivationVerifier.requireAuthorized(
+        activation.authorize(authorization),
+        authorization,
+        material.material().activationId(),
+        material.material().activationManifestHash(),
+        material.admission().isolatedDomainDbBindingHash());
     var facts = evidence.manifestFacts(material.material().roomFencingToken(), grant.activationId(), request, result);
     return new PreparedFinalization(material.material().activationManifestHash(), new ReceiptBindings(
         grant.activationId(), graph.tenantSurrogate(), graph.caseId(), RoomType.EVIDENCE, graph.roomEpoch(),
