@@ -136,6 +136,14 @@ const projectionRuntimeMode = computed(() =>
     processProjection.value?.graph_runtime_mode || processProjection.value?.graphRuntimeMode || "",
   ).toUpperCase(),
 );
+const projectionWriterMode = computed(() =>
+  String(
+    processProjection.value?.writer_mode || processProjection.value?.writerMode || "",
+  ).toUpperCase(),
+);
+const projectionVersionPins = computed(() =>
+  processProjection.value?.version_pins || processProjection.value?.versionPins || {},
+);
 const projectionManifestItemCount = computed(() => {
   const count = Number(
     processProjection.value?.assessment_counts?.manifest_item_count ??
@@ -145,20 +153,55 @@ const projectionManifestItemCount = computed(() => {
 });
 const signedSyntheticProjection = computed(() =>
   projectionRuntimeMode.value === "SIGNED_SYNTHETIC_SHADOW" &&
-  String(
-    processProjection.value?.writer_mode || processProjection.value?.writerMode || "",
-  ).toUpperCase() === "SHADOW" &&
+  projectionWriterMode.value === "SHADOW" &&
   processProjection.value?.formal_sink_allowed === false &&
   processProjection.value?.temporal_evidence_allocation_allowed === false &&
   processProjection.value?.real_case_shadow_allowed === false &&
   projectionManifestItemCount.value !== null,
 );
+const targetTemporalProjection = computed(() =>
+  (processProjection.value?.schema_version || processProjection.value?.schemaVersion) ===
+    "evidence-process-projection.v1" &&
+  projectionRuntimeMode.value === "TARGET_E2E_CANDIDATE" &&
+  projectionWriterMode.value === "TEMPORAL" &&
+  processProjection.value?.formal_sink_allowed === false &&
+  processProjection.value?.temporal_evidence_allocation_allowed === true &&
+  processProjection.value?.real_case_shadow_allowed === false &&
+  projectionManifestItemCount.value !== null &&
+  Boolean(projectionVersionPins.value?.workflow_build_id) &&
+  projectionVersionPins.value?.graph_version === "target-e2e-graph.2026-07-27.1" &&
+  projectionVersionPins.value?.checkpoint_schema_version === "target-e2e-checkpoint.v1" &&
+  projectionVersionPins.value?.state_schema_version === "evidence-graph-state.v2" &&
+  projectionVersionPins.value?.prompt_version === "all-rooms-prompt.target-e2e.v1" &&
+  projectionVersionPins.value?.model_profile_id === "target-e2e.contract-blocked" &&
+  projectionVersionPins.value?.assessment_output_schema_version ===
+    "evidence-item-assessment.v1" &&
+  projectionVersionPins.value?.terminal_output_schema_version ===
+    "evidence-batch-proposal.v1" &&
+  projectionVersionPins.value?.policy_version === "all-rooms-policy.target-e2e.v1" &&
+  projectionVersionPins.value?.guardrail_version === "all-rooms-guardrail.target-e2e.v1" &&
+  projectionVersionPins.value?.tool_policy_version === "tools.none.v1",
+);
+const targetProjectionClaimed = computed(() =>
+  projectionWriterMode.value === "TEMPORAL" ||
+  projectionRuntimeMode.value === "TARGET_E2E_CANDIDATE",
+);
 const projectionDisplay = computed(() => {
   if (!processProjection.value) return null;
+  if (targetTemporalProjection.value) {
+    return {
+      kind: "TARGET_E2E_CANDIDATE",
+      count: projectionManifestItemCount.value,
+      countLabel: "项证据",
+      label: "Temporal 证据流程",
+      detail: "当前状态来自 Java 持久化投影；页面只提交命令，不在客户端推断或推进流程。",
+    };
+  }
   if (signedSyntheticProjection.value) {
     return {
       kind: "SIGNED_SYNTHETIC_SHADOW",
       count: projectionManifestItemCount.value,
+      countLabel: "项合成证据",
       label: "签名合成核验",
       detail: "仅用于封闭合成验证，不会改变公开举证上限或写入正式裁决。",
     };
@@ -181,7 +224,9 @@ const projectionDisplay = computed(() => {
 const projectionWriteLocked = computed(() =>
   projectionReadOnly.value ||
   projectionState.value === "FAILED" ||
-  projectionRecoveryState.value !== "NONE",
+  projectionRecoveryState.value !== "NONE" ||
+  (targetProjectionClaimed.value &&
+    (!targetTemporalProjection.value || projectionState.value !== "AVAILABLE")),
 );
 const role = computed(() => props.viewerRole || actor.role);
 const demoActorIds = {
@@ -2134,7 +2179,7 @@ onBeforeUnmount(() => {
             >
               <span class="evidence-process-projection__label">{{ projectionDisplay.label }}</span>
               <strong v-if="projectionDisplay.count !== null" data-evidence-synthetic-count>
-                {{ projectionDisplay.count }} 项合成证据
+                {{ projectionDisplay.count }} {{ projectionDisplay.countLabel }}
               </strong>
               <p>{{ projectionDisplay.detail }}</p>
               <small v-if="projectionRecoveryState !== 'NONE'" data-evidence-recovery-status>

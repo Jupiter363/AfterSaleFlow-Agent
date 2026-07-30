@@ -77,6 +77,7 @@ contracts:
     max_serialized_bytes: 32768
     accepts: [evidence-process-projection.v1]
     rejects_unknown_future: true
+runtime_gate_scope: PHASE5_DEFAULT_AND_SIGNED_SYNTHETIC_SHADOW
 runtime_gate:
   graph_runtime_default: DISABLED
   allowed_modes: [DISABLED, SIGNED_SYNTHETIC_SHADOW]
@@ -231,6 +232,22 @@ projection_compatibility:
     active_graph_run: null
     authorization_material_exposed: false
     write_behavior_changed: false
+  target_e2e_temporal:
+    scope: ACTIVATION_BOUND_TARGET_E2E_ONLY
+    execution_lane: TARGET_E2E_CANDIDATE
+    writer_mode: TEMPORAL
+    graph_runtime_mode: TARGET_E2E_CANDIDATE
+    activation_case_scope: persisted_target_e2e_case_reservation
+    temporal_evidence_allocation_allowed: true
+    formal_graph_sink_allowed: false
+    real_case_shadow_allowed: false
+    graph_version: target-e2e-graph.2026-07-27.1
+    checkpoint_schema_version: target-e2e-checkpoint.v1
+    prompt_version: all-rooms-prompt.target-e2e.v1
+    model_profile_id: target-e2e.contract-blocked
+    policy_version: all-rooms-policy.target-e2e.v1
+    guardrail_version: all-rooms-guardrail.target-e2e.v1
+    tool_policy_version: tools.none.v1
 governance:
   closed_root_schema_set: true
   pre_entry_in_place_correction:

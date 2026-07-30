@@ -125,6 +125,14 @@ public final class HttpTargetE2EGraphProposalClient implements TargetE2EGraphPro
       throw TargetE2EGraphClientException.remote(
           code, retryable, "Python rejected target Graph execution");
     }
+    if (terminal.eventType() == StreamEventType.ATTEMPT_ABORTED) {
+      String reasonCode = terminal.payload().reasonCode();
+      if (reasonCode == null || reasonCode.isBlank()) {
+        throw TargetE2EGraphClientException.protocol(
+            "target Graph attempt-aborted terminal is incomplete", null);
+      }
+      throw TargetE2EGraphClientException.attemptAborted(reasonCode);
+    }
     if (terminal.eventType() != StreamEventType.FINAL) {
       throw TargetE2EGraphClientException.protocol(
           "target Graph command did not produce a final proposal", null);

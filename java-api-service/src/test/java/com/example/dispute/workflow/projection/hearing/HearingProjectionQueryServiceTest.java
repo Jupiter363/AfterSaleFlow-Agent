@@ -10,6 +10,8 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import com.example.dispute.common.api.ErrorCode;
+import com.example.dispute.common.exception.BusinessException;
 import com.example.dispute.common.exception.ForbiddenException;
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
@@ -209,8 +211,15 @@ class HearingProjectionQueryServiceTest {
                                 service.get(
                                         CASE_ID,
                                         new AuthenticatedActor("merchant-1", ActorRole.MERCHANT)))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("not initialized");
+                .isInstanceOfSatisfying(
+                        BusinessException.class,
+                        exception -> {
+                            assertThat(exception.errorCode())
+                                    .isEqualTo(ErrorCode.CASE_STATUS_INVALID);
+                            assertThat(exception.getMessage())
+                                    .isEqualTo("hearing flow is not initialized");
+                            assertThat(exception.details()).containsEntry("case_id", CASE_ID);
+                        });
 
         assertNoWritesOrWriteLocks();
     }

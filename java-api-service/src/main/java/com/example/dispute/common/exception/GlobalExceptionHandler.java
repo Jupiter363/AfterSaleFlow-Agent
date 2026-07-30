@@ -18,13 +18,14 @@ import java.util.UUID;
 import java.util.LinkedHashMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.MissingRequestHeaderException;
-import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.context.request.async.AsyncRequestNotUsableException;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 // 所属模块：【后端公共边界 / 核心业务层】类型「GlobalExceptionHandler」。
@@ -100,6 +101,7 @@ public class GlobalExceptionHandler {
         MissingRequestHeaderException.class,
         ConstraintViolationException.class,
         HttpMessageNotReadableException.class,
+        MethodArgumentTypeMismatchException.class,
         IllegalArgumentException.class
     })
     public ResponseEntity<ApiResponse<Void>> handleInvalidRequest(
@@ -222,6 +224,9 @@ public class GlobalExceptionHandler {
         }
         if (exception instanceof ConstraintViolationException) {
             return "request constraint violated";
+        }
+        if (exception instanceof MethodArgumentTypeMismatchException) {
+            return "request parameter type mismatch";
         }
         if (exception instanceof IllegalArgumentException) {
             return exception.getMessage() == null

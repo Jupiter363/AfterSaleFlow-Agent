@@ -37,13 +37,28 @@ export const caseApi = {
     actor,
     caseId,
     file,
-    { evidenceType, sourceType, visibility },
+    {
+      evidenceType,
+      sourceType,
+      visibility,
+      claimedFact,
+      truthAttested,
+      modelProcessingAuthorized = false,
+      occurredAt,
+    },
   ) => {
     const body = new FormData();
     body.append("file", file);
     body.append("evidence_type", evidenceType);
     body.append("source_type", sourceType);
     body.append("visibility", visibility);
+    body.append("claimed_fact", claimedFact);
+    body.append("truth_attested", String(truthAttested));
+    body.append(
+      "model_processing_authorized",
+      String(modelProcessingAuthorized),
+    );
+    if (occurredAt) body.append("occurred_at", occurredAt);
     return apiRequest(`/disputes/${caseId}/evidence`, actor, {
       method: "POST",
       body,

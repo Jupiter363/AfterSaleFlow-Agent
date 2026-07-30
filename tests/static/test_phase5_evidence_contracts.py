@@ -85,6 +85,7 @@ EXPECTED_VALID_FIXTURES = {
     "evidence-finalization-receipt-valid.json",
     "evidence-item-proposal-valid.json",
     "evidence-process-projection-legacy-unavailable-valid.json",
+    "evidence-process-projection-target-temporal-valid.json",
     "evidence-process-projection-valid.json",
     "evidence-terminal-proposal-valid.json",
 }
@@ -1162,6 +1163,50 @@ def test_projection_party_receipts_and_ready_coverage_fail_closed() -> None:
     missing_proposal["terminal_proposal"] = None
     with pytest.raises(ValueError, match="ready to freeze"):
         _validate_projection_semantics(missing_proposal)
+
+
+def test_target_projection_profile_is_bidirectionally_closed() -> None:
+    validator = _validator("evidence-process-projection.schema.json")
+    target = _load_json(
+        VALID_ROOT / "evidence-process-projection-target-temporal-valid.json"
+    )
+    assert not list(validator.iter_errors(target))
+    assert target["viewer_scope_hash"] == _canonical_hash(
+        {
+            "actor_id": target["viewer_actor_id"],
+            "actor_role": target["viewer_actor_role"],
+            "audience": target["audience"],
+        }
+    )
+
+    mutations = (
+        lambda value: value.update(writer_mode="SHADOW"),
+        lambda value: value.update(graph_runtime_mode="SIGNED_SYNTHETIC_SHADOW"),
+        lambda value: value.update(temporal_evidence_allocation_allowed=False),
+        lambda value: value.update(formal_sink_allowed=True),
+        lambda value: value.update(real_case_shadow_allowed=True),
+        lambda value: value["version_pins"].update(
+            graph_version="target-e2e-graph.drifted"
+        ),
+        lambda value: value["version_pins"].update(model_profile_id="model.drifted"),
+        lambda value: value["active_graph_run"].update(
+            checkpoint_schema_version="target-e2e-checkpoint.drifted"
+        ),
+    )
+    for mutate in mutations:
+        invalid = copy.deepcopy(target)
+        mutate(invalid)
+        assert list(validator.iter_errors(invalid))
+
+    shadow_disabled = _load_json(VALID_ROOT / "evidence-process-projection-valid.json")
+    shadow_disabled["graph_runtime_mode"] = "DISABLED"
+    assert list(validator.iter_errors(shadow_disabled))
+
+    legacy_available = _load_json(
+        VALID_ROOT / "evidence-process-projection-legacy-unavailable-valid.json"
+    )
+    legacy_available["projection_state"] = "AVAILABLE"
+    assert list(validator.iter_errors(legacy_available))
 
 
 def test_projection_privacy_history_terminal_and_recovery_states_fail_closed() -> None:

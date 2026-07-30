@@ -75,13 +75,23 @@ public record EvidenceProcessProjectionView(
         requireNullableIdentifier(roomId, "roomId");
         requireNonNegative(roomEpoch, "roomEpoch");
         requireNonNegative(fencingToken, "fencingToken");
-        requireEnum(writerMode, Set.of("LEGACY", "SHADOW"), "writerMode");
+        requireEnum(writerMode, Set.of("LEGACY", "SHADOW", "TEMPORAL"), "writerMode");
         requireEnum(
                 graphRuntimeMode,
-                Set.of("DISABLED", "SIGNED_SYNTHETIC_SHADOW"),
+                Set.of("DISABLED", "SIGNED_SYNTHETIC_SHADOW", "TARGET_E2E_CANDIDATE"),
                 "graphRuntimeMode");
-        if (formalSinkAllowed || temporalEvidenceAllocationAllowed || realCaseShadowAllowed) {
-            throw new IllegalArgumentException("Evidence projection authority flags must be false");
+        if ("TEMPORAL".equals(writerMode)) {
+            if (formalSinkAllowed
+                    || !temporalEvidenceAllocationAllowed
+                    || realCaseShadowAllowed) {
+                throw new IllegalArgumentException(
+                        "target Evidence projection authority flags are invalid");
+            }
+        } else if (formalSinkAllowed
+                || temporalEvidenceAllocationAllowed
+                || realCaseShadowAllowed) {
+            throw new IllegalArgumentException(
+                    "legacy and shadow Evidence projection authority flags must be false");
         }
         requireIdentifier(viewerActorId, "viewerActorId");
         requireViewerRole(viewerActorRole, "viewerActorRole");
@@ -222,6 +232,20 @@ public record EvidenceProcessProjectionView(
                     || activeGraphRun != null
                     || pins.hasRuntimePins()) {
                 throw new IllegalArgumentException("legacy projection must remain unavailable");
+            }
+            return;
+        }
+        if ("TEMPORAL".equals(writerMode)) {
+            if (!"TARGET_E2E_CANDIDATE".equals(graphRuntimeMode)
+                    || roomId == null
+                    || fencingToken < 1
+                    || !pins.hasTargetComposite()
+                    || (activeGraphRun != null
+                            && (!pins.graphVersion().equals(activeGraphRun.graphVersion())
+                                    || !pins.checkpointSchemaVersion()
+                                            .equals(activeGraphRun.checkpointSchemaVersion())))) {
+                throw new IllegalArgumentException(
+                        "target Evidence projection authority is invalid");
             }
             return;
         }
@@ -541,11 +565,73 @@ public record EvidenceProcessProjectionView(
                     "evidence-tools.synthetic.v1");
         }
 
+        public static VersionPins target(
+                String workflowBuildId,
+                String graphVersion,
+                String checkpointSchemaVersion,
+                String promptVersion,
+                String modelProfileId,
+                String policyVersion,
+                String guardrailVersion,
+                String toolPolicyVersion) {
+            requireEquals(
+                    graphVersion,
+                    "target-e2e-graph.2026-07-27.1",
+                    "target graphVersion");
+            requireEquals(
+                    checkpointSchemaVersion,
+                    "target-e2e-checkpoint.v1",
+                    "target checkpointSchemaVersion");
+            requireEquals(
+                    promptVersion,
+                    "all-rooms-prompt.target-e2e.v1",
+                    "target promptVersion");
+            requireEquals(
+                    modelProfileId,
+                    "target-e2e.contract-blocked",
+                    "target modelProfileId");
+            requireEquals(
+                    policyVersion,
+                    "all-rooms-policy.target-e2e.v1",
+                    "target policyVersion");
+            requireEquals(
+                    guardrailVersion,
+                    "all-rooms-guardrail.target-e2e.v1",
+                    "target guardrailVersion");
+            requireEquals(toolPolicyVersion, "tools.none.v1", "target toolPolicyVersion");
+            return new VersionPins(
+                    workflowBuildId,
+                    graphVersion,
+                    checkpointSchemaVersion,
+                    "evidence-graph-state.v2",
+                    promptVersion,
+                    modelProfileId,
+                    "evidence-item-assessment.v1",
+                    "evidence-batch-proposal.v1",
+                    policyVersion,
+                    guardrailVersion,
+                    toolPolicyVersion);
+        }
+
         boolean hasRuntimePins() {
             return workflowBuildId != null
                     || graphVersion != null
                     || checkpointSchemaVersion != null
                     || stateSchemaVersion != null;
+        }
+
+        boolean hasTargetComposite() {
+            return hasRuntimePins()
+                    && "target-e2e-graph.2026-07-27.1".equals(graphVersion)
+                    && "target-e2e-checkpoint.v1".equals(checkpointSchemaVersion)
+                    && "evidence-graph-state.v2".equals(stateSchemaVersion)
+                    && "all-rooms-prompt.target-e2e.v1".equals(promptVersion)
+                    && "target-e2e.contract-blocked".equals(modelProfileId)
+                    && "evidence-item-assessment.v1".equals(assessmentOutputSchemaVersion)
+                    && "evidence-batch-proposal.v1".equals(terminalOutputSchemaVersion)
+                    && "all-rooms-policy.target-e2e.v1".equals(policyVersion)
+                    && "all-rooms-guardrail.target-e2e.v1".equals(guardrailVersion)
+                    && "tools.none.v1".equals(toolPolicyVersion);
         }
     }
 

@@ -10,6 +10,8 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import com.example.dispute.common.api.ErrorCode;
+import com.example.dispute.common.exception.BusinessException;
 import com.example.dispute.common.exception.GlobalExceptionHandler;
 import com.example.dispute.common.trace.TraceIdFilter;
 import com.example.dispute.config.CommonConfiguration;
@@ -90,6 +92,27 @@ class HearingFlowControllerTest {
 
         verify(projectionQueryService).completeGate(eq("CASE_test"), any());
         verifyNoInteractions(runtimeService);
+    }
+
+    @Test
+    void getMapsAnUninitializedHearingProjectionToAStableConflict() throws Exception {
+        when(projectionQueryService.get(eq("CASE_test"), any()))
+                .thenThrow(
+                        new BusinessException(
+                                ErrorCode.CASE_STATUS_INVALID,
+                                "hearing flow is not initialized",
+                                Map.of("case_id", "CASE_test")));
+
+        mockMvc.perform(
+                        get("/api/disputes/CASE_test/hearing")
+                                .header(HeaderAuthenticationFilter.USER_ID_HEADER, "user-local")
+                                .header(HeaderAuthenticationFilter.ROLE_HEADER, "USER"))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value("CASE_STATUS_INVALID"))
+                .andExpect(jsonPath("$.message").value("hearing flow is not initialized"))
+                .andExpect(jsonPath("$.details.case_id").value("CASE_test"));
+
+        verifyNoInteractions(runtimeService, settlementService);
     }
 
     private static HearingFlowView flow() {

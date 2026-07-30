@@ -116,6 +116,8 @@ class EvidenceV2ContractFixtureTest {
                     "2945f7364bce768063509edf28972cad140bddec3d894170f5818e88853ecb23",
                     "evidence-process-projection-legacy-unavailable-valid.json",
                     "ffbd340481fd1647afe2882308c24292d7b4e284e28adb114fce16f785002056",
+                    "evidence-process-projection-target-temporal-valid.json",
+                    "47b505669b2c9214b05af9894f6d788f068a592ef3caa5ecdbe105d94dc0d8cf",
                     "evidence-process-projection-valid.json",
                     "2f1037416b62ae524ec7882eeb2e57bfcf773a2267e09449e77cbf82bf170908",
                     "evidence-terminal-proposal-valid.json",
@@ -276,6 +278,8 @@ class EvidenceV2ContractFixtureTest {
                         .asText())
                 .isEqualTo("assessment_output_schema_version");
 
+        assertThat(matrix.required("runtime_gate_scope").asText())
+                .isEqualTo("PHASE5_DEFAULT_AND_SIGNED_SYNTHETIC_SHADOW");
         JsonNode runtimeGate = matrix.required("runtime_gate");
         assertThat(runtimeGate.required("public_submission_max").intValue()).isEqualTo(50);
         List<Integer> signedSyntheticCounts = new ArrayList<>();
@@ -287,6 +291,18 @@ class EvidenceV2ContractFixtureTest {
         assertThat(runtimeGate.required("real_case_shadow_allowed").asBoolean()).isFalse();
         assertThat(runtimeGate.required("temporal_evidence_allocation_allowed").asBoolean())
                 .isFalse();
+        JsonNode targetProfile =
+                matrix.required("projection_compatibility").required("target_e2e_temporal");
+        assertThat(targetProfile.required("scope").asText())
+                .isEqualTo("ACTIVATION_BOUND_TARGET_E2E_ONLY");
+        assertThat(targetProfile.required("writer_mode").asText()).isEqualTo("TEMPORAL");
+        assertThat(targetProfile.required("graph_runtime_mode").asText())
+                .isEqualTo("TARGET_E2E_CANDIDATE");
+        assertThat(targetProfile.required("activation_case_scope").asText())
+                .isEqualTo("persisted_target_e2e_case_reservation");
+        assertThat(targetProfile.required("temporal_evidence_allocation_allowed").asBoolean())
+                .isTrue();
+        assertThat(targetProfile.required("formal_graph_sink_allowed").asBoolean()).isFalse();
     }
 
     @ParameterizedTest(name = "{0}")

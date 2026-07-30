@@ -122,6 +122,12 @@ public final class TargetE2EAgentGraphCommandClient implements AgentGraphCommand
           progress.lastSequenceNo,
           progress.publicOutputEmitted,
           failure);
+      case CREATE_NEXT_ATTEMPT -> AgentRunExecutionException.createNextAttempt(
+          failure.errorCode(),
+          "target Graph durably aborted the current attempt",
+          progress.lastSequenceNo,
+          progress.publicOutputEmitted,
+          failure);
       case RECONCILE_SEALED_COMMAND -> AgentRunExecutionException.reconcileTerminal(
           failure.errorCode(),
           "target Graph requires terminal reconciliation of the sealed command",

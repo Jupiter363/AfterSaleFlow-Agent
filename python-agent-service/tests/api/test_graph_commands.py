@@ -21,7 +21,11 @@ from app.api.graph_commands import (
     _stream_ndjson,
     create_graph_commands_router,
 )
-from app.contracts.v1.codec import ContractCodec, canonical_sha256_omitting
+from app.contracts.v1.codec import (
+    ContractCodec,
+    canonical_sha256,
+    canonical_sha256_omitting,
+)
 from app.contracts.v1.models import (
     AgentStreamEvent,
     AgentStreamPayload,
@@ -34,6 +38,11 @@ from app.graph_runtime.errors import (
     GraphNewAgentAttemptRequiredError,
 )
 from app.graph_runtime.identity import ActorScopeBinding, RoomType, ThreadIdentity
+from app.graph_runtime.target_e2e import (
+    TargetE2EGraphCommandEnvelope,
+    VerifiedTargetE2EInvocation,
+    target_e2e_command_hash,
+)
 from app.security.invocation_envelope import (
     InvocationEnvelopeVerifier,
     ResolvedVerificationKey,
@@ -128,6 +137,20 @@ class ThreadResolver:
             graph_version=command.graph_version,
             checkpoint_schema_version=command.checkpoint_schema_version,
         )
+
+
+class TargetVerifier:
+    def __init__(
+        self,
+        envelope: TargetE2EGraphCommandEnvelope,
+        verified: VerifiedTargetE2EInvocation,
+    ) -> None:
+        self.envelope = envelope
+        self.verified = verified
+
+    def verify_envelope(self, **kwargs: Any) -> VerifiedTargetE2EInvocation:
+        assert kwargs["envelope"] == self.envelope
+        return self.verified
 
 
 def _command() -> tuple[RoomGraphCommand, dict[str, Any]]:
@@ -227,6 +250,54 @@ def _client(
         )
     )
     return TestClient(app, raise_server_exceptions=False)
+
+
+def _target_client(
+    *,
+    envelope: TargetE2EGraphCommandEnvelope,
+    service: FakeStreamService,
+) -> TestClient:
+    command = envelope.command
+    verified = VerifiedTargetE2EInvocation(
+        claims=object(),  # type: ignore[arg-type]
+        key_id=KID,
+        request_hash=command.request_hash,
+        transport_certificate_sha256="c" * 64,
+        authority=object(),  # type: ignore[arg-type]
+        command_hash=envelope.command_hash,
+        command_envelope_hash=envelope.command_envelope_hash,
+        room_fencing_token=envelope.room_fencing_token,
+    )
+    app = FastAPI()
+    app.include_router(
+        create_graph_commands_router(
+            GraphCommandEndpointDependencies(
+                mode="TARGET_E2E_CANDIDATE",
+                codec=ContractCodec(CONTRACT_ROOT),
+                transport_identity_resolver=IdentityResolver(),
+                envelope_verifier=object(),  # type: ignore[arg-type]
+                thread_identity_resolver=ThreadResolver(),
+                stream_service=service,
+                ready=lambda: True,
+                target_e2e_envelope_verifier=TargetVerifier(envelope, verified),
+            )
+        )
+    )
+    return TestClient(app, raise_server_exceptions=False)
+
+
+def _target_envelope(command: RoomGraphCommand) -> TargetE2EGraphCommandEnvelope:
+    values = {
+        "schema_version": "target-e2e-graph-command-envelope.v1",
+        "execution_lane": "TARGET_E2E_CANDIDATE",
+        "activation_id": "p9act.v1." + ("a" * 32),
+        "room_fencing_token": 7,
+        "command_hash": target_e2e_command_hash(command),
+        "command": command.model_dump(mode="json", exclude_none=True),
+    }
+    return TargetE2EGraphCommandEnvelope.model_validate(
+        {**values, "command_envelope_hash": canonical_sha256(values)}
+    )
 
 
 def test_signed_command_streams_only_validated_agent_stream_v2_events() -> None:
@@ -617,14 +688,29 @@ def test_attempt_aborted_is_a_valid_attempt_terminal_event() -> None:
 
 
 @pytest.mark.parametrize(
-    "failure",
+    ("failure", "terminal_type", "terminal_payload"),
     [
-        GraphLeaseLostError("private lease detail"),
-        RuntimeError("private provider response"),
+        (
+            GraphLeaseLostError("private lease detail"),
+            "attempt_aborted",
+            {"reason_code": "GRAPH_LEASE_LOST"},
+        ),
+        (
+            GraphContractError("private binding detail"),
+            "error",
+            {"error_code": "GRAPH_CONTRACT_REJECTED", "retryable": False},
+        ),
+        (
+            RuntimeError("private provider response"),
+            "error",
+            {"error_code": "GRAPH_STREAM_INTERNAL_ERROR", "retryable": False},
+        ),
     ],
 )
-def test_failure_after_headers_defers_terminal_authority_to_java_and_closes_iterator(
+def test_failure_after_headers_emits_one_safe_terminal_event_and_closes_iterator(
     failure: Exception,
+    terminal_type: str,
+    terminal_payload: dict[str, Any],
 ) -> None:
     command, instance = _command()
     private_key = ec.generate_private_key(ec.SECP256R1())
@@ -645,8 +731,48 @@ def test_failure_after_headers_defers_terminal_authority_to_java_and_closes_iter
 
     assert response.status_code == 200
     events = [json.loads(line) for line in response.text.splitlines()]
-    assert [event["event_type"] for event in events] == ["attempt_started"]
+    assert [(event["sequence_no"], event["event_type"]) for event in events] == [
+        (0, "attempt_started"),
+        (1, terminal_type),
+    ]
+    assert events[-1]["payload"] == terminal_payload
+    if events[-1]["event_type"] == "error":
+        assert events[-1]["payload"]["retryable"] is False
+    decoded = ContractCodec(CONTRACT_ROOT).decode(
+        "agent-stream-event.schema.json",
+        json.dumps(events[-1], separators=(",", ":")),
+    )
+    assert isinstance(decoded, AgentStreamEvent)
     assert "private" not in response.text
+    assert service.closed is True
+
+
+def test_target_e2e_retryable_runtime_failure_requests_a_new_attempt_in_band() -> None:
+    command, _ = _command()
+    envelope = _target_envelope(command)
+    service = FakeStreamService(
+        (_event(command, "attempt_started", 0),),
+        failure_after=GraphLeaseLostError("private target lease detail"),
+    )
+    client = _target_client(envelope=envelope, service=service)
+
+    response = client.post(
+        "/internal/graphs/target-e2e/commands/stream",
+        content=envelope.model_dump_json(),
+        headers={
+            "Authorization": "Bearer a.b.c",
+            "Content-Type": "application/json",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["x-graph-execution-lane"] == "TARGET_E2E_CANDIDATE"
+    events = [json.loads(line) for line in response.text.splitlines()]
+    assert [(event["sequence_no"], event["event_type"]) for event in events] == [
+        (0, "attempt_started"),
+        (1, "attempt_aborted"),
+    ]
+    assert events[-1]["payload"] == {"reason_code": "GRAPH_LEASE_LOST"}
     assert service.closed is True
 
 
@@ -665,7 +791,7 @@ def test_failure_after_headers_defers_terminal_authority_to_java_and_closes_iter
         ),
     ],
 )
-def test_truncated_extra_terminal_and_gapped_streams_fail_in_band_without_final(
+def test_truncated_extra_terminal_and_gapped_streams_end_with_one_protocol_error(
     events: Any,
 ) -> None:
     command, instance = _command()
@@ -684,7 +810,14 @@ def test_truncated_extra_terminal_and_gapped_streams_fail_in_band_without_final(
 
     assert response.status_code == 200
     decoded = [json.loads(line) for line in response.text.splitlines()]
-    assert [event["event_type"] for event in decoded] == ["attempt_started"]
+    assert [(event["sequence_no"], event["event_type"]) for event in decoded] == [
+        (0, "attempt_started"),
+        (1, "error"),
+    ]
+    assert decoded[-1]["payload"] == {
+        "error_code": "GRAPH_STREAM_PROTOCOL_REJECTED",
+        "retryable": False,
+    }
     assert service.closed is True
 
 
@@ -776,7 +909,14 @@ def test_python_attempt_reset_is_never_forwarded_to_java() -> None:
 
     assert response.status_code == 200
     events = [json.loads(line) for line in response.text.splitlines()]
-    assert [event["event_type"] for event in events] == ["attempt_started"]
+    assert [(event["sequence_no"], event["event_type"]) for event in events] == [
+        (0, "attempt_started"),
+        (1, "error"),
+    ]
+    assert events[-1]["payload"] == {
+        "error_code": "GRAPH_STREAM_PROTOCOL_REJECTED",
+        "retryable": False,
+    }
     assert service.closed is True
 
 

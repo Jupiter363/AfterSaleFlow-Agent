@@ -8,6 +8,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.dispute.workflow.activity.agent.AgentRunCancellationToken;
 import com.example.dispute.workflow.contract.v1.AgentStreamEvent;
+import com.example.dispute.workflow.contract.v1.ContractTypes.StreamEventType;
 import com.example.dispute.workflow.infrastructure.agent.GraphCommandHttpTransport;
 import com.example.dispute.workflow.infrastructure.agent.GraphReconciliationHttpTransport;
 import com.example.dispute.workflow.infrastructure.agent.GraphTransportBundle;
@@ -118,6 +119,57 @@ class HttpTargetE2EGraphProposalClientTest {
     assertThat(reconciliationTransport.requests.getFirst().maximumResponseBytes())
         .isEqualTo(131_072);
     assertThat(events).hasSize(4);
+  }
+
+  @Test
+  void publishesAttemptAbortedTerminalBeforeRequiringTheNextAgentAttempt() {
+    var codec = TargetE2EGraphTestFixtures.codec();
+    TargetE2ESealedGraphCommand sealed =
+        codec.sealCommand(
+            ACTIVATION_ID,
+            7L,
+            TargetE2EGraphTestFixtures.command(),
+            REGISTRY_BINDING,
+            (envelope, binding) -> credential());
+    GraphTransportSecurityProof proof = mutualTlsProof();
+    GraphCommandHttpTransport aborted =
+        new FakeCommandTransport("0".repeat(64), proof) {
+          @Override
+          public void stream(
+              Request request, AgentRunCancellationToken cancellationToken, Listener listener) {
+            listener.onResponse(
+                successHead(request.uri(), sealed, sealed.envelope().activationId()));
+            listener.onLine(
+                event(sealed, 0, "attempt_started", "{\"node\":\"intake.reason\"}"));
+            listener.onLine(
+                event(
+                    sealed,
+                    1,
+                    "attempt_aborted",
+                    "{\"reason_code\":\"GRAPH_LEASE_LOST\"}"));
+          }
+        };
+    FakeReconciliationTransport reconciliation =
+        new FakeReconciliationTransport("{}".getBytes(StandardCharsets.UTF_8), proof);
+    var client = proposalClient(aborted, reconciliation, proof, codec);
+    List<AgentStreamEvent> events = new ArrayList<>();
+
+    assertThatThrownBy(
+            () ->
+                client.execute(
+                    sealed, Map.of(), events::add, new AgentRunCancellationToken()))
+        .isInstanceOfSatisfying(
+            TargetE2EGraphClientException.class,
+            failure -> {
+              assertThat(failure.errorCode()).isEqualTo("GRAPH_LEASE_LOST");
+              assertThat(failure.recoveryAction())
+                  .isEqualTo(TargetE2EGraphClientException.RecoveryAction.CREATE_NEXT_ATTEMPT);
+            });
+
+    assertThat(events).extracting(AgentStreamEvent::eventType)
+        .containsExactly(StreamEventType.ATTEMPT_STARTED, StreamEventType.ATTEMPT_ABORTED);
+    assertThat(events.getLast().payload().reasonCode()).isEqualTo("GRAPH_LEASE_LOST");
+    assertThat(reconciliation.requests).isEmpty();
   }
 
   @Test

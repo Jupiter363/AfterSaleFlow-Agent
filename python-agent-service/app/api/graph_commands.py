@@ -5,6 +5,7 @@ import logging
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from email.message import Message
 from typing import Any, Protocol, cast
 
@@ -887,15 +888,75 @@ async def _stream_ndjson(
             yield encoded
     except GraphRuntimeError as error:
         _log_safe_failure("graph stream runtime", error)
-        return
+        if error.retryable:
+            yield _encode_terminal_attempt_aborted(
+                codec,
+                validator,
+                reason_code=error.code,
+            )
+        else:
+            yield _encode_terminal_error(
+                codec,
+                validator,
+                error_code=error.code,
+            )
     except (AgentStreamProtocolError, TypeError, ValueError) as error:
         _log_safe_failure("graph stream protocol", error)
-        return
+        yield _encode_terminal_error(
+            codec,
+            validator,
+            error_code="GRAPH_STREAM_PROTOCOL_REJECTED",
+        )
     except Exception as error:
         _log_safe_failure("graph stream iteration", error)
-        return
+        yield _encode_terminal_error(
+            codec,
+            validator,
+            error_code="GRAPH_STREAM_INTERNAL_ERROR",
+        )
     finally:
         await _close_iterator_safely(iterator)
+
+
+def _encode_terminal_error(
+    codec: ContractCodec,
+    validator: AgentStreamProtocolValidator,
+    *,
+    error_code: str,
+) -> bytes:
+    event = AgentStreamEvent(
+        schema_version="agent-stream.v2",
+        run_id=validator.run_id,
+        attempt_id=validator.attempt_id,
+        sequence_no=validator.last_sequence + 1,
+        event_type="error",
+        audience=validator.audience,
+        occurred_at=datetime.now(timezone.utc),
+        payload=AgentStreamPayload(
+            error_code=error_code,
+            retryable=False,
+        ),
+    )
+    return _encode_event(codec, validator, event)
+
+
+def _encode_terminal_attempt_aborted(
+    codec: ContractCodec,
+    validator: AgentStreamProtocolValidator,
+    *,
+    reason_code: str,
+) -> bytes:
+    event = AgentStreamEvent(
+        schema_version="agent-stream.v2",
+        run_id=validator.run_id,
+        attempt_id=validator.attempt_id,
+        sequence_no=validator.last_sequence + 1,
+        event_type="attempt_aborted",
+        audience=validator.audience,
+        occurred_at=datetime.now(timezone.utc),
+        payload=AgentStreamPayload(reason_code=reason_code),
+    )
+    return _encode_event(codec, validator, event)
 
 
 def _encode_event(

@@ -1,5 +1,7 @@
 package com.example.dispute.hearing.application.query;
 
+import com.example.dispute.common.api.ErrorCode;
+import com.example.dispute.common.exception.BusinessException;
 import com.example.dispute.common.exception.ForbiddenException;
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
@@ -90,7 +92,11 @@ public class HearingProjectionQueryService {
                 instanceRepository
                         .findByCaseId(requiredCaseId)
                         .orElseThrow(
-                                () -> new IllegalStateException("hearing flow is not initialized"));
+                                () ->
+                                        new BusinessException(
+                                                ErrorCode.CASE_STATUS_INVALID,
+                                                "hearing flow is not initialized",
+                                                Map.of("case_id", requiredCaseId)));
         HearingFlowStageEntity stage =
                 stageRepository
                         .findByFlowInstanceIdAndStageSequence(

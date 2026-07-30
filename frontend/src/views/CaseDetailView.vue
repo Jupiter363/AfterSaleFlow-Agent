@@ -36,6 +36,9 @@ const upload = reactive({
   evidenceType: "PARTY_STATEMENT",
   sourceType: actorSourceType,
   visibility: "PARTIES",
+  claimedFact: "",
+  truthAttested: false,
+  modelProcessingAuthorized: false,
 });
 const isStaff = computed(() =>
   ["CUSTOMER_SERVICE", "PLATFORM_REVIEWER", "ADMIN"].includes(actor.role),
@@ -89,10 +92,25 @@ async function uploadEvidence() {
     ElMessage.warning("请先选择文件");
     return;
   }
+  const claimedFact = upload.claimedFact.trim();
+  if (claimedFact.length < 5 || claimedFact.length > 1000) {
+    ElMessage.warning("请填写 5 至 1000 个字符的具体证明事实");
+    return;
+  }
+  if (!upload.truthAttested) {
+    ElMessage.warning("请确认所提交证据真实、完整且与证明事实相关");
+    return;
+  }
   try {
-    await caseApi.uploadEvidence(actor, caseId.value, uploadFile.value, upload);
+    await caseApi.uploadEvidence(actor, caseId.value, uploadFile.value, {
+      ...upload,
+      claimedFact,
+    });
     ElMessage.success("证据已上传");
     uploadFile.value = null;
+    upload.claimedFact = "";
+    upload.truthAttested = false;
+    upload.modelProcessingAuthorized = false;
     await load();
     activeTab.value = "evidence";
   } catch (error) {
@@ -177,6 +195,18 @@ onMounted(load);
             >
               <el-button>选择证据</el-button>
             </el-upload>
+            <el-input
+              v-model="upload.claimedFact"
+              aria-label="证据证明事实"
+              maxlength="1000"
+              placeholder="请说明这份材料能够证明的具体事实（至少 5 个字符）"
+            />
+            <el-checkbox v-model="upload.truthAttested">
+              我确认材料真实、完整且与上述事实相关
+            </el-checkbox>
+            <el-checkbox v-model="upload.modelProcessingAuthorized">
+              允许模型在本争议处理中分析该材料
+            </el-checkbox>
             <el-button type="primary" @click="uploadEvidence">上传</el-button>
           </div>
           <el-table :data="dossier?.evidences || []" row-key="id">

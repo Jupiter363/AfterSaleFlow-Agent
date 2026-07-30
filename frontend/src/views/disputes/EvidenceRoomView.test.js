@@ -212,6 +212,43 @@ function signedSyntheticProjection(count, overrides = {}) {
   };
 }
 
+function targetTemporalProjection(count, overrides = {}) {
+  return {
+    schema_version: "evidence-process-projection.v1",
+    projection_state: "AVAILABLE",
+    writer_mode: "TEMPORAL",
+    graph_runtime_mode: "TARGET_E2E_CANDIDATE",
+    formal_sink_allowed: false,
+    temporal_evidence_allocation_allowed: true,
+    real_case_shadow_allowed: false,
+    room_phase: "WAITING_PARTIES",
+    pending_state: "WAITING_PARTY",
+    history_mode: false,
+    assessment_counts: {
+      manifest_item_count: count,
+      completed_count: 0,
+      needs_review_count: 0,
+      failed_count: 0,
+      pending_count: count,
+    },
+    recovery: { state: "NONE" },
+    version_pins: {
+      workflow_build_id: "control-build.991ec9c5",
+      graph_version: "target-e2e-graph.2026-07-27.1",
+      checkpoint_schema_version: "target-e2e-checkpoint.v1",
+      state_schema_version: "evidence-graph-state.v2",
+      prompt_version: "all-rooms-prompt.target-e2e.v1",
+      model_profile_id: "target-e2e.contract-blocked",
+      assessment_output_schema_version: "evidence-item-assessment.v1",
+      terminal_output_schema_version: "evidence-batch-proposal.v1",
+      policy_version: "all-rooms-policy.target-e2e.v1",
+      guardrail_version: "all-rooms-guardrail.target-e2e.v1",
+      tool_policy_version: "tools.none.v1",
+    },
+    ...overrides,
+  };
+}
+
 const initialEvidenceMessages = [
   {
     id: "EVIDENCE_OPENING",
@@ -2422,6 +2459,31 @@ describe("EvidenceRoomView", () => {
     expect(projection.text()).toContain("不会创建图运行");
     expect(projection.find("[data-evidence-synthetic-count]").exists()).toBe(false);
     expect(wrapper.get("[data-open-evidence-upload]").element.disabled).toBe(false);
+  });
+
+  it("renders a target Temporal projection without client-side write selection", async () => {
+    const { wrapper } = await mountView({
+      initialProcessProjection: targetTemporalProjection(1),
+    });
+
+    const projection = wrapper.get("[data-evidence-process-projection]");
+    expect(projection.attributes("data-projection-mode")).toBe("TARGET_E2E_CANDIDATE");
+    expect(projection.attributes("data-projection-count")).toBe("1");
+    expect(projection.text()).toContain("Temporal 证据流程");
+    expect(projection.text()).toContain("1 项证据");
+    expect(projection.text()).toContain("页面只提交命令");
+    expect(wrapper.get("[data-open-evidence-upload]").element.disabled).toBe(false);
+  });
+
+  it("locks target writes when the public target profile is incomplete", async () => {
+    const invalid = targetTemporalProjection(1);
+    invalid.version_pins.graph_version = "target-e2e-graph.drifted";
+    const { wrapper } = await mountView({ initialProcessProjection: invalid });
+
+    expect(wrapper.get("[data-evidence-process-projection]").attributes("data-projection-mode"))
+      .toBe("UNAVAILABLE");
+    expect(wrapper.get("[data-open-evidence-upload]").element.disabled).toBe(true);
+    expect(wrapper.get("[data-complete-evidence]").element.disabled).toBe(true);
   });
 
   it("fails closed for recovery and history projections without rendering private authority references", async () => {

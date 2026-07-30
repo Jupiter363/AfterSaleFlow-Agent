@@ -30,6 +30,7 @@ import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.http.MediaType;
 import org.springframework.http.HttpMethod;
@@ -153,6 +154,16 @@ class GlobalExceptionHandlerTest {
                 .andExpect(jsonPath("$.details.fields.orderId").value("must not be blank"));
     }
 
+    @Test
+    void mapsInvalidEnumQueryParameterToInvalidArgument() throws Exception {
+        mockMvc.perform(get("/test/enum").queryParam("status", "NOT_A_STATUS"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_ARGUMENT"))
+                .andExpect(jsonPath("$.message").value("request validation failed"))
+                .andExpect(jsonPath("$.details.reason")
+                        .value("request parameter type mismatch"));
+    }
+
     // 所属模块：【后端公共边界 / 自动化测试层】「GlobalExceptionHandlerTest.treatsDisconnectedSseClientsAsCompletedStreams()」。
     // 具体功能：「GlobalExceptionHandlerTest.treatsDisconnectedSseClientsAsCompletedStreams()」：复现“核对完整业务行为（场景方法「treatsDisconnectedSseClientsAsCompletedStreams」）”场景：驱动 「appender.start」、「logger.addAppender」、「mockMvc.perform」、「result.getResponse」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「ERROR」。
     // 上游调用：「GlobalExceptionHandlerTest.treatsDisconnectedSseClientsAsCompletedStreams()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
@@ -254,6 +265,9 @@ class GlobalExceptionHandlerTest {
         @PostMapping("/test/validate")
         void validate(@Valid @RequestBody ValidationRequest request) {}
 
+        @GetMapping("/test/enum")
+        void enumValue(@RequestParam TestStatus status) {}
+
         // 所属模块：【后端公共边界 / 自动化测试层】「GlobalExceptionHandlerTest.FailingController.sseDisconnected()」。
         // 具体功能：「GlobalExceptionHandlerTest.FailingController.sseDisconnected()」：作为测试辅助方法为“核对完整业务行为（场景方法「sseDisconnected」）”组装或读取「AsyncRequestNotUsableException」 输入夹具，供本测试类的场景方法复用。
         // 上游调用：「GlobalExceptionHandlerTest.FailingController.sseDisconnected()」由 JUnit 生命周期或本测试类的场景方法调用。
@@ -274,4 +288,9 @@ class GlobalExceptionHandlerTest {
             @com.fasterxml.jackson.annotation.JsonProperty("order_id")
                     @NotBlank
                     String orderId) {}
+
+    enum TestStatus {
+        OPEN,
+        CLOSED
+    }
 }

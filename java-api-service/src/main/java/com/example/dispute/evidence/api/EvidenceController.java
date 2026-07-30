@@ -7,6 +7,8 @@
 package com.example.dispute.evidence.api;
 
 import com.example.dispute.common.api.ApiResponse;
+import com.example.dispute.common.api.ErrorCode;
+import com.example.dispute.common.exception.BusinessException;
 import com.example.dispute.common.trace.TraceIdFilter;
 import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.evidence.application.EvidenceApplicationService;
@@ -36,6 +38,7 @@ import jakarta.validation.constraints.Size;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.OffsetDateTime;
+import java.util.Map;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.CacheControl;
 import org.springframework.http.ContentDisposition;
@@ -305,7 +308,12 @@ public class EvidenceController {
         }
         EvidenceProcessProjectionView projection = processProjectionQuery
                 .read(caseId, evidenceReadActor(caseId, authentication), historyMode)
-                .orElseThrow(() -> new IllegalArgumentException("Evidence process projection is unavailable"));
+                .orElseThrow(
+                        () ->
+                                new BusinessException(
+                                        ErrorCode.CASE_STATUS_INVALID,
+                                        "evidence process projection is not initialized",
+                                        Map.of("case_id", caseId)));
         return ResponseEntity.ok()
                 .cacheControl(CacheControl.noStore().cachePrivate())
                 .header(HttpHeaders.PRAGMA, "no-cache")

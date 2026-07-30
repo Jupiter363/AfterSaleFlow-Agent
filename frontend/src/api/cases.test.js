@@ -48,12 +48,18 @@ describe("caseApi", () => {
       evidenceType: "LOGISTICS_PROOF",
       sourceType: "USER_UPLOAD",
       visibility: "PARTIES",
+      claimedFact: "物流凭证证明包裹已经签收。",
+      truthAttested: true,
+      modelProcessingAuthorized: true,
     });
 
     const [, options] = fetch.mock.calls[0];
     expect(options.body).toBeInstanceOf(FormData);
     expect(options.headers["Content-Type"]).toBeUndefined();
     expect(options.body.get("file")).toBe(file);
+    expect(options.body.get("claimed_fact")).toBe("物流凭证证明包裹已经签收。");
+    expect(options.body.get("truth_attested")).toBe("true");
+    expect(options.body.get("model_processing_authorized")).toBe("true");
   });
 
   // 业务位置：【前端 API/SSE 适配】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 页面操作和访问令牌 正确进入 Java HTTP 请求或 Agent 流事件。上游：页面操作和访问令牌。下游：Java HTTP 请求或 Agent 流事件。边界：统一处理错误和取消，不能伪造服务端状态。

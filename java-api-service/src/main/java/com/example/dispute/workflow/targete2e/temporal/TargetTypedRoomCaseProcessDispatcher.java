@@ -70,6 +70,16 @@ import java.util.Objects;
 public abstract class TargetTypedRoomCaseProcessDispatcher
     extends TargetTypedRoomCaseProcessWorkflow {
 
+  private static final String TARGET_INTAKE_PROMPT_VERSION =
+      "all-rooms-prompt.target-e2e.v1";
+  private static final String TARGET_INTAKE_MODEL_PROFILE_ID =
+      "target-e2e.contract-blocked";
+  private static final String TARGET_INTAKE_POLICY_VERSION =
+      "all-rooms-policy.target-e2e.v1";
+  private static final String TARGET_INTAKE_GUARDRAIL_VERSION =
+      "all-rooms-guardrail.target-e2e.v1";
+  private static final String TARGET_INTAKE_TOOL_POLICY_VERSION = "tools.none.v1";
+
   private final TargetIntakeCommandBridgeActivities targetIntakeCommandBridge =
       Workflow.newActivityStub(
           TargetIntakeCommandBridgeActivities.class,
@@ -215,32 +225,7 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
 
   private TargetTypedRoomChildHandle startIntake(
       ProvisionRoomEpoch request, String provisioningHash) {
-    String initiatorScopeHash =
-        TargetIntakeActorScopes.hash(request.caseId(), IntakeParty.INITIATOR);
-    String respondentScopeHash =
-        TargetIntakeActorScopes.hash(request.caseId(), IntakeParty.RESPONDENT);
-    IntakeRoomStart start =
-        new IntakeRoomStart(
-            "intake-room-start.v1",
-            request.tenantSurrogate(),
-            request.caseId(),
-            request.roomEpoch(),
-            request.fencingToken(),
-            request.initialProcessRevision(),
-            request.initialRoomRevision(),
-            request.firstCommandSequence(),
-            request.firstCaseEventSequence(),
-            request.roomWorkflowBuildId(),
-            request.graphVersion(),
-            request.checkpointSchemaVersion(),
-            "target-e2e-prompt.v1",
-            "target-e2e-model.v1",
-            "target-e2e-intake-output.v1",
-            "target-e2e-policy.v1",
-            "target-e2e-guardrail.v1",
-            "target-e2e-no-tools.v1",
-            initiatorScopeHash,
-            respondentScopeHash);
+    IntakeRoomStart start = targetIntakeStart(request);
     IntakeRoomWorkflow child =
         Workflow.newChildWorkflowStub(
             IntakeRoomWorkflow.class, childOptions(request.roomWorkflowId()));
@@ -253,6 +238,35 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
         request.fencingToken(),
         request.initialProcessRevision(),
         request.initialRoomRevision(),
+        start.initiatorActorScopeHash(),
+        start.respondentActorScopeHash());
+  }
+
+  static IntakeRoomStart targetIntakeStart(ProvisionRoomEpoch request) {
+    Objects.requireNonNull(request, "request");
+    String initiatorScopeHash =
+        TargetIntakeActorScopes.hash(request.caseId(), IntakeParty.INITIATOR);
+    String respondentScopeHash =
+        TargetIntakeActorScopes.hash(request.caseId(), IntakeParty.RESPONDENT);
+    return new IntakeRoomStart(
+        "intake-room-start.v1",
+        request.tenantSurrogate(),
+        request.caseId(),
+        request.roomEpoch(),
+        request.fencingToken(),
+        request.initialProcessRevision(),
+        request.initialRoomRevision(),
+        request.firstCommandSequence(),
+        request.firstCaseEventSequence(),
+        request.roomWorkflowBuildId(),
+        request.graphVersion(),
+        request.checkpointSchemaVersion(),
+        TARGET_INTAKE_PROMPT_VERSION,
+        TARGET_INTAKE_MODEL_PROFILE_ID,
+        "target-e2e-intake-output.v1",
+        TARGET_INTAKE_POLICY_VERSION,
+        TARGET_INTAKE_GUARDRAIL_VERSION,
+        TARGET_INTAKE_TOOL_POLICY_VERSION,
         initiatorScopeHash,
         respondentScopeHash);
   }

@@ -16,6 +16,7 @@ import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.projection.evidence.EvidenceProcessProjectionAdapter;
 import com.example.dispute.workflow.projection.evidence.EvidenceProcessProjectionAdapter.ProjectionEvidenceState;
 import com.example.dispute.workflow.projection.evidence.EvidenceProcessProjectionAdapter.ProjectionRow;
+import com.example.dispute.workflow.projection.evidence.EvidenceProcessProjectionAdapter.TargetActivationAuthority;
 import com.example.dispute.workflow.projection.evidence.EvidenceProcessProjectionQuery;
 import com.example.dispute.workflow.projection.evidence.EvidenceProcessProjectionView;
 import com.example.dispute.workflow.projection.evidence.EvidenceProcessProjectionView.ActiveGraphRun;
@@ -24,6 +25,7 @@ import com.example.dispute.workflow.projection.evidence.EvidenceProcessProjectio
 import com.example.dispute.workflow.projection.evidence.EvidenceProcessProjectionView.Recovery;
 import com.example.dispute.workflow.projection.evidence.EvidenceProcessProjectionView.TerminalProposal;
 import com.example.dispute.workflow.projection.evidence.EvidenceProcessProjectionView.VersionPins;
+import com.example.dispute.workflow.targete2e.ingress.materialization.TargetIntakeRuntimePins;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
@@ -54,9 +56,27 @@ class EvidenceProcessProjectionAdapterTest {
     private static final OffsetDateTime PROJECTED_AT =
             OffsetDateTime.parse("2026-07-22T03:04:05Z");
     private static final ObjectMapper JSON = JsonMapper.builder().findAndAddModules().build();
+    private static final String TARGET_SYNTHETIC_PREFIX = "QA_TARGET_";
+    private static final TargetIntakeRuntimePins TARGET_RUNTIME_PINS = new TargetIntakeRuntimePins(
+            "case-build-p9",
+            "agent-build-p9",
+            "b".repeat(64),
+            "graph-code-p9",
+            "d".repeat(64),
+            "all-rooms-agent.target-e2e.v1",
+            "all-rooms-prompt.target-e2e.v1",
+            "target-e2e.contract-blocked",
+            "all-rooms-policy.target-e2e.v1",
+            "all-rooms-guardrail.target-e2e.v1",
+            "tools.none.v1",
+            "memory-p9",
+            "envelope-key-p9");
 
     private final EvidenceProcessProjectionAdapter adapter =
             new EvidenceProcessProjectionAdapter(mock(NamedParameterJdbcOperations.class));
+    private final EvidenceProcessProjectionAdapter targetAdapter =
+            new EvidenceProcessProjectionAdapter(
+                    mock(NamedParameterJdbcOperations.class), TARGET_RUNTIME_PINS);
 
     @Test
     @SuppressWarnings("unchecked")
@@ -88,6 +108,9 @@ class EvidenceProcessProjectionAdapterTest {
                                 "viewer.permission_scopes_json",
                                 "participant.participant_status = 'ACTIVE'",
                                 "epoch.room_type = 'EVIDENCE'",
+                                "target_e2e_room_epoch_binding target_binding",
+                                "target_e2e_case_reservation target_reservation",
+                                "target_e2e_activation target_activation",
                                 "run.room_type = 'EVIDENCE'",
                                 "run.stream_audience_json",
                                 "run.stream_audience_actor_ids_json",
@@ -241,6 +264,78 @@ class EvidenceProcessProjectionAdapterTest {
         assertThat(view.projectedAt()).isEqualTo(PROJECTED_AT);
         assertSelfHash(view);
         assertFrozenSchemaValid(view);
+    }
+
+    @Test
+    void mapsTargetTemporalTupleUsingItsBoundActivationAndTargetProfilePins()
+            throws IOException {
+        AuthenticatedActor actor = actor(ActorRole.USER);
+        EvidenceProcessProjectionView view = targetAdapter.adapt(
+                row(
+                        actor,
+                        "TEMPORAL",
+                        "tenant-run001",
+                        "QA_TARGET_0001",
+                        "ROOM_P9_EVIDENCE_1",
+                        false,
+                        false,
+                        "WAITING_TIMER",
+                        "ACTIVE",
+                        pendingState(),
+                        PROJECTED_AT),
+                actor);
+
+        assertThat(view.projectionState()).isEqualTo("AVAILABLE");
+        assertThat(view.tenantSurrogate()).isEqualTo("tenant-run001");
+        assertThat(view.caseId()).isEqualTo("QA_TARGET_0001");
+        assertThat(view.writerMode()).isEqualTo("TEMPORAL");
+        assertThat(view.graphRuntimeMode()).isEqualTo("TARGET_E2E_CANDIDATE");
+        assertThat(view.formalSinkAllowed()).isFalse();
+        assertThat(view.temporalEvidenceAllocationAllowed()).isTrue();
+        assertThat(view.realCaseShadowAllowed()).isFalse();
+        assertThat(view.pendingState()).isEqualTo("WAITING_TIMER");
+        assertThat(view.versionPins())
+                .isEqualTo(VersionPins.target(
+                        "control-build-p9",
+                        "target-e2e-graph.2026-07-27.1",
+                        "target-e2e-checkpoint.v1",
+                        "all-rooms-prompt.target-e2e.v1",
+                        "target-e2e.contract-blocked",
+                        "all-rooms-policy.target-e2e.v1",
+                        "all-rooms-guardrail.target-e2e.v1",
+                        "tools.none.v1"));
+        assertSelfHash(view);
+        assertFrozenSchemaValid(view);
+    }
+
+    @Test
+    void mapsExplicitCaseIdDeclaredByTheActivationLedger() {
+        AuthenticatedActor actor = actor(ActorRole.PLATFORM_REVIEWER);
+        String explicitCaseId = "PRECREATED_CASE_42";
+        ProjectionRow explicit = row(
+                actor,
+                "TEMPORAL",
+                "tenant-run001",
+                explicitCaseId,
+                "ROOM_P9_EVIDENCE_42",
+                false,
+                false,
+                "OPEN",
+                "ACTIVE",
+                pendingState(),
+                PROJECTED_AT,
+                targetAuthority(
+                        "tenant-run001",
+                        explicitCaseId,
+                        "EXPLICIT_CASE_IDS",
+                        null,
+                        "EXPLICIT_CASE_ID"));
+
+        EvidenceProcessProjectionView view = targetAdapter.adapt(explicit, actor);
+
+        assertThat(view.projectionState()).isEqualTo("AVAILABLE");
+        assertThat(view.caseId()).isEqualTo(explicitCaseId);
+        assertThat(view.graphRuntimeMode()).isEqualTo("TARGET_E2E_CANDIDATE");
     }
 
     @Test
@@ -408,6 +503,18 @@ class EvidenceProcessProjectionAdapterTest {
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("promptVersion");
 
+        assertThatThrownBy(() -> VersionPins.target(
+                        "control-build-p9",
+                        "target-e2e-graph.2026-07-27.1",
+                        "target-e2e-checkpoint.v1",
+                        "evidence-prompt.v2",
+                        "target-e2e.contract-blocked",
+                        "all-rooms-policy.target-e2e.v1",
+                        "all-rooms-guardrail.target-e2e.v1",
+                        "tools.none.v1"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("target promptVersion");
+
         AuthenticatedActor actor = actor(ActorRole.USER);
         ProjectionRow missingTimestamp = shadowRow(
                 actor, false, false, "OPEN", "ACTIVE", pendingState(), null);
@@ -435,25 +542,39 @@ class EvidenceProcessProjectionAdapterTest {
     }
 
     @Test
-    void temporalUnknownAndRealCaseShadowModesFailClosed() {
+    void unknownAndOutOfScopeTargetRuntimeModesFailClosed() {
         AuthenticatedActor actor = actor(ActorRole.USER);
-        for (String mode : List.of("TEMPORAL", "UNKNOWN")) {
-            ProjectionRow row = row(
-                    actor,
-                    mode,
-                    "TENANT_P5_SYNTHETIC_1",
-                    "CASE_P5_SYNTHETIC_1",
-                    "ROOM_P5_EVIDENCE_1",
-                    false,
-                    false,
-                    "OPEN",
-                    "ACTIVE",
-                    pendingState(),
-                    PROJECTED_AT);
-            assertThatThrownBy(() -> adapter.adapt(row, actor))
-                    .isInstanceOf(IllegalArgumentException.class)
-                    .hasMessageContaining("unsupported Evidence writer mode");
-        }
+        ProjectionRow unknown = row(
+                actor,
+                "UNKNOWN",
+                "TENANT_P5_SYNTHETIC_1",
+                "CASE_P5_SYNTHETIC_1",
+                "ROOM_P5_EVIDENCE_1",
+                false,
+                false,
+                "OPEN",
+                "ACTIVE",
+                pendingState(),
+                PROJECTED_AT);
+        assertThatThrownBy(() -> adapter.adapt(unknown, actor))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("unsupported Evidence writer mode");
+
+        ProjectionRow nonSyntheticTemporal = row(
+                actor,
+                "TEMPORAL",
+                "tenant-p9-isolated-01",
+                "CASE_REAL_1",
+                "ROOM_P9_EVIDENCE_1",
+                false,
+                false,
+                "OPEN",
+                "ACTIVE",
+                pendingState(),
+                PROJECTED_AT);
+        assertThatThrownBy(() -> adapter.adapt(nonSyntheticTemporal, actor))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("activation case scope");
 
         ProjectionRow realShadow = row(
                 actor,
@@ -470,6 +591,27 @@ class EvidenceProcessProjectionAdapterTest {
         assertThatThrownBy(() -> adapter.adapt(realShadow, actor))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("real-case Evidence shadow is forbidden");
+    }
+
+    @Test
+    void targetProjectionFailsClosedWhenDeploymentProfilePinsAreUnavailable() {
+        AuthenticatedActor actor = actor(ActorRole.USER);
+        ProjectionRow target = row(
+                actor,
+                "TEMPORAL",
+                "tenant-run001",
+                "QA_TARGET_0002",
+                "ROOM_P9_EVIDENCE_2",
+                false,
+                false,
+                "OPEN",
+                "ACTIVE",
+                pendingState(),
+                PROJECTED_AT);
+
+        assertThatThrownBy(() -> adapter.adapt(target, actor))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("runtime profile pins are unavailable");
     }
 
     @Test
@@ -560,7 +702,44 @@ class EvidenceProcessProjectionAdapterTest {
             String lifecycle,
             ProjectionEvidenceState state,
             OffsetDateTime projectedAt) {
+        TargetActivationAuthority targetAuthority = "TEMPORAL".equals(writerMode)
+                ? targetAuthority(
+                        tenantSurrogate,
+                        caseId,
+                        "ISOLATED_SYNTHETIC_NEW_CASES",
+                        TARGET_SYNTHETIC_PREFIX,
+                        "ISOLATED_SYNTHETIC_NEW_CASE")
+                : null;
+        return row(
+                actor,
+                writerMode,
+                tenantSurrogate,
+                caseId,
+                roomId,
+                historyMode,
+                activeRun,
+                phase,
+                lifecycle,
+                state,
+                projectedAt,
+                targetAuthority);
+    }
+
+    private static ProjectionRow row(
+            AuthenticatedActor actor,
+            String writerMode,
+            String tenantSurrogate,
+            String caseId,
+            String roomId,
+            boolean historyMode,
+            boolean activeRun,
+            String phase,
+            String lifecycle,
+            ProjectionEvidenceState state,
+            OffsetDateTime projectedAt,
+            TargetActivationAuthority targetAuthority) {
         boolean legacy = "LEGACY".equals(writerMode);
+        boolean target = "TEMPORAL".equals(writerMode);
         ActiveGraphRun graphRun = activeRun
                 ? new ActiveGraphRun(
                         "COMMAND_P5_ONE",
@@ -568,8 +747,8 @@ class EvidenceProcessProjectionAdapterTest {
                         "ATTEMPT_P5_ONE_1",
                         "MANIFEST_P5_ONE",
                         "a".repeat(64),
-                        "evidence.v2.0.0",
-                        "evidence-checkpoint.v2",
+                        target ? "target-e2e-graph.2026-07-27.1" : "evidence.v2.0.0",
+                        target ? "target-e2e-checkpoint.v1" : "evidence-checkpoint.v2",
                         "RUNNING")
                 : null;
         return new ProjectionRow(
@@ -583,22 +762,57 @@ class EvidenceProcessProjectionAdapterTest {
                 legacy ? 0 : 9,
                 phase,
                 projectedAt,
-                legacy ? null : "SHADOW",
+                legacy ? null : writerMode,
                 lifecycle,
                 legacy ? null : "READY",
                 legacy ? null : 4L,
                 legacy ? null : 12L,
                 legacy ? null : 7L,
                 legacy ? null : 9L,
-                legacy ? null : "evidence-workflow.synthetic.v1",
-                legacy ? null : "evidence.v2.0.0",
-                legacy ? null : "evidence-checkpoint.v2",
+                legacy ? null : target ? "control-build-p9" : "evidence-workflow.synthetic.v1",
+                legacy ? null : target ? "target-e2e-graph.2026-07-27.1" : "evidence.v2.0.0",
+                legacy ? null : target ? "target-e2e-checkpoint.v1" : "evidence-checkpoint.v2",
+                targetAuthority,
                 activeRun,
                 graphRun,
                 state,
                 historyMode,
                 actor.actorId(),
                 actor.role().name());
+    }
+
+    private static TargetActivationAuthority targetAuthority(
+            String tenantSurrogate,
+            String caseId,
+            String caseScopeMode,
+            String caseIdPrefix,
+            String reservationKind) {
+        return new TargetActivationAuthority(
+                "p9act.v1." + "a".repeat(32),
+                "c".repeat(64),
+                "TARGET_E2E_CANDIDATE",
+                tenantSurrogate,
+                tenantSurrogate,
+                caseId,
+                "EVIDENCE",
+                4,
+                9,
+                "p9case.v1." + "f".repeat(32),
+                reservationKind,
+                "e".repeat(64),
+                caseScopeMode,
+                "e".repeat(64),
+                caseIdPrefix,
+                "case-build-p9",
+                "control-build-p9",
+                "agent-build-p9",
+                "all-rooms.target-e2e.v1",
+                "target-e2e-graph.2026-07-27.1",
+                "target-e2e-checkpoint.v1",
+                "b".repeat(64),
+                "graph-code-p9",
+                "d".repeat(64),
+                "ACTIVE");
     }
 
     private static ProjectionEvidenceState pendingState() {

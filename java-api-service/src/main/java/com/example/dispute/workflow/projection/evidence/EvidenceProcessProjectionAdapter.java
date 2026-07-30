@@ -9,6 +9,7 @@ import com.example.dispute.workflow.projection.evidence.EvidenceProcessProjectio
 import com.example.dispute.workflow.projection.evidence.EvidenceProcessProjectionView.Recovery;
 import com.example.dispute.workflow.projection.evidence.EvidenceProcessProjectionView.TerminalProposal;
 import com.example.dispute.workflow.projection.evidence.EvidenceProcessProjectionView.VersionPins;
+import com.example.dispute.workflow.targete2e.ingress.materialization.TargetIntakeRuntimePins;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.sql.ResultSet;
@@ -19,6 +20,7 @@ import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcOperations;
 import org.springframework.stereotype.Component;
@@ -52,6 +54,33 @@ public class EvidenceProcessProjectionAdapter {
                    epoch.room_workflow_build_id,
                    epoch.graph_version,
                    epoch.checkpoint_schema_version,
+                   target_binding.activation_id as target_activation_id,
+                   target_binding.activation_manifest_hash as target_manifest_hash,
+                   target_binding.execution_lane as target_execution_lane,
+                   target_binding.tenant_surrogate as target_tenant_surrogate,
+                   target_binding.case_id as target_case_id,
+                   target_binding.room_type as target_room_type,
+                   target_binding.room_epoch as target_room_epoch,
+                   target_binding.room_fencing_token as target_room_fencing_token,
+                   target_reservation.reservation_id as target_reservation_id,
+                   target_reservation.reservation_kind as target_reservation_kind,
+                   target_reservation.case_scope_hash as target_reservation_scope_hash,
+                   target_activation.case_scope_mode as target_case_scope_mode,
+                   target_activation.case_scope_hash as target_activation_scope_hash,
+                   target_activation.synthetic_case_id_prefix as target_case_id_prefix,
+                   target_activation.tenant_surrogate as target_activation_tenant,
+                   target_activation.case_build_id as target_case_build_id,
+                   target_activation.control_build_id as target_control_build_id,
+                   target_activation.agent_build_id as target_agent_build_id,
+                   target_activation.graph_key as target_graph_key,
+                   target_activation.graph_version as target_graph_version,
+                   target_activation.graph_checkpoint_schema_version
+                       as target_checkpoint_schema_version,
+                   target_activation.graph_binding_hash as target_graph_binding_hash,
+                   target_activation.graph_code_build_id as target_graph_code_build_id,
+                   target_activation.isolated_domain_db_binding_hash
+                       as target_domain_binding_hash,
+                   target_activation.lifecycle_status as target_activation_lifecycle,
                    active_run.command_id,
                    active_run.logical_run_id,
                    active_run.attempt_id,
@@ -84,7 +113,24 @@ public class EvidenceProcessProjectionAdapter {
                and epoch.room_epoch = projection.room_epoch
                and epoch.fencing_token = projection.fencing_token
                and epoch.lifecycle_status in ('ACTIVE', 'TERMINAL')
-              left join lateral (
+               left join target_e2e_room_epoch_binding target_binding
+                 on target_binding.epoch_id = epoch.id
+                and target_binding.tenant_surrogate = projection.tenant_surrogate
+                and target_binding.case_id = projection.case_id
+                and target_binding.room_type = 'EVIDENCE'
+                and target_binding.room_epoch = epoch.room_epoch
+                and target_binding.room_fencing_token = epoch.fencing_token
+               left join target_e2e_activation target_activation
+                 on target_activation.activation_id = target_binding.activation_id
+                and target_activation.manifest_hash = target_binding.activation_manifest_hash
+                and target_activation.execution_lane = target_binding.execution_lane
+                and target_activation.isolated_domain_db_binding_hash =
+                    target_binding.isolated_domain_db_binding_hash
+               left join target_e2e_case_reservation target_reservation
+                 on target_reservation.activation_id = target_binding.activation_id
+                and target_reservation.tenant_surrogate = target_binding.tenant_surrogate
+                and target_reservation.case_id = target_binding.case_id
+               left join lateral (
                     select run.id as command_id,
                            run.id as logical_run_id,
                            attempt.id as attempt_id,
@@ -171,9 +217,24 @@ public class EvidenceProcessProjectionAdapter {
             """;
 
     private final NamedParameterJdbcOperations jdbc;
+    private final TargetIntakeRuntimePins targetRuntimePins;
 
     public EvidenceProcessProjectionAdapter(NamedParameterJdbcOperations jdbc) {
+        this(jdbc, Optional.empty());
+    }
+
+    public EvidenceProcessProjectionAdapter(
+            NamedParameterJdbcOperations jdbc, TargetIntakeRuntimePins targetRuntimePins) {
+        this(jdbc, Optional.of(Objects.requireNonNull(targetRuntimePins, "targetRuntimePins")));
+    }
+
+    @Autowired
+    public EvidenceProcessProjectionAdapter(
+            NamedParameterJdbcOperations jdbc,
+            Optional<TargetIntakeRuntimePins> targetRuntimePins) {
         this.jdbc = Objects.requireNonNull(jdbc, "jdbc");
+        this.targetRuntimePins = Objects.requireNonNull(targetRuntimePins, "targetRuntimePins")
+                .orElse(null);
     }
 
     public Optional<EvidenceProcessProjectionView> read(
@@ -236,10 +297,13 @@ public class EvidenceProcessProjectionAdapter {
         if ("LEGACY".equals(writerMode)) {
             return legacy(row, viewer);
         }
-        if (!"SHADOW".equals(writerMode)) {
+        if ("SHADOW".equals(writerMode)) {
+            requireSyntheticShadow(row);
+        } else if ("TEMPORAL".equals(writerMode)) {
+            requireTargetTemporal(row);
+        } else {
             throw new IllegalArgumentException("unsupported Evidence writer mode: " + writerMode);
         }
-        requireSyntheticShadow(row);
         if (!tupleIsCurrent(row)
                 || !phaseIsKnown(row.roomPhase())
                 || !activeRunTupleIsCurrent(row)
@@ -294,12 +358,12 @@ public class EvidenceProcessProjectionAdapter {
                 .withComputedHash();
     }
 
-    private static EvidenceProcessProjectionView processing(
+    private EvidenceProcessProjectionView processing(
             ProjectionRow row, ViewerBinding viewer) {
         return projection(row, viewer, EvidenceProcessProjectionView.PROCESSING, false);
     }
 
-    private static EvidenceProcessProjectionView projection(
+    private EvidenceProcessProjectionView projection(
             ProjectionRow row,
             ViewerBinding viewer,
             String projectionState,
@@ -322,10 +386,10 @@ public class EvidenceProcessProjectionAdapter {
                         row.roomId(),
                         row.projectionRoomEpoch(),
                         row.projectionFencingToken(),
-                        "SHADOW",
-                        "SIGNED_SYNTHETIC_SHADOW",
+                        normalized(row.writerMode()),
+                        graphRuntimeMode(row),
                         false,
-                        false,
+                        "TEMPORAL".equals(normalized(row.writerMode())),
                         false,
                         viewer.actorId(),
                         viewer.actorRole(),
@@ -346,11 +410,17 @@ public class EvidenceProcessProjectionAdapter {
                         activeRun,
                         proposalForPhase(phase, state.terminalProposal()),
                         state.recovery(),
-                        shadowPins(row),
+                        versionPins(row),
                         row.projectionProcessRevision(),
                         row.epochPresent() ? row.roomRevision() : 0,
                         requireProjectedAt(row))
                 .withComputedHash();
+    }
+
+    private VersionPins versionPins(ProjectionRow row) {
+        return "TEMPORAL".equals(normalized(row.writerMode()))
+                ? targetPins(row)
+                : shadowPins(row);
     }
 
     private static VersionPins shadowPins(ProjectionRow row) {
@@ -358,6 +428,45 @@ public class EvidenceProcessProjectionAdapter {
                 requiredPin(row.roomWorkflowBuildId(), "roomWorkflowBuildId"),
                 requiredPin(row.graphVersion(), "graphVersion"),
                 requiredPin(row.checkpointSchemaVersion(), "checkpointSchemaVersion"));
+    }
+
+    private VersionPins targetPins(ProjectionRow row) {
+        TargetActivationAuthority authority = requireTargetTemporal(row);
+        if (targetRuntimePins == null) {
+            throw new IllegalStateException(
+                    "target Evidence runtime profile pins are unavailable");
+        }
+        targetRuntimePins.requireActivation(
+                authority.caseBuildId(),
+                authority.agentBuildId(),
+                authority.graphKey(),
+                authority.graphVersion(),
+                authority.checkpointSchemaVersion(),
+                authority.graphBindingHash(),
+                authority.graphCodeBuildId(),
+                authority.isolatedDomainDbBindingHash());
+        if (!Objects.equals(authority.controlBuildId(), row.roomWorkflowBuildId())
+                || !Objects.equals(authority.graphVersion(), row.graphVersion())
+                || !Objects.equals(
+                        authority.checkpointSchemaVersion(), row.checkpointSchemaVersion())) {
+            throw new IllegalStateException(
+                    "target Evidence epoch pins differ from activation authority");
+        }
+        return VersionPins.target(
+                authority.controlBuildId(),
+                authority.graphVersion(),
+                authority.checkpointSchemaVersion(),
+                targetRuntimePins.promptVersion(),
+                targetRuntimePins.modelProfileId(),
+                targetRuntimePins.policyVersion(),
+                targetRuntimePins.guardrailVersion(),
+                targetRuntimePins.toolPolicyVersion());
+    }
+
+    private static String graphRuntimeMode(ProjectionRow row) {
+        return "TEMPORAL".equals(normalized(row.writerMode()))
+                ? "TARGET_E2E_CANDIDATE"
+                : "SIGNED_SYNTHETIC_SHADOW";
     }
 
     private static String requiredPin(String value, String field) {
@@ -461,6 +570,48 @@ public class EvidenceProcessProjectionAdapter {
         }
     }
 
+    private static TargetActivationAuthority requireTargetTemporal(ProjectionRow row) {
+        TargetActivationAuthority authority = row.targetAuthority();
+        if (row.tenantSurrogate() == null
+                || row.tenantSurrogate().isBlank()
+                || row.caseId() == null
+                || row.caseId().isBlank()
+                || row.roomId() == null
+                || authority == null
+                || !"TARGET_E2E_CANDIDATE".equals(authority.executionLane())
+                || !row.tenantSurrogate().equals(authority.tenantSurrogate())
+                || !row.tenantSurrogate().equals(authority.activationTenantSurrogate())
+                || !row.caseId().equals(authority.caseId())
+                || !"EVIDENCE".equals(authority.roomType())
+                || row.projectionRoomEpoch() != authority.roomEpoch()
+                || row.projectionFencingToken() != authority.roomFencingToken()
+                || authority.activationScopeHash() == null
+                || !authority.activationScopeHash().equals(authority.reservationScopeHash())
+                || authority.activationLifecycle() == null
+                || !Set.of("ACTIVE", "DRAIN_ONLY", "DRAINED", "REVOKED_TERMINAL")
+                        .contains(authority.activationLifecycle())) {
+            throw new IllegalArgumentException(
+                    "target Evidence Temporal projection lacks its activation ledger binding");
+        }
+        boolean validScope = "EXPLICIT_CASE_IDS".equals(authority.caseScopeMode())
+                ? "EXPLICIT_CASE_ID".equals(authority.reservationKind())
+                        && authority.caseIdPrefix() == null
+                : "ISOLATED_SYNTHETIC_NEW_CASES".equals(authority.caseScopeMode())
+                        && "ISOLATED_SYNTHETIC_NEW_CASE"
+                                .equals(authority.reservationKind())
+                        && authority.caseIdPrefix() != null
+                        && authority.caseIdPrefix().matches("[A-Z][A-Z0-9_]{2,31}")
+                        && row.caseId().startsWith(authority.caseIdPrefix());
+        if (!validScope) {
+            throw new IllegalArgumentException(
+                    "target Evidence Temporal projection exceeds its activation case scope");
+        }
+        requiredPin(authority.activationId(), "targetActivationId");
+        requiredPin(authority.manifestHash(), "targetManifestHash");
+        requiredPin(authority.reservationId(), "targetReservationId");
+        return authority;
+    }
+
     static String viewerScopeHash(AuthenticatedActor actor) {
         return viewerScopeHash(new ViewerBinding(actor.actorId(), actor.role().name()));
     }
@@ -480,7 +631,7 @@ public class EvidenceProcessProjectionAdapter {
                         normalized(row.writerActivationStatus()), lifecycleStatus)
                 && lifecycleMatchesPhase(lifecycleStatus, row.roomPhase())
                 && "READY".equals(normalized(row.epochProvisioningStatus()))
-                && "SHADOW".equals(normalized(row.epochWriterMode()))
+                && normalized(row.writerMode()).equals(normalized(row.epochWriterMode()))
                 && row.projectionRoomEpoch() == row.epochRoomEpoch()
                 && row.projectionProcessRevision() == row.epochProcessRevision()
                 && row.projectionFencingToken() == row.epochFencingToken();
@@ -514,7 +665,12 @@ public class EvidenceProcessProjectionAdapter {
             return row.activeGraphRun() == null;
         }
         return row.activeGraphRun() != null
-                && Set.of("QUEUED", "RUNNING").contains(row.activeGraphRun().status());
+                && Set.of("QUEUED", "RUNNING").contains(row.activeGraphRun().status())
+                && Objects.equals(
+                        row.graphVersion(), row.activeGraphRun().graphVersion())
+                && Objects.equals(
+                        row.checkpointSchemaVersion(),
+                        row.activeGraphRun().checkpointSchemaVersion());
     }
 
     private static boolean phaseIsKnown(String roomPhase) {
@@ -551,12 +707,47 @@ public class EvidenceProcessProjectionAdapter {
                 resultSet.getString("room_workflow_build_id"),
                 resultSet.getString("graph_version"),
                 resultSet.getString("checkpoint_schema_version"),
+                targetAuthority(resultSet),
                 logicalRunId != null,
                 activeGraphRun,
                 ProjectionEvidenceState.pending(projectedAt),
                 resultSet.getBoolean("history_mode"),
                 resultSet.getString("scoped_actor_id"),
                 resultSet.getString("scoped_actor_role"));
+    }
+
+    private static TargetActivationAuthority targetAuthority(ResultSet resultSet)
+            throws SQLException {
+        String activationId = resultSet.getString("target_activation_id");
+        if (activationId == null) {
+            return null;
+        }
+        return new TargetActivationAuthority(
+                activationId,
+                resultSet.getString("target_manifest_hash"),
+                resultSet.getString("target_execution_lane"),
+                resultSet.getString("target_tenant_surrogate"),
+                resultSet.getString("target_activation_tenant"),
+                resultSet.getString("target_case_id"),
+                resultSet.getString("target_room_type"),
+                resultSet.getLong("target_room_epoch"),
+                resultSet.getLong("target_room_fencing_token"),
+                resultSet.getString("target_reservation_id"),
+                resultSet.getString("target_reservation_kind"),
+                resultSet.getString("target_reservation_scope_hash"),
+                resultSet.getString("target_case_scope_mode"),
+                resultSet.getString("target_activation_scope_hash"),
+                resultSet.getString("target_case_id_prefix"),
+                resultSet.getString("target_case_build_id"),
+                resultSet.getString("target_control_build_id"),
+                resultSet.getString("target_agent_build_id"),
+                resultSet.getString("target_graph_key"),
+                resultSet.getString("target_graph_version"),
+                resultSet.getString("target_checkpoint_schema_version"),
+                resultSet.getString("target_graph_binding_hash"),
+                resultSet.getString("target_graph_code_build_id"),
+                resultSet.getString("target_domain_binding_hash"),
+                resultSet.getString("target_activation_lifecycle"));
     }
 
     private static ActiveGraphRun graphRun(ResultSet resultSet, String logicalRunId)
@@ -666,12 +857,70 @@ public class EvidenceProcessProjectionAdapter {
             String roomWorkflowBuildId,
             String graphVersion,
             String checkpointSchemaVersion,
+            TargetActivationAuthority targetAuthority,
             boolean activeRunObserved,
             ActiveGraphRun activeGraphRun,
             ProjectionEvidenceState evidenceState,
             boolean historyMode,
             String scopedActorId,
             String scopedActorRole) {
+
+        public ProjectionRow(
+                String tenantSurrogate,
+                String caseId,
+                String roomId,
+                String writerMode,
+                String writerActivationStatus,
+                long projectionRoomEpoch,
+                long projectionProcessRevision,
+                long projectionFencingToken,
+                String roomPhase,
+                OffsetDateTime projectedAt,
+                String epochWriterMode,
+                String epochLifecycleStatus,
+                String epochProvisioningStatus,
+                Long epochRoomEpochValue,
+                Long epochProcessRevisionValue,
+                Long roomRevisionValue,
+                Long epochFencingTokenValue,
+                String roomWorkflowBuildId,
+                String graphVersion,
+                String checkpointSchemaVersion,
+                boolean activeRunObserved,
+                ActiveGraphRun activeGraphRun,
+                ProjectionEvidenceState evidenceState,
+                boolean historyMode,
+                String scopedActorId,
+                String scopedActorRole) {
+            this(
+                    tenantSurrogate,
+                    caseId,
+                    roomId,
+                    writerMode,
+                    writerActivationStatus,
+                    projectionRoomEpoch,
+                    projectionProcessRevision,
+                    projectionFencingToken,
+                    roomPhase,
+                    projectedAt,
+                    epochWriterMode,
+                    epochLifecycleStatus,
+                    epochProvisioningStatus,
+                    epochRoomEpochValue,
+                    epochProcessRevisionValue,
+                    roomRevisionValue,
+                    epochFencingTokenValue,
+                    roomWorkflowBuildId,
+                    graphVersion,
+                    checkpointSchemaVersion,
+                    null,
+                    activeRunObserved,
+                    activeGraphRun,
+                    evidenceState,
+                    historyMode,
+                    scopedActorId,
+                    scopedActorRole);
+        }
 
         boolean epochPresent() {
             return epochRoomEpochValue != null;
@@ -715,6 +964,7 @@ public class EvidenceProcessProjectionAdapter {
                     roomWorkflowBuildId,
                     graphVersion,
                     checkpointSchemaVersion,
+                    targetAuthority,
                     activeRunObserved,
                     activeGraphRun,
                     value,
@@ -723,6 +973,33 @@ public class EvidenceProcessProjectionAdapter {
                     scopedActorRole);
         }
     }
+
+    public record TargetActivationAuthority(
+            String activationId,
+            String manifestHash,
+            String executionLane,
+            String tenantSurrogate,
+            String activationTenantSurrogate,
+            String caseId,
+            String roomType,
+            long roomEpoch,
+            long roomFencingToken,
+            String reservationId,
+            String reservationKind,
+            String reservationScopeHash,
+            String caseScopeMode,
+            String activationScopeHash,
+            String caseIdPrefix,
+            String caseBuildId,
+            String controlBuildId,
+            String agentBuildId,
+            String graphKey,
+            String graphVersion,
+            String checkpointSchemaVersion,
+            String graphBindingHash,
+            String graphCodeBuildId,
+            String isolatedDomainDbBindingHash,
+            String activationLifecycle) {}
 
     private record ViewerBinding(String actorId, String actorRole) {}
 }

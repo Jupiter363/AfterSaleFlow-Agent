@@ -138,6 +138,111 @@ class EvidenceRoomControllerTest {
         verify(processProjectionQuery).read(eq("CASE_evidence"), any(), eq(false));
     }
 
+    @Test
+    void exposesTheP9TargetTemporalSyntheticProjectionContract() throws Exception {
+        String caseId = "CASE_P9_SYNTHETIC_0001";
+        EvidenceProcessProjectionView projection = new EvidenceProcessProjectionView(
+                        EvidenceProcessProjectionView.SCHEMA_VERSION,
+                        "0".repeat(64),
+                        EvidenceProcessProjectionView.AVAILABLE,
+                        "tenant-run001",
+                        caseId,
+                        "ROOM_P9_EVIDENCE_1",
+                        4,
+                        9,
+                        "TEMPORAL",
+                        "TARGET_E2E_CANDIDATE",
+                        false,
+                        true,
+                        false,
+                        "user-local",
+                        "USER",
+                        "1".repeat(64),
+                        "USER",
+                        "WAITING_PARTIES",
+                        null,
+                        "WAITING_TIMER",
+                        null,
+                        OffsetDateTime.parse("2026-07-31T00:00:00Z"),
+                        false,
+                        null,
+                        EvidenceProcessProjectionView.PartyCompletion.pending(),
+                        EvidenceProcessProjectionView.AssessmentCounts.empty(),
+                        null,
+                        false,
+                        0,
+                        null,
+                        null,
+                        EvidenceProcessProjectionView.Recovery.none(),
+                        EvidenceProcessProjectionView.VersionPins.target(
+                                "p9-control-build",
+                                "target-e2e-graph.2026-07-27.1",
+                                "target-e2e-checkpoint.v1",
+                                "all-rooms-prompt.target-e2e.v1",
+                                "target-e2e.contract-blocked",
+                                "all-rooms-policy.target-e2e.v1",
+                                "all-rooms-guardrail.target-e2e.v1",
+                                "tools.none.v1"),
+                        12,
+                        7,
+                        OffsetDateTime.parse("2026-07-30T00:00:00Z"))
+                .withComputedHash();
+        when(processProjectionQuery.read(eq(caseId), any(), eq(false)))
+                .thenReturn(Optional.of(projection));
+
+        mockMvc.perform(
+                        get("/api/disputes/{caseId}/evidence/process-projection", caseId)
+                                .header(HeaderAuthenticationFilter.USER_ID_HEADER, "user-local")
+                                .header(HeaderAuthenticationFilter.ROLE_HEADER, "USER"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.tenant_surrogate")
+                        .value("tenant-run001"))
+                .andExpect(jsonPath("$.data.case_id").value(caseId))
+                .andExpect(jsonPath("$.data.writer_mode").value("TEMPORAL"))
+                .andExpect(jsonPath("$.data.graph_runtime_mode")
+                        .value("TARGET_E2E_CANDIDATE"))
+                .andExpect(jsonPath("$.data.formal_sink_allowed").value(false))
+                .andExpect(jsonPath("$.data.temporal_evidence_allocation_allowed").value(true))
+                .andExpect(jsonPath("$.data.real_case_shadow_allowed").value(false));
+
+        verify(intakeProgressService).assertEvidenceReadAccess(eq(caseId), any());
+        verify(processProjectionQuery).read(eq(caseId), any(), eq(false));
+    }
+
+    @Test
+    void mapsAnUninitializedTargetTemporalProjectionToARetryableConflict() throws Exception {
+        String caseId = "CASE_P9_SYNTHETIC_0002";
+        when(processProjectionQuery.read(eq(caseId), any(), eq(false)))
+                .thenReturn(Optional.empty());
+
+        mockMvc.perform(
+                        get("/api/disputes/{caseId}/evidence/process-projection", caseId)
+                                .header(HeaderAuthenticationFilter.USER_ID_HEADER, "user-local")
+                                .header(HeaderAuthenticationFilter.ROLE_HEADER, "USER"))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value("CASE_STATUS_INVALID"))
+                .andExpect(jsonPath("$.message")
+                        .value("evidence process projection is not initialized"))
+                .andExpect(jsonPath("$.details.case_id").value(caseId));
+
+        verify(intakeProgressService).assertEvidenceReadAccess(eq(caseId), any());
+        verify(processProjectionQuery).read(eq(caseId), any(), eq(false));
+    }
+
+    @Test
+    void keepsAnInvalidProjectionViewAsBadRequest() throws Exception {
+        String caseId = "CASE_P9_SYNTHETIC_0003";
+
+        mockMvc.perform(
+                        get("/api/disputes/{caseId}/evidence/process-projection", caseId)
+                                .queryParam("view", "latest")
+                                .header(HeaderAuthenticationFilter.USER_ID_HEADER, "user-local")
+                                .header(HeaderAuthenticationFilter.ROLE_HEADER, "USER"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_ARGUMENT"))
+                .andExpect(jsonPath("$.message").value("request validation failed"));
+    }
+
     // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceRoomControllerTest.exposesTheRoleScopedCatalogOnTheFinalUnversionedApi()」。
     // 具体功能：「EvidenceRoomControllerTest.exposesTheRoleScopedCatalogOnTheFinalUnversionedApi()」：复现“核对完整业务行为（场景方法「exposesTheRoleScopedCatalogOnTheFinalUnversionedApi」）”场景：驱动 「catalogService.catalog」，再用 测试框架断言 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_evidence」、「EVIDENCE_1」、「LOGISTICS_PROOF」、「MERCHANT」。
     // 上游调用：「EvidenceRoomControllerTest.exposesTheRoleScopedCatalogOnTheFinalUnversionedApi()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
