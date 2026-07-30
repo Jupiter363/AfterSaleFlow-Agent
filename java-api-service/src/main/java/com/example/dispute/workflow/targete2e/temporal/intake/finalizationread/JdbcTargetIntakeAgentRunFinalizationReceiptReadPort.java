@@ -361,7 +361,8 @@ public final class JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
                 throw rejected("TARGET_E2E_FINALIZATION_EVENT_TYPE_INVALID", "formal Intake event is not a turn event");
             }
             requireFormalBinding(request, targetReceipt, targetRow, formal, event);
-            return new FormalProjection(formal, event, operation.requestHash());
+            return new FormalProjection(
+                    formal, event, canonicalEventHash(document), operation.requestHash());
         } catch (TargetE2eFinalizationRejectedException failure) {
             throw failure;
         } catch (Exception failure) {
@@ -619,6 +620,15 @@ public final class JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
         }
     }
 
+    static String canonicalEventHash(JsonNode eventDocument) {
+        if (eventDocument == null || !eventDocument.isObject()) {
+            throw rejected(
+                    "TARGET_E2E_FINALIZATION_EVENT_INVALID",
+                    "formal Intake event must be a JSON object");
+        }
+        return ContractJson.sha256Hex(eventDocument);
+    }
+
     private record TargetRow(String receiptId, String activationManifestHash, byte[] canonicalBytes,
             TargetE2eFinalizationReceipt columns, String agentRunManifestId, String agentRunManifestHash,
             String isolatedDomainDbBindingHash, String attemptCommandId, String attemptRequestHash,
@@ -629,7 +639,11 @@ public final class JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
             String caseId, long roomEpoch, long processRevision, long fencingToken) {}
     private record EventRow(String id, String caseId, long sequence, String eventType, String eventJson) {}
 
-    private record FormalProjection(IntakeFinalizationReceipt formal, EventRow event, String formalRequestHash) {
+    private record FormalProjection(
+            IntakeFinalizationReceipt formal,
+            EventRow event,
+            String eventHash,
+            String formalRequestHash) {
         TurnFinalizationReceipt toActivityReceipt(
                 String workflowCommandRequestHash,
                 com.example.dispute.workflow.temporal.room.intake.IntakeParty party,
@@ -643,7 +657,7 @@ public final class JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
                     "urn:target-e2e:proposal:intake:" + formal.proposalHash(), formal.proposalHash());
             IntakeDomainEventRef committed = new IntakeDomainEventRef("intake-domain-event-ref.v1", event.id(),
                     "urn:target-e2e:intake-finalization:" + formal.receiptHash(),
-                    ContractJson.sha256Hex(com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.textNode(event.eventJson())),
+                    eventHash,
                     event.sequence(), eventType, party,
                     formal.commandId(), formal.tenantSurrogate(), formal.caseId(), formal.roomEpoch(), formal.fencingToken(),
                     formal.actorScopeHash(), formal.operationKey(), workflowCommandRequestHash, formal.resultHash(),

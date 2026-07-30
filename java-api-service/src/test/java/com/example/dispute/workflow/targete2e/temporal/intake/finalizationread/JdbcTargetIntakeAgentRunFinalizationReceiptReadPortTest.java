@@ -188,6 +188,20 @@ class JdbcTargetIntakeAgentRunFinalizationReceiptReadPortTest {
         assertThat(decoded).isEqualTo(expected);
     }
 
+    @Test
+    void hashesTheFormalEventDocumentInsteadOfItsJsonStringEncoding() throws Exception {
+        JsonNode event = MAPPER.readTree("""
+                {
+                  "schema_version": "intake-turn-committed-event.v1",
+                  "event_type": "TURN_NEEDS_INPUT",
+                  "receipt": {"domain_event_ids": ["event-1"]}
+                }
+                """);
+
+        assertThat(JdbcTargetIntakeAgentRunFinalizationReceiptReadPort.canonicalEventHash(event))
+                .isEqualTo(ContractJson.sha256Hex(event));
+    }
+
     private static ObjectNode commandJson() throws Exception {
         JsonNode wrapper = MAPPER.readTree(COMMAND_FIXTURE.toFile());
         return (ObjectNode) wrapper.required("instance").deepCopy();
