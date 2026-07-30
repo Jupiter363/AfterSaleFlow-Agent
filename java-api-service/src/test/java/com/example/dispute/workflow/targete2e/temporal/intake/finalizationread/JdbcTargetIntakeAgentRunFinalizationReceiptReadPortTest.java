@@ -5,14 +5,29 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.dispute.workflow.contract.v1.ContractJson;
+import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationRejectedException;
 import com.example.dispute.workflow.temporal.room.intake.IntakeAgentRunFinalizationReceiptReadPort;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.nio.file.Path;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcOperations;
 
 class JdbcTargetIntakeAgentRunFinalizationReceiptReadPortTest {
+
+    private static final ObjectMapper MAPPER = JsonMapper.builder().findAndAddModules().build();
+    private static final Path COMMAND_FIXTURE = Path.of(
+            "..",
+            "contracts",
+            "agent-platform",
+            "v1",
+            "fixtures",
+            "valid",
+            "room-graph-command-valid.json");
 
     private static final String TARGET_RECEIPT_HASH = ContractJson.sha256Hex(
             JsonMapper.builder().build().valueToTree(Map.of(
@@ -111,6 +126,43 @@ class JdbcTargetIntakeAgentRunFinalizationReceiptReadPortTest {
                 .hasMessage("formal Intake operation hash is not canonical")
                 .extracting(failure -> ((TargetE2eFinalizationRejectedException) failure).code())
                 .isEqualTo("TARGET_E2E_FINALIZATION_OPERATION_HASH_MISMATCH");
+    }
+
+    @Test
+    void acceptsJsonbStyleWinningAttemptTextWhenItsCanonicalHashMatches() throws Exception {
+        ObjectNode commandJson = commandJson();
+        String jsonbStyleText =
+                MAPPER.writerWithDefaultPrettyPrinter().writeValueAsString(commandJson);
+
+        RoomGraphCommand command =
+                JdbcTargetIntakeAgentRunFinalizationReceiptReadPort.decodeAttemptCommand(
+                        MAPPER,
+                        jsonbStyleText,
+                        commandJson.required("request_hash").textValue());
+
+        assertThat(command).isEqualTo(MAPPER.treeToValue(commandJson, RoomGraphCommand.class));
+    }
+
+    @Test
+    void rejectsJsonbStyleWinningAttemptTextWhenItsBodyWasTampered() throws Exception {
+        ObjectNode commandJson = commandJson();
+        String requestHash = commandJson.required("request_hash").textValue();
+        commandJson.put("stage_sequence", commandJson.required("stage_sequence").longValue() + 1);
+
+        assertThatThrownBy(() ->
+                        JdbcTargetIntakeAgentRunFinalizationReceiptReadPort.decodeAttemptCommand(
+                                MAPPER,
+                                MAPPER.writerWithDefaultPrettyPrinter().writeValueAsString(commandJson),
+                                requestHash))
+                .isInstanceOf(TargetE2eFinalizationRejectedException.class)
+                .hasMessage("winning attempt command self-hash is invalid")
+                .extracting(failure -> ((TargetE2eFinalizationRejectedException) failure).code())
+                .isEqualTo("TARGET_E2E_FINALIZATION_ATTEMPT_COMMAND_INVALID");
+    }
+
+    private static ObjectNode commandJson() throws Exception {
+        JsonNode wrapper = MAPPER.readTree(COMMAND_FIXTURE.toFile());
+        return (ObjectNode) wrapper.required("instance").deepCopy();
     }
 
     private static void assertCompletionHashRejected(String completionHash) {

@@ -444,24 +444,26 @@ public final class JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
     }
 
     private RoomGraphCommand decodeAttemptCommand(TargetRow row) {
+        return decodeAttemptCommand(
+                objectMapper, row.attemptCommandJson(), row.attemptRequestHash());
+    }
+
+    static RoomGraphCommand decodeAttemptCommand(
+            ObjectMapper objectMapper,
+            String persistedCommandJson,
+            String persistedRequestHash) {
         try {
-            JsonNode document = objectMapper.readTree(row.attemptCommandJson());
-            if (document == null
-                    || !row.attemptCommandJson().equals(ContractJson.canonicalString(document))) {
-                throw rejected(
-                        "TARGET_E2E_FINALIZATION_ATTEMPT_COMMAND_INVALID",
-                        "winning attempt command is not canonical");
-            }
-            RoomGraphCommand command = objectMapper.treeToValue(document, RoomGraphCommand.class);
-            if (!document.isObject()) {
+            JsonNode document = objectMapper.readTree(persistedCommandJson);
+            if (document == null || !document.isObject()) {
                 throw rejected(
                         "TARGET_E2E_FINALIZATION_ATTEMPT_COMMAND_INVALID",
                         "winning attempt command is not an object");
             }
+            RoomGraphCommand command = objectMapper.treeToValue(document, RoomGraphCommand.class);
             com.fasterxml.jackson.databind.node.ObjectNode unhashed =
                     ((com.fasterxml.jackson.databind.node.ObjectNode) document).deepCopy();
             unhashed.remove("request_hash");
-            if (!row.attemptRequestHash().equals(ContractJson.sha256Hex(unhashed))) {
+            if (!persistedRequestHash.equals(ContractJson.sha256Hex(unhashed))) {
                 throw rejected(
                         "TARGET_E2E_FINALIZATION_ATTEMPT_COMMAND_INVALID",
                         "winning attempt command self-hash is invalid");
