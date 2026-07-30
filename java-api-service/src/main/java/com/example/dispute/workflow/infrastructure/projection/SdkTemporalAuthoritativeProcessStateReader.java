@@ -73,7 +73,7 @@ public final class SdkTemporalAuthoritativeProcessStateReader
                 return new Unavailable(verification.reasonCode());
             }
             if (!isCompleteRepairCheckpoint(snapshot, commitment.request())) {
-                return incomplete(snapshot, INCOMPLETE_REASON);
+                return incomplete(snapshot, receipt, INCOMPLETE_REASON);
             }
             return new Verified(
                     authoritativeState(snapshot, receipt),
@@ -246,15 +246,30 @@ public final class SdkTemporalAuthoritativeProcessStateReader
 
     private static Incomplete incomplete(
             CaseProcessSnapshot snapshot, String reasonCode) {
+        return incomplete(snapshot, null, reasonCode);
+    }
+
+    private static Incomplete incomplete(
+            CaseProcessSnapshot snapshot,
+            ProvisionRoomEpochReceipt verifiedReceipt,
+            String reasonCode) {
         return new Incomplete(
                 new AuthoritativeProcessObservation(
                         snapshot.tenantSurrogate(),
                         snapshot.caseId(),
                         snapshot.workflowId(),
                         snapshot.workflowRunId(),
+                        verifiedReceipt == null
+                                ? null
+                                : verifiedReceipt.caseWorkflowRunId(),
+                        verifiedReceipt == null
+                                ? null
+                                : verifiedReceipt.roomWorkflowRunId(),
                         snapshot.macroPhase(),
                         snapshot.activeRoomType(),
                         snapshot.activeRoomEpoch(),
+                        snapshot.activeRoomRevision(),
+                        snapshot.activeFencingToken(),
                         snapshot.observedProcessRevision(),
                         previousSequence(snapshot.nextCommandSequence()),
                         previousSequence(snapshot.nextCaseEventSequence())),

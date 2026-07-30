@@ -46,15 +46,22 @@ import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
 import java.util.HexFormat;
 import java.util.Objects;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 @Service
 public class ProcessProjectionReconciliationService {
 
+    private static final String INCOMPLETE_REPAIR_REASON =
+            "CASE_PROCESS_STATE_NOT_REPAIR_COMPLETE";
+    private static final String CONTROL_PLANE_MACRO_SENTINEL = "CONTROL_PLANE_SHADOW";
+
     private final CaseProcessProjectionRepository projectionRepository;
     private final CaseRoomEpochRepository roomEpochRepository;
     private final ProcessReconciliationIssueRepository issueRepository;
+    private final ObjectProvider<IntakeProcessProjectionCompletionService>
+            intakeProjectionCompletion;
     private final ObjectMapper objectMapper;
     private final Clock clock;
 
@@ -62,11 +69,14 @@ public class ProcessProjectionReconciliationService {
             CaseProcessProjectionRepository projectionRepository,
             CaseRoomEpochRepository roomEpochRepository,
             ProcessReconciliationIssueRepository issueRepository,
+            ObjectProvider<IntakeProcessProjectionCompletionService>
+                    intakeProjectionCompletion,
             ObjectMapper objectMapper,
             Clock clock) {
         this.projectionRepository = projectionRepository;
         this.roomEpochRepository = roomEpochRepository;
         this.issueRepository = issueRepository;
+        this.intakeProjectionCompletion = intakeProjectionCompletion;
         this.objectMapper = objectMapper;
         this.clock = clock;
     }
@@ -76,6 +86,9 @@ public class ProcessProjectionReconciliationService {
             ReconciliationTarget target, ReadResult authoritativeRead) {
         Objects.requireNonNull(target, "target must not be null");
         Objects.requireNonNull(authoritativeRead, "authoritativeRead must not be null");
+
+        IntakeRecoveryAttempt intakeRecovery =
+                attemptIntakeRecovery(target, authoritativeRead);
 
         CaseRoomEpochEntity epoch =
                 roomEpochRepository
@@ -166,6 +179,88 @@ public class ProcessProjectionReconciliationService {
                     -1);
         }
 
+        if (intakeRecovery.completion() != null
+                && intakeRecovery.completion().outcome()
+                        == IntakeProcessProjectionCompletionService.CompletionOutcome.APPLIED) {
+            String issueKey =
+                    recordIssue(
+                            target,
+                            issue(
+                                            "INCOMPLETE_AUTHORITY_PROJECTION_DRIFT",
+                                            PROJECTION,
+                                            ERROR,
+                                            epoch,
+                                            projection,
+                                            intakeRecovery.completion().processRevision(),
+                                            null,
+                                            null,
+                                            temporalRunId(authoritativeRead),
+                                            INCOMPLETE_REPAIR_REASON,
+                                            null)
+                                    .withActualRevision(
+                                            intakeRecovery.completion().processRevision() - 1),
+                            true);
+            return new ProcessProjectionReconciliationResult(
+                    REPAIRED,
+                    "FENCED_FINALIZATION_REPAIR_APPLIED",
+                    issueKey,
+                    intakeRecovery.completion().processRevision(),
+                    intakeRecovery.completion().processRevision());
+        }
+        if (intakeRecovery.completion() != null
+                && authoritativeRead instanceof Incomplete incomplete
+                && incompleteObservationMatches(epoch, projection, incomplete.observation())) {
+            String issueKey =
+                    recordIssue(
+                            target,
+                            issue(
+                                            "INCOMPLETE_AUTHORITY_PROJECTION_DRIFT",
+                                            PROJECTION,
+                                            ERROR,
+                                            epoch,
+                                            projection,
+                                            incomplete.observation().processRevision(),
+                                            null,
+                                            null,
+                                            incomplete.observation().temporalRunId(),
+                                            incomplete.reasonCode(),
+                                            null)
+                                    .withActualRevision(
+                                            intakeRecovery.completion().processRevision() - 1),
+                            true);
+            return result(
+                    SOURCE_INCOMPLETE,
+                    incomplete.reasonCode(),
+                    issueKey,
+                    projection,
+                    incomplete.observation().processRevision());
+        }
+        if (intakeRecovery.rejection() != null) {
+            long authoritativeRevision = processRevision(authoritativeRead);
+            String issueKey =
+                    recordIssue(
+                            target,
+                            issue(
+                                    "INCOMPLETE_AUTHORITY_REPAIR_REJECTED",
+                                    PROJECTION,
+                                    CRITICAL,
+                                    epoch,
+                                    projection,
+                                    authoritativeRevision,
+                                    null,
+                                    null,
+                                    temporalRunId(authoritativeRead),
+                                    intakeRecovery.rejection().reasonCode(),
+                                    null),
+                            false);
+            return result(
+                    REPAIR_REJECTED,
+                    intakeRecovery.rejection().reasonCode(),
+                    issueKey,
+                    projection,
+                    authoritativeRevision);
+        }
+
         if (authoritativeRead instanceof Unavailable unavailable) {
             return reconcileUnavailable(target, epoch, projection, unavailable);
         }
@@ -173,6 +268,25 @@ public class ProcessProjectionReconciliationService {
             return reconcileIncomplete(target, epoch, projection, incomplete);
         }
         return reconcileVerified(target, epoch, projection, (Verified) authoritativeRead);
+    }
+
+    private IntakeRecoveryAttempt attemptIntakeRecovery(
+            ReconciliationTarget target, ReadResult authoritativeRead) {
+        if (!(authoritativeRead instanceof Incomplete incomplete)
+                || !INCOMPLETE_REPAIR_REASON.equals(incomplete.reasonCode())) {
+            return IntakeRecoveryAttempt.NONE;
+        }
+        IntakeProcessProjectionCompletionService completion =
+                intakeProjectionCompletion.getIfAvailable();
+        if (completion == null) {
+            return IntakeRecoveryAttempt.NONE;
+        }
+        try {
+            return new IntakeRecoveryAttempt(
+                    completion.recover(target, incomplete.observation()).orElse(null), null);
+        } catch (ProjectionWriteRejectedException rejected) {
+            return new IntakeRecoveryAttempt(null, rejected);
+        }
     }
 
     private ProcessProjectionReconciliationResult reconcileUnavailable(
@@ -236,7 +350,7 @@ public class ProcessProjectionReconciliationService {
                     projection,
                     observation.processRevision());
         }
-        if (incompleteObservationMatches(projection, observation)) {
+        if (incompleteObservationMatches(epoch, projection, observation)) {
             return result(
                     SOURCE_INCOMPLETE,
                     incomplete.reasonCode(),
@@ -631,25 +745,47 @@ public class ProcessProjectionReconciliationService {
     }
 
     private static boolean incompleteObservationMatches(
+            CaseRoomEpochEntity epoch,
             CaseProcessProjectionEntity projection,
             AuthoritativeProcessObservation observation) {
-        return projection != null
+        return epoch != null
+                && projection != null
+                && epoch.getTenantSurrogate().equals(observation.tenantSurrogate())
+                && epoch.getRoomType() == observation.activeRoomType()
+                && epoch.getRoomEpoch() == observation.activeRoomEpoch()
+                && epoch.getProcessRevision() == observation.processRevision()
+                && (observation.activeRoomRevision() == null
+                        || epoch.getRoomRevision() == observation.activeRoomRevision())
+                && epoch.getFencingToken() == observation.activeFencingToken()
+                && Objects.equals(
+                        epoch.getTemporalWorkflowId(), observation.temporalWorkflowId())
+                && (observation.verifiedFirstExecutionRunId() == null
+                        || (Objects.equals(
+                                        epoch.getTemporalRunId(),
+                                        observation.verifiedFirstExecutionRunId())
+                                && Objects.equals(
+                                        epoch.getRoomTemporalRunId(),
+                                        observation.verifiedActiveChildRunId())))
                 && projection.getTenantSurrogate().equals(observation.tenantSurrogate())
-                && projection.getMacroPhase().equals(observation.macroPhase())
+                && (CONTROL_PLANE_MACRO_SENTINEL.equals(observation.macroPhase())
+                        || projection.getMacroPhase().equals(observation.macroPhase()))
                 && Objects.equals(
                         projection.getCurrentRoom(),
                         observation.activeRoomType() == null
                                 ? null
                                 : observation.activeRoomType().name())
                 && projection.getRoomEpoch() == observation.activeRoomEpoch()
+                && projection.getFencingToken() == observation.activeFencingToken()
                 && projection.getProcessRevision() == observation.processRevision()
                 && projection.getLastCommandSequence() == observation.lastCommandSequence()
                 && projection.getLastCaseEventSequence()
                         == observation.lastCaseEventSequence()
                 && Objects.equals(
                         projection.getTemporalWorkflowId(), observation.temporalWorkflowId())
-                && Objects.equals(
-                        projection.getTemporalRunId(), observation.temporalRunId());
+                && (observation.verifiedFirstExecutionRunId() == null
+                        || Objects.equals(
+                                projection.getTemporalRunId(),
+                                observation.verifiedFirstExecutionRunId()));
     }
 
     private static boolean projectionMatches(
@@ -762,5 +898,47 @@ public class ProcessProjectionReconciliationService {
             String expectedRunId,
             String actualRunId,
             String reasonCode,
-            String verificationRef) {}
+            String verificationRef) {
+
+        private IssueDescription withActualRevision(long value) {
+            return new IssueDescription(
+                    issueType,
+                    scope,
+                    severity,
+                    writerMode,
+                    roomType,
+                    roomEpoch,
+                    expectedRevision,
+                    value,
+                    fencingToken,
+                    expectedRef,
+                    expectedSha256,
+                    actualRef,
+                    actualSha256,
+                    expectedRunId,
+                    actualRunId,
+                    reasonCode,
+                    verificationRef);
+        }
+    }
+
+    private static String temporalRunId(ReadResult authoritativeRead) {
+        return authoritativeRead instanceof Incomplete incomplete
+                ? incomplete.observation().temporalRunId()
+                : null;
+    }
+
+    private static long processRevision(ReadResult authoritativeRead) {
+        return authoritativeRead instanceof Incomplete incomplete
+                ? incomplete.observation().processRevision()
+                : -1;
+    }
+
+    private record IntakeRecoveryAttempt(
+            IntakeProcessProjectionCompletionService.CompletionResult completion,
+            ProjectionWriteRejectedException rejection) {
+
+        private static final IntakeRecoveryAttempt NONE =
+                new IntakeRecoveryAttempt(null, null);
+    }
 }

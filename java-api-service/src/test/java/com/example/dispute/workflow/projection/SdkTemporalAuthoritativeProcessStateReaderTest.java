@@ -15,6 +15,7 @@ import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
 import com.example.dispute.workflow.contract.v1.ProvisionRoomEpoch;
 import com.example.dispute.workflow.contract.v1.ProvisionRoomEpochReceipt;
 import com.example.dispute.workflow.infrastructure.projection.SdkTemporalAuthoritativeProcessStateReader;
+import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.ActiveChildKind;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessSnapshot;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessWorkflow;
 import com.example.dispute.workflow.temporal.caseprocess.ProvisioningCommitment;
@@ -79,9 +80,41 @@ class SdkTemporalAuthoritativeProcessStateReaderTest {
         Incomplete incomplete = (Incomplete) result;
         assertThat(incomplete.reasonCode())
                 .isEqualTo("TEMPORAL_PROVISIONING_COMMITMENT_MISSING");
+        assertThat(incomplete.observation().macroPhase())
+                .isEqualTo("CONTROL_PLANE_SHADOW");
+        assertThat(incomplete.observation().verifiedFirstExecutionRunId()).isNull();
+        assertThat(incomplete.observation().verifiedActiveChildRunId()).isNull();
+        assertThat(incomplete.observation().activeRoomRevision()).isEqualTo(12);
+        assertThat(incomplete.observation().activeFencingToken()).isEqualTo(9);
         assertThat(incomplete.observation().processRevision()).isEqualTo(7);
         assertThat(incomplete.observation().lastCommandSequence()).isEqualTo(11);
         assertThat(incomplete.observation().lastCaseEventSequence()).isEqualTo(20);
+    }
+
+    @Test
+    void progressedSnapshotCarriesOnlyHistoryVerifiedRunBindings() {
+        ProvisionRoomEpoch request = request();
+        ProvisionRoomEpochReceipt receipt = receipt(request);
+        when(workflow.state()).thenReturn(progressedSnapshot(request));
+        when(workflow.provisioningCommitment())
+                .thenReturn(
+                        new ProvisioningCommitment(
+                                request.updateId(), request.payloadSha256(), request, receipt));
+        when(workflowClient.fetchHistory(WORKFLOW_ID, FIRST_RUN_ID))
+                .thenReturn(history(receipt, true));
+
+        var result = reader.read(TARGET);
+
+        assertThat(result).isInstanceOf(Incomplete.class);
+        Incomplete incomplete = (Incomplete) result;
+        assertThat(incomplete.reasonCode())
+                .isEqualTo("CASE_PROCESS_STATE_NOT_REPAIR_COMPLETE");
+        assertThat(incomplete.observation().verifiedFirstExecutionRunId())
+                .isEqualTo(FIRST_RUN_ID);
+        assertThat(incomplete.observation().verifiedActiveChildRunId())
+                .isEqualTo(ROOM_RUN_ID);
+        assertThat(incomplete.observation().activeRoomRevision()).isEqualTo(4);
+        assertThat(incomplete.observation().processRevision()).isEqualTo(8);
     }
 
     @Test
@@ -346,6 +379,49 @@ class SdkTemporalAuthoritativeProcessStateReaderTest {
                 9,
                 ROOM_RUN_ID,
                 0,
+                null,
+                ActiveChildKind.TARGET_TYPED_ROOM,
+                "target-room-selection.v1",
+                "EvidenceRoomWorkflow",
+                "room-build-reader",
+                12L,
+                null);
+    }
+
+    private static CaseProcessSnapshot progressedSnapshot(ProvisionRoomEpoch request) {
+        return new CaseProcessSnapshot(
+                "case-process-snapshot.v1",
+                WORKFLOW_ID,
+                FIRST_RUN_ID,
+                TENANT,
+                CASE_ID,
+                "CONTROL_PLANE_SHADOW",
+                request.roomType(),
+                request.roomEpoch(),
+                request.roomWorkflowId(),
+                request.initialProcessRevision() + 1,
+                request.firstCommandSequence() + 1,
+                request.firstCaseEventSequence() + 2,
+                1,
+                2,
+                0,
+                0,
+                1,
+                1,
+                2,
+                0,
+                "NONE",
+                null,
+                List.of("command-reader"),
+                request.fencingToken(),
+                ROOM_RUN_ID,
+                1,
+                request.payloadSha256(),
+                ActiveChildKind.TARGET_TYPED_ROOM,
+                request.selectionSchemaVersion(),
+                "EvidenceRoomWorkflow",
+                "room-build-reader",
+                request.initialRoomRevision() + 1,
                 null);
     }
 }

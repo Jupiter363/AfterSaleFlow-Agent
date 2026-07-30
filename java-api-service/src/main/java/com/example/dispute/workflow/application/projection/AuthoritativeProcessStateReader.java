@@ -55,9 +55,13 @@ public interface AuthoritativeProcessStateReader {
             String caseId,
             String temporalWorkflowId,
             String temporalRunId,
+            String verifiedFirstExecutionRunId,
+            String verifiedActiveChildRunId,
             String macroPhase,
             RoomType activeRoomType,
             long activeRoomEpoch,
+            Long activeRoomRevision,
+            long activeFencingToken,
             long processRevision,
             long lastCommandSequence,
             long lastCaseEventSequence) {
@@ -67,8 +71,18 @@ public interface AuthoritativeProcessStateReader {
             requireText(caseId, 64, "caseId");
             requireText(temporalWorkflowId, 128, "temporalWorkflowId");
             requireText(temporalRunId, 128, "temporalRunId");
+            if ((verifiedFirstExecutionRunId == null) != (verifiedActiveChildRunId == null)) {
+                throw new IllegalArgumentException(
+                        "verified Temporal run bindings must be supplied together");
+            }
+            if (verifiedFirstExecutionRunId != null) {
+                requireText(verifiedFirstExecutionRunId, 128, "verifiedFirstExecutionRunId");
+                requireText(verifiedActiveChildRunId, 128, "verifiedActiveChildRunId");
+            }
             requireState(macroPhase, "macroPhase");
             if (activeRoomEpoch < 0
+                    || (activeRoomRevision != null && activeRoomRevision < 0)
+                    || activeFencingToken < 0
                     || processRevision < 0
                     || lastCommandSequence < 0
                     || lastCaseEventSequence < 0) {
