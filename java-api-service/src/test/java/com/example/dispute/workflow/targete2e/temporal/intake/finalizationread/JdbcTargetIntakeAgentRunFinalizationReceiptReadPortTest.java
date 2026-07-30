@@ -164,6 +164,21 @@ class JdbcTargetIntakeAgentRunFinalizationReceiptReadPortTest {
     }
 
     @Test
+    void rejectsWinningAttemptWhenItsPersistedRequestHashWasTampered() throws Exception {
+        ObjectNode commandJson = commandJson();
+
+        assertThatThrownBy(() ->
+                        JdbcTargetIntakeAgentRunFinalizationReceiptReadPort.decodeAttemptCommand(
+                                MAPPER,
+                                MAPPER.writeValueAsString(commandJson),
+                                "f".repeat(64)))
+                .isInstanceOf(TargetE2eFinalizationRejectedException.class)
+                .hasMessage("winning attempt command self-hash is invalid")
+                .extracting(failure -> ((TargetE2eFinalizationRejectedException) failure).code())
+                .isEqualTo("TARGET_E2E_FINALIZATION_ATTEMPT_COMMAND_INVALID");
+    }
+
+    @Test
     void decodesCamelCaseIntakeMaterialWithAnInjectedSnakeCaseMapper() throws Exception {
         IntakeCommandExecutionContext expected = new IntakeCommandExecutionContext(
                 "intake-command-execution-context.v1",

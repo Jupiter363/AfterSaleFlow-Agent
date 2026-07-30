@@ -1,6 +1,11 @@
 package com.example.dispute.workflow.projection;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.reset;
 
 import com.example.dispute.workflow.application.projection.AuthoritativeProcessStateReader;
 import com.example.dispute.workflow.application.projection.AuthoritativeProcessStateReader.AuthoritativeProcessObservation;
@@ -9,9 +14,13 @@ import com.example.dispute.workflow.application.projection.AuthoritativeProcessS
 import com.example.dispute.workflow.application.projection.AuthoritativeProcessStateReader.ReadResult;
 import com.example.dispute.workflow.application.projection.AuthoritativeProcessStateReader.ReconciliationTarget;
 import com.example.dispute.workflow.application.projection.AuthoritativeProcessStateReader.Verified;
+import com.example.dispute.workflow.application.projection.IntakeProcessProjectionCompletionService;
+import com.example.dispute.workflow.application.projection.IntakeProcessProjectionCompletionService.CompletionOutcome;
+import com.example.dispute.workflow.application.projection.IntakeProcessProjectionCompletionService.CompletionResult;
 import com.example.dispute.workflow.application.projection.ProcessProjectionReconciler;
 import com.example.dispute.workflow.application.projection.ProcessProjectionReconciliationResult.Outcome;
 import com.example.dispute.workflow.application.projection.ProcessProjectionReconciliationService;
+import com.example.dispute.workflow.application.projection.ProjectionWriteRejectedException;
 import com.example.dispute.workflow.config.ProcessProjectionReconciliationProperties;
 import com.example.dispute.workflow.contract.v1.CaseProcessWorkflowProtocol;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
@@ -24,7 +33,10 @@ import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.Objects;
+import java.util.Optional;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.aop.support.AopUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
 import org.springframework.boot.test.context.TestConfiguration;
@@ -84,7 +96,14 @@ class ProcessProjectionReconcilerIntegrationTest {
 
     @Autowired private ProcessProjectionReconciler reconciler;
     @Autowired private MutableAuthoritativeProcessStateReader authoritativeStateReader;
+    @Autowired private IntakeProcessProjectionCompletionService intakeProjectionCompletion;
+    @Autowired private CompletionMockHolder completionMockHolder;
     @Autowired private JdbcTemplate jdbc;
+
+    @BeforeEach
+    void resetCompletionMock() {
+        reset(completionMockHolder.completion());
+    }
 
     @Test
     void missingTemporalProjectionIsRebuiltFromCompleteVerifiedState() {
@@ -181,6 +200,90 @@ class ProcessProjectionReconcilerIntegrationTest {
                 .isEqualTo(5);
         assertThat(stringValue("process_reconciliation_issue", "issue_status", fixture.caseId()))
                 .isEqualTo("OPEN");
+    }
+
+    @Test
+    void rejectedIntakeRecoveryRollsBackChildWriteAndPersistsIssue() {
+        Fixture fixture = insertFixture("INTAKE_REJECTED", WriterMode.TEMPORAL, true, 5, 3);
+        Incomplete incomplete = incompleteObservation(fixture, 5, 3);
+        authoritativeStateReader.answer(incomplete);
+        doAnswer(
+                        ignored -> {
+                            jdbc.update(
+                                    "update case_process_projection set process_revision = 99 where case_id = ?",
+                                    fixture.caseId());
+                            throw new ProjectionWriteRejectedException(
+                                    "INTAKE_PROJECTION_FENCE_STALE",
+                                    "projection fence was rejected");
+                        })
+                .when(completionMockHolder.completion())
+                .recover(any(), any());
+
+        var result = reconciler.reconcile(fixture.target());
+
+        assertThat(AopUtils.isAopProxy(intakeProjectionCompletion)).isTrue();
+        assertThat(result.outcome()).isEqualTo(Outcome.REPAIR_REJECTED);
+        assertThat(result.reasonCode()).isEqualTo("INTAKE_PROJECTION_FENCE_STALE");
+        assertThat(longValue("case_process_projection", "process_revision", fixture.caseId()))
+                .isEqualTo(5);
+        assertThat(countIssues(fixture.caseId())).isEqualTo(1);
+        assertThat(stringValue("process_reconciliation_issue", "issue_type", fixture.caseId()))
+                .isEqualTo("INCOMPLETE_AUTHORITY_REPAIR_REJECTED");
+        assertThat(stringValue("process_reconciliation_issue", "issue_status", fixture.caseId()))
+                .isEqualTo("OPEN");
+    }
+
+    @Test
+    void appliedIntakeRecoveryIsReportedAsRepaired() {
+        Fixture fixture = insertFixture("INTAKE_APPLIED", WriterMode.TEMPORAL, true, 5, 3);
+        authoritativeStateReader.answer(incompleteObservation(fixture, 6, 4));
+        doAnswer(
+                        ignored -> {
+                            jdbc.update(
+                                    "update case_room_epoch set process_revision = 6, room_revision = 4 where id = ?",
+                                    fixture.epochId());
+                            jdbc.update(
+                                    "update case_process_projection set process_revision = 6 where case_id = ?",
+                                    fixture.caseId());
+                            return Optional.of(completion(CompletionOutcome.APPLIED, 6, 4, 19));
+                        })
+                .when(completionMockHolder.completion())
+                .recover(any(), any());
+
+        var result = reconciler.reconcile(fixture.target());
+
+        assertThat(result.outcome()).isEqualTo(Outcome.REPAIRED);
+        assertThat(result.reasonCode()).isEqualTo("FENCED_FINALIZATION_REPAIR_APPLIED");
+        assertThat(result.actualProcessRevision()).isEqualTo(6);
+        assertThat(result.authoritativeProcessRevision()).isEqualTo(6);
+        assertThat(longValue("case_process_projection", "process_revision", fixture.caseId()))
+                .isEqualTo(6);
+        assertThat(longValue("case_room_epoch", "room_revision", fixture.epochId()))
+                .isEqualTo(4);
+        assertThat(stringValue("process_reconciliation_issue", "issue_status", fixture.caseId()))
+                .isEqualTo("RESOLVED");
+    }
+
+    @Test
+    void idempotentIntakeRecoveryReplayRemainsSourceIncomplete() {
+        Fixture fixture = insertFixture("INTAKE_REPLAY", WriterMode.TEMPORAL, true, 5, 3);
+        Incomplete incomplete = incompleteObservation(fixture, 5, 3);
+        authoritativeStateReader.answer(incomplete);
+        doReturn(
+                        Optional.of(
+                                completion(CompletionOutcome.IDEMPOTENT_REPLAY, 5, 3, 19)))
+                .when(completionMockHolder.completion())
+                .recover(any(), any());
+
+        var result = reconciler.reconcile(fixture.target());
+
+        assertThat(result.outcome()).isEqualTo(Outcome.SOURCE_INCOMPLETE);
+        assertThat(result.outcome()).isNotEqualTo(Outcome.REPAIRED);
+        assertThat(result.reasonCode()).isEqualTo(incomplete.reasonCode());
+        assertThat(longValue("case_process_projection", "process_revision", fixture.caseId()))
+                .isEqualTo(5);
+        assertThat(stringValue("process_reconciliation_issue", "issue_status", fixture.caseId()))
+                .isEqualTo("RESOLVED");
     }
 
     @Test
@@ -357,6 +460,42 @@ class ProcessProjectionReconcilerIntegrationTest {
                         + state.temporalRunId());
     }
 
+    private static Incomplete incompleteObservation(
+            Fixture fixture, long processRevision, long roomRevision) {
+        return new Incomplete(
+                new AuthoritativeProcessObservation(
+                        TENANT,
+                        fixture.caseId(),
+                        fixture.workflowId(),
+                        RUN_2,
+                        null,
+                        null,
+                        "EVIDENCE_OPEN",
+                        RoomType.EVIDENCE,
+                        2,
+                        roomRevision,
+                        17,
+                        processRevision,
+                        10,
+                        19),
+                "CASE_PROCESS_STATE_NOT_REPAIR_COMPLETE");
+    }
+
+    private static CompletionResult completion(
+            CompletionOutcome outcome,
+            long processRevision,
+            long roomRevision,
+            long lastCaseEventSequence) {
+        return new CompletionResult(
+                outcome,
+                processRevision,
+                roomRevision,
+                lastCaseEventSequence,
+                "urn:test:intake-projection-completion",
+                "d".repeat(64),
+                NOW);
+    }
+
     private long longValue(String table, String column, String id) {
         String idColumn = table.equals("case_process_projection") ? "case_id" : "id";
         return jdbc.queryForObject(
@@ -403,6 +542,8 @@ class ProcessProjectionReconcilerIntegrationTest {
         }
     }
 
+    record CompletionMockHolder(IntakeProcessProjectionCompletionService completion) {}
+
     @TestConfiguration(proxyBeanMethods = false)
     static class ReconciliationTestConfiguration {
 
@@ -420,6 +561,17 @@ class ProcessProjectionReconcilerIntegrationTest {
         @Bean
         MutableAuthoritativeProcessStateReader authoritativeProcessStateReader() {
             return new MutableAuthoritativeProcessStateReader();
+        }
+
+        @Bean
+        CompletionMockHolder completionMockHolder() {
+            return new CompletionMockHolder(mock(IntakeProcessProjectionCompletionService.class));
+        }
+
+        @Bean
+        IntakeProcessProjectionCompletionService intakeProcessProjectionCompletionService(
+                CompletionMockHolder holder) {
+            return holder.completion();
         }
 
         @Bean
