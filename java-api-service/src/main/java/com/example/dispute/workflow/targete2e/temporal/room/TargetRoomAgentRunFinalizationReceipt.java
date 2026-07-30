@@ -60,12 +60,21 @@ public record TargetRoomAgentRunFinalizationReceipt(
     if (result.outcome() != ExecuteAgentRunResult.Outcome.COMPLETED
         || !request.agentRunId().equals(result.agentRunId())
         || !request.logicalRunId().equals(result.logicalRunId())
-        || !request.attemptId().equals(result.attemptId())
-        || request.attemptNo() != result.attemptNo()
+        || result.attemptNo() < request.attemptNo()
+        || result.attemptNo() > request.attemptLimit()
+        || (result.attemptNo() == request.attemptNo()
+            && !request.attemptId().equals(result.attemptId()))
+        || (result.attemptNo() > request.attemptNo()
+            && request.attemptId().equals(result.attemptId()))
         || result.graphResult() == null
-        || !request.command().commandId().equals(result.graphResult().commandId())
+        || (result.attemptNo() == request.attemptNo()
+            && !request.command().commandId().equals(result.graphResult().commandId()))
+        || (result.attemptNo() > request.attemptNo()
+            && request.command().commandId().equals(result.graphResult().commandId()))
         || !request.command().logicalRunId().equals(result.graphResult().logicalRunId())
-        || !request.command().attemptId().equals(result.graphResult().attemptId())
+        || !result.attemptId().equals(result.graphResult().attemptId())
+        || !request.command().graphKey().equals(result.graphResult().graphKey())
+        || !request.command().graphVersion().equals(result.graphResult().graphVersion())
         || !result.resultHash().equals(result.graphResult().outputHash())) {
       throw new IllegalArgumentException("completed AgentRun result does not bind its request");
     }
@@ -81,8 +90,8 @@ public record TargetRoomAgentRunFinalizationReceipt(
         request.command().stageSequence(),
         request.command().commandId(),
         request.logicalRunId(),
-        request.attemptId(),
-        request.attemptNo(),
+        result.attemptId(),
+        result.attemptNo(),
         result.resultHash());
   }
 

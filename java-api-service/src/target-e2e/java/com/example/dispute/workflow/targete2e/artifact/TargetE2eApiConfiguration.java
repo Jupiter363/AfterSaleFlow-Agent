@@ -46,6 +46,8 @@ import com.example.dispute.workflow.targete2e.rooms.review.JdbcTargetReviewComma
 import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewCommandMaterialStore;
 import com.example.dispute.agentstream.application.AgentRunCommandBindingFactory;
 import com.example.dispute.agentstream.application.AgentRunLedger;
+import com.example.dispute.agentstream.application.AgentRunV2RetryPreparation;
+import com.example.dispute.workflow.targete2e.artifact.recovery.TargetE2eAgentRunV2RetryPreparation;
 import com.example.dispute.workflow.infrastructure.persistence.repository.CaseRoomEpochRepository;
 import com.example.dispute.workflow.infrastructure.persistence.repository.CaseProcessProjectionRepository;
 import com.example.dispute.workflow.targete2e.graph.TargetE2EGraphEnvelopeCodec;
@@ -203,6 +205,19 @@ public class TargetE2eApiConfiguration {
       DataSource dataSource, Clock clock, ObjectMapper objectMapper) {
     return new JdbcTargetReviewCommandMaterialStore(
         dataSource, new TargetE2EActivationLedger(dataSource, clock), objectMapper);
+  }
+
+  @Bean
+  AgentRunV2RetryPreparation targetE2eAgentRunV2RetryPreparation(
+      ObjectMapper objectMapper,
+      TargetE2EGraphEnvelopeCodec envelopes,
+      TargetIntakeCommandMaterialStore intake,
+      TargetEvidenceCommandMaterialStore evidence,
+      TargetHearingCommandMaterialStore hearing,
+      TargetReviewCommandMaterialStore review,
+      TargetE2eRoomObjectIndex objectIndex) {
+    return new TargetE2eAgentRunV2RetryPreparation(
+        objectMapper, envelopes, intake, evidence, hearing, review, objectIndex);
   }
 
   @Bean

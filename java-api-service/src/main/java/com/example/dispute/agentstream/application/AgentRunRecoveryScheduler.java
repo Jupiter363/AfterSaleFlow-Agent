@@ -19,6 +19,7 @@ import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.List;
 import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -53,6 +54,8 @@ public class AgentRunRecoveryScheduler {
     private final AgentRunStreamEventService eventService;
     private final PostCommitSideEffectExecutor executor;
     private final JdbcTemplate detectorJdbcTemplate;
+    private final AgentRunV2RecoveryService v2RecoveryService;
+    private final AgentRunV2Coordinator v2Coordinator;
     private final SchedulerMode schedulerMode;
     private final long staleAfterMillis;
 
@@ -70,13 +73,17 @@ public class AgentRunRecoveryScheduler {
             PostCommitSideEffectExecutor executor,
             AppProperties properties,
             AgentRunV2Properties v2Properties,
-            JdbcTemplate detectorJdbcTemplate) {
+            JdbcTemplate detectorJdbcTemplate,
+            AgentRunV2RecoveryService v2RecoveryService,
+            AgentRunV2Coordinator v2Coordinator) {
         this.runRepository = runRepository;
         this.worker = worker;
         this.lifecycleService = lifecycleService;
         this.eventService = eventService;
         this.executor = executor;
         this.detectorJdbcTemplate = detectorJdbcTemplate;
+        this.v2RecoveryService = v2RecoveryService;
+        this.v2Coordinator = v2Coordinator;
         this.schedulerMode = v2Properties.schedulerMode();
         this.staleAfterMillis = Math.max(30_000L, properties.agent().timeoutMs() + 30_000L);
     }
@@ -94,6 +101,9 @@ public class AgentRunRecoveryScheduler {
         }
         if (schedulerMode == SchedulerMode.DETECTOR) {
             detectLegacyOwnedRuns();
+            if (v2RecoveryService.isRecoveryConfigured()) {
+                recoverV2Attempts();
+            }
             return;
         }
 
@@ -137,6 +147,24 @@ public class AgentRunRecoveryScheduler {
                 detection.pendingCount(),
                 detection.runningCount(),
                 detection.evidenceHash());
+    }
+
+    private void recoverV2Attempts() {
+        for (String status : List.of("PENDING", "RUNNING")) {
+            runRepository
+                    .findTop20ByProtocolAndExecutorKindAndRunStatusAndStreamOperationIsNotNullOrderByCreatedAtAsc(
+                            AgentRunProtocol.V2.wireValue(),
+                            AgentRunExecutorKind.TEMPORAL_ACTIVITY,
+                            status)
+                    .forEach(
+                            run ->
+                                    executor.execute(
+                                            "agent-run-v2-recovery",
+                                            Map.of("run_id", run.getId(), "run_status", status),
+                                            () -> v2RecoveryService
+                                                    .prepare(run.getId())
+                                                    .ifPresent(v2Coordinator::dispatchAllocatedAttempt)));
+        }
     }
 
     private record AgentRunDetection(

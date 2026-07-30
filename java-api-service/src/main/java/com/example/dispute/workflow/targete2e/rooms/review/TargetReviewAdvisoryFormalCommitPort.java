@@ -19,7 +19,7 @@ public final class TargetReviewAdvisoryFormalCommitPort implements TargetReviewF
     var graph = request.request().command();
     var handoff = handoffStore.requireInTransaction(transaction, new TargetReviewOutcomeHandoffStore.Route(
         request.activationId(), request.activationManifestHash(), graph.tenantSurrogate(), graph.caseId(),
-        graph.commandId(), graph.roomEpoch(), request.roomFencingToken()));
+        request.rootCommandId(), graph.roomEpoch(), request.roomFencingToken()));
     if (!handoff.decision().equals(request.humanDecision())) {
       throw new IllegalStateException("target Review finalization must use the pre-existing Java human decision");
     }

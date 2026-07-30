@@ -103,13 +103,18 @@ public record IntakeAgentRunChildState(
   }
 
   public IntakeAgentRunChildState committed(IntakeAgentRunFinalizationReadResult result) {
+    return committed(result, false);
+  }
+
+  public IntakeAgentRunChildState committed(
+      IntakeAgentRunFinalizationReadResult result, boolean allowWinningAttempt) {
     Objects.requireNonNull(result, "result");
     if (result.resolution() != IntakeAgentRunFinalizationReadResult.Resolution.COMMITTED) {
       throw new IllegalArgumentException("finalization result is not committed");
     }
     var locator = result.locator();
     if (!logicalRunId.equals(locator.logicalRunId())
-        || !attemptId.equals(locator.attemptId())
+        || (!allowWinningAttempt && !attemptId.equals(locator.attemptId()))
         || !Objects.equals(resultHash, locator.resultHash())) {
       throw new IllegalArgumentException("committed locator does not match the child result");
     }

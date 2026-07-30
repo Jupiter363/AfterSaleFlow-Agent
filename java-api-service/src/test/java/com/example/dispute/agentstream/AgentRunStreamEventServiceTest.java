@@ -10,12 +10,15 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static org.mockito.ArgumentMatchers.any;
 
 import com.example.dispute.agentstream.application.AgentRunStreamEventService;
 import com.example.dispute.agentstream.infrastructure.persistence.AgentRunStreamEventEntity;
 import com.example.dispute.agentstream.infrastructure.persistence.AgentRunStreamEventRepository;
+import com.example.dispute.agentstream.infrastructure.delivery.AgentRunStreamWakeup;
+import com.example.dispute.agentstream.infrastructure.delivery.AgentRunStreamWakeupPublisher;
 import com.example.dispute.common.exception.ForbiddenException;
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
@@ -47,6 +50,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.LongStream;
 import org.springframework.data.domain.Pageable;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -68,6 +72,7 @@ class AgentRunStreamEventServiceTest {
     @Mock private AgentRunRepository runRepository;
     @Mock private AgentRunAttemptRepository attemptRepository;
     @Mock private AgentRunStreamEventRepository eventRepository;
+    @Mock private AgentRunStreamWakeupPublisher wakeupPublisher;
     @Mock private AccessSessionResolver accessSessionResolver;
 
     private final ObjectMapper objectMapper = JsonMapper.builder().findAndAddModules().build();
@@ -85,6 +90,7 @@ class AgentRunStreamEventServiceTest {
                         runRepository,
                         attemptRepository,
                         eventRepository,
+                        wakeupPublisher,
                         accessSessionResolver,
                         new SessionPermissionService(),
                         objectMapper);
@@ -316,6 +322,127 @@ class AgentRunStreamEventServiceTest {
         assertThatThrownBy(() -> service.replay(run.getId(), -1L, actor))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("after an attempt terminal");
+    }
+
+    @Test
+    void v2RecoveryErrorClosesTheLogicalRunAfterAttemptAborted() throws Exception {
+        AgentRunEntity run = v2Run();
+        AuthenticatedActor actor = allowV2(run);
+        AgentRunAttemptEntity attempt = v2Attempt(1, "ATTEMPT_RECOVERY_TERMINAL");
+        AgentRunStreamEventEntity started = v2Event(
+                run.getId(),
+                attempt.getId(),
+                0,
+                StreamEventType.ATTEMPT_STARTED,
+                emptyV2Payload());
+        AgentRunStreamEventEntity aborted = v2Event(
+                run.getId(),
+                attempt.getId(),
+                1,
+                StreamEventType.ATTEMPT_ABORTED,
+                new AgentStreamEvent.Payload(
+                        null, null, null, null, "PROVIDER_TIMEOUT", null,
+                        null, null, null, null));
+        AgentRunStreamEventEntity terminal = v2Event(
+                run.getId(),
+                attempt.getId(),
+                2,
+                StreamEventType.ERROR,
+                new AgentStreamEvent.Payload(
+                        null, null, null, null, null, null,
+                        null, null, "AGENT_RUN_RECOVERY_ATTEMPT_LIMIT_EXHAUSTED", false));
+        when(attemptRepository.findAllByAgentRunIdOrderByAttemptNoAsc(run.getId()))
+                .thenReturn(List.of(attempt));
+        when(eventRepository.findV2ReplayPage(
+                        org.mockito.ArgumentMatchers.eq(run.getId()),
+                        org.mockito.ArgumentMatchers.eq(attempt.getId()),
+                        org.mockito.ArgumentMatchers.eq(-1L),
+                        any()))
+                .thenReturn(List.of(started, aborted, terminal));
+        when(eventRepository.findV2Event(run.getId(), attempt.getId(), 1L))
+                .thenReturn(Optional.of(aborted));
+        when(eventRepository.findV2ReplayPage(
+                        org.mockito.ArgumentMatchers.eq(run.getId()),
+                        org.mockito.ArgumentMatchers.eq(attempt.getId()),
+                        org.mockito.ArgumentMatchers.eq(1L),
+                        any()))
+                .thenReturn(List.of(terminal));
+
+        var fullReplay = service.replay(run.getId(), -1L, actor);
+        var catchUp = service.replay(
+                run.getId(), "v2:" + attempt.getId() + ":1", actor);
+
+        assertThat(fullReplay).extracting(value -> value.type())
+                .containsExactly("attempt_started", "attempt_aborted", "error");
+        assertThat(catchUp).hasSize(1);
+        assertThat(catchUp.getFirst().type()).isEqualTo("error");
+        assertThat(catchUp.getFirst().code())
+                .isEqualTo("AGENT_RUN_RECOVERY_ATTEMPT_LIMIT_EXHAUSTED");
+        assertThat(catchUp.getFirst().retryable()).isFalse();
+    }
+
+    @Test
+    void v2RecoveryErrorMustBeTheExactNextSequenceAfterAttemptAborted() throws Exception {
+        AgentRunEntity run = v2Run();
+        AuthenticatedActor actor = allowV2(run);
+        AgentRunAttemptEntity attempt = v2Attempt(1, "ATTEMPT_RECOVERY_GAP");
+        when(attemptRepository.findAllByAgentRunIdOrderByAttemptNoAsc(run.getId()))
+                .thenReturn(List.of(attempt));
+        when(eventRepository.findV2ReplayPage(
+                        org.mockito.ArgumentMatchers.eq(run.getId()),
+                        org.mockito.ArgumentMatchers.eq(attempt.getId()),
+                        org.mockito.ArgumentMatchers.eq(-1L),
+                        any()))
+                .thenReturn(List.of(
+                        v2Event(
+                                run.getId(),
+                                attempt.getId(),
+                                0,
+                                StreamEventType.ATTEMPT_STARTED,
+                                emptyV2Payload()),
+                        v2Event(
+                                run.getId(),
+                                attempt.getId(),
+                                1,
+                                StreamEventType.ATTEMPT_ABORTED,
+                                emptyV2Payload()),
+                        v2Event(
+                                run.getId(),
+                                attempt.getId(),
+                                3,
+                                StreamEventType.ERROR,
+                                new AgentStreamEvent.Payload(
+                                        null, null, null, null, null, null,
+                                        null, null, "RECOVERY_ERROR", false))));
+
+        assertThatThrownBy(() -> service.replay(run.getId(), -1L, actor))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("after an attempt terminal");
+    }
+
+    @Test
+    void recoveryWakeupIsDeferredUntilCommitAndCarriesTheTerminalCursor() {
+        TransactionSynchronizationManager.setActualTransactionActive(true);
+        TransactionSynchronizationManager.initSynchronization();
+        try {
+            service.wakeUpAfterCommit(RUN_ID, "ATTEMPT_RECOVERY_TERMINAL", 3L);
+
+            verifyNoInteractions(wakeupPublisher);
+            var synchronizations = TransactionSynchronizationManager.getSynchronizations();
+            assertThat(synchronizations).hasSize(1);
+            synchronizations.getFirst().afterCommit();
+
+            ArgumentCaptor<AgentRunStreamWakeup> wakeupCaptor =
+                    ArgumentCaptor.forClass(AgentRunStreamWakeup.class);
+            verify(wakeupPublisher).publish(wakeupCaptor.capture());
+            assertThat(wakeupCaptor.getValue().runId()).isEqualTo(RUN_ID);
+            assertThat(wakeupCaptor.getValue().attemptId())
+                    .isEqualTo("ATTEMPT_RECOVERY_TERMINAL");
+            assertThat(wakeupCaptor.getValue().durableHighWatermark()).isEqualTo(3L);
+        } finally {
+            TransactionSynchronizationManager.clearSynchronization();
+            TransactionSynchronizationManager.setActualTransactionActive(false);
+        }
     }
 
     @Test

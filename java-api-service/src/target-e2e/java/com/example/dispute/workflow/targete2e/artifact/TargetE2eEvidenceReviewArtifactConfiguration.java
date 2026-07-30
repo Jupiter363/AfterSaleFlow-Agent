@@ -1,6 +1,7 @@
 package com.example.dispute.workflow.targete2e.artifact;
 
 import com.example.dispute.agentstream.application.AgentRunDomainResultCommitter;
+import com.example.dispute.infrastructure.persistence.repository.AgentRunAttemptRepository;
 import com.example.dispute.workflow.activity.agent.GraphRegistryBindingPolicy;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationActivationPort;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationRuntimeContextProvider;
@@ -121,7 +122,8 @@ public class TargetE2eEvidenceReviewArtifactConfiguration {
             HttpTargetE2EGraphReconciliationClient reconciliation,
             GraphRegistryBindingPolicy registryBindings,
             TargetE2eFinalizationActivationPort targetE2eFinalizationAuthority,
-            TargetE2eFinalizationRuntimeContextProvider runtime) {
+            TargetE2eFinalizationRuntimeContextProvider runtime,
+            AgentRunAttemptRepository attempts) {
         TargetReviewCommandMaterialStore materialStore =
                 new JdbcTargetReviewCommandMaterialStore(dataSource, activationLedger, objectMapper);
         TargetReviewOutcomeHandoffStore handoffStore =
@@ -135,7 +137,7 @@ public class TargetE2eEvidenceReviewArtifactConfiguration {
                         reconciliation,
                         registryBindings);
         var resolver = new TargetReviewFinalizationRequestResolver(
-                materialStore, handoffStore, evidenceSource, objectMapper);
+                materialStore, handoffStore, evidenceSource, attempts, objectMapper);
         TargetReviewFinalizationFactsProvider factsProvider =
                 new JdbcTargetReviewFinalizationFactsProvider(dataSource, runtime);
         TargetReviewAdvisoryProjectionPort projectionPort =

@@ -126,6 +126,37 @@ class AgentRunAttemptEntityTest {
     }
 
     @Test
+    void recoveryTerminalErrorAdvancesOnlyTheExactPublicCursor() {
+        AgentRunAttemptEntity attempt = AgentRunAttemptEntity.start(
+                RUN_ID,
+                AgentRunPersistenceFixtures.allocation(1, "ATTEMPT_V2_RECOVERY_ERROR"),
+                null,
+                false,
+                0,
+                STARTED_AT);
+        attempt.recordHeartbeat(
+                AgentRunPersistenceFixtures.heartbeat(
+                        1, "ATTEMPT_V2_RECOVERY_ERROR", 2));
+        attempt.recordFailure(
+                AgentRunAttemptStatus.ABORTED,
+                "PROVIDER_TIMEOUT",
+                AgentRunRecoveryAction.CREATE_NEXT_ATTEMPT,
+                COMPLETED_AT);
+
+        attempt.advanceRecoveryTerminalErrorSequence(3L);
+
+        assertThat(attempt.getLastSequenceNo()).isEqualTo(3L);
+        assertThat(attempt.getAttemptStatus()).isEqualTo(AgentRunAttemptStatus.ABORTED);
+        assertThat(attempt.getErrorCode()).isEqualTo("PROVIDER_TIMEOUT");
+        assertThat(attempt.getErrorRetryable()).isTrue();
+        assertThat(attempt.getTerminationCode()).isEqualTo("CREATE_NEXT_ATTEMPT");
+        assertThat(attempt.getCompletedAt().toInstant()).isEqualTo(COMPLETED_AT);
+        assertThatThrownBy(() -> attempt.advanceRecoveryTerminalErrorSequence(5L))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("exact next public sequence");
+    }
+
+    @Test
     void mergesHeartbeatDimensionsMonotonicallyAcrossClockSkewAndReordering() {
         AgentRunAttemptEntity attempt =
                 AgentRunAttemptEntity.start(

@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from psycopg import OperationalError
+from psycopg import errors as psycopg_errors
+from psycopg_pool import PoolTimeout, TooManyRequests
+
 
 class GraphRuntimeError(RuntimeError):
     """Base failure carrying a stable code and no untrusted provider text."""
@@ -145,3 +149,31 @@ class GraphNewAgentAttemptRequiredError(GraphRecoveryError):
 
 class GraphTerminalBindingError(GraphRecoveryError):
     code = "GRAPH_TERMINAL_BINDING_CONFLICT"
+
+
+_TRANSIENT_PERSISTENCE_ERRORS = (
+    psycopg_errors.LockNotAvailable,
+    psycopg_errors.ConnectionException,
+    psycopg_errors.AdminShutdown,
+    psycopg_errors.CrashShutdown,
+    psycopg_errors.CannotConnectNow,
+    psycopg_errors.SerializationFailure,
+    psycopg_errors.DeadlockDetected,
+    psycopg_errors.IdleInTransactionSessionTimeout,
+    PoolTimeout,
+    TooManyRequests,
+)
+
+
+def normalize_transient_persistence_error(error: Exception) -> GraphRuntimeError | None:
+    """Map only proven transient PostgreSQL failures to a public-safe retry contract.
+
+    Psycopg uses the bare ``OperationalError`` for failures such as a connection
+    timeout.  Generated subclasses are deliberately not covered by that fallback:
+    each retryable SQLSTATE must be opted in above so an unknown database failure
+    remains non-retryable at the API boundary.
+    """
+
+    if type(error) in _TRANSIENT_PERSISTENCE_ERRORS or type(error) is OperationalError:
+        return GraphLeaseUnavailableError()
+    return None

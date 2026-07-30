@@ -36,6 +36,7 @@ from app.graph_runtime.errors import (
     GraphNonceReplayError,
     GraphResultNotCommittedError,
     GraphRuntimeError,
+    normalize_transient_persistence_error,
 )
 from app.graph_runtime.identity import ThreadIdentity
 from app.graph_runtime.target_e2e import (
@@ -61,9 +62,7 @@ GRAPH_COMMAND_MAX_BYTES = 65_536
 GRAPH_STREAM_PATH = "/internal/graphs/commands/stream"
 GRAPH_RECONCILE_PATH = "/internal/graphs/commands/reconcile"
 TARGET_E2E_RECONCILE_PATH = "/internal/graphs/target-e2e/commands/reconcile"
-TARGET_E2E_PROPOSAL_SOURCE_PATH = (
-    "/internal/graphs/target-e2e/commands/proposal-source"
-)
+TARGET_E2E_PROPOSAL_SOURCE_PATH = "/internal/graphs/target-e2e/commands/proposal-source"
 _TERMINAL_EVENTS = frozenset({"attempt_aborted", "final", "error"})
 _NO_STORE_HEADERS: Mapping[str, str] = {
     "Cache-Control": "no-store, no-transform",
@@ -335,6 +334,10 @@ def create_graph_commands_router(
         except Exception as error:
             if iterator is not None:
                 await _close_iterator_safely(iterator)
+            persistence_error = normalize_transient_persistence_error(error)
+            if persistence_error is not None:
+                _log_safe_failure("graph stream startup persistence", error)
+                return _graph_runtime_error(persistence_error)
             _log_safe_failure("graph stream startup", error)
             return _error_response(500, "GRAPH_STREAM_INTERNAL_ERROR", False)
         except BaseException:
@@ -452,6 +455,10 @@ def create_graph_commands_router(
         except Exception as error:
             if iterator is not None:
                 await _close_iterator_safely(iterator)
+            persistence_error = normalize_transient_persistence_error(error)
+            if persistence_error is not None:
+                _log_safe_failure("target-E2E graph stream startup persistence", error)
+                return _graph_runtime_error(persistence_error)
             _log_safe_failure("target-E2E graph stream startup", error)
             return _error_response(500, "GRAPH_STREAM_INTERNAL_ERROR", False)
         except BaseException:
@@ -526,9 +533,7 @@ def create_graph_reconciliation_router(
             if len(authorization) > 1:
                 raise InvocationEnvelopeError("INVOCATION_AUTHORIZATION_REJECTED")
             token = extract_bearer_token(authorization[0] if authorization else None)
-            transport_identity = dependencies.transport_identity_resolver.resolve(
-                request.scope
-            )
+            transport_identity = dependencies.transport_identity_resolver.resolve(request.scope)
             if not isinstance(transport_identity, TransportIdentity):
                 raise InvocationEnvelopeError("INVOCATION_MTLS_IDENTITY_REJECTED")
         except InvocationEnvelopeError as error:
@@ -585,9 +590,7 @@ def create_graph_reconciliation_router(
                 verified.claims,
                 ReconciliationClaims,
             ):
-                raise InvocationEnvelopeError(
-                    "INVOCATION_RECONCILIATION_CREDENTIAL_TYPE_REJECTED"
-                )
+                raise InvocationEnvelopeError("INVOCATION_RECONCILIATION_CREDENTIAL_TYPE_REJECTED")
         except InvocationEnvelopeError as error:
             return _reconciliation_error_response(
                 401,
@@ -670,9 +673,7 @@ def create_graph_reconciliation_router(
             if len(authorization) > 1:
                 raise InvocationEnvelopeError("INVOCATION_AUTHORIZATION_REJECTED")
             token = extract_bearer_token(authorization[0] if authorization else None)
-            transport_identity = dependencies.transport_identity_resolver.resolve(
-                request.scope
-            )
+            transport_identity = dependencies.transport_identity_resolver.resolve(request.scope)
             body_text = await _read_bounded_body(request, GRAPH_COMMAND_MAX_BYTES)
             envelope = TargetE2EGraphCommandEnvelope.model_validate(json.loads(body_text))
             verified = verifier.verify_envelope_for_reconciliation(
@@ -743,9 +744,7 @@ def create_graph_reconciliation_router(
         if not _has_identity_content_encoding(request):
             return _error_response(415, "GRAPH_CONTENT_ENCODING_REJECTED", False)
         try:
-            expected_result_ref, expected_proposal_hash = _target_proposal_selector(
-                request
-            )
+            expected_result_ref, expected_proposal_hash = _target_proposal_selector(request)
         except ValueError:
             return _error_response(
                 400,
@@ -757,9 +756,7 @@ def create_graph_reconciliation_router(
             if len(authorization) > 1:
                 raise InvocationEnvelopeError("INVOCATION_AUTHORIZATION_REJECTED")
             token = extract_bearer_token(authorization[0] if authorization else None)
-            transport_identity = dependencies.transport_identity_resolver.resolve(
-                request.scope
-            )
+            transport_identity = dependencies.transport_identity_resolver.resolve(request.scope)
             body_text = await _read_bounded_body(request, GRAPH_COMMAND_MAX_BYTES)
             envelope = TargetE2EGraphCommandEnvelope.model_validate(json.loads(body_text))
             verified = verifier.verify_envelope_for_reconciliation(
@@ -869,9 +866,7 @@ async def _stream_ndjson(
             try:
                 event = await anext(iterator)
             except StopAsyncIteration as error:
-                raise AgentStreamProtocolError(
-                    "stream ended without a terminal event"
-                ) from error
+                raise AgentStreamProtocolError("stream ended without a terminal event") from error
 
             candidate = replace(validator)
             encoded = _encode_event(codec, candidate, event)
@@ -881,9 +876,7 @@ async def _stream_ndjson(
                 except StopAsyncIteration:
                     yield encoded
                     return
-                raise AgentStreamProtocolError(
-                    "stream emitted an event after its terminal event"
-                )
+                raise AgentStreamProtocolError("stream emitted an event after its terminal event")
             validator = candidate
             yield encoded
     except GraphRuntimeError as error:
@@ -908,6 +901,15 @@ async def _stream_ndjson(
             error_code="GRAPH_STREAM_PROTOCOL_REJECTED",
         )
     except Exception as error:
+        persistence_error = normalize_transient_persistence_error(error)
+        if persistence_error is not None:
+            _log_safe_failure("graph stream persistence", error)
+            yield _encode_terminal_attempt_aborted(
+                codec,
+                validator,
+                reason_code=persistence_error.code,
+            )
+            return
         _log_safe_failure("graph stream iteration", error)
         yield _encode_terminal_error(
             codec,
@@ -971,9 +973,7 @@ def _encode_event(
         encoded = codec.encode(AGENT_STREAM_SCHEMA, event)
     except ValueError as error:
         raise AgentStreamProtocolError("stream event violates Agent Stream v2") from error
-    return (
-        json.dumps(encoded, ensure_ascii=False, separators=(",", ":")) + "\n"
-    ).encode("utf-8")
+    return (json.dumps(encoded, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
 
 
 async def _close_iterator_safely(iterator: AsyncIterator[AgentStreamEvent]) -> None:
@@ -1013,9 +1013,7 @@ def _has_json_utf8_content_type(request: Request) -> bool:
 
 def _has_identity_content_encoding(request: Request) -> bool:
     values = request.headers.getlist("content-encoding")
-    return not values or (
-        len(values) == 1 and values[0].strip().lower() == "identity"
-    )
+    return not values or (len(values) == 1 and values[0].strip().lower() == "identity")
 
 
 def _graph_runtime_error(error: GraphRuntimeError) -> JSONResponse:

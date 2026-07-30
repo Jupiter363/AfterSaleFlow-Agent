@@ -11,6 +11,8 @@ import static org.mockito.Mockito.when;
 import com.example.dispute.agentstream.application.AgentRunLifecycleService;
 import com.example.dispute.agentstream.application.AgentRunRecoveryScheduler;
 import com.example.dispute.agentstream.application.AgentRunStreamEventService;
+import com.example.dispute.agentstream.application.AgentRunV2Coordinator;
+import com.example.dispute.agentstream.application.AgentRunV2RecoveryService;
 import com.example.dispute.agentstream.application.AgentRunWorker;
 import com.example.dispute.common.transaction.PostCommitSideEffectExecutor;
 import com.example.dispute.config.AppProperties;
@@ -20,6 +22,7 @@ import com.example.dispute.workflow.config.AgentRunV2Properties;
 import com.example.dispute.workflow.config.AgentRunV2Properties.SchedulerMode;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunExecutorKind;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunProtocol;
+import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -28,6 +31,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 class AgentRunRecoverySchedulerTest {
 
@@ -36,6 +40,9 @@ class AgentRunRecoverySchedulerTest {
     private final AgentRunLifecycleService lifecycleService = mock(AgentRunLifecycleService.class);
     private final AgentRunStreamEventService eventService = mock(AgentRunStreamEventService.class);
     private final JdbcTemplate detectorJdbc = mock(JdbcTemplate.class);
+    private final AgentRunV2RecoveryService v2RecoveryService =
+            mock(AgentRunV2RecoveryService.class);
+    private final AgentRunV2Coordinator v2Coordinator = mock(AgentRunV2Coordinator.class);
 
     @Test
     void executorModeClaimsOnlyLegacyV1Rows() {
@@ -64,18 +71,41 @@ class AgentRunRecoverySchedulerTest {
     }
 
     @Test
-    void detectorModeAggregatesTheCompleteLegacyOwnershipUniverseWithoutMutation() {
+    void detectorModeAggregatesLegacyOwnershipAndRecoversOnlyNarrowV2Candidates() {
+        AgentRunEntity pending = mock(AgentRunEntity.class);
+        AgentRunEntity running = mock(AgentRunEntity.class);
+        ExecuteAgentRunRequest request = mock(ExecuteAgentRunRequest.class);
+        when(pending.getId()).thenReturn("AGENT_RUN_V2_PENDING");
+        when(running.getId()).thenReturn("AGENT_RUN_V2_RUNNING");
         when(detectorJdbc.queryForMap(org.mockito.ArgumentMatchers.anyString()))
                 .thenReturn(
                         Map.<String, Object>of(
                                 "candidate_count", 27L,
                                 "pending_count", 21L,
                                 "running_count", 6L));
+        when(runRepository
+                        .findTop20ByProtocolAndExecutorKindAndRunStatusAndStreamOperationIsNotNullOrderByCreatedAtAsc(
+                                AgentRunProtocol.V2.wireValue(),
+                                AgentRunExecutorKind.TEMPORAL_ACTIVITY,
+                                "PENDING"))
+                .thenReturn(List.of(pending));
+        when(runRepository
+                        .findTop20ByProtocolAndExecutorKindAndRunStatusAndStreamOperationIsNotNullOrderByCreatedAtAsc(
+                                AgentRunProtocol.V2.wireValue(),
+                                AgentRunExecutorKind.TEMPORAL_ACTIVITY,
+                                "RUNNING"))
+                .thenReturn(List.of(running));
+        when(v2RecoveryService.prepare("AGENT_RUN_V2_PENDING"))
+                .thenReturn(Optional.of(request));
+        when(v2RecoveryService.prepare("AGENT_RUN_V2_RUNNING"))
+                .thenReturn(Optional.empty());
 
         scheduler(SchedulerMode.DETECTOR).recoverPendingRuns();
 
         verifyNoInteractions(worker, lifecycleService, eventService);
-        verifyNoInteractions(runRepository);
+        verify(v2RecoveryService).prepare("AGENT_RUN_V2_PENDING");
+        verify(v2RecoveryService).prepare("AGENT_RUN_V2_RUNNING");
+        verify(v2Coordinator).dispatchAllocatedAttempt(request);
         ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
         verify(detectorJdbc).queryForMap(sql.capture());
         assertThat(sql.getValue())
@@ -86,6 +116,24 @@ class AgentRunRecoverySchedulerTest {
                         "stream_operation is not null",
                         "run_status in ('PENDING', 'RUNNING')")
                 .doesNotContain("limit", "hearing_temporal_projection");
+    }
+
+    @Test
+    void detectorModeDoesNotScanV2WhenThisProcessOwnsNoRetryPreparer() {
+        when(detectorJdbc.queryForMap(org.mockito.ArgumentMatchers.anyString()))
+                .thenReturn(
+                        Map.<String, Object>of(
+                                "candidate_count", 0L,
+                                "pending_count", 0L,
+                                "running_count", 0L));
+        AgentRunRecoveryScheduler scheduler = scheduler(SchedulerMode.DETECTOR);
+        when(v2RecoveryService.isRecoveryConfigured()).thenReturn(false);
+
+        scheduler.recoverPendingRuns();
+
+        verify(v2RecoveryService).isRecoveryConfigured();
+        verifyNoInteractions(runRepository, worker, lifecycleService, eventService, v2Coordinator);
+        verify(v2RecoveryService, never()).prepare(org.mockito.ArgumentMatchers.anyString());
     }
 
     @Test
@@ -101,7 +149,7 @@ class AgentRunRecoverySchedulerTest {
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("incomplete or inconsistent");
 
-        verifyNoInteractions(runRepository, worker, lifecycleService, eventService);
+        verifyNoInteractions(runRepository, worker, lifecycleService, eventService, v2RecoveryService, v2Coordinator);
         verify(runRepository, never())
                 .findTop20ByProtocolAndExecutorKindAndRunStatusAndStreamOperationIsNotNullOrderByCreatedAtAsc(
                         AgentRunProtocol.V2.wireValue(),
@@ -113,7 +161,14 @@ class AgentRunRecoverySchedulerTest {
     void offModeDoesNotReadOrMutateTheQueue() {
         scheduler(SchedulerMode.OFF).recoverPendingRuns();
 
-        verifyNoInteractions(runRepository, worker, lifecycleService, eventService, detectorJdbc);
+        verifyNoInteractions(
+                runRepository,
+                worker,
+                lifecycleService,
+                eventService,
+                detectorJdbc,
+                v2RecoveryService,
+                v2Coordinator);
     }
 
     private AgentRunRecoveryScheduler scheduler(SchedulerMode mode) {
@@ -128,6 +183,7 @@ class AgentRunRecoverySchedulerTest {
                         Duration.ofMinutes(10),
                         Duration.ofSeconds(15),
                         Duration.ofSeconds(5));
+        when(v2RecoveryService.isRecoveryConfigured()).thenReturn(true);
         return new AgentRunRecoveryScheduler(
                 runRepository,
                 worker,
@@ -136,6 +192,8 @@ class AgentRunRecoverySchedulerTest {
                 new PostCommitSideEffectExecutor(Runnable::run),
                 appProperties,
                 v2Properties,
-                detectorJdbc);
+                detectorJdbc,
+                v2RecoveryService,
+                v2Coordinator);
     }
 }

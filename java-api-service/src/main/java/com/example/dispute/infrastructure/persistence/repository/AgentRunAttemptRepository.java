@@ -15,6 +15,11 @@ public interface AgentRunAttemptRepository
     Optional<AgentRunAttemptEntity> findByAgentRunIdAndAttemptNo(
             String agentRunId, long attemptNo);
 
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select attempt from AgentRunAttemptEntity attempt where attempt.agentRunId = :runId and attempt.attemptNo = :attemptNo")
+    Optional<AgentRunAttemptEntity> findByAgentRunIdAndAttemptNoForUpdate(
+            @Param("runId") String agentRunId, @Param("attemptNo") long attemptNo);
+
     Optional<AgentRunAttemptEntity> findByAgentRunIdAndCommandId(
             String agentRunId, String commandId);
 

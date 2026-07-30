@@ -4,6 +4,7 @@ import com.example.dispute.agentstream.application.AgentRunDomainResultCommitter
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eExecutionLaneVerifier;
+import com.example.dispute.infrastructure.persistence.repository.AgentRunAttemptRepository;
 import java.util.Objects;
 
 /** Rebuilds a Review finalization request solely from admitted material and a Java human receipt. */
@@ -11,15 +12,18 @@ public final class TargetReviewFinalizationRequestResolver {
   private final TargetReviewCommandMaterialStore materialStore;
   private final TargetReviewOutcomeHandoffStore handoffStore;
   private final TargetReviewReconciledFinalizationEvidenceSource evidenceSource;
+  private final AgentRunAttemptRepository attempts;
   private final com.fasterxml.jackson.databind.ObjectMapper objectMapper;
 
   public TargetReviewFinalizationRequestResolver(
       TargetReviewCommandMaterialStore materialStore, TargetReviewOutcomeHandoffStore handoffStore,
       TargetReviewReconciledFinalizationEvidenceSource evidenceSource,
+      AgentRunAttemptRepository attempts,
       com.fasterxml.jackson.databind.ObjectMapper objectMapper) {
     this.materialStore = Objects.requireNonNull(materialStore, "materialStore");
     this.handoffStore = Objects.requireNonNull(handoffStore, "handoffStore");
     this.evidenceSource = Objects.requireNonNull(evidenceSource, "evidenceSource");
+    this.attempts = Objects.requireNonNull(attempts, "attempts");
     this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper").copy();
   }
 
@@ -64,9 +68,17 @@ public final class TargetReviewFinalizationRequestResolver {
     require(graph.graphKey().equals(result.graphResult().graphKey()), "result graph key");
     require(graph.graphVersion().equals(result.graphResult().graphVersion()), "result graph version");
 
+    String rootCommandId = attempts.findByAgentRunIdAndAttemptNo(request.agentRunId(), 1)
+        .map(attempt -> attempt.getCommandId())
+        .orElseThrow(() -> new IllegalStateException("target Review root AgentRun command is absent"));
+    require(
+        request.attemptNo() == 1
+            ? rootCommandId.equals(graph.commandId())
+            : !rootCommandId.equals(graph.commandId()),
+        "root command lineage");
     var handoff = handoffStore.require(new TargetReviewOutcomeHandoffStore.Route(
         material.activationId(), material.activationManifestHash(), graph.tenantSurrogate(), graph.caseId(),
-        graph.commandId(), graph.roomEpoch(), material.roomFencingToken()));
+        rootCommandId, graph.roomEpoch(), material.roomFencingToken()));
     require(handoff.decision().decisionAuthority().equals(TargetReviewHumanDecisionReceipt.DECISION_AUTHORITY),
         "human decision authority");
     require(handoff.decision().outcomeReceipt().caseId().equals(graph.caseId()), "outcome case");
@@ -75,7 +87,7 @@ public final class TargetReviewFinalizationRequestResolver {
     var evidence = evidenceSource.resolve(snapshot, request, result);
     return new TargetReviewFinalizationRequest(material.executionLane(), material.activationId(),
         material.activationManifestHash(), admission.isolatedDomainDbBindingHash(), evidence.roomId(),
-        material.roomFencingToken(), snapshot.admissionId(),
+        material.roomFencingToken(), snapshot.admissionId(), rootCommandId,
         material.commandHash(), material.commandEnvelopeHash(), evidence.proposalHash(),
         evidence.resultEnvelopeHash(), evidence.executionProvider(), evidence.executionModel(),
         request, result, handoff.decision());

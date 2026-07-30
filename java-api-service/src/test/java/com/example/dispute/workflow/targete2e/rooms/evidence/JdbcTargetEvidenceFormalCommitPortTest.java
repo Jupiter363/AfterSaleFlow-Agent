@@ -87,6 +87,8 @@ class JdbcTargetEvidenceFormalCommitPortTest {
     jdbc.execute("drop table if exists case_room_epoch");
     jdbc.execute("drop table if exists case_command");
     jdbc.execute("drop table if exists target_e2e_command_admission");
+    jdbc.execute("drop table if exists agent_run_attempt");
+    jdbc.execute("drop table if exists agent_run");
     createSchema();
     seedAuthority();
     port = new JdbcTargetEvidenceFormalCommitPort(JsonMapper.builder().build());
@@ -112,6 +114,46 @@ class JdbcTargetEvidenceFormalCommitPortTest {
     assertThat(text("select result_sha256 from case_command where id = ?", COMMAND_ROW_ID))
         .isEqualTo(first.formalCommitHash());
     assertThat(number("select count(*) from room_message where case_id = ?", CASE_ID)).isEqualTo(1);
+  }
+
+  @Test
+  void appliesAWinningRetryAdmissionToTheRootCaseCommand() throws Exception {
+    String retryCommandId = "agent-command:" + "a".repeat(32);
+    String retryAdmissionId = "p9cmd.v1." + "b".repeat(32);
+    String retryCommandHash = "c".repeat(64);
+    String retryEnvelopeHash = "d".repeat(64);
+    jdbc.update(
+        "insert into agent_run_attempt values (?, ?, 2, ?)",
+        "target-evidence-attempt:RUN_1:2",
+        "target-evidence-run:RUN_1",
+        retryCommandId);
+    jdbc.update(
+        "insert into target_e2e_command_admission values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        retryAdmissionId,
+        ACTIVATION_ID,
+        MANIFEST_HASH,
+        TargetEvidenceCommandMaterial.TARGET_LANE,
+        DATABASE_HASH,
+        TENANT,
+        CASE_ID,
+        retryCommandId,
+        retryCommandHash,
+        retryEnvelopeHash,
+        ROOM_EPOCH,
+        FENCE);
+
+    TargetEvidenceFormalCommitPort.CommitResult committed = commit(request(
+        ACTIVATION_ID,
+        retryAdmissionId,
+        retryCommandId,
+        retryCommandHash,
+        retryEnvelopeHash,
+        2));
+
+    assertThat(text("select command_status from case_command where id = ?", COMMAND_ROW_ID))
+        .isEqualTo("APPLIED");
+    assertThat(text("select result_sha256 from case_command where id = ?", COMMAND_ROW_ID))
+        .isEqualTo(committed.formalCommitHash());
   }
 
   @Test
@@ -253,10 +295,27 @@ class JdbcTargetEvidenceFormalCommitPortTest {
   }
 
   private TargetEvidenceFinalizationRequest request(String activationId) {
+    return request(
+        activationId,
+        ADMISSION_ID,
+        COMMAND_ID,
+        COMMAND_HASH,
+        ENVELOPE_HASH,
+        1);
+  }
+
+  private TargetEvidenceFinalizationRequest request(
+      String activationId,
+      String admissionId,
+      String graphCommandId,
+      String commandHash,
+      String envelopeHash,
+      long attemptNo) {
     RoomGraphCommand graph = mock(RoomGraphCommand.class);
     when(graph.tenantSurrogate()).thenReturn(TENANT);
     when(graph.caseId()).thenReturn(CASE_ID);
-    when(graph.commandId()).thenReturn(COMMAND_ID);
+    when(graph.commandId()).thenReturn(graphCommandId);
+    when(graph.logicalRunId()).thenReturn("target-evidence-run:RUN_1");
     when(graph.roomType()).thenReturn(RoomType.EVIDENCE);
     when(graph.roomEpoch()).thenReturn(ROOM_EPOCH);
     when(graph.actorScope())
@@ -273,6 +332,7 @@ class JdbcTargetEvidenceFormalCommitPortTest {
     ExecuteAgentRunRequest execution = mock(ExecuteAgentRunRequest.class);
     when(execution.command()).thenReturn(graph);
     when(execution.agentRunId()).thenReturn("target-evidence-run:RUN_1");
+    when(execution.attemptNo()).thenReturn(attemptNo);
     ExecuteAgentRunResult result = mock(ExecuteAgentRunResult.class);
     when(result.resultHash()).thenReturn(RESULT_HASH);
     CommitCommand command =
@@ -281,10 +341,10 @@ class JdbcTargetEvidenceFormalCommitPortTest {
         TargetEvidenceCommandMaterial.TARGET_LANE,
         activationId,
         MANIFEST_HASH,
-        ADMISSION_ID,
+        admissionId,
         DATABASE_HASH,
-        COMMAND_HASH,
-        ENVELOPE_HASH,
+        commandHash,
+        envelopeHash,
         REQUEST_HASH,
         FENCE,
         PROCESS_REVISION,
@@ -299,6 +359,20 @@ class JdbcTargetEvidenceFormalCommitPortTest {
   }
 
   private void createSchema() {
+    jdbc.execute("""
+        create table agent_run (
+          id varchar(128) primary key,
+          protocol varchar(32) not null,
+          executor_kind varchar(32) not null)
+        """);
+    jdbc.execute("""
+        create table agent_run_attempt (
+          id varchar(128) primary key,
+          agent_run_id varchar(128) not null references agent_run(id),
+          attempt_no bigint not null,
+          command_id varchar(128) not null,
+          unique (agent_run_id, attempt_no))
+        """);
     jdbc.execute("""
         create table target_e2e_command_admission (
           admission_id varchar(64) primary key,
@@ -412,6 +486,14 @@ class JdbcTargetEvidenceFormalCommitPortTest {
   }
 
   private void seedAuthority() {
+    jdbc.update(
+        "insert into agent_run values (?, 'agent-stream.v2', 'TEMPORAL_ACTIVITY')",
+        "target-evidence-run:RUN_1");
+    jdbc.update(
+        "insert into agent_run_attempt values (?, ?, 1, ?)",
+        "target-evidence-attempt:RUN_1:1",
+        "target-evidence-run:RUN_1",
+        COMMAND_ID);
     jdbc.update(
         "insert into target_e2e_command_admission values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         ADMISSION_ID,

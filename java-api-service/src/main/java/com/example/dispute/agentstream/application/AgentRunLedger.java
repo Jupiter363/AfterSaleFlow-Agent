@@ -23,6 +23,17 @@ public interface AgentRunLedger {
 
     Optional<LogicalRun> findByLogicalKey(String caseId, String logicalIdempotencyKey);
 
+    /** Locks the logical run and its latest attempt for one recovery decision. */
+    Optional<RecoveryState> lockV2RecoveryState(String agentRunId);
+
+    /** Durably removes an ineligible recovery candidate from the scheduler queue. */
+    void terminalizeV2RecoveryCandidate(
+            String agentRunId,
+            String attemptId,
+            long attemptNo,
+            String errorCode,
+            Instant completedAt);
+
     /** Allocates the next attempt while holding the logical-run lock. */
     Attempt startNextAttempt(
             String agentRunId, AttemptAllocation allocation, Instant startedAt);
@@ -178,6 +189,31 @@ public interface AgentRunLedger {
                     terminationCode,
                     null,
                     null);
+        }
+    }
+
+    record RecoveryState(
+            LogicalRun logicalRun,
+            Attempt latestAttempt,
+            String roomId,
+            String operation,
+            String logicalIdempotencyKey) {
+
+        public RecoveryState {
+            if (logicalRun == null || latestAttempt == null) {
+                throw new IllegalArgumentException("recovery state requires a run and latest attempt");
+            }
+            if (!logicalRun.agentRunId().equals(latestAttempt.agentRunId())) {
+                throw new IllegalArgumentException("recovery state crosses logical AgentRuns");
+            }
+            if (roomId == null
+                    || roomId.isBlank()
+                    || operation == null
+                    || operation.isBlank()
+                    || logicalIdempotencyKey == null
+                    || logicalIdempotencyKey.isBlank()) {
+                throw new IllegalArgumentException("recovery binding context is incomplete");
+            }
         }
     }
 }

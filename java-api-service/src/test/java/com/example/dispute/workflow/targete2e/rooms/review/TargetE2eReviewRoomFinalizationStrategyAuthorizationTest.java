@@ -1,6 +1,7 @@
 package com.example.dispute.workflow.targete2e.rooms.review;
 
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -22,6 +23,24 @@ import org.junit.jupiter.api.Test;
 class TargetE2eReviewRoomFinalizationStrategyAuthorizationTest {
 
   @Test
+  void keepsTheRootReviewCommandSeparateFromTheWinningRetryCommand() {
+    ExecuteAgentRunRequest request = mock(ExecuteAgentRunRequest.class);
+    ExecuteAgentRunResult result = mock(ExecuteAgentRunResult.class);
+    RoomGraphCommand graph = mock(RoomGraphCommand.class);
+    when(request.command()).thenReturn(graph);
+    when(request.attemptNo()).thenReturn(2L);
+    when(graph.commandId()).thenReturn("COMMAND_REVIEW_RETRY_2");
+
+    assertThatCode(() -> request(
+            request, result, "COMMAND_REVIEW_ROOT_1"))
+        .doesNotThrowAnyException();
+    assertThatThrownBy(() -> request(
+            request, result, "COMMAND_REVIEW_RETRY_2"))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("root and winning command lineage");
+  }
+
+  @Test
   void reauthorizesTheExactDurableReviewRouteBeforePreparingACommit() {
     String manifestHash = "a".repeat(64);
     String databaseHash = "b".repeat(64);
@@ -32,6 +51,7 @@ class TargetE2eReviewRoomFinalizationStrategyAuthorizationTest {
     RoomGraphCommand graph = mock(RoomGraphCommand.class);
     when(request.command()).thenReturn(graph);
     when(request.agentRunId()).thenReturn("RUN_REVIEW_1");
+    when(request.attemptNo()).thenReturn(1L);
     when(graph.roomType()).thenReturn(RoomType.REVIEW);
     when(graph.graphKey()).thenReturn(TargetReviewFinalizationAdapter.TARGET_GRAPH_KEY);
     when(graph.graphVersion()).thenReturn(
@@ -51,6 +71,7 @@ class TargetE2eReviewRoomFinalizationStrategyAuthorizationTest {
         "ROOM_REVIEW_1",
         9,
         "ADMISSION_REVIEW_1",
+        "COMMAND_REVIEW_1",
         commandHash,
         envelopeHash,
         "e".repeat(64),
@@ -95,5 +116,27 @@ class TargetE2eReviewRoomFinalizationStrategyAuthorizationTest {
             && authorization.commandHash().equals(commandHash)
             && authorization.commandEnvelopeHash().equals(envelopeHash)
             && authorization.roomFencingToken() == 9));
+  }
+
+  private static TargetReviewFinalizationRequest request(
+      ExecuteAgentRunRequest request, ExecuteAgentRunResult result, String rootCommandId) {
+    return new TargetReviewFinalizationRequest(
+        TargetReviewCommandMaterial.TARGET_LANE,
+        "p9act.v1." + "1".repeat(32),
+        "a".repeat(64),
+        "b".repeat(64),
+        "ROOM_REVIEW_1",
+        9,
+        "ADMISSION_REVIEW_1",
+        rootCommandId,
+        "c".repeat(64),
+        "d".repeat(64),
+        "e".repeat(64),
+        "f".repeat(64),
+        "provider-review",
+        "model-review",
+        request,
+        result,
+        mock(TargetReviewHumanDecisionReceipt.class));
   }
 }

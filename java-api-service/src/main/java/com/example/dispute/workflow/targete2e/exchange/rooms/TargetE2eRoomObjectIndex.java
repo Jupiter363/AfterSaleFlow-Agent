@@ -8,6 +8,13 @@ import java.util.Optional;
 public interface TargetE2eRoomObjectIndex {
   void bindInput(Authority authority, RoomGraphCommand command, StoredObject object, Kind kind);
 
+  /** Rebinds immutable inputs to a later command in the same logical AgentRun. */
+  void rebindInputs(
+      Authority sourceAuthority,
+      RoomGraphCommand sourceCommand,
+      Authority targetAuthority,
+      RoomGraphCommand targetCommand);
+
   StoredObject recordProposal(Authority authority, RoomGraphCommand command, ProposalIdentity proposal,
       String storageBucket, String storageKey);
 

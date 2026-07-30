@@ -18,6 +18,8 @@ import com.example.dispute.room.application.SessionPermissionService;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseAccessSessionEntity;
 import com.example.dispute.agentstream.infrastructure.persistence.AgentRunStreamEventEntity;
 import com.example.dispute.agentstream.infrastructure.persistence.AgentRunStreamEventRepository;
+import com.example.dispute.agentstream.infrastructure.delivery.AgentRunStreamWakeup;
+import com.example.dispute.agentstream.infrastructure.delivery.AgentRunStreamWakeupPublisher;
 import com.example.dispute.workflow.contract.v1.AgentStreamEvent;
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunProtocol;
@@ -30,6 +32,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -55,6 +58,7 @@ public class AgentRunStreamEventService {
     private final AgentRunRepository runRepository;
     private final AgentRunAttemptRepository attemptRepository;
     private final AgentRunStreamEventRepository eventRepository;
+    private final AgentRunStreamWakeupPublisher wakeupPublisher;
     private final AccessSessionResolver accessSessionResolver;
     private final SessionPermissionService permissionService;
     private final ObjectMapper objectMapper;
@@ -71,12 +75,14 @@ public class AgentRunStreamEventService {
             AgentRunRepository runRepository,
             AgentRunAttemptRepository attemptRepository,
             AgentRunStreamEventRepository eventRepository,
+            AgentRunStreamWakeupPublisher wakeupPublisher,
             AccessSessionResolver accessSessionResolver,
             SessionPermissionService permissionService,
             ObjectMapper objectMapper) {
         this.runRepository = runRepository;
         this.attemptRepository = attemptRepository;
         this.eventRepository = eventRepository;
+        this.wakeupPublisher = wakeupPublisher;
         this.accessSessionResolver = accessSessionResolver;
         this.permissionService = permissionService;
         this.objectMapper = objectMapper;
@@ -203,6 +209,23 @@ public class AgentRunStreamEventService {
             throw new IllegalArgumentException("runId must not be blank");
         }
         publish(runId);
+    }
+
+    /** Schedules a durable-source catch-up without exposing an uncommitted terminal event. */
+    public void wakeUpAfterCommit(
+            String runId, String attemptId, long durableHighWatermark) {
+        if (runId == null || runId.isBlank()) {
+            throw new IllegalArgumentException("runId must not be blank");
+        }
+        AgentRunStreamWakeup wakeup = new AgentRunStreamWakeup(
+                AgentRunStreamWakeup.SCHEMA_VERSION,
+                runId,
+                attemptId,
+                durableHighWatermark);
+        publishAfterCommit(() -> {
+            publish(runId);
+            wakeupPublisher.publish(wakeup);
+        });
     }
 
     // 所属模块：【Agent 流式运行 / 应用编排层】「AgentRunStreamEventService.requireVisibleRun(String,AuthenticatedActor)」。
@@ -379,7 +402,8 @@ public class AgentRunStreamEventService {
                 ? null
                 : attempts.get(attemptIndex - 1).getId();
         boolean started = afterSequence > 0;
-        boolean terminal = isAttemptTerminal(cursorEvent);
+        AgentRunEventView terminalEvent =
+                isAttemptTerminal(cursorEvent) ? cursorEvent : null;
         if (cursorEvent != null) {
             if (cursorEvent.sequence() == 0
                     && !"attempt_started".equals(cursorEvent.type())) {
@@ -391,7 +415,8 @@ public class AgentRunStreamEventService {
         }
         for (int index = 0; index < events.size(); index++) {
             AgentRunEventView event = events.get(index);
-            if (terminal) {
+            if (terminalEvent != null
+                    && !isRecoveryTerminalError(terminalEvent, event)) {
                 throw new IllegalStateException("V2 stream contains events after an attempt terminal");
             }
             if (afterSequence == -1 && index == 0
@@ -402,7 +427,7 @@ public class AgentRunStreamEventService {
             }
             validateAttemptEvent(event, previousAttemptId, started);
             started = started || "attempt_started".equals(event.type());
-            terminal = isAttemptTerminal(event);
+            terminalEvent = isAttemptTerminal(event) ? event : null;
         }
     }
 
@@ -445,6 +470,15 @@ public class AgentRunStreamEventService {
     private static boolean isGlobalTerminal(AgentRunEventView event) {
         return event != null
                 && ("final".equals(event.type()) || "error".equals(event.type()));
+    }
+
+    private static boolean isRecoveryTerminalError(
+            AgentRunEventView previous, AgentRunEventView current) {
+        return "attempt_aborted".equals(previous.type())
+                && "error".equals(current.type())
+                && Objects.equals(previous.attemptId(), current.attemptId())
+                && previous.sequence() != Long.MAX_VALUE
+                && current.sequence() == previous.sequence() + 1;
     }
 
     // 所属模块：【Agent 流式运行 / 应用编排层】「AgentRunStreamEventService.visibleTo(AgentRunEntity,CaseAccessSessionEntity)」。
@@ -590,7 +624,10 @@ public class AgentRunStreamEventService {
     // 系统意义：「AgentRunStreamEventService.publishAfterCommit(String)」位于模型输出的信任边界，决定哪些内容可持久化和对前端可见，并保证断线后能够按序回放。
     // Java 语法：new 接口/父类(...) { ... } 创建匿名实现，花括号内的 @Override 方法会在回调时执行。
     private void publishAfterCommit(String runId) {
-        Runnable publish = () -> publish(runId);
+        publishAfterCommit(() -> publish(runId));
+    }
+
+    private void publishAfterCommit(Runnable publish) {
         // 事件行尚未提交时不能通知 SSE，否则 catchUp 可能查询不到刚发布的 sequence，
         // 浏览器游标却已经前进，最终造成永久漏帧。
         if (TransactionSynchronizationManager.isActualTransactionActive()) {

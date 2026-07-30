@@ -30,11 +30,15 @@ import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptSta
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunExecutorKind;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunProtocol;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunRecoveryAction;
+import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -52,7 +56,11 @@ import java.time.ZoneOffset;
 @ExtendWith(MockitoExtension.class)
 class AgentRunV2CoordinatorTest {
 
-    private static final ObjectMapper MAPPER = JsonMapper.builder().findAndAddModules().build();
+    private static final ObjectMapper MAPPER = JsonMapper.builder()
+            .findAndAddModules()
+            .serializationInclusion(JsonInclude.Include.NON_NULL)
+            .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
+            .build();
     private static final Path FIXTURE =
             Path.of(
                     "..",
@@ -249,6 +257,68 @@ class AgentRunV2CoordinatorTest {
     }
 
     @Test
+    void dispatchesAnAlreadyCommittedLaterAttemptWithoutAllocatingAgain() throws Exception {
+        ExecuteAgentRunRequest request = laterRequest();
+        Attempt attempt = laterAttempt(request, AgentRunAttemptStatus.RUNNING);
+        when(ledger.requireAllocatedAttempt(request)).thenReturn(attempt);
+        StartReceipt accepted = new StartReceipt(
+                TemporalAgentRunV2WorkflowLauncher.workflowId(request.agentRunId()),
+                "temporal-run-001",
+                StartDisposition.ATTEMPT_ACCEPTED);
+        when(launcher.start(request)).thenReturn(accepted);
+
+        StartReceipt receipt = coordinator(enabled()).dispatchAllocatedAttempt(request);
+
+        assertThat(receipt).isEqualTo(accepted);
+        verify(ledger).requireAllocatedAttempt(request);
+        verify(ledger, never()).createOrLoad(any());
+        verify(ledger, never()).startNextAttempt(any(), any(), any());
+    }
+
+    @Test
+    void replaysAnInitialAllocationThroughIdempotentTemporalStart() {
+        ExecuteAgentRunRequest request = initialRequest();
+        Attempt attempt = attempt(AgentRunAttemptStatus.RUNNING);
+        when(ledger.requireAllocatedAttempt(request)).thenReturn(attempt);
+        StartReceipt replayed = new StartReceipt(
+                TemporalAgentRunV2WorkflowLauncher.workflowId(request.agentRunId()),
+                "temporal-run-001",
+                StartDisposition.ALREADY_STARTED);
+        when(launcher.start(request)).thenReturn(replayed);
+
+        assertThat(coordinator(enabled()).dispatchAllocatedAttempt(request))
+                .isEqualTo(replayed);
+
+        verify(ledger).requireAllocatedAttempt(request);
+        verify(ledger, never()).createOrLoad(any());
+        verify(ledger, never()).startNextAttempt(any(), any(), any());
+    }
+
+    @Test
+    void preservesALaterAttemptWhenRecoveryDispatchCanBeRetried() throws Exception {
+        ExecuteAgentRunRequest request = laterRequest();
+        Attempt attempt = laterAttempt(request, AgentRunAttemptStatus.RUNNING);
+        when(ledger.requireAllocatedAttempt(request)).thenReturn(attempt);
+        AgentRunV2WorkflowLaunchException unavailable =
+                AgentRunV2WorkflowLaunchException.retryable(
+                        "TEMPORAL_DISPATCH_FAILED",
+                        new IllegalStateException("Temporal is unavailable"));
+        when(launcher.start(request)).thenThrow(unavailable);
+
+        assertThatThrownBy(() -> coordinator(enabled()).dispatchAllocatedAttempt(request))
+                .isSameAs(unavailable);
+        verify(ledger, never())
+                .recordAttemptFailure(
+                        any(),
+                        any(),
+                        eq(2L),
+                        any(),
+                        any(),
+                        eq(AgentRunRecoveryAction.FAIL_LOGICAL_RUN),
+                        any());
+    }
+
+    @Test
     void failsClosedWhenV2IsOffOrTheLegacySchedulerWouldExecuteIt() {
         assertThatThrownBy(() -> coordinator(disabled()).start(command(Selection.SHADOW, 1)))
                 .isInstanceOf(IllegalStateException.class)
@@ -341,6 +411,88 @@ class AgentRunV2CoordinatorTest {
                 null,
                 false,
                 0,
+                null);
+    }
+
+    private ExecuteAgentRunRequest laterRequest() throws Exception {
+        ObjectNode body = MAPPER.valueToTree(graphCommand);
+        body.put("command_id", "graph-cmd-002");
+        body.put("attempt_id", "attempt-002");
+        ((ObjectNode) body.required("invocation_context"))
+                .put("envelope_nonce", "nonce-002");
+        body.remove("request_hash");
+        body.put("request_hash", ContractJson.sha256Hex(body));
+        RoomGraphCommand later = MAPPER.treeToValue(body, RoomGraphCommand.class);
+        var binding = bindingFactory.bind(
+                new Context(
+                        "ROOM_EVIDENCE_001",
+                        "EPOCH_EVIDENCE_001",
+                        "EVIDENCE_ANALYZE",
+                        "logical-key-001"),
+                later);
+        return new ExecuteAgentRunRequest(
+                ExecuteAgentRunRequest.SCHEMA_VERSION,
+                later.logicalRunId(),
+                2,
+                3,
+                AgentRunProtocol.V2.wireValue(),
+                binding.logicalInputHash(),
+                graphCommand.attemptId(),
+                false,
+                0,
+                later);
+    }
+
+    private ExecuteAgentRunRequest initialRequest() {
+        var binding = bindingFactory.bind(
+                new Context(
+                        "ROOM_EVIDENCE_001",
+                        "EPOCH_EVIDENCE_001",
+                        "EVIDENCE_ANALYZE",
+                        "logical-key-001"),
+                graphCommand);
+        return new ExecuteAgentRunRequest(
+                ExecuteAgentRunRequest.SCHEMA_VERSION,
+                graphCommand.logicalRunId(),
+                1,
+                3,
+                AgentRunProtocol.V2.wireValue(),
+                binding.logicalInputHash(),
+                null,
+                false,
+                0,
+                graphCommand);
+    }
+
+    private Attempt laterAttempt(
+            ExecuteAgentRunRequest request, AgentRunAttemptStatus status) {
+        var binding = bindingFactory.bind(
+                new Context(
+                        "ROOM_EVIDENCE_001",
+                        "EPOCH_EVIDENCE_001",
+                        "EVIDENCE_ANALYZE",
+                        "logical-key-001"),
+                request.command());
+        return new Attempt(
+                request.attemptId(),
+                request.agentRunId(),
+                request.attemptNo(),
+                status,
+                false,
+                false,
+                0,
+                NOW,
+                NOW,
+                null,
+                1,
+                "agent-run-attempt-lineage.v1",
+                request.command().commandId(),
+                binding.commandRequestHash(),
+                binding.logicalInputHash(),
+                binding.canonicalCommandJson(),
+                request.previousAttemptId(),
+                request.resetRequired(),
+                request.publicSequenceOffset(),
                 null);
     }
 

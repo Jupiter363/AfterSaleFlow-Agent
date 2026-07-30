@@ -27,11 +27,14 @@ public record IntakeTargetAgentRunContext(
     ExecuteAgentRunRequest request) {
 
   public static final String TARGET_LANE = "TARGET_E2E_CANDIDATE";
+  public static final String INITIAL_SCHEMA_VERSION = "intake-target-agent-run-context.v1";
+  public static final String RETRY_SCHEMA_VERSION = "intake-target-agent-run-context.v2";
 
   public IntakeTargetAgentRunContext {
-    if (!"intake-target-agent-run-context.v1".equals(schemaVersion)) {
+    if (!INITIAL_SCHEMA_VERSION.equals(schemaVersion)
+        && !RETRY_SCHEMA_VERSION.equals(schemaVersion)) {
       throw new IllegalArgumentException(
-          "schemaVersion must be intake-target-agent-run-context.v1");
+          "schemaVersion must be intake-target-agent-run-context.v1 or v2");
     }
     if (!TARGET_LANE.equals(executionLane)) {
       throw new IllegalArgumentException("executionLane must be TARGET_E2E_CANDIDATE");
@@ -51,8 +54,11 @@ public record IntakeTargetAgentRunContext(
     requireHash(commandHash, "commandHash");
     requireHash(commandEnvelopeHash, "commandEnvelopeHash");
     Objects.requireNonNull(request, "request must not be null");
-    if (request.attemptNo() != 1) {
-      throw new IllegalArgumentException("Intake child must start AgentRun attempt one");
+    if ((INITIAL_SCHEMA_VERSION.equals(schemaVersion) && request.attemptNo() != 1)
+        || (RETRY_SCHEMA_VERSION.equals(schemaVersion)
+            && (request.attemptNo() <= 1 || request.previousAttemptId() == null))) {
+      throw new IllegalArgumentException(
+          "Intake target context attempt does not match its schema version");
     }
     RoomGraphCommand graphCommand = request.command();
     if (graphCommand.roomType() != RoomType.INTAKE) {
@@ -69,6 +75,10 @@ public record IntakeTargetAgentRunContext(
       long roomRevision) {
     Objects.requireNonNull(start, "start");
     Objects.requireNonNull(command, "command");
+    if (!INITIAL_SCHEMA_VERSION.equals(schemaVersion)) {
+      throw new IllegalArgumentException(
+          "only the initial target context may start an Intake AgentRun child");
+    }
     RoomGraphCommand graphCommand = request.command();
     if (!start.tenantSurrogate().equals(command.tenantSurrogate())
         || !start.tenantSurrogate().equals(graphCommand.tenantSurrogate())

@@ -28,6 +28,11 @@ public record IntakeAgentRunFinalizationReadResult(
   }
 
   public void requireMatches(IntakeAgentRunFinalizationReadRequest request) {
+    requireMatches(request, false);
+  }
+
+  public void requireMatches(
+      IntakeAgentRunFinalizationReadRequest request, boolean allowWinningAttempt) {
     Objects.requireNonNull(request, "request");
     if (resolution != Resolution.COMMITTED) {
       return;
@@ -43,7 +48,7 @@ public record IntakeAgentRunFinalizationReadResult(
         || !target.activationManifestHash().equals(locator.activationManifestHash())
         || target.roomFencingToken() != locator.roomFencingToken()
         || !child.logicalRunId().equals(locator.logicalRunId())
-        || !child.attemptId().equals(locator.attemptId())
+        || (!allowWinningAttempt && !child.attemptId().equals(locator.attemptId()))
         || !locator.operationKey().equals(operation.operationKey())
         || !locator.operationKey().equals(formal.operationKey())
         || !locator.resultHash().equals(operation.resultHash())
@@ -54,19 +59,20 @@ public record IntakeAgentRunFinalizationReadResult(
         || !command.caseId().equals(formal.caseId())
         || command.roomEpoch() != formal.roomEpoch()
         || command.fencingToken() != formal.fencingToken()
-        || !command.commandId().equals(formal.commandId())
+        || (!allowWinningAttempt && !command.commandId().equals(formal.commandId()))
         || !command.executionContext().threadId().equals(formal.threadId())
         || !command.executionContext().agentSessionId().equals(formal.agentSessionId())
         || !command.actorScopeHash().equals(formal.actorScopeHash())
         || !locator.logicalRunId().equals(formal.logicalRunId())
         || !locator.attemptId().equals(formal.attemptId())
-        || !event.commandId().equals(command.commandId())
+        || !event.commandId().equals(formal.commandId())
         || !event.operationKey().equals(locator.operationKey())
         || !event.requestHash().equals(command.requestHash())
         || !event.resultHash().equals(locator.resultHash())
         || !event.agentRunRef().logicalRunId().equals(locator.logicalRunId())
         || !event.agentRunRef().attemptId().equals(locator.attemptId())
         || !event.agentRunRef().finalResultHash().equals(locator.resultHash())
+        || !event.graphExecutionRef().graphCommandId().equals(formal.commandId())
         || !event.graphExecutionRef().proposalHash().equals(locator.proposalHash())
         || !event.graphExecutionRef().checkpointId().equals(locator.checkpointId())) {
       throw new IllegalArgumentException(

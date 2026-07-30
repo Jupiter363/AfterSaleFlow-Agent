@@ -57,7 +57,9 @@ public final class JdbcTargetEvidenceFormalCommitPort implements TargetEvidenceF
 
       Admission admission = lockAdmission(transaction, request.admissionId());
       requireAdmission(request, graph, admission);
-      Command command = lockCommand(transaction, graph.tenantSurrogate(), graph.commandId());
+      String rootCommandId = lockRootCommandId(transaction, graph.logicalRunId());
+      requireRootCommandLineage(request.command().request(), rootCommandId);
+      Command command = lockCommand(transaction, graph.tenantSurrogate(), rootCommandId);
       requireCommand(request, graph, command);
       String formalCommitHash = formalHash(request, formalObjectId, command.sequence());
       Epoch epoch = lockEpoch(transaction, graph.tenantSurrogate(), graph.caseId(), graph.roomEpoch());
@@ -207,6 +209,38 @@ public final class JdbcTargetEvidenceFormalCommitPort implements TargetEvidenceF
     }
   }
 
+  private static String lockRootCommandId(Connection transaction, String logicalRunId)
+      throws SQLException {
+    try (PreparedStatement statement = transaction.prepareStatement("""
+        select attempt.command_id
+          from agent_run run
+          join agent_run_attempt attempt
+            on attempt.agent_run_id = run.id and attempt.attempt_no = 1
+         where run.id = ? and run.protocol = 'agent-stream.v2'
+           and run.executor_kind = 'TEMPORAL_ACTIVITY'
+         for key share of run, attempt
+        """)) {
+      statement.setString(1, logicalRunId);
+      try (ResultSet row = statement.executeQuery()) {
+        require(row.next(), "target Evidence root AgentRun command is absent");
+        String commandId = row.getString(1);
+        require(!row.next(), "target Evidence root AgentRun command is ambiguous");
+        return commandId;
+      }
+    }
+  }
+
+  private static void requireRootCommandLineage(
+      com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest request,
+      String rootCommandId) {
+    boolean initial = request.attemptNo() == 1;
+    require(
+        initial
+            ? rootCommandId.equals(request.command().commandId())
+            : !rootCommandId.equals(request.command().commandId()),
+        "target Evidence root and winning command lineage drifted");
+  }
+
   private void requireCommand(
       TargetEvidenceFinalizationRequest request,
       com.example.dispute.workflow.contract.v1.RoomGraphCommand graph,
@@ -215,7 +249,7 @@ public final class JdbcTargetEvidenceFormalCommitPort implements TargetEvidenceF
     require(event != null, "Evidence graph event reference is absent");
     require(graph.tenantSurrogate().equals(command.tenant()), "case command tenant drifted");
     require(graph.caseId().equals(command.caseId()), "case command case drifted");
-    require(graph.commandId().equals(command.commandId()), "case command id drifted");
+    require(command.commandId() != null && !command.commandId().isBlank(), "case command id drifted");
     require(command.sequence() > 0, "case command sequence is invalid");
     require("EVIDENCE_SUBMIT".equals(command.commandType()), "case command type drifted");
     require("EVIDENCE".equals(command.roomType()), "case command room type drifted");
@@ -550,7 +584,7 @@ public final class JdbcTargetEvidenceFormalCommitPort implements TargetEvidenceF
       statement.setString(3, command.id());
       statement.setString(4, graph.tenantSurrogate());
       statement.setString(5, graph.caseId());
-      statement.setString(6, graph.commandId());
+      statement.setString(6, command.commandId());
       statement.setLong(7, command.sequence());
       statement.setLong(8, graph.roomEpoch());
       statement.setString(9, request.actorId());

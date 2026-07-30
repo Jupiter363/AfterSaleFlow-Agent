@@ -22,6 +22,14 @@ class JdbcTargetIntakeAgentRunFinalizationReceiptReadPortTest {
             JsonMapper.builder().build().valueToTree(Map.of(
                     "schema_version", "intake-finalization-receipt.v1",
                     "operation_key", "intake-operation-1")));
+    private static final String OUTER_PROPOSAL_DESCRIPTOR_HASH = ContractJson.sha256Hex(
+            JsonMapper.builder().build().valueToTree(Map.of(
+                    "schema_version", "target-e2e-proposal-descriptor.v1",
+                    "proposal_uri", "minio://target/proposal.json")));
+    private static final String FORMAL_PROPOSAL_PAYLOAD_HASH = ContractJson.sha256Hex(
+            JsonMapper.builder().build().valueToTree(Map.of(
+                    "schema_version", "intake-turn-proposal.v2",
+                    "room_utterance", "Additional details are required.")));
 
     @Test
     void isAnExplicitFrameworkFreeReadPort() {
@@ -46,6 +54,26 @@ class JdbcTargetIntakeAgentRunFinalizationReceiptReadPortTest {
         assertThatCode(() -> JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
                 .requireCanonicalFormalOperationHash(FORMAL_RECEIPT_HASH, FORMAL_RECEIPT_HASH))
                 .doesNotThrowAnyException();
+    }
+
+    @Test
+    void acceptsDistinctOuterDescriptorAndFormalPayloadProposalHashes() {
+        assertThat(OUTER_PROPOSAL_DESCRIPTOR_HASH).isNotEqualTo(FORMAL_PROPOSAL_PAYLOAD_HASH);
+
+        assertThatCode(() -> JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
+                .requireFormalEventProposalHash(
+                        FORMAL_PROPOSAL_PAYLOAD_HASH, FORMAL_PROPOSAL_PAYLOAD_HASH))
+                .doesNotThrowAnyException();
+    }
+
+    @Test
+    void rejectsTamperedFormalEventProposalHash() {
+        assertThatThrownBy(() -> JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
+                .requireFormalEventProposalHash(FORMAL_PROPOSAL_PAYLOAD_HASH, "ab".repeat(32)))
+                .isInstanceOf(TargetE2eFinalizationRejectedException.class)
+                .hasMessage("formal Intake event conflicts with its receipt")
+                .extracting(failure -> ((TargetE2eFinalizationRejectedException) failure).code())
+                .isEqualTo("TARGET_E2E_FINALIZATION_EVENT_MISMATCH");
     }
 
     @Test

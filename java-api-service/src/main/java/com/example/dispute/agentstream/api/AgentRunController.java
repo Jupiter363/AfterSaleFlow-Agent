@@ -40,6 +40,9 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 @RequestMapping("/api/agent-runs/{runId}")
 public class AgentRunController {
 
+    static final String RUN_ID_PATTERN =
+            "AGENT_RUN_[A-Za-z0-9]{1,54}|target-(?:intake|evidence|hearing|review)-run:[0-9a-f]{32}";
+
     private final AgentRunQueryService queryService;
     private final AgentRunStreamEventService eventService;
     private final Clock clock;
@@ -66,7 +69,7 @@ public class AgentRunController {
     // 系统意义：「AgentRunController.get(String,Authentication,HttpServletRequest)」是外部请求进入业务事实源的边界，必须先完成身份/参数校验，再由应用服务决定事务和权限。
     @GetMapping
     public ApiResponse<AgentRunView> get(
-            @PathVariable @Pattern(regexp = "AGENT_RUN_[A-Za-z0-9]{1,54}") String runId,
+            @PathVariable @Pattern(regexp = RUN_ID_PATTERN) String runId,
             Authentication authentication,
             HttpServletRequest request) {
         return ApiResponse.success(
@@ -84,9 +87,7 @@ public class AgentRunController {
     @GetMapping(value = "/events", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public ResponseEntity<SseEmitter> events(
             @PathVariable
-                    @Pattern(
-                            regexp =
-                                    "AGENT_RUN_[A-Za-z0-9]{1,54}|target-(?:intake|evidence|hearing|review)-run:[0-9a-f]{32}")
+                    @Pattern(regexp = RUN_ID_PATTERN)
                     String runId,
             @RequestHeader(value = "Last-Event-ID", required = false)
                     String lastEventId,
@@ -110,7 +111,7 @@ public class AgentRunController {
     // 系统意义：「AgentRunController.replay(String,long,Authentication,HttpServletRequest)」是外部请求进入业务事实源的边界，必须先完成身份/参数校验，再由应用服务决定事务和权限。
     @GetMapping("/events/replay")
     public ApiResponse<List<AgentRunEventView>> replay(
-            @PathVariable @Pattern(regexp = "AGENT_RUN_[A-Za-z0-9]{1,54}") String runId,
+            @PathVariable @Pattern(regexp = RUN_ID_PATTERN) String runId,
             @RequestParam(value = "after_sequence", required = false)
                     Long afterSequence,
             @RequestParam(value = "after_cursor", required = false)

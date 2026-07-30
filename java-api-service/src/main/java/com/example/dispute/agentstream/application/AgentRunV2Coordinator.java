@@ -113,6 +113,22 @@ public final class AgentRunV2Coordinator {
         return new StartOutcome(logicalRun, attempt, request, workflow);
     }
 
+    /** Replays one already committed attempt allocation to the stable workflow. */
+    public StartReceipt dispatchAllocatedAttempt(ExecuteAgentRunRequest request) {
+        Objects.requireNonNull(request, "request");
+        requireV2Runtime();
+        Attempt attempt = ledger.requireAllocatedAttempt(request);
+        requireAttempt(attempt, request);
+        try {
+            StartReceipt workflow = workflowLauncher.start(request);
+            requireWorkflow(workflow, request);
+            return workflow;
+        } catch (AgentRunV2WorkflowLaunchException failure) {
+            recordPermanentAdmissionFailure(attempt, request, failure);
+            throw failure;
+        }
+    }
+
     private void recordPermanentAdmissionFailure(
             Attempt attempt,
             ExecuteAgentRunRequest request,
@@ -139,14 +155,18 @@ public final class AgentRunV2Coordinator {
     }
 
     private void requireShadowSelection(Selection selection) {
+        requireV2Runtime();
+        if (selection != Selection.SHADOW) {
+            throw new IllegalStateException("AgentRun V2 execution is restricted to SHADOW");
+        }
+    }
+
+    private void requireV2Runtime() {
         if (!properties.enabled()) {
             throw new IllegalStateException("AgentRun V2 is OFF");
         }
         if (properties.schedulerMode() == SchedulerMode.EXECUTOR) {
             throw new IllegalStateException("legacy scheduler cannot execute AgentRun V2");
-        }
-        if (selection != Selection.SHADOW) {
-            throw new IllegalStateException("AgentRun V2 execution is restricted to SHADOW");
         }
     }
 

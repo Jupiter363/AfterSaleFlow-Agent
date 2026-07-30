@@ -232,7 +232,10 @@ public final class JdbcTargetHearingFormalizationActivities
       require(request.request().command().caseId().equals(request.transition().start().caseId())
               && graph.roomEpoch() == request.transition().start().roomEpoch()
               && graph.stageCode().equals(request.transition().expectedStage().name())
-              && request.result().agentRunId().equals(request.request().agentRunId()),
+              && request.result().agentRunId().equals(request.request().agentRunId())
+              && request.result().logicalRunId().equals(request.request().logicalRunId())
+              && request.result().attemptNo() >= request.request().attemptNo()
+              && request.result().attemptNo() <= request.request().attemptLimit(),
           "AgentRun finalization coordinates drifted");
       FinalizationFact outer = one(jdbc.query("""
           select receipt_id, receipt_hash, process_revision, stage_sequence, room_fencing_token
@@ -245,7 +248,7 @@ public final class JdbcTargetHearingFormalizationActivities
           """, (row, ignored) -> new FinalizationFact(row.getString(1), row.getString(2), row.getLong(3),
           row.getLong(4), row.getLong(5)), graph.tenantSurrogate(), graph.caseId(), graph.roomEpoch(),
           request.transition().expectedFencingToken(), request.transition().expectedProcessRevision(),
-          request.transition().expectedStageSequence(), request.request().agentRunId(), request.request().attemptId(),
+          request.transition().expectedStageSequence(), request.request().agentRunId(), request.result().attemptId(),
           request.result().resultHash()));
       String finalKey = one(jdbc.query("""
           select operation_key from hearing_domain_receipt

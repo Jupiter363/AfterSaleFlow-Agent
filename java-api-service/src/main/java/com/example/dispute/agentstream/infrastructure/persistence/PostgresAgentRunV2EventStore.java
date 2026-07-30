@@ -36,6 +36,7 @@ import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 /** PostgreSQL source of truth for attempt-scoped {@code agent-stream.v2} events. */
@@ -298,6 +299,38 @@ public class PostgresAgentRunV2EventStore {
         return receipt;
     }
 
+    /**
+     * Appends Java recovery's single global error inside the caller's transaction.
+     *
+     * <p>This entry point is intentionally separate from the public stream append, whose
+     * {@code REQUIRES_NEW} durability boundary must not outlive a rolled-back recovery ledger
+     * transition.
+     */
+    public AgentRunV2StreamStore.AppendReceipt appendRecoveryErrorInCurrentTransaction(
+            AgentStreamEvent event) {
+        if (!TransactionSynchronizationManager.isActualTransactionActive()) {
+            throw new IllegalStateException(
+                    "recovery error append requires an actual caller transaction");
+        }
+        AgentStreamEvent required = requireEvent(event);
+        if (required.eventType() != StreamEventType.ERROR) {
+            throw new IllegalArgumentException(
+                    "recovery error append accepts exactly one ERROR event");
+        }
+        if (compatibilityMode.writer() == StreamCompatibilityMode.Writer.TARGET_ONLY) {
+            throw new IllegalStateException(
+                    "target-only stream writes require a separately authorized release switch");
+        }
+        List<PersistedEvent> batch = prepareBatch(List.of(required));
+        AgentRunAttemptStatus attemptStatus = lockAttempt(required.runId(), required.attemptId());
+        if (!recoveryErrorAppendStatus(attemptStatus)) {
+            throw new NonRunningAttemptException(attemptStatus);
+        }
+        BatchAppendReceipt appended = appendLocked(batch);
+        return new AgentRunV2StreamStore.AppendReceipt(
+                appended.inserted().getFirst(), appended.durableHighWatermark());
+    }
+
     public AgentRunReconciledFinalStore.Receipt appendOrLoadReconciledFinal(
             AgentRunReconciledFinalStore.Request request) {
         Objects.requireNonNull(request, "request");
@@ -424,17 +457,10 @@ public class PostgresAgentRunV2EventStore {
                             compatibilityEquivalent(old, candidate)));
             boolean targetOnlyWriteObserved = target.stream()
                     .anyMatch(row -> !sourceByIdentity.containsKey(row.eventId()));
-            long expected = 0;
-            boolean unionContiguous = true;
-            boolean terminal = false;
-            for (long sequence : union.keySet()) {
-                CompatibilityRow row = union.get(sequence);
-                if (sequence != expected++ || terminal) {
-                    unionContiguous = false;
-                    break;
-                }
-                terminal = row.terminal();
-            }
+            List<CompatibilityRow> unionRows = List.copyOf(union.values());
+            boolean unionContiguous = (unionRows.isEmpty()
+                            || unionRows.getFirst().sequenceNo() == 0)
+                    && terminalOrderValid(unionRows);
             long unionMaximum = union.isEmpty() ? -1 : union.keySet().stream()
                     .mapToLong(Long::longValue)
                     .max()
@@ -523,6 +549,13 @@ public class PostgresAgentRunV2EventStore {
             return loadExactReplayLocked(batch, attemptStatus);
         }
         return appendLocked(batch);
+    }
+
+    private static boolean recoveryErrorAppendStatus(AgentRunAttemptStatus status) {
+        return status == AgentRunAttemptStatus.RUNNING
+                || status == AgentRunAttemptStatus.FAILED
+                || status == AgentRunAttemptStatus.ABORTED
+                || status == AgentRunAttemptStatus.CANCELLED;
     }
 
     private BatchAppendReceipt loadExactReplayLocked(
@@ -802,19 +835,21 @@ public class PostgresAgentRunV2EventStore {
                 (resultSet, rowNumber) -> resultSet.getString("event_type"),
                 first.runId(),
                 first.attemptId());
-        if (lastTypes.size() > 1
-                || (!lastTypes.isEmpty()
-                        && Set.of("final", "error", "attempt_aborted").contains(
-                                lastTypes.getFirst()))) {
-            throw new IllegalStateException("durable stream append follows a terminal event");
+        if (lastTypes.size() > 1) {
+            throw new IllegalStateException("durable stream has an ambiguous terminal position");
         }
         long expected = highWatermark + 1;
-        boolean terminal = false;
+        String previousType = lastTypes.isEmpty() ? null : lastTypes.getFirst();
         for (PersistedEvent candidate : newEvents) {
             AgentStreamEvent event = candidate.event();
-            if (event.sequenceNo() != expected++ || terminal) {
+            if (event.sequenceNo() != expected++) {
                 throw new IllegalStateException(
-                        "durable stream append is not contiguous or follows a terminal");
+                        "durable stream append is not contiguous");
+            }
+            if (isGlobalTerminal(previousType)
+                    || ("attempt_aborted".equals(previousType)
+                            && event.eventType() != StreamEventType.ERROR)) {
+                throw new IllegalStateException("durable stream append follows a terminal event");
             }
             if (event.sequenceNo() == 0
                     && event.eventType() != StreamEventType.ATTEMPT_STARTED) {
@@ -826,9 +861,7 @@ public class PostgresAgentRunV2EventStore {
                 throw new IllegalStateException(
                         "durable stream cannot repeat attempt_started");
             }
-            terminal = event.eventType() == StreamEventType.FINAL
-                    || event.eventType() == StreamEventType.ERROR
-                    || event.eventType() == StreamEventType.ATTEMPT_ABORTED;
+            previousType = event.eventType().wireValue();
         }
     }
 
@@ -1108,14 +1141,26 @@ public class PostgresAgentRunV2EventStore {
     }
 
     private static boolean terminalOrderValid(List<CompatibilityRow> rows) {
-        boolean terminal = false;
+        CompatibilityRow previous = null;
         for (CompatibilityRow row : rows) {
-            if (terminal) {
-                return false;
+            if (previous != null) {
+                if (!previous.streamProtocol().equals(row.streamProtocol())
+                        || !previous.runId().equals(row.runId())
+                        || !previous.attemptId().equals(row.attemptId())
+                        || previous.sequenceNo() == Long.MAX_VALUE
+                        || row.sequenceNo() != previous.sequenceNo() + 1
+                        || previous.globalTerminal()
+                        || (previous.attemptAborted() && !row.error())) {
+                    return false;
+                }
             }
-            terminal = row.terminal();
+            previous = row;
         }
         return true;
+    }
+
+    private static boolean isGlobalTerminal(String eventType) {
+        return "final".equals(eventType) || "error".equals(eventType);
     }
 
     private static boolean paired(
@@ -1279,6 +1324,18 @@ public class PostgresAgentRunV2EventStore {
 
         private boolean terminal() {
             return Set.of("final", "error", "attempt_aborted").contains(eventType);
+        }
+
+        private boolean globalTerminal() {
+            return isGlobalTerminal(eventType);
+        }
+
+        private boolean attemptAborted() {
+            return "attempt_aborted".equals(eventType);
+        }
+
+        private boolean error() {
+            return "error".equals(eventType);
         }
 
         private String compositeCursor() {

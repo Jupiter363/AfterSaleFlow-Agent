@@ -2,9 +2,12 @@ package com.example.dispute.workflow.targete2e.temporal.intake.finalizationread;
 
 import com.example.dispute.workflow.application.intake.IntakeFinalizationReceipt;
 import com.example.dispute.workflow.contract.v1.ContractJson;
+import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
+import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationReceipt;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationReceiptCodec;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationRejectedException;
+import com.example.dispute.workflow.targete2e.graph.TargetE2EGraphEnvelopeCodec;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.FormalFinalizationReceipt;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.OperationReceipt;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.TurnFinalizationReceipt;
@@ -17,6 +20,7 @@ import com.example.dispute.workflow.temporal.room.intake.IntakeDomainEventType;
 import com.example.dispute.workflow.temporal.room.intake.IntakeGraphExecutionRef;
 import com.example.dispute.workflow.temporal.room.intake.IntakeOperationKeys;
 import com.example.dispute.workflow.temporal.room.intake.IntakeAgentRunRef;
+import com.example.dispute.workflow.temporal.room.intake.IntakeCommandExecutionContext;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.sql.ResultSet;
@@ -48,28 +52,73 @@ public final class JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
         implements IntakeAgentRunFinalizationReceiptReadPort {
 
     private static final String TARGET_RECEIPT_SQL = """
-            select receipt_id, activation_manifest_hash, receipt_canonical_bytes,
-                   schema_version, execution_lane, activation_id, tenant_surrogate, case_id,
-                   room_type, room_epoch, room_fencing_token, process_revision, stage_sequence,
-                   logical_run_id, attempt_id, command_hash, command_envelope_hash,
-                   graph_key, graph_version, checkpoint_schema_version, checkpoint_id,
-                   result_hash, proposal_hash, result_envelope_hash, agent_run_manifest_id,
-                   agent_run_manifest_hash, isolated_domain_db_binding_hash, committed_at,
-                   receipt_hash, formal_writer, domain_commit_status
-              from target_e2e_finalization_receipt
-             where activation_id = :activationId
-               and activation_manifest_hash = :activationManifestHash
-               and execution_lane = 'TARGET_E2E_CANDIDATE'
-               and tenant_surrogate = :tenantSurrogate
-               and case_id = :caseId
-               and room_type = 'INTAKE'
-               and room_epoch = :roomEpoch
-               and room_fencing_token = :roomFencingToken
-               and process_revision = :processRevision
-               and logical_run_id = :logicalRunId
-               and attempt_id = :attemptId
-               and command_hash = :commandHash
-               and command_envelope_hash = :commandEnvelopeHash
+            select receipt.receipt_id, receipt.activation_manifest_hash,
+                   receipt.receipt_canonical_bytes,
+                   receipt.schema_version, receipt.execution_lane, receipt.activation_id,
+                   receipt.tenant_surrogate, receipt.case_id, receipt.room_type,
+                   receipt.room_epoch, receipt.room_fencing_token,
+                   receipt.process_revision, receipt.stage_sequence,
+                   receipt.logical_run_id, receipt.attempt_id, receipt.command_hash,
+                   receipt.command_envelope_hash, receipt.graph_key, receipt.graph_version,
+                   receipt.checkpoint_schema_version, receipt.checkpoint_id,
+                   receipt.result_hash, receipt.proposal_hash, receipt.result_envelope_hash,
+                   receipt.agent_run_manifest_id, receipt.agent_run_manifest_hash,
+                   receipt.isolated_domain_db_binding_hash, receipt.committed_at,
+                   receipt.receipt_hash, receipt.formal_writer, receipt.domain_commit_status,
+                   attempt.command_id as attempt_command_id,
+                   attempt.command_request_hash as attempt_request_hash,
+                   cast(attempt.command_json as text) as attempt_command_json,
+                   attempt.attempt_no, attempt.logical_input_hash,
+                   attempt.previous_attempt_id, attempt.reset_required,
+                   attempt.public_sequence_offset, run.attempt_limit,
+                   material.context_canonical_json, material.context_sha256
+              from target_e2e_finalization_receipt receipt
+              join agent_run run
+                on run.id = receipt.logical_run_id
+               and run.protocol = 'agent-stream.v2'
+               and run.executor_kind = 'TEMPORAL_ACTIVITY'
+               and run.committed_attempt_id = receipt.attempt_id
+               and run.final_result_hash = receipt.result_hash
+               and run.finalization_status = 'COMMITTED'
+              join agent_run_attempt attempt
+                on attempt.agent_run_id = run.id
+               and attempt.id = receipt.attempt_id
+               and attempt.attempt_status = 'COMPLETED'
+               and attempt.result_hash = receipt.result_hash
+               and attempt.logical_input_hash = run.logical_input_hash
+              join target_e2e_command_admission admission
+                on admission.activation_id = receipt.activation_id
+               and admission.activation_manifest_hash = receipt.activation_manifest_hash
+               and admission.execution_lane = receipt.execution_lane
+               and admission.tenant_surrogate = receipt.tenant_surrogate
+               and admission.case_id = receipt.case_id
+               and admission.command_id = attempt.command_id
+               and admission.command_hash = receipt.command_hash
+               and admission.command_envelope_hash = receipt.command_envelope_hash
+               and admission.room_epoch = receipt.room_epoch
+               and admission.room_fencing_token = receipt.room_fencing_token
+              join target_e2e_intake_command_material material
+                on material.admission_id = admission.admission_id
+               and material.activation_id = admission.activation_id
+               and material.activation_manifest_hash = admission.activation_manifest_hash
+               and material.isolated_domain_db_binding_hash = admission.isolated_domain_db_binding_hash
+               and material.tenant_surrogate = admission.tenant_surrogate
+               and material.case_id = admission.case_id
+               and material.command_id = admission.command_id
+               and material.command_hash = admission.command_hash
+               and material.command_envelope_hash = admission.command_envelope_hash
+               and material.room_epoch = admission.room_epoch
+               and material.room_fencing_token = admission.room_fencing_token
+             where receipt.activation_id = :activationId
+               and receipt.activation_manifest_hash = :activationManifestHash
+               and receipt.execution_lane = 'TARGET_E2E_CANDIDATE'
+               and receipt.tenant_surrogate = :tenantSurrogate
+               and receipt.case_id = :caseId
+               and receipt.room_type = 'INTAKE'
+               and receipt.room_epoch = :roomEpoch
+               and receipt.room_fencing_token = :roomFencingToken
+               and receipt.process_revision = :processRevision
+               and receipt.logical_run_id = :logicalRunId
             """;
 
     private static final String COMPLETION_SQL = """
@@ -106,6 +155,7 @@ public final class JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
     private final NamedParameterJdbcOperations jdbc;
     private final TransactionTemplate transactions;
     private final ObjectMapper objectMapper;
+    private final TargetE2EGraphEnvelopeCodec envelopes;
 
     public JdbcTargetIntakeAgentRunFinalizationReceiptReadPort(
             DataSource dataSource,
@@ -120,6 +170,7 @@ public final class JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
             ObjectMapper objectMapper) {
         this.jdbc = Objects.requireNonNull(jdbc, "jdbc");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper");
+        this.envelopes = new TargetE2EGraphEnvelopeCodec(objectMapper);
         this.transactions = new TransactionTemplate(
                 Objects.requireNonNull(transactionManager, "transactionManager"));
         this.transactions.setReadOnly(true);
@@ -164,10 +215,7 @@ public final class JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
                 Map.entry("roomEpoch", command.roomEpoch()),
                 Map.entry("roomFencingToken", command.fencingToken()),
                 Map.entry("processRevision", target.expectedProcessRevision()),
-                Map.entry("logicalRunId", child.logicalRunId()),
-                Map.entry("attemptId", child.attemptId()),
-                Map.entry("commandHash", target.commandHash()),
-                Map.entry("commandEnvelopeHash", target.commandEnvelopeHash()));
+                Map.entry("logicalRunId", child.logicalRunId()));
         List<TargetRow> rows = jdbc.query(TARGET_RECEIPT_SQL, parameters, this::targetRow);
         if (rows.size() > 1) {
             throw rejected("TARGET_E2E_FINALIZATION_READ_AMBIGUOUS", "target receipt identity is not unique");
@@ -179,8 +227,8 @@ public final class JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
         TargetRow row = rows.getFirst();
         TargetE2eFinalizationReceipt receipt = decodeTargetReceipt(row);
         requireTargetBinding(request, receipt, row);
-        requireSingleCompletion(request, parameters, receipt);
-        FormalProjection formal = readFormalProjection(request, receipt);
+        requireSingleCompletion(parameters, receipt, row);
+        FormalProjection formal = readFormalProjection(request, receipt, row);
         return new IntakeAgentRunFinalizationReadResult(
                 "intake-agent-run-finalization-read-result.v1",
                 IntakeAgentRunFinalizationReadResult.Resolution.COMMITTED,
@@ -207,12 +255,13 @@ public final class JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
     }
 
     private void requireSingleCompletion(
-            IntakeAgentRunFinalizationReadRequest request,
             Map<String, Object> parameters,
-            TargetE2eFinalizationReceipt receipt) {
-        var command = request.command();
+            TargetE2eFinalizationReceipt receipt,
+            TargetRow targetRow) {
         Map<String, Object> completionParameters = new java.util.HashMap<>(parameters);
-        completionParameters.put("commandId", command.commandId());
+        completionParameters.put("commandId", targetRow.attemptCommandId());
+        completionParameters.put("commandHash", receipt.commandHash());
+        completionParameters.put("commandEnvelopeHash", receipt.commandEnvelopeHash());
         List<String> rows = jdbc.queryForList(COMPLETION_SQL, completionParameters, String.class);
         if (rows.size() != 1) {
             throw rejected(
@@ -232,11 +281,13 @@ public final class JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
     }
 
     private FormalProjection readFormalProjection(
-            IntakeAgentRunFinalizationReadRequest request, TargetE2eFinalizationReceipt targetReceipt) {
+            IntakeAgentRunFinalizationReadRequest request,
+            TargetE2eFinalizationReceipt targetReceipt,
+            TargetRow targetRow) {
         var command = request.command();
         String operationKey = IntakeOperationKeys.turnFinalize(
                 command.caseId(), command.roomEpoch(), command.executionContext().threadId(),
-                command.commandId(), targetReceipt.resultHash());
+                targetRow.attemptCommandId(), targetReceipt.resultHash());
         List<OperationRow> operations = jdbc.query(
                 OPERATION_SQL,
                 Map.of("tenantSurrogate", command.tenantSurrogate(), "operationKey", operationKey),
@@ -260,7 +311,8 @@ public final class JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
             throw rejected("TARGET_E2E_FINALIZATION_EVENT_MISSING", "formal Intake receipt event is absent");
         }
         FormalProjection formal =
-                decodeFormalProjection(request, targetReceipt, operation, events.getFirst());
+                decodeFormalProjection(
+                        request, targetReceipt, targetRow, operation, events.getFirst());
         requireCanonicalFormalOperationHash(
                 operation.resultHash(), formal.formal().receiptHash());
         return formal;
@@ -278,6 +330,7 @@ public final class JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
     private FormalProjection decodeFormalProjection(
             IntakeAgentRunFinalizationReadRequest request,
             TargetE2eFinalizationReceipt targetReceipt,
+            TargetRow targetRow,
             OperationRow operation,
             EventRow event) {
         try {
@@ -285,19 +338,20 @@ public final class JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
             if (!"intake-turn-committed-event.v1".equals(document.path("schema_version").asText())
                     || !operation.requestHash().equals(document.path("request_hash").asText())
                     || !targetReceipt.resultHash().equals(document.path("result_hash").asText())
-                    || !targetReceipt.proposalHash().equals(document.path("proposal_hash").asText())
                     || !event.id().equals(document.path("receipt").path("domain_event_ids").get(0).asText())) {
                 throw rejected("TARGET_E2E_FINALIZATION_EVENT_MISMATCH", "formal Intake event conflicts with its receipt");
             }
             IntakeFinalizationReceipt formal = objectMapper.treeToValue(
                     document.required("receipt"), IntakeFinalizationReceipt.class);
             formal.requireCanonicalHash();
+            requireFormalEventProposalHash(
+                    formal.proposalHash(), document.path("proposal_hash").asText());
             IntakeDomainEventType eventType = IntakeDomainEventType.valueOf(event.eventType());
             if (eventType != IntakeDomainEventType.TURN_NEEDS_INPUT
                     && eventType != IntakeDomainEventType.TURN_READY_TO_CONFIRM) {
                 throw rejected("TARGET_E2E_FINALIZATION_EVENT_TYPE_INVALID", "formal Intake event is not a turn event");
             }
-            requireFormalBinding(request, targetReceipt, formal, event);
+            requireFormalBinding(request, targetReceipt, targetRow, formal, event);
             return new FormalProjection(formal, event, operation.requestHash());
         } catch (TargetE2eFinalizationRejectedException failure) {
             throw failure;
@@ -313,6 +367,8 @@ public final class JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
         var command = request.command();
         var target = command.executionContext().targetAgentRun();
         var child = request.childState();
+        RoomGraphCommand winningCommand = decodeAttemptCommand(row);
+        ExecuteAgentRunRequest winningRequest = decodeWinningMaterial(row, receipt, winningCommand);
         if (!receipt.activationId().equals(target.activationId())
                 || !row.activationManifestHash().equals(target.activationManifestHash())
                 || !receipt.tenantSurrogate().equals(command.tenantSurrogate())
@@ -321,12 +377,29 @@ public final class JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
                 || receipt.roomFencingToken() != command.fencingToken()
                 || receipt.processRevision() != target.expectedProcessRevision()
                 || !receipt.logicalRunId().equals(child.logicalRunId())
-                || !receipt.attemptId().equals(child.attemptId())
-                || !receipt.commandHash().equals(target.commandHash())
-                || !receipt.commandEnvelopeHash().equals(target.commandEnvelopeHash())
-                || !receipt.graphKey().equals(target.request().command().graphKey())
-                || !receipt.graphVersion().equals(target.request().command().graphVersion())
-                || !receipt.checkpointSchemaVersion().equals(target.request().command().checkpointSchemaVersion())
+                || (child.resultHash() != null
+                    && !receipt.resultHash().equals(child.resultHash()))
+                || !winningCommand.commandId().equals(row.attemptCommandId())
+                || !winningCommand.requestHash().equals(row.attemptRequestHash())
+                || !winningRequest.command().equals(winningCommand)
+                || winningRequest.attemptNo() < target.request().attemptNo()
+                || winningRequest.attemptLimit() != target.request().attemptLimit()
+                || !winningRequest.logicalInputHash().equals(
+                    target.request().logicalInputHash())
+                || (winningRequest.attemptNo() == target.request().attemptNo()
+                    && !winningRequest.attemptId().equals(target.request().attemptId()))
+                || (winningRequest.attemptNo() > target.request().attemptNo()
+                    && (winningRequest.attemptId().equals(target.request().attemptId())
+                        || winningRequest.command().commandId().equals(
+                            target.request().command().commandId())))
+                || !winningCommand.logicalRunId().equals(receipt.logicalRunId())
+                || !winningCommand.attemptId().equals(receipt.attemptId())
+                || !winningCommand.tenantSurrogate().equals(receipt.tenantSurrogate())
+                || !winningCommand.caseId().equals(receipt.caseId())
+                || winningCommand.roomEpoch() != receipt.roomEpoch()
+                || !winningCommand.graphKey().equals(receipt.graphKey())
+                || !winningCommand.graphVersion().equals(receipt.graphVersion())
+                || !winningCommand.checkpointSchemaVersion().equals(receipt.checkpointSchemaVersion())
                 || !receipt.resultHash().equals(child.resultHash() == null ? receipt.resultHash() : child.resultHash())
                 || !receipt.agentRunManifestId().equals(row.agentRunManifestId())
                 || !receipt.agentRunManifestHash().equals(row.agentRunManifestHash())
@@ -338,6 +411,7 @@ public final class JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
     private void requireFormalBinding(
             IntakeAgentRunFinalizationReadRequest request,
             TargetE2eFinalizationReceipt targetReceipt,
+            TargetRow targetRow,
             IntakeFinalizationReceipt formal,
             EventRow event) {
         var command = request.command();
@@ -348,11 +422,10 @@ public final class JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
                 || !formal.threadId().equals(command.executionContext().threadId())
                 || !formal.actorScopeHash().equals(command.actorScopeHash())
                 || !formal.agentSessionId().equals(command.executionContext().agentSessionId())
-                || !formal.commandId().equals(command.commandId())
-                || !formal.logicalRunId().equals(target.request().logicalRunId())
-                || !formal.attemptId().equals(target.request().attemptId())
+                || !formal.commandId().equals(targetRow.attemptCommandId())
+                || !formal.logicalRunId().equals(targetReceipt.logicalRunId())
+                || !formal.attemptId().equals(targetReceipt.attemptId())
                 || !formal.resultHash().equals(targetReceipt.resultHash())
-                || !formal.proposalHash().equals(targetReceipt.proposalHash())
                 || formal.processRevision() != target.expectedProcessRevision()
                 || formal.roomRevision() != target.expectedRoomRevision()
                 || formal.fencingToken() != command.fencingToken()
@@ -370,6 +443,100 @@ public final class JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
         return decoded;
     }
 
+    private RoomGraphCommand decodeAttemptCommand(TargetRow row) {
+        try {
+            JsonNode document = objectMapper.readTree(row.attemptCommandJson());
+            if (document == null
+                    || !row.attemptCommandJson().equals(ContractJson.canonicalString(document))) {
+                throw rejected(
+                        "TARGET_E2E_FINALIZATION_ATTEMPT_COMMAND_INVALID",
+                        "winning attempt command is not canonical");
+            }
+            RoomGraphCommand command = objectMapper.treeToValue(document, RoomGraphCommand.class);
+            if (!document.isObject()) {
+                throw rejected(
+                        "TARGET_E2E_FINALIZATION_ATTEMPT_COMMAND_INVALID",
+                        "winning attempt command is not an object");
+            }
+            com.fasterxml.jackson.databind.node.ObjectNode unhashed =
+                    ((com.fasterxml.jackson.databind.node.ObjectNode) document).deepCopy();
+            unhashed.remove("request_hash");
+            if (!row.attemptRequestHash().equals(ContractJson.sha256Hex(unhashed))) {
+                throw rejected(
+                        "TARGET_E2E_FINALIZATION_ATTEMPT_COMMAND_INVALID",
+                        "winning attempt command self-hash is invalid");
+            }
+            return command;
+        } catch (TargetE2eFinalizationRejectedException failure) {
+            throw failure;
+        } catch (Exception failure) {
+            throw rejected(
+                    "TARGET_E2E_FINALIZATION_ATTEMPT_COMMAND_INVALID",
+                    "winning attempt command cannot be decoded",
+                    failure);
+        }
+    }
+
+    private ExecuteAgentRunRequest decodeWinningMaterial(
+            TargetRow row,
+            TargetE2eFinalizationReceipt receipt,
+            RoomGraphCommand winningCommand) {
+        try {
+            JsonNode materialDocument = objectMapper.readTree(row.materialCanonicalJson());
+            if (materialDocument == null
+                    || !row.materialCanonicalJson().equals(
+                            ContractJson.canonicalString(materialDocument))
+                    || !row.materialSha256().equals(ContractJson.sha256Hex(materialDocument))) {
+                throw rejected(
+                        "TARGET_E2E_FINALIZATION_WINNING_MATERIAL_INVALID",
+                        "winning Intake material is not canonical");
+            }
+            IntakeCommandExecutionContext material = objectMapper.treeToValue(
+                    materialDocument, IntakeCommandExecutionContext.class);
+            ExecuteAgentRunRequest expected = new ExecuteAgentRunRequest(
+                    ExecuteAgentRunRequest.SCHEMA_VERSION,
+                    receipt.logicalRunId(),
+                    row.attemptNo(),
+                    row.attemptLimit(),
+                    "agent-stream.v2",
+                    row.logicalInputHash(),
+                    row.previousAttemptId(),
+                    row.resetRequired(),
+                    row.publicSequenceOffset(),
+                    winningCommand);
+            if (!expected.equals(material.targetAgentRun().request())) {
+                throw rejected(
+                        "TARGET_E2E_FINALIZATION_WINNING_MATERIAL_INVALID",
+                        "winning Intake material does not bind the committed attempt");
+            }
+
+            var sealed = envelopes.wrapCommand(
+                    receipt.activationId(), receipt.roomFencingToken(), winningCommand);
+            String commandHash = sealed.commandHash();
+            String commandEnvelopeHash = sealed.commandEnvelopeHash();
+            if (!receipt.commandHash().equals(commandHash)
+                    || !receipt.commandEnvelopeHash().equals(commandEnvelopeHash)
+                    || !material.targetAgentRun().activationId().equals(receipt.activationId())
+                    || material.targetAgentRun().roomFencingToken()
+                            != receipt.roomFencingToken()
+                    || !material.targetAgentRun().commandHash().equals(commandHash)
+                    || !material.targetAgentRun().commandEnvelopeHash().equals(
+                            commandEnvelopeHash)) {
+                throw rejected(
+                        "TARGET_E2E_FINALIZATION_WINNING_MATERIAL_INVALID",
+                        "winning Intake command envelope differs from its material");
+            }
+            return expected;
+        } catch (TargetE2eFinalizationRejectedException failure) {
+            throw failure;
+        } catch (Exception failure) {
+            throw rejected(
+                    "TARGET_E2E_FINALIZATION_WINNING_MATERIAL_INVALID",
+                    "winning Intake material cannot be decoded",
+                    failure);
+        }
+    }
+
     private static FinalizationLocator locator(
             TargetE2eFinalizationReceipt receipt,
             String manifestHash,
@@ -377,7 +544,7 @@ public final class JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
         return new FinalizationLocator(
                 "intake-agent-run-finalization-locator.v1", receipt.executionLane(),
                 receipt.activationId(), manifestHash, receipt.roomFencingToken(),
-                receipt.logicalRunId(), receipt.attemptId(), receipt.resultHash(), receipt.proposalHash(),
+                receipt.logicalRunId(), receipt.attemptId(), receipt.resultHash(), formal.proposalHash(),
                 receipt.checkpointId(), formal.operationKey(),
                 receipt.agentRunManifestId(), receipt.agentRunManifestHash(),
                 receipt.isolatedDomainDbBindingHash(), receipt.receiptHash());
@@ -399,7 +566,13 @@ public final class JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
                 TargetE2eFinalizationReceipt.DomainCommitStatus.valueOf(rs.getString("domain_commit_status")));
         return new TargetRow(rs.getString("receipt_id"), rs.getString("activation_manifest_hash"),
                 rs.getBytes("receipt_canonical_bytes"), columns, columns.agentRunManifestId(),
-                columns.agentRunManifestHash(), columns.isolatedDomainDbBindingHash());
+                columns.agentRunManifestHash(), columns.isolatedDomainDbBindingHash(),
+                rs.getString("attempt_command_id"), rs.getString("attempt_request_hash"),
+                rs.getString("attempt_command_json"), rs.getLong("attempt_no"),
+                rs.getInt("attempt_limit"), rs.getString("logical_input_hash"),
+                rs.getString("previous_attempt_id"), rs.getBoolean("reset_required"),
+                rs.getInt("public_sequence_offset"), rs.getString("context_canonical_json"),
+                rs.getString("context_sha256"));
     }
 
     private OperationRow operationRow(ResultSet rs, int ignored) throws SQLException {
@@ -421,9 +594,26 @@ public final class JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
         return new TargetE2eFinalizationRejectedException(code, message, cause);
     }
 
+    /**
+     * The target receipt binds the outer result-envelope proposal descriptor, while the formal
+     * Intake receipt binds the persisted proposal payload. Those hashes are independent domains;
+     * the formal event must repeat the latter.
+     */
+    static void requireFormalEventProposalHash(
+            String formalPayloadProposalHash, String eventProposalHash) {
+        if (!Objects.equals(formalPayloadProposalHash, eventProposalHash)) {
+            throw rejected(
+                    "TARGET_E2E_FINALIZATION_EVENT_MISMATCH",
+                    "formal Intake event conflicts with its receipt");
+        }
+    }
+
     private record TargetRow(String receiptId, String activationManifestHash, byte[] canonicalBytes,
             TargetE2eFinalizationReceipt columns, String agentRunManifestId, String agentRunManifestHash,
-            String isolatedDomainDbBindingHash) {}
+            String isolatedDomainDbBindingHash, String attemptCommandId, String attemptRequestHash,
+            String attemptCommandJson, long attemptNo, int attemptLimit, String logicalInputHash,
+            String previousAttemptId, boolean resetRequired, int publicSequenceOffset,
+            String materialCanonicalJson, String materialSha256) {}
     private record OperationRow(String requestHash, String resultUri, String resultHash, String status,
             String caseId, long roomEpoch, long processRevision, long fencingToken) {}
     private record EventRow(String id, String caseId, long sequence, String eventType, String eventJson) {}

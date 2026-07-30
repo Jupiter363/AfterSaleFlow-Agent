@@ -12,6 +12,9 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from psycopg import OperationalError
+from psycopg.errors import DiskFull, LockNotAvailable, ProtocolViolation
+from psycopg_pool import PoolTimeout
 
 from app.api.graph_commands import (
     AgentStreamProtocolError,
@@ -87,9 +90,7 @@ class FakeStreamService:
         self.failure_before = failure_before
         self.failure_after = failure_after
         self.closed = False
-        self.calls: list[
-            tuple[RoomGraphCommand, VerifiedInvocation, ThreadIdentity]
-        ] = []
+        self.calls: list[tuple[RoomGraphCommand, VerifiedInvocation, ThreadIdentity]] = []
 
     async def open_stream(
         self,
@@ -128,9 +129,7 @@ class ThreadResolver:
             case_id=command.case_id,
             room_type=RoomType(command.room_type),
             room_epoch=command.room_epoch,
-            actor_scope=ActorScopeBinding.from_json(
-                command.actor_scope.model_dump(mode="json")
-            ),
+            actor_scope=ActorScopeBinding.from_json(command.actor_scope.model_dump(mode="json")),
             agent_session_id="trusted-agent-session-1",
             shared_session=False,
             graph_key=command.graph_key,
@@ -155,10 +154,9 @@ class TargetVerifier:
 
 def _command() -> tuple[RoomGraphCommand, dict[str, Any]]:
     vector = json.loads(
-        (
-            CONTRACT_ROOT
-            / "fixtures/canonical-hash/room-graph-command-self-hash.json"
-        ).read_text(encoding="utf-8")
+        (CONTRACT_ROOT / "fixtures/canonical-hash/room-graph-command-self-hash.json").read_text(
+            encoding="utf-8"
+        )
     )
     instance = {**vector["input"], "request_hash": vector["sha256"]}
     return RoomGraphCommand.model_validate(instance), instance
@@ -174,9 +172,7 @@ def _event(command: RoomGraphCommand, event_type: str, sequence: int) -> AgentSt
             delta="visible",
         )
     elif event_type == "usage":
-        payload = AgentStreamPayload(
-            usage=Usage(input_tokens=10, output_tokens=5, total_tokens=15)
-        )
+        payload = AgentStreamPayload(usage=Usage(input_tokens=10, output_tokens=5, total_tokens=15))
     elif event_type == "attempt_aborted":
         payload = AgentStreamPayload(reason_code="PROVIDER_TRANSPORT_LOST")
     elif event_type == "attempt_reset":
@@ -630,6 +626,91 @@ def test_gateway_contract_error_before_first_event_keeps_public_runtime_mapping(
     assert service.closed is True
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [
+        LockNotAvailable("private lock holder detail"),
+        PoolTimeout("private pool state"),
+        OperationalError("private connection timeout"),
+    ],
+)
+def test_transient_persistence_failure_before_first_event_returns_retryable_503(
+    failure: Exception,
+) -> None:
+    command, instance = _command()
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    service = FakeStreamService((), failure_before=failure)
+    client = _client(command=command, private_key=private_key, service=service)
+
+    response = client.post(
+        "/internal/graphs/commands/stream",
+        content=json.dumps(instance),
+        headers={
+            "Authorization": f"Bearer {_token(command, private_key)}",
+            "Content-Type": "application/json",
+        },
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {"code": "GRAPH_LEASE_UNAVAILABLE", "retryable": True}
+    assert "private" not in response.text
+    assert service.closed is True
+
+
+def test_target_e2e_lock_contention_before_first_event_returns_retryable_503() -> None:
+    command, _ = _command()
+    envelope = _target_envelope(command)
+    service = FakeStreamService(
+        (),
+        failure_before=LockNotAvailable("private target lock holder detail"),
+    )
+    client = _target_client(envelope=envelope, service=service)
+
+    response = client.post(
+        "/internal/graphs/target-e2e/commands/stream",
+        content=envelope.model_dump_json(),
+        headers={
+            "Authorization": "Bearer a.b.c",
+            "Content-Type": "application/json",
+        },
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {"code": "GRAPH_LEASE_UNAVAILABLE", "retryable": True}
+    assert "private" not in response.text
+    assert service.closed is True
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        DiskFull("private storage detail"),
+        ProtocolViolation("private protocol detail"),
+    ],
+)
+def test_unclassified_database_failure_before_first_event_remains_nonretryable(
+    failure: Exception,
+) -> None:
+    command, instance = _command()
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    service = FakeStreamService((), failure_before=failure)
+    client = _client(command=command, private_key=private_key, service=service)
+
+    response = client.post(
+        "/internal/graphs/commands/stream",
+        content=json.dumps(instance),
+        headers={
+            "Authorization": f"Bearer {_token(command, private_key)}",
+            "Content-Type": "application/json",
+        },
+    )
+
+    assert response.status_code == 500
+    assert response.json() == {"code": "GRAPH_STREAM_INTERNAL_ERROR", "retryable": False}
+    assert "private" not in response.text
+    assert service.closed is True
+
+
 def test_started_public_attempt_returns_the_explicit_new_attempt_contract() -> None:
     command, instance = _command()
     private_key = ec.generate_private_key(ec.SECP256R1())
@@ -705,6 +786,11 @@ def test_attempt_aborted_is_a_valid_attempt_terminal_event() -> None:
             "error",
             {"error_code": "GRAPH_STREAM_INTERNAL_ERROR", "retryable": False},
         ),
+        (
+            DiskFull("private storage detail"),
+            "error",
+            {"error_code": "GRAPH_STREAM_INTERNAL_ERROR", "retryable": False},
+        ),
     ],
 )
 def test_failure_after_headers_emits_one_safe_terminal_event_and_closes_iterator(
@@ -773,6 +859,35 @@ def test_target_e2e_retryable_runtime_failure_requests_a_new_attempt_in_band() -
         (1, "attempt_aborted"),
     ]
     assert events[-1]["payload"] == {"reason_code": "GRAPH_LEASE_LOST"}
+    assert service.closed is True
+
+
+def test_target_e2e_lock_contention_after_first_event_aborts_the_attempt() -> None:
+    command, _ = _command()
+    envelope = _target_envelope(command)
+    service = FakeStreamService(
+        (_event(command, "attempt_started", 0),),
+        failure_after=LockNotAvailable("private target lock holder detail"),
+    )
+    client = _target_client(envelope=envelope, service=service)
+
+    response = client.post(
+        "/internal/graphs/target-e2e/commands/stream",
+        content=envelope.model_dump_json(),
+        headers={
+            "Authorization": "Bearer a.b.c",
+            "Content-Type": "application/json",
+        },
+    )
+
+    assert response.status_code == 200
+    events = [json.loads(line) for line in response.text.splitlines()]
+    assert [(event["sequence_no"], event["event_type"]) for event in events] == [
+        (0, "attempt_started"),
+        (1, "attempt_aborted"),
+    ]
+    assert events[-1]["payload"] == {"reason_code": "GRAPH_LEASE_UNAVAILABLE"}
+    assert "private" not in response.text
     assert service.closed is True
 
 

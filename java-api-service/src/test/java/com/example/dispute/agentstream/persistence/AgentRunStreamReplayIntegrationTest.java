@@ -79,6 +79,7 @@ class AgentRunStreamReplayIntegrationTest {
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
     void batchAppendAndRequiresNewPreserveReplayAcrossConflictsAttemptsAndOuterRollback() {
         insertCase();
+        TransactionTemplate outerTransaction = new TransactionTemplate(transactionManager);
         AgentRunLedger.LogicalRun logical =
                 ledger.createOrLoad(AgentRunPersistenceFixtures.logicalRun("ATTEMPT_STREAM_1"));
         AgentRunLedger.Attempt first =
@@ -139,6 +140,79 @@ class AgentRunStreamReplayIntegrationTest {
                 .hasMessageContaining("payload hash");
         assertThat(eventStore.durableHighWatermark(logical.agentRunId(), first.attemptId()))
                 .isEqualTo(3);
+
+        PostgresAgentRunV2EventStore recoveryStore = new PostgresAgentRunV2EventStore(
+                jdbc,
+                objectMapper,
+                transactionManager,
+                StreamCompatibilityMode.DUAL_WRITE_OLD_READ);
+        AgentStreamEvent recoveryError = new AgentStreamEvent(
+                "agent-stream.v2",
+                logical.agentRunId(),
+                first.attemptId(),
+                4,
+                StreamEventType.ERROR,
+                Audience.USER,
+                Instant.parse("2026-07-19T01:00:04Z"),
+                new Payload(
+                        null, null, null, null, null, null,
+                        null, null, "RECOVERY_EXHAUSTED", false));
+        AtomicReference<AppendReceipt> recoveryReceipt = new AtomicReference<>();
+        outerTransaction.executeWithoutResult(status -> {
+            assertThatThrownBy(() -> recoveryStore.appendRecoveryErrorInCurrentTransaction(
+                            event(
+                                    first.attemptId(),
+                                    4,
+                                    StreamEventType.VISIBLE_DELTA,
+                                    "not a recovery error")))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("exactly one ERROR");
+            for (long sequence = 0; sequence <= 3; sequence++) {
+                TestSource source = source(logical.agentRunId(), first.attemptId(), sequence);
+                assertThat(recordTarget(source, source.payloadHash())).isTrue();
+            }
+            recoveryReceipt.set(
+                    recoveryStore.appendRecoveryErrorInCurrentTransaction(recoveryError));
+            assertThat(recoveryStore.durableHighWatermark(
+                            logical.agentRunId(), first.attemptId()))
+                    .isEqualTo(4);
+            assertThat(targetHighWatermark(
+                            "agent-stream.v2", logical.agentRunId(), first.attemptId()))
+                    .isEqualTo(4);
+            assertThat(attemptProgress(first.attemptId()))
+                    .isEqualTo(new AttemptProgress(4, true, false));
+            status.setRollbackOnly();
+        });
+        assertThat(recoveryReceipt.get())
+                .isEqualTo(new AppendReceipt(true, 4));
+        assertThat(eventStore.durableHighWatermark(logical.agentRunId(), first.attemptId()))
+                .isEqualTo(3);
+        assertThat(attemptProgress(first.attemptId()))
+                .isEqualTo(new AttemptProgress(3, true, false));
+        assertThat(jdbc.queryForObject(
+                        """
+                        select count(*) from agent_run_stream_event_delivery
+                         where stream_protocol = 'agent-stream.v2'
+                           and agent_run_id = ? and agent_run_attempt_id = ?
+                        """,
+                        Long.class,
+                        logical.agentRunId(),
+                        first.attemptId()))
+                .isZero();
+        assertThat(jdbc.queryForObject(
+                        """
+                        select count(*) from agent_run_stream_delivery_high_watermark
+                         where stream_protocol = 'agent-stream.v2'
+                           and agent_run_id = ? and agent_run_attempt_id = ?
+                        """,
+                        Long.class,
+                        logical.agentRunId(),
+                        first.attemptId()))
+                .isZero();
+        assertThatThrownBy(() ->
+                        recoveryStore.appendRecoveryErrorInCurrentTransaction(recoveryError))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("actual caller transaction");
 
         ledger.recordAttemptFailure(
                 logical.agentRunId(),
@@ -256,7 +330,6 @@ class AgentRunStreamReplayIntegrationTest {
                         String.class,
                         AgentRunPersistenceFixtures.CASE_ID);
         AtomicReference<AppendReceipt> appendReceipt = new AtomicReference<>();
-        TransactionTemplate outerTransaction = new TransactionTemplate(transactionManager);
         outerTransaction.executeWithoutResult(
                 status -> {
                     jdbc.update(
@@ -549,9 +622,50 @@ class AgentRunStreamReplayIntegrationTest {
     private void postTerminalParityAndRollbackFailClosed(
             TestSource terminalSource, TestSource basis) {
         insertV2Source(terminalSource);
-        AgentStreamEvent late = event(
+        AgentStreamEvent recoveryError = new AgentStreamEvent(
+                "agent-stream.v2",
+                terminalSource.runId(),
                 terminalSource.attemptId(),
                 5,
+                StreamEventType.ERROR,
+                Audience.USER,
+                Instant.parse("2026-07-25T12:00:05Z"),
+                new Payload(
+                        null, null, null, null, null, null,
+                        null, null, "RECOVERY_EXHAUSTED", false));
+        String recoveryErrorJson =
+                ContractJson.canonicalString(objectMapper.valueToTree(recoveryError));
+        String recoveryErrorHash = ContractJson.sha256Hex(objectMapper.valueToTree(recoveryError));
+        TestSource recoveryErrorSource = new TestSource(
+                "P8_RECOVERY_ERROR_V2",
+                "agent-stream.v2",
+                terminalSource.runId(),
+                terminalSource.attemptId(),
+                5,
+                "error",
+                recoveryErrorJson,
+                recoveryErrorHash,
+                "USER",
+                recoveryError.occurredAt(),
+                basis.actorId(),
+                basis.audienceActorIdsJson());
+        insertV2Source(recoveryErrorSource);
+        assertThat(recordTarget(recoveryErrorSource, recoveryErrorHash)).isTrue();
+        assertThat(eventStore.validateCompatibility(
+                        "agent-stream.v2", terminalSource.runId(), terminalSource.attemptId())
+                        .terminalParity())
+                .isTrue();
+        assertThat(eventStore
+                        .validateRollbackCoverage(
+                                "agent-stream.v2",
+                                terminalSource.runId(),
+                                terminalSource.attemptId())
+                        .compatibleUnion())
+                .isTrue();
+
+        AgentStreamEvent late = event(
+                terminalSource.attemptId(),
+                6,
                 StreamEventType.VISIBLE_DELTA,
                 "post-terminal rows must fail closed");
         String lateJson = ContractJson.canonicalString(objectMapper.valueToTree(late));
@@ -561,12 +675,12 @@ class AgentRunStreamReplayIntegrationTest {
                 "agent-stream.v2",
                 terminalSource.runId(),
                 terminalSource.attemptId(),
-                5,
+                6,
                 "visible_delta",
                 lateJson,
                 lateHash,
                 "USER",
-                Instant.parse("2026-07-25T12:00:05Z"),
+                Instant.parse("2026-07-25T12:00:06Z"),
                 basis.actorId(),
                 basis.audienceActorIdsJson());
         insertV2Source(lateSource);

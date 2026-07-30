@@ -2,6 +2,7 @@ package com.example.dispute.agentstream.infrastructure.persistence;
 
 import com.example.dispute.agentstream.application.AgentRunLedger;
 import com.example.dispute.agentstream.application.AgentRunLedger.AttemptAllocation;
+import com.example.dispute.agentstream.application.AgentRunLedger.RecoveryState;
 import com.example.dispute.agentstream.application.AgentRunCommandBindingFactory;
 import com.example.dispute.agentstream.application.AgentRunCommandBindingFactory.Binding;
 import com.example.dispute.agentstream.application.AgentRunCommandBindingFactory.Context;
@@ -18,12 +19,14 @@ import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptSta
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunExecutorKind;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunProtocol;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunRecoveryAction;
+import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
 import com.example.dispute.workflow.contract.v1.ContractTypes.StreamEventType;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
@@ -42,6 +45,7 @@ public class JpaAgentRunLedger implements AgentRunLedger {
     private final AgentRunRepository runRepository;
     private final AgentRunAttemptRepository attemptRepository;
     private final AgentRunStreamEventRepository eventRepository;
+    private final PostgresAgentRunV2EventStore recoveryEventStore;
     private final EntityManager entityManager;
     private final ObjectMapper objectMapper;
     private final ObjectMapper streamObjectMapper;
@@ -51,11 +55,13 @@ public class JpaAgentRunLedger implements AgentRunLedger {
             AgentRunRepository runRepository,
             AgentRunAttemptRepository attemptRepository,
             AgentRunStreamEventRepository eventRepository,
+            PostgresAgentRunV2EventStore recoveryEventStore,
             EntityManager entityManager,
             ObjectMapper objectMapper) {
         this.runRepository = runRepository;
         this.attemptRepository = attemptRepository;
         this.eventRepository = eventRepository;
+        this.recoveryEventStore = recoveryEventStore;
         this.entityManager = entityManager;
         this.objectMapper = objectMapper;
         this.streamObjectMapper = objectMapper.copy();
@@ -95,6 +101,108 @@ public class JpaAgentRunLedger implements AgentRunLedger {
         return runRepository
                 .findByCaseIdAndLogicalIdempotencyKey(caseId, logicalIdempotencyKey)
                 .map(this::logical);
+    }
+
+    @Override
+    @Transactional
+    public Optional<RecoveryState> lockV2RecoveryState(String agentRunId) {
+        AgentRunEntity run = runRepository.findByIdForUpdate(agentRunId).orElse(null);
+        if (run == null) {
+            return Optional.empty();
+        }
+        if (!AgentRunProtocol.V2.wireValue().equals(run.getProtocol())
+                || run.getExecutorKind() != AgentRunExecutorKind.TEMPORAL_ACTIVITY) {
+            throw new IllegalStateException("recovery candidate is not a Temporal AgentRun V2");
+        }
+        if (!"PENDING".equals(run.getRunStatus()) && !"RUNNING".equals(run.getRunStatus())) {
+            return Optional.empty();
+        }
+        if ("COMMITTED".equals(run.getFinalizationStatus())
+                || run.getResultReadyAttemptId() != null
+                || run.getCommittedAttemptId() != null
+                || run.getFinalResultHash() != null) {
+            return Optional.empty();
+        }
+        if (!"UNCOMMITTED".equals(run.getFinalizationStatus())) {
+            throw new IllegalStateException("recovery candidate has an unknown finalization state");
+        }
+
+        long persistedCount = attemptRepository.countByAgentRunId(agentRunId);
+        long latestAttemptNo = attemptRepository.findMaxAttemptNoByAgentRunId(agentRunId);
+        if (latestAttemptNo < 1 || persistedCount != latestAttemptNo) {
+            throw new IllegalStateException(
+                    "persisted attempts are not a contiguous sequence from one");
+        }
+        AgentRunAttemptEntity latest = attemptRepository
+                .findByAgentRunIdAndAttemptNoForUpdate(agentRunId, latestAttemptNo)
+                .orElseThrow(() -> new IllegalStateException("latest AgentRun attempt was not found"));
+        if (latest.getAttemptStatus() == AgentRunAttemptStatus.RESULT_READY
+                || latest.getAttemptStatus() == AgentRunAttemptStatus.COMPLETED) {
+            return Optional.empty();
+        }
+        return Optional.of(new RecoveryState(
+                logical(run),
+                attempt(latest),
+                run.getRoomId(),
+                run.getStreamOperation(),
+                run.getLogicalIdempotencyKey()));
+    }
+
+    @Override
+    @Transactional
+    public void terminalizeV2RecoveryCandidate(
+            String agentRunId,
+            String attemptId,
+            long attemptNo,
+            String errorCode,
+            Instant completedAt) {
+        AgentRunEntity run = lockRun(agentRunId);
+        if (!AgentRunProtocol.V2.wireValue().equals(run.getProtocol())
+                || run.getExecutorKind() != AgentRunExecutorKind.TEMPORAL_ACTIVITY) {
+            throw new IllegalStateException("recovery candidate is not a Temporal AgentRun V2");
+        }
+        if (!"PENDING".equals(run.getRunStatus()) && !"RUNNING".equals(run.getRunStatus())) {
+            return;
+        }
+        if ("COMMITTED".equals(run.getFinalizationStatus())
+                || run.getResultReadyAttemptId() != null
+                || run.getCommittedAttemptId() != null
+                || run.getFinalResultHash() != null) {
+            return;
+        }
+        long latestAttemptNo = attemptRepository.findMaxAttemptNoByAgentRunId(agentRunId);
+        requireEqual(latestAttemptNo, attemptNo, "latestAttemptNo");
+        AgentRunAttemptEntity attempt = attemptRepository
+                .findByAgentRunIdAndAttemptNoForUpdate(agentRunId, attemptNo)
+                .orElseThrow(() -> new IllegalStateException("latest AgentRun attempt was not found"));
+        requireEqual(attempt.getId(), attemptId, "attemptId");
+        if (attempt.getAttemptStatus() == AgentRunAttemptStatus.RESULT_READY
+                || attempt.getAttemptStatus() == AgentRunAttemptStatus.COMPLETED) {
+            return;
+        }
+        Instant terminalAt = java.util.Objects.requireNonNull(completedAt, "completedAt")
+                .truncatedTo(ChronoUnit.MICROS);
+        AgentRunAttemptStatus recoveryAttemptStatus = attempt.getAttemptStatus();
+        RecoveryTerminalPosition terminalPosition = requireRecoveryTerminalPosition(
+                run, attempt, recoveryAttemptStatus);
+        if (recoveryAttemptStatus == AgentRunAttemptStatus.RUNNING) {
+            attempt.recordFailure(
+                    AgentRunAttemptStatus.FAILED,
+                    errorCode,
+                    AgentRunRecoveryAction.FAIL_LOGICAL_RUN,
+                    terminalAt);
+        }
+        run.markFailed(
+                errorCode,
+                "AgentRun V2 recovery candidate cannot continue",
+                false,
+                null);
+        // markFailed owns the public GET error projection; the V2 transition restores the
+        // authority-supplied terminal timestamp instead of retaining its wall-clock timestamp.
+        run.markV2AttemptFailed(AgentRunAttemptStatus.FAILED, false, terminalAt);
+        attempt.advanceRecoveryTerminalErrorSequence(terminalPosition.sequenceNo());
+        persistRecoveryTerminalError(
+                run, attempt, errorCode, terminalAt, terminalPosition);
     }
 
     @Override
@@ -618,6 +726,128 @@ public class JpaAgentRunLedger implements AgentRunLedger {
                 ContractJson.sha256Hex(json));
     }
 
+    private void persistRecoveryTerminalError(
+            AgentRunEntity run,
+            AgentRunAttemptEntity attempt,
+            String errorCode,
+            Instant occurredAt,
+            RecoveryTerminalPosition position) {
+        AgentStreamEvent terminal = new AgentStreamEvent(
+                AgentRunProtocol.V2.wireValue(),
+                run.getId(),
+                attempt.getId(),
+                position.sequenceNo(),
+                StreamEventType.ERROR,
+                position.audience(),
+                occurredAt,
+                new AgentStreamEvent.Payload(
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        errorCode,
+                        false));
+        // Flush the managed cursor/status first so JDBC observes the same recovery terminal
+        // authority. The enclosing transaction still rolls back this flush together with both
+        // stream stores and the target delivery high-watermark if the append fails.
+        entityManager.flush();
+        var receipt = recoveryEventStore.appendRecoveryErrorInCurrentTransaction(terminal);
+        requireEqual(
+                receipt.durableHighWatermark(),
+                terminal.sequenceNo(),
+                "recoveryTerminalDurableHighWatermark");
+    }
+
+    private RecoveryTerminalPosition requireRecoveryTerminalPosition(
+            AgentRunEntity run,
+            AgentRunAttemptEntity attempt,
+            AgentRunAttemptStatus attemptStatus) {
+        boolean pending = "PENDING".equals(run.getRunStatus());
+        if (pending
+                && attemptStatus != AgentRunAttemptStatus.FAILED
+                && attemptStatus != AgentRunAttemptStatus.ABORTED
+                && attemptStatus != AgentRunAttemptStatus.CANCELLED) {
+            throw new IllegalStateException(
+                    "PENDING recovery requires a terminal failed predecessor");
+        }
+        if (!pending && attemptStatus != AgentRunAttemptStatus.RUNNING) {
+            throw new IllegalStateException(
+                    "RUNNING recovery requires a running latest attempt");
+        }
+        long highWatermark = eventRepository.findMaxV2Sequence(run.getId(), attempt.getId());
+        requireEqual(
+                highWatermark,
+                attempt.getLastSequenceNo(),
+                "recoveryTerminalSourceHighWatermark");
+        AgentRunStreamEventEntity persisted = eventRepository
+                .findV2Event(run.getId(), attempt.getId(), highWatermark)
+                .orElseThrow(() -> new IllegalStateException(
+                        "recovery terminal source high-watermark event is missing"));
+        persisted.requireCompatibilityBinding();
+        persisted.canonicalPayloadHash(streamObjectMapper);
+        AgentStreamEvent lastEvent;
+        try {
+            lastEvent = streamObjectMapper.readValue(
+                    persisted.getPayloadJson(), AgentStreamEvent.class);
+        } catch (JsonProcessingException exception) {
+            throw new IllegalStateException(
+                    "recovery terminal source event is invalid", exception);
+        }
+        Audience audience = requireV2Audience(run);
+        requireEqual(persisted.getAgentRunId(), run.getId(), "recoveryTerminalStoredRunId");
+        requireEqual(
+                persisted.getAgentRunAttemptId(),
+                attempt.getId(),
+                "recoveryTerminalStoredAttemptId");
+        requireEqual(
+                persisted.getSequenceNo(), highWatermark, "recoveryTerminalStoredSequenceNo");
+        requireEqual(
+                persisted.getStreamProtocol(),
+                AgentRunProtocol.V2.wireValue(),
+                "recoveryTerminalStoredProtocol");
+        requireEqual(
+                persisted.getAudience(), audience, "recoveryTerminalStoredAudience");
+        requireEqual(lastEvent.runId(), run.getId(), "recoveryTerminalRunId");
+        requireEqual(lastEvent.attemptId(), attempt.getId(), "recoveryTerminalAttemptId");
+        requireEqual(lastEvent.sequenceNo(), highWatermark, "recoveryTerminalSequenceNo");
+        requireEqual(lastEvent.eventType().wireValue(), persisted.getEventType(),
+                "recoveryTerminalEventType");
+        requireEqual(lastEvent.audience(), audience, "recoveryTerminalAudience");
+        if (lastEvent.eventType() == StreamEventType.ERROR
+                || lastEvent.eventType() == StreamEventType.FINAL) {
+            throw new IllegalStateException(
+                    "recovery candidate already has a global terminal event");
+        }
+        if (pending && lastEvent.eventType() != StreamEventType.ATTEMPT_ABORTED) {
+            throw new IllegalStateException(
+                    "PENDING recovery predecessor must end with attempt_aborted");
+        }
+        if (!pending && lastEvent.eventType() == StreamEventType.ATTEMPT_ABORTED) {
+            throw new IllegalStateException(
+                    "RUNNING recovery cannot follow an attempt terminal event");
+        }
+        return new RecoveryTerminalPosition(Math.addExact(highWatermark, 1L), audience);
+    }
+
+    private Audience requireV2Audience(AgentRunEntity run) {
+        try {
+            List<Audience> audiences = streamObjectMapper.readValue(
+                    run.getStreamAudienceJson(), new TypeReference<>() {});
+            if (audiences == null || audiences.size() != 1 || audiences.getFirst() == null) {
+                throw new IllegalStateException(
+                        "V2 recovery terminal requires exactly one stream audience");
+            }
+            return audiences.getFirst();
+        } catch (JsonProcessingException exception) {
+            throw new IllegalStateException(
+                    "V2 recovery terminal has an invalid stream audience", exception);
+        }
+    }
+
     private JsonNode streamJson(String value) {
         if (value == null || value.isBlank()) {
             throw new IllegalStateException("persisted public prelude JSON is missing");
@@ -632,6 +862,8 @@ public class JpaAgentRunLedger implements AgentRunLedger {
 
     private record PublicPreludeEvent(
             AgentStreamEvent event, String canonicalJson, String payloadHash) {}
+
+    private record RecoveryTerminalPosition(long sequenceNo, Audience audience) {}
 
     private AgentRunEntity lockRun(String agentRunId) {
         return runRepository

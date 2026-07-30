@@ -416,6 +416,34 @@ public class AgentRunAttemptEntity extends AbstractEntity {
         updatedAt = completedAt;
     }
 
+    /**
+     * Advances only the durable public cursor for Java's global recovery error.
+     *
+     * <p>The preceding Activity failure remains the attempt authority: this transition must not
+     * rewrite its status, error, recovery action, or completion timestamp.
+     */
+    public void advanceRecoveryTerminalErrorSequence(long terminalSequenceNo) {
+        if (attemptStatus != AgentRunAttemptStatus.FAILED
+                && attemptStatus != AgentRunAttemptStatus.ABORTED
+                && attemptStatus != AgentRunAttemptStatus.CANCELLED) {
+            throw new IllegalStateException(
+                    "recovery terminal error requires a terminal failed attempt");
+        }
+        if (completedAt == null
+                || errorCode == null
+                || errorRetryable == null
+                || terminationCode == null) {
+            throw new IllegalStateException(
+                    "recovery terminal error requires durable failure authority");
+        }
+        if (lastSequenceNo == Long.MAX_VALUE
+                || terminalSequenceNo != lastSequenceNo + 1) {
+            throw new IllegalStateException(
+                    "recovery terminal error must be the exact next public sequence");
+        }
+        lastSequenceNo = terminalSequenceNo;
+    }
+
     public void recordFailureResult(
             AgentRunAttemptStatus status,
             ExecuteAgentRunResult result,

@@ -49,6 +49,8 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
   private static final String CANCELLATION_RECONCILIATION_CHANGE_ID =
       "intake-room-cancellation-reconciliation-v1";
   private static final String AGENT_RUN_CHILD_CHANGE_ID = "intake-room-agent-run-v2-child-v1";
+  private static final String AGENT_RUN_WINNING_ATTEMPT_CHANGE_ID =
+      "intake-room-agent-run-winning-attempt-v1";
   private static final String TARGET_BRANCH_OUTPUT_SCHEMA_VERSION =
       "target-e2e-room-proposal-source.v1";
   private static final long HISTORY_EVENT_LIMIT = 2_000;
@@ -89,6 +91,7 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
   private int runGeneration;
   private io.temporal.workflow.Promise<Void> runMaxAgeTimer;
   private boolean rolloverEnabled;
+  private boolean winningAttemptEnabled;
   private boolean continueAsNewRequested;
   private Promise<Void> activeOrchestration;
   private CancellationScope activeCancellationScope;
@@ -102,6 +105,10 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
     restoreCarryState();
     rolloverEnabled =
         Workflow.getVersion(ROLLOVER_CHANGE_ID, Workflow.DEFAULT_VERSION, 1) == 1;
+    winningAttemptEnabled =
+        Workflow.getVersion(
+                AGENT_RUN_WINNING_ATTEMPT_CHANGE_ID, Workflow.DEFAULT_VERSION, 1)
+            == 1;
     if (rolloverEnabled) {
       runMaxAgeTimer = Workflow.newTimer(RUN_MAX_AGE);
     }
@@ -385,7 +392,19 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
       protocolErrorCode = "EVENT_WITHOUT_PENDING_COMMAND";
       return;
     }
-    if (!pendingCommand.commandId().equals(event.commandId())) {
+    boolean winningAttemptEvent =
+        winningAttemptEnabled
+            && targetAgentRunChild != null
+            && targetAgentRunChild.status()
+                == IntakeAgentRunChildState.Status.RECEIPT_COMMITTED
+            && targetAgentRunChild
+                .logicalRunId()
+                .equals(
+                    event.agentRunRef() == null
+                        ? null
+                        : event.agentRunRef().logicalRunId())
+            && targetAgentRunChild.finalizationOperationKey().equals(event.operationKey());
+    if (!pendingCommand.commandId().equals(event.commandId()) && !winningAttemptEvent) {
       protocolErrorCode = "EVENT_COMMAND_MISMATCH";
       return;
     }
@@ -439,7 +458,9 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
       return;
     }
     if (event.graphExecutionRef() != null
-        && !pendingCommand.commandId().equals(event.graphExecutionRef().graphCommandId())) {
+        && !(winningAttemptEvent
+            ? event.commandId().equals(event.graphExecutionRef().graphCommandId())
+            : pendingCommand.commandId().equals(event.graphExecutionRef().graphCommandId()))) {
       protocolErrorCode = "EVENT_GRAPH_COMMAND_MISMATCH";
       return;
     }
@@ -582,7 +603,7 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
                   .build());
       Promise<ExecuteAgentRunResult> childResult = Async.function(child::run, target.request());
       ExecuteAgentRunResult result = childResult.get();
-      requireTargetChildResult(command, target, result);
+      requireTargetChildResult(command, target, result, winningAttemptEnabled);
       if (result.outcome() != ExecuteAgentRunResult.Outcome.COMPLETED) {
         targetAgentRunChild = targetAgentRunChild.terminalNoCommit();
         protocolErrorCode = "TARGET_AGENT_RUN_" + result.outcome().name();
@@ -619,7 +640,7 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
     if (result == null) {
       throw new IllegalArgumentException("target finalization lookup returned no resolution");
     }
-    result.requireMatches(request);
+    result.requireMatches(request, winningAttemptEnabled);
     return result;
   }
 
@@ -632,7 +653,8 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
           targetAgentRunChild =
               targetAgentRunChild.resultReady(result.locator().resultHash());
         }
-        targetAgentRunChild = targetAgentRunChild.committed(result);
+        targetAgentRunChild =
+            targetAgentRunChild.committed(result, winningAttemptEnabled);
         processEvent(
             result.receipt().committedEvent(), result.receipt().operation().operationKey());
         yield true;
@@ -645,18 +667,30 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
   private static void requireTargetChildResult(
       IntakeWorkflowCommand command,
       IntakeTargetAgentRunContext target,
-      ExecuteAgentRunResult result) {
+      ExecuteAgentRunResult result,
+      boolean allowWinningAttempt) {
     if (result == null
         || !target.request().agentRunId().equals(result.agentRunId())
         || !target.request().logicalRunId().equals(result.logicalRunId())
-        || !target.request().attemptId().equals(result.attemptId())
-        || target.request().attemptNo() != result.attemptNo()) {
+        || result.attemptNo() < target.request().attemptNo()
+        || result.attemptNo() > target.request().attemptLimit()
+        || (!allowWinningAttempt
+            && (!target.request().attemptId().equals(result.attemptId())
+                || target.request().attemptNo() != result.attemptNo()))
+        || (result.attemptNo() == target.request().attemptNo()
+            && !target.request().attemptId().equals(result.attemptId()))
+        || (result.attemptNo() > target.request().attemptNo()
+            && target.request().attemptId().equals(result.attemptId()))) {
       throw new IllegalArgumentException("AgentRun child result identity does not match the request");
     }
     if (result.outcome() == ExecuteAgentRunResult.Outcome.COMPLETED
-        && (!command.commandId().equals(result.graphResult().commandId())
+        && (result.graphResult() == null
+            || (!allowWinningAttempt
+                && !command.commandId().equals(result.graphResult().commandId()))
+            || (result.attemptNo() > target.request().attemptNo()
+                && command.commandId().equals(result.graphResult().commandId()))
             || !target.request().logicalRunId().equals(result.graphResult().logicalRunId())
-            || !target.request().attemptId().equals(result.graphResult().attemptId())
+            || !result.attemptId().equals(result.graphResult().attemptId())
             || !target.request().command().graphKey().equals(result.graphResult().graphKey())
             || !target.request().command().graphVersion().equals(result.graphResult().graphVersion())
             || !result.resultHash().equals(result.graphResult().outputHash()))) {
@@ -850,7 +884,8 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
                         targetAgentRunChild =
                             targetAgentRunChild.resultReady(result.locator().resultHash());
                       }
-                      targetAgentRunChild = targetAgentRunChild.committed(result);
+                      targetAgentRunChild =
+                          targetAgentRunChild.committed(result, winningAttemptEnabled);
                       yield CancellationReconciliation.committed(
                           result.receipt().operation().operationKey(),
                           result.receipt().committedEvent());
