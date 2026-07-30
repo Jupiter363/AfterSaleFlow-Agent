@@ -55,6 +55,9 @@ import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPe
 import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.EpochProvisioningStatus;
 import com.example.dispute.workflow.infrastructure.persistence.repository.CaseRoomEpochRepository;
 import com.example.dispute.workflow.targete2e.ingress.rooms.TargetRoomCommandIngress;
+import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceCompletionCommandMaterialStore;
+import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceCompletionCommandMaterialStore.Provenance;
+import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceCompletionCommandMaterialStore.Route;
 import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.ObjectProvider;
@@ -90,6 +93,8 @@ public class EvidenceCompletionService {
     private final ObjectProvider<TargetRoomCommandIngress> targetRoomIngress;
     private final CaseCommandService caseCommandService;
     private final ObjectMapper objectMapper;
+    private final ObjectProvider<TargetEvidenceCompletionCommandMaterialStore>
+            targetCompletionMaterialStore;
 
     // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceCompletionService.EvidenceCompletionService(FulfillmentCaseRepository,EvidencePartyCompletionRepository,EvidenceItemRepository,CaseRoomRepository,CasePhaseClockRepository,EvidenceDossierFreezer,EvidenceWindowCoordinator,CaseEventService,NotificationService,CaseLifecycleNotificationService,HearingRoundService,HearingWorkflowCoordinator,DisputeProperties,Clock)」。
     // 具体功能：「EvidenceCompletionService.EvidenceCompletionService(FulfillmentCaseRepository,EvidencePartyCompletionRepository,EvidenceItemRepository,CaseRoomRepository,CasePhaseClockRepository,EvidenceDossierFreezer,EvidenceWindowCoordinator,CaseEventService,NotificationService,CaseLifecycleNotificationService,HearingRoundService,HearingWorkflowCoordinator,DisputeProperties,Clock)」：通过构造器接收 「caseRepository」(FulfillmentCaseRepository)、「completionRepository」(EvidencePartyCompletionRepository)、「evidenceRepository」(EvidenceItemRepository)、「roomRepository」(CaseRoomRepository)、「clockRepository」(CasePhaseClockRepository)、「dossierFreezer」(EvidenceDossierFreezer)、「evidenceWindowCoordinator」(EvidenceWindowCoordinator)、「caseEventService」(CaseEventService)、「notificationService」(NotificationService)、「lifecycleNotifications」(CaseLifecycleNotificationService)、「hearingRoundService」(HearingRoundService)、「hearingWorkflowCoordinator」(HearingWorkflowCoordinator)、「disputeProperties」(DisputeProperties)、「clock」(Clock) 并保存为「EvidenceCompletionService」的协作依赖；这里只完成依赖装配，不提前访问数据库或外部服务。
@@ -134,6 +139,7 @@ public class EvidenceCompletionService {
                 null,
                 null,
                 null,
+                null,
                 null);
     }
 
@@ -158,7 +164,9 @@ public class EvidenceCompletionService {
             CaseRoomEpochRepository roomEpochRepository,
             ObjectProvider<TargetRoomCommandIngress> targetRoomIngress,
             CaseCommandService caseCommandService,
-            ObjectMapper objectMapper) {
+            ObjectMapper objectMapper,
+            ObjectProvider<TargetEvidenceCompletionCommandMaterialStore>
+                    targetCompletionMaterialStore) {
         this.caseRepository = caseRepository;
         this.completionRepository = completionRepository;
         this.evidenceRepository = evidenceRepository;
@@ -179,6 +187,7 @@ public class EvidenceCompletionService {
         this.targetRoomIngress = targetRoomIngress;
         this.caseCommandService = caseCommandService;
         this.objectMapper = objectMapper;
+        this.targetCompletionMaterialStore = targetCompletionMaterialStore;
     }
 
     // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceCompletionService.warnDeadline(String)」。
@@ -225,13 +234,22 @@ public class EvidenceCompletionService {
         caseCommandService.accept(dispute.getId(), commandId, command, actor, commandId, commandId, null);
     }
 
-    private Optional<CaseRoomEpochEntity> currentTargetEvidenceEpoch(String caseId) {
+    private Optional<CaseRoomEpochEntity> currentActiveEvidenceEpoch(String caseId) {
         if (roomEpochRepository == null) return Optional.empty();
         return roomEpochRepository
                 .findTopByCaseIdAndRoomTypeAndLifecycleStatusOrderByRoomEpochDesc(
                         caseId,
                         com.example.dispute.workflow.contract.v1.ContractTypes.RoomType.EVIDENCE,
-                        EpochLifecycleStatus.ACTIVE)
+                        EpochLifecycleStatus.ACTIVE);
+    }
+
+    private Optional<CaseRoomEpochEntity> latestTerminalTargetEvidenceEpoch(String caseId) {
+        if (roomEpochRepository == null) return Optional.empty();
+        return roomEpochRepository
+                .findTopByCaseIdAndRoomTypeAndLifecycleStatusOrderByRoomEpochDesc(
+                        caseId,
+                        com.example.dispute.workflow.contract.v1.ContractTypes.RoomType.EVIDENCE,
+                        EpochLifecycleStatus.TERMINAL)
                 .filter(epoch -> epoch.getWriterMode() == WriterMode.TEMPORAL
                         && epoch.getProvisioningStatus() == EpochProvisioningStatus.READY
                         && TargetTypedRoomProtocol.GRAPH_KEY.equals(epoch.getGraphKey()));
@@ -296,8 +314,40 @@ public class EvidenceCompletionService {
         Optional<EvidencePartyCompletionEntity> participantCompletion =
                 completionRepository.findByCaseIdAndDossierVersionAndParticipantId(
                         caseId, dossierVersion, actor.actorId());
+        existing.ifPresent(value -> requireExactCompletionReplay(value, dispute, actor, dossierVersion));
+        participantCompletion.ifPresent(
+                value -> requireExactCompletionReplay(value, dispute, actor, dossierVersion));
+        boolean created = existing.isEmpty() && participantCompletion.isEmpty();
+        Optional<CaseRoomEpochEntity> activeEvidenceEpoch = currentActiveEvidenceEpoch(caseId);
+        Optional<CaseRoomEpochEntity> activeTargetEpoch = Optional.empty();
+        if (activeEvidenceEpoch.isPresent()) {
+            CaseRoomEpochEntity active = activeEvidenceEpoch.orElseThrow();
+            switch (active.getWriterMode()) {
+                case TEMPORAL -> {
+                    if (active.getProvisioningStatus() != EpochProvisioningStatus.READY
+                            || !TargetTypedRoomProtocol.GRAPH_KEY.equals(active.getGraphKey())) {
+                        throw new IllegalStateException(
+                                "active Temporal Evidence epoch is not exact target authority");
+                    }
+                    activeTargetEpoch = activeEvidenceEpoch;
+                }
+                case LEGACY -> {
+                    // The active legacy epoch remains the sole business writer.
+                }
+                case SHADOW -> {
+                    // SHADOW observes only; it does not displace the legacy business writer.
+                }
+            }
+        }
+        Optional<CaseRoomEpochEntity> terminalTargetEpoch = activeEvidenceEpoch.isEmpty()
+                ? latestTerminalTargetEvidenceEpoch(caseId)
+                : Optional.empty();
+        if (created && terminalTargetEpoch.isPresent()) {
+            throw new IllegalStateException(
+                    "new Evidence completion is forbidden after the target epoch is terminal");
+        }
         EvidencePartyCompletionEntity completion;
-        if (existing.isEmpty() && participantCompletion.isEmpty()) {
+        if (created) {
             completion =
                     completionRepository.save(
                             EvidencePartyCompletionEntity.completed(
@@ -311,15 +361,43 @@ public class EvidenceCompletionService {
         } else {
             completion = existing.orElseGet(participantCompletion::orElseThrow);
         }
-        Optional<CaseRoomEpochEntity> targetEpoch = currentTargetEvidenceEpoch(caseId);
-        if (targetEpoch.isPresent()) {
-            dispatchTargetCompletion(dispute, completion, actor, targetEpoch.orElseThrow());
+        if (activeTargetEpoch.isPresent()) {
+            CaseRoomEpochEntity epoch = activeTargetEpoch.orElseThrow();
+            Optional<Provenance> provenance = created
+                    ? Optional.empty()
+                    : readTargetCompletionProvenance(completion, epoch);
+            if (created || provenance.isEmpty()) {
+                dispatchTargetCompletion(dispute, completion, actor, epoch);
+            }
             return new EvidenceCompletionView(
                     caseId,
                     dossierVersion,
                     actor.role(),
                     false,
                     "EVIDENCE",
+                    dispute.getCurrentDeadlineAt());
+        }
+        if (terminalTargetEpoch.isPresent()) {
+            Provenance provenance = readTargetCompletionProvenance(
+                            completion, terminalTargetEpoch.orElseThrow())
+                    .orElseThrow(() -> new IllegalStateException(
+                            "terminal target Evidence completion has no durable target provenance"));
+            if (provenance != Provenance.APPLIED_EXACT) {
+                throw new IllegalStateException(
+                        "terminal target Evidence completion is not an exact applied replay");
+            }
+            var completions =
+                    completionRepository.findAllByCaseIdAndDossierVersionAndCompletionStatus(
+                            caseId, dossierVersion, "COMPLETED");
+            boolean allPartiesCompleted =
+                    hasCompletionForParticipant(completions, dispute.getUserId())
+                            && hasCompletionForParticipant(completions, dispute.getMerchantId());
+            return new EvidenceCompletionView(
+                    caseId,
+                    dossierVersion,
+                    actor.role(),
+                    allPartiesCompleted,
+                    dispute.getCurrentRoom(),
                     dispute.getCurrentDeadlineAt());
         }
         evidenceWindowCoordinator.signalPartyCompletedAfterCommit(
@@ -354,6 +432,42 @@ public class EvidenceCompletionService {
                 true,
                 "HEARING",
                 dispute.getCurrentDeadlineAt());
+    }
+
+    private Optional<Provenance> readTargetCompletionProvenance(
+            EvidencePartyCompletionEntity completion, CaseRoomEpochEntity epoch) {
+        if (targetCompletionMaterialStore == null) {
+            throw new IllegalStateException(
+                    "target Evidence completion provenance store is unavailable");
+        }
+        TargetEvidenceCompletionCommandMaterialStore store =
+                targetCompletionMaterialStore.getIfAvailable();
+        if (store == null) {
+            throw new IllegalStateException(
+                    "target Evidence completion provenance store is unavailable");
+        }
+        String commandId = "evidence-complete:" + completion.getId();
+        return store.readProvenance(new Route(
+                epoch.getTenantSurrogate(),
+                completion.getCaseId(),
+                commandId,
+                epoch.getRoomEpoch(),
+                epoch.getFencingToken(),
+                completion.getId()));
+    }
+
+    private static void requireExactCompletionReplay(
+            EvidencePartyCompletionEntity completion,
+            FulfillmentCaseEntity dispute,
+            AuthenticatedActor actor,
+            int dossierVersion) {
+        if (!dispute.getId().equals(completion.getCaseId())
+                || completion.getDossierVersion() != dossierVersion
+                || !actor.actorId().equals(completion.getParticipantId())
+                || !"COMPLETED".equals(completion.getCompletionStatus())) {
+            throw new IllegalArgumentException(
+                    "evidence completion idempotency key is bound to another participant fact");
+        }
     }
 
     // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceCompletionService.status(String,AuthenticatedActor)」。

@@ -179,7 +179,7 @@ public final class JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
         TargetRow row = rows.getFirst();
         TargetE2eFinalizationReceipt receipt = decodeTargetReceipt(row);
         requireTargetBinding(request, receipt, row);
-        requireSingleCompletion(request, parameters);
+        requireSingleCompletion(request, parameters, receipt);
         FormalProjection formal = readFormalProjection(request, receipt);
         return new IntakeAgentRunFinalizationReadResult(
                 "intake-agent-run-finalization-read-result.v1",
@@ -207,9 +207,10 @@ public final class JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
     }
 
     private void requireSingleCompletion(
-            IntakeAgentRunFinalizationReadRequest request, Map<String, Object> parameters) {
+            IntakeAgentRunFinalizationReadRequest request,
+            Map<String, Object> parameters,
+            TargetE2eFinalizationReceipt receipt) {
         var command = request.command();
-        var target = command.executionContext().targetAgentRun();
         Map<String, Object> completionParameters = new java.util.HashMap<>(parameters);
         completionParameters.put("commandId", command.commandId());
         List<String> rows = jdbc.queryForList(COMPLETION_SQL, completionParameters, String.class);
@@ -218,12 +219,12 @@ public final class JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
                     "TARGET_E2E_FINALIZATION_COMPLETION_MISSING",
                     "target receipt is not atomically paired with one admitted command completion");
         }
-        String expected = ContractJson.sha256Hex(objectMapper.valueToTree(Map.of(
-                "activation_id", target.activationId(),
-                "command_id", command.commandId(),
-                "command_hash", target.commandHash(),
-                "command_envelope_hash", target.commandEnvelopeHash())));
-        if (!expected.equals(rows.getFirst())) {
+        requireCanonicalCompletionHash(rows.getFirst(), receipt.receiptHash());
+    }
+
+    static void requireCanonicalCompletionHash(
+            String persistedCompletionHash, String canonicalReceiptHash) {
+        if (!Objects.equals(canonicalReceiptHash, persistedCompletionHash)) {
             throw rejected(
                     "TARGET_E2E_FINALIZATION_COMPLETION_HASH_MISMATCH",
                     "target command completion hash is not canonical");
@@ -249,7 +250,6 @@ public final class JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
                 || command.roomEpoch() != operation.roomEpoch()
                 || targetReceipt.processRevision() != operation.processRevision()
                 || command.fencingToken() != operation.fencingToken()
-                || !targetReceipt.receiptHash().equals(operation.resultHash())
                 || operation.resultUri() == null
                 || !operation.resultUri().startsWith("urn:intake:finalization-receipt:")) {
             throw rejected("TARGET_E2E_FINALIZATION_OPERATION_MISMATCH", "formal Intake operation conflicts with target receipt");
@@ -259,7 +259,20 @@ public final class JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
         if (events.size() != 1) {
             throw rejected("TARGET_E2E_FINALIZATION_EVENT_MISSING", "formal Intake receipt event is absent");
         }
-        return decodeFormalProjection(request, targetReceipt, operation, events.getFirst());
+        FormalProjection formal =
+                decodeFormalProjection(request, targetReceipt, operation, events.getFirst());
+        requireCanonicalFormalOperationHash(
+                operation.resultHash(), formal.formal().receiptHash());
+        return formal;
+    }
+
+    static void requireCanonicalFormalOperationHash(
+            String persistedOperationHash, String canonicalFormalReceiptHash) {
+        if (!Objects.equals(canonicalFormalReceiptHash, persistedOperationHash)) {
+            throw rejected(
+                    "TARGET_E2E_FINALIZATION_OPERATION_HASH_MISMATCH",
+                    "formal Intake operation hash is not canonical");
+        }
     }
 
     private FormalProjection decodeFormalProjection(

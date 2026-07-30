@@ -9,7 +9,9 @@ import com.example.dispute.infrastructure.persistence.entity.ReviewTaskEntity;
 import com.example.dispute.infrastructure.persistence.repository.ActionRecordRepository;
 import com.example.dispute.notification.infrastructure.persistence.entity.NotificationOutboxEntity;
 import com.example.dispute.notification.infrastructure.persistence.repository.NotificationOutboxRepository;
+import com.example.dispute.review.domain.ActionSnapshotHasher;
 import com.example.dispute.workflow.contract.v1.ContractJson;
+import com.example.dispute.workflow.contract.outcome.v1.OutcomeWireTypes;
 import com.example.dispute.workflow.infrastructure.persistence.entity.CaseRoomEpochEntity;
 import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewHumanDecisionReceipt;
 import com.example.dispute.workflow.targete2e.temporal.TargetRoomEpochSelectionAuthority;
@@ -90,11 +92,16 @@ public final class ReviewTargetDecisionHandoffWriter {
         payload.put("handoff_hash", handoffHash);
         String canonical = ContractJson.canonicalString(payload);
 
-        if (outbox.existsByBusinessEventKey(eventKey)) {
-            if (!outbox.existsById(handoffId)) {
-                throw new IllegalStateException("target Review handoff idempotency binding is ambiguous");
-            }
-            return new Receipt(handoffId, handoffHash);
+        var durable = outbox.findByBusinessEventKey(eventKey);
+        if (durable.isPresent()) {
+            return requireExactReplay(
+                    mapper,
+                    durable.get(),
+                    handoffId,
+                    epoch.getCaseId(),
+                    eventKey,
+                    EVENT_TYPE,
+                    canonical);
         }
         if (outbox.existsById(handoffId)) {
             throw new IllegalStateException("target Review handoff id is already bound to another event");
@@ -102,6 +109,39 @@ public final class ReviewTargetDecisionHandoffWriter {
         outbox.save(NotificationOutboxEntity.pending(
                 handoffId, epoch.getCaseId(), eventKey, EVENT_TYPE, canonical, clock.instant()));
         return new Receipt(handoffId, handoffHash);
+    }
+
+    static Receipt requireExactReplay(
+            ObjectMapper mapper,
+            NotificationOutboxEntity durable,
+            String expectedId,
+            String expectedCaseId,
+            String expectedBusinessEventKey,
+            String expectedEventType,
+            String expectedCanonicalPayload) {
+        Objects.requireNonNull(mapper, "mapper");
+        Objects.requireNonNull(durable, "durable");
+        if (!Objects.equals(expectedId, durable.getId())
+                || !Objects.equals(expectedCaseId, durable.getCaseId())
+                || !Objects.equals(expectedBusinessEventKey, durable.getBusinessEventKey())
+                || !Objects.equals(expectedEventType, durable.getEventType())) {
+            throw new IllegalStateException("target Review handoff replay identity conflicts");
+        }
+        JsonNode expected = parse(mapper, expectedCanonicalPayload, "expected handoff");
+        JsonNode actual = parse(mapper, durable.getEventPayloadJson(), "durable handoff");
+        if (!expected.isObject() || !actual.isObject()) {
+            throw new IllegalStateException("target Review handoff replay payload is not an object");
+        }
+        String durableHash = actual.path("handoff_hash").asText();
+        ObjectNode durablePreimage = ((ObjectNode) actual).deepCopy();
+        durablePreimage.remove("handoff_hash");
+        if (!durableHash.matches("[0-9a-f]{64}")
+                || !durableHash.equals(ContractJson.sha256Hex(durablePreimage))
+                || !ContractJson.canonicalString(expected)
+                        .equals(ContractJson.canonicalString(actual))) {
+            throw new IllegalStateException("target Review handoff replay payload conflicts");
+        }
+        return new Receipt(durable.getId(), durableHash);
     }
 
     private void recordActionIfAuthorized(
@@ -124,36 +164,47 @@ public final class ReviewTargetDecisionHandoffWriter {
         if (!epoch.getCaseId().equals(task.getCaseId())
                 || !task.getPlanId().equals(approval.getPlanId())
                 || !task.getPacketId().equals(packet.getId())
-                || !packet.getId().equals(approval.getReviewPacketId())
-                || !packet.getActionHash().equals(approval.getActionSnapshotHash())) {
-            throw new IllegalStateException("target ActionRecord parents do not match the frozen approval");
+                || !packet.getId().equals(approval.getReviewPacketId())) {
+            throw new IllegalStateException("target ActionRecord parents do not match the approval");
         }
         JsonNode frozenPlan = parse(packet.getRemedyJson());
         JsonNode approvedPlan = parse(approval.getApprovedPlanJson());
-        if (!frozenPlan.equals(approvedPlan)) {
-            throw new IllegalStateException("target approved plan must exactly replay the frozen remedy");
+        var outcomeReceipt = decision.outcomeReceipt();
+        if (!approval.getId().equals(decision.decisionRecordId())
+                || !decision.decisionRecordHash().equals(outcomeReceipt.receiptHash())
+                || !task.getId().equals(outcomeReceipt.reviewTaskId())
+                || !task.getCaseId().equals(outcomeReceipt.caseId())
+                || !packet.getId().equals(outcomeReceipt.frozenReviewPacketRef())
+                || !packet.getActionHash().equals(outcomeReceipt.actionSnapshotHash())
+                || !("approval:" + approval.getId() + ":action")
+                        .equals(outcomeReceipt.approvedActionSnapshotRef())) {
+            throw new IllegalStateException("target approved action does not bind its human decision receipt");
         }
-        JsonNode operations = frozenPlan.path("actions");
-        if (!operations.isArray() || operations.size() != 1
-                || !frozenPlan.path("notifications").isArray()
-                || !frozenPlan.path("notifications").isEmpty()) {
-            throw new IllegalStateException("target frozen remedy must contain exactly one action and no notifications");
-        }
-        JsonNode operation = operations.get(0);
+        JsonNode operation = requireApprovedOperation(
+                mapper,
+                approval.getDecisionType(),
+                approval.getId(),
+                approval.getActionSnapshotHash(),
+                packet.getActionHash(),
+                frozenPlan,
+                approvedPlan,
+                outcomeReceipt.decision(),
+                outcomeReceipt.receiptId(),
+                outcomeReceipt.receiptHash(),
+                outcomeReceipt.decisionRecordRef(),
+                outcomeReceipt.approvedActionSnapshotHash());
         String idempotencyKey = operation.path("idempotency_key").asText();
-        if (!ACTION_TYPE.equals(operation.path("action_type").asText())
-                || !"NO_EXTERNAL_EFFECT".equals(operation.path("effect_class").asText())
-                || idempotencyKey.isBlank()) {
-            throw new IllegalStateException("target frozen remedy action is not the no-external-effect manifest");
-        }
         ObjectNode request = mapper.createObjectNode();
         request.put("action_record_schema", "target-no-external-effect-action-record.v1");
         request.put("action_snapshot_hash", approval.getActionSnapshotHash());
         request.put("approval_record_id", approval.getId());
+        request.put("decision_receipt_id", outcomeReceipt.receiptId());
+        request.put("decision_receipt_hash", outcomeReceipt.receiptHash());
         request.put("case_id", task.getCaseId());
         request.put("plan_id", task.getPlanId());
         request.put("review_packet_id", packet.getId());
         request.put("reviewer_id", approval.getReviewerId());
+        request.set("approved_plan", approvedPlan.deepCopy());
         request.set("action", operation.deepCopy());
         String requestJson = ContractJson.canonicalString(request);
         ActionRecordEntity expected = ActionRecordEntity.runningGoverned(
@@ -166,6 +217,74 @@ public final class ReviewTargetDecisionHandoffWriter {
                 throw new IllegalStateException("target ActionRecord idempotency key is bound to another approval");
             }
         }, () -> actions.save(expected));
+    }
+
+    static JsonNode requireApprovedOperation(
+            ObjectMapper mapper,
+            ApprovalDecisionType approvalDecision,
+            String approvalId,
+            String approvedActionSnapshotHash,
+            String frozenActionSnapshotHash,
+            JsonNode frozenPlan,
+            JsonNode approvedPlan,
+            OutcomeWireTypes.ReviewDecision receiptDecision,
+            String receiptId,
+            String receiptHash,
+            String receiptDecisionRecordRef,
+            String receiptApprovedActionSnapshotHash) {
+        Objects.requireNonNull(mapper, "mapper");
+        Objects.requireNonNull(approvalDecision, "approvalDecision");
+        Objects.requireNonNull(frozenPlan, "frozenPlan");
+        Objects.requireNonNull(approvedPlan, "approvedPlan");
+        if (!Objects.equals(approvalId, receiptId)
+                || !Objects.equals(approvalId, receiptDecisionRecordRef)
+                || receiptHash == null
+                || !receiptHash.matches("[0-9a-f]{64}")
+                || receiptDecision != OutcomeWireTypes.ReviewDecision.valueOf(approvalDecision.name())
+                || !Objects.equals(approvedActionSnapshotHash, receiptApprovedActionSnapshotHash)) {
+            throw new IllegalStateException("target approved action does not bind its human decision receipt");
+        }
+        String actualFrozenHash = ActionSnapshotHasher.hash(mapper, frozenPlan);
+        String actualApprovedHash = ActionSnapshotHasher.hash(mapper, approvedPlan);
+        if (!Objects.equals(frozenActionSnapshotHash, actualFrozenHash)
+                || !Objects.equals(approvedActionSnapshotHash, actualApprovedHash)) {
+            throw new IllegalStateException("target approved action snapshot hash is stale");
+        }
+        if (frozenPlan.path("id").asText().isBlank()
+                || approvedPlan.path("id").asText().isBlank()
+                || !frozenPlan.path("version").isIntegralNumber()
+                || !approvedPlan.path("version").isIntegralNumber()) {
+            throw new IllegalStateException("target approved remedy identity is invalid");
+        }
+        if (approvalDecision == ApprovalDecisionType.APPROVE) {
+            if (!frozenPlan.equals(approvedPlan)
+                    || !frozenActionSnapshotHash.equals(approvedActionSnapshotHash)) {
+                throw new IllegalStateException("target APPROVE must exactly replay the frozen remedy");
+            }
+        } else if (approvalDecision == ApprovalDecisionType.MODIFY_AND_APPROVE) {
+            if (frozenPlan.equals(approvedPlan)
+                    || frozenActionSnapshotHash.equals(approvedActionSnapshotHash)
+                    || !frozenPlan.path("id").equals(approvedPlan.path("id"))
+                    || !frozenPlan.path("version").equals(approvedPlan.path("version"))) {
+                throw new IllegalStateException("target MODIFY_AND_APPROVE must bind a changed approved remedy");
+            }
+        } else {
+            throw new IllegalStateException("target action requires an approving human decision");
+        }
+        JsonNode operations = approvedPlan.path("actions");
+        if (!operations.isArray() || operations.size() != 1
+                || !approvedPlan.path("notifications").isArray()
+                || !approvedPlan.path("notifications").isEmpty()) {
+            throw new IllegalStateException("target approved remedy must contain exactly one action and no notifications");
+        }
+        JsonNode operation = operations.get(0);
+        String idempotencyKey = operation.path("idempotency_key").asText();
+        if (!ACTION_TYPE.equals(operation.path("action_type").asText())
+                || !"NO_EXTERNAL_EFFECT".equals(operation.path("effect_class").asText())
+                || idempotencyKey.isBlank()) {
+            throw new IllegalStateException("target approved remedy action is not the no-external-effect manifest");
+        }
+        return operation.deepCopy();
     }
 
     private boolean sameBinding(ActionRecordEntity actual, ActionRecordEntity expected) {
@@ -187,10 +306,14 @@ public final class ReviewTargetDecisionHandoffWriter {
     }
 
     private JsonNode parse(String value) {
+        return parse(mapper, value, "target Review frozen plan");
+    }
+
+    private static JsonNode parse(ObjectMapper mapper, String value, String description) {
         try {
             return mapper.readTree(value);
         } catch (Exception failure) {
-            throw new IllegalStateException("target Review frozen plan is not valid JSON", failure);
+            throw new IllegalStateException(description + " is not valid JSON", failure);
         }
     }
 

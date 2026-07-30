@@ -12,11 +12,15 @@ import com.example.dispute.workflow.temporal.room.evidence.EvidenceRoomPhase;
 import com.example.dispute.workflow.temporal.room.evidence.EvidenceRoomSignal;
 import com.example.dispute.workflow.temporal.room.evidence.EvidenceRoomSnapshot;
 import com.example.dispute.workflow.temporal.room.evidence.EvidenceRoomStart;
+import com.example.dispute.workflow.temporal.room.evidence.EvidenceRoomStart.ExecutionLane;
 import com.example.dispute.workflow.temporal.room.evidence.EvidenceRoomWorkflow;
 import com.example.dispute.workflow.temporal.room.evidence.EvidenceRoomWorkflowImpl;
 import com.example.dispute.workflow.temporal.room.evidence.EvidenceTimerPlan;
 import com.example.dispute.workflow.targete2e.temporal.room.TargetRoomAgentRunFinalizationReceipt;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.grpc.StatusRuntimeException;
 import io.temporal.api.testservice.v1.SleepRequest;
 import io.temporal.api.testservice.v1.TestServiceGrpc;
@@ -106,6 +110,52 @@ class EvidenceRoomWorkflowTest {
             EvidenceOperationKeys.partyComplete(
                 CASE_ID, EPOCH, RESPONDENT, "COMPLETE_RESPONDENT"));
     assertThat(result.originalDeadlineAt()).isEqualTo(started.start().originalDeadlineAt());
+  }
+
+  @Test
+  void missingExecutionLaneDeserializesAsReplaySafeLegacy() throws Exception {
+    ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule());
+    ObjectNode legacyPayload = (ObjectNode) mapper.valueToTree(
+        startAt(
+            Instant.parse("2026-07-30T00:00:00Z"),
+            Instant.parse("2026-07-30T02:00:00Z")));
+    assertThat(legacyPayload.has("executionLane")).isFalse();
+    legacyPayload.remove("executionLane");
+
+    EvidenceRoomStart decoded = mapper.treeToValue(legacyPayload, EvidenceRoomStart.class);
+
+    assertThat(decoded.executionLane()).isEqualTo(ExecutionLane.LEGACY);
+    assertThat(decoded.targetE2eCandidate()).isFalse();
+  }
+
+  @Test
+  void targetLookingBuildIdWithoutExplicitLaneStaysLegacyAndSkipsTargetActivity() {
+    Instant openedAt = Instant.ofEpochMilli(environment.currentTimeMillis());
+    EvidenceRoomStart legacy =
+        new EvidenceRoomStart(
+            "evidence-room-start.v1",
+            "TENANT_P5_SYNTHETIC_TIMER",
+            CASE_ID,
+            "ROOM_P5_EVIDENCE_TIMER",
+            EPOCH,
+            11,
+            INITIATOR,
+            RESPONDENT,
+            openedAt,
+            openedAt.plus(Duration.ofHours(2)),
+            1,
+            4,
+            6,
+            "target-e2e-looking-but-legacy");
+    StartedWorkflow started = start("legacy-target-looking-build", legacy);
+
+    started.workflow().partyCompleted(signal(INITIATOR, "LEGACY_PREFIX_I", 1));
+    started.workflow().partyCompleted(signal(RESPONDENT, "LEGACY_PREFIX_R", 2));
+
+    assertThat(result(started.workflow()).terminalReason())
+        .isEqualTo("BOTH_PARTIES_COMPLETED");
+    assertThat(legacy.executionLane()).isEqualTo(ExecutionLane.LEGACY);
+    assertThat(legacy.legacyTargetBuildMarker()).isTrue();
   }
 
   @Test
@@ -548,6 +598,10 @@ class EvidenceRoomWorkflowTest {
   private StartedWorkflow start(String suffix, Duration window) {
     Instant openedAt = Instant.ofEpochMilli(environment.currentTimeMillis());
     EvidenceRoomStart start = startAt(openedAt, openedAt.plus(window));
+    return start(suffix, start);
+  }
+
+  private StartedWorkflow start(String suffix, EvidenceRoomStart start) {
     EvidenceRoomWorkflow workflow =
         client.newWorkflowStub(
             EvidenceRoomWorkflow.class,

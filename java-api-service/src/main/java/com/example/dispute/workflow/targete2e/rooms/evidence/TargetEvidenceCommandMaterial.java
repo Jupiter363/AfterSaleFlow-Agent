@@ -18,6 +18,7 @@ public record TargetEvidenceCommandMaterial(
     long expectedRoomRevision,
     String commandHash,
     String commandEnvelopeHash,
+    String caseCommandRequestHash,
     ExecuteAgentRunRequest request) {
 
   public static final String SCHEMA_VERSION = "target-e2e-evidence-command-material.v1";
@@ -30,6 +31,7 @@ public record TargetEvidenceCommandMaterial(
     requireHash(activationManifestHash, "activationManifestHash");
     requireHash(commandHash, "commandHash");
     requireHash(commandEnvelopeHash, "commandEnvelopeHash");
+    requireHash(caseCommandRequestHash, "caseCommandRequestHash");
     if (roomFencingToken < 1 || expectedProcessRevision < 0 || expectedRoomRevision < 0) {
       throw new IllegalArgumentException("target Evidence fence or revision is invalid");
     }

@@ -31,6 +31,7 @@ public class ReviewTaskEntity extends AbstractEntity {
     @Column(name="case_id",length=64,nullable=false) private String caseId;
     @Column(name="plan_id",length=64,nullable=false) private String planId;
     @Column(name="packet_id",length=64,nullable=false) private String packetId;
+    @Column(name="policy_decision_id",length=64) private String policyDecisionId;
     @Enumerated(EnumType.STRING) @Column(name="task_status",length=32,nullable=false) private ReviewTaskStatus taskStatus;
     @Column(name="priority",length=32,nullable=false) private String priority;
     @Column(name="assigned_reviewer_id",length=128) private String assignedReviewerId;
@@ -70,6 +71,15 @@ public class ReviewTaskEntity extends AbstractEntity {
         task.requiredRole=requiredRole;task.dueAt=dueAt;task.decisionJson="{}";
         task.createdBy=actorId;task.updatedBy=actorId;return task;
     }
+    public static ReviewTaskEntity pending(
+            String id,String caseId,String planId,String packetId,String priority,
+            String requiredRole,OffsetDateTime dueAt,String actorId,String policyDecisionId){
+        if(policyDecisionId==null||policyDecisionId.isBlank())
+            throw new IllegalArgumentException("policyDecisionId is required for a pinned review task");
+        ReviewTaskEntity task=pending(
+                id,caseId,planId,packetId,priority,requiredRole,dueAt,actorId);
+        task.policyDecisionId=policyDecisionId;return task;
+    }
     // 所属模块：【PostgreSQL 事实模型 / JPA 实体层】「ReviewTaskEntity.pendingAssigned(String,String,String,String,String,String,String,OffsetDateTime,String)」。
     // 具体功能：「ReviewTaskEntity.pendingAssigned(String,String,String,String,String,String,String,OffsetDateTime,String)」：更新待处理Assigned：先更新内部状态 「assignedReviewerId」；实际协作者为 「pending」，最终返回「ReviewTaskEntity」。
     // 上游调用：「ReviewTaskEntity.pendingAssigned(String,String,String,String,String,String,String,OffsetDateTime,String)」的上游调用点包括 「ReviewApplicationService.createForWorkflow」。
@@ -80,6 +90,14 @@ public class ReviewTaskEntity extends AbstractEntity {
             String requiredRole,String assignedReviewerId,OffsetDateTime dueAt,String actorId){
         ReviewTaskEntity task=pending(
                 id,caseId,planId,packetId,priority,requiredRole,dueAt,actorId);
+        task.assignedReviewerId=assignedReviewerId;return task;
+    }
+    public static ReviewTaskEntity pendingAssigned(
+            String id,String caseId,String planId,String packetId,String priority,
+            String requiredRole,String assignedReviewerId,OffsetDateTime dueAt,String actorId,
+            String policyDecisionId){
+        ReviewTaskEntity task=pending(
+                id,caseId,planId,packetId,priority,requiredRole,dueAt,actorId,policyDecisionId);
         task.assignedReviewerId=assignedReviewerId;return task;
     }
     // 所属模块：【PostgreSQL 事实模型 / JPA 实体层】「ReviewTaskEntity.decide(ApprovalDecisionType,String,String)」。
@@ -108,6 +126,18 @@ public class ReviewTaskEntity extends AbstractEntity {
         assignedReviewerId = reviewerId;
         taskStatus = ReviewTaskStatus.IN_REVIEW;
         updatedBy = reviewerId;
+    }
+    public void pinPolicyDecision(String exactPolicyDecisionId) {
+        if (exactPolicyDecisionId == null || exactPolicyDecisionId.isBlank()) {
+            throw new IllegalArgumentException("exactPolicyDecisionId is required");
+        }
+        if (policyDecisionId == null) {
+            policyDecisionId = exactPolicyDecisionId;
+            return;
+        }
+        if (!policyDecisionId.equals(exactPolicyDecisionId)) {
+            throw new IllegalStateException("review task policy decision pin is immutable");
+        }
     }
     // 所属模块：【PostgreSQL 事实模型 / JPA 实体层】「ReviewTaskEntity.prePersist()」。
     // 具体功能：「ReviewTaskEntity.prePersist()」：在 JPA 首次 INSERT 前初始化 「createdAt」、「updatedAt」，保证即使调用方没有显式赋值，数据库中的审计字段也完整。
@@ -139,6 +169,7 @@ public class ReviewTaskEntity extends AbstractEntity {
     // 下游影响：「ReviewTaskEntity.getPacketId()」只产生当前对象的返回值或字段变化，不访问额外基础设施；计算结果以「String」交给调用方。
     // 系统意义：「ReviewTaskEntity.getPacketId()」直接影响 PostgreSQL 事实投影；实体记录是 API 查询投影和审计依据，写入必须服从上层事务与状态机
     public String getPacketId(){return packetId;}
+    public String getPolicyDecisionId(){return policyDecisionId;}
     // 所属模块：【PostgreSQL 事实模型 / JPA 实体层】「ReviewTaskEntity.getTaskStatus()」。
     // 具体功能：「ReviewTaskEntity.getTaskStatus()」：读取「ReviewTaskEntity」中的「taskStatus」状态，向 JPA、应用服务或序列化层返回「ReviewTaskStatus」。
     // 上游调用：「ReviewTaskEntity.getTaskStatus()」的上游调用点包括 「ReviewApplicationService.decisionView」、「ReviewApplicationService.view」。

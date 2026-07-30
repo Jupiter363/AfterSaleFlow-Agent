@@ -60,8 +60,11 @@ public final class TargetEvidenceFinalizationRequestResolver {
         + ContractJson.sha256Hex(objectMapper.valueToTree(java.util.List.of(
             material.activationId(), graph.commandId(), command.result().resultHash()))).substring(0, 40);
     return new TargetEvidenceFinalizationRequest(
-        material.executionLane(), material.activationId(), snapshot.admissionId(), material.commandHash(),
-        material.commandEnvelopeHash(), operationId, graph.stageCode(), graph.stageSequence(),
+        material.executionLane(), material.activationId(), material.activationManifestHash(),
+        snapshot.admissionId(), admission.isolatedDomainDbBindingHash(), material.commandHash(),
+        material.commandEnvelopeHash(), material.caseCommandRequestHash(), material.roomFencingToken(),
+        material.expectedProcessRevision(), material.expectedRoomRevision(), operationId,
+        graph.stageCode(), graph.stageSequence(),
         graph.actorScope().actorId(), graph.actorScope().actorRole(), graph.actorScope().audience(), command);
   }
 

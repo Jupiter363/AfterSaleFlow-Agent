@@ -8,9 +8,12 @@ import com.example.dispute.agentstream.application.AgentRunLedger.CreateLogicalR
 import com.example.dispute.agentstream.application.AgentRunLedger.LogicalRun;
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
+import com.example.dispute.common.trace.W3cTraceContext;
 import com.example.dispute.workflow.application.command.AcceptCaseCommand;
+import com.example.dispute.workflow.application.command.CaseCommandRequestHasher;
 import com.example.dispute.workflow.application.epoch.RoomEpochSelectionContext.TrafficSource;
 import com.example.dispute.workflow.contract.v1.ContractJson;
+import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRef;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunExecutorKind;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunProtocol;
 import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
@@ -31,6 +34,8 @@ import com.example.dispute.workflow.targete2e.persistence.JdbcTargetE2eApiAuthor
 import com.example.dispute.workflow.targete2e.persistence.TargetE2EActivationLedger.CommandAdmission;
 import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceCommandMaterial;
 import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceCommandMaterialStore;
+import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceCompletionCommandMaterial;
+import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceCompletionCommandMaterialStore;
 import com.example.dispute.workflow.targete2e.rooms.hearing.TargetHearingCommandMaterial;
 import com.example.dispute.workflow.targete2e.rooms.hearing.TargetHearingCommandMaterialStore;
 import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewCommandMaterial;
@@ -41,9 +46,12 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.List;
+import java.util.HexFormat;
 import java.util.Objects;
 import java.util.UUID;
 
@@ -67,6 +75,7 @@ public final class CanonicalTargetRoomCommandMaterializer implements TargetRoomC
     private final TargetE2eReviewInvocationPublisher reviewInvocationPublisher;
     private final JdbcTargetReviewInvocationFactsLoader reviewFacts;
     private final TargetEvidenceCommandMaterialStore evidence;
+    private final TargetEvidenceCompletionCommandMaterialStore evidenceCompletion;
     private final TargetHearingCommandMaterialStore hearing;
     private final TargetReviewCommandMaterialStore review;
     private final ObjectMapper mapper;
@@ -85,6 +94,7 @@ public final class CanonicalTargetRoomCommandMaterializer implements TargetRoomC
             TargetE2eReviewInvocationPublisher reviewInvocationPublisher,
             JdbcTargetReviewInvocationFactsLoader reviewFacts,
             TargetEvidenceCommandMaterialStore evidence,
+            TargetEvidenceCompletionCommandMaterialStore evidenceCompletion,
             TargetHearingCommandMaterialStore hearing,
             TargetReviewCommandMaterialStore review,
             ObjectMapper mapper,
@@ -101,6 +111,7 @@ public final class CanonicalTargetRoomCommandMaterializer implements TargetRoomC
         this.reviewInvocationPublisher = Objects.requireNonNull(reviewInvocationPublisher, "reviewInvocationPublisher");
         this.reviewFacts = Objects.requireNonNull(reviewFacts, "reviewFacts");
         this.evidence = Objects.requireNonNull(evidence, "evidence");
+        this.evidenceCompletion = Objects.requireNonNull(evidenceCompletion, "evidenceCompletion");
         this.hearing = Objects.requireNonNull(hearing, "hearing");
         this.review = Objects.requireNonNull(review, "review");
         this.mapper = Objects.requireNonNull(mapper, "mapper").copy();
@@ -110,7 +121,7 @@ public final class CanonicalTargetRoomCommandMaterializer implements TargetRoomC
     @Override
     public void materialize(
             String caseId, String commandId, AcceptCaseCommand command, AuthenticatedActor actor, String traceId) {
-        if (!isGraphCommand(command.commandType()) || command.roomType() == RoomType.HEARING) return;
+        if (!isMaterializedCommand(command.commandType()) || command.roomType() == RoomType.HEARING) return;
         CaseRoomEpochEntity epoch = epochs.findByCaseIdAndRoomTypeAndRoomEpochForUpdate(
                 caseId, command.roomType(), command.roomEpoch()).orElse(null);
         if (epoch == null || !isTargetEpoch(epoch)) return;
@@ -123,6 +134,10 @@ public final class CanonicalTargetRoomCommandMaterializer implements TargetRoomC
                         command.roomType(), TrafficSource.AUTHENTICATED_SIGNED_SYNTHETIC))
                 .orElseThrow(() -> new IllegalStateException("target room activation authority rejected command"));
         requireGrant(epoch, grant);
+        if (command.commandType() == CommandType.PARTY_EVIDENCE_COMPLETE) {
+            materializeEvidenceCompletion(caseId, commandId, command, actor, traceId, epoch, grant);
+            return;
+        }
         Instant now = clock.instant();
         String identity = stableToken(epoch.getTenantSurrogate() + "\n" + caseId + "\n" + commandId);
         String logicalRunId = "target-" + command.roomType().name().toLowerCase() + "-run:" + identity;
@@ -174,20 +189,56 @@ public final class CanonicalTargetRoomCommandMaterializer implements TargetRoomC
         }
         ExecuteAgentRunRequest request = new ExecuteAgentRunRequest(ExecuteAgentRunRequest.SCHEMA_VERSION,
                 logicalRunId, 1, ATTEMPT_LIMIT, "agent-stream.v2", binding.logicalInputHash(), null, false, 0, graph);
+        ActorRef caseCommandActor = new ActorRef(
+                graph.actorScope().actorId(), graph.actorScope().actorRole(), graph.actorScope().capabilities());
+        String caseCommandRequestHash = CaseCommandRequestHasher.hash(
+                epoch.getTenantSurrogate(), caseId, commandId, command, caseCommandActor);
         CommandAdmission admission = new CommandAdmission(grant.activationId(), grant.activationManifestHash(),
                 grant.isolatedDomainDbBindingHash(), epoch.getTenantSurrogate(), caseId, commandId,
                 envelope.commandHash(), envelope.commandEnvelopeHash(), epoch.getRoomEpoch(), epoch.getFencingToken());
-        append(command, admission, request, envelope, epoch);
+        append(command, admission, request, envelope, epoch, caseCommandRequestHash);
+    }
+
+    private void materializeEvidenceCompletion(
+            String caseId,
+            String commandId,
+            AcceptCaseCommand command,
+            AuthenticatedActor actor,
+            String traceId,
+            CaseRoomEpochEntity epoch,
+            TargetRoomEpochSelectionAuthority.Grant grant) {
+        if (command.roomType() != RoomType.EVIDENCE) {
+            throw new IllegalArgumentException("party completion must target Evidence");
+        }
+        ActorRef actorRef = new ActorRef(
+                actor.actorId(), mapRole(actor.role()),
+                List.of("case:" + caseId + ":command:" + command.commandType().name()));
+        String requestHash = CaseCommandRequestHasher.hash(
+                epoch.getTenantSurrogate(), caseId, commandId, command, actorRef);
+        TargetEvidenceCompletionCommandMaterial material =
+                TargetEvidenceCompletionCommandMaterial.create(
+                        grant.activationId(), grant.activationManifestHash(),
+                        grant.isolatedDomainDbBindingHash(), epoch.getTenantSurrogate(), caseId,
+                        commandId, epoch.getRoomEpoch(), epoch.getFencingToken(),
+                        epoch.getProcessRevision(), epoch.getRoomRevision(), actorRef,
+                        command.payloadRef(), command.deadlineAt(), expectedTraceId(traceId), requestHash);
+        CommandAdmission admission = new CommandAdmission(
+                grant.activationId(), grant.activationManifestHash(),
+                grant.isolatedDomainDbBindingHash(), epoch.getTenantSurrogate(), caseId, commandId,
+                material.commandHash(), material.commandEnvelopeHash(), epoch.getRoomEpoch(),
+                epoch.getFencingToken());
+        evidenceCompletion.append(admission, material);
     }
 
     private void append(AcceptCaseCommand command, CommandAdmission admission, ExecuteAgentRunRequest request,
-            TargetE2EGraphCommandEnvelope envelope, CaseRoomEpochEntity epoch) {
+            TargetE2EGraphCommandEnvelope envelope, CaseRoomEpochEntity epoch,
+            String caseCommandRequestHash) {
         switch (command.roomType()) {
             case EVIDENCE -> evidence.append(admission, new TargetEvidenceCommandMaterial(
                     TargetEvidenceCommandMaterial.SCHEMA_VERSION, TargetEvidenceCommandMaterial.TARGET_LANE,
                     admission.activationId(), admission.manifestHash(), epoch.getFencingToken(),
                     epoch.getProcessRevision(), epoch.getRoomRevision(), envelope.commandHash(),
-                    envelope.commandEnvelopeHash(), request));
+                    envelope.commandEnvelopeHash(), caseCommandRequestHash, request));
             case HEARING -> hearing.append(new TargetHearingCommandMaterial(
                     TargetHearingCommandMaterial.SCHEMA_VERSION, admission, request,
                     envelope.commandHash(), envelope.commandEnvelopeHash()));
@@ -248,6 +299,9 @@ public final class CanonicalTargetRoomCommandMaterializer implements TargetRoomC
         return type == CommandType.EVIDENCE_SUBMIT || type == CommandType.HEARING_STATEMENT
                 || type == CommandType.HEARING_EVIDENCE_BATCH || type == CommandType.REVIEW_DECISION;
     }
+    static boolean isMaterializedCommand(CommandType type) {
+        return type == CommandType.PARTY_EVIDENCE_COMPLETE || isGraphCommand(type);
+    }
     private static String graphStageCode(RoomType roomType) {
         return switch (roomType) {
             case EVIDENCE -> "EVIDENCE_SEAL";
@@ -294,6 +348,19 @@ public final class CanonicalTargetRoomCommandMaterializer implements TargetRoomC
     }
     private static String stableToken(String value) {
         return UUID.nameUUIDFromBytes(value.getBytes(StandardCharsets.UTF_8)).toString().replace("-", "");
+    }
+    private static String expectedTraceId(String traceId) {
+        var current = W3cTraceContext.currentTraceparent();
+        if (current.isPresent()) return current.orElseThrow().substring(3, 35);
+        if (traceId == null || traceId.isBlank()) {
+            throw new IllegalArgumentException("target room traceId must not be blank");
+        }
+        try {
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                    .digest(("trace:" + traceId).getBytes(StandardCharsets.UTF_8))).substring(0, 32);
+        } catch (NoSuchAlgorithmException failure) {
+            throw new IllegalStateException("SHA-256 is unavailable", failure);
+        }
     }
     private static String traceparent(String traceId) {
         if (traceId != null && traceId.matches("[0-9a-f]{32}") && !"0".repeat(32).equals(traceId)) {

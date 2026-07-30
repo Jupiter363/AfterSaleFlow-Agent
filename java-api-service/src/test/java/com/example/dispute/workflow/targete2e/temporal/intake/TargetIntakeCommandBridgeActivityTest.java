@@ -50,7 +50,33 @@ class TargetIntakeCommandBridgeActivityTest {
     assertThat(fixture.graph().requestHash()).isNotEqualTo(fixture.command().requestHash());
     assertThat(bound.actorScopeHash())
         .isEqualTo(ContractJson.sha256Hex(new ObjectMapper().valueToTree(fixture.graph().actorScope())));
+    assertThat(bound.party())
+        .isEqualTo(com.example.dispute.workflow.temporal.room.intake.IntakeParty.INITIATOR);
     assertThat(bound.payloadRef()).isEqualTo("s3://target/payload.json");
+  }
+
+  @Test
+  void merchantInitiatedMessagesMapMerchantToInitiatorAndUserToRespondent() {
+    Fixture merchant = fixture(true, ActorRole.MERCHANT);
+    Fixture user = fixture(true, ActorRole.USER);
+
+    var merchantBound =
+        merchant
+            .activity()
+            .bindCommand(
+                new TargetIntakeCommandBridgeActivities.BindRequest(merchant.command(), 17, 3));
+    var userBound =
+        user.activity()
+            .bindCommand(new TargetIntakeCommandBridgeActivities.BindRequest(user.command(), 17, 3));
+
+    assertThat(merchantBound.party())
+        .isEqualTo(com.example.dispute.workflow.temporal.room.intake.IntakeParty.INITIATOR);
+    assertThat(userBound.party())
+        .isEqualTo(com.example.dispute.workflow.temporal.room.intake.IntakeParty.RESPONDENT);
+    assertThat(merchantBound.actorScopeHash())
+        .isEqualTo(TargetIntakeActorScopes.hash("case-1", "merchant-local", ActorRole.MERCHANT));
+    assertThat(userBound.actorScopeHash())
+        .isEqualTo(TargetIntakeActorScopes.hash("case-1", "user-local", ActorRole.USER));
   }
 
   @Test
@@ -64,13 +90,11 @@ class TargetIntakeCommandBridgeActivityTest {
 
     assertThat(
             TargetIntakeActorScopes.scope(
-                "case-1",
-                com.example.dispute.workflow.temporal.room.intake.IntakeParty.INITIATOR))
+                "case-1", "user-local", ActorRole.USER))
         .isEqualTo(expected);
     assertThat(
             TargetIntakeActorScopes.hash(
-                "case-1",
-                com.example.dispute.workflow.temporal.room.intake.IntakeParty.INITIATOR))
+                "case-1", "user-local", ActorRole.USER))
         .isEqualTo(ContractJson.sha256Hex(new ObjectMapper().valueToTree(expected)));
   }
 
@@ -114,6 +138,7 @@ class TargetIntakeCommandBridgeActivityTest {
         new TargetIntakeCommandBridgeActivity(
             new FixedMaterialStore(null),
             new ObjectMapper(),
+            partySource(false),
             request ->
                 new TargetIntakeBranchContextSource.ResolvedBranchContext(
                     INITIATOR_THREAD_ID,
@@ -137,9 +162,15 @@ class TargetIntakeCommandBridgeActivityTest {
         new TargetIntakeCommandBridgeActivity(
             new FixedMaterialStore(null),
             new ObjectMapper(),
+            partySource(false),
             request -> {
+              assertThat(request.party())
+                  .isEqualTo(
+                      com.example.dispute.workflow.temporal.room.intake.IntakeParty.RESPONDENT);
               assertThat(request.actorScopeHash())
-                  .isEqualTo(TargetIntakeActorScopes.hash("case-1", com.example.dispute.workflow.temporal.room.intake.IntakeParty.RESPONDENT));
+                  .isEqualTo(
+                      TargetIntakeActorScopes.hash(
+                          "case-1", "merchant-local", ActorRole.MERCHANT));
               return new TargetIntakeBranchContextSource.ResolvedBranchContext(
                   RESPONDENT_THREAD_ID,
                   "session-respondent",
@@ -155,12 +186,49 @@ class TargetIntakeCommandBridgeActivityTest {
   }
 
   @Test
+  void merchantInitiatedBranchesMapMerchantToInitiatorAndUserToRespondent() {
+    TargetIntakeCommandBridgeActivity activity =
+        new TargetIntakeCommandBridgeActivity(
+            new FixedMaterialStore(null),
+            new ObjectMapper(),
+            partySource(true),
+            request ->
+                request.party()
+                        == com.example.dispute.workflow.temporal.room.intake.IntakeParty.INITIATOR
+                    ? new TargetIntakeBranchContextSource.ResolvedBranchContext(
+                        INITIATOR_THREAD_ID,
+                        "session-merchant-initiator",
+                        BranchOperation.INITIATOR_REJECT)
+                    : new TargetIntakeBranchContextSource.ResolvedBranchContext(
+                        RESPONDENT_THREAD_ID,
+                        "session-user-respondent",
+                        BranchOperation.RESPONDENT_CONFIRM));
+
+    var merchant =
+        activity.bindCommand(
+            new TargetIntakeCommandBridgeActivities.BindRequest(
+                branchCommand(CommandType.INTAKE_CONFIRM, ActorRole.MERCHANT), 17, 3));
+    var user =
+        activity.bindCommand(
+            new TargetIntakeCommandBridgeActivities.BindRequest(
+                branchCommand(CommandType.INTAKE_CONFIRM, ActorRole.USER), 17, 3));
+
+    assertThat(merchant.party())
+        .isEqualTo(com.example.dispute.workflow.temporal.room.intake.IntakeParty.INITIATOR);
+    assertThat(merchant.executionContext().threadId()).isEqualTo(INITIATOR_THREAD_ID);
+    assertThat(user.party())
+        .isEqualTo(com.example.dispute.workflow.temporal.room.intake.IntakeParty.RESPONDENT);
+    assertThat(user.executionContext().threadId()).isEqualTo(RESPONDENT_THREAD_ID);
+  }
+
+  @Test
   void failsClosedWhenTheBranchSourceRejectsAnExactBindingMismatch() {
     CaseCommandRef command = branchCommand(CommandType.INTAKE_CANCEL, ActorRole.USER);
     TargetIntakeCommandBridgeActivity activity =
         new TargetIntakeCommandBridgeActivity(
             new FixedMaterialStore(null),
             new ObjectMapper(),
+            partySource(false),
             request -> {
               throw new IllegalArgumentException("registered private-thread binding mismatch");
             });
@@ -206,9 +274,13 @@ class TargetIntakeCommandBridgeActivityTest {
   }
 
   private static Fixture fixture() {
+    return fixture(false, ActorRole.USER);
+  }
+
+  private static Fixture fixture(boolean merchantInitiated, ActorRole actorRole) {
+    String actorId = actorRole == ActorRole.USER ? "user-local" : "merchant-local";
     RoomGraphCommand.ActorScope actorScope =
-        TargetIntakeActorScopes.scope(
-            "case-1", com.example.dispute.workflow.temporal.room.intake.IntakeParty.INITIATOR);
+        TargetIntakeActorScopes.scope("case-1", actorId, actorRole);
     RoomGraphCommand graph =
         new RoomGraphCommand(
             "room-graph-command.v1",
@@ -268,8 +340,8 @@ class TargetIntakeCommandBridgeActivityTest {
             RoomType.INTAKE,
             2,
             new ActorRef(
-                "user-local",
-                ActorRole.USER,
+                actorId,
+                actorRole,
                 List.of("case:case-1:command:INTAKE_MESSAGE")),
             new PayloadRef("payload.v1", "s3://target/payload.json", HASH_B, 2),
             9,
@@ -283,10 +355,23 @@ class TargetIntakeCommandBridgeActivityTest {
     TargetIntakeCommandMaterialStore.MaterialSnapshot material =
         new TargetIntakeCommandMaterialStore.MaterialSnapshot("admission-1", admission, context, HASH_C, DEADLINE.minusSeconds(30));
     return new Fixture(
-        new TargetIntakeCommandBridgeActivity(new FixedMaterialStore(material), new ObjectMapper()),
+        new TargetIntakeCommandBridgeActivity(
+            new FixedMaterialStore(material), new ObjectMapper(), partySource(merchantInitiated)),
         command,
         context,
         graph);
+  }
+
+  private static TargetIntakePartyScopeSource partySource(boolean merchantInitiated) {
+    return request ->
+        TargetIntakePartyScopeSource.ResolvedPartyScopes.create(
+            "p9act.v1." + HASH_A.substring(0, 32),
+            HASH_E,
+            request,
+            merchantInitiated ? "merchant-local" : "user-local",
+            merchantInitiated ? ActorRole.MERCHANT : ActorRole.USER,
+            merchantInitiated ? "user-local" : "merchant-local",
+            merchantInitiated ? ActorRole.USER : ActorRole.MERCHANT);
   }
 
   private record Fixture(

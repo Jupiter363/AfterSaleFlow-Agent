@@ -4,7 +4,6 @@ import com.example.dispute.workflow.application.authority.epoch.EpochPartyAuthor
 import com.example.dispute.workflow.application.authority.payload.IntakeBranchCommand;
 import com.example.dispute.workflow.contract.v1.CaseCommandRef;
 import com.example.dispute.workflow.contract.v1.ContractJson;
-import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
 import com.example.dispute.workflow.contract.v1.ContractTypes.CommandType;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.BranchOperation;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -27,17 +26,34 @@ public final class JdbcTargetIntakeBranchContextSource implements TargetIntakeBr
   public static final String TARGET_INTAKE_PREFIX = "browser-messages";
   private static final int MAX_BYTES = 16 * 1024;
   private static final String BINDING_SQL = """
-      select thread_id, agent_session_id
-        from case_intake_graph_thread_binding
-       where tenant_surrogate = :tenantSurrogate
-         and case_id = :caseId
-         and room_type = 'INTAKE'
-         and room_epoch = :roomEpoch
-         and fencing_token = :fencingToken
-         and actor_id = :actorId
-         and actor_role = :actorRole
-         and actor_scope_hash = :actorScopeHash
-         and registration_status = 'REGISTERED'
+      select thread.thread_id, thread.agent_session_id
+        from case_intake_graph_thread_binding thread
+        join target_e2e_room_epoch_binding binding
+          on binding.tenant_surrogate = thread.tenant_surrogate
+         and binding.case_id = thread.case_id
+         and binding.room_type = thread.room_type
+         and binding.room_epoch = thread.room_epoch
+         and binding.room_fencing_token = thread.fencing_token
+        join target_e2e_activation activation
+          on activation.activation_id = binding.activation_id
+         and activation.manifest_hash = binding.activation_manifest_hash
+         and activation.execution_lane = binding.execution_lane
+         and activation.isolated_domain_db_binding_hash =
+             binding.isolated_domain_db_binding_hash
+       where thread.tenant_surrogate = :tenantSurrogate
+         and thread.case_id = :caseId
+         and thread.room_type = 'INTAKE'
+         and thread.room_epoch = :roomEpoch
+         and thread.fencing_token = :fencingToken
+         and thread.actor_id = :actorId
+         and thread.actor_role = :actorRole
+         and thread.actor_scope_hash = :actorScopeHash
+         and thread.registration_status = 'REGISTERED'
+         and binding.activation_id = :activationId
+         and binding.activation_manifest_hash = :activationManifestHash
+         and binding.execution_lane = 'TARGET_E2E_CANDIDATE'
+         and activation.execution_lane = 'TARGET_E2E_CANDIDATE'
+         and activation.lifecycle_status in ('ACTIVE', 'DRAIN_ONLY')
       """;
 
   private final MinioClient minio;
@@ -72,8 +88,9 @@ public final class JdbcTargetIntakeBranchContextSource implements TargetIntakeBr
     require(bytes.length > 0 && bytes.length <= MAX_BYTES, "branch command object size is invalid");
     require(command.payloadRef().sha256().equals(sha256(bytes)), "branch command object hash differs from command");
     IntakeBranchCommand branch = decodeCanonical(bytes);
-    BranchOperation operation = bindBranch(command, branch);
-    List<Map<String, Object>> rows = jdbc.queryForList(BINDING_SQL, bindingParameters(command, request.actorScopeHash(), request.roomFencingToken()));
+    BranchOperation operation = bindBranch(command, branch, request.party());
+    List<Map<String, Object>> rows =
+        jdbc.queryForList(BINDING_SQL, bindingParameters(request));
     if (rows.size() != 1) {
       throw new IllegalArgumentException("target Intake branch has no exact registered private-thread binding");
     }
@@ -124,14 +141,17 @@ public final class JdbcTargetIntakeBranchContextSource implements TargetIntakeBr
     }
   }
 
-  private static BranchOperation bindBranch(CaseCommandRef command, IntakeBranchCommand branch) {
+  private static BranchOperation bindBranch(
+      CaseCommandRef command,
+      IntakeBranchCommand branch,
+      com.example.dispute.workflow.temporal.room.intake.IntakeParty party) {
     BranchOperation operation;
     try {
       operation = BranchOperation.valueOf(branch.operation().name());
     } catch (IllegalArgumentException failure) {
       throw new IllegalArgumentException("branch operation is invalid", failure);
     }
-    Party expectedParty = party(command.actorRef().actorRole()) == com.example.dispute.workflow.temporal.room.intake.IntakeParty.INITIATOR
+    Party expectedParty = party == com.example.dispute.workflow.temporal.room.intake.IntakeParty.INITIATOR
         ? Party.INITIATOR : Party.RESPONDENT;
     require(IntakeBranchCommand.SCHEMA_VERSION.equals(branch.schemaVersion())
             && command.commandId().equals(branch.commandId())
@@ -144,23 +164,18 @@ public final class JdbcTargetIntakeBranchContextSource implements TargetIntakeBr
     return operation;
   }
 
-  private static MapSqlParameterSource bindingParameters(CaseCommandRef command, String actorScopeHash, long fence) {
+  private static MapSqlParameterSource bindingParameters(Request request) {
+    CaseCommandRef command = request.command();
     return new MapSqlParameterSource()
         .addValue("tenantSurrogate", command.tenantSurrogate())
         .addValue("caseId", command.caseId())
         .addValue("roomEpoch", command.roomEpoch())
-        .addValue("fencingToken", fence)
+        .addValue("fencingToken", request.roomFencingToken())
         .addValue("actorId", command.actorRef().actorId())
         .addValue("actorRole", command.actorRef().actorRole().name())
-        .addValue("actorScopeHash", actorScopeHash);
-  }
-
-  private static com.example.dispute.workflow.temporal.room.intake.IntakeParty party(ActorRole role) {
-    return switch (role) {
-      case USER -> com.example.dispute.workflow.temporal.room.intake.IntakeParty.INITIATOR;
-      case MERCHANT -> com.example.dispute.workflow.temporal.room.intake.IntakeParty.RESPONDENT;
-      default -> throw new IllegalArgumentException("target Intake actor must be USER or MERCHANT");
-    };
+        .addValue("actorScopeHash", request.actorScopeHash())
+        .addValue("activationId", request.activationId())
+        .addValue("activationManifestHash", request.activationManifestHash());
   }
 
   private static String sha256(byte[] value) {

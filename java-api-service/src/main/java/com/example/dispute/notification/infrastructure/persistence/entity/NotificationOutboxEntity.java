@@ -110,6 +110,22 @@ public class NotificationOutboxEntity extends AbstractEntity {
         updatedAt = Instant.now();
     }
 
+    public String getCaseId() {
+        return caseId;
+    }
+
+    public String getBusinessEventKey() {
+        return businessEventKey;
+    }
+
+    public String getEventType() {
+        return eventType;
+    }
+
+    public String getEventPayloadJson() {
+        return eventPayloadJson;
+    }
+
     // 所属模块：【案件生命周期通知 / JPA 实体层】「NotificationOutboxEntity.required(String,String)」。
     // 具体功能：「NotificationOutboxEntity.required(String,String)」：校验字符串；不满足前置条件时抛出 「IllegalArgumentException」，最终返回「String」。
     // 上游调用：「NotificationOutboxEntity.required(String,String)」的上游调用点包括 「NotificationOutboxEntity.pending」。

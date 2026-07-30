@@ -1066,6 +1066,9 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
       TargetTypedRoomDispatchReceipt receipt = activeTargetTypedChild.postRouting(command);
       if (activeTargetTypedChild.terminalAfterPostRouting()) {
         adoptTargetTerminalReceipt(receipt, activeTargetTypedChild.terminalProgressReceipt());
+      } else if (activeTargetTypedChild.sourceTransitionAfterPostRouting()) {
+        adoptTargetSourceTransitionReceipt(
+            receipt, activeTargetTypedChild.terminalProgressReceipt());
       } else if (receipt != null) {
         applyTargetTypedRoomReceipt(receipt);
       }
@@ -1100,6 +1103,9 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
       TargetTypedRoomDispatchReceipt receipt = activeTargetTypedChild.recoverAppliedTerminal(command);
       if (activeTargetTypedChild.terminalAfterPostRouting()) {
         adoptTargetTerminalReceipt(receipt, activeTargetTypedChild.terminalProgressReceipt());
+      } else if (activeTargetTypedChild.sourceTransitionAfterPostRouting()) {
+        adoptTargetSourceTransitionReceipt(
+            receipt, activeTargetTypedChild.terminalProgressReceipt());
       }
     } catch (TypedChildOperationFailure failure) {
       throw failure;
@@ -1137,6 +1143,32 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
     lastTargetRoomProgress = terminal;
     rememberClosedRoom(activeRoomType, activeRoomEpoch);
     terminalTargetReviewCompleted = true;
+  }
+
+  /** Closes the source Review epoch while the bootstrap outbox provisions a real next room. */
+  private void adoptTargetSourceTransitionReceipt(
+      TargetTypedRoomDispatchReceipt receipt, TargetRoomProgressReceipt sourceTerminal) {
+    if (sourceTerminal == null
+        || receipt == null
+        || sourceTerminal.roomType() != receipt.roomType()
+        || sourceTerminal.roomEpoch() != receipt.roomEpoch()
+        || sourceTerminal.fencingToken() != receipt.fencingToken()
+        || sourceTerminal.processRevision() != receipt.processRevision()
+        || sourceTerminal.roomRevision() != receipt.roomRevision()) {
+      throw new TypedChildOperationFailure(
+          "TARGET_TYPED_ROOM_SOURCE_TRANSITION_RECEIPT_INVALID",
+          "target source transition is missing its exact durable Review progress receipt",
+          null);
+    }
+    if (activeRoomType != RoomType.REVIEW) {
+      throw new TypedChildOperationFailure(
+          "TARGET_TYPED_ROOM_SOURCE_TRANSITION_TYPE_INVALID",
+          "only target Review may transition to a newly provisioned room",
+          null);
+    }
+    applyTargetTypedRoomReceipt(receipt);
+    lastTargetRoomProgress = sourceTerminal;
+    rememberClosedRoom(activeRoomType, activeRoomEpoch);
   }
 
   private ActiveChildKind selectProvisionedChildKind(ProvisionRoomEpoch request) {
@@ -3310,6 +3342,11 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
 
     /** A target room may close its child as the durable result of its post-routing hook. */
     default boolean terminalAfterPostRouting() {
+      return false;
+    }
+
+    /** The source target room closed, but the case awaits a real next-room provisioning update. */
+    default boolean sourceTransitionAfterPostRouting() {
       return false;
     }
 

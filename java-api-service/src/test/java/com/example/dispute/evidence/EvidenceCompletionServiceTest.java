@@ -10,6 +10,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -21,6 +22,7 @@ import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.RiskLevel;
 import com.example.dispute.evidence.application.EvidenceCompletionService;
 import com.example.dispute.evidence.application.EvidenceDossierFreezer;
+import com.example.dispute.evidence.domain.EvidenceSubmissionStatus;
 import com.example.dispute.evidence.infrastructure.persistence.entity.EvidencePartyCompletionEntity;
 import com.example.dispute.evidence.infrastructure.persistence.repository.EvidencePartyCompletionRepository;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
@@ -36,6 +38,7 @@ import com.example.dispute.room.domain.RoomStatus;
 import com.example.dispute.room.domain.RoomType;
 import com.example.dispute.room.infrastructure.persistence.entity.CasePhaseClockEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
+import com.example.dispute.room.infrastructure.persistence.entity.CaseTimelineEventEntity;
 import com.example.dispute.room.infrastructure.persistence.repository.CasePhaseClockRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import com.example.dispute.infrastructure.persistence.repository.EvidenceItemRepository;
@@ -43,6 +46,17 @@ import com.example.dispute.workflow.application.EvidenceWindowCoordinator;
 import com.example.dispute.workflow.application.epoch.RoomEpochAllocator;
 import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.TransitionRoomEpoch;
 import com.example.dispute.workflow.contract.v1.ContractTypes;
+import com.example.dispute.workflow.application.command.CaseCommandService;
+import com.example.dispute.workflow.infrastructure.persistence.entity.CaseRoomEpochEntity;
+import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.EpochLifecycleStatus;
+import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.EpochProvisioningStatus;
+import com.example.dispute.workflow.infrastructure.persistence.repository.CaseRoomEpochRepository;
+import com.example.dispute.workflow.targete2e.ingress.rooms.TargetRoomCommandIngress;
+import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceCompletionCommandMaterialStore;
+import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceCompletionCommandMaterialStore.Provenance;
+import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceCompletionCommandMaterialStore.Route;
+import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.example.dispute.hearing.application.HearingFlowRuntimeService;
 import java.time.Clock;
 import java.time.Instant;
@@ -57,6 +71,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.ArgumentCaptor;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.beans.factory.ObjectProvider;
 
 // 所属模块：【证据与版本化卷宗 / 自动化测试层】类型「EvidenceCompletionServiceTest」。
 // 类型职责：集中验证证据完成确认的业务场景、权限边界和持久化/外部协作契约；本类型显式提供 「setUp」、「bothPartyCompletionsSealEvidenceEarlyAndOpenTheThreeHourHearing」、「repeatedCompletionByTheSameRoleUsesTheExistingPhaseConfirmation」、「initiatorCannotCompleteEvidenceWithoutSubmittedEvidence」、「deadlineWarningNotifiesBothPartiesWhileTheEvidenceWindowIsOpen」。
@@ -257,7 +272,7 @@ class EvidenceCompletionServiceTest {
     // 下游影响：「EvidenceCompletionServiceTest.repeatedCompletionByTheSameRoleUsesTheExistingPhaseConfirmation()」的下游是被测服务、仓储或外部客户端替身；「assertThat」把结果与预期状态、异常或调用次数锁定。
     // 系统意义：「EvidenceCompletionServiceTest.repeatedCompletionByTheSameRoleUsesTheExistingPhaseConfirmation()」守住「证据与版本化卷宗」的可执行规格，尤其防止 「USER」、「EVIDENCE_COMPLETE_EXISTING」、「user-local」、「user-complete-original」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
-    void repeatedCompletionByTheSameParticipantIdUsesTheExistingPhaseConfirmation() {
+  void repeatedCompletionByTheSameParticipantIdUsesTheExistingPhaseConfirmation() {
         when(evidenceRepository.countByCaseIdAndSubmittedByIdAndSubmissionStatusAndDeletedAtIsNull(
                         dispute.getId(), "user-local", com.example.dispute.evidence.domain.EvidenceSubmissionStatus.SUBMITTED))
                 .thenReturn(1L);
@@ -289,7 +304,368 @@ class EvidenceCompletionServiceTest {
         assertThat(result.dossierVersion()).isEqualTo(1);
         assertThat(result.allPartiesCompleted()).isFalse();
         verify(completionRepository, never()).save(any());
+        verify(evidenceWindowCoordinator)
+                .signalPartyCompletedAfterCommit(dispute.getId(), "USER");
         verify(roomEpochAllocator, never()).transition(any());
+  }
+
+    @Test
+    void delayedTargetCompletionReplayDoesNotRematerializeAtTheNewRevision() {
+        when(evidenceRepository.countByCaseIdAndSubmittedByIdAndSubmissionStatusAndDeletedAtIsNull(
+                        dispute.getId(), "user-local", com.example.dispute.evidence.domain.EvidenceSubmissionStatus.SUBMITTED))
+                .thenReturn(1L);
+        EvidencePartyCompletionEntity existing =
+                EvidencePartyCompletionEntity.completed(
+                        "EVIDENCE_COMPLETE_TARGET_EXISTING", dispute.getId(), 1, ActorRole.USER,
+                        "user-local", "target-original", Instant.parse("2026-07-03T00:30:00Z"));
+        when(completionRepository.findByCaseIdAndIdempotencyKey(dispute.getId(), "target-retry"))
+                .thenReturn(Optional.empty());
+        when(completionRepository.findByCaseIdAndDossierVersionAndParticipantId(
+                        dispute.getId(), 1, "user-local"))
+                .thenReturn(Optional.of(existing));
+        CaseRoomEpochRepository epochs = org.mockito.Mockito.mock(CaseRoomEpochRepository.class);
+        CaseRoomEpochEntity epoch = org.mockito.Mockito.mock(CaseRoomEpochEntity.class);
+        when(epochs.findTopByCaseIdAndRoomTypeAndLifecycleStatusOrderByRoomEpochDesc(
+                        dispute.getId(), ContractTypes.RoomType.EVIDENCE, EpochLifecycleStatus.ACTIVE))
+                .thenReturn(Optional.of(epoch));
+        when(epoch.getWriterMode()).thenReturn(ContractTypes.WriterMode.TEMPORAL);
+        when(epoch.getProvisioningStatus()).thenReturn(EpochProvisioningStatus.READY);
+        when(epoch.getGraphKey()).thenReturn(TargetTypedRoomProtocol.GRAPH_KEY);
+        org.mockito.Mockito.lenient().when(epoch.getTenantSurrogate()).thenReturn("tenant-e2e");
+        org.mockito.Mockito.lenient().when(epoch.getRoomEpoch()).thenReturn(4L);
+        org.mockito.Mockito.lenient().when(epoch.getFencingToken()).thenReturn(9L);
+        @SuppressWarnings("unchecked")
+        ObjectProvider<TargetRoomCommandIngress> ingress = org.mockito.Mockito.mock(ObjectProvider.class);
+        CaseCommandService commands = org.mockito.Mockito.mock(CaseCommandService.class);
+        TargetEvidenceCompletionCommandMaterialStore materialStore =
+                org.mockito.Mockito.mock(TargetEvidenceCompletionCommandMaterialStore.class);
+        @SuppressWarnings("unchecked")
+        ObjectProvider<TargetEvidenceCompletionCommandMaterialStore> materialProvider =
+                org.mockito.Mockito.mock(ObjectProvider.class);
+        when(materialProvider.getIfAvailable()).thenReturn(materialStore);
+        when(materialStore.readProvenance(any())).thenReturn(Optional.of(Provenance.IN_FLIGHT));
+        EvidenceCompletionService targetService = new EvidenceCompletionService(
+                caseRepository, completionRepository, evidenceRepository, roomRepository, clockRepository,
+                dossierFreezer, evidenceWindowCoordinator, intakeProgressService, intakeMatrixLifecycleService,
+                caseEventService, notificationService, lifecycleNotifications, hearingFlowRuntimeService,
+                roomEpochAllocator, new DisputeProperties(Duration.ofHours(2), Duration.ofHours(3),
+                        Duration.ofMinutes(20), Duration.ofSeconds(15), true),
+                Clock.fixed(Instant.parse("2026-07-03T01:00:00Z"), ZoneOffset.UTC),
+                epochs, ingress, commands, new ObjectMapper(), materialProvider);
+
+        var result = targetService.complete(
+                dispute.getId(), new AuthenticatedActor("user-local", ActorRole.USER), "target-retry");
+
+        assertThat(result.nextRoom()).isEqualTo("EVIDENCE");
+        verify(ingress, never()).getIfAvailable();
+        verify(commands, never()).accept(any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void activeTargetEpochDispatchesAnExistingLegacyCompletionWithAbsentProvenanceExactlyOnce() {
+        when(evidenceRepository.countByCaseIdAndSubmittedByIdAndSubmissionStatusAndDeletedAtIsNull(
+                        dispute.getId(), "user-local", EvidenceSubmissionStatus.SUBMITTED))
+                .thenReturn(1L);
+        EvidencePartyCompletionEntity existing = EvidencePartyCompletionEntity.completed(
+                "EVIDENCE_COMPLETE_TARGET_LEGACY", dispute.getId(), 1, ActorRole.USER,
+                "user-local", "target-legacy-original", Instant.parse("2026-07-03T00:30:00Z"));
+        when(completionRepository.findByCaseIdAndIdempotencyKey(dispute.getId(), "target-legacy-retry"))
+                .thenReturn(Optional.empty());
+        when(completionRepository.findByCaseIdAndDossierVersionAndParticipantId(
+                        dispute.getId(), 1, "user-local"))
+                .thenReturn(Optional.of(existing));
+        TargetFixture target = targetFixture(EpochLifecycleStatus.ACTIVE);
+        when(target.materialStore().readProvenance(any())).thenReturn(Optional.empty());
+        when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.EVIDENCE))
+                .thenReturn(Optional.of(evidenceRoom));
+        CaseTimelineEventEntity event = org.mockito.Mockito.mock(CaseTimelineEventEntity.class);
+        when(event.getId()).thenReturn("EVENT_TARGET_LEGACY");
+        when(caseEventService.recordLifecycleEvent(any(), any(), any(), any(), any(), any()))
+                .thenReturn(event);
+
+        var result = target.service().complete(
+                dispute.getId(), new AuthenticatedActor("user-local", ActorRole.USER),
+                "target-legacy-retry");
+
+        assertThat(result.nextRoom()).isEqualTo("EVIDENCE");
+        ArgumentCaptor<Route> route = ArgumentCaptor.forClass(Route.class);
+        verify(target.materialStore()).readProvenance(route.capture());
+        assertThat(route.getValue()).isEqualTo(new Route(
+                "tenant-e2e", dispute.getId(),
+                "evidence-complete:EVIDENCE_COMPLETE_TARGET_LEGACY", 4, 9,
+                "EVIDENCE_COMPLETE_TARGET_LEGACY"));
+        verify(target.ingress(), times(1)).materialize(
+                any(), any(), any(), any(), any());
+        verify(target.commands(), times(1)).accept(
+                any(), any(), any(), any(), any(), any(), any());
+        verify(evidenceWindowCoordinator, never())
+                .signalPartyCompletedAfterCommit(any(), any());
+    }
+
+    @Test
+    void activeTargetAppliedReplayDoesNotRedispatchOrEnterLegacyFlow() {
+        when(evidenceRepository.countByCaseIdAndSubmittedByIdAndSubmissionStatusAndDeletedAtIsNull(
+                        dispute.getId(), "user-local", EvidenceSubmissionStatus.SUBMITTED))
+                .thenReturn(1L);
+        EvidencePartyCompletionEntity existing = EvidencePartyCompletionEntity.completed(
+                "EVIDENCE_COMPLETE_TARGET_APPLIED", dispute.getId(), 1, ActorRole.USER,
+                "user-local", "target-applied-original", Instant.parse("2026-07-03T00:30:00Z"));
+        when(completionRepository.findByCaseIdAndIdempotencyKey(dispute.getId(), "target-applied-retry"))
+                .thenReturn(Optional.empty());
+        when(completionRepository.findByCaseIdAndDossierVersionAndParticipantId(
+                        dispute.getId(), 1, "user-local"))
+                .thenReturn(Optional.of(existing));
+        TargetFixture target = targetFixture(EpochLifecycleStatus.ACTIVE);
+        when(target.materialStore().readProvenance(any()))
+                .thenReturn(Optional.of(Provenance.APPLIED_EXACT));
+
+        var result = target.service().complete(
+                dispute.getId(), new AuthenticatedActor("user-local", ActorRole.USER),
+                "target-applied-retry");
+
+        assertThat(result.nextRoom()).isEqualTo("EVIDENCE");
+        verify(target.ingressProvider(), never()).getIfAvailable();
+        verify(target.commands(), never()).accept(any(), any(), any(), any(), any(), any(), any());
+        verify(evidenceWindowCoordinator, never())
+                .signalPartyCompletedAfterCommit(any(), any());
+    }
+
+    @Test
+    void activeTemporalProvisioningEpochFailsBeforeAnyCompletionWriteOrDispatch() {
+        when(evidenceRepository.countByCaseIdAndSubmittedByIdAndSubmissionStatusAndDeletedAtIsNull(
+                        dispute.getId(), "user-local", EvidenceSubmissionStatus.SUBMITTED))
+                .thenReturn(1L);
+        when(completionRepository.findByCaseIdAndIdempotencyKey(
+                        dispute.getId(), "target-provisioning"))
+                .thenReturn(Optional.empty());
+        when(completionRepository.findByCaseIdAndDossierVersionAndParticipantId(
+                        dispute.getId(), 1, "user-local"))
+                .thenReturn(Optional.empty());
+        TargetFixture target = targetFixture(EpochLifecycleStatus.ACTIVE);
+        when(target.epoch().getProvisioningStatus())
+                .thenReturn(EpochProvisioningStatus.PROVISIONING);
+
+        assertThatThrownBy(() -> target.service().complete(
+                        dispute.getId(), new AuthenticatedActor("user-local", ActorRole.USER),
+                        "target-provisioning"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("not exact target authority");
+
+        verify(completionRepository, never()).save(any());
+        verify(evidenceWindowCoordinator, never()).signalPartyCompletedAfterCommit(any(), any());
+        verify(dossierFreezer, never()).freeze(any(), any(Integer.class), any());
+        verify(target.ingressProvider(), never()).getIfAvailable();
+        verify(target.commands(), never()).accept(any(), any(), any(), any(), any(), any(), any());
+        verify(target.epochs(), never())
+                .findTopByCaseIdAndRoomTypeAndLifecycleStatusOrderByRoomEpochDesc(
+                        dispute.getId(), ContractTypes.RoomType.EVIDENCE,
+                        EpochLifecycleStatus.TERMINAL);
+    }
+
+    @Test
+    void activeLegacyEpochIsNotHijackedByAnOlderTerminalTargetEpoch() {
+        when(evidenceRepository.countByCaseIdAndSubmittedByIdAndSubmissionStatusAndDeletedAtIsNull(
+                        dispute.getId(), "user-local", EvidenceSubmissionStatus.SUBMITTED))
+                .thenReturn(1L);
+        when(completionRepository.findByCaseIdAndIdempotencyKey(
+                        dispute.getId(), "active-legacy"))
+                .thenReturn(Optional.empty());
+        when(completionRepository.findByCaseIdAndDossierVersionAndParticipantId(
+                        dispute.getId(), 1, "user-local"))
+                .thenReturn(Optional.empty());
+        when(completionRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(completionRepository.findAllByCaseIdAndDossierVersionAndCompletionStatus(
+                        dispute.getId(), 1, "COMPLETED"))
+                .thenReturn(List.of());
+        TargetFixture target = targetFixture(EpochLifecycleStatus.ACTIVE);
+        when(target.epoch().getWriterMode()).thenReturn(ContractTypes.WriterMode.LEGACY);
+        CaseRoomEpochEntity olderTarget = org.mockito.Mockito.mock(CaseRoomEpochEntity.class);
+        org.mockito.Mockito.lenient().when(target.epochs()
+                        .findTopByCaseIdAndRoomTypeAndLifecycleStatusOrderByRoomEpochDesc(
+                                dispute.getId(), ContractTypes.RoomType.EVIDENCE,
+                                EpochLifecycleStatus.TERMINAL))
+                .thenReturn(Optional.of(olderTarget));
+
+        var result = target.service().complete(
+                dispute.getId(), new AuthenticatedActor("user-local", ActorRole.USER),
+                "active-legacy");
+
+        assertThat(result.nextRoom()).isEqualTo("EVIDENCE");
+        verify(completionRepository, times(1)).save(any());
+        verify(evidenceWindowCoordinator, times(1))
+                .signalPartyCompletedAfterCommit(dispute.getId(), "USER");
+        verify(target.epochs(), never())
+                .findTopByCaseIdAndRoomTypeAndLifecycleStatusOrderByRoomEpochDesc(
+                        dispute.getId(), ContractTypes.RoomType.EVIDENCE,
+                        EpochLifecycleStatus.TERMINAL);
+        verify(target.materialStore(), never()).readProvenance(any());
+        verify(target.ingressProvider(), never()).getIfAvailable();
+    }
+
+    @Test
+    void activeShadowEpochLeavesLegacyAsTheBusinessWriter() {
+        when(evidenceRepository.countByCaseIdAndSubmittedByIdAndSubmissionStatusAndDeletedAtIsNull(
+                        dispute.getId(), "user-local", EvidenceSubmissionStatus.SUBMITTED))
+                .thenReturn(1L);
+        when(completionRepository.findByCaseIdAndIdempotencyKey(
+                        dispute.getId(), "active-shadow"))
+                .thenReturn(Optional.empty());
+        when(completionRepository.findByCaseIdAndDossierVersionAndParticipantId(
+                        dispute.getId(), 1, "user-local"))
+                .thenReturn(Optional.empty());
+        when(completionRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(completionRepository.findAllByCaseIdAndDossierVersionAndCompletionStatus(
+                        dispute.getId(), 1, "COMPLETED"))
+                .thenReturn(List.of());
+        TargetFixture target = targetFixture(EpochLifecycleStatus.ACTIVE);
+        when(target.epoch().getWriterMode()).thenReturn(ContractTypes.WriterMode.SHADOW);
+
+        var result = target.service().complete(
+                dispute.getId(), new AuthenticatedActor("user-local", ActorRole.USER),
+                "active-shadow");
+
+        assertThat(result.nextRoom()).isEqualTo("EVIDENCE");
+        verify(completionRepository, times(1)).save(any());
+        verify(evidenceWindowCoordinator, times(1))
+                .signalPartyCompletedAfterCommit(dispute.getId(), "USER");
+        verify(target.materialStore(), never()).readProvenance(any());
+        verify(target.ingressProvider(), never()).getIfAvailable();
+    }
+
+    @Test
+    void terminalTargetReplayReturnsTheCurrentHearingProjectionWithoutLegacySideEffects() {
+        OffsetDateTime hearingDeadline = OffsetDateTime.parse("2026-07-03T04:00:00Z");
+        dispute.openHearing(hearingDeadline, "system");
+        when(dossierFreezer.latestVersion(dispute.getId())).thenReturn(1);
+        when(evidenceRepository.countByCaseIdAndSubmittedByIdAndSubmissionStatusAndDeletedAtIsNull(
+                        dispute.getId(), "user-local", com.example.dispute.evidence.domain.EvidenceSubmissionStatus.SUBMITTED))
+                .thenReturn(1L);
+        EvidencePartyCompletionEntity userCompletion =
+                EvidencePartyCompletionEntity.completed(
+                        "EVIDENCE_COMPLETE_TARGET_TERMINAL_USER", dispute.getId(), 1,
+                        ActorRole.USER, "user-local", "target-terminal-original",
+                        Instant.parse("2026-07-03T00:30:00Z"));
+        EvidencePartyCompletionEntity merchantCompletion =
+                EvidencePartyCompletionEntity.completed(
+                        "EVIDENCE_COMPLETE_TARGET_TERMINAL_MERCHANT", dispute.getId(), 1,
+                        ActorRole.MERCHANT, "merchant-local", "target-terminal-merchant",
+                        Instant.parse("2026-07-03T00:40:00Z"));
+        when(completionRepository.findByCaseIdAndIdempotencyKey(
+                        dispute.getId(), "target-terminal-retry"))
+                .thenReturn(Optional.empty());
+        when(completionRepository.findByCaseIdAndDossierVersionAndParticipantId(
+                        dispute.getId(), 1, "user-local"))
+                .thenReturn(Optional.of(userCompletion));
+        when(completionRepository.findAllByCaseIdAndDossierVersionAndCompletionStatus(
+                        dispute.getId(), 1, "COMPLETED"))
+                .thenReturn(List.of(userCompletion, merchantCompletion));
+        CaseRoomEpochRepository epochs = org.mockito.Mockito.mock(CaseRoomEpochRepository.class);
+        CaseRoomEpochEntity terminalEpoch = org.mockito.Mockito.mock(CaseRoomEpochEntity.class);
+        when(epochs.findTopByCaseIdAndRoomTypeAndLifecycleStatusOrderByRoomEpochDesc(
+                        dispute.getId(), ContractTypes.RoomType.EVIDENCE, EpochLifecycleStatus.ACTIVE))
+                .thenReturn(Optional.empty());
+        when(epochs.findTopByCaseIdAndRoomTypeAndLifecycleStatusOrderByRoomEpochDesc(
+                        dispute.getId(), ContractTypes.RoomType.EVIDENCE, EpochLifecycleStatus.TERMINAL))
+                .thenReturn(Optional.of(terminalEpoch));
+        when(terminalEpoch.getWriterMode()).thenReturn(ContractTypes.WriterMode.TEMPORAL);
+        when(terminalEpoch.getProvisioningStatus()).thenReturn(EpochProvisioningStatus.READY);
+        when(terminalEpoch.getGraphKey()).thenReturn(TargetTypedRoomProtocol.GRAPH_KEY);
+        when(terminalEpoch.getTenantSurrogate()).thenReturn("tenant-e2e");
+        when(terminalEpoch.getRoomEpoch()).thenReturn(4L);
+        when(terminalEpoch.getFencingToken()).thenReturn(9L);
+        @SuppressWarnings("unchecked")
+        ObjectProvider<TargetRoomCommandIngress> ingress = org.mockito.Mockito.mock(ObjectProvider.class);
+        CaseCommandService commands = org.mockito.Mockito.mock(CaseCommandService.class);
+        TargetEvidenceCompletionCommandMaterialStore materialStore =
+                org.mockito.Mockito.mock(TargetEvidenceCompletionCommandMaterialStore.class);
+        @SuppressWarnings("unchecked")
+        ObjectProvider<TargetEvidenceCompletionCommandMaterialStore> materialProvider =
+                org.mockito.Mockito.mock(ObjectProvider.class);
+        when(materialProvider.getIfAvailable()).thenReturn(materialStore);
+        when(materialStore.readProvenance(any())).thenReturn(Optional.of(Provenance.APPLIED_EXACT));
+        EvidenceCompletionService targetService = new EvidenceCompletionService(
+                caseRepository, completionRepository, evidenceRepository, roomRepository, clockRepository,
+                dossierFreezer, evidenceWindowCoordinator, intakeProgressService, intakeMatrixLifecycleService,
+                caseEventService, notificationService, lifecycleNotifications, hearingFlowRuntimeService,
+                roomEpochAllocator, new DisputeProperties(Duration.ofHours(2), Duration.ofHours(3),
+                        Duration.ofMinutes(20), Duration.ofSeconds(15), true),
+                Clock.fixed(Instant.parse("2026-07-03T01:00:00Z"), ZoneOffset.UTC),
+                epochs, ingress, commands, new ObjectMapper(), materialProvider);
+
+        var result = targetService.complete(
+                dispute.getId(), new AuthenticatedActor("user-local", ActorRole.USER),
+                "target-terminal-retry");
+
+        assertThat(result.allPartiesCompleted()).isTrue();
+        assertThat(result.nextRoom()).isEqualTo("HEARING");
+        assertThat(result.nextDeadlineAt()).isEqualTo(hearingDeadline);
+        verify(completionRepository, never()).save(any());
+        verify(evidenceWindowCoordinator, never())
+                .signalPartyCompletedAfterCommit(dispute.getId(), "USER");
+        verify(dossierFreezer, never()).freeze(dispute.getId(), 1, "user-local");
+        verify(roomEpochAllocator, never()).transition(any());
+        verify(ingress, never()).getIfAvailable();
+        verify(commands, never()).accept(any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void terminalTargetRejectsAnExistingLegacyCompletionWithoutAppliedProvenance() {
+        dispute.openHearing(OffsetDateTime.parse("2026-07-03T04:00:00Z"), "system");
+        when(dossierFreezer.latestVersion(dispute.getId())).thenReturn(1);
+        when(evidenceRepository.countByCaseIdAndSubmittedByIdAndSubmissionStatusAndDeletedAtIsNull(
+                        dispute.getId(), "user-local", EvidenceSubmissionStatus.SUBMITTED))
+                .thenReturn(1L);
+        EvidencePartyCompletionEntity existing = EvidencePartyCompletionEntity.completed(
+                "EVIDENCE_COMPLETE_TARGET_TERMINAL_LEGACY", dispute.getId(), 1, ActorRole.USER,
+                "user-local", "terminal-legacy-original", Instant.parse("2026-07-03T00:30:00Z"));
+        when(completionRepository.findByCaseIdAndIdempotencyKey(dispute.getId(), "terminal-legacy-retry"))
+                .thenReturn(Optional.empty());
+        when(completionRepository.findByCaseIdAndDossierVersionAndParticipantId(
+                        dispute.getId(), 1, "user-local"))
+                .thenReturn(Optional.of(existing));
+        TargetFixture target = targetFixture(EpochLifecycleStatus.TERMINAL);
+        when(target.materialStore().readProvenance(any())).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> target.service().complete(
+                        dispute.getId(), new AuthenticatedActor("user-local", ActorRole.USER),
+                        "terminal-legacy-retry"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("no durable target provenance");
+
+        verify(completionRepository, never()).save(any());
+        verify(evidenceWindowCoordinator, never())
+                .signalPartyCompletedAfterCommit(any(), any());
+        verify(dossierFreezer, never()).freeze(any(), any(Integer.class), any());
+        verify(roomEpochAllocator, never()).transition(any());
+    }
+
+    @Test
+    void terminalTargetRejectsANewCompletionBeforeItCanBePersisted() {
+        dispute.openHearing(OffsetDateTime.parse("2026-07-03T04:00:00Z"), "system");
+        when(dossierFreezer.latestVersion(dispute.getId())).thenReturn(1);
+        when(evidenceRepository.countByCaseIdAndSubmittedByIdAndSubmissionStatusAndDeletedAtIsNull(
+                        dispute.getId(), "user-local", EvidenceSubmissionStatus.SUBMITTED))
+                .thenReturn(1L);
+        when(completionRepository.findByCaseIdAndIdempotencyKey(dispute.getId(), "terminal-created"))
+                .thenReturn(Optional.empty());
+        when(completionRepository.findByCaseIdAndDossierVersionAndParticipantId(
+                        dispute.getId(), 1, "user-local"))
+                .thenReturn(Optional.empty());
+        TargetFixture target = targetFixture(EpochLifecycleStatus.TERMINAL);
+
+        assertThatThrownBy(() -> target.service().complete(
+                        dispute.getId(), new AuthenticatedActor("user-local", ActorRole.USER),
+                        "terminal-created"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("forbidden after the target epoch is terminal");
+
+        verify(completionRepository, never()).save(any());
+        verify(target.materialStore(), never()).readProvenance(any());
+        verify(evidenceWindowCoordinator, never())
+                .signalPartyCompletedAfterCommit(any(), any());
+        verify(dossierFreezer, never()).freeze(any(), any(Integer.class), any());
     }
 
     @Test
@@ -569,6 +945,64 @@ class EvidenceCompletionServiceTest {
         assertThat(transition.getValue().occurredAt())
                 .isEqualTo(OffsetDateTime.parse("2026-07-03T01:00:00Z"));
     }
+
+    private TargetFixture targetFixture(EpochLifecycleStatus lifecycle) {
+        CaseRoomEpochRepository epochs = org.mockito.Mockito.mock(CaseRoomEpochRepository.class);
+        CaseRoomEpochEntity epoch = org.mockito.Mockito.mock(CaseRoomEpochEntity.class);
+        when(epochs.findTopByCaseIdAndRoomTypeAndLifecycleStatusOrderByRoomEpochDesc(
+                        dispute.getId(), ContractTypes.RoomType.EVIDENCE,
+                        EpochLifecycleStatus.ACTIVE))
+                .thenReturn(lifecycle == EpochLifecycleStatus.ACTIVE
+                        ? Optional.of(epoch)
+                        : Optional.empty());
+        if (lifecycle == EpochLifecycleStatus.TERMINAL) {
+            when(epochs.findTopByCaseIdAndRoomTypeAndLifecycleStatusOrderByRoomEpochDesc(
+                            dispute.getId(), ContractTypes.RoomType.EVIDENCE,
+                            EpochLifecycleStatus.TERMINAL))
+                    .thenReturn(Optional.of(epoch));
+        }
+        when(epoch.getWriterMode()).thenReturn(ContractTypes.WriterMode.TEMPORAL);
+        org.mockito.Mockito.lenient()
+                .when(epoch.getProvisioningStatus()).thenReturn(EpochProvisioningStatus.READY);
+        org.mockito.Mockito.lenient()
+                .when(epoch.getGraphKey()).thenReturn(TargetTypedRoomProtocol.GRAPH_KEY);
+        org.mockito.Mockito.lenient().when(epoch.getTenantSurrogate()).thenReturn("tenant-e2e");
+        org.mockito.Mockito.lenient().when(epoch.getRoomEpoch()).thenReturn(4L);
+        org.mockito.Mockito.lenient().when(epoch.getFencingToken()).thenReturn(9L);
+        @SuppressWarnings("unchecked")
+        ObjectProvider<TargetRoomCommandIngress> ingressProvider =
+                org.mockito.Mockito.mock(ObjectProvider.class);
+        TargetRoomCommandIngress ingress = org.mockito.Mockito.mock(TargetRoomCommandIngress.class);
+        org.mockito.Mockito.lenient().when(ingressProvider.getIfAvailable()).thenReturn(ingress);
+        CaseCommandService commands = org.mockito.Mockito.mock(CaseCommandService.class);
+        TargetEvidenceCompletionCommandMaterialStore materialStore =
+                org.mockito.Mockito.mock(TargetEvidenceCompletionCommandMaterialStore.class);
+        @SuppressWarnings("unchecked")
+        ObjectProvider<TargetEvidenceCompletionCommandMaterialStore> materialProvider =
+                org.mockito.Mockito.mock(ObjectProvider.class);
+        org.mockito.Mockito.lenient()
+                .when(materialProvider.getIfAvailable())
+                .thenReturn(materialStore);
+        EvidenceCompletionService targetService = new EvidenceCompletionService(
+                caseRepository, completionRepository, evidenceRepository, roomRepository, clockRepository,
+                dossierFreezer, evidenceWindowCoordinator, intakeProgressService, intakeMatrixLifecycleService,
+                caseEventService, notificationService, lifecycleNotifications, hearingFlowRuntimeService,
+                roomEpochAllocator, new DisputeProperties(Duration.ofHours(2), Duration.ofHours(3),
+                        Duration.ofMinutes(20), Duration.ofSeconds(15), true),
+                Clock.fixed(Instant.parse("2026-07-03T01:00:00Z"), ZoneOffset.UTC),
+                epochs, ingressProvider, commands, new ObjectMapper(), materialProvider);
+        return new TargetFixture(
+                targetService, ingressProvider, ingress, commands, materialStore, epochs, epoch);
+    }
+
+    private record TargetFixture(
+            EvidenceCompletionService service,
+            ObjectProvider<TargetRoomCommandIngress> ingressProvider,
+            TargetRoomCommandIngress ingress,
+            CaseCommandService commands,
+            TargetEvidenceCompletionCommandMaterialStore materialStore,
+            CaseRoomEpochRepository epochs,
+            CaseRoomEpochEntity epoch) {}
 
     private static FulfillmentCaseEntity importedEvidenceCase(CaseStatus status) {
         return FulfillmentCaseEntity.imported(

@@ -33,7 +33,9 @@ import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomCaseProces
 import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
 import com.example.dispute.workflow.targete2e.temporal.intake.TargetIntakeCommandBridgeActivity;
 import com.example.dispute.workflow.targete2e.temporal.intake.JdbcTargetIntakeBranchContextSource;
+import com.example.dispute.workflow.targete2e.temporal.intake.JdbcTargetIntakePartyScopeSource;
 import com.example.dispute.workflow.targete2e.temporal.intake.TargetIntakeBranchContextSource;
+import com.example.dispute.workflow.targete2e.temporal.intake.TargetIntakePartyScopeSource;
 import com.example.dispute.workflow.targete2e.rooms.intake.TargetE2eIntakeFormalBranchCommandResolver;
 import com.example.dispute.workflow.targete2e.rooms.intake.TargetE2eIntakeRoomActivities;
 import com.example.dispute.workflow.targete2e.temporal.intake.finalizationread.JdbcTargetIntakeAgentRunFinalizationReceiptReadPort;
@@ -81,6 +83,8 @@ import com.example.dispute.workflow.targete2e.rooms.review.JdbcTargetReviewOutco
 import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewOutcomeStartBindingActivities;
 import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewOutcomeStartBindingActivity;
 import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewOutcomeStartBindingPort;
+import com.example.dispute.workflow.targete2e.rooms.review.JdbcTargetReviewNonExecutionActivities;
+import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewNonExecutionActivities;
 import com.example.dispute.workflow.targete2e.rooms.outcome.JdbcTargetOutcomeCompletionActivities;
 import com.example.dispute.workflow.targete2e.rooms.outcome.JdbcTargetTemporalOutcomeBindingResolver;
 import com.example.dispute.workflow.targete2e.rooms.outcome.TargetDeterministicEvaluationAgentClient;
@@ -175,12 +179,21 @@ public class TargetE2eControlConfiguration {
   }
 
   @Bean
+  TargetIntakePartyScopeSource targetIntakePartyScopeSource(DataSource dataSource) {
+    return new JdbcTargetIntakePartyScopeSource(dataSource);
+  }
+
+  @Bean
   TargetIntakeCommandBridgeActivity targetIntakeCommandBridgeActivity(
       TargetIntakeCommandMaterialStore targetIntakeCommandMaterialStore,
       ObjectMapper objectMapper,
+      TargetIntakePartyScopeSource targetIntakePartyScopeSource,
       TargetIntakeBranchContextSource targetIntakeBranchContextSource) {
     return new TargetIntakeCommandBridgeActivity(
-        targetIntakeCommandMaterialStore, objectMapper, targetIntakeBranchContextSource);
+        targetIntakeCommandMaterialStore,
+        objectMapper,
+        targetIntakePartyScopeSource,
+        targetIntakeBranchContextSource);
   }
 
   @Bean
@@ -446,10 +459,29 @@ public class TargetE2eControlConfiguration {
   }
 
   @Bean
+  TargetReviewNonExecutionActivities targetReviewNonExecutionActivities(
+      DataSource dataSource,
+      PlatformTransactionManager transactionManager,
+      RoomEpochAllocator roomEpochAllocator,
+      TargetE2EActivationLedger targetE2eControlActivationLedger,
+      ObjectMapper objectMapper,
+      DisputeProperties disputeProperties) {
+    return new JdbcTargetReviewNonExecutionActivities(
+        dataSource,
+        new TransactionTemplate(transactionManager),
+        roomEpochAllocator,
+        targetE2eControlActivationLedger,
+        objectMapper,
+        Clock.systemUTC(),
+        disputeProperties);
+  }
+
+  @Bean
   TargetTemporalWorkerRegistration targetTemporalWorkerRegistration(
       Environment environment,
       TemporalWorkerProperties workerProperties,
       TargetIntakeCommandBridgeActivity targetIntakeCommandBridgeActivity,
+      TargetIntakePartyScopeSource targetIntakePartyScopeSource,
       IntakeRoomActivities targetE2eIntakeRoomActivities,
       IntakeAgentRunFinalizationReadActivities targetIntakeAgentRunFinalizationReadActivities,
       TargetEvidenceCommandBridgeActivities targetEvidenceCommandBridgeActivity,
@@ -462,6 +494,7 @@ public class TargetE2eControlConfiguration {
       TargetReviewCommandBridgeActivities targetReviewCommandBridgeActivity,
       TargetReviewOutcomeHandoffActivities targetReviewOutcomeHandoffRelayActivity,
       TargetReviewOutcomeStartBindingActivities targetReviewOutcomeStartBindingActivity,
+      TargetReviewNonExecutionActivities targetReviewNonExecutionActivities,
       TargetOutcomeCompletionActivities targetOutcomeCompletionActivities) {
     String activationId = required(environment, "target.e2e.activation.id");
     TargetTemporalWorkerRegistration.Registration registration =
@@ -472,9 +505,10 @@ public class TargetE2eControlConfiguration {
             workerProperties.buildId(),
             TargetE2eCaseProcessWorkflow.class,
             TargetTypedRoomProtocol.additionalWorkflowImplementations(),
-            List.of(
-                targetIntakeCommandBridgeActivity,
-                targetE2eIntakeRoomActivities,
+             List.of(
+                 targetIntakeCommandBridgeActivity,
+                 targetIntakePartyScopeSource,
+                 targetE2eIntakeRoomActivities,
                 targetIntakeAgentRunFinalizationReadActivities,
                 targetEvidenceCommandBridgeActivity,
                 targetEvidenceParticipantBindingActivities,
@@ -486,6 +520,7 @@ public class TargetE2eControlConfiguration {
                 targetReviewCommandBridgeActivity,
                 targetReviewOutcomeHandoffRelayActivity,
                 targetReviewOutcomeStartBindingActivity,
+                targetReviewNonExecutionActivities,
                 targetOutcomeCompletionActivities),
             List.of());
     return () -> registration;

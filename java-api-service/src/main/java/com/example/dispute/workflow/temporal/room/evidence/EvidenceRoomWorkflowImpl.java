@@ -28,6 +28,9 @@ public final class EvidenceRoomWorkflowImpl implements EvidenceRoomWorkflow {
       "evidence-history-ordered-timer-arbitration";
   private static final int HISTORY_ORDERED_TIMER_ARBITRATION = 1;
   private static final int ACCEPTED_TIME_TIMER_ARBITRATION = 2;
+  private static final String EXPLICIT_TARGET_LANE_CHANGE_ID =
+      "evidence-explicit-target-terminal-lane";
+  private static final int EXPLICIT_TARGET_LANE = 1;
   private static final int MAX_AGENT_RUN_FINALIZATION_RECEIPTS = 64;
   private final TargetEvidenceTerminalActivities terminalActivities =
       Workflow.newActivityStub(
@@ -381,13 +384,41 @@ public final class EvidenceRoomWorkflowImpl implements EvidenceRoomWorkflow {
   }
 
   private void finalizeTargetTerminalOnce() {
-    if (!isTargetE2eStart() || terminalProgressReceipt != null) {
+    int targetLaneVersion =
+        Workflow.getVersion(
+            EXPLICIT_TARGET_LANE_CHANGE_ID,
+            Workflow.DEFAULT_VERSION,
+            EXPLICIT_TARGET_LANE);
+    boolean targetTerminal =
+        targetLaneVersion == Workflow.DEFAULT_VERSION
+            ? start.legacyTargetBuildMarker()
+            : start.targetE2eCandidate();
+    if (!targetTerminal || terminalProgressReceipt != null) {
       return;
     }
+    TargetEvidenceTerminalActivities.TerminalRequest terminalRequest;
+    if (targetLaneVersion == Workflow.DEFAULT_VERSION) {
+      terminalRequest =
+          new TargetEvidenceTerminalActivities.TerminalRequest(
+              start,
+              processRevision,
+              roomRevision,
+              initiatorCompletion.completionRequestId(),
+              respondentCompletion.completionRequestId());
+    } else {
+      var workflowInfo = Workflow.getInfo();
+      terminalRequest =
+          new TargetEvidenceTerminalActivities.TerminalRequest(
+              start,
+              processRevision,
+              roomRevision,
+              initiatorCompletion.completionRequestId(),
+              respondentCompletion.completionRequestId(),
+              workflowInfo.getWorkflowId(),
+              workflowInfo.getRunId());
+    }
     TargetRoomProgressReceipt receipt = terminalActivities.finalizeTerminal(
-        new TargetEvidenceTerminalActivities.TerminalRequest(
-            start, processRevision, roomRevision, initiatorCompletion.completionRequestId(),
-            respondentCompletion.completionRequestId())).progressReceipt();
+        terminalRequest).progressReceipt();
     if (receipt.roomType() != RoomType.EVIDENCE || receipt.roomEpoch() != start.roomEpoch()
         || receipt.fencingToken() != start.fencingToken()
         || receipt.processRevision() != Math.incrementExact(processRevision)
@@ -401,10 +432,6 @@ public final class EvidenceRoomWorkflowImpl implements EvidenceRoomWorkflow {
         CaseProcessWorkflow.class,
         CaseProcessWorkflowProtocol.caseWorkflowId(start.tenantSurrogate(), start.caseId()));
     parent.targetRoomProgressed(receipt);
-  }
-
-  private boolean isTargetE2eStart() {
-    return start.workflowBuildId().startsWith("target-e2e");
   }
 
   private boolean awaitLegacyInputBefore(Instant boundary) {

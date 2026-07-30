@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
+import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
 import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.ActiveChildDescriptor;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.ActiveChildKind;
@@ -11,7 +12,6 @@ import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceParti
 import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewOutcomeStartBindingPort.Binding;
 import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
 import com.example.dispute.workflow.targete2e.temporal.intake.TargetIntakeActorScopes;
-import com.example.dispute.workflow.temporal.room.intake.IntakeParty;
 import com.example.dispute.workflow.contract.outcome.v1.OutcomeWireTypes;
 import com.example.dispute.workflow.contract.outcome.v1.OutcomeWorkflowStart;
 import io.temporal.failure.ApplicationFailure;
@@ -86,10 +86,10 @@ class TargetE2ECaseProcessControlTest {
               "room-child-3",
               "room-run-3",
               roomType == RoomType.INTAKE
-                  ? TargetIntakeActorScopes.hash("case-3", IntakeParty.INITIATOR)
+                  ? TargetIntakeActorScopes.hash("case-3", "user-3", ActorRole.USER)
                   : null,
               roomType == RoomType.INTAKE
-                  ? TargetIntakeActorScopes.hash("case-3", IntakeParty.RESPONDENT)
+                  ? TargetIntakeActorScopes.hash("case-3", "merchant-3", ActorRole.MERCHANT)
                   : null,
                5L,
                11L,
@@ -109,11 +109,48 @@ class TargetE2ECaseProcessControlTest {
       assertThat(descriptor.currentRoomRevision()).isEqualTo(13);
       if (roomType == RoomType.INTAKE) {
         assertThat(descriptor.initiatorActorScopeHash())
-            .isEqualTo(TargetIntakeActorScopes.hash("case-3", IntakeParty.INITIATOR));
+            .isEqualTo(TargetIntakeActorScopes.hash("case-3", "user-3", ActorRole.USER));
         assertThat(descriptor.withCurrentRevisions(8, 14).respondentActorScopeHash())
-            .isEqualTo(TargetIntakeActorScopes.hash("case-3", IntakeParty.RESPONDENT));
+            .isEqualTo(
+                TargetIntakeActorScopes.hash(
+                    "case-3", "merchant-3", ActorRole.MERCHANT));
       }
     }
+  }
+
+  @Test
+  void targetDescriptorPreservesMerchantInitiatedReplayStablePartyHashes() {
+    String initiator =
+        TargetIntakeActorScopes.hash("case-3", "merchant-3", ActorRole.MERCHANT);
+    String respondent = TargetIntakeActorScopes.hash("case-3", "user-3", ActorRole.USER);
+    ActiveChildDescriptor descriptor =
+        new ActiveChildDescriptor(
+            ActiveChildKind.TARGET_TYPED_ROOM,
+            "room-epoch-selection.v2",
+            WriterMode.TEMPORAL,
+            "CaseProcessWorkflow",
+            "p9-case-build",
+            TargetTypedRoomProtocol.workflowType(RoomType.INTAKE),
+            "p9-control-build",
+            RoomType.INTAKE,
+            3,
+            17,
+            "room-child-3",
+            "room-run-3",
+            initiator,
+            respondent,
+            5L,
+            11L,
+            7L,
+            13L,
+            null,
+            null);
+
+    CaseProcessWorkflowImpl.validateTargetTypedDescriptor(descriptor);
+    assertThat(descriptor.withCurrentRevisions(8, 14).initiatorActorScopeHash())
+        .isEqualTo(initiator);
+    assertThat(descriptor.withCurrentRevisions(8, 14).respondentActorScopeHash())
+        .isEqualTo(respondent);
   }
 
   @Test

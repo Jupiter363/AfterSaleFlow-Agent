@@ -2,6 +2,7 @@ package com.example.dispute.workflow.targete2e.rooms.evidence;
 
 import com.example.dispute.evidence.application.EvidenceDossierFreezer;
 import com.example.dispute.infrastructure.persistence.entity.EvidenceDossierEntity;
+import com.example.dispute.workflow.contract.v1.CaseProcessWorkflowProtocol;
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
@@ -11,6 +12,7 @@ import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.Transit
 import com.example.dispute.workflow.temporal.caseprocess.TargetRoomProgressReceipt;
 import com.example.dispute.workflow.targete2e.temporal.TargetTypedRoomProtocol;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.temporal.activity.Activity;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -24,6 +26,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Arrays;
 import javax.sql.DataSource;
 import org.springframework.jdbc.datasource.DataSourceUtils;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -67,23 +70,23 @@ public final class JdbcTargetEvidenceTerminalActivities implements TargetEvidenc
     Connection connection = DataSourceUtils.getConnection(dataSource);
     try {
       requireTransaction(connection);
+      var activityInfo = Activity.getExecutionContext().getInfo();
+      WorkflowIdentity workflowIdentity =
+          requireWorkflowIdentity(
+              request, activityInfo.getWorkflowId(), activityInfo.getRunId());
+      // Match the party-completion transaction's command -> participant -> epoch lock order.
+      requirePersistedCompletionFacts(connection, request);
+      Authority authority = lockAuthority(connection, request, workflowIdentity);
       Stored stored = readStored(connection, request, true);
+      requireAuthorityCoordinates(authority, request, stored != null);
       if (stored != null) {
+        requireStoredReplay(request, stored);
         return result(request, stored.receiptId(), stored.receiptHash());
       }
 
       requireAgentRunReceipts(connection, request);
-      String initiatorRole = participantRole(connection, request.start().caseId(), request.start().initiatorParticipantId());
-      String respondentRole = participantRole(connection, request.start().caseId(), request.start().respondentParticipantId());
-      if (initiatorRole.equals(respondentRole)) {
-        throw new IllegalStateException("target Evidence terminal requires opposing party roles");
-      }
 
       int targetVersion = dossierFreezer.targetVersion(request.start().caseId());
-      completionFact(connection, request, targetVersion, initiatorRole,
-          request.start().initiatorParticipantId(), request.initiatorCompletionId());
-      completionFact(connection, request, targetVersion, respondentRole,
-          request.start().respondentParticipantId(), request.respondentCompletionId());
       EvidenceDossierEntity frozen = dossierFreezer.freeze(request.start().caseId(), targetVersion, WRITER);
       if (frozen.getDossierVersion() != targetVersion) {
         throw new IllegalStateException("target Evidence terminal froze an unexpected dossier version");
@@ -123,6 +126,309 @@ public final class JdbcTargetEvidenceTerminalActivities implements TargetEvidenc
         Math.incrementExact(request.expectedRoomRevision()), receiptId, receiptHash));
   }
 
+  static WorkflowIdentity requireWorkflowIdentity(
+      TerminalRequest request, String actualWorkflowId, String actualWorkflowRunId) {
+    Objects.requireNonNull(request, "request");
+    String canonicalWorkflowId =
+        CaseProcessWorkflowProtocol.roomWorkflowId(
+            request.start().caseId(), RoomType.EVIDENCE, request.start().roomEpoch());
+    if (actualWorkflowId == null
+        || actualWorkflowRunId == null
+        || !canonicalWorkflowId.equals(actualWorkflowId)
+        || actualWorkflowRunId.isBlank()) {
+      throw new IllegalStateException(
+          "target Evidence terminal caller is not the canonical room workflow");
+    }
+    if (request.carriesWorkflowIdentity()) {
+      if (!request.start().targetE2eCandidate()
+          || !actualWorkflowId.equals(request.workflowId())
+          || !actualWorkflowRunId.equals(request.workflowRunId())) {
+        throw new IllegalStateException(
+            "target Evidence terminal workflow identity drifted");
+      }
+    } else if (!request.start().legacyTargetBuildMarker()) {
+      throw new IllegalStateException(
+          "legacy target Evidence terminal request has no target build marker");
+    }
+    return new WorkflowIdentity(actualWorkflowId, actualWorkflowRunId);
+  }
+
+  static Authority lockAuthority(
+      Connection connection, TerminalRequest request, WorkflowIdentity workflowIdentity)
+      throws SQLException {
+    try (PreparedStatement statement = connection.prepareStatement("""
+        select epoch.id, epoch.lifecycle_status, epoch.process_revision, epoch.room_revision,
+               binding.activation_id, activation.lifecycle_status,
+               (activation.lifecycle_status = 'DRAIN_ONLY'
+                 or (activation.lifecycle_status = 'ACTIVE'
+                     and activation.expires_at > clock_timestamp())) as accepts_new_write
+          from case_room_epoch epoch
+          join target_e2e_room_epoch_binding binding
+            on binding.epoch_id = epoch.id
+           and binding.tenant_surrogate = epoch.tenant_surrogate
+           and binding.case_id = epoch.case_id
+           and binding.room_type = epoch.room_type
+           and binding.room_epoch = epoch.room_epoch
+           and binding.room_fencing_token = epoch.fencing_token
+          join target_e2e_activation activation
+            on activation.activation_id = binding.activation_id
+           and activation.manifest_hash = binding.activation_manifest_hash
+           and activation.execution_lane = binding.execution_lane
+           and activation.isolated_domain_db_binding_hash =
+               binding.isolated_domain_db_binding_hash
+           and activation.tenant_surrogate = binding.tenant_surrogate
+         where epoch.tenant_surrogate = ?
+           and epoch.case_id = ?
+           and epoch.room_id = ?
+           and epoch.room_type = 'EVIDENCE'
+           and epoch.room_epoch = ?
+           and epoch.fencing_token = ?
+           and epoch.writer_mode = 'TEMPORAL'
+           and epoch.provisioning_status = 'READY'
+           and epoch.lifecycle_status in ('ACTIVE', 'TERMINAL')
+           and epoch.room_temporal_workflow_id = ?
+           and epoch.room_temporal_run_id = ?
+           and epoch.room_workflow_build_id = ?
+           and binding.execution_lane = 'TARGET_E2E_CANDIDATE'
+           and activation.execution_lane = 'TARGET_E2E_CANDIDATE'
+           and activation.lifecycle_status in (
+               'ACTIVE', 'DRAIN_ONLY', 'DRAINED', 'REVOKED_TERMINAL')
+         for update of epoch
+        """)) {
+      int index = 1;
+      statement.setString(index++, request.start().tenantSurrogate());
+      statement.setString(index++, request.start().caseId());
+      statement.setString(index++, request.start().roomId());
+      statement.setLong(index++, request.start().roomEpoch());
+      statement.setLong(index++, request.start().fencingToken());
+      statement.setString(index++, workflowIdentity.workflowId());
+      statement.setString(index++, workflowIdentity.workflowRunId());
+      statement.setString(index, request.start().workflowBuildId());
+      try (ResultSet row = statement.executeQuery()) {
+        if (!row.next()) {
+          throw new IllegalStateException(
+              "target Evidence terminal has no exact active room authority");
+        }
+        Authority authority =
+            new Authority(
+                row.getString(1),
+                row.getString(2),
+                row.getLong(3),
+                row.getLong(4),
+                row.getString(5),
+                row.getString(6),
+                row.getBoolean(7));
+        if (row.next()
+            || authority.activationId() == null
+            || authority.activationId().isBlank()) {
+          throw new IllegalStateException(
+              "target Evidence terminal room authority is ambiguous");
+        }
+        return authority;
+      }
+    }
+  }
+
+  static void requireAuthorityCoordinates(
+      Authority authority, TerminalRequest request, boolean storedReplay) {
+    long expectedProcessRevision =
+        storedReplay
+            ? Math.incrementExact(request.expectedProcessRevision())
+            : request.expectedProcessRevision();
+    long expectedRoomRevision =
+        storedReplay
+            ? Math.incrementExact(request.expectedRoomRevision())
+            : request.expectedRoomRevision();
+    String expectedLifecycle = storedReplay ? "TERMINAL" : "ACTIVE";
+    if (!expectedLifecycle.equals(authority.lifecycleStatus())
+        || authority.activationId() == null
+        || authority.activationId().isBlank()
+        || !validActivationLifecycle(authority.activationLifecycleStatus(), storedReplay)
+        || (!storedReplay && !authority.activationAcceptsNewWrite())
+        || authority.processRevision() != expectedProcessRevision
+        || authority.roomRevision() != expectedRoomRevision) {
+      throw new IllegalStateException(
+          "target Evidence terminal epoch coordinates drifted");
+    }
+  }
+
+  static boolean validActivationLifecycle(String lifecycle, boolean storedReplay) {
+    if ("ACTIVE".equals(lifecycle) || "DRAIN_ONLY".equals(lifecycle)) {
+      return true;
+    }
+    return storedReplay
+        && ("DRAINED".equals(lifecycle) || "REVOKED_TERMINAL".equals(lifecycle));
+  }
+
+  void requirePersistedCompletionFacts(Connection connection, TerminalRequest request)
+      throws SQLException {
+    lockCompletionCommands(connection, request);
+    requirePersistedCompletionFactsAfterCommandLock(connection, request);
+  }
+
+  static void lockCompletionCommands(Connection connection, TerminalRequest request)
+      throws SQLException {
+    try (PreparedStatement statement = connection.prepareStatement("""
+        select command_id
+          from case_command
+         where tenant_surrogate = ?
+           and case_id = ?
+           and room_type = 'EVIDENCE'
+           and room_epoch = ?
+           and command_type = 'PARTY_EVIDENCE_COMPLETE'
+           and command_status = 'APPLIED'
+           and command_id in (?, ?)
+         order by command_id
+         for update
+        """)) {
+      statement.setString(1, request.start().tenantSurrogate());
+      statement.setString(2, request.start().caseId());
+      statement.setLong(3, request.start().roomEpoch());
+      statement.setString(4, request.initiatorCompletionId());
+      statement.setString(5, request.respondentCompletionId());
+      java.util.Set<String> locked = new java.util.HashSet<>(2);
+      try (ResultSet row = statement.executeQuery()) {
+        while (row.next()) {
+          locked.add(row.getString(1));
+        }
+      }
+      if (!locked.equals(
+          java.util.Set.of(
+              request.initiatorCompletionId(), request.respondentCompletionId()))) {
+        throw new IllegalStateException(
+            "target Evidence terminal completion commands are absent or ambiguous");
+      }
+    }
+  }
+
+  void requirePersistedCompletionFactsAfterCommandLock(
+      Connection connection, TerminalRequest request) throws SQLException {
+    try (PreparedStatement statement = connection.prepareStatement("""
+        select completion.id, command_row.command_id, completion.dossier_version,
+               completion.participant_role, completion.participant_id,
+               completion.completion_status, completion.created_by,
+               command_row.request_hash, command_row.expected_process_revision,
+               command_row.result_sha256
+          from evidence_party_completion completion
+          join case_participant participant
+            on participant.case_id = completion.case_id
+           and participant.actor_id = completion.participant_id
+           and participant.participant_role = completion.participant_role
+           and participant.participant_status = 'ACTIVE'
+          join case_command command_row
+            on command_row.tenant_surrogate = ?
+           and command_row.case_id = completion.case_id
+           and command_row.command_id = 'evidence-complete:' || completion.id
+           and command_row.command_type = 'PARTY_EVIDENCE_COMPLETE'
+           and command_row.room_type = 'EVIDENCE'
+           and command_row.room_epoch = ?
+           and command_row.actor_id = completion.participant_id
+           and command_row.actor_role = completion.participant_role
+           and command_row.command_status = 'APPLIED'
+           and command_row.result_uri = ? || completion.id
+         where completion.case_id = ?
+           and command_row.command_id in (?, ?)
+         for update of completion, command_row, participant
+        """)) {
+      statement.setString(1, request.start().tenantSurrogate());
+      statement.setLong(2, request.start().roomEpoch());
+      statement.setString(3, JdbcTargetEvidencePartyCompletionActivities.RESULT_URI_PREFIX);
+      statement.setString(4, request.start().caseId());
+      statement.setString(5, request.initiatorCompletionId());
+      statement.setString(6, request.respondentCompletionId());
+      List<CompletionFact> facts = new java.util.ArrayList<>(2);
+      try (ResultSet row = statement.executeQuery()) {
+        while (row.next()) {
+          facts.add(
+              new CompletionFact(
+                   row.getString(1),
+                   row.getString(2),
+                   row.getInt(3),
+                   row.getString(4),
+                   row.getString(5),
+                   row.getString(6),
+                   row.getString(7),
+                   row.getString(8),
+                   row.getLong(9),
+                   row.getString(10)));
+        }
+      }
+      if (facts.size() != 2) {
+        throw new IllegalStateException(
+            "target Evidence terminal requires two durable party completions");
+      }
+      CompletionFact initiator =
+          requireCompletionFact(
+              facts,
+              request,
+              request.initiatorCompletionId(),
+              request.start().initiatorParticipantId());
+      CompletionFact respondent =
+          requireCompletionFact(
+              facts,
+              request,
+              request.respondentCompletionId(),
+              request.start().respondentParticipantId());
+      if (initiator.participantRole().equals(respondent.participantRole())
+          || !(List.of("USER", "MERCHANT").contains(initiator.participantRole())
+              && List.of("USER", "MERCHANT").contains(respondent.participantRole()))
+          || initiator.dossierVersion() != respondent.dossierVersion()
+          || initiator.dossierVersion()
+              != dossierFreezer.targetVersion(request.start().caseId())) {
+        throw new IllegalStateException(
+            "target Evidence terminal requires opposing durable party roles");
+      }
+    }
+  }
+
+  private CompletionFact requireCompletionFact(
+      List<CompletionFact> facts,
+      TerminalRequest request,
+      String commandId,
+      String participantId) {
+    CompletionFact match = null;
+    for (CompletionFact fact : facts) {
+      if (commandId.equals(fact.commandId())) {
+        if (match != null) {
+          throw new IllegalStateException(
+              "target Evidence durable party completion is ambiguous");
+        }
+        match = fact;
+      }
+    }
+    long coordinateDelta =
+        Math.subtractExact(
+            match == null ? request.start().initialProcessRevision() : match.expectedProcessRevision(),
+            request.start().initialProcessRevision());
+    long expectedRoomRevision =
+        Math.addExact(request.start().initialRoomRevision(), coordinateDelta);
+    String expectedResultHash =
+        match == null
+            ? null
+            : ContractJson.sha256Hex(
+                mapper.valueToTree(
+                    List.of(
+                        "target-e2e-evidence-party-receipt.v1",
+                        match.id(),
+                        match.requestHash(),
+                        match.expectedProcessRevision(),
+                        expectedRoomRevision)));
+    if (match == null
+        || !("evidence-complete:" + match.id()).equals(match.commandId())
+        || !participantId.equals(match.participantId())
+        || !"COMPLETED".equals(match.status())
+        || !match.participantId().equals(match.createdBy())
+        || match.expectedProcessRevision() < request.start().initialProcessRevision()
+        || match.expectedProcessRevision() >= request.expectedProcessRevision()
+        || expectedRoomRevision < request.start().initialRoomRevision()
+        || expectedRoomRevision >= request.expectedRoomRevision()
+        || !expectedResultHash.equals(match.resultHash())) {
+      throw new IllegalStateException(
+          "target Evidence durable party completion drifted");
+    }
+    return match;
+  }
+
   void requireAgentRunReceipts(Connection connection, TerminalRequest request) throws SQLException {
     try (PreparedStatement statement = connection.prepareStatement("""
         select count(*)
@@ -156,52 +462,6 @@ public final class JdbcTargetEvidenceTerminalActivities implements TargetEvidenc
       try (ResultSet row = statement.executeQuery()) {
         if (!row.next() || row.getLong(1) != 0) {
           throw new IllegalStateException("all EVIDENCE_SUBMIT AgentRun formal receipts are required");
-        }
-      }
-    }
-  }
-
-  private static String participantRole(Connection connection, String caseId, String participantId) throws SQLException {
-    try (PreparedStatement statement = connection.prepareStatement("""
-        select participant_role from case_participant
-         where case_id = ? and actor_id = ? and participant_status = 'ACTIVE'
-           and participant_role in ('USER', 'MERCHANT') for update
-        """)) {
-      statement.setString(1, caseId);
-      statement.setString(2, participantId);
-      try (ResultSet row = statement.executeQuery()) {
-        if (!row.next()) throw new IllegalStateException("target Evidence participant is absent");
-        String role = row.getString(1);
-        if (row.next()) throw new IllegalStateException("target Evidence participant role is ambiguous");
-        return role;
-      }
-    }
-  }
-
-  private void completionFact(Connection connection, TerminalRequest request, int version, String role,
-      String participantId, String completionId) throws SQLException {
-    String id = "EVDPC_" + ContractJson.sha256Hex(mapper.valueToTree(
-        List.of(request.start().caseId(), version, role, completionId))).substring(0, 32);
-    try (PreparedStatement statement = connection.prepareStatement("""
-        insert into evidence_party_completion (
-          id, case_id, dossier_version, participant_role, participant_id, completion_status,
-          idempotency_key, completed_at, created_by)
-        values (?, ?, ?, ?, ?, 'COMPLETED', ?, now(), ?)
-        on conflict (case_id, idempotency_key) do nothing
-        """)) {
-      statement.setString(1, id); statement.setString(2, request.start().caseId()); statement.setInt(3, version);
-      statement.setString(4, role); statement.setString(5, participantId); statement.setString(6, completionId);
-      statement.setString(7, WRITER); statement.executeUpdate();
-    }
-    try (PreparedStatement statement = connection.prepareStatement("""
-        select dossier_version, participant_role, participant_id, completion_status
-          from evidence_party_completion where case_id = ? and idempotency_key = ? for update
-        """)) {
-      statement.setString(1, request.start().caseId()); statement.setString(2, completionId);
-      try (ResultSet row = statement.executeQuery()) {
-        if (!row.next() || row.getInt(1) != version || !role.equals(row.getString(2))
-            || !participantId.equals(row.getString(3)) || !"COMPLETED".equals(row.getString(4)) || row.next()) {
-          throw new IllegalStateException("target Evidence completion fact drifted");
         }
       }
     }
@@ -355,14 +615,9 @@ public final class JdbcTargetEvidenceTerminalActivities implements TargetEvidenc
   private void insertReceipt(Connection connection, String receiptId, String receiptHash, String requestHash,
       TerminalRequest request, EvidenceDossierEntity frozen, String hearingRoomId, Instant deadline,
       long processRevision, long roomRevision, Instant committedAt) throws SQLException {
-    Map<String, Object> canonical = new LinkedHashMap<>();
-    canonical.put("schema_version", "target-e2e-evidence-terminal-receipt.v1"); canonical.put("receipt_id", receiptId);
-    canonical.put("receipt_hash", receiptHash); canonical.put("request_hash", requestHash); canonical.put("case_id", request.start().caseId());
-    canonical.put("room_epoch", request.start().roomEpoch()); canonical.put("fencing_token", request.start().fencingToken());
-    canonical.put("dossier_id", frozen.getId()); canonical.put("dossier_version", frozen.getDossierVersion());
-    canonical.put("hearing_room_id", hearingRoomId); canonical.put("hearing_deadline_at", deadline.toString());
-    canonical.put("process_revision", processRevision); canonical.put("room_revision", roomRevision);
-    byte[] bytes = ContractJson.canonicalize(mapper.valueToTree(canonical));
+    byte[] bytes = receiptCanonical(
+        receiptId, receiptHash, requestHash, request, frozen.getId(), frozen.getDossierVersion(),
+        hearingRoomId, deadline, processRevision, roomRevision, committedAt);
     try (PreparedStatement statement = connection.prepareStatement("""
         insert into target_e2e_evidence_terminal_receipt (
           receipt_id, receipt_hash, request_hash, tenant_surrogate, case_id, room_epoch, fencing_token,
@@ -381,21 +636,161 @@ public final class JdbcTargetEvidenceTerminalActivities implements TargetEvidenc
   }
 
   private Stored readStored(Connection connection, TerminalRequest request, boolean lock) throws SQLException {
-    try (PreparedStatement statement = connection.prepareStatement("select receipt_id, receipt_hash, request_hash from target_e2e_evidence_terminal_receipt where case_id = ? and room_epoch = ?" + (lock ? " for update" : ""))) {
+    try (PreparedStatement statement = connection.prepareStatement("""
+        select receipt.receipt_id, receipt.receipt_hash, receipt.request_hash,
+               receipt.tenant_surrogate, receipt.case_id, receipt.room_epoch,
+               receipt.fencing_token, receipt.initiator_completion_id,
+               receipt.respondent_completion_id, receipt.dossier_id,
+               receipt.dossier_version, receipt.hearing_room_id,
+               receipt.hearing_deadline_at, receipt.process_revision,
+               receipt.room_revision, receipt.receipt_canonical_bytes,
+               receipt.committed_at
+          from target_e2e_evidence_terminal_receipt receipt
+          join evidence_dossier dossier
+            on dossier.id = receipt.dossier_id and dossier.case_id = receipt.case_id
+           and dossier.dossier_version = receipt.dossier_version
+           and dossier.dossier_status = 'FROZEN' and dossier.deleted_at is null
+          join case_room hearing
+            on hearing.id = receipt.hearing_room_id and hearing.case_id = receipt.case_id
+           and hearing.room_type = 'HEARING' and hearing.room_status = 'OPEN'
+         where receipt.case_id = ? and receipt.room_epoch = ?
+        """ + (lock ? " for update of receipt" : ""))) {
       statement.setString(1, request.start().caseId()); statement.setLong(2, request.start().roomEpoch());
       try (ResultSet row = statement.executeQuery()) {
         if (!row.next()) return null;
-        Stored stored = new Stored(row.getString(1), row.getString(2), row.getString(3));
-        if (row.next() || !stored.requestHash().equals(hash(request))) throw new IllegalStateException("target Evidence terminal replay drifted");
+        Stored stored = new Stored(
+            row.getString(1), row.getString(2), row.getString(3), row.getString(4),
+            row.getString(5), row.getLong(6), row.getLong(7), row.getString(8),
+            row.getString(9), row.getString(10), row.getInt(11), row.getString(12),
+            row.getTimestamp(13).toInstant(), row.getLong(14), row.getLong(15),
+            row.getBytes(16), row.getTimestamp(17).toInstant());
+        if (row.next()) throw new IllegalStateException("target Evidence terminal replay is ambiguous");
         return stored;
       }
     }
   }
 
-  private String hash(TerminalRequest request) { return ContractJson.sha256Hex(mapper.valueToTree(List.of(request.start(), request.expectedProcessRevision(), request.expectedRoomRevision(), request.initiatorCompletionId(), request.respondentCompletionId()))); }
-  private String receiptHash(TerminalRequest request, EvidenceDossierEntity frozen, String roomId, Instant deadline, long processRevision, long roomRevision) { return ContractJson.sha256Hex(mapper.valueToTree(List.of("target-e2e-evidence-terminal-receipt.v1", hash(request), frozen.getId(), frozen.getDossierVersion(), roomId, deadline.toString(), processRevision, roomRevision))); }
+  void requireStoredReplay(TerminalRequest request, Stored stored) {
+    String requestHash = hash(request);
+    String seed = ContractJson.sha256Hex(mapper.valueToTree(
+        List.of(request.start().caseId(), request.start().roomEpoch(), requestHash)));
+    String expectedReceiptId = "EVDTERM_" + seed.substring(0, 32);
+    String expectedHearingRoomId = "ROOM_HEARING_" + seed.substring(0, 28);
+    long expectedProcess = Math.incrementExact(request.expectedProcessRevision());
+    long expectedRoom = Math.incrementExact(request.expectedRoomRevision());
+    String expectedReceiptHash = receiptHash(
+        request, stored.dossierId(), stored.dossierVersion(), stored.hearingRoomId(),
+        stored.hearingDeadline(), stored.processRevision(), stored.roomRevision());
+    byte[] expectedCanonical = receiptCanonical(
+        stored.receiptId(), stored.receiptHash(), stored.requestHash(), request,
+        stored.dossierId(), stored.dossierVersion(), stored.hearingRoomId(),
+        stored.hearingDeadline(), stored.processRevision(), stored.roomRevision(),
+        stored.committedAt());
+    if (!expectedReceiptId.equals(stored.receiptId())
+        || !expectedHearingRoomId.equals(stored.hearingRoomId())
+        || !requestHash.equals(stored.requestHash())
+        || !request.start().tenantSurrogate().equals(stored.tenantSurrogate())
+        || !request.start().caseId().equals(stored.caseId())
+        || request.start().roomEpoch() != stored.roomEpoch()
+        || request.start().fencingToken() != stored.fencingToken()
+        || !request.initiatorCompletionId().equals(stored.initiatorCompletionId())
+        || !request.respondentCompletionId().equals(stored.respondentCompletionId())
+        || stored.dossierId() == null || stored.dossierId().isBlank()
+        || stored.dossierVersion() < 1
+        || expectedProcess != stored.processRevision()
+        || expectedRoom != stored.roomRevision()
+        || !stored.committedAt().plus(HEARING_WINDOW).equals(stored.hearingDeadline())
+        || !expectedReceiptHash.equals(stored.receiptHash())
+        || !Arrays.equals(expectedCanonical, stored.canonicalBytes())) {
+      throw new IllegalStateException("target Evidence terminal replay drifted");
+    }
+  }
+
+  byte[] receiptCanonical(
+      String receiptId, String receiptHash, String requestHash, TerminalRequest request,
+      String dossierId, int dossierVersion, String hearingRoomId, Instant hearingDeadline,
+      long processRevision, long roomRevision, Instant committedAt) {
+    Map<String, Object> canonical = new LinkedHashMap<>();
+    canonical.put("schema_version", "target-e2e-evidence-terminal-receipt.v1");
+    canonical.put("receipt_id", receiptId);
+    canonical.put("receipt_hash", receiptHash);
+    canonical.put("request_hash", requestHash);
+    canonical.put("tenant_surrogate", request.start().tenantSurrogate());
+    canonical.put("case_id", request.start().caseId());
+    canonical.put("room_epoch", request.start().roomEpoch());
+    canonical.put("fencing_token", request.start().fencingToken());
+    canonical.put("initiator_completion_id", request.initiatorCompletionId());
+    canonical.put("respondent_completion_id", request.respondentCompletionId());
+    canonical.put("dossier_id", dossierId);
+    canonical.put("dossier_version", dossierVersion);
+    canonical.put("hearing_room_id", hearingRoomId);
+    canonical.put("hearing_deadline_at", hearingDeadline.toString());
+    canonical.put("process_revision", processRevision);
+    canonical.put("room_revision", roomRevision);
+    canonical.put("committed_at", committedAt.toString());
+    return ContractJson.canonicalize(mapper.valueToTree(canonical));
+  }
+
+  String hash(TerminalRequest request) {
+    List<?> material =
+        request.carriesWorkflowIdentity()
+            ? List.of(
+                request.start(),
+                request.expectedProcessRevision(),
+                request.expectedRoomRevision(),
+                request.initiatorCompletionId(),
+                request.respondentCompletionId(),
+                request.workflowId(),
+                request.workflowRunId())
+            : List.of(
+                request.start(),
+                request.expectedProcessRevision(),
+                request.expectedRoomRevision(),
+                request.initiatorCompletionId(),
+                request.respondentCompletionId());
+    return ContractJson.sha256Hex(mapper.valueToTree(material));
+  }
+  private String receiptHash(TerminalRequest request, EvidenceDossierEntity frozen, String roomId, Instant deadline, long processRevision, long roomRevision) { return receiptHash(request, frozen.getId(), frozen.getDossierVersion(), roomId, deadline, processRevision, roomRevision); }
+  String receiptHash(TerminalRequest request, String dossierId, int dossierVersion, String roomId, Instant deadline, long processRevision, long roomRevision) { return ContractJson.sha256Hex(mapper.valueToTree(List.of("target-e2e-evidence-terminal-receipt.v1", hash(request), dossierId, dossierVersion, roomId, deadline.toString(), processRevision, roomRevision))); }
   private static boolean isSha256(String value) { return value != null && value.matches("[0-9a-f]{64}"); }
   private static void requireTransaction(Connection connection) throws SQLException { if (connection.getAutoCommit()) throw new IllegalStateException("target Evidence terminal requires a transaction"); }
   private static void execute(Connection connection, String sql, Object... values) throws SQLException { try (PreparedStatement s = connection.prepareStatement(sql)) { for (int i = 0; i < values.length; i++) s.setObject(i + 1, values[i]); s.executeUpdate(); } }
-  private record Stored(String receiptId, String receiptHash, String requestHash) {}
+  record WorkflowIdentity(String workflowId, String workflowRunId) {}
+  record Authority(
+      String epochId,
+      String lifecycleStatus,
+      long processRevision,
+      long roomRevision,
+      String activationId,
+      String activationLifecycleStatus,
+      boolean activationAcceptsNewWrite) {}
+  private record CompletionFact(
+      String id,
+      String commandId,
+      int dossierVersion,
+      String participantRole,
+      String participantId,
+      String status,
+      String createdBy,
+      String requestHash,
+      long expectedProcessRevision,
+      String resultHash) {}
+  record Stored(
+      String receiptId,
+      String receiptHash,
+      String requestHash,
+      String tenantSurrogate,
+      String caseId,
+      long roomEpoch,
+      long fencingToken,
+      String initiatorCompletionId,
+      String respondentCompletionId,
+      String dossierId,
+      int dossierVersion,
+      String hearingRoomId,
+      Instant hearingDeadline,
+      long processRevision,
+      long roomRevision,
+      byte[] canonicalBytes,
+      Instant committedAt) {}
 }

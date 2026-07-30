@@ -7,6 +7,7 @@
 package com.example.dispute.notification.infrastructure.persistence.repository;
 
 import com.example.dispute.notification.infrastructure.persistence.entity.NotificationOutboxEntity;
+import java.util.Optional;
 import org.springframework.data.jpa.repository.JpaRepository;
 
 // 所属模块：【案件生命周期通知 / 仓储接口层】类型「NotificationOutboxRepository」。
@@ -24,4 +25,6 @@ public interface NotificationOutboxRepository
     // 系统意义：「NotificationOutboxRepository.existsByBusinessEventKey(String)」直接影响 PostgreSQL 事实投影；通知是事务后的派生副作用，失败不能回滚已提交业务事实，也不能重复轰炸接收者
     // Java 语法：接口方法以分号结束，只声明契约；运行时执行实现类中的同签名方法。
     boolean existsByBusinessEventKey(String businessEventKey);
+
+    Optional<NotificationOutboxEntity> findByBusinessEventKey(String businessEventKey);
 }

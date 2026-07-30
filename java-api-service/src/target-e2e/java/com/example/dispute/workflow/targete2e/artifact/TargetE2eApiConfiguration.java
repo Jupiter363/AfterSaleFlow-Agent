@@ -38,6 +38,8 @@ import com.example.dispute.workflow.infrastructure.security.GraphEnvelopeSigning
 import com.example.dispute.workflow.infrastructure.security.MountedPemGraphEnvelopeKeySet;
 import com.example.dispute.workflow.targete2e.rooms.evidence.JdbcTargetEvidenceCommandMaterialStore;
 import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceCommandMaterialStore;
+import com.example.dispute.workflow.targete2e.rooms.evidence.JdbcTargetEvidenceCompletionCommandMaterialStore;
+import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceCompletionCommandMaterialStore;
 import com.example.dispute.workflow.targete2e.rooms.hearing.JdbcTargetHearingCommandMaterialStore;
 import com.example.dispute.workflow.targete2e.rooms.hearing.TargetHearingCommandMaterialStore;
 import com.example.dispute.workflow.targete2e.rooms.review.JdbcTargetReviewCommandMaterialStore;
@@ -183,6 +185,13 @@ public class TargetE2eApiConfiguration {
   }
 
   @Bean
+  TargetEvidenceCompletionCommandMaterialStore targetEvidenceCompletionCommandMaterialStore(
+      DataSource dataSource, Clock clock, ObjectMapper objectMapper) {
+    return new JdbcTargetEvidenceCompletionCommandMaterialStore(
+        dataSource, new TargetE2EActivationLedger(dataSource, clock), objectMapper);
+  }
+
+  @Bean
   TargetHearingCommandMaterialStore targetHearingCommandMaterialStore(
       DataSource dataSource, Clock clock, ObjectMapper objectMapper) {
     return new JdbcTargetHearingCommandMaterialStore(
@@ -315,6 +324,7 @@ public class TargetE2eApiConfiguration {
       AgentRunLedger ledger,
       AgentRunCommandBindingFactory bindings,
       TargetEvidenceCommandMaterialStore evidence,
+      TargetEvidenceCompletionCommandMaterialStore evidenceCompletion,
       TargetHearingCommandMaterialStore hearing,
       TargetReviewCommandMaterialStore review,
       MinioTargetE2eRoomCommandPayloadPublisher payloads,
@@ -326,7 +336,7 @@ public class TargetE2eApiConfiguration {
       Clock clock) {
     return new CanonicalTargetRoomCommandMaterializer(
         epochs, authority, pins, ledger, bindings, new TargetE2EGraphEnvelopeCodec(objectMapper), payloads, objectIndex, evidenceManifestPublisher, reviewInvocationPublisher, reviewFacts,
-        evidence, hearing, review, objectMapper, clock);
+        evidence, evidenceCompletion, hearing, review, objectMapper, clock);
   }
 
   private static String required(Environment environment, String property) {

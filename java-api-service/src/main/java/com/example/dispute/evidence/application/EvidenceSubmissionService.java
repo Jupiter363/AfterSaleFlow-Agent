@@ -8,6 +8,7 @@ package com.example.dispute.evidence.application;
 
 import com.example.dispute.common.audit.AuditRecorder;
 import com.example.dispute.common.exception.ForbiddenException;
+import com.example.dispute.common.exception.IdempotencyConflictException;
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.evidence.domain.EvidenceSubmissionStatus;
@@ -44,6 +45,7 @@ import java.time.ZoneOffset;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import org.springframework.beans.factory.ObjectProvider;
@@ -139,17 +141,23 @@ public class EvidenceSubmissionService {
                         .findByIdForUpdate(caseId)
                         .orElseThrow(() -> new IllegalArgumentException("case not found"));
         assertParty(dispute, actor);
-        return batchRepository
-                .findByCaseIdAndIdempotencyKey(caseId, idempotencyKey)
-                .map(this::viewWithoutMessage)
-                .orElseGet(
-                        () ->
-                                createSubmission(
-                                        dispute,
-                                        command,
-                                        actor,
-                                        idempotencyKey,
-                                        traceId));
+        List<String> evidenceIds = normalizedEvidenceIds(command.evidenceIds());
+        Optional<EvidenceSubmissionBatchEntity> existing =
+                batchRepository.findByCaseIdAndIdempotencyKey(caseId, idempotencyKey);
+        if (existing.isPresent()) {
+            return exactReplay(
+                    existing.orElseThrow(), actor, evidenceIds, command.batchNote());
+        }
+        if (evidenceIds.isEmpty()) {
+            throw new IllegalArgumentException("evidence_ids must not be empty");
+        }
+        return createSubmission(
+                dispute,
+                command,
+                evidenceIds,
+                actor,
+                idempotencyKey,
+                traceId);
     }
 
     // 所属模块：【证据与版本化卷宗 / 应用编排层】「EvidenceSubmissionService.deletePending(String,String,AuthenticatedActor)」。
@@ -193,13 +201,10 @@ public class EvidenceSubmissionService {
     private EvidenceSubmissionView createSubmission(
             FulfillmentCaseEntity dispute,
             EvidenceSubmissionCommand command,
+            List<String> evidenceIds,
             AuthenticatedActor actor,
             String idempotencyKey,
             String traceId) {
-        List<String> evidenceIds = normalizedEvidenceIds(command.evidenceIds());
-        if (evidenceIds.isEmpty()) {
-            throw new IllegalArgumentException("evidence_ids must not be empty");
-        }
         List<EvidenceItemEntity> evidences = evidenceRepository.findAllById(evidenceIds);
         if (evidences.size() != evidenceIds.size()) {
             throw new IllegalArgumentException("some evidence items were not found");
@@ -268,6 +273,24 @@ public class EvidenceSubmissionService {
                         submitTargetCommand(
                                 dispute, batch, message, evidenceIds, actor, traceId, epoch));
         return view(batch, message);
+    }
+
+    private EvidenceSubmissionView exactReplay(
+            EvidenceSubmissionBatchEntity existing,
+            AuthenticatedActor actor,
+            List<String> evidenceIds,
+            String batchNote) {
+        boolean exact =
+                !evidenceIds.isEmpty()
+                        && existing.getActorId().equals(actor.actorId())
+                        && existing.getActorRole().equals(actor.role().name())
+                        && readEvidenceIds(existing.getEvidenceIdsJson()).equals(evidenceIds)
+                        && Objects.equals(existing.getBatchNote(), batchNote);
+        if (!exact) {
+            throw new IdempotencyConflictException(
+                    "evidence submission idempotency key is bound to a different request");
+        }
+        return viewWithoutMessage(existing);
     }
 
     private void submitTargetCommand(

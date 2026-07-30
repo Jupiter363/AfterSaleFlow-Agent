@@ -1,5 +1,6 @@
 package com.example.dispute.workflow.targete2e.rooms.review;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.dispute.workflow.contract.outcome.v1.OutcomeReviewDecisionReceipt;
@@ -61,6 +62,50 @@ class TargetReviewOutcomeStartBindingActivityTest {
             """, new ObjectMapper(), 9);
 
     org.assertj.core.api.Assertions.assertThat(contract.requiredOperationCount()).isEqualTo(1);
+  }
+
+  @Test
+  void reviewStartBindingAcceptsOnlyCoherentBootstrapOrCommittedEpochStates() {
+    assertThat(
+            JdbcTargetReviewOutcomeStartBindingPort.allowedProvisioningState(
+                "PROVISIONING", "PROVISIONING"))
+        .isTrue();
+    assertThat(
+            JdbcTargetReviewOutcomeStartBindingPort.allowedProvisioningState("ACTIVE", "READY"))
+        .isTrue();
+    assertThat(
+            JdbcTargetReviewOutcomeStartBindingPort.allowedProvisioningState(
+                "ACTIVE", "PROVISIONING"))
+        .isFalse();
+    assertThat(
+            JdbcTargetReviewOutcomeStartBindingPort.allowedProvisioningState(
+                "PROVISIONING", "READY"))
+        .isFalse();
+  }
+
+  @Test
+  void reviewStartReadsOnlyTheTaskPinnedPolicyDecision() {
+    assertThat(JdbcTargetReviewOutcomeStartBindingPort.SQL)
+        .contains(
+            "task.policy_decision_id as task_policy_decision_id",
+            "policy.id = task.policy_decision_id",
+            "policy.case_id = task.case_id",
+            "policy.plan_id = task.plan_id",
+            "policy.id as policy_decision_id")
+        .doesNotContain("created_at <= task.created_at", "order by policy_value.created_at");
+  }
+
+  @Test
+  void reviewStartReadsOnlyTheTaskDurablyBoundToTheExactEpoch() {
+    assertThat(JdbcTargetReviewOutcomeStartBindingPort.SQL)
+        .contains(
+            "join target_e2e_review_epoch_task_binding review_binding",
+            "review_binding.epoch_id = epoch.id",
+            "review_binding.room_fencing_token = epoch.fencing_token",
+            "task.id = review_binding.review_task_id",
+            "task.plan_id = review_binding.plan_id",
+            "task.policy_decision_id = review_binding.policy_decision_id")
+        .doesNotContain("on task.case_id = epoch.case_id");
   }
 
   private static OutcomeWorkflowStart start() {

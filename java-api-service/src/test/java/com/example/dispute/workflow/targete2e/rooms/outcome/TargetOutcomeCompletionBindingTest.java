@@ -24,6 +24,43 @@ class TargetOutcomeCompletionBindingTest {
   }
 
   @Test
+  void resolvesTheReviewCommandFromItsDecisionPayloadAndExactAdmissionMaterial() {
+    assertThat(JdbcTargetOutcomeCompletionActivities.COMMAND_ADMISSION_SQL)
+        .contains(
+            "command.command_type = 'REVIEW_DECISION'",
+            "admission.tenant_surrogate = command.tenant_surrogate",
+            "admission.command_id = command.command_id",
+            "admission.room_epoch = command.room_epoch",
+            "approval.id = ?",
+            "command.payload_sha256 = ?",
+            "material.admission_id = admission.admission_id",
+            "material.command_hash = admission.command_hash",
+            "material.command_envelope_hash = admission.command_envelope_hash",
+            "'{request,command,event_ref,sha256}'",
+            "'{request,command,request_hash}'",
+            "command.request_hash")
+        .doesNotContain("command.request_hash = ?");
+  }
+
+  @Test
+  void requiresAnExactActivationCompletionAndAppliedResultIdentity() {
+    String terminalHash = "c".repeat(64);
+
+    assertThat(JdbcTargetOutcomeCompletionActivities.COMMAND_COMPLETION_SQL)
+        .contains(
+            "admission_id = ?",
+            "activation_id = ?",
+            "command_id = ?",
+            "command_hash = ?",
+            "command_envelope_hash = ?",
+            "completion_hash = ?");
+    assertThat(JdbcTargetOutcomeCompletionActivities.terminalResultUri(terminalHash))
+        .isEqualTo("urn:target-e2e:outcome-terminal:" + terminalHash);
+    assertThatThrownBy(() -> JdbcTargetOutcomeCompletionActivities.terminalResultUri("bad"))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
   void advancesIndependentProcessAndRoomRevisionsFromTheirOwnSources() {
     OutcomeCompletionRequest request = request(13, 8);
 

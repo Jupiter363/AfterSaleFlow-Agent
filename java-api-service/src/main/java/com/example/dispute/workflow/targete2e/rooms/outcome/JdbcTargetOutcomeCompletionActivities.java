@@ -47,6 +47,86 @@ public final class JdbcTargetOutcomeCompletionActivities implements TargetOutcom
        order by revision
        for update
       """;
+  static final String COMMAND_ADMISSION_SQL = """
+      select command.id, command.command_id, command.command_status, command.result_uri,
+             command.result_sha256, admission.admission_id, admission.activation_id,
+             admission.command_hash, admission.command_envelope_hash,
+             decision_event.event_json::text, material.material_canonical_json,
+             material.material_sha256
+        from case_command command
+        join target_e2e_command_admission admission
+          on admission.tenant_surrogate = command.tenant_surrogate
+         and admission.case_id = command.case_id
+         and admission.command_id = command.command_id
+         and admission.room_epoch = command.room_epoch
+        join target_e2e_review_command_material material
+          on material.admission_id = admission.admission_id
+         and material.activation_id = admission.activation_id
+         and material.activation_manifest_hash = admission.activation_manifest_hash
+         and material.isolated_domain_db_binding_hash = admission.isolated_domain_db_binding_hash
+         and material.tenant_surrogate = admission.tenant_surrogate
+         and material.case_id = admission.case_id
+         and material.command_id = admission.command_id
+         and material.command_hash = admission.command_hash
+         and material.command_envelope_hash = admission.command_envelope_hash
+         and material.room_epoch = admission.room_epoch
+         and material.room_fencing_token = admission.room_fencing_token
+        join case_timeline_event decision_event
+          on decision_event.case_id = command.case_id
+         and decision_event.event_json ->> 'command_id' = command.command_id
+         and decision_event.event_key =
+             ('target-review-decision:' || (decision_event.event_json ->> 'approval_record_id'))
+        join human_review_record approval
+          on approval.id = decision_event.event_json ->> 'approval_record_id'
+         and approval.case_id = command.case_id
+         and approval.review_task_id = decision_event.event_json ->> 'review_task_id'
+         and approval.review_packet_id = decision_event.event_json ->> 'packet_id'
+         and approval.action_snapshot_hash =
+             decision_event.event_json ->> 'approved_action_snapshot_hash'
+         and approval.decision_type::text = decision_event.event_json ->> 'decision'
+       where command.case_id = ?
+         and command.command_type = 'REVIEW_DECISION'
+         and command.room_type = 'REVIEW'
+         and command.room_epoch = ?
+         and admission.room_fencing_token = ?
+         and approval.id = ?
+         and approval.decision_type in ('APPROVE', 'MODIFY_AND_APPROVE')
+         and command.payload_schema_version = 'target-e2e-review-human-decision-event.v1'
+         and command.payload_sha256 = ?
+         and decision_event.event_json ->> 'schema_version' = command.payload_schema_version
+         and decision_event.event_json ->> 'case_id' = command.case_id
+         and decision_event.event_json ->> 'room_epoch' = command.room_epoch::text
+         and decision_event.event_json ->> 'fencing_token' = admission.room_fencing_token::text
+         and decision_event.event_json ->> 'case_process_revision' =
+             command.expected_process_revision::text
+         and material.material_schema_version = 'target-e2e-review-command-material.v1'
+         and material.material_canonical_json::jsonb #>> '{expected_process_revision}' =
+             command.expected_process_revision::text
+         and material.material_canonical_json::jsonb #>> '{room_fencing_token}' =
+             admission.room_fencing_token::text
+         and material.material_canonical_json::jsonb #>> '{request,command,tenant_surrogate}' =
+             command.tenant_surrogate
+         and material.material_canonical_json::jsonb #>> '{request,command,case_id}' =
+             command.case_id
+         and material.material_canonical_json::jsonb #>> '{request,command,command_id}' =
+             command.command_id
+         and material.material_canonical_json::jsonb #>> '{request,command,room_type}' =
+             command.room_type
+         and material.material_canonical_json::jsonb #>> '{request,command,room_epoch}' =
+             command.room_epoch::text
+         and material.material_canonical_json::jsonb #>> '{request,command,event_ref,uri}' =
+             command.payload_uri
+         and material.material_canonical_json::jsonb #>> '{request,command,event_ref,sha256}' =
+             command.payload_sha256
+         and material.material_canonical_json::jsonb #>> '{request,command,request_hash}' =
+             command.request_hash
+      """;
+  static final String COMMAND_COMPLETION_SQL = """
+      select 1 from target_e2e_command_completion
+       where admission_id = ? and activation_id = ? and command_id = ?
+         and command_hash = ? and command_envelope_hash = ? and completion_hash = ?
+       for key share
+      """;
   private final DataSource dataSource;
   private final TransactionTemplate transactions;
   private final ObjectMapper mapper;
@@ -182,13 +262,10 @@ public final class JdbcTargetOutcomeCompletionActivities implements TargetOutcom
           processRevision = rows.getLong(1); roomRevision = rows.getLong(2);
         }
       }
-      try (PreparedStatement statement = connection.prepareStatement("""
-          select 1 from case_command where case_id = ? and room_type = 'REVIEW' and room_epoch = ?
-             and command_status = 'APPLIED' and result_sha256 = ? for key share
-          """)) {
-        statement.setString(1, request.caseId()); statement.setLong(2, request.outcomeEpoch()); statement.setString(3, facts.getLast().hash());
-        try (ResultSet rows = statement.executeQuery()) { if (!rows.next() || rows.next()) throw new IllegalStateException("target Outcome command is not durably applied"); }
-      }
+      CommandAdmissionBinding command = commandAdmission(connection, request.caseId(),
+          request.outcomeEpoch(), request.fencingToken(), request.humanReceiptId(),
+          request.humanReceiptHash(), false);
+      requireAppliedCommand(command, facts.getLast().hash());
       try (PreparedStatement statement = connection.prepareStatement("""
           select 1 from case_process_projection where case_id = ? and writer_mode = 'TEMPORAL'
              and macro_phase = 'TERMINAL' and current_room is null and room_phase = 'TERMINAL'
@@ -198,17 +275,7 @@ public final class JdbcTargetOutcomeCompletionActivities implements TargetOutcom
         statement.setString(1, request.caseId()); statement.setLong(2, processRevision);
         try (ResultSet rows = statement.executeQuery()) { if (!rows.next() || rows.next()) throw new IllegalStateException("target Outcome case process is not terminal"); }
       }
-      try (PreparedStatement statement = connection.prepareStatement("""
-          select 1 from target_e2e_command_completion completion
-          join target_e2e_command_admission admission on admission.admission_id = completion.admission_id
-          join case_command command on command.case_id = admission.case_id and command.command_id = admission.command_id
-         where command.case_id = ? and command.room_type = 'REVIEW' and command.room_epoch = ?
-           and completion.completion_hash = ?
-          for key share of completion, admission, command
-          """)) {
-        statement.setString(1, request.caseId()); statement.setLong(2, request.outcomeEpoch()); statement.setString(3, facts.getLast().hash());
-        try (ResultSet rows = statement.executeQuery()) { if (!rows.next() || rows.next()) throw new IllegalStateException("target Outcome activation completion is absent"); }
-      }
+      requireActivationCompletion(connection, command, facts.getLast().hash());
       String identity = hash(List.of(request.workflowId(), request.caseId(), request.outcomeEpoch(), request.fencingToken(),
           processRevision, roomRevision, facts.stream().map(Fact::hash).toList()));
       return new TargetRoomProgressReceipt(RoomType.REVIEW, request.outcomeEpoch(), request.fencingToken(),
@@ -271,6 +338,8 @@ public final class JdbcTargetOutcomeCompletionActivities implements TargetOutcom
     if (!start.workflowId().equals(decision.workflowId()) || !start.caseId().equals(decision.caseId())
         || start.epoch() != decision.epoch() || start.fence() != decision.fence()
         || start.revision() != decision.sourceRevision() || decision.revision() != start.revision() + 1
+        || !decision.receiptId().equals(decision.decisionRecordRef())
+        || !decision.receiptHash().equals(decision.decisionRecordHash())
         || !start.reviewTaskId().equals(decision.reviewTaskId())
         || !start.frozenReviewPacketRef().equals(decision.frozenReviewPacketRef())
         || !start.frozenReviewPacketHash().equals(decision.frozenReviewPacketHash())
@@ -506,41 +575,91 @@ public final class JdbcTargetOutcomeCompletionActivities implements TargetOutcom
   private void completeAdmission(Connection connection, CompletionRequest request, Fact terminalFact)
       throws java.sql.SQLException {
     if (activationLedger == null) throw new IllegalStateException("target Outcome requires activation command ledger");
-    try (PreparedStatement statement = connection.prepareStatement("""
-        select command.id, command.command_id, command.command_status, command.result_uri, command.result_sha256,
-               admission.admission_id, admission.activation_id, admission.command_hash, admission.command_envelope_hash
-          from case_command command
-          join target_e2e_command_admission admission
-            on admission.case_id = command.case_id and admission.command_id = command.command_id
-         where command.case_id = ? and command.room_type = 'REVIEW' and command.room_epoch = ?
-           and command.request_hash = ?
-         for update of command, admission
-        """)) {
-      statement.setString(1, request.start().caseId()); statement.setLong(2, request.start().epoch());
-      statement.setString(3, request.humanDecision().requestHash());
+    CommandAdmissionBinding command = commandAdmission(connection, request.start().caseId(),
+        request.start().epoch(), request.start().fence(), request.humanDecision().decisionRecordRef(),
+        request.humanDecision().decisionRecordHash(), true);
+    String resultUri = terminalResultUri(terminalFact.hash());
+    if ("ORCHESTRATION_ACCEPTED".equals(command.status())) {
+      if (command.resultUri() != null || command.resultHash() != null) {
+        throw new IllegalStateException("target Outcome accepted command already carries a result");
+      }
+      try (PreparedStatement update = connection.prepareStatement("""
+          update case_command set command_status = 'APPLIED', result_uri = ?, result_sha256 = ?,
+              applied_at = ?, updated_at = ?, version = version + 1
+           where id = ? and command_status = 'ORCHESTRATION_ACCEPTED'
+             and result_uri is null and result_sha256 is null
+          """)) {
+        Instant now = clock.instant(); update.setString(1, resultUri); update.setString(2, terminalFact.hash());
+        update.setObject(3, now); update.setObject(4, now); update.setString(5, command.id());
+        if (update.executeUpdate() != 1) throw new IllegalStateException("target Outcome command CAS was rejected");
+      }
+    } else {
+      requireAppliedCommand(command, terminalFact.hash());
+    }
+    activationLedger.completeCommand(connection, new TargetE2EActivationLedger.CommandCompletion(
+        command.admissionId(), command.activationId(), command.commandId(), command.commandHash(),
+        command.commandEnvelopeHash(), terminalFact.hash()));
+  }
+
+  private CommandAdmissionBinding commandAdmission(Connection connection, String caseId, long epoch,
+      long fence, String decisionRecordId, String decisionRecordHash, boolean updateLock)
+      throws java.sql.SQLException {
+    String lock = updateLock
+        ? "\nfor update of command"
+        : "\nfor key share of command, admission, material, decision_event, approval";
+    try (PreparedStatement statement = connection.prepareStatement(COMMAND_ADMISSION_SQL + lock)) {
+      statement.setString(1, caseId); statement.setLong(2, epoch); statement.setLong(3, fence);
+      statement.setString(4, decisionRecordId); statement.setString(5, decisionRecordHash);
       try (ResultSet rows = statement.executeQuery()) {
-        if (!rows.next() || rows.next()) throw new IllegalStateException("target Outcome command admission is absent or ambiguous");
-        String resultUri = "urn:target-e2e:outcome-terminal:" + terminalFact.hash();
-        String status = rows.getString("command_status");
-        if ("ORCHESTRATION_ACCEPTED".equals(status)) {
-          try (PreparedStatement update = connection.prepareStatement("""
-              update case_command set command_status = 'APPLIED', result_uri = ?, result_sha256 = ?,
-                  applied_at = ?, updated_at = ?, version = version + 1
-               where id = ? and command_status = 'ORCHESTRATION_ACCEPTED'
-              """)) {
-            Instant now = clock.instant(); update.setString(1, resultUri); update.setString(2, terminalFact.hash());
-            update.setObject(3, now); update.setObject(4, now); update.setString(5, rows.getString("id"));
-            if (update.executeUpdate() != 1) throw new IllegalStateException("target Outcome command CAS was rejected");
-          }
-        } else if (!"APPLIED".equals(status) || !resultUri.equals(rows.getString("result_uri"))
-            || !terminalFact.hash().equals(rows.getString("result_sha256"))) {
-          throw new IllegalStateException("target Outcome command replay conflicts with its terminal fact");
+        if (!rows.next()) {
+          throw new IllegalStateException("target Outcome command admission is absent or ambiguous");
         }
-        activationLedger.completeCommand(connection, new TargetE2EActivationLedger.CommandCompletion(
-            rows.getString("admission_id"), rows.getString("activation_id"), rows.getString("command_id"),
-            rows.getString("command_hash"), rows.getString("command_envelope_hash"), terminalFact.hash()));
+        CommandAdmissionBinding binding = new CommandAdmissionBinding(
+            rows.getString("id"), rows.getString("command_id"), rows.getString("command_status"),
+            rows.getString("result_uri"), rows.getString("result_sha256"),
+            rows.getString("admission_id"), rows.getString("activation_id"),
+            rows.getString("command_hash"), rows.getString("command_envelope_hash"));
+        String eventJson = rows.getString("event_json");
+        String materialJson = rows.getString("material_canonical_json");
+        String materialHash = rows.getString("material_sha256");
+        if (rows.next()
+            || !decisionRecordHash.equals(canonicalPayloadHash(eventJson))
+            || !materialJson.equals(canonicalPayload(materialJson))
+            || !materialHash.equals(canonicalPayloadHash(materialJson))) {
+          throw new IllegalStateException("target Outcome command admission has conflicting durable material");
+        }
+        return binding;
       }
     }
+  }
+
+  private void requireActivationCompletion(Connection connection, CommandAdmissionBinding command,
+      String completionHash) throws java.sql.SQLException {
+    try (PreparedStatement statement = connection.prepareStatement(COMMAND_COMPLETION_SQL)) {
+      statement.setString(1, command.admissionId()); statement.setString(2, command.activationId());
+      statement.setString(3, command.commandId()); statement.setString(4, command.commandHash());
+      statement.setString(5, command.commandEnvelopeHash()); statement.setString(6, completionHash);
+      try (ResultSet rows = statement.executeQuery()) {
+        if (!rows.next() || rows.next()) {
+          throw new IllegalStateException("target Outcome activation completion is absent or conflicting");
+        }
+      }
+    }
+  }
+
+  private static void requireAppliedCommand(CommandAdmissionBinding command, String terminalHash) {
+    if (!"APPLIED".equals(command.status())
+        || !terminalResultUri(terminalHash).equals(command.resultUri())
+        || !terminalHash.equals(command.resultHash())) {
+      throw new IllegalStateException("target Outcome command replay conflicts with its terminal fact");
+    }
+  }
+
+  static String terminalResultUri(String terminalHash) {
+    if (terminalHash == null || !terminalHash.matches("[0-9a-f]{64}")) {
+      throw new IllegalArgumentException("target Outcome terminal hash is invalid");
+    }
+    return "urn:target-e2e:outcome-terminal:" + terminalHash;
   }
 
   private void advanceTerminalProjection(Connection connection, CompletionRequest request) throws java.sql.SQLException {
@@ -660,8 +779,15 @@ public final class JdbcTargetOutcomeCompletionActivities implements TargetOutcom
     try { return ContractJson.sha256Hex(mapper.readTree(payload)); }
     catch (Exception failure) { throw new IllegalStateException("target Outcome fact payload is malformed", failure); }
   }
+  private String canonicalPayload(String payload) {
+    try { return ContractJson.canonicalString(mapper.readTree(payload)); }
+    catch (Exception failure) { throw new IllegalStateException("target Outcome durable material is malformed", failure); }
+  }
   private String hash(Object value) { return ContractJson.sha256Hex(mapper.valueToTree(value)); }
   private static String id(String prefix, String hash) { return prefix + "_" + hash.substring(0, 32); }
   private record Fact(String kind, long revision, long sequence, String payload, String hash) {}
+  private record CommandAdmissionBinding(String id, String commandId, String status, String resultUri,
+      String resultHash, String admissionId, String activationId, String commandHash,
+      String commandEnvelopeHash) {}
   private record SnapshotFacts(String inputSnapshotHash, String reportHash, long caseVersion) {}
 }

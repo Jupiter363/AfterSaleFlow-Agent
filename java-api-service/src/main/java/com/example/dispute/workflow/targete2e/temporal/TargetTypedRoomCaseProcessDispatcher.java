@@ -11,6 +11,7 @@ import com.example.dispute.workflow.contract.outcome.v1.OutcomeWireTypes.Runtime
 import com.example.dispute.workflow.contract.outcome.v1.OutcomeWorkflowStart;
 import com.example.dispute.workflow.contract.v1.CaseCommandRef;
 import com.example.dispute.workflow.contract.v1.AgentRunWorkflowIds;
+import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
@@ -21,11 +22,11 @@ import com.example.dispute.workflow.temporal.caseprocess.TargetRoomProgressRecei
 import com.example.dispute.workflow.temporal.room.evidence.EvidenceOperationKeys;
 import com.example.dispute.workflow.temporal.room.evidence.EvidenceRoomSignal;
 import com.example.dispute.workflow.temporal.room.evidence.EvidenceRoomStart;
+import com.example.dispute.workflow.temporal.room.evidence.EvidenceRoomStart.ExecutionLane;
 import com.example.dispute.workflow.temporal.room.evidence.EvidenceRoomWorkflow;
 import com.example.dispute.workflow.temporal.room.hearing.HearingRoomStart;
 import com.example.dispute.workflow.temporal.room.hearing.HearingRoomWorkflow;
 import com.example.dispute.workflow.temporal.room.hearing.HearingPartyCommand;
-import com.example.dispute.workflow.temporal.room.intake.IntakeParty;
 import com.example.dispute.workflow.temporal.room.intake.IntakeRoomStart;
 import com.example.dispute.workflow.temporal.room.intake.IntakeRoomWorkflow;
 import com.example.dispute.workflow.temporal.room.intake.IntakeWorkflowCommand;
@@ -40,6 +41,7 @@ import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceParty
 import com.example.dispute.workflow.targete2e.rooms.outcome.TargetOutcomeCompletionActivities;
 import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewAgentRunTrigger;
 import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewCommandBridgeActivities;
+import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewNonExecutionActivities;
 import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewOutcomeHandoffActivities;
 import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewOutcomeStartBindingActivities;
 import com.example.dispute.workflow.targete2e.rooms.review.TargetReviewOutcomeStartBindingPort.Binding;
@@ -47,6 +49,9 @@ import com.example.dispute.workflow.targete2e.temporal.intake.TargetIntakeActorS
 import com.example.dispute.workflow.targete2e.temporal.room.hearing.TargetHearingBootstrapActivities;
 import com.example.dispute.workflow.targete2e.temporal.intake.TargetIntakeCommandBridgeActivities;
 import com.example.dispute.workflow.targete2e.temporal.intake.TargetIntakeCommandBridgeActivities.BindRequest;
+import com.example.dispute.workflow.targete2e.temporal.intake.TargetIntakePartyScopeSource;
+import com.example.dispute.workflow.targete2e.temporal.intake.TargetIntakePartyScopeSource.Request;
+import com.example.dispute.workflow.targete2e.temporal.intake.TargetIntakePartyScopeSource.ResolvedPartyScopes;
 import com.example.dispute.workflow.targete2e.temporal.room.TargetRoomAgentRunFinalizationReceipt;
 import com.example.dispute.workflow.temporal.agentrun.AgentRunWorkflow;
 import io.temporal.activity.ActivityOptions;
@@ -79,10 +84,22 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
   private static final String TARGET_INTAKE_GUARDRAIL_VERSION =
       "all-rooms-guardrail.target-e2e.v1";
   private static final String TARGET_INTAKE_TOOL_POLICY_VERSION = "tools.none.v1";
+  public static final String TARGET_INTAKE_PARTY_SCOPE_AUTHORITY_CHANGE_ID =
+      "target-intake-party-scope-authority-v1";
+  public static final String TARGET_REVIEW_NON_EXECUTION_CHANGE_ID =
+      "target-review-non-execution-v1";
 
   private final TargetIntakeCommandBridgeActivities targetIntakeCommandBridge =
       Workflow.newActivityStub(
           TargetIntakeCommandBridgeActivities.class,
+          ActivityOptions.newBuilder()
+              .setTaskQueue(CASE_CONTROL_TASK_QUEUE)
+              .setStartToCloseTimeout(Duration.ofSeconds(10))
+              .setScheduleToCloseTimeout(Duration.ofSeconds(30))
+              .build());
+  private final TargetIntakePartyScopeSource targetIntakePartyScopes =
+      Workflow.newActivityStub(
+          TargetIntakePartyScopeSource.class,
           ActivityOptions.newBuilder()
               .setTaskQueue(CASE_CONTROL_TASK_QUEUE)
               .setStartToCloseTimeout(Duration.ofSeconds(10))
@@ -131,6 +148,14 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
   private final TargetOutcomeCompletionActivities targetOutcomeCompletionActivities =
       Workflow.newActivityStub(
           TargetOutcomeCompletionActivities.class,
+          ActivityOptions.newBuilder()
+              .setTaskQueue(CASE_CONTROL_TASK_QUEUE)
+              .setStartToCloseTimeout(Duration.ofSeconds(20))
+              .setScheduleToCloseTimeout(Duration.ofSeconds(45))
+              .build());
+  private final TargetReviewNonExecutionActivities targetReviewNonExecutionActivities =
+      Workflow.newActivityStub(
+          TargetReviewNonExecutionActivities.class,
           ActivityOptions.newBuilder()
               .setTaskQueue(CASE_CONTROL_TASK_QUEUE)
               .setStartToCloseTimeout(Duration.ofSeconds(20))
@@ -200,7 +225,9 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
               descriptor.currentRoomRevision(),
               Objects.requireNonNull(
                   descriptor.evidenceParticipantBinding(),
-                  "restored target Evidence participant binding"));
+                  "restored target Evidence participant binding"),
+              descriptor.roomWorkflowBuildId(),
+              ExecutionLane.TARGET_E2E_CANDIDATE);
       case HEARING ->
           new HearingHandle(
               Workflow.newExternalWorkflowStub(HearingRoomWorkflow.class, execution),
@@ -225,7 +252,17 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
 
   private TargetTypedRoomChildHandle startIntake(
       ProvisionRoomEpoch request, String provisioningHash) {
-    IntakeRoomStart start = targetIntakeStart(request);
+    int partyScopeAuthorityVersion =
+        Workflow.getVersion(
+            TARGET_INTAKE_PARTY_SCOPE_AUTHORITY_CHANGE_ID, Workflow.DEFAULT_VERSION, 1);
+    IntakeRoomStart start;
+    if (partyScopeAuthorityVersion == Workflow.DEFAULT_VERSION) {
+      start = legacyTargetIntakeStart(request);
+    } else {
+      Request partyScopeRequest = partyScopeRequest(request);
+      ResolvedPartyScopes partyScopes = targetIntakePartyScopes.resolve(partyScopeRequest);
+      start = targetIntakeStart(request, partyScopes);
+    }
     IntakeRoomWorkflow child =
         Workflow.newChildWorkflowStub(
             IntakeRoomWorkflow.class, childOptions(request.roomWorkflowId()));
@@ -242,12 +279,29 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
         start.respondentActorScopeHash());
   }
 
-  static IntakeRoomStart targetIntakeStart(ProvisionRoomEpoch request) {
+  static IntakeRoomStart targetIntakeStart(
+      ProvisionRoomEpoch request, ResolvedPartyScopes partyScopes) {
     Objects.requireNonNull(request, "request");
-    String initiatorScopeHash =
-        TargetIntakeActorScopes.hash(request.caseId(), IntakeParty.INITIATOR);
-    String respondentScopeHash =
-        TargetIntakeActorScopes.hash(request.caseId(), IntakeParty.RESPONDENT);
+    Objects.requireNonNull(partyScopes, "partyScopes").requireMatches(partyScopeRequest(request));
+    return targetIntakeStart(
+        request,
+        partyScopes.initiator().actorScopeHash(),
+        partyScopes.respondent().actorScopeHash());
+  }
+
+  static IntakeRoomStart legacyTargetIntakeStart(ProvisionRoomEpoch request) {
+    Objects.requireNonNull(request, "request");
+    return targetIntakeStart(
+        request,
+        TargetIntakeActorScopes.hash(request.caseId(), "user-local", ActorRole.USER),
+        TargetIntakeActorScopes.hash(
+            request.caseId(), "merchant-local", ActorRole.MERCHANT));
+  }
+
+  private static IntakeRoomStart targetIntakeStart(
+      ProvisionRoomEpoch request,
+      String initiatorActorScopeHash,
+      String respondentActorScopeHash) {
     return new IntakeRoomStart(
         "intake-room-start.v1",
         request.tenantSurrogate(),
@@ -267,12 +321,19 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
         TARGET_INTAKE_POLICY_VERSION,
         TARGET_INTAKE_GUARDRAIL_VERSION,
         TARGET_INTAKE_TOOL_POLICY_VERSION,
-        initiatorScopeHash,
-        respondentScopeHash);
+        initiatorActorScopeHash,
+        respondentActorScopeHash);
+  }
+
+  private static Request partyScopeRequest(ProvisionRoomEpoch request) {
+    return new Request(
+        request.tenantSurrogate(),
+        request.caseId(),
+        request.roomEpoch(),
+        request.fencingToken());
   }
 
   private TargetTypedRoomChildHandle startEvidence(ProvisionRoomEpoch request) {
-    Instant openedAt = request.requestedAt();
     TargetEvidenceParticipantBindingActivities.Binding participants =
         targetEvidenceParticipantBinding.bind(
             new TargetEvidenceParticipantBindingActivities.Request(
@@ -280,22 +341,7 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
                 request.caseId(),
                 request.roomEpoch(),
                 request.fencingToken()));
-    EvidenceRoomStart start =
-        new EvidenceRoomStart(
-            "evidence-room-start.v1",
-            request.tenantSurrogate(),
-            request.caseId(),
-            request.roomId(),
-            request.roomEpoch(),
-            request.fencingToken(),
-            participants.initiatorParticipantId(),
-            participants.respondentParticipantId(),
-            openedAt,
-            deadlineAfter(openedAt, request.projectedDeadlineAt()),
-            1,
-            request.initialProcessRevision(),
-            request.initialRoomRevision(),
-            request.roomWorkflowBuildId());
+    EvidenceRoomStart start = targetEvidenceStart(request, participants);
     EvidenceRoomWorkflow child =
         Workflow.newChildWorkflowStub(
             EvidenceRoomWorkflow.class, childOptions(request.roomWorkflowId()));
@@ -308,7 +354,33 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
         request.fencingToken(),
         request.initialProcessRevision(),
         request.initialRoomRevision(),
-        participants);
+        participants,
+        start.workflowBuildId(),
+        start.executionLane());
+  }
+
+  static EvidenceRoomStart targetEvidenceStart(
+      ProvisionRoomEpoch request,
+      TargetEvidenceParticipantBindingActivities.Binding participants) {
+    Objects.requireNonNull(request, "request");
+    Objects.requireNonNull(participants, "participants");
+    Instant openedAt = request.requestedAt();
+    return new EvidenceRoomStart(
+        "evidence-room-start.v1",
+        request.tenantSurrogate(),
+        request.caseId(),
+        request.roomId(),
+        request.roomEpoch(),
+        request.fencingToken(),
+        participants.initiatorParticipantId(),
+        participants.respondentParticipantId(),
+        openedAt,
+        deadlineAfter(openedAt, request.projectedDeadlineAt()),
+        1,
+        request.initialProcessRevision(),
+        request.initialRoomRevision(),
+        request.roomWorkflowBuildId(),
+        ExecutionLane.TARGET_E2E_CANDIDATE);
   }
 
   private TargetTypedRoomChildHandle startHearing(ProvisionRoomEpoch request) {
@@ -511,6 +583,16 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
       roomRevision = progress.roomRevision();
     }
 
+    protected final void requireCurrent(TargetRoomProgressReceipt progress) {
+      if (progress.roomType() != roomType
+          || progress.roomEpoch() != roomEpoch
+          || progress.fencingToken() != fencingToken
+          || progress.processRevision() != processRevision
+          || progress.roomRevision() != roomRevision) {
+        throw new IllegalStateException("target post-routing acknowledgement coordinates are invalid");
+      }
+    }
+
     protected final long roomRevision() {
       return roomRevision;
     }
@@ -654,10 +736,13 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
     private final Binding binding;
     private boolean executionAuthorized;
     private boolean terminalClosed;
+    private boolean sourceTransitionClosed;
     private String acceptedReviewCommandId;
     private String acceptedReviewReceiptId;
     private String acceptedReviewReceiptHash;
     private long acceptedReviewReceiptRevision;
+    private com.example.dispute.workflow.contract.outcome.v1.OutcomeReviewDecisionReceipt
+        acceptedReviewDecision;
     private TargetRoomProgressReceipt terminalProgressReceipt;
 
     private ReviewHandle(
@@ -709,6 +794,7 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
       acceptedReviewReceiptId = handoff.outcomeReceipt().receiptId();
       acceptedReviewReceiptHash = handoff.outcomeReceipt().receiptHash();
       acceptedReviewReceiptRevision = handoff.outcomeReceipt().revision();
+      acceptedReviewDecision = handoff.outcomeReceipt();
       // The Java-owned decision is authoritative. Advisory Graph execution is intentionally
       // detached so an advisory outage cannot block or alter Outcome progression.
       Async.procedure(
@@ -731,7 +817,27 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
         throw new IllegalArgumentException("target Review completion does not match its accepted command");
       }
       if (!executionAuthorized) {
-        return null;
+        int version =
+            Workflow.getVersion(
+                TARGET_REVIEW_NON_EXECUTION_CHANGE_ID, Workflow.DEFAULT_VERSION, 1);
+        if (version == Workflow.DEFAULT_VERSION) {
+          return null;
+        }
+        TargetReviewNonExecutionActivities.CompletionResult completion =
+            targetReviewNonExecutionActivities.complete(
+                new TargetReviewNonExecutionActivities.CompletionRequest(
+                    binding.start(),
+                    Objects.requireNonNull(
+                        acceptedReviewDecision, "accepted target Review non-execution decision"),
+                    command,
+                    command.expectedProcessRevision(),
+                    binding.start().revision()));
+        TargetRoomProgressReceipt progress = completion.sourceProgressReceipt();
+        requireCurrent(progress);
+        terminalProgressReceipt = progress;
+        terminalClosed = completion.terminalCaseProcess();
+        sourceTransitionClosed = !terminalClosed;
+        return targetReceipt();
       }
       OutcomeCompletionResult completion = outcomeChild.completeTargetOutcomeAfterRouting(
           new OutcomeCompletionRequest(
@@ -775,7 +881,16 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
                   fencingToken()));
       binding.requireCompatible(handoff.outcomeReceipt());
       if (!handoff.outcomeReceipt().executionAuthorized()) {
-        return null;
+        TargetReviewNonExecutionActivities.CompletionResult completion =
+            targetReviewNonExecutionActivities.loadApplied(
+                new TargetReviewNonExecutionActivities.LoadRequest(
+                    binding.start(), handoff.outcomeReceipt(), command));
+        TargetRoomProgressReceipt progress = completion.sourceProgressReceipt();
+        advanceTo(progress);
+        terminalProgressReceipt = progress;
+        terminalClosed = completion.terminalCaseProcess();
+        sourceTransitionClosed = !terminalClosed;
+        return targetReceipt();
       }
       TargetRoomProgressReceipt progress = targetOutcomeCompletionActivities.loadTerminalProgress(
           new TargetOutcomeCompletionActivities.TerminalProgressRequest(
@@ -795,6 +910,11 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
     @Override
     public boolean terminalAfterPostRouting() {
       return terminalClosed;
+    }
+
+    @Override
+    public boolean sourceTransitionAfterPostRouting() {
+      return sourceTransitionClosed;
     }
 
     @Override
@@ -819,6 +939,8 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
     private final EvidenceRoomWorkflow child;
     private final long roomEpoch;
     private final TargetEvidenceParticipantBindingActivities.Binding participants;
+    private final String workflowBuildId;
+    private final ExecutionLane executionLane;
 
     private EvidenceHandle(
         EvidenceRoomWorkflow child,
@@ -827,11 +949,18 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
         long fencingToken,
         long processRevision,
         long roomRevision,
-        TargetEvidenceParticipantBindingActivities.Binding participants) {
+        TargetEvidenceParticipantBindingActivities.Binding participants,
+        String workflowBuildId,
+        ExecutionLane executionLane) {
       super(RoomType.EVIDENCE, execution, roomEpoch, fencingToken, processRevision, roomRevision);
       this.child = Objects.requireNonNull(child, "child");
       this.roomEpoch = roomEpoch;
       this.participants = Objects.requireNonNull(participants, "participants");
+      this.workflowBuildId = Objects.requireNonNull(workflowBuildId, "workflowBuildId");
+      if (executionLane != ExecutionLane.TARGET_E2E_CANDIDATE) {
+        throw new IllegalArgumentException("target Evidence handle requires the target execution lane");
+      }
+      this.executionLane = executionLane;
     }
 
     @Override
@@ -902,7 +1031,8 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
           1,
           processRevision(),
           roomRevision(),
-          "p9-control-build");
+          workflowBuildId,
+          executionLane);
     }
   }
 

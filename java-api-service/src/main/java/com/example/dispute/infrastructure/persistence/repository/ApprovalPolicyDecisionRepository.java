@@ -7,6 +7,7 @@
 package com.example.dispute.infrastructure.persistence.repository;
 
 import com.example.dispute.infrastructure.persistence.entity.ApprovalPolicyDecisionEntity;
+import java.time.OffsetDateTime;
 import java.util.Optional;
 import org.springframework.data.jpa.repository.JpaRepository;
 
@@ -27,4 +28,11 @@ public interface ApprovalPolicyDecisionRepository
     Optional<ApprovalPolicyDecisionEntity>
             findFirstByCaseIdAndPlanIdOrderByCreatedAtDesc(
                     String caseId, String planId);
+
+    Optional<ApprovalPolicyDecisionEntity> findByIdAndCaseIdAndPlanId(
+            String id, String caseId, String planId);
+
+    Optional<ApprovalPolicyDecisionEntity>
+            findFirstByCaseIdAndPlanIdAndCreatedAtLessThanEqualOrderByCreatedAtDescIdDesc(
+                    String caseId, String planId, OffsetDateTime createdAt);
 }

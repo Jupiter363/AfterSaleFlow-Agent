@@ -10,10 +10,13 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import com.example.dispute.common.audit.AuditRecorder;
+import com.example.dispute.common.exception.IdempotencyConflictException;
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.domain.model.CaseStatus;
@@ -31,6 +34,9 @@ import com.example.dispute.room.application.RoomMessageService;
 import com.example.dispute.room.application.RoomMessageView;
 import com.example.dispute.room.domain.MessageType;
 import com.example.dispute.room.domain.RoomType;
+import com.example.dispute.workflow.application.command.CaseCommandService;
+import com.example.dispute.workflow.infrastructure.persistence.repository.CaseRoomEpochRepository;
+import com.example.dispute.workflow.targete2e.ingress.rooms.TargetRoomCommandIngress;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.time.Instant;
@@ -44,6 +50,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.beans.factory.ObjectProvider;
 
 // 所属模块：【证据与版本化卷宗 / 自动化测试层】类型「EvidenceSubmissionServiceTest」。
 // 类型职责：集中验证证据提交的业务场景、权限边界和持久化/外部协作契约；本类型显式提供 「setUp」、「submitsPendingEvidenceAsOneBatchAndPostsEvidenceReferenceToClerk」、「submitsHearingSupplementEvidenceToTheHearingRoom」、「deletesOnlyPendingEvidenceOwnedByCurrentActor」、「refusesToDeleteSubmittedEvidence」、「evidence」。
@@ -58,6 +65,9 @@ class EvidenceSubmissionServiceTest {
     @Mock private EvidenceSubmissionBatchRepository batchRepository;
     @Mock private RoomMessageService roomMessageService;
     @Mock private AuditRecorder auditRecorder;
+    @Mock private CaseRoomEpochRepository roomEpochRepository;
+    @Mock private ObjectProvider<TargetRoomCommandIngress> targetRoomIngress;
+    @Mock private CaseCommandService caseCommandService;
 
     private EvidenceSubmissionService service;
 
@@ -78,7 +88,10 @@ class EvidenceSubmissionServiceTest {
                         auditRecorder,
                         Clock.fixed(
                                 Instant.parse("2026-07-06T08:00:00Z"),
-                                ZoneOffset.UTC));
+                                ZoneOffset.UTC),
+                        roomEpochRepository,
+                        targetRoomIngress,
+                        caseCommandService);
     }
 
     // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceSubmissionServiceTest.submitsPendingEvidenceAsOneBatchAndPostsEvidenceReferenceToClerk()」。
@@ -215,6 +228,86 @@ class EvidenceSubmissionServiceTest {
                 .containsExactlyElementsOf(batchIds);
     }
 
+    @Test
+    void exactReplayReturnsTheOriginalBatchAfterOrderedDeduplicationWithoutWriting() {
+        FulfillmentCaseEntity dispute = evidenceCase();
+        EvidenceSubmissionBatchEntity existing = existingBatch("same-note");
+        when(caseRepository.findByIdForUpdate(dispute.getId())).thenReturn(Optional.of(dispute));
+        when(batchRepository.findByCaseIdAndIdempotencyKey(dispute.getId(), "submit-replay"))
+                .thenReturn(Optional.of(existing));
+
+        var result =
+                service.submit(
+                        dispute.getId(),
+                        new EvidenceSubmissionCommand(
+                                List.of("EVIDENCE_ONE", "EVIDENCE_ONE", "EVIDENCE_TWO"),
+                                "same-note"),
+                        new AuthenticatedActor("user-local", ActorRole.USER),
+                        "submit-replay",
+                        "TRACE_REPLAY");
+
+        assertThat(result.batchId()).isEqualTo(existing.getId());
+        assertThat(result.evidenceIds()).containsExactly("EVIDENCE_ONE", "EVIDENCE_TWO");
+        assertThat(result.batchNote()).isEqualTo("same-note");
+        assertNoReplayWrites();
+    }
+
+    @Test
+    void sameKeyWithAnotherPartyConflictsBeforeAnySubmissionWrite() {
+        FulfillmentCaseEntity dispute = evidenceCase();
+        when(caseRepository.findByIdForUpdate(dispute.getId())).thenReturn(Optional.of(dispute));
+        when(batchRepository.findByCaseIdAndIdempotencyKey(dispute.getId(), "submit-replay"))
+                .thenReturn(Optional.of(existingBatch("same-note")));
+
+        assertConflict(
+                dispute,
+                new EvidenceSubmissionCommand(
+                        List.of("EVIDENCE_ONE", "EVIDENCE_TWO"), "same-note"),
+                new AuthenticatedActor("merchant-local", ActorRole.MERCHANT));
+    }
+
+    @Test
+    void sameKeyWithDifferentNormalizedEvidenceOrderConflictsBeforeAnySubmissionWrite() {
+        FulfillmentCaseEntity dispute = evidenceCase();
+        when(caseRepository.findByIdForUpdate(dispute.getId())).thenReturn(Optional.of(dispute));
+        when(batchRepository.findByCaseIdAndIdempotencyKey(dispute.getId(), "submit-replay"))
+                .thenReturn(Optional.of(existingBatch("same-note")));
+
+        assertConflict(
+                dispute,
+                new EvidenceSubmissionCommand(
+                        List.of("EVIDENCE_TWO", "EVIDENCE_ONE", "EVIDENCE_TWO"),
+                        "same-note"),
+                new AuthenticatedActor("user-local", ActorRole.USER));
+    }
+
+    @Test
+    void sameKeyWithDifferentBatchNoteConflictsBeforeAnySubmissionWrite() {
+        FulfillmentCaseEntity dispute = evidenceCase();
+        when(caseRepository.findByIdForUpdate(dispute.getId())).thenReturn(Optional.of(dispute));
+        when(batchRepository.findByCaseIdAndIdempotencyKey(dispute.getId(), "submit-replay"))
+                .thenReturn(Optional.of(existingBatch("same-note")));
+
+        assertConflict(
+                dispute,
+                new EvidenceSubmissionCommand(
+                        List.of("EVIDENCE_ONE", "EVIDENCE_TWO"), "different-note"),
+                new AuthenticatedActor("user-local", ActorRole.USER));
+    }
+
+    @Test
+    void emptyEvidenceIdsCannotReplayAnExistingIdempotencyKey() {
+        FulfillmentCaseEntity dispute = evidenceCase();
+        when(caseRepository.findByIdForUpdate(dispute.getId())).thenReturn(Optional.of(dispute));
+        when(batchRepository.findByCaseIdAndIdempotencyKey(dispute.getId(), "submit-replay"))
+                .thenReturn(Optional.of(existingBatch("same-note")));
+
+        assertConflict(
+                dispute,
+                new EvidenceSubmissionCommand(List.of(), "same-note"),
+                new AuthenticatedActor("user-local", ActorRole.USER));
+    }
+
     // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceSubmissionServiceTest.deletesOnlyPendingEvidenceOwnedByCurrentActor()」。
     // 具体功能：「EvidenceSubmissionServiceTest.deletesOnlyPendingEvidenceOwnedByCurrentActor()」：复现“核对完整业务行为（场景方法「deletesOnlyPendingEvidenceOwnedByCurrentActor」）”场景：驱动 「caseRepository.findByIdForUpdate」、「evidenceRepository.findById」、「service.deletePending」，再用 「assertThat」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「EVIDENCE_PENDING」、「user-local」。
     // 上游调用：「EvidenceSubmissionServiceTest.deletesOnlyPendingEvidenceOwnedByCurrentActor()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
@@ -259,6 +352,47 @@ class EvidenceSubmissionServiceTest {
                                         new AuthenticatedActor("user-local", ActorRole.USER)))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("submitted evidence cannot be deleted");
+    }
+
+    private void assertConflict(
+            FulfillmentCaseEntity dispute,
+            EvidenceSubmissionCommand command,
+            AuthenticatedActor actor) {
+        assertThatThrownBy(
+                        () ->
+                                service.submit(
+                                        dispute.getId(),
+                                        command,
+                                        actor,
+                                        "submit-replay",
+                                        "TRACE_REPLAY"))
+                .isInstanceOf(IdempotencyConflictException.class)
+                .hasMessage(
+                        "evidence submission idempotency key is bound to a different request");
+        assertNoReplayWrites();
+    }
+
+    private void assertNoReplayWrites() {
+        verify(batchRepository, never()).save(any());
+        verifyNoInteractions(
+                evidenceRepository,
+                roomMessageService,
+                auditRecorder,
+                roomEpochRepository,
+                targetRoomIngress,
+                caseCommandService);
+    }
+
+    private static EvidenceSubmissionBatchEntity existingBatch(String note) {
+        return EvidenceSubmissionBatchEntity.submitted(
+                "EVIDENCE_BATCH_REPLAY",
+                "CASE_EVIDENCE_ROOM",
+                ActorRole.USER.name(),
+                "user-local",
+                "[\"EVIDENCE_ONE\",\"EVIDENCE_TWO\"]",
+                note,
+                "submit-replay",
+                Instant.parse("2026-07-06T08:00:00Z"));
     }
 
     // 所属模块：【证据与版本化卷宗 / 自动化测试层】「EvidenceSubmissionServiceTest.evidence(String)」。

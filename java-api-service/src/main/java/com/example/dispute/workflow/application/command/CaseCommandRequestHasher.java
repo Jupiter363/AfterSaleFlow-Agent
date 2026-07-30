@@ -5,11 +5,11 @@ import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRef;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import java.util.ArrayList;
 
-final class CaseCommandRequestHasher {
+public final class CaseCommandRequestHasher {
 
     private CaseCommandRequestHasher() {}
 
-    static String hash(
+    public static String hash(
             String tenantSurrogate,
             String caseId,
             String commandId,

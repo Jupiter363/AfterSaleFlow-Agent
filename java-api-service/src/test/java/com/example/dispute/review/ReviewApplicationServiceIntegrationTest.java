@@ -26,6 +26,7 @@ import com.example.dispute.domain.model.CaseStatus;
 import com.example.dispute.domain.model.RiskLevel;
 import com.example.dispute.domain.model.ReviewTaskStatus;
 import com.example.dispute.domain.model.RouteType;
+import com.example.dispute.infrastructure.persistence.entity.ApprovalPolicyDecisionEntity;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.entity.RemedyPlanEntity;
 import com.example.dispute.infrastructure.persistence.repository.ApprovalRecordRepository;
@@ -42,12 +43,16 @@ import com.example.dispute.review.application.ReviewDecisionCommand;
 import com.example.dispute.review.application.ReviewOutcomeProtocolAdapter;
 import com.example.dispute.review.application.ReviewOutcomeReceiptContext;
 import com.example.dispute.review.application.ReviewPacketAuthorizationView;
+import com.example.dispute.review.domain.ApprovalPolicyDecision;
 import com.example.dispute.review.domain.ReviewPacketContentHasher;
+import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
+import jakarta.persistence.EntityManager;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.HexFormat;
+import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 import org.junit.jupiter.api.BeforeEach;
@@ -106,6 +111,7 @@ class ReviewApplicationServiceIntegrationTest {
     @Autowired RemedyPlanRepository plans; @Autowired ReviewTaskRepository tasks;
     @Autowired ReviewPacketRepository packets; @Autowired ApprovalRecordRepository approvals;
     @Autowired ApprovalPolicyDecisionRepository policyDecisions;
+    @Autowired EntityManager entityManager;
     @MockitoBean AuditRecorder audit;
     @MockitoBean PostReviewOrchestrationService postReviewOrchestration;
     @MockitoBean CaseLifecycleNotificationService lifecycleNotifications;
@@ -289,6 +295,179 @@ class ReviewApplicationServiceIntegrationTest {
     }
 
     @Test
+    void pinsAuthorizationAndDecisionToThePolicyAtTaskCreation() {
+        String taskId = service.createForWorkflow("CASE_review", "REMEDY_review");
+        tasks.flush();
+        var task = tasks.findById(taskId).orElseThrow();
+        String pinnedPolicyDecisionId = task.getPolicyDecisionId();
+        assertThat(pinnedPolicyDecisionId).isNotBlank();
+        ApprovalPolicyDecisionEntity late = appendPolicy(
+                "POLICY_REVIEW_LATE", "approval-policy-v2");
+        entityManager.createNativeQuery(
+                        "update approval_policy_decision set created_at = :createdAt where id = :id")
+                .setParameter("createdAt", task.getCreatedAt().plusSeconds(1))
+                .setParameter("id", late.getId())
+                .executeUpdate();
+        entityManager.flush();
+        entityManager.clear();
+
+        assertThat(policyDecisions.findFirstByCaseIdAndPlanIdOrderByCreatedAtDesc(
+                        "CASE_review", "REMEDY_review"))
+                .hasValueSatisfying(policy ->
+                        assertThat(policy.getPolicyVersion()).isEqualTo("approval-policy-v2"));
+
+        AuthenticatedActor reviewer = new AuthenticatedActor(
+                "reviewer-local", ActorRole.PLATFORM_REVIEWER);
+        ReviewPacketAuthorizationView authorization = service.packetAuthorization(
+                taskId, reviewer, 4, 3, 7);
+        var decision = service.decide(
+                taskId,
+                new ReviewDecisionCommand(
+                        ApprovalDecisionType.APPROVE,
+                        "approve the frozen policy",
+                        null,
+                        "policy-pin-key"),
+                reviewer);
+
+        assertThat(authorization.policyVersion()).isEqualTo("approval-policy-v1");
+        assertThat(tasks.findById(taskId).orElseThrow().getPolicyDecisionId())
+                .isEqualTo(pinnedPolicyDecisionId);
+        assertThat(approvals.findById(decision.approvalRecordId()))
+                .hasValueSatisfying(record ->
+                        assertThat(record.getPolicyVersion()).isEqualTo("approval-policy-v1"));
+    }
+
+    @Test
+    void sameTimestampPolicyInsertedAfterTaskDoesNotChangeItsImmutablePin() {
+        String taskId = service.createForWorkflow("CASE_review", "REMEDY_review");
+        tasks.flush();
+        var task = tasks.findById(taskId).orElseThrow();
+        String pinnedPolicyDecisionId = task.getPolicyDecisionId();
+        String pinnedPolicyVersion = policyDecisions
+                .findByIdAndCaseIdAndPlanId(
+                        pinnedPolicyDecisionId, "CASE_review", "REMEDY_review")
+                .orElseThrow()
+                .getPolicyVersion();
+        ApprovalPolicyDecisionEntity tie = appendPolicy(
+                "ZZZ_POLICY_REVIEW_TIE", "approval-policy-tie");
+        entityManager.createNativeQuery(
+                        "update approval_policy_decision set created_at = :createdAt "
+                                + "where id = :policyId")
+                .setParameter("createdAt", task.getCreatedAt())
+                .setParameter("policyId", tie.getId())
+                .executeUpdate();
+        entityManager.flush();
+        entityManager.clear();
+
+        AuthenticatedActor reviewer = new AuthenticatedActor(
+                "reviewer-local", ActorRole.PLATFORM_REVIEWER);
+        ReviewPacketAuthorizationView authorization = service.packetAuthorization(
+                taskId, reviewer, 4, 3, 7);
+        var decision = service.decide(
+                taskId,
+                new ReviewDecisionCommand(
+                        ApprovalDecisionType.APPROVE,
+                        "approve the immutable policy pin",
+                        null,
+                        "same-timestamp-policy-pin"),
+                reviewer);
+
+        assertThat(tasks.findById(taskId).orElseThrow().getPolicyDecisionId())
+                .isEqualTo(pinnedPolicyDecisionId)
+                .isNotEqualTo(tie.getId());
+        assertThat(authorization.policyVersion()).isEqualTo(pinnedPolicyVersion);
+        assertThat(approvals.findById(decision.approvalRecordId()).orElseThrow().getPolicyVersion())
+                .isEqualTo(pinnedPolicyVersion);
+    }
+
+    @Test
+    void databaseRejectsAReviewTaskPolicyPinChangedAfterAuthorization() {
+        String taskId = service.createForWorkflow("CASE_review", "REMEDY_review");
+        tasks.flush();
+        AuthenticatedActor reviewer = new AuthenticatedActor(
+                "reviewer-local", ActorRole.PLATFORM_REVIEWER);
+        service.packetAuthorization(taskId, reviewer, 4, 3, 7);
+        ApprovalPolicyDecisionEntity replacement = appendPolicy(
+                "POLICY_REVIEW_PIN_DRIFT", "approval-policy-drift");
+        assertThatThrownBy(() -> entityManager.createNativeQuery(
+                            "update review_task set policy_decision_id = :policyId where id = :taskId")
+                    .setParameter("policyId", replacement.getId())
+                    .setParameter("taskId", taskId)
+                    .executeUpdate())
+                .isInstanceOf(RuntimeException.class)
+                .hasStackTraceContaining("policy_decision_id is immutable");
+    }
+
+    @Test
+    void terminalTargetDecisionReplayDoesNotFallBackToLegacyOrchestration() throws Exception {
+        String taskId = service.createForWorkflow("CASE_review", "REMEDY_review");
+        AuthenticatedActor reviewer = new AuthenticatedActor(
+                "reviewer-local", ActorRole.PLATFORM_REVIEWER);
+        ReviewDecisionCommand command = new ReviewDecisionCommand(
+                ApprovalDecisionType.APPROVE, "durable target replay", null,
+                "terminal-target-replay");
+        var committed = service.decide(taskId, command, reviewer);
+        entityManager.flush();
+        entityManager.clear();
+
+        installExactTargetDecisionChain(taskId, committed.approvalRecordId());
+        Number upgraded = (Number) entityManager.createNativeQuery(
+                        "select backfill_exact_legacy_target_review_decisions(:commandId)")
+                .setParameter("commandId", "review-decision:terminal-target-replay")
+                .getSingleResult();
+        assertThat(upgraded.longValue()).isEqualTo(1);
+        String migratedDecision = (String) entityManager.createNativeQuery(
+                        "select decision_json::text from review_task where id = :taskId")
+                .setParameter("taskId", taskId)
+                .getSingleResult();
+        assertThat(new ObjectMapper().readTree(migratedDecision)
+                        .path("authority_source").asText())
+                .isEqualTo("TARGET_REVIEW");
+        assertThat(new ObjectMapper().readTree(migratedDecision)
+                        .path("policy_decision_id").asText())
+                .isEqualTo(tasks.findById(taskId).orElseThrow().getPolicyDecisionId());
+        entityManager.clear();
+
+        var replay = service.decide(taskId, command, reviewer);
+
+        assertThat(replay.approvalRecordId()).isEqualTo(committed.approvalRecordId());
+        verify(postReviewOrchestration, times(1))
+                .orchestrate(committed.approvalRecordId(), reviewer, command.idempotencyKey());
+    }
+
+    @Test
+    void replayRejectsSamePolicyVersionWithAnotherPolicyDecisionIdentity() {
+        String taskId = service.createForWorkflow("CASE_review", "REMEDY_review");
+        AuthenticatedActor reviewer = new AuthenticatedActor(
+                "reviewer-local", ActorRole.PLATFORM_REVIEWER);
+        ReviewDecisionCommand command = new ReviewDecisionCommand(
+                ApprovalDecisionType.APPROVE, "exact policy identity", null,
+                "exact-policy-identity");
+        service.decide(taskId, command, reviewer);
+        var task = tasks.findById(taskId).orElseThrow();
+        String pinnedVersion = policyDecisions.findById(task.getPolicyDecisionId())
+                .orElseThrow()
+                .getPolicyVersion();
+        ApprovalPolicyDecisionEntity sameVersion = appendPolicy(
+                "POLICY_REVIEW_SAME_VERSION_OTHER_ID", pinnedVersion);
+        entityManager.createNativeQuery(
+                        "update review_task set decision_json = jsonb_set(decision_json, "
+                                + "'{policy_decision_id}', to_jsonb(cast(:policyId as text)), true) "
+                                + "where id = :taskId")
+                .setParameter("policyId", sameVersion.getId())
+                .setParameter("taskId", taskId)
+                .executeUpdate();
+        entityManager.flush();
+        entityManager.clear();
+
+        assertThatThrownBy(() -> service.decide(taskId, command, reviewer))
+                .isInstanceOf(IdempotencyConflictException.class)
+                .hasMessageContaining("exact task-pinned approval policy");
+        verify(postReviewOrchestration, times(1))
+                .orchestrate(anyString(), eq(reviewer), eq(command.idempotencyKey()));
+    }
+
+    @Test
     void trustedServerContextProducesActorAndPacketBoundTypedReceipt() {
         String taskId=service.createForWorkflow("CASE_review","REMEDY_review");
         AuthenticatedActor reviewer=new AuthenticatedActor("reviewer-local",ActorRole.PLATFORM_REVIEWER);
@@ -469,6 +648,188 @@ class ReviewApplicationServiceIntegrationTest {
         request.put("task_status",authorization.taskStatus());
         request.put("outcome_context",context.canonicalRequestBinding());
         return ReviewPacketContentHasher.hash(new ObjectMapper(),request);
+    }
+
+    private void installExactTargetDecisionChain(String taskId, String approvalId) throws Exception {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        var task = tasks.findById(taskId).orElseThrow();
+        var packet = packets.findById(task.getPacketId()).orElseThrow();
+        var approval = approvals.findById(approvalId).orElseThrow();
+        var durableDecision = mapper.readTree(task.getDecisionJson());
+        String commandId = "review-decision:terminal-target-replay";
+        String eventId = "EVENT_TERMINAL_TARGET_REPLAY";
+        long eventSequence = 9001;
+        long roomEpoch = 7;
+        long fencingToken = 11;
+        long processRevision = 3;
+
+        var event = mapper.createObjectNode();
+        event.put("schema_version", "target-e2e-review-human-decision-event.v1");
+        event.put("approval_record_id", approval.getId());
+        event.put("approval_hash", approval.getApprovalHash());
+        event.set("approved_plan", mapper.readTree(approval.getApprovedPlanJson()));
+        event.set("original_plan", mapper.readTree(approval.getOriginalPlanJson()));
+        event.put("case_id", task.getCaseId());
+        event.put("command_id", commandId);
+        event.put("decision", approval.getDecisionType().name());
+        event.put("decision_reason", approval.getDecisionReason());
+        event.put("fencing_token", fencingToken);
+        event.put("packet_content_hash", durableDecision.path("packet_content_hash").asText());
+        event.put("packet_id", packet.getId());
+        event.put("packet_version", packet.getPacketVersion());
+        event.put("case_process_revision", processRevision);
+        event.put("policy_version", approval.getPolicyVersion());
+        event.put("recorded_at", approval.getCreatedAt().toInstant().toString());
+        event.put("request_hash", durableDecision.path("request_hash").asText());
+        event.put("review_task_id", task.getId());
+        event.put("reviewer_id", approval.getReviewerId());
+        event.put("room_epoch", roomEpoch);
+        event.put("frozen_action_snapshot_hash", packet.getActionHash());
+        event.put("approved_action_snapshot_hash", approval.getActionSnapshotHash());
+        String eventJson = ContractJson.canonicalString(event);
+        String eventHash = ContractJson.sha256Hex(event);
+
+        entityManager.createNativeQuery("""
+                        insert into case_timeline_event (
+                            id, case_id, event_type, event_time, source_refs_json, event_json,
+                            created_at, created_by, sequence_no, audience_json, event_key
+                        ) values (
+                            :id, :caseId, 'TARGET_REVIEW_DECISION_COMMITTED', current_timestamp,
+                            '[]'::jsonb, cast(:eventJson as jsonb), current_timestamp, :reviewer,
+                            :sequence, '[]'::jsonb, :eventKey
+                        )
+                        """)
+                .setParameter("id", eventId)
+                .setParameter("caseId", task.getCaseId())
+                .setParameter("eventJson", eventJson)
+                .setParameter("reviewer", approval.getReviewerId())
+                .setParameter("sequence", eventSequence)
+                .setParameter("eventKey", "target-review-decision:" + approval.getId())
+                .executeUpdate();
+
+        var outcome = mapper.createObjectNode();
+        outcome.put("schema_version", "outcome-reviewer-decision-receipt.v1");
+        outcome.put("workflow_id", "review:terminal-target-replay");
+        outcome.put("case_id", task.getCaseId());
+        outcome.put("receipt_id", approval.getId());
+        outcome.put("receipt_hash", eventHash);
+        outcome.put("review_task_id", task.getId());
+        outcome.put("reviewer_authority_ref", "reviewer-authority:test");
+        outcome.put("frozen_review_packet_ref", packet.getId());
+        outcome.put("frozen_review_packet_hash", durableDecision.path("packet_content_hash").asText());
+        outcome.put("action_snapshot_ref", "review-packet:" + packet.getId() + ":action");
+        outcome.put("action_snapshot_hash", packet.getActionHash());
+        outcome.put("approved_action_snapshot_ref", "approval:" + approval.getId() + ":action");
+        outcome.put("approved_action_snapshot_hash", approval.getActionSnapshotHash());
+        outcome.put("decision_record_ref", approval.getId());
+        outcome.put("decision_record_hash", eventHash);
+        outcome.put("reason_ref", "review-decision:" + approval.getId() + ":reason");
+        outcome.put("reason_hash", "4".repeat(64));
+        outcome.put("operation_key_hash", "5".repeat(64));
+        outcome.put("required_operation_set_ref", "review-packet:" + packet.getId() + ":operations");
+        outcome.put("required_operation_set_hash", "6".repeat(64));
+        outcome.put("required_operation_count", 1);
+        outcome.put("decision", approval.getDecisionType().name());
+        outcome.put("execution_authorized", true);
+        outcome.put("request_hash", durableDecision.path("request_hash").asText());
+        outcome.put("idempotency_key_hash", sha256("terminal-target-replay"));
+        outcome.put("policy_version", approval.getPolicyVersion());
+        outcome.put("epoch", roomEpoch);
+        outcome.put("source_revision", 2);
+        outcome.put("revision", 4);
+        outcome.put("fence", fencingToken);
+        outcome.put("committed_event_sequence", eventSequence);
+        outcome.put("committed_at", approval.getCreatedAt().toInstant().toString());
+        outcome.put("synthetic_only", false);
+        var humanDecision = mapper.createObjectNode();
+        humanDecision.put("schema_version", "target-e2e-review-human-decision-receipt.v1");
+        humanDecision.put("decision_authority", "JAVA_HUMAN");
+        humanDecision.put("decision_record_id", approval.getId());
+        humanDecision.put("decision_record_hash", eventHash);
+        humanDecision.set("outcome_receipt", outcome);
+        String handoffId = "HANDOFF_TERMINAL_TARGET_REPLAY";
+        var handoff = mapper.createObjectNode();
+        handoff.put("schema_version", "target-e2e-review-outcome-handoff.v1");
+        handoff.put("handoff_id", handoffId);
+        handoff.put("activation_id", "p9act.v1." + "1".repeat(32));
+        handoff.put("activation_manifest_hash", "2".repeat(64));
+        handoff.put("tenant_surrogate", "TENANT_REVIEW");
+        handoff.put("case_id", task.getCaseId());
+        handoff.put("command_id", commandId);
+        handoff.put("room_epoch", roomEpoch);
+        handoff.put("room_fencing_token", fencingToken);
+        handoff.set("human_decision", humanDecision);
+        handoff.put("handoff_hash", ContractJson.sha256Hex(handoff));
+
+        entityManager.createNativeQuery("""
+                        insert into notification_outbox (
+                            id, case_id, business_event_key, event_type, event_payload_json,
+                            outbox_status, attempt_count, available_at, created_at, updated_at
+                        ) values (
+                            :id, :caseId, :eventKey, 'TARGET_REVIEW_OUTCOME_HANDOFF',
+                            cast(:payload as jsonb), 'PENDING', 0, current_timestamp,
+                            current_timestamp, current_timestamp
+                        )
+                        """)
+                .setParameter("id", handoffId)
+                .setParameter("caseId", task.getCaseId())
+                .setParameter("eventKey", "target-review-handoff:terminal-target-replay")
+                .setParameter("payload", ContractJson.canonicalString(handoff))
+                .executeUpdate();
+
+        entityManager.createNativeQuery("""
+                        insert into case_command (
+                            id, command_id, tenant_surrogate, case_id, case_command_sequence,
+                            command_type, room_type, room_epoch, actor_id, actor_role,
+                            actor_scopes_json, payload_schema_version, payload_uri,
+                            payload_sha256, payload_size_bytes, expected_process_revision,
+                            occurred_at, deadline_at, traceparent, request_hash, command_status
+                        ) values (
+                            'COMMAND_TERMINAL_TARGET_REPLAY', :commandId, 'TENANT_REVIEW', :caseId,
+                            (select coalesce(max(existing.case_command_sequence), 0) + 1
+                               from case_command existing where existing.case_id = :caseId),
+                            'REVIEW_DECISION', 'REVIEW', :roomEpoch, :reviewer,
+                            'PLATFORM_REVIEWER', '["review:decide"]'::jsonb,
+                            'target-e2e-review-human-decision-event.v1', :payloadUri,
+                            :payloadHash, :payloadSize, :processRevision, current_timestamp,
+                            current_timestamp + interval '1 hour', :traceparent,
+                            :requestHash, 'PENDING_ORCHESTRATION'
+                        )
+                        """)
+                .setParameter("commandId", commandId)
+                .setParameter("caseId", task.getCaseId())
+                .setParameter("roomEpoch", roomEpoch)
+                .setParameter("reviewer", approval.getReviewerId())
+                .setParameter("payloadUri", "urn:target-e2e:review-decision:" + eventId)
+                .setParameter("payloadHash", eventHash)
+                .setParameter("payloadSize", eventJson.getBytes(StandardCharsets.UTF_8).length)
+                .setParameter("processRevision", processRevision)
+                .setParameter("traceparent", "00-" + "7".repeat(32) + "-" + "8".repeat(16) + "-01")
+                .setParameter("requestHash", "9".repeat(64))
+                .executeUpdate();
+    }
+
+    private ApprovalPolicyDecisionEntity appendPolicy(String id, String policyVersion) {
+        var policy = new ApprovalPolicyDecision(
+                policyVersion,
+                ActorRole.PLATFORM_REVIEWER.name(),
+                1,
+                "HIGH",
+                List.of("PLATFORM_REVIEW"),
+                List.of("POLICY_REFRESH"),
+                List.of("REFUND"),
+                List.of(),
+                false);
+        return policyDecisions.saveAndFlush(
+                ApprovalPolicyDecisionEntity.record(
+                        id,
+                        "CASE_review",
+                        "REMEDY_review",
+                        RiskLevel.HIGH,
+                        policy,
+                        "[\"REFUND\"]",
+                        "[]",
+                        "policy-refresh"));
     }
 
     private static String sha256(String value) {

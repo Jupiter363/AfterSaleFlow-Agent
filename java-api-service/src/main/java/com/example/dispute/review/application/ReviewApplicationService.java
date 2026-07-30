@@ -94,6 +94,9 @@ import org.springframework.transaction.support.TransactionTemplate;
 @Service
 public class ReviewApplicationService {
 
+    static final String LEGACY_DECISION_AUTHORITY = "LEGACY_NONE";
+    static final String TRUSTED_DECISION_AUTHORITY = "SERVER_TRUSTED_SYNTHETIC";
+    static final String TARGET_DECISION_AUTHORITY = "TARGET_REVIEW";
     private static final AuthenticatedActor SYSTEM =
             new AuthenticatedActor("temporal-worker", ActorRole.SYSTEM);
     private final FulfillmentCaseRepository caseRepository;
@@ -222,7 +225,7 @@ public class ReviewApplicationService {
         boolean insufficient=hearingRepository.findByCaseId(caseId).map(state->state.isManualRequired()).orElse(false);
         ApprovalPolicyDecision policy=policyEngine.evaluate(new ApprovalPolicyInput(
                 plan.getRiskLevel(),plan.getTotalAmount(),actionTypes,disputeCase.getDisputeType(),insufficient));
-        policyDecisionRepository.save(
+        ApprovalPolicyDecisionEntity policyDecision=policyDecisionRepository.save(
                 ApprovalPolicyDecisionEntity.record(
                         "POLICY_" + id(),
                         caseId,
@@ -331,7 +334,8 @@ public class ReviewApplicationService {
         ReviewTaskEntity task=taskRepository.save(ReviewTaskEntity.pendingAssigned(
                 "REVIEW_"+id(),caseId,planId,packet.getId(),policy.priority(),policy.requiredRole(),
                 PlatformReviewerAuthorization.SYSTEM_REVIEWER_ID,
-                nextBusinessDay(frozenAt,reviewDueBusinessDays),SYSTEM.actorId()));
+                nextBusinessDay(frozenAt,reviewDueBusinessDays),SYSTEM.actorId(),
+                policyDecision.getId()));
         disputeCase.waitForHumanReview(SYSTEM.actorId()); caseRepository.save(disputeCase);
         auditRecorder.record(SYSTEM,"REVIEW_TASK_CREATED","REVIEW_TASK",task.getId(),caseId,Map.of(),
                 Map.of("priority",policy.priority(),"required_approvals",policy.requiredApprovals(),"risk_flags",policy.riskFlags()));
@@ -409,7 +413,7 @@ public class ReviewApplicationService {
                 task.getAssignedReviewerId(),reviewDeadline(task,p));
     }
 
-    @Transactional(readOnly=true)
+    @Transactional
     public ReviewPacketAuthorizationView packetAuthorization(
             String taskId,
             AuthenticatedActor actor,
@@ -417,7 +421,8 @@ public class ReviewApplicationService {
             long processRevision,
             long fencingToken) {
         PlatformReviewerAuthorization.requireDecisionAccess(actor);
-        ReviewTaskEntity task=taskRepository.findById(taskId).orElseThrow(()->notFound("review task",taskId));
+        ReviewTaskEntity task=taskRepository.findByIdForUpdate(taskId)
+                .orElseThrow(()->notFound("review task",taskId));
         if(!Objects.equals(task.getAssignedReviewerId(),actor.actorId()))
             throw new ForbiddenException("review packet capability belongs to the assigned reviewer");
         if(!isOpen(task.getTaskStatus()))
@@ -428,10 +433,7 @@ public class ReviewApplicationService {
             throw new BusinessException(ErrorCode.CASE_STATUS_INVALID,"review packet is not frozen",Map.of("packet_id",packet.getId()));
         if(OffsetDateTime.now(ZoneOffset.UTC).isAfter(reviewDeadline(task,packet)))
             throw new BusinessException(ErrorCode.CASE_STATUS_INVALID,"review packet authorization has expired",Map.of("task_id",taskId));
-        String policyVersion=policyDecisionRepository
-                .findFirstByCaseIdAndPlanIdOrderByCreatedAtDesc(task.getCaseId(),task.getPlanId())
-                .orElseThrow(()->new BusinessException(ErrorCode.CASE_STATUS_INVALID,
-                        "approval policy decision is required",Map.of("plan_id",task.getPlanId())))
+        String policyVersion=pinnedPolicyDecision(task,targetEpoch(task.getCaseId())==null)
                 .getPolicyVersion();
         Map<String,String> refs=Map.of(
                 "case_summary",packet.getId()+":case-summary",
@@ -456,12 +458,22 @@ public class ReviewApplicationService {
     public ReviewDecisionView decide(String taskId,ReviewDecisionCommand command,AuthenticatedActor actor){
         PlatformReviewerAuthorization.requireDecisionAccess(actor);
         ReviewTaskEntity task = taskRepository.findById(taskId).orElseThrow(()->notFound("review task",taskId));
+        String durableAuthority=durableDecisionAuthority(task.getDecisionJson());
+        if(TARGET_DECISION_AUTHORITY.equals(durableAuthority)) {
+            return transactions.execute(ignored->persistDecision(
+                    taskId,command,actor,null,TARGET_DECISION_AUTHORITY));
+        }
+        if(TRUSTED_DECISION_AUTHORITY.equals(durableAuthority)) {
+            throw new IdempotencyConflictException(
+                    "a trusted Outcome decision cannot be replayed through the legacy endpoint");
+        }
         if (targetEpoch(task.getCaseId()) != null) {
             return transactions.execute(ignored -> decideTarget(taskId, command, actor));
         }
         // 审批事实先在事务内完成版本、哈希和幂等校验并提交。
         // 工具执行与结案属于事务后编排，不能在持有 ReviewTask 行锁时调用外部系统。
-        ReviewDecisionView result=transactions.execute(ignored->persistDecision(taskId,command,actor,null));
+        ReviewDecisionView result=transactions.execute(ignored->persistDecision(
+                taskId,command,actor,null,LEGACY_DECISION_AUTHORITY));
         if (result.executionAllowed()) {
             postReviewOrchestration.orchestrate(
                     result.approvalRecordId(), actor, command.idempotencyKey());
@@ -476,7 +488,8 @@ public class ReviewApplicationService {
         ReviewTaskEntity initialTask = taskRepository.findByIdForUpdate(taskId)
                 .orElseThrow(() -> notFound("review task", taskId));
         TargetReviewRoute target = targetRoute(initialTask.getCaseId());
-        ReviewDecisionView decision = persistDecision(taskId, command, actor, null);
+        ReviewDecisionView decision = persistDecision(
+                taskId, command, actor, null, TARGET_DECISION_AUTHORITY);
         ReviewTaskEntity task = taskRepository.findByIdForUpdate(taskId)
                 .orElseThrow(() -> notFound("review task", taskId));
         ReviewPacketEntity packet = packetRepository.findById(task.getPacketId())
@@ -594,6 +607,7 @@ public class ReviewApplicationService {
         value.put("kernel_revision", execution.kernelRevision());
         value.put("decision_source_revision", execution.decisionSourceRevision());
         value.put("decision_revision", execution.decisionRevision());
+        value.put("policy_decision_id", task.getPolicyDecisionId());
         value.put("policy_version", record.getPolicyVersion());
         value.put("recorded_at", record.getCreatedAt().toInstant().toString());
         value.put("request_hash", read(task.getDecisionJson()).path("request_hash").asText());
@@ -677,7 +691,8 @@ public class ReviewApplicationService {
         PlatformReviewerAuthorization.requireDecisionAccess(actor);
         Objects.requireNonNull(outcomeContext,"outcomeContext");
         return transactions.execute(
-                ignored->persistDecision(taskId,command,actor,outcomeContext));
+                ignored->persistDecision(
+                        taskId,command,actor,outcomeContext,TRUSTED_DECISION_AUTHORITY));
     }
 
     // 所属模块：【平台人工终审 / 应用编排层】「ReviewApplicationService.persistDecision(String,ReviewDecisionCommand,AuthenticatedActor)」。
@@ -690,7 +705,8 @@ public class ReviewApplicationService {
             String taskId,
             ReviewDecisionCommand command,
             AuthenticatedActor actor,
-            ReviewOutcomeReceiptContext outcomeContext){
+            ReviewOutcomeReceiptContext outcomeContext,
+            String expectedAuthoritySource){
         ReviewTaskEntity task=taskRepository.findByIdForUpdate(taskId).orElseThrow(()->notFound("review task",taskId));
         ReviewPacketEntity packet =
                 packetRepository
@@ -699,27 +715,27 @@ public class ReviewApplicationService {
         if (!packet.isFrozen() || !"FROZEN".equals(packet.getPacketStatus())) {
             throw new BusinessException(ErrorCode.CASE_STATUS_INVALID,"review packet is not frozen",Map.of("packet_id",packet.getId()));
         }
-        var policyDecision =
-                policyDecisionRepository
-                        .findFirstByCaseIdAndPlanIdOrderByCreatedAtDesc(
-                                task.getCaseId(), task.getPlanId())
-                        .orElseThrow(
-                                () ->
-                                        new BusinessException(
-                                                ErrorCode.CASE_STATUS_INVALID,
-                                                "approval policy decision is required",
-                                                Map.of("plan_id", task.getPlanId())));
+        boolean allowLegacyLazyPin=LEGACY_DECISION_AUTHORITY.equals(expectedAuthoritySource);
+        var policyDecision=pinnedPolicyDecision(task,allowLegacyLazyPin);
         String hash=sha256(taskId+":"+command.idempotencyKey());
         var existing=approvalRepository.findByApprovalHash(hash);
         JsonNode storedDecision=existing.isPresent()?read(task.getDecisionJson()):objectMapper.createObjectNode();
         if(existing.isPresent()
-                && outcomeContext==null
-                && "SERVER_TRUSTED_SYNTHETIC".equals(
-                        storedDecision.path("authority_source").asText()))
+                && !expectedAuthoritySource.equals(
+                        durableDecisionAuthority(storedDecision))) {
             throw new IdempotencyConflictException(
-                    "a trusted Outcome decision cannot be replayed through the legacy endpoint");
+                    "durable review decision authority source drifted");
+        }
         String packetContentHash=packetContentHash(packet);
+        String effectivePolicyDecisionId=storedDecision.path("policy_decision_id").asText();
         String effectivePolicyVersion=storedDecision.path("policy_version").asText(policyDecision.getPolicyVersion());
+        if((existing.isPresent()
+                    && !policyDecision.getId().equals(effectivePolicyDecisionId))
+                || !policyDecision.getPolicyVersion().equals(effectivePolicyVersion)
+                || (existing.isPresent()
+                    && !policyDecision.getPolicyVersion().equals(existing.get().getPolicyVersion())))
+            throw new IdempotencyConflictException(
+                    "durable review decision does not bind the exact task-pinned approval policy");
         String submittedTaskStatus=storedDecision.path("submitted_task_status").asText(task.getTaskStatus().name());
         ReviewPacketAuthorizationView trustedAuthorization=
                 outcomeContext==null?null:outcomeContext.authorization();
@@ -737,7 +753,8 @@ public class ReviewApplicationService {
                 outcomeEpoch,fencingToken,processRevision);
         if(existing.isPresent()) {
             assertSameIdempotentRequest(
-                    existing.get(),task,command,actor,requestHash,outcomeContext!=null);
+                    existing.get(),task,command,actor,requestHash,
+                    !LEGACY_DECISION_AUTHORITY.equals(expectedAuthoritySource));
             return decisionView(existing.get(),task,packetContentHash,packet.getActionHash(),requestHash,
                     outcomeEpoch,fencingToken,processRevision,outcomeContext!=null);
         }
@@ -781,14 +798,14 @@ public class ReviewApplicationService {
         Map<String,Object> decisionFact=new TreeMap<>();
         decisionFact.put("approved_action_hash",actionSnapshotHash);
         decisionFact.put("approved_plan",approved);
-        decisionFact.put("authority_source",
-                outcomeContext==null?"LEGACY_NONE":"SERVER_TRUSTED_SYNTHETIC");
+        decisionFact.put("authority_source",expectedAuthoritySource);
         decisionFact.put("confirmed",true);
         decisionFact.put("decision",command.decision().name());
         decisionFact.put("fencing_token",fencingToken);
         decisionFact.put("original_plan",original);
         decisionFact.put("outcome_epoch",outcomeEpoch);
         decisionFact.put("packet_content_hash",packetContentHash);
+        decisionFact.put("policy_decision_id",policyDecision.getId());
         decisionFact.put("policy_version",policyDecision.getPolicyVersion());
         decisionFact.put("process_revision",processRevision);
         decisionFact.put("reason",command.reason());
@@ -826,6 +843,58 @@ public class ReviewApplicationService {
         }
         return decisionView(record,task,packetContentHash,packet.getActionHash(),requestHash,
                 outcomeEpoch,fencingToken,processRevision,outcomeContext!=null);
+    }
+
+    private ApprovalPolicyDecisionEntity pinnedPolicyDecision(
+            ReviewTaskEntity task,
+            boolean allowLegacyLazyPin) {
+        String policyDecisionId=task.getPolicyDecisionId();
+        if(policyDecisionId==null||policyDecisionId.isBlank()) {
+            if(!allowLegacyLazyPin) {
+                throw new BusinessException(
+                        ErrorCode.CASE_STATUS_INVALID,
+                        "target review task has no pinned approval policy decision",
+                        Map.of("task_id",task.getId(),"plan_id",task.getPlanId()));
+            }
+            ApprovalPolicyDecisionEntity historical=policyDecisionRepository
+                    .findFirstByCaseIdAndPlanIdAndCreatedAtLessThanEqualOrderByCreatedAtDescIdDesc(
+                            task.getCaseId(),task.getPlanId(),task.getCreatedAt())
+                    .orElseThrow(()->new BusinessException(
+                            ErrorCode.CASE_STATUS_INVALID,
+                            "legacy review task has no deterministic approval policy decision",
+                            Map.of("task_id",task.getId(),"plan_id",task.getPlanId())));
+            task.pinPolicyDecision(historical.getId());
+            taskRepository.save(task);
+            return historical;
+        }
+        return policyDecisionRepository
+                .findByIdAndCaseIdAndPlanId(
+                        policyDecisionId,task.getCaseId(),task.getPlanId())
+                .orElseThrow(()->new BusinessException(
+                        ErrorCode.CASE_STATUS_INVALID,
+                        "pinned approval policy decision does not bind the review task",
+                        Map.of("task_id",task.getId(),"plan_id",task.getPlanId())));
+    }
+
+    static String durableDecisionAuthority(String decisionJson) {
+        if(decisionJson==null||decisionJson.isBlank()||"{}".equals(decisionJson.trim()))
+            return LEGACY_DECISION_AUTHORITY;
+        try {
+            JsonNode decision=new ObjectMapper().readTree(decisionJson);
+            return durableDecisionAuthority(decision);
+        } catch (JsonProcessingException failure) {
+            throw new IdempotencyConflictException("durable review decision authority is invalid");
+        }
+    }
+
+    private static String durableDecisionAuthority(JsonNode decision) {
+        String source=decision.path("authority_source").asText(LEGACY_DECISION_AUTHORITY);
+        if(!LEGACY_DECISION_AUTHORITY.equals(source)
+                && !TRUSTED_DECISION_AUTHORITY.equals(source)
+                && !TARGET_DECISION_AUTHORITY.equals(source)) {
+            throw new IdempotencyConflictException("durable review decision authority is invalid");
+        }
+        return source;
     }
 
     // 所属模块：【平台人工终审 / 应用编排层】「ReviewApplicationService.decisionView(ApprovalRecordEntity,ReviewTaskEntity)」。

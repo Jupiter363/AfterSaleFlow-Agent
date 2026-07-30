@@ -2,8 +2,6 @@ package com.example.dispute.workflow.targete2e.temporal.intake;
 
 import com.example.dispute.workflow.contract.v1.CaseCommandRef;
 import com.example.dispute.workflow.contract.v1.ContractJson;
-import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
-import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
 import com.example.dispute.workflow.contract.v1.ContractTypes.CommandType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
@@ -16,6 +14,8 @@ import com.example.dispute.workflow.temporal.room.intake.IntakeOperationKeys;
 import com.example.dispute.workflow.temporal.room.intake.IntakeParty;
 import com.example.dispute.workflow.temporal.room.intake.IntakeTargetAgentRunContext;
 import com.example.dispute.workflow.temporal.room.intake.IntakeWorkflowCommand;
+import com.example.dispute.workflow.targete2e.temporal.intake.TargetIntakePartyScopeSource.PartyBinding;
+import com.example.dispute.workflow.targete2e.temporal.intake.TargetIntakePartyScopeSource.ResolvedPartyScopes;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.temporal.failure.ApplicationFailure;
 import java.util.Objects;
@@ -30,19 +30,24 @@ public final class TargetIntakeCommandBridgeActivity implements TargetIntakeComm
 
   private final TargetIntakeCommandMaterialStore materialStore;
   private final ObjectMapper objectMapper;
+  private final TargetIntakePartyScopeSource partyScopeSource;
   private final TargetIntakeBranchContextSource branchContextSource;
 
   public TargetIntakeCommandBridgeActivity(
-      TargetIntakeCommandMaterialStore materialStore, ObjectMapper objectMapper) {
-    this(materialStore, objectMapper, null);
+      TargetIntakeCommandMaterialStore materialStore,
+      ObjectMapper objectMapper,
+      TargetIntakePartyScopeSource partyScopeSource) {
+    this(materialStore, objectMapper, partyScopeSource, null);
   }
 
   public TargetIntakeCommandBridgeActivity(
       TargetIntakeCommandMaterialStore materialStore,
       ObjectMapper objectMapper,
+      TargetIntakePartyScopeSource partyScopeSource,
       TargetIntakeBranchContextSource branchContextSource) {
     this.materialStore = Objects.requireNonNull(materialStore, "materialStore");
     this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper");
+    this.partyScopeSource = Objects.requireNonNull(partyScopeSource, "partyScopeSource");
     this.branchContextSource = branchContextSource;
   }
 
@@ -52,8 +57,9 @@ public final class TargetIntakeCommandBridgeActivity implements TargetIntakeComm
       Objects.requireNonNull(request, "request");
       CaseCommandRef command = request.command();
       require(command.roomType() == RoomType.INTAKE, "command is not routed to Intake");
+      ResolvedPartyScopes partyScopes = resolvePartyScopes(command, request.roomFencingToken());
       if (command.commandType() != CommandType.INTAKE_MESSAGE) {
-        return bindBranch(command, request);
+        return bindBranch(command, request, partyScopes);
       }
 
       MaterialSnapshot material =
@@ -66,7 +72,7 @@ public final class TargetIntakeCommandBridgeActivity implements TargetIntakeComm
                       command.roomEpoch(),
                       request.roomFencingToken()))
               .orElseThrow(() -> new IllegalArgumentException("target Intake material is absent"));
-      return bind(command, request, material);
+      return bind(command, request, material, partyScopes);
     } catch (ApplicationFailure failure) {
       throw failure;
     } catch (IllegalArgumentException | IllegalStateException failure) {
@@ -75,19 +81,27 @@ public final class TargetIntakeCommandBridgeActivity implements TargetIntakeComm
     }
   }
 
-  private IntakeWorkflowCommand bindBranch(CaseCommandRef command, BindRequest request) {
+  private IntakeWorkflowCommand bindBranch(
+      CaseCommandRef command, BindRequest request, ResolvedPartyScopes partyScopes) {
     require(
         command.commandType() == CommandType.INTAKE_CONFIRM
             || command.commandType() == CommandType.INTAKE_CANCEL,
         "target Intake bridge command type is unsupported");
-    IntakeParty party = party(command.actorRef().actorRole());
-    String actorScopeHash = TargetIntakeActorScopes.hash(command.caseId(), party);
+    PartyBinding actor =
+        partyScopes.actor(command.actorRef().actorId(), command.actorRef().actorRole());
+    IntakeParty party = actor.party();
+    String actorScopeHash = actor.actorScopeHash();
     TargetIntakeBranchContextSource source =
         Objects.requireNonNull(branchContextSource, "target Intake branch context source is not configured");
     TargetIntakeBranchContextSource.ResolvedBranchContext resolved =
         source.resolve(
             new TargetIntakeBranchContextSource.Request(
-                command, request.roomFencingToken(), actorScopeHash));
+                command,
+                request.roomFencingToken(),
+                party,
+                actorScopeHash,
+                partyScopes.activationId(),
+                partyScopes.activationManifestHash()));
     IntakeCommandType type =
         command.commandType() == CommandType.INTAKE_CONFIRM
             ? IntakeCommandType.INTAKE_CONFIRM
@@ -133,7 +147,10 @@ public final class TargetIntakeCommandBridgeActivity implements TargetIntakeComm
   }
 
   private IntakeWorkflowCommand bind(
-      CaseCommandRef command, BindRequest request, MaterialSnapshot material) {
+      CaseCommandRef command,
+      BindRequest request,
+      MaterialSnapshot material,
+      ResolvedPartyScopes partyScopes) {
     IntakeCommandExecutionContext context = material.context();
     require(
         "intake-command-execution-context.v2".equals(context.schemaVersion()),
@@ -159,6 +176,10 @@ public final class TargetIntakeCommandBridgeActivity implements TargetIntakeComm
     require(target.roomFencingToken() == request.roomFencingToken(), "target context fence");
     require(target.expectedProcessRevision() == command.expectedProcessRevision(), "target process revision");
     require(target.expectedRoomRevision() == request.expectedRoomRevision(), "target room revision");
+    require(partyScopes.activationId().equals(target.activationId()), "party authority activation");
+    require(
+        partyScopes.activationManifestHash().equals(target.activationManifestHash()),
+        "party authority manifest hash");
 
     require(graph.roomType() == RoomType.INTAKE, "graph room type");
     require(graph.commandId().equals(command.commandId()), "graph command id");
@@ -170,18 +191,23 @@ public final class TargetIntakeCommandBridgeActivity implements TargetIntakeComm
     require(graph.eventRef() != null, "graph event reference");
     require(graph.eventRef().uri().equals(command.payloadRef().uri()), "graph payload URI");
     require(graph.eventRef().sha256().equals(command.payloadRef().sha256()), "graph payload hash");
-    IntakeParty party = party(command.actorRef().actorRole());
-    require(graph.actorScope().equals(TargetIntakeActorScopes.scope(command.caseId(), party)), "graph actor scope");
+    PartyBinding actor =
+        partyScopes.actor(command.actorRef().actorId(), command.actorRef().actorRole());
+    IntakeParty party = actor.party();
+    require(
+        graph.actorScope().equals(
+            TargetIntakeActorScopes.scope(
+                command.caseId(), actor.actorId(), actor.actorRole())),
+        "graph actor scope");
     require(graph.actorScope().actorId().equals(command.actorRef().actorId()), "graph actor id");
     require(graph.actorScope().actorRole() == command.actorRef().actorRole(), "graph actor role");
     require(graph.actorScope().capabilities().equals(command.actorRef().actorScopes()), "graph actor scopes");
-    require(graph.actorScope().audience() == audience(command.actorRef().actorRole()), "graph audience");
     require(context.threadId().equals(graph.threadId()), "context thread id");
     require(
         context.deadlineEpochMillis() == graph.deadlineAt().toEpochMilli(), "context deadline");
     require(target.request().agentRunId().equals(graph.logicalRunId()), "AgentRun id");
 
-    String actorScopeHash = TargetIntakeActorScopes.hash(command.caseId(), party);
+    String actorScopeHash = actor.actorScopeHash();
     require(
         actorScopeHash.equals(ContractJson.sha256Hex(objectMapper.valueToTree(graph.actorScope()))),
         "graph actor scope hash");
@@ -204,20 +230,18 @@ public final class TargetIntakeCommandBridgeActivity implements TargetIntakeComm
         context);
   }
 
-  private static IntakeParty party(ActorRole role) {
-    return switch (role) {
-      case USER -> IntakeParty.INITIATOR;
-      case MERCHANT -> IntakeParty.RESPONDENT;
-      default -> throw new IllegalArgumentException("target Intake actor must be USER or MERCHANT");
-    };
-  }
-
-  private static Audience audience(ActorRole role) {
-    return switch (role) {
-      case USER -> Audience.USER;
-      case MERCHANT -> Audience.MERCHANT;
-      default -> throw new IllegalArgumentException("target Intake actor must be USER or MERCHANT");
-    };
+  private ResolvedPartyScopes resolvePartyScopes(
+      CaseCommandRef command, long roomFencingToken) {
+    TargetIntakePartyScopeSource.Request request =
+        new TargetIntakePartyScopeSource.Request(
+            command.tenantSurrogate(),
+            command.caseId(),
+            command.roomEpoch(),
+            roomFencingToken);
+    ResolvedPartyScopes resolved = partyScopeSource.resolve(request);
+    Objects.requireNonNull(resolved, "target Intake party scope source returned null")
+        .requireMatches(request);
+    return resolved;
   }
 
   private static void require(boolean condition, String field) {
