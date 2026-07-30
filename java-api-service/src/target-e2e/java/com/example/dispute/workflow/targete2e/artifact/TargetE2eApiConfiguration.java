@@ -210,14 +210,19 @@ public class TargetE2eApiConfiguration {
   @Bean
   AgentRunV2RetryPreparation targetE2eAgentRunV2RetryPreparation(
       ObjectMapper objectMapper,
-      TargetE2EGraphEnvelopeCodec envelopes,
       TargetIntakeCommandMaterialStore intake,
       TargetEvidenceCommandMaterialStore evidence,
       TargetHearingCommandMaterialStore hearing,
       TargetReviewCommandMaterialStore review,
       TargetE2eRoomObjectIndex objectIndex) {
     return new TargetE2eAgentRunV2RetryPreparation(
-        objectMapper, envelopes, intake, evidence, hearing, review, objectIndex);
+        objectMapper,
+        new TargetE2EGraphEnvelopeCodec(objectMapper),
+        intake,
+        evidence,
+        hearing,
+        review,
+        objectIndex);
   }
 
   @Bean

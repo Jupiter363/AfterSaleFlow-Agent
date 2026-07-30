@@ -42,6 +42,16 @@ class TargetE2eApiConfigurationAssemblyTest {
         .contains("accessSessions, agentSessions, participants");
   }
 
+  @Test
+  void retryPreparationDoesNotDependOnTheAgentWorkerCodecBean() throws IOException {
+    String source = Files.readString(CONFIGURATION_SOURCE);
+    String preparation = method(source, "targetE2eAgentRunV2RetryPreparation");
+
+    assertThat(preparation)
+        .contains("new TargetE2EGraphEnvelopeCodec(objectMapper)")
+        .doesNotContain("TargetE2EGraphEnvelopeCodec envelopes");
+  }
+
   private static String method(String source, String methodName) {
     int start = source.indexOf(methodName);
     int end = source.indexOf("\n  @Bean", start + methodName.length());
