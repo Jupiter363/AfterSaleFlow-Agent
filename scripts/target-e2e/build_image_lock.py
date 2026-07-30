@@ -215,11 +215,11 @@ def _build_application_image(
     repository = f"{repository_prefix.rstrip('/')}/{specification.repository}"
     tag = f"{repository}:{build_id}"
     metadata_path = metadata_directory / f"buildx-{key}-metadata.json"
-    _run(
+    build_command = [docker, "buildx", "build"]
+    if key == "java":
+        build_command.extend(["--build-arg", f"TARGET_E2E_SOURCE_SHA={candidate}"])
+    build_command.extend(
         [
-            docker,
-            "buildx",
-            "build",
             "--file",
             str(specification.dockerfile),
             "--label",
@@ -238,6 +238,7 @@ def _build_application_image(
             str(specification.context),
         ]
     )
+    _run(build_command)
     reference = f"{repository}@{_build_manifest_digest(metadata_path)}"
     _run([docker, "pull", reference], timeout=900)
     inspection = _inspect_image(docker, reference)

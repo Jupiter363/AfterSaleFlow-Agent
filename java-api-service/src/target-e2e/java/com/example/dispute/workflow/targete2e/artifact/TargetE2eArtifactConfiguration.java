@@ -16,6 +16,7 @@ import com.example.dispute.workflow.activity.agent.DurableAgentRunExecutionGatew
 import com.example.dispute.workflow.activity.agent.GraphRegistryBindingPolicy;
 import com.example.dispute.workflow.activity.agent.GraphStreamVisibilityPolicy;
 import com.example.dispute.workflow.config.GraphCommandClientProperties;
+import com.example.dispute.workflow.config.TemporalWorkerProperties;
 import com.example.dispute.workflow.infrastructure.agent.GraphTransportBundle;
 import com.example.dispute.workflow.infrastructure.security.MountedPemGraphEnvelopeKeySet;
 import com.example.dispute.workflow.application.intake.IntakeAgentRunDomainResultCommitter;
@@ -60,6 +61,7 @@ import com.example.dispute.workflow.targete2e.graph.TargetE2EGraphEnvelopeCodec;
 import com.example.dispute.workflow.targete2e.graph.TargetE2EGraphEnvelopeSigner;
 import com.example.dispute.workflow.targete2e.graph.TargetE2EGraphProposalClient;
 import com.example.dispute.workflow.targete2e.TargetE2eActivationLifecycleStore;
+import com.example.dispute.workflow.targete2e.TargetE2eAgentDeploymentBinding;
 import com.example.dispute.workflow.targete2e.lifecycle.TargetE2eActivationLifecycleControl;
 import com.example.dispute.workflow.targete2e.lifecycle.TargetE2eActivationLifecycleControl.DeploymentBinding;
 import com.example.dispute.workflow.targete2e.persistence.JdbcTargetE2eActivationStores;
@@ -71,10 +73,12 @@ import java.util.List;
 import javax.sql.DataSource;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.DependsOn;
 import org.springframework.context.annotation.Profile;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.core.env.Environment;
 import org.springframework.core.env.Profiles;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
 
 /** Target-only AgentRun and proposal Graph assembly, absent from the ordinary Java artifact. */
@@ -88,6 +92,50 @@ public class TargetE2eArtifactConfiguration {
     @Bean
     TargetE2eArtifactMarker targetE2eArtifactMarker() {
         return new TargetE2eArtifactMarker(TargetE2eArtifactMarker.EXPECTED_VALUE);
+    }
+
+    @Bean
+    @DependsOn("flyway")
+    TargetE2eAgentDeploymentBinding targetE2eAgentDeploymentBinding(
+            DataSource dataSource,
+            GraphCommandClientProperties graphProperties,
+            TemporalWorkerProperties workerProperties,
+            Environment environment) {
+        requireTargetMode(graphProperties);
+        String activationId = required(environment, "target.e2e.activation.id");
+        TargetE2eAgentDeploymentBinding configured =
+                new TargetE2eAgentDeploymentBinding(
+                        required(environment, "target.e2e.environment.id"),
+                        requiredPositiveLong(
+                                environment, "target.e2e.environment.generation"),
+                        activationId,
+                        required(environment, "target.e2e.activation.manifest-hash"),
+                        workerProperties.buildId());
+        configured.requireWorkerConfiguration(
+                graphProperties.activationId(), workerProperties.buildId());
+        List<TargetE2eAgentDeploymentBinding> registered =
+                new JdbcTemplate(dataSource)
+                        .query(
+                                """
+                                select environment_id, environment_generation,
+                                       activation_id, manifest_hash, agent_build_id
+                                  from target_e2e_activation
+                                 where activation_id = ?
+                                """,
+                                (result, ignored) ->
+                                        new TargetE2eAgentDeploymentBinding(
+                                                result.getString("environment_id"),
+                                                result.getLong("environment_generation"),
+                                                result.getString("activation_id"),
+                                                result.getString("manifest_hash"),
+                                                result.getString("agent_build_id")),
+                                activationId);
+        if (registered.size() != 1) {
+            throw new IllegalStateException(
+                    "target AGENT activation registration is absent or ambiguous");
+        }
+        return TargetE2eAgentDeploymentBinding.requireExact(
+                configured, registered.getFirst());
     }
 
     @Bean
@@ -172,10 +220,11 @@ public class TargetE2eArtifactConfiguration {
             TargetE2EGraphProposalClient proposalClient,
             GraphStreamVisibilityPolicy visibilityPolicy,
             GraphRegistryBindingPolicy registryBindingPolicy,
+            TargetE2eAgentDeploymentBinding deploymentBinding,
             GraphCommandClientProperties properties) {
         requireTargetMode(properties);
         return new TargetE2EAgentGraphCommandClient(
-                properties.activationId(),
+                deploymentBinding.activationId(),
                 identityResolver,
                 codec,
                 signer,
@@ -191,10 +240,11 @@ public class TargetE2eArtifactConfiguration {
             TargetE2EGraphEnvelopeSigner signer,
             HttpTargetE2EGraphReconciliationClient reconciliationClient,
             GraphRegistryBindingPolicy registryBindingPolicy,
+            TargetE2eAgentDeploymentBinding deploymentBinding,
             GraphCommandClientProperties properties) {
         requireTargetMode(properties);
         return new TargetE2EAgentGraphReconciliationClient(
-                properties.activationId(),
+                deploymentBinding.activationId(),
                 identityResolver,
                 codec,
                 signer,
@@ -215,11 +265,10 @@ public class TargetE2eArtifactConfiguration {
     @Bean
     JdbcTargetE2eFinalizationAuthority targetE2eFinalizationAuthority(
             DataSource dataSource,
-            GraphCommandClientProperties properties,
+            TargetE2eAgentDeploymentBinding deploymentBinding,
             Clock clock) {
-        requireTargetMode(properties);
         return new JdbcTargetE2eFinalizationAuthority(
-                dataSource, properties.activationId(), clock);
+                dataSource, deploymentBinding.activationId(), clock);
     }
 
     @Bean
@@ -233,9 +282,9 @@ public class TargetE2eArtifactConfiguration {
 
     @Bean
     TargetE2eFinalizationRuntimeContextProvider targetE2eFinalizationRuntimeContextProvider(
-            Environment environment) {
+            TargetE2eAgentDeploymentBinding deploymentBinding) {
         return new TemporalTargetE2eFinalizationRuntimeContextProvider(
-                required(environment, "app.temporal.worker.build-id"));
+                deploymentBinding.agentBuildId());
     }
 
     @Bean
@@ -344,14 +393,15 @@ public class TargetE2eArtifactConfiguration {
     @Bean
     TargetE2eActivationLifecycleControl targetE2eActivationLifecycleControl(
             TargetE2eActivationLifecycleStore lifecycleStore,
+            TargetE2eAgentDeploymentBinding deploymentBinding,
             Environment environment,
             Clock clock) {
         DeploymentBinding binding = new DeploymentBinding(
                 environment.acceptsProfiles(Profiles.of("target-e2e")),
-                required(environment, "target.e2e.environment.id"),
-                requiredPositiveLong(environment, "target.e2e.environment.generation"),
-                required(environment, "target.e2e.activation.id"),
-                required(environment, "target.e2e.activation.manifest-hash"),
+                deploymentBinding.environmentId(),
+                deploymentBinding.environmentGeneration(),
+                deploymentBinding.activationId(),
+                deploymentBinding.manifestHash(),
                 required(environment, "target.e2e.runtime-context-hash"));
         return TargetE2eActivationLifecycleControl.bind(lifecycleStore, binding, clock);
     }

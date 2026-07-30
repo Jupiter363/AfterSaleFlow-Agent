@@ -77,4 +77,20 @@ class ReviewDecisionCommandTest {
         assertThat(request.reason()).isEqualTo("reviewed");
         assertThat(request.approvedPlan().path("id").asText()).isEqualTo("PLAN_1");
     }
+
+    @Test
+    void approvedPlanSerializesWithThePublicSnakeCaseName() {
+        ObjectMapper httpMapper=new ObjectMapper()
+                .setPropertyNamingStrategy(
+                        com.fasterxml.jackson.databind.PropertyNamingStrategies.SNAKE_CASE);
+        var request=new ReviewController.DecisionRequest(
+                ApprovalDecisionType.MODIFY_AND_APPROVE,
+                "reviewed",
+                mapper.createObjectNode().put("id","PLAN_1"));
+
+        var serialized=httpMapper.valueToTree(request);
+
+        assertThat(serialized.has("approved_plan")).isTrue();
+        assertThat(serialized.has("approvedPlan")).isFalse();
+    }
 }

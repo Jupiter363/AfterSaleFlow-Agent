@@ -6,6 +6,7 @@
  */
 package com.example.dispute.casecore.application;
 
+import com.example.dispute.casecore.domain.CaseSourceType;
 import com.example.dispute.casecore.infrastructure.persistence.entity.SimulatedImportTemplateCursorEntity;
 import com.example.dispute.casecore.infrastructure.persistence.repository.SimulatedImportTemplateCursorRepository;
 import com.example.dispute.common.transaction.PostCommitSideEffectExecutor;
@@ -32,7 +33,7 @@ import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.Activat
 import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.RoomEpochAllocation;
 import com.example.dispute.workflow.application.epoch.RoomEpochAllocator.TerminalRoomEpoch;
 import com.example.dispute.workflow.contract.v1.ContractTypes;
-import java.nio.charset.StandardCharsets;
+import java.nio.ByteBuffer;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
@@ -195,7 +196,9 @@ public class ExternalCaseImportTransactionService {
         requireText(idempotencyKey, "idempotencyKey");
         var replay = repository.findByCreationIdempotencyKey(idempotencyKey);
         if (replay.isPresent()) {
-            return new SimulatedImportResultView(List.of(restoreExisting(replay.orElseThrow(), actor)));
+            FulfillmentCaseEntity existing = replay.orElseThrow();
+            assertSimulationReplayMatches(existing, command, idempotencyKey);
+            return new SimulatedImportResultView(List.of(restoreExisting(existing, actor)));
         }
 
         SimulatedImportTemplateCursorEntity cursor =
@@ -239,19 +242,13 @@ public class ExternalCaseImportTransactionService {
         if (requestReplay.isPresent()) {
             FulfillmentCaseEntity existing =
                     lockExisting(requestReplay.orElseThrow().getId());
-            if (!Objects.equals(existing.getSourceSystem(), command.sourceSystem())
-                    || !Objects.equals(
-                            existing.getExternalCaseRef(),
-                            command.externalCaseReference())) {
-                throw new IdempotencyConflictException(
-                        "import idempotency key already belongs to another external case");
-            }
+            assertImportReplayMatches(existing, command);
             return restoreLockedExisting(existing, actor);
         }
         return repository
                 .findBySourceSystemAndExternalCaseRef(
                         command.sourceSystem(), command.externalCaseReference())
-                .map(existing -> restoreExisting(existing, actor))
+                .map(existing -> restoreMatchingImport(existing, command, actor))
                 .orElseGet(
                         () -> {
                             FulfillmentCaseEntity entity =
@@ -274,6 +271,8 @@ public class ExternalCaseImportTransactionService {
                                             command.sourceSystem(),
                                             command.externalCaseReference(),
                                             actor.actorId());
+                            entity.bindImportRequestFingerprint(
+                                    ImportDisputeRequestFingerprint.of(command));
                             FulfillmentCaseEntity saved = repository.save(entity);
                             OffsetDateTime now = OffsetDateTime.now(clock);
                             MaterializedRoom materializedRoom =
@@ -293,6 +292,27 @@ public class ExternalCaseImportTransactionService {
                                     roomEpoch);
                             return view(saved);
                         });
+    }
+
+    private ImportedDisputeView restoreMatchingImport(
+            FulfillmentCaseEntity existing,
+            ImportDisputeCommand command,
+            AuthenticatedActor actor) {
+        FulfillmentCaseEntity locked = lockExisting(existing.getId());
+        assertImportReplayMatches(locked, command);
+        return restoreLockedExisting(locked, actor);
+    }
+
+    private static void assertImportReplayMatches(
+            FulfillmentCaseEntity existing,
+            ImportDisputeCommand command) {
+        if (existing.getSourceType() != CaseSourceType.EXTERNAL_IMPORT
+                || !Objects.equals(
+                        existing.getImportRequestFingerprint(),
+                        ImportDisputeRequestFingerprint.of(command))) {
+            throw new IdempotencyConflictException(
+                    "import replay is bound to another immutable request");
+        }
     }
 
     // 所属模块：【案件核心与导入 / 应用编排层】「ExternalCaseImportTransactionService.restoreExisting(FulfillmentCaseEntity,AuthenticatedActor)」。
@@ -724,7 +744,7 @@ public class ExternalCaseImportTransactionService {
         ActorRole initiatorRole = request.initiatorRoleHint();
         SimulatedExternalDisputeTemplate.InitiatorPerspective perspective =
                 template.forInitiator(initiatorRole);
-        String stableKey = stableReferenceKey(idempotencyKey);
+        String stableKey = simulationReferenceKey(request, idempotencyKey);
         String templatePrefix = "T%02d-".formatted(template.templateNo());
         IntakeLobbySeed.ClaimResolutionSeed claim =
                 new IntakeLobbySeed.ClaimResolutionSeed(
@@ -740,8 +760,8 @@ public class ExternalCaseImportTransactionService {
                 "ORDER-" + templatePrefix + stableKey,
                 "AFTER-" + templatePrefix + stableKey,
                 "LOG-" + templatePrefix + stableKey,
-                DemoImportActors.USER_ID,
-                DemoImportActors.MERCHANT_ID,
+                simulationUserId(request),
+                simulationMerchantId(request),
                 initiatorRole.name(),
                 template.disputeType(),
                 template.title(),
@@ -755,16 +775,67 @@ public class ExternalCaseImportTransactionService {
                 null);
     }
 
+    private static void assertSimulationReplayMatches(
+            FulfillmentCaseEntity existing,
+            SimulateExternalImportCommand request,
+            String idempotencyKey) {
+        String externalReference = existing.getExternalCaseRef();
+        String boundSuffix = "-" + simulationReferenceKey(request, idempotencyKey);
+        boolean matchingReference = externalReference != null
+                && externalReference.endsWith(boundSuffix);
+        if (existing.getSourceType() != CaseSourceType.EXTERNAL_IMPORT
+                || !Objects.equals(
+                        existing.getSourceSystem(),
+                        SimulatedExternalDisputeTemplateCatalog.SOURCE_SYSTEM)
+                || !matchingReference
+                || !Objects.equals(existing.getUserId(), simulationUserId(request))
+                || !Objects.equals(
+                        existing.getMerchantId(), simulationMerchantId(request))
+                || existing.getInitiatorRole() != request.initiatorRoleHint()) {
+            throw new IdempotencyConflictException(
+                    "simulation idempotency key is bound to another request");
+        }
+    }
+
+    private static String simulationUserId(SimulateExternalImportCommand request) {
+        return request.initiatorRoleHint() == ActorRole.USER
+                ? request.currentActorId()
+                : request.counterpartyActorId();
+    }
+
+    private static String simulationMerchantId(SimulateExternalImportCommand request) {
+        return request.initiatorRoleHint() == ActorRole.MERCHANT
+                ? request.currentActorId()
+                : request.counterpartyActorId();
+    }
+
+    private static String simulationReferenceKey(
+            SimulateExternalImportCommand request, String idempotencyKey) {
+        return stableReferenceKey(
+                idempotencyKey,
+                Integer.toString(request.count()),
+                request.scenario(),
+                request.riskLevelHint().name(),
+                request.initiatorRoleHint().name(),
+                request.currentActorId(),
+                request.counterpartyActorId(),
+                request.simulationBatchId());
+    }
+
     // 所属模块：【案件核心与导入 / 应用编排层】「ExternalCaseImportTransactionService.stableReferenceKey(String)」。
     // 具体功能：「ExternalCaseImportTransactionService.stableReferenceKey(String)」：构建稳定引用键：先计算稳定哈希以绑定审批快照；实际协作者为 「MessageDigest.getInstance」、「value.append」、「MessageDigest.getInstance("SHA-256").digest」、「"%02x".formatted」；不满足前置条件时抛出 「IllegalStateException」；处理的关键状态/协议值包括 「SHA-256」、「%02x」，最终返回「String」。
     // 上游调用：「ExternalCaseImportTransactionService.stableReferenceKey(String)」的上游调用点包括 「ExternalCaseImportTransactionService.simulatedCommand」。
     // 下游影响：「ExternalCaseImportTransactionService.stableReferenceKey(String)」向下依次触达 「MessageDigest.getInstance」、「value.append」、「MessageDigest.getInstance("SHA-256").digest」、「"%02x".formatted」；计算结果以「String」交给调用方。
     // 系统意义：「ExternalCaseImportTransactionService.stableReferenceKey(String)」负责主链路中的“稳定引用键”；Java/PostgreSQL 是案件状态事实源，导入重试不能创建重复案件
-    private static String stableReferenceKey(String idempotencyKey) {
+    private static String stableReferenceKey(String... values) {
         try {
-            byte[] digest =
-                    MessageDigest.getInstance("SHA-256")
-                            .digest(idempotencyKey.getBytes(StandardCharsets.UTF_8));
+            MessageDigest hash = MessageDigest.getInstance("SHA-256");
+            for (String valuePart : values) {
+                byte[] value = StrictUtf8.encode(valuePart);
+                hash.update(ByteBuffer.allocate(Integer.BYTES).putInt(value.length).array());
+                hash.update(value);
+            }
+            byte[] digest = hash.digest();
             StringBuilder value = new StringBuilder(24);
             for (int index = 0; index < 12; index++) {
                 value.append("%02x".formatted(digest[index]));

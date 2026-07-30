@@ -31,9 +31,11 @@ import com.example.dispute.workflow.shadow.intake.IntakeSignedSyntheticGraphExec
 import com.example.dispute.workflow.shadow.intake.IntakeSyntheticComparisonLedger;
 import com.example.dispute.workflow.shadow.intake.IntakeSyntheticParityObservationPort;
 import com.example.dispute.workflow.shadow.intake.IntakeSyntheticWorkerRegistration;
+import com.example.dispute.workflow.targete2e.TargetE2eAgentDeploymentBinding;
 import io.temporal.client.WorkflowOptions;
 import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.worker.WorkerFactory;
+import java.net.URI;
 import java.time.Duration;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
@@ -180,13 +182,15 @@ class TemporalWorkerConfigurationTest {
             assertThatThrownBy(() -> configuration.temporalAgentWorkerFactory(
                             environment.getWorkflowClient(),
                             properties,
-                            new TemporalWorkerOptionsFactory(properties),
-                            v2Properties,
-                            disabledIntakeSelection(),
+                             new TemporalWorkerOptionsFactory(properties),
+                             v2Properties,
+                             disabledGraphClientProperties(),
+                             disabledIntakeSelection(),
                             syntheticRegistrationProvider,
-                            ledgerProvider,
-                            executionGatewayProvider,
-                            finalizationGatewayProvider))
+                             ledgerProvider,
+                             executionGatewayProvider,
+                             finalizationGatewayProvider,
+                             mockProvider(TargetE2eAgentDeploymentBinding.class)))
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining(
                             "requires Temporal versioningMode BUILD_ID or DEPLOYMENT");
@@ -209,13 +213,15 @@ class TemporalWorkerConfigurationTest {
             WorkerFactory factory = configuration.temporalAgentWorkerFactory(
                     environment.getWorkflowClient(),
                     properties,
-                    new TemporalWorkerOptionsFactory(properties),
-                    enabledAgentRunProperties(),
-                    disabledIntakeSelection(),
+                     new TemporalWorkerOptionsFactory(properties),
+                     enabledAgentRunProperties(),
+                     disabledGraphClientProperties(),
+                     disabledIntakeSelection(),
                     mockProvider(IntakeSyntheticWorkerRegistration.class),
-                    provider(mock(AgentRunLedger.class)),
-                    provider(mock(AgentRunExecutionGateway.class)),
-                    provider(mock(AgentRunFinalizationGateway.class)));
+                     provider(mock(AgentRunLedger.class)),
+                     provider(mock(AgentRunExecutionGateway.class)),
+                     provider(mock(AgentRunFinalizationGateway.class)),
+                     mockProvider(TargetE2eAgentDeploymentBinding.class));
             try {
                 assertThat(factory.isStarted()).isTrue();
                 assertThat(factory.tryGetWorker(AGENT_EXECUTION)).isNotNull();
@@ -230,6 +236,50 @@ class TemporalWorkerConfigurationTest {
     }
 
     @Test
+    void targetAgentWorkerRequiresTheExactRegisteredDeploymentBinding() {
+        TemporalWorkerProperties properties =
+                properties(WorkerRole.AGENT, VersioningMode.BUILD_ID);
+        TemporalWorkerConfiguration configuration = new TemporalWorkerConfiguration();
+
+        try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+            assertThatThrownBy(
+                            () ->
+                                    configuration.temporalAgentWorkerFactory(
+                                            environment.getWorkflowClient(),
+                                            properties,
+                                            new TemporalWorkerOptionsFactory(properties),
+                                            enabledAgentRunProperties(),
+                                            targetGraphClientProperties(),
+                                            disabledIntakeSelection(),
+                                            mockProvider(IntakeSyntheticWorkerRegistration.class),
+                                            provider(mock(AgentRunLedger.class)),
+                                            provider(mock(AgentRunExecutionGateway.class)),
+                                            provider(mock(AgentRunFinalizationGateway.class)),
+                                            mockProvider(
+                                                    TargetE2eAgentDeploymentBinding.class)))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("target AGENT deployment binding");
+
+            assertThatThrownBy(
+                            () ->
+                                    configuration.temporalAgentWorkerFactory(
+                                            environment.getWorkflowClient(),
+                                            properties,
+                                            new TemporalWorkerOptionsFactory(properties),
+                                            enabledAgentRunProperties(),
+                                            targetGraphClientProperties(),
+                                            disabledIntakeSelection(),
+                                            mockProvider(IntakeSyntheticWorkerRegistration.class),
+                                            provider(mock(AgentRunLedger.class)),
+                                            provider(mock(AgentRunExecutionGateway.class)),
+                                            provider(mock(AgentRunFinalizationGateway.class)),
+                                            provider(targetBinding("wrong-agent-build"))))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("worker configuration");
+        }
+    }
+
+    @Test
     void v2AgentWorkerFailsClosedWhenExecutionGatewayIsMissing() {
         TemporalWorkerProperties properties =
                 properties(WorkerRole.AGENT, VersioningMode.BUILD_ID);
@@ -240,13 +290,15 @@ class TemporalWorkerConfigurationTest {
             assertThatThrownBy(() -> configuration.temporalAgentWorkerFactory(
                             environment.getWorkflowClient(),
                             properties,
-                            new TemporalWorkerOptionsFactory(properties),
-                            v2Properties,
-                            disabledIntakeSelection(),
+                             new TemporalWorkerOptionsFactory(properties),
+                             v2Properties,
+                             disabledGraphClientProperties(),
+                             disabledIntakeSelection(),
                             mockProvider(IntakeSyntheticWorkerRegistration.class),
-                            provider(mock(AgentRunLedger.class)),
-                            mockProvider(AgentRunExecutionGateway.class),
-                            provider(mock(AgentRunFinalizationGateway.class))))
+                             provider(mock(AgentRunLedger.class)),
+                             mockProvider(AgentRunExecutionGateway.class),
+                             provider(mock(AgentRunFinalizationGateway.class)),
+                             mockProvider(TargetE2eAgentDeploymentBinding.class)))
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining("exactly one AgentRunExecutionGateway");
         }
@@ -268,13 +320,15 @@ class TemporalWorkerConfigurationTest {
                 WorkerFactory factory = configuration.temporalAgentWorkerFactory(
                         environment.getWorkflowClient(),
                         properties,
-                        new TemporalWorkerOptionsFactory(properties),
-                        disabledAgentRunProperties(),
-                        selection,
-                        syntheticRegistrationProvider,
-                        mockProvider(AgentRunLedger.class),
-                        mockProvider(AgentRunExecutionGateway.class),
-                        mockProvider(AgentRunFinalizationGateway.class));
+                         new TemporalWorkerOptionsFactory(properties),
+                         disabledAgentRunProperties(),
+                         disabledGraphClientProperties(),
+                         selection,
+                         syntheticRegistrationProvider,
+                         mockProvider(AgentRunLedger.class),
+                         mockProvider(AgentRunExecutionGateway.class),
+                         mockProvider(AgentRunFinalizationGateway.class),
+                         mockProvider(TargetE2eAgentDeploymentBinding.class));
                 try {
                     assertThat(factory.isStarted()).isTrue();
                 } finally {
@@ -304,13 +358,15 @@ class TemporalWorkerConfigurationTest {
             assertThatThrownBy(() -> configuration.temporalAgentWorkerFactory(
                             environment.getWorkflowClient(),
                             properties,
-                            new TemporalWorkerOptionsFactory(properties),
-                            disabledAgentRunProperties(),
-                            enabledIntakeSelection(),
-                            syntheticRegistrationProvider,
-                            mockProvider(AgentRunLedger.class),
-                            mockProvider(AgentRunExecutionGateway.class),
-                            mockProvider(AgentRunFinalizationGateway.class)))
+                             new TemporalWorkerOptionsFactory(properties),
+                             disabledAgentRunProperties(),
+                             disabledGraphClientProperties(),
+                             enabledIntakeSelection(),
+                             syntheticRegistrationProvider,
+                             mockProvider(AgentRunLedger.class),
+                             mockProvider(AgentRunExecutionGateway.class),
+                             mockProvider(AgentRunFinalizationGateway.class),
+                             mockProvider(TargetE2eAgentDeploymentBinding.class)))
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining(
                             "Signed synthetic Intake requires Temporal versioningMode BUILD_ID or DEPLOYMENT");
@@ -329,13 +385,15 @@ class TemporalWorkerConfigurationTest {
             WorkerFactory factory = configuration.temporalAgentWorkerFactory(
                     environment.getWorkflowClient(),
                     properties,
-                    new TemporalWorkerOptionsFactory(properties),
-                    disabledAgentRunProperties(),
-                    enabledIntakeSelection(),
-                    streamProvider(syntheticRegistration()),
-                    mockProvider(AgentRunLedger.class),
-                    mockProvider(AgentRunExecutionGateway.class),
-                    mockProvider(AgentRunFinalizationGateway.class));
+                     new TemporalWorkerOptionsFactory(properties),
+                     disabledAgentRunProperties(),
+                     disabledGraphClientProperties(),
+                     enabledIntakeSelection(),
+                     streamProvider(syntheticRegistration()),
+                     mockProvider(AgentRunLedger.class),
+                     mockProvider(AgentRunExecutionGateway.class),
+                     mockProvider(AgentRunFinalizationGateway.class),
+                     mockProvider(TargetE2eAgentDeploymentBinding.class));
             try {
                 assertThat(factory.isStarted()).isTrue();
                 assertThat(factory.tryGetWorker(AGENT_EXECUTION)).isNotNull();
@@ -372,13 +430,15 @@ class TemporalWorkerConfigurationTest {
             assertThatThrownBy(() -> configuration.temporalAgentWorkerFactory(
                             environment.getWorkflowClient(),
                             properties,
-                            new TemporalWorkerOptionsFactory(properties),
-                            enabledAgentRunProperties(),
-                            enabledIntakeSelection(),
+                             new TemporalWorkerOptionsFactory(properties),
+                             enabledAgentRunProperties(),
+                             disabledGraphClientProperties(),
+                             enabledIntakeSelection(),
                             syntheticRegistrationProvider,
-                            ledgerProvider,
-                            executionGatewayProvider,
-                            finalizationGatewayProvider))
+                             ledgerProvider,
+                             executionGatewayProvider,
+                             finalizationGatewayProvider,
+                             mockProvider(TargetE2eAgentDeploymentBinding.class)))
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining(
                             "Signed synthetic Intake cannot share AGENT_EXECUTION with AgentRunV2");
@@ -401,13 +461,15 @@ class TemporalWorkerConfigurationTest {
             assertThatThrownBy(() -> configuration.temporalAgentWorkerFactory(
                             environment.getWorkflowClient(),
                             properties,
-                            new TemporalWorkerOptionsFactory(properties),
-                            disabledAgentRunProperties(),
-                            enabledIntakeSelection(),
-                            syntheticRegistrationProvider,
-                            mockProvider(AgentRunLedger.class),
-                            mockProvider(AgentRunExecutionGateway.class),
-                            mockProvider(AgentRunFinalizationGateway.class)))
+                             new TemporalWorkerOptionsFactory(properties),
+                             disabledAgentRunProperties(),
+                             disabledGraphClientProperties(),
+                             enabledIntakeSelection(),
+                             syntheticRegistrationProvider,
+                             mockProvider(AgentRunLedger.class),
+                             mockProvider(AgentRunExecutionGateway.class),
+                             mockProvider(AgentRunFinalizationGateway.class),
+                             mockProvider(TargetE2eAgentDeploymentBinding.class)))
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining(
                             "exactly one IntakeSyntheticWorkerRegistration");
@@ -435,13 +497,15 @@ class TemporalWorkerConfigurationTest {
             return configuration.temporalAgentWorkerFactory(
                     environment.getWorkflowClient(),
                     properties,
-                    optionsFactory,
-                    disabledAgentRunProperties(),
-                    disabledIntakeSelection(),
-                    mockProvider(IntakeSyntheticWorkerRegistration.class),
-                    mockProvider(AgentRunLedger.class),
-                    mockProvider(AgentRunExecutionGateway.class),
-                    mockProvider(AgentRunFinalizationGateway.class));
+                     optionsFactory,
+                     disabledAgentRunProperties(),
+                     disabledGraphClientProperties(),
+                     disabledIntakeSelection(),
+                     mockProvider(IntakeSyntheticWorkerRegistration.class),
+                     mockProvider(AgentRunLedger.class),
+                     mockProvider(AgentRunExecutionGateway.class),
+                     mockProvider(AgentRunFinalizationGateway.class),
+                     mockProvider(TargetE2eAgentDeploymentBinding.class));
         }
         return configuration.temporalControlWorkerFactory(
                 environment.getWorkflowClient(),
@@ -526,6 +590,33 @@ class TemporalWorkerConfigurationTest {
                 Duration.ofMinutes(10),
                 Duration.ofSeconds(15),
                 Duration.ofSeconds(5));
+    }
+
+    private static GraphCommandClientProperties disabledGraphClientProperties() {
+        return new GraphCommandClientProperties(
+                GraphCommandClientProperties.Mode.DISABLED,
+                null,
+                null,
+                Duration.ofSeconds(10),
+                false);
+    }
+
+    private static GraphCommandClientProperties targetGraphClientProperties() {
+        return new GraphCommandClientProperties(
+                GraphCommandClientProperties.Mode.TARGET_E2E_CANDIDATE,
+                URI.create("https://graph-target.test"),
+                "p9act.v1.0123456789abcdef0123456789abcdef",
+                Duration.ofSeconds(10),
+                false);
+    }
+
+    private static TargetE2eAgentDeploymentBinding targetBinding(String agentBuildId) {
+        return new TargetE2eAgentDeploymentBinding(
+                "local-preprod",
+                1,
+                "p9act.v1.0123456789abcdef0123456789abcdef",
+                "a".repeat(64),
+                agentBuildId);
     }
 
     private static IntakeEpochSelectionProperties disabledIntakeSelection() {

@@ -184,7 +184,7 @@ public class ReviewController {
     public record DecisionRequest(
             @NotNull ApprovalDecisionType decision,
             @NotBlank @Size(max=2000) String reason,
-            @JsonProperty("approvedPlan") @JsonAlias("approved_plan") JsonNode approvedPlan,
+            @JsonProperty("approved_plan") @JsonAlias("approvedPlan") JsonNode approvedPlan,
             Boolean confirmed){
 
         public DecisionRequest(

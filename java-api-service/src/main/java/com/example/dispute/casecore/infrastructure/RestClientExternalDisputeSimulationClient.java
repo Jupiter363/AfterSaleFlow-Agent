@@ -83,9 +83,11 @@ public class RestClientExternalDisputeSimulationClient
                     Map.of("endpoint", ENDPOINT, "item_count", itemCount));
         }
         try {
-            return response.items().stream()
+            List<SimulatedExternalDispute> items = response.items().stream()
                     .map(AgentSimulatedExternalDispute::toDomain)
                     .toList();
+            validateResponseBinding(items.getFirst(), command);
+            return items;
         } catch (IllegalArgumentException invalidItem) {
             throw new AgentExecutionException(
                     ErrorCode.AGENT_OUTPUT_SCHEMA_INVALID,
@@ -95,6 +97,31 @@ public class RestClientExternalDisputeSimulationClient
                             ENDPOINT,
                             "validation_error",
                             invalidItem.getMessage()));
+        }
+    }
+
+    private static void validateResponseBinding(
+            SimulatedExternalDispute item,
+            SimulateExternalImportCommand command) {
+        if (!command.initiatorRoleHint().name().equals(item.initiatorRole())) {
+            throw new IllegalArgumentException(
+                    "initiatorRole must match the simulation request");
+        }
+        String expectedUserId =
+                command.initiatorRoleHint() == ActorRole.USER
+                        ? command.currentActorId()
+                        : command.counterpartyActorId();
+        String expectedMerchantId =
+                command.initiatorRoleHint() == ActorRole.MERCHANT
+                        ? command.currentActorId()
+                        : command.counterpartyActorId();
+        if (!expectedUserId.equals(item.userId())) {
+            throw new IllegalArgumentException(
+                    "userId must match the simulation request");
+        }
+        if (!expectedMerchantId.equals(item.merchantId())) {
+            throw new IllegalArgumentException(
+                    "merchantId must match the simulation request");
         }
     }
 

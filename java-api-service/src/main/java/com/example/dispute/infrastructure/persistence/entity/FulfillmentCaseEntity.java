@@ -67,6 +67,9 @@ public class FulfillmentCaseEntity extends AbstractEntity {
     @Column(name = "creation_idempotency_key", length = 128, nullable = false, unique = true)
     private String creationIdempotencyKey;
 
+    @Column(name = "import_request_fingerprint", length = 64, updatable = false)
+    private String importRequestFingerprint;
+
     @Column(name = "case_type", length = 64, nullable = false)
     private String caseType;
 
@@ -426,6 +429,27 @@ public class FulfillmentCaseEntity extends AbstractEntity {
         entity.currentDeadlineAt = currentDeadlineAt;
         entity.intakeResultJson = "{\"potentialDispute\":true,\"missingSlots\":[],\"agentDegraded\":false,\"analyzedAt\":\"2026-07-03T00:00:00Z\"}";
         return entity;
+    }
+
+    public void bindImportRequestFingerprint(String fingerprint) {
+        if (sourceType != CaseSourceType.EXTERNAL_IMPORT) {
+            throw new IllegalStateException(
+                    "only an imported case can bind an import request fingerprint");
+        }
+        String requiredFingerprint = required(fingerprint, "importRequestFingerprint");
+        if (!requiredFingerprint.matches("[0-9a-f]{64}")) {
+            throw new IllegalArgumentException(
+                    "importRequestFingerprint must be lowercase SHA-256");
+        }
+        if (importRequestFingerprint != null
+                && !importRequestFingerprint.equals(requiredFingerprint)) {
+            throw new IllegalStateException("import request fingerprint is immutable");
+        }
+        importRequestFingerprint = requiredFingerprint;
+    }
+
+    public String getImportRequestFingerprint() {
+        return importRequestFingerprint;
     }
 
     public void synchronizeImportedCurrentDeadline(

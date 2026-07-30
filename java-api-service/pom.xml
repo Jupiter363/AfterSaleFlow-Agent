@@ -26,6 +26,7 @@
         <java.version>21</java.version>
         <target-e2e.classifier>target-e2e</target-e2e.classifier>
         <target-e2e.classes-directory>${project.build.directory}/target-e2e-classes</target-e2e.classes-directory>
+        <target-e2e.source-sha>UNBOUND</target-e2e.source-sha>
         <target-e2e.skip-unit-tests>false</target-e2e.skip-unit-tests>
         <springdoc.version>2.8.11</springdoc.version>
         <temporal.version>1.35.0</temporal.version>
@@ -214,8 +215,18 @@
                                 </goals>
                                 <configuration>
                                     <target>
+                                        <fail message="target-e2e.source-sha must be an exact Git commit SHA">
+                                            <condition>
+                                                <not>
+                                                    <matches string="${target-e2e.source-sha}" pattern="^[0-9a-f]{40}$"/>
+                                                </not>
+                                            </condition>
+                                        </fail>
                                         <delete dir="${target-e2e.classes-directory}"/>
                                         <mkdir dir="${target-e2e.classes-directory}"/>
+                                        <mkdir dir="${target-e2e.classes-directory}/META-INF/after-sale-flow"/>
+                                        <echo file="${target-e2e.classes-directory}/META-INF/after-sale-flow/compiled-source.sha"
+                                              encoding="UTF-8">${target-e2e.source-sha}</echo>
                                     </target>
                                 </configuration>
                             </execution>

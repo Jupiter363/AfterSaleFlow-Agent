@@ -7,8 +7,10 @@
 package com.example.dispute.casecore;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -22,6 +24,7 @@ import com.example.dispute.casecore.application.SimulatedExternalDisputeTemplate
 import com.example.dispute.casecore.application.SingleInstanceImportGate;
 import com.example.dispute.casecore.infrastructure.persistence.entity.SimulatedImportTemplateCursorEntity;
 import com.example.dispute.casecore.infrastructure.persistence.repository.SimulatedImportTemplateCursorRepository;
+import com.example.dispute.common.exception.IdempotencyConflictException;
 import com.example.dispute.common.transaction.PostCommitSideEffectExecutor;
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.config.AuthenticatedActor;
@@ -175,6 +178,32 @@ class SimulatedExternalImportTemplateCycleTest {
                 .findByIdForUpdate(SimulatedImportTemplateCursorEntity.CURSOR_ID);
     }
 
+    @Test
+    void rejectsMalformedUnicodeBeforeCreatingASimulatedCase() {
+        SimulateExternalImportCommand malformed =
+                new SimulateExternalImportCommand(
+                        1,
+                        "\uD800",
+                        RiskLevel.MEDIUM,
+                        ActorRole.USER,
+                        "user-external",
+                        "merchant-external");
+
+        assertThatThrownBy(
+                        () ->
+                                facade.simulateExternalImport(
+                                        malformed,
+                                        systemActor(),
+                                        "malformed-unicode-key",
+                                        "malformed-unicode-trace",
+                                        "malformed-unicode-request"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("valid Unicode");
+
+        verify(caseRepository, never()).save(any());
+        verify(cursorRepository, never()).save(any());
+    }
+
     // 所属模块：【案件核心与导入 / 自动化测试层】「SimulatedExternalImportTemplateCycleTest.replaysTheSameCreationKeyWithoutLockingOrAdvancingTheCursor()」。
     // 具体功能：「SimulatedExternalImportTemplateCycleTest.replaysTheSameCreationKeyWithoutLockingOrAdvancingTheCursor()」：复现“回放持久化事件（场景方法「replaysTheSameCreationKeyWithoutLockingOrAdvancingTheCursor」）”场景：驱动 「facade.simulateExternalImport」、「cursor.getNextTemplateNo」、「replay.id」、「first.id」，再用 「assertThat」、「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「stable-replay-key」、「trace-first」、「request-first」、「trace-replay」。
     // 上游调用：「SimulatedExternalImportTemplateCycleTest.replaysTheSameCreationKeyWithoutLockingOrAdvancingTheCursor()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
@@ -209,6 +238,49 @@ class SimulatedExternalImportTemplateCycleTest {
         verify(cursorRepository, times(1))
                 .findByIdForUpdate(SimulatedImportTemplateCursorEntity.CURSOR_ID);
         verify(cursorRepository, times(1)).save(cursor);
+    }
+
+    @Test
+    void rejectsReusingASimulationKeyForDifferentPartiesBeforeRepairingTheCase() {
+        SimulateExternalImportCommand firstRequest =
+                new SimulateExternalImportCommand(
+                        1,
+                        "external production dispute",
+                        RiskLevel.MEDIUM,
+                        ActorRole.USER,
+                        "user-external-1",
+                        "merchant-external-1");
+        var first =
+                facade.simulateExternalImport(
+                                firstRequest,
+                                systemActor(),
+                                "party-bound-replay-key",
+                                "trace-first-party",
+                                "request-first-party")
+                        .items()
+                        .getFirst();
+
+        assertThat(first.userId()).isEqualTo("user-external-1");
+        assertThat(first.merchantId()).isEqualTo("merchant-external-1");
+        assertThatThrownBy(
+                        () ->
+                                facade.simulateExternalImport(
+                                        new SimulateExternalImportCommand(
+                                                1,
+                                                "external production dispute",
+                                                RiskLevel.MEDIUM,
+                                                ActorRole.USER,
+                                                "user-external-2",
+                                                "merchant-external-1"),
+                                        systemActor(),
+                                        "party-bound-replay-key",
+                                        "trace-conflicting-party",
+                                        "request-conflicting-party"))
+                .isInstanceOf(IdempotencyConflictException.class)
+                .hasMessageContaining("bound to another request");
+
+        verify(cursorRepository, times(1))
+                .findByIdForUpdate(SimulatedImportTemplateCursorEntity.CURSOR_ID);
     }
 
     // 所属模块：【案件核心与导入 / 自动化测试层】「SimulatedExternalImportTemplateCycleTest.mapsUserInitiatedTemplateClaimAsFormFactsWithoutInventedStatementsOrAttitude()」。

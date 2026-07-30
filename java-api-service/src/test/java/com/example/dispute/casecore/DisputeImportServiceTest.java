@@ -22,6 +22,7 @@ import static org.mockito.Mockito.when;
 import com.example.dispute.casecore.application.DisputeImportService;
 import com.example.dispute.casecore.application.ExternalCaseImportTransactionService;
 import com.example.dispute.casecore.application.ImportDisputeCommand;
+import com.example.dispute.casecore.application.ImportDisputeRequestFingerprint;
 import com.example.dispute.casecore.application.ImportedDisputeView;
 import com.example.dispute.casecore.application.SimulateExternalImportCommand;
 import com.example.dispute.casecore.application.SimulatedExternalDisputeTemplateCatalog;
@@ -132,6 +133,29 @@ class DisputeImportServiceTest {
                 .thenAnswer(invocation -> invocation.getArgument(0));
     }
 
+    @Test
+    void fingerprintRejectsMalformedUnicodeInsteadOfHashingReplacementBytes() {
+        assertThatThrownBy(
+                        () -> ImportDisputeRequestFingerprint.of(command("\uD800")))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("valid Unicode");
+    }
+
+    @Test
+    void simulationCommandRejectsPartyIdsThatExceedPersistenceLimits() {
+        assertThatThrownBy(
+                        () ->
+                                new SimulateExternalImportCommand(
+                                        1,
+                                        "external production dispute",
+                                        RiskLevel.MEDIUM,
+                                        ActorRole.USER,
+                                        "x".repeat(129),
+                                        "merchant-external"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("currentActorId must not exceed 128");
+    }
+
     // 所属模块：【案件核心与导入 / 自动化测试层】「DisputeImportServiceTest.importsAnExternalDisputeWithOverviewState()」。
     // 具体功能：「DisputeImportServiceTest.importsAnExternalDisputeWithOverviewState()」：复现“核对完整业务行为（场景方法「importsAnExternalDisputeWithOverviewState」）”场景：驱动 「repository.findBySourceSystemAndExternalCaseRef」、「repository.save」、「service.importDispute」，再用 「assertThat」、「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「OMS」、「EXT-1001」、「external-adapter」、「import-ext-1001」。
     // 上游调用：「DisputeImportServiceTest.importsAnExternalDisputeWithOverviewState()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
@@ -170,6 +194,8 @@ class DisputeImportServiceTest {
         verify(repository).save(savedCase.capture());
         assertThat(savedCase.getValue().getCaseType()).isEqualTo("DISPUTE");
         assertThat(savedCase.getValue().getInitiatorRole()).isEqualTo(ActorRole.USER);
+        assertThat(savedCase.getValue().getImportRequestFingerprint())
+                .isEqualTo(ImportDisputeRequestFingerprint.of(command("EXT-1001")));
         verify(participantService)
                 .ensureImportedParties(
                         any(FulfillmentCaseEntity.class),
@@ -474,6 +500,12 @@ class DisputeImportServiceTest {
 
     @Test
     void terminalReplayCompletesLegacyRunningClockAndClearsTheCaseDeadline() {
+        ImportDisputeCommand replayCommand =
+                command(
+                        "EXT-TERMINAL-REPLAY",
+                        CaseStatus.CLOSED,
+                        "EVIDENCE",
+                        OffsetDateTime.parse("2026-07-03T02:00:00Z"));
         FulfillmentCaseEntity existing =
                 FulfillmentCaseEntity.imported(
                         "CASE_TERMINAL_REPLAY",
@@ -493,6 +525,7 @@ class DisputeImportServiceTest {
                         "OMS",
                         "EXT-TERMINAL-REPLAY",
                         "external-adapter");
+        bindReplay(existing, replayCommand);
         CaseRoomEntity evidenceRoom =
                 CaseRoomEntity.open(
                         "ROOM_TERMINAL_REPLAY",
@@ -525,11 +558,7 @@ class DisputeImportServiceTest {
 
         var replay =
                 service.importDispute(
-                        command(
-                                "EXT-TERMINAL-REPLAY",
-                                CaseStatus.CLOSED,
-                                "EVIDENCE",
-                                OffsetDateTime.parse("2026-07-03T02:00:00Z")),
+                        replayCommand,
                         new AuthenticatedActor("external-adapter", ActorRole.SYSTEM),
                         "terminal-replay-request");
 
@@ -559,6 +588,7 @@ class DisputeImportServiceTest {
     // 系统意义：「DisputeImportServiceTest.returnsTheExistingCaseForTheSameExternalReference()」守住「案件核心与导入」的可执行规格，尤其防止 「CASE_EXISTING」、「ORDER-1001」、「AFTER-1001」、「LOG-1001」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void returnsTheExistingCaseForTheSameExternalReference() {
+        ImportDisputeCommand replayCommand = command("EXT-1001");
         FulfillmentCaseEntity existing =
                 FulfillmentCaseEntity.imported(
                         "CASE_EXISTING",
@@ -578,6 +608,7 @@ class DisputeImportServiceTest {
                         "OMS",
                         "EXT-1001",
                         "external-adapter");
+        bindReplay(existing, replayCommand);
         when(repository.findBySourceSystemAndExternalCaseRef("OMS", "EXT-1001"))
                 .thenReturn(Optional.of(existing));
         when(repository.findByIdForUpdate(existing.getId()))
@@ -585,7 +616,7 @@ class DisputeImportServiceTest {
 
         var imported =
                 service.importDispute(
-                        command("EXT-1001"),
+                        replayCommand,
                         new AuthenticatedActor("external-adapter", ActorRole.SYSTEM),
                         "different-request-key");
 
@@ -601,6 +632,95 @@ class DisputeImportServiceTest {
                         any(String.class));
     }
 
+    @Test
+    void rejectsAChangedImmutableImportRequestBeforeRepairingTheExistingCase() {
+        ImportDisputeCommand original = command("EXT-BOUND-REQUEST");
+        FulfillmentCaseEntity existing =
+                importedCase(
+                        "CASE_BOUND_REQUEST",
+                        "original-request-key",
+                        original);
+        when(repository.findBySourceSystemAndExternalCaseRef(
+                        "OMS", "EXT-BOUND-REQUEST"))
+                .thenReturn(Optional.of(existing));
+        when(repository.findByIdForUpdate(existing.getId()))
+                .thenReturn(Optional.of(existing));
+        ImportDisputeCommand changedParties =
+                new ImportDisputeCommand(
+                        original.sourceSystem(),
+                        original.externalCaseReference(),
+                        original.orderReference(),
+                        original.afterSalesReference(),
+                        original.logisticsReference(),
+                        "user-external-changed",
+                        original.merchantId(),
+                        original.initiatorRole(),
+                        original.disputeType(),
+                        original.title(),
+                        original.description(),
+                        original.riskLevel(),
+                        original.caseStatus(),
+                        original.currentRoom(),
+                        original.currentDeadlineAt());
+
+        assertThatThrownBy(
+                        () ->
+                                service.importDispute(
+                                        changedParties,
+                                        new AuthenticatedActor(
+                                                "external-adapter", ActorRole.SYSTEM),
+                                        "changed-request-key"))
+                .isInstanceOf(IdempotencyConflictException.class)
+                .hasMessageContaining("immutable request");
+
+        verify(participantService, never())
+                .ensureImportedParties(any(), any(), any());
+        verify(hearingInitializer, never()).initialize(any());
+        verify(roomEpochAllocator, never()).activate(any());
+    }
+
+    @Test
+    void rejectsAChangedImmutableImportRequestUsingTheOriginalIdempotencyKey() {
+        ImportDisputeCommand original = command("EXT-BOUND-KEY");
+        FulfillmentCaseEntity existing =
+                importedCase("CASE_BOUND_KEY", "bound-request-key", original);
+        when(repository.findByCreationIdempotencyKey("bound-request-key"))
+                .thenReturn(Optional.of(existing));
+        when(repository.findByIdForUpdate(existing.getId()))
+                .thenReturn(Optional.of(existing));
+        ImportDisputeCommand changedRisk =
+                new ImportDisputeCommand(
+                        original.sourceSystem(),
+                        original.externalCaseReference(),
+                        original.orderReference(),
+                        original.afterSalesReference(),
+                        original.logisticsReference(),
+                        original.userId(),
+                        original.merchantId(),
+                        original.initiatorRole(),
+                        original.disputeType(),
+                        original.title(),
+                        original.description(),
+                        RiskLevel.LOW,
+                        original.caseStatus(),
+                        original.currentRoom(),
+                        original.currentDeadlineAt());
+
+        assertThatThrownBy(
+                        () ->
+                                service.importDispute(
+                                        changedRisk,
+                                        new AuthenticatedActor(
+                                                "external-adapter", ActorRole.SYSTEM),
+                                        "bound-request-key"))
+                .isInstanceOf(IdempotencyConflictException.class)
+                .hasMessageContaining("immutable request");
+
+        verify(participantService, never())
+                .ensureImportedParties(any(), any(), any());
+        verify(roomEpochAllocator, never()).activate(any());
+    }
+
     // 所属模块：【案件核心与导入 / 自动化测试层】「DisputeImportServiceTest.replayRepairsThePersistedRoomInsteadOfTrustingConflictingPayloadState()」。
     // 具体功能：「DisputeImportServiceTest.replayRepairsThePersistedRoomInsteadOfTrustingConflictingPayloadState()」：复现“核对完整业务行为（场景方法「replayRepairsThePersistedRoomInsteadOfTrustingConflictingPayloadState」）”场景：驱动 「repository.findBySourceSystemAndExternalCaseRef」、「roomRepository.save」、「service.importDispute」，再用 「verify」 核对返回值、状态变化或协作者调用，重点覆盖状态/错误码 「CASE_EXISTING_STATE」、「ORDER-1001」、「AFTER-1001」、「LOG-1001」。
     // 上游调用：「DisputeImportServiceTest.replayRepairsThePersistedRoomInsteadOfTrustingConflictingPayloadState()」由 JUnit 测试运行器调用；夹具、Mock 和输入均在本用例内创建，不依赖生产请求。
@@ -608,6 +728,12 @@ class DisputeImportServiceTest {
     // 系统意义：「DisputeImportServiceTest.replayRepairsThePersistedRoomInsteadOfTrustingConflictingPayloadState()」守住「案件核心与导入」的可执行规格，尤其防止 「CASE_EXISTING_STATE」、「ORDER-1001」、「AFTER-1001」、「LOG-1001」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
     void replayRepairsThePersistedRoomInsteadOfTrustingConflictingPayloadState() {
+        ImportDisputeCommand replayCommand =
+                command(
+                        "EXT-STATE-REPLAY",
+                        CaseStatus.EVIDENCE_OPEN,
+                        "EVIDENCE",
+                        OffsetDateTime.parse("2026-07-03T02:00:00Z"));
         FulfillmentCaseEntity existing =
                 FulfillmentCaseEntity.imported(
                         "CASE_EXISTING_STATE",
@@ -627,6 +753,7 @@ class DisputeImportServiceTest {
                         "OMS",
                         "EXT-STATE-REPLAY",
                         "external-adapter");
+        bindReplay(existing, command("EXT-STATE-REPLAY"));
         when(repository.findBySourceSystemAndExternalCaseRef(
                         "OMS",
                         "EXT-STATE-REPLAY"))
@@ -635,11 +762,7 @@ class DisputeImportServiceTest {
                 .thenReturn(Optional.of(existing));
 
         service.importDispute(
-                command(
-                        "EXT-STATE-REPLAY",
-                        CaseStatus.EVIDENCE_OPEN,
-                        "EVIDENCE",
-                        OffsetDateTime.parse("2026-07-03T02:00:00Z")),
+                replayCommand,
                 new AuthenticatedActor(
                         "external-adapter",
                         ActorRole.SYSTEM),
@@ -659,18 +782,20 @@ class DisputeImportServiceTest {
 
     @Test
     void restoredHearingStateReplaysTheIdempotentHearingInitialization() {
+        ImportDisputeCommand replayCommand = command("EXT-HEARING-RESTORE");
         FulfillmentCaseEntity existing =
                 hearingCase(
                         "CASE_HEARING_RESTORE",
                         "restore-hearing",
                         "EXT-HEARING-RESTORE");
+        bindReplay(existing, replayCommand);
         when(repository.findBySourceSystemAndExternalCaseRef("OMS", "EXT-HEARING-RESTORE"))
                 .thenReturn(Optional.of(existing));
         when(repository.findByIdForUpdate(existing.getId())).thenReturn(Optional.of(existing));
 
         var restored =
                 service.importDispute(
-                        command("EXT-HEARING-RESTORE"),
+                        replayCommand,
                         new AuthenticatedActor("external-adapter", ActorRole.SYSTEM),
                         "restore-hearing-request");
 
@@ -681,7 +806,7 @@ class DisputeImportServiceTest {
     }
 
     @Test
-    void demoReplayOfAHearingCaseInitializesHearingWithoutConsumingAnotherTemplate() {
+    void simulationReplayRejectsAnUnrelatedImportedCaseBeforeRepairingIt() {
         FulfillmentCaseEntity existing =
                 hearingCase(
                         "CASE_HEARING_DEMO",
@@ -689,25 +814,77 @@ class DisputeImportServiceTest {
                         "EXT-HEARING-DEMO");
         when(repository.findByCreationIdempotencyKey("demo-hearing-replay"))
                 .thenReturn(Optional.of(existing));
-        when(repository.findByIdForUpdate(existing.getId())).thenReturn(Optional.of(existing));
 
-        var result =
-                service.simulateExternalImport(
-                        new SimulateExternalImportCommand(
-                                1,
-                                "电商售后争议",
-                                RiskLevel.MEDIUM,
-                                ActorRole.USER,
-                                "user-local",
-                                "merchant-local"),
-                        new AuthenticatedActor("external-dispute-adapter", ActorRole.SYSTEM),
-                        "demo-hearing-replay",
-                        "demo-hearing-trace",
-                        "demo-hearing-request");
+        assertThatThrownBy(
+                        () ->
+                                service.simulateExternalImport(
+                                        new SimulateExternalImportCommand(
+                                                1,
+                                                "电商售后争议",
+                                                RiskLevel.MEDIUM,
+                                                ActorRole.USER,
+                                                "user-local",
+                                                "merchant-local"),
+                                        new AuthenticatedActor(
+                                                "external-dispute-adapter",
+                                                ActorRole.SYSTEM),
+                                        "demo-hearing-replay",
+                                        "demo-hearing-trace",
+                                        "demo-hearing-request"))
+                .isInstanceOf(IdempotencyConflictException.class)
+                .hasMessageContaining("bound to another request");
 
-        assertThat(result.items()).extracting(ImportedDisputeView::id)
-                .containsExactly(existing.getId());
-        verify(hearingInitializer).initialize(existing);
+        verify(hearingInitializer, never()).initialize(any());
+        verify(simulatedImportCursorRepository, never()).findByIdForUpdate(any(String.class));
+    }
+
+    @Test
+    void simulationReplayRejectsALegacyKeyOnlyReferenceBeforeRepairingIt() {
+        FulfillmentCaseEntity legacy =
+                FulfillmentCaseEntity.imported(
+                        "CASE_LEGACY_SIMULATION",
+                        "ORDER-LEGACY-SIMULATION",
+                        null,
+                        null,
+                        "user-local",
+                        "merchant-local",
+                        ActorRole.USER,
+                        "legacy-simulation-key",
+                        "SIGNED_NOT_RECEIVED",
+                        "Legacy simulated dispute",
+                        "Legacy references did not bind the full request.",
+                        RiskLevel.MEDIUM,
+                        CaseStatus.INTAKE_PENDING,
+                        "INTAKE",
+                        null,
+                        SimulatedExternalDisputeTemplateCatalog.SOURCE_SYSTEM,
+                        "SIM-T01-2EB9E2A079E2D606CFB60D9C",
+                        "external-dispute-adapter");
+        when(repository.findByCreationIdempotencyKey("legacy-simulation-key"))
+                .thenReturn(Optional.of(legacy));
+
+        assertThatThrownBy(
+                        () ->
+                                service.simulateExternalImport(
+                                        new SimulateExternalImportCommand(
+                                                1,
+                                                "external production dispute",
+                                                RiskLevel.MEDIUM,
+                                                ActorRole.USER,
+                                                "user-local",
+                                                "merchant-local"),
+                                        new AuthenticatedActor(
+                                                "external-dispute-adapter",
+                                                ActorRole.SYSTEM),
+                                        "legacy-simulation-key",
+                                        "legacy-simulation-trace",
+                                        "legacy-simulation-request"))
+                .isInstanceOf(IdempotencyConflictException.class)
+                .hasMessageContaining("bound to another request");
+
+        verify(repository, never()).findByIdForUpdate(any(String.class));
+        verify(participantService, never())
+                .ensureImportedParties(any(), any(), any());
         verify(simulatedImportCursorRepository, never()).findByIdForUpdate(any(String.class));
     }
 
@@ -1040,27 +1217,26 @@ class DisputeImportServiceTest {
     // 下游影响：「DisputeImportServiceTest.importCommandRejectsNonDemoPartyIds()」的下游是被测服务、仓储或外部客户端替身；「assertThatThrownBy」把结果与预期状态、异常或调用次数锁定。
     // 系统意义：「DisputeImportServiceTest.importCommandRejectsNonDemoPartyIds()」守住「案件核心与导入」的可执行规格，尤其防止 「OMS」、「EXT-WRONG-PARTY」、「ORDER-WRONG-PARTY」、「user-1」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
-    void importCommandRejectsNonDemoPartyIds() {
-        assertThatThrownBy(
-                        () ->
-                                new ImportDisputeCommand(
-                                        "OMS",
-                                        "EXT-WRONG-PARTY",
-                                        "ORDER-WRONG-PARTY",
-                                        null,
-                                        null,
-                                        "user-1",
-                                        "merchant-local",
-                                        "USER",
-                                        "SIGNED_NOT_RECEIVED",
-                                        "Imported dispute",
-                                        "Imported dispute description",
-                                        RiskLevel.MEDIUM,
-                                        CaseStatus.INTAKE_PENDING,
-                                        "INTAKE",
-                                        null))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("userId must be user-local");
+    void importCommandAcceptsArbitraryUserIds() {
+        ImportDisputeCommand command =
+                new ImportDisputeCommand(
+                        "OMS",
+                        "EXT-WRONG-PARTY",
+                        "ORDER-WRONG-PARTY",
+                        null,
+                        null,
+                        "user-1",
+                        "merchant-local",
+                        "USER",
+                        "SIGNED_NOT_RECEIVED",
+                        "Imported dispute",
+                        "Imported dispute description",
+                        RiskLevel.MEDIUM,
+                        CaseStatus.INTAKE_PENDING,
+                        "INTAKE",
+                        null);
+
+        assertThat(command.userId()).isEqualTo("user-1");
     }
 
     // 所属模块：【案件核心与导入 / 自动化测试层】「DisputeImportServiceTest.importCommandRejectsNonDemoMerchantIds()」。
@@ -1069,27 +1245,35 @@ class DisputeImportServiceTest {
     // 下游影响：「DisputeImportServiceTest.importCommandRejectsNonDemoMerchantIds()」的下游是被测服务、仓储或外部客户端替身；「assertThatThrownBy」把结果与预期状态、异常或调用次数锁定。
     // 系统意义：「DisputeImportServiceTest.importCommandRejectsNonDemoMerchantIds()」守住「案件核心与导入」的可执行规格，尤其防止 「OMS」、「EXT-WRONG-MERCHANT」、「ORDER-WRONG-MERCHANT」、「user-local」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
-    void importCommandRejectsNonDemoMerchantIds() {
-        assertThatThrownBy(
-                        () ->
-                                new ImportDisputeCommand(
-                                        "OMS",
-                                        "EXT-WRONG-MERCHANT",
-                                        "ORDER-WRONG-MERCHANT",
-                                        null,
-                                        null,
-                                        "user-local",
-                                        "merchant-1",
-                                        "USER",
-                                        "SIGNED_NOT_RECEIVED",
-                                        "Imported dispute",
-                                        "Imported dispute description",
-                                        RiskLevel.MEDIUM,
-                                        CaseStatus.INTAKE_PENDING,
-                                        "INTAKE",
-                                        null))
+    void importCommandAcceptsArbitraryMerchantIds() {
+        ImportDisputeCommand command =
+                new ImportDisputeCommand(
+                        "OMS",
+                        "EXT-WRONG-MERCHANT",
+                        "ORDER-WRONG-MERCHANT",
+                        null,
+                        null,
+                        "user-local",
+                        "merchant-1",
+                        "USER",
+                        "SIGNED_NOT_RECEIVED",
+                        "Imported dispute",
+                        "Imported dispute description",
+                        RiskLevel.MEDIUM,
+                        CaseStatus.INTAKE_PENDING,
+                        "INTAKE",
+                        null);
+
+        assertThat(command.merchantId()).isEqualTo("merchant-1");
+    }
+
+    @Test
+    void importCommandEnforcesTheDescriptionContractAtTheApplicationBoundary() {
+        assertThat(commandWithDescription("x".repeat(2000)).description())
+                .hasSize(2000);
+        assertThatThrownBy(() -> commandWithDescription("x".repeat(2001)))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("merchantId must be merchant-local");
+                .hasMessageContaining("description must not exceed 2000 characters");
     }
 
     // 所属模块：【案件核心与导入 / 自动化测试层】「DisputeImportServiceTest.simulationCommandRequiresFixedPartiesInInitiatorOrder()」。
@@ -1098,18 +1282,18 @@ class DisputeImportServiceTest {
     // 下游影响：「DisputeImportServiceTest.simulationCommandRequiresFixedPartiesInInitiatorOrder()」的下游是被测服务、仓储或外部客户端替身；「assertThatThrownBy」把结果与预期状态、异常或调用次数锁定。
     // 系统意义：「DisputeImportServiceTest.simulationCommandRequiresFixedPartiesInInitiatorOrder()」守住「案件核心与导入」的可执行规格，尤其防止 「merchant-local」、「user-local」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
-    void simulationCommandRequiresFixedPartiesInInitiatorOrder() {
-        assertThatThrownBy(
-                        () ->
-                                new SimulateExternalImportCommand(
-                                        1,
-                                        "watch dispute",
-                                        RiskLevel.MEDIUM,
-                                        ActorRole.USER,
-                                        "merchant-local",
-                                        "user-local"))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("currentActorId must be user-local");
+    void simulationCommandAcceptsArbitraryPartiesInInitiatorOrder() {
+        SimulateExternalImportCommand command =
+                new SimulateExternalImportCommand(
+                        1,
+                        "watch dispute",
+                        RiskLevel.MEDIUM,
+                        ActorRole.USER,
+                        "merchant-local",
+                        "user-local");
+
+        assertThat(command.currentActorId()).isEqualTo("merchant-local");
+        assertThat(command.counterpartyActorId()).isEqualTo("user-local");
     }
 
     private static FulfillmentCaseEntity hearingCase(
@@ -1136,6 +1320,41 @@ class DisputeImportServiceTest {
                 "external-adapter");
     }
 
+    private static FulfillmentCaseEntity importedCase(
+            String caseId,
+            String creationIdempotencyKey,
+            ImportDisputeCommand command) {
+        FulfillmentCaseEntity entity =
+                FulfillmentCaseEntity.imported(
+                        caseId,
+                        command.orderReference(),
+                        command.afterSalesReference(),
+                        command.logisticsReference(),
+                        command.userId(),
+                        command.merchantId(),
+                        ActorRole.valueOf(command.initiatorRole()),
+                        creationIdempotencyKey,
+                        command.disputeType(),
+                        command.title(),
+                        command.description(),
+                        command.riskLevel(),
+                        command.caseStatus(),
+                        command.currentRoom(),
+                        command.currentDeadlineAt(),
+                        command.sourceSystem(),
+                        command.externalCaseReference(),
+                        "external-adapter");
+        bindReplay(entity, command);
+        return entity;
+    }
+
+    private static void bindReplay(
+            FulfillmentCaseEntity entity,
+            ImportDisputeCommand command) {
+        entity.bindImportRequestFingerprint(
+                ImportDisputeRequestFingerprint.of(command));
+    }
+
     // 所属模块：【案件核心与导入 / 自动化测试层】「DisputeImportServiceTest.command(String)」。
     // 具体功能：「DisputeImportServiceTest.command(String)」：作为测试辅助方法为“核对完整业务行为（场景方法「command」）”组装或读取「command」，供本测试类的场景方法复用。
     // 上游调用：「DisputeImportServiceTest.command(String)」由本测试类中的 「DisputeImportServiceTest.importsAnExternalDisputeWithOverviewState」、「DisputeImportServiceTest.startsInitialIntakeTurnOnlyAfterTheImportTransactionCommits」、「DisputeImportServiceTest.intakePersistenceFailureAfterCommitDoesNotRollBackTheImportedCase」、「DisputeImportServiceTest.importedEvidenceStateHasAnEnterableRoomAndAuthoritativeClock」 调用。
@@ -1144,6 +1363,25 @@ class DisputeImportServiceTest {
     private static ImportDisputeCommand command(String externalReference) {
         return command(
                 externalReference,
+                CaseStatus.INTAKE_PENDING,
+                "INTAKE",
+                null);
+    }
+
+    private static ImportDisputeCommand commandWithDescription(String description) {
+        return new ImportDisputeCommand(
+                "OMS",
+                "EXT-DESCRIPTION-LIMIT",
+                "ORDER-1001",
+                "AFTER-1001",
+                "LOG-1001",
+                "user-local",
+                "merchant-local",
+                "USER",
+                "SIGNED_NOT_RECEIVED",
+                "Imported dispute",
+                description,
+                RiskLevel.HIGH,
                 CaseStatus.INTAKE_PENDING,
                 "INTAKE",
                 null);

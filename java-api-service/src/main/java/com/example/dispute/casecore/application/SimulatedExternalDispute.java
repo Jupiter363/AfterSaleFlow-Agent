@@ -41,7 +41,6 @@ public record SimulatedExternalDispute(
         optionalText(logisticsReference, 64, "logisticsReference");
         requireText(userId, 128, "userId");
         requireText(merchantId, 128, "merchantId");
-        DemoImportActors.requireImportedParties(userId, merchantId);
         requireText(initiatorRole, 32, "initiatorRole");
         if (!"USER".equals(initiatorRole) && !"MERCHANT".equals(initiatorRole)) {
             throw new IllegalArgumentException(

@@ -24,6 +24,7 @@ import com.example.dispute.workflow.temporal.caseprocess.CaseProcessWorkflowImpl
 import com.example.dispute.workflow.temporal.caseprocess.IntakeChildBridgeActivitiesV2;
 import com.example.dispute.workflow.temporal.room.common.RoomControlWorkflowImpl;
 import com.example.dispute.workflow.temporal.room.intake.IntakeRoomWorkflowImpl;
+import com.example.dispute.workflow.targete2e.TargetE2eAgentDeploymentBinding;
 import com.example.dispute.workflow.targete2e.temporal.TargetTemporalWorkerRegistration;
 import com.example.dispute.workflow.infrastructure.persistence.authority.bridge.JdbcIntakeChildBridgeReadPort;
 import com.example.dispute.workflow.shadow.intake.IntakeSyntheticWorkerRegistration;
@@ -103,13 +104,17 @@ public class TemporalWorkerConfiguration {
             TemporalWorkerProperties properties,
             TemporalWorkerOptionsFactory optionsFactory,
             AgentRunV2Properties agentRunV2Properties,
+            GraphCommandClientProperties graphClientProperties,
             IntakeEpochSelectionProperties intakeEpochSelectionProperties,
             ObjectProvider<IntakeSyntheticWorkerRegistration> syntheticRegistrationProvider,
             ObjectProvider<AgentRunLedger> ledgerProvider,
             ObjectProvider<AgentRunExecutionGateway> executionGatewayProvider,
-            ObjectProvider<AgentRunFinalizationGateway> finalizationGatewayProvider) {
+            ObjectProvider<AgentRunFinalizationGateway> finalizationGatewayProvider,
+            ObjectProvider<TargetE2eAgentDeploymentBinding> targetBindingProvider) {
         requireVersionedAgentWorker(
                 properties, agentRunV2Properties, intakeEpochSelectionProperties);
+        requireTargetAgentDeploymentBinding(
+                properties, graphClientProperties, targetBindingProvider);
         WorkerFactory factory =
                 WorkerFactory.newInstance(workflowClient, optionsFactory.factoryOptions());
         return start(
@@ -335,6 +340,20 @@ public class TemporalWorkerConfiguration {
             throw new IllegalStateException(
                     "Signed synthetic Intake cannot share AGENT_EXECUTION with AgentRunV2");
         }
+    }
+
+    private static void requireTargetAgentDeploymentBinding(
+            TemporalWorkerProperties workerProperties,
+            GraphCommandClientProperties graphProperties,
+            ObjectProvider<TargetE2eAgentDeploymentBinding> bindingProvider) {
+        if (graphProperties.mode()
+                != GraphCommandClientProperties.Mode.TARGET_E2E_CANDIDATE) {
+            return;
+        }
+        TargetE2eAgentDeploymentBinding binding =
+                requireUnique(bindingProvider, "target AGENT deployment binding");
+        binding.requireWorkerConfiguration(
+                graphProperties.activationId(), workerProperties.buildId());
     }
 
     private static void requireVersionedControlWorker(TemporalWorkerProperties properties) {

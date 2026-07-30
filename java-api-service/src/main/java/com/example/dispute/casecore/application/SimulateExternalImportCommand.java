@@ -65,16 +65,19 @@ public record SimulateExternalImportCommand(
         if (initiatorRoleHint != ActorRole.USER && initiatorRoleHint != ActorRole.MERCHANT) {
             throw new IllegalArgumentException("initiatorRoleHint must be USER or MERCHANT");
         }
-        if (currentActorId == null || currentActorId.isBlank()) {
-            throw new IllegalArgumentException("currentActorId must not be blank");
-        }
-        if (counterpartyActorId == null || counterpartyActorId.isBlank()) {
-            throw new IllegalArgumentException("counterpartyActorId must not be blank");
-        }
-        DemoImportActors.requireSimulationParties(
-                initiatorRoleHint, currentActorId, counterpartyActorId);
+        requireBoundedActorId(currentActorId, "currentActorId");
+        requireBoundedActorId(counterpartyActorId, "counterpartyActorId");
         if (simulationBatchId == null || simulationBatchId.isBlank()) {
             simulationBatchId = "default";
+        }
+    }
+
+    private static void requireBoundedActorId(String value, String field) {
+        if (value == null || value.isBlank()) {
+            throw new IllegalArgumentException(field + " must not be blank");
+        }
+        if (value.length() > 128) {
+            throw new IllegalArgumentException(field + " must not exceed 128 characters");
         }
     }
 }

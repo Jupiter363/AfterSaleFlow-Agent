@@ -8,6 +8,7 @@ package com.example.dispute.casecore;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -216,7 +217,7 @@ class DisputeControllerTest {
     // 下游影响：「DisputeControllerTest.rejectsExternalImportsForNonDemoPartyIds()」的下游是被测服务、仓储或外部客户端替身；「verifyNoInteractions」把结果与预期状态、异常或调用次数锁定。
     // 系统意义：「DisputeControllerTest.rejectsExternalImportsForNonDemoPartyIds()」守住「案件核心与导入」的可执行规格，尤其防止 「X-Service-Identity」、「external-dispute-adapter」、「Idempotency-Key」、「import-wrong-party」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
-    void rejectsExternalImportsForNonDemoPartyIds() throws Exception {
+    void acceptsExternalImportsForArbitraryPartyIds() throws Exception {
         mockMvc.perform(
                         post("/internal/disputes/import")
                                 .header("X-Service-Identity", "external-dispute-adapter")
@@ -237,10 +238,41 @@ class DisputeControllerTest {
                                           "risk_level": "MEDIUM"
                                         }
                                         """))
-                .andExpect(status().isBadRequest())
-                .andExpect(
-                        jsonPath("$.details.reason")
-                                .value("userId must be user-local"));
+                .andExpect(status().isCreated());
+        verify(importService)
+                .importDispute(
+                        any(),
+                        any(),
+                        eq("import-wrong-party"),
+                        any(),
+                        any());
+    }
+
+    @Test
+    void rejectsExternalImportDescriptionsBeyondThePublishedLimit() throws Exception {
+        mockMvc.perform(
+                        post("/internal/disputes/import")
+                                .header("X-Service-Identity", "external-dispute-adapter")
+                                .header("Idempotency-Key", "import-long-description")
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content(
+                                        """
+                                        {
+                                          "source_system": "OMS",
+                                          "external_case_reference": "EXT-LONG-DESCRIPTION",
+                                          "order_reference": "ORDER-LONG-DESCRIPTION",
+                                          "user_id": "user-external",
+                                          "merchant_id": "merchant-external",
+                                          "initiator_role": "USER",
+                                          "dispute_type": "SIGNED_NOT_RECEIVED",
+                                          "title": "Imported dispute",
+                                          "description": "%s",
+                                          "risk_level": "MEDIUM"
+                                        }
+                                        """
+                                                .formatted("x".repeat(2001))))
+                .andExpect(status().isBadRequest());
+
         verifyNoInteractions(importService);
     }
 
@@ -394,7 +426,7 @@ class DisputeControllerTest {
     // 下游影响：「DisputeControllerTest.publicSimulationRejectsNonDemoCounterpartyIds()」的下游是被测服务、仓储或外部客户端替身；「verifyNoInteractions」把结果与预期状态、异常或调用次数锁定。
     // 系统意义：「DisputeControllerTest.publicSimulationRejectsNonDemoCounterpartyIds()」守住「案件核心与导入」的可执行规格，尤其防止 「user-local」、「USER」、「Idempotency-Key」、「simulate-wrong-counterparty」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     @Test
-    void publicSimulationRejectsNonDemoCounterpartyIds() throws Exception {
+    void publicSimulationAcceptsArbitraryCounterpartyIds() throws Exception {
         mockMvc.perform(
                         post("/api/disputes/import/simulate")
                                 .header(HeaderAuthenticationFilter.USER_ID_HEADER, "user-local")
@@ -412,11 +444,14 @@ class DisputeControllerTest {
                                           "counterparty_actor_id": "merchant-1"
                                         }
                                         """))
-                .andExpect(status().isBadRequest())
-                .andExpect(
-                        jsonPath("$.details.reason")
-                                .value("counterpartyActorId must be merchant-local"));
-        verifyNoInteractions(importService);
+                .andExpect(status().isCreated());
+        verify(importService)
+                .simulateExternalImport(
+                        any(),
+                        any(),
+                        eq("simulate-wrong-counterparty"),
+                        any(),
+                        any());
     }
 
     // 所属模块：【案件核心与导入 / 自动化测试层】「DisputeControllerTest.rejectsPublicExternalImportWhenTheActorDoesNotMatchTheRequestedInitiator()」。

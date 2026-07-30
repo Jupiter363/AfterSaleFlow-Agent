@@ -49,11 +49,14 @@ public record ImportDisputeCommand(
         requireText(orderReference, "orderReference");
         requireText(userId, "userId");
         requireText(merchantId, "merchantId");
-        DemoImportActors.requireImportedParties(userId, merchantId);
         requireText(initiatorRole, "initiatorRole");
         requireText(disputeType, "disputeType");
         requireText(title, "title");
         requireText(description, "description");
+        if (description.length() > 2000) {
+            throw new IllegalArgumentException(
+                    "description must not exceed 2000 characters");
+        }
         Objects.requireNonNull(riskLevel, "riskLevel must not be null");
         Objects.requireNonNull(caseStatus, "caseStatus must not be null");
         requireText(currentRoom, "currentRoom");

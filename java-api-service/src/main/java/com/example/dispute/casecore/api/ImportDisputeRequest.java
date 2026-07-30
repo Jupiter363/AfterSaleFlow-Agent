@@ -15,6 +15,7 @@ import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
+import jakarta.validation.constraints.Size;
 
 // 所属模块：【案件核心与导入 / HTTP 接口层】类型「ImportDisputeRequest」。
 // 类型职责：定义导入争议跨层传递时使用的不可变数据契约；本类型显式提供 「toCommand」。
@@ -22,17 +23,17 @@ import jakarta.validation.constraints.Pattern;
 // 边界意义：Java/PostgreSQL 是案件状态事实源，导入重试不能创建重复案件
 // Java 语法：record 用于不可变数据载体，编译器会生成组件访问器和值语义方法。
 public record ImportDisputeRequest(
-        @NotBlank String sourceSystem,
-        @NotBlank String externalCaseReference,
-        @NotBlank String orderReference,
-        String afterSalesReference,
-        String logisticsReference,
-        @NotBlank String userId,
-        @NotBlank String merchantId,
+        @NotBlank @Size(max = 64) String sourceSystem,
+        @NotBlank @Size(max = 128) String externalCaseReference,
+        @NotBlank @Size(max = 64) String orderReference,
+        @Size(max = 64) String afterSalesReference,
+        @Size(max = 64) String logisticsReference,
+        @NotBlank @Size(max = 128) String userId,
+        @NotBlank @Size(max = 128) String merchantId,
         @NotBlank @Pattern(regexp = "USER|MERCHANT") String initiatorRole,
-        @NotBlank String disputeType,
-        @NotBlank String title,
-        @NotBlank String description,
+        @NotBlank @Size(max = 64) String disputeType,
+        @NotBlank @Size(max = 256) String title,
+        @NotBlank @Size(max = 2000) String description,
         @JsonProperty("requested_outcome_hint")
                 @Pattern(
                         regexp =
