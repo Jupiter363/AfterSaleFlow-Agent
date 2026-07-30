@@ -227,6 +227,24 @@ class OutcomeWireContractTest {
     }
 
     @Test
+    void firstReviewEpochZeroMatchesTheSharedRoomEpochContract() throws IOException {
+        OutcomeWireTypes.coordinates(0L, 0L, 1L);
+        assertThatThrownBy(() -> OutcomeWireTypes.coordinates(-1L, 0L, 1L))
+                .isInstanceOf(IllegalArgumentException.class);
+
+        ObjectNode firstEpoch = (ObjectNode) MAPPER.readTree(FIXTURES.resolve("valid")
+                .resolve("outcome-workflow-start-valid.json").toFile());
+        firstEpoch.put("epoch", 0L);
+        JsonSchema schema = JsonSchemaFactory.getInstance(SpecVersion.VersionFlag.V202012)
+                .getSchema(MAPPER.readTree(
+                        CONTRACT_ROOT.resolve("outcome-workflow-start.schema.json").toFile()));
+        assertThat(schema.validate(firstEpoch)).isEmpty();
+        assertThat(codec.decode(
+                        "outcome-workflow-start.schema.json", firstEpoch, OutcomeWorkflowStart.class)
+                .epoch()).isZero();
+    }
+
+    @Test
     void operationSequenceIsBoundedAtEverySharedWireBoundary() throws IOException {
         Map<String, String> operationCases = Map.of(
                 "outcome-operation-command-valid.json", "outcome-operation-command.schema.json",

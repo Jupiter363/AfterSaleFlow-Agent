@@ -18,7 +18,6 @@ import io.temporal.client.WorkflowUpdateHandle;
 import io.temporal.failure.ApplicationFailure;
 import jakarta.annotation.PreDestroy;
 import java.time.Duration;
-import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -31,27 +30,6 @@ import org.springframework.stereotype.Component;
 @Component
 public final class SdkRoomEpochProvisioningGateway
         implements RoomEpochProvisioningGateway {
-
-    private static final Set<String> DEFINITIVE_CONFLICTS =
-            Set.of(
-                    "ROOM_EPOCH_PAYLOAD_CONFLICT",
-                    "ROOM_EPOCH_SCOPE_CONFLICT",
-                    "ROOM_EPOCH_FENCE_CONFLICT",
-                    "ROOM_EPOCH_SELECTION_CONFLICT",
-                    "ROOM_EPOCH_PROVISIONING_INVALID",
-                    "ROOM_EPOCH_UPDATE_ID_CONFLICT",
-                    "ROOM_EPOCH_UPDATE_ID_MISMATCH",
-                    "CASE_PROCESS_SCOPE_MISMATCH",
-                    "CASE_PROCESS_WORKFLOW_ID_MISMATCH",
-                    "ROOM_EPOCH_CASE_WORKFLOW_ID_MISMATCH",
-                    "ROOM_EPOCH_CURRENT_ROOM_MISMATCH",
-                    "ROOM_EPOCH_TUPLE_CONFLICT",
-                    "ROOM_EPOCH_ALREADY_ACTIVE_LEGACY",
-                    "ROOM_EPOCH_FENCING_TOKEN_STALE",
-                    "ROOM_EPOCH_NOT_MONOTONIC",
-                    "ROOM_EPOCH_PROCESS_REVISION_CONFLICT",
-                    "ROOM_EPOCH_CHILD_START_CONFLICT",
-                    "ROOM_EPOCH_SEQUENCE_BOUNDARY_CONFLICT");
 
     private final WorkflowClient workflowClient;
     private final Duration completionTimeout;
@@ -142,14 +120,8 @@ public final class SdkRoomEpochProvisioningGateway
             return exception;
         }
         ApplicationFailure applicationFailure = findApplicationFailure(failure);
-        if (applicationFailure != null
-                && applicationFailure.isNonRetryable()
-                && DEFINITIVE_CONFLICTS.contains(applicationFailure.getType())) {
-            return RoomEpochProvisioningException.permanent(
-                    applicationFailure.getType(), detail(failure), failure);
-        }
         if (applicationFailure != null && applicationFailure.isNonRetryable()) {
-            return RoomEpochProvisioningException.retryable(
+            return RoomEpochProvisioningException.permanent(
                     applicationFailure.getType(), detail(failure), failure);
         }
         Status.Code statusCode = grpcStatus(failure);

@@ -65,7 +65,7 @@ public interface TargetReviewNonExecutionActivities {
       requireText(roomId, "roomId");
       requireText(workflowId, "workflowId");
       deadlineAt = Objects.requireNonNull(deadlineAt, "deadlineAt");
-      if (roomEpoch < 1 || fencingToken < 1 || processRevision < 0 || roomRevision < 0) {
+      if (roomEpoch < 0 || fencingToken < 1 || processRevision < 0 || roomRevision < 0) {
         throw new IllegalArgumentException("target Review Evidence transition coordinates are invalid");
       }
     }

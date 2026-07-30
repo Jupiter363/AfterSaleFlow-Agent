@@ -199,6 +199,7 @@ def _command_from_state(state: OutcomeReviewGraphStateV1):
         frozen_packet_hash=binding.get("frozen_packet_hash"),
         frozen_packet_version=binding.get("frozen_packet_version"),
         action_hash=binding.get("action_hash"),
+        event_hash=binding.get("event_hash"),
         review_task_status=binding.get("review_task_status"),
         review_deadline=binding.get("review_deadline"),
         authorized_artifact_refs=dict(

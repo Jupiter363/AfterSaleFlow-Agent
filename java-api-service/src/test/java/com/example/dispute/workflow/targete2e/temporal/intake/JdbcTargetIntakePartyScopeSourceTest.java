@@ -138,8 +138,12 @@ class JdbcTargetIntakePartyScopeSourceTest {
             "fulfillment_dispute_case",
             "epoch.room_type = 'INTAKE'",
             "epoch.fencing_token = :roomFencingToken",
+            "epoch.lifecycle_status = 'PROVISIONING'",
+            "epoch.provisioning_status = 'PROVISIONING'",
+            "epoch.room_temporal_run_id is null",
             "epoch.lifecycle_status = 'ACTIVE'",
             "epoch.provisioning_status = 'READY'",
+            "coalesce(btrim(epoch.room_temporal_run_id), '') <> ''",
             "binding.execution_lane = 'TARGET_E2E_CANDIDATE'");
     assertThat(parameters.getValue().getValue("tenantSurrogate")).isEqualTo("tenant-1");
     assertThat(parameters.getValue().getValue("caseId")).isEqualTo("case-1");

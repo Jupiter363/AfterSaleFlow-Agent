@@ -15,7 +15,7 @@ public record OutcomeCompletionRequest(
 
   public OutcomeCompletionRequest {
     if (roomType != RoomType.REVIEW
-        || roomEpoch < 1
+        || roomEpoch < 0
         || fencingToken < 1
         || expectedProcessRevision < 0
         || expectedRoomRevision < 0

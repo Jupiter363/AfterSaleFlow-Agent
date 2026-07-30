@@ -17,7 +17,6 @@ public final class JdbcTargetHearingBootstrapActivities
 
   public static final String BOOTSTRAP_INVALID = "TARGET_HEARING_BOOTSTRAP_INVALID";
   private static final String FLOW_SCHEMA = "hearing_flow.v2";
-  private static final String PROJECTION_SCHEMA = "hearing-stage-projection.v1";
   private static final String CONTROL_ACTOR = "target-e2e-hearing-bootstrap";
 
   private final JdbcTemplate jdbc;
@@ -49,10 +48,91 @@ public final class JdbcTargetHearingBootstrapActivities
     }
   }
 
+  @Override
+  public void awaitActivation(ActivationRequest request) {
+    Objects.requireNonNull(request, "request");
+    try {
+      List<ActivationRow> rows =
+          jdbc.query(
+              """
+              select epoch.lifecycle_status, epoch.provisioning_status,
+                     epoch.temporal_run_id as case_workflow_run_id,
+                     epoch.room_temporal_run_id as room_workflow_run_id,
+                     process_projection.writer_activation_status,
+                     process_projection.temporal_run_id as projection_case_run_id,
+                     hearing_projection.temporal_run_id as hearing_room_run_id
+                from case_room_epoch epoch
+                join case_process_projection process_projection
+                  on process_projection.case_id = epoch.case_id
+                 and process_projection.tenant_surrogate = epoch.tenant_surrogate
+                 and process_projection.current_room = 'HEARING'
+                 and process_projection.writer_mode = 'TEMPORAL'
+                 and process_projection.room_epoch = epoch.room_epoch
+                 and process_projection.fencing_token = epoch.fencing_token
+                 and process_projection.process_revision = epoch.process_revision
+                join hearing_temporal_projection hearing_projection
+                  on hearing_projection.flow_instance_id = epoch.room_id
+                 and hearing_projection.case_id = epoch.case_id
+                 and hearing_projection.tenant_surrogate = epoch.tenant_surrogate
+                 and hearing_projection.epoch_id = epoch.id
+                 and hearing_projection.room_type = 'HEARING'
+                 and hearing_projection.hearing_epoch = epoch.room_epoch
+                 and hearing_projection.fencing_token = epoch.fencing_token
+                 and hearing_projection.process_revision = epoch.process_revision
+                 and hearing_projection.room_revision = epoch.room_revision
+                 and hearing_projection.writer_mode = 'TEMPORAL'
+               where epoch.id = ? and epoch.tenant_surrogate = ? and epoch.case_id = ?
+                 and epoch.room_id = ? and epoch.room_type = 'HEARING'
+                 and epoch.room_epoch = ? and epoch.fencing_token = ?
+                 and epoch.process_revision = ? and epoch.room_revision = ?
+                 and epoch.writer_mode = 'TEMPORAL'
+                 and epoch.room_temporal_workflow_id = ?
+                 and epoch.room_workflow_build_id = ?
+              """,
+              (row, ignored) ->
+                  new ActivationRow(
+                      row.getString("lifecycle_status"),
+                      row.getString("provisioning_status"),
+                      row.getString("case_workflow_run_id"),
+                      row.getString("room_workflow_run_id"),
+                      row.getString("writer_activation_status"),
+                      row.getString("projection_case_run_id"),
+                      row.getString("hearing_room_run_id")),
+              request.epochId(),
+              request.tenantSurrogate(),
+              request.caseId(),
+              request.flowInstanceId(),
+              request.roomEpoch(),
+              request.fencingToken(),
+              request.processRevision(),
+              request.roomRevision(),
+              request.roomWorkflowId(),
+              request.roomWorkflowBuildId());
+      ActivationRow state = exactlyOne(rows, "target Hearing activation authority drifted");
+      ActivationPhase phase = activationPhase(request, state);
+      if (phase == ActivationPhase.READY) {
+        return;
+      }
+      if (phase == ActivationPhase.PENDING) {
+        throw ApplicationFailure.newFailure(
+            "target Hearing activation is not committed yet", ACTIVATION_PENDING);
+      }
+      throw ApplicationFailure.newNonRetryableFailure(
+          "target Hearing activation authority is invalid", ACTIVATION_INVALID);
+    } catch (ApplicationFailure failure) {
+      throw failure;
+    } catch (IllegalArgumentException | IllegalStateException failure) {
+      throw ApplicationFailure.newNonRetryableFailure(failure.getMessage(), ACTIVATION_INVALID);
+    } catch (RuntimeException failure) {
+      throw ApplicationFailure.newFailure(
+          "target Hearing activation read is temporarily unavailable", ACTIVATION_PENDING);
+    }
+  }
+
   private Binding bootstrapLocked(ProvisionRoomEpoch provision) {
     CaseRow caseRow = lockCase(provision.caseId());
     EpochRow epoch = lockEpoch(provision);
-    lockCaseProjection(provision);
+    lockCaseProjection(provision, epoch);
     Participants participants = lockParticipants(provision.caseId(), caseRow);
 
     ProjectionRow projection = lockProjection(provision.caseId(), epoch.epochId());
@@ -72,21 +152,30 @@ public final class JdbcTargetHearingBootstrapActivities
         epoch.roomRevision(),
         projection.stageCode(),
         projection.stageSequence(),
-        participants.userId(),
-        participants.merchantId());
+        participants.initiatorId(),
+        participants.respondentId());
   }
 
   private CaseRow lockCase(String caseId) {
     List<CaseRow> rows =
         jdbc.query(
             """
-            select id, user_id, merchant_id, current_room
+            select id, user_id, merchant_id, initiator_id, initiator_role,
+                   respondent_id, respondent_role, current_room
               from fulfillment_dispute_case
              where id = ?
              for update
             """,
             (row, ignored) ->
-                new CaseRow(row.getString("id"), row.getString("user_id"), row.getString("merchant_id"), row.getString("current_room")),
+                new CaseRow(
+                    row.getString("id"),
+                    row.getString("user_id"),
+                    row.getString("merchant_id"),
+                    row.getString("initiator_id"),
+                    row.getString("initiator_role"),
+                    row.getString("respondent_id"),
+                    row.getString("respondent_role"),
+                    row.getString("current_room")),
             caseId);
     return exactlyOne(rows, "target Hearing case is absent or ambiguous");
   }
@@ -125,65 +214,112 @@ public final class JdbcTargetHearingBootstrapActivities
             provision.fencingToken());
     EpochRow value = exactlyOne(rows, "target Hearing epoch authority is absent or ambiguous");
     require(
-        "ACTIVE".equals(value.lifecycleStatus())
-            && "READY".equals(value.provisioningStatus())
+        allowedEpochState(
+                value.lifecycleStatus(), value.provisioningStatus(), value.roomRunId())
             && "TEMPORAL".equals(value.writerMode())
             && provision.initialProcessRevision() == value.processRevision()
             && provision.initialRoomRevision() == value.roomRevision()
             && provision.roomWorkflowId().equals(value.roomWorkflowId())
-            && provision.roomWorkflowBuildId().equals(value.roomWorkflowBuildId())
-            && nonBlank(value.roomRunId()),
+            && provision.roomWorkflowBuildId().equals(value.roomWorkflowBuildId()),
         "target Hearing epoch authority drifted");
     return value;
   }
 
-  private void lockCaseProjection(ProvisionRoomEpoch provision) {
-    List<String> rows =
+  private void lockCaseProjection(ProvisionRoomEpoch provision, EpochRow epoch) {
+    List<CaseProjectionRow> rows =
         jdbc.query(
             """
-            select case_id
+            select writer_activation_status, temporal_run_id
               from case_process_projection
              where case_id = ? and tenant_surrogate = ? and current_room = 'HEARING'
                and writer_mode = 'TEMPORAL' and room_epoch = ? and fencing_token = ?
-               and process_revision = ? and writer_activation_status = 'READY'
+               and process_revision = ?
              for update
             """,
-            (row, ignored) -> row.getString("case_id"),
+            (row, ignored) ->
+                new CaseProjectionRow(
+                    row.getString("writer_activation_status"),
+                    row.getString("temporal_run_id")),
             provision.caseId(),
             provision.tenantSurrogate(),
             provision.roomEpoch(),
             provision.fencingToken(),
             provision.initialProcessRevision());
-    exactlyOne(rows, "target Hearing case projection drifted");
+    CaseProjectionRow projection =
+        exactlyOne(rows, "target Hearing case projection drifted");
+    boolean provisioning =
+        "PROVISIONING".equals(epoch.lifecycleStatus())
+            && "PROVISIONING".equals(epoch.provisioningStatus())
+            && "PROVISIONING".equals(projection.activationStatus())
+            && !nonBlank(projection.temporalRunId());
+    boolean ready =
+        "ACTIVE".equals(epoch.lifecycleStatus())
+            && "READY".equals(epoch.provisioningStatus())
+            && "READY".equals(projection.activationStatus())
+            && nonBlank(projection.temporalRunId());
+    require(provisioning || ready, "target Hearing case projection activation drifted");
   }
 
   private Participants lockParticipants(String caseId, CaseRow caseRow) {
     require("HEARING".equals(caseRow.currentRoom()), "target Hearing case is not in HEARING");
-    String user = participant(caseId, "USER");
-    String merchant = participant(caseId, "MERCHANT");
-    require(
-        user.equals(caseRow.userId())
-            && merchant.equals(caseRow.merchantId())
-            && !user.equals(merchant),
-        "target Hearing case participants drifted");
-    return new Participants(user, merchant);
+    Participants parties = exactCaseParties(caseRow);
+    participant(caseId, parties.initiatorId(), caseRow.initiatorRole());
+    participant(caseId, parties.respondentId(), caseRow.respondentRole());
+    return parties;
   }
 
-  private String participant(String caseId, String role) {
+  private String participant(String caseId, String actorId, String role) {
     List<String> rows =
         jdbc.query(
             """
             select actor_id
               from case_participant
-             where case_id = ? and participant_role = ? and participant_status = 'ACTIVE'
+             where case_id = ? and actor_id = ? and participant_role = ?
+               and participant_status = 'ACTIVE'
              for update
             """,
             (row, ignored) -> row.getString("actor_id"),
             caseId,
+            actorId,
             role);
-    String actorId = exactlyOne(rows, "target Hearing " + role + " participant is absent or ambiguous");
-    require(nonBlank(actorId), "target Hearing " + role + " actor is invalid");
-    return actorId;
+    String resolvedActorId =
+        exactlyOne(rows, "target Hearing " + role + " participant is absent or ambiguous");
+    require(nonBlank(resolvedActorId), "target Hearing " + role + " actor is invalid");
+    return resolvedActorId;
+  }
+
+  static boolean allowedEpochState(
+      String lifecycleStatus, String provisioningStatus, String roomRunId) {
+    boolean runAbsent = !nonBlank(roomRunId);
+    return ("PROVISIONING".equals(lifecycleStatus)
+            && "PROVISIONING".equals(provisioningStatus)
+            && runAbsent)
+        || ("ACTIVE".equals(lifecycleStatus)
+            && "READY".equals(provisioningStatus)
+            && !runAbsent);
+  }
+
+  static Participants exactCaseParties(CaseRow caseRow) {
+    boolean userInitiated =
+        "USER".equals(caseRow.initiatorRole())
+            && Objects.equals(caseRow.userId(), caseRow.initiatorId())
+            && "MERCHANT".equals(caseRow.respondentRole())
+            && Objects.equals(caseRow.merchantId(), caseRow.respondentId());
+    boolean merchantInitiated =
+        "MERCHANT".equals(caseRow.initiatorRole())
+            && Objects.equals(caseRow.merchantId(), caseRow.initiatorId())
+            && "USER".equals(caseRow.respondentRole())
+            && Objects.equals(caseRow.userId(), caseRow.respondentId());
+    require(
+        nonBlank(caseRow.userId())
+            && nonBlank(caseRow.merchantId())
+            && !caseRow.userId().equals(caseRow.merchantId())
+            && nonBlank(caseRow.initiatorId())
+            && nonBlank(caseRow.respondentId())
+            && !caseRow.initiatorId().equals(caseRow.respondentId())
+            && (userInitiated || merchantInitiated),
+        "target Hearing case participants drifted");
+    return new Participants(caseRow.initiatorId(), caseRow.respondentId());
   }
 
   private ProjectionRow lockProjection(String caseId, String epochId) {
@@ -234,6 +370,16 @@ public final class JdbcTargetHearingBootstrapActivities
             provision.caseId());
     require(existingFlows.isEmpty(), "target Hearing flow exists without an exact projection");
 
+    jdbc.queryForObject(
+        "select set_config('app.hearing_authority_commit', 'on', true)", String.class);
+    jdbc.queryForObject(
+        "select set_config('app.hearing_temporal_namespace', ?, true)",
+        String.class,
+        temporalNamespace);
+    jdbc.queryForObject(
+        "select set_config('app.hearing_epoch_id', ?, true)",
+        String.class,
+        provision.epochId());
     String stageId = stableId("hearing-stage-", provision.epochId() + ':' + provision.roomId());
     int inserted =
         jdbc.update(
@@ -266,32 +412,6 @@ public final class JdbcTargetHearingBootstrapActivities
             CONTROL_ACTOR,
             CONTROL_ACTOR);
     require(inserted == 1, "target Hearing initial stage creation failed");
-    inserted =
-        jdbc.update(
-            """
-            insert into hearing_temporal_projection (
-                flow_instance_id, case_id, schema_version, tenant_surrogate, epoch_id, room_type,
-                hearing_epoch, writer_mode, process_revision, room_revision, fencing_token,
-                current_stage, stage_sequence, stage_deadline_at, temporal_namespace,
-                temporal_workflow_id, temporal_run_id, temporal_build_or_deployment,
-                projected_at, updated_at
-            ) values (?, ?, ?, ?, ?, 'HEARING', ?, 'TEMPORAL', ?, ?, ?, 'COURT_PREPARING', 1,
-                null, ?, ?, ?, ?, now(), now())
-            """,
-            provision.roomId(),
-            provision.caseId(),
-            PROJECTION_SCHEMA,
-            provision.tenantSurrogate(),
-            epoch.epochId(),
-            epoch.roomEpoch(),
-            epoch.processRevision(),
-            epoch.roomRevision(),
-            epoch.fencingToken(),
-            temporalNamespace,
-            epoch.roomWorkflowId(),
-            epoch.roomRunId(),
-            epoch.roomWorkflowBuildId());
-    require(inserted == 1, "target Hearing projection creation failed");
   }
 
   private void requireExactReplay(
@@ -307,7 +427,7 @@ public final class JdbcTargetHearingBootstrapActivities
             && projection.stageSequence() == 1
             && temporalNamespace.equals(projection.temporalNamespace())
             && epoch.roomWorkflowId().equals(projection.temporalWorkflowId())
-            && epoch.roomRunId().equals(projection.temporalRunId())
+            && expectedProjectionRunId(epoch).equals(projection.temporalRunId())
             && epoch.roomWorkflowBuildId().equals(projection.temporalBuild()),
         "target Hearing projection replay drifted");
   }
@@ -351,13 +471,51 @@ public final class JdbcTargetHearingBootstrapActivities
     return value != null && !value.isBlank();
   }
 
+  private static String expectedProjectionRunId(EpochRow epoch) {
+    return nonBlank(epoch.roomRunId())
+        ? epoch.roomRunId()
+        : TargetHearingProvisioningRunIds.provisional(epoch.epochId());
+  }
+
+  static ActivationPhase activationPhase(ActivationRequest request, ActivationRow state) {
+    String provisional = TargetHearingProvisioningRunIds.provisional(request.epochId());
+    boolean pending =
+        "PROVISIONING".equals(state.lifecycleStatus())
+            && "PROVISIONING".equals(state.provisioningStatus())
+            && !nonBlank(state.caseWorkflowRunId())
+            && !nonBlank(state.roomWorkflowRunId())
+            && "PROVISIONING".equals(state.projectionActivationStatus())
+            && !nonBlank(state.projectionCaseRunId())
+            && provisional.equals(state.hearingRoomRunId());
+    if (pending) {
+      return ActivationPhase.PENDING;
+    }
+    boolean ready =
+        "ACTIVE".equals(state.lifecycleStatus())
+            && "READY".equals(state.provisioningStatus())
+            && nonBlank(state.caseWorkflowRunId())
+            && request.roomWorkflowRunId().equals(state.roomWorkflowRunId())
+            && "READY".equals(state.projectionActivationStatus())
+            && state.caseWorkflowRunId().equals(state.projectionCaseRunId())
+            && request.roomWorkflowRunId().equals(state.hearingRoomRunId());
+    return ready ? ActivationPhase.READY : ActivationPhase.INVALID;
+  }
+
   private static void require(boolean condition, String message) {
     if (!condition) {
       throw new IllegalStateException(message);
     }
   }
 
-  private record CaseRow(String caseId, String userId, String merchantId, String currentRoom) {}
+  record CaseRow(
+      String caseId,
+      String userId,
+      String merchantId,
+      String initiatorId,
+      String initiatorRole,
+      String respondentId,
+      String respondentRole,
+      String currentRoom) {}
 
   private record EpochRow(
       String epochId,
@@ -372,7 +530,24 @@ public final class JdbcTargetHearingBootstrapActivities
       String provisioningStatus,
       String writerMode) {}
 
-  private record Participants(String userId, String merchantId) {}
+  record Participants(String initiatorId, String respondentId) {}
+
+  private record CaseProjectionRow(String activationStatus, String temporalRunId) {}
+
+  enum ActivationPhase {
+    PENDING,
+    READY,
+    INVALID
+  }
+
+  record ActivationRow(
+      String lifecycleStatus,
+      String provisioningStatus,
+      String caseWorkflowRunId,
+      String roomWorkflowRunId,
+      String projectionActivationStatus,
+      String projectionCaseRunId,
+      String hearingRoomRunId) {}
 
   private record ProjectionRow(
       String flowInstanceId,

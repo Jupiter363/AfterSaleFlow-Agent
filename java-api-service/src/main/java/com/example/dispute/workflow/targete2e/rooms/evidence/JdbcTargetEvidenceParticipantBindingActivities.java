@@ -31,8 +31,9 @@ public final class JdbcTargetEvidenceParticipantBindingActivities
       try {
         Request route = Objects.requireNonNull(request, "request");
         lockEpoch(connection, route);
-        String initiator = participant(connection, route.caseId(), "USER");
-        String respondent = participant(connection, route.caseId(), "MERCHANT");
+        CaseParties parties = caseParties(connection, route.caseId());
+        String initiator = parties.initiatorId();
+        String respondent = parties.respondentId();
         Binding result =
             new Binding(
                 route.tenantSurrogate(),
@@ -61,17 +62,22 @@ public final class JdbcTargetEvidenceParticipantBindingActivities
     try (PreparedStatement statement =
         connection.prepareStatement(
             """
-            select fencing_token, lifecycle_status, writer_mode
+            select fencing_token, lifecycle_status, provisioning_status, writer_mode,
+                   room_temporal_run_id
               from case_room_epoch
-             where case_id = ? and room_type = 'EVIDENCE' and room_epoch = ? for update
+             where tenant_surrogate = ? and case_id = ? and room_type = 'EVIDENCE'
+               and room_epoch = ? and fencing_token = ?
+             for update
             """)) {
-      statement.setString(1, request.caseId());
-      statement.setLong(2, request.roomEpoch());
+      statement.setString(1, request.tenantSurrogate());
+      statement.setString(2, request.caseId());
+      statement.setLong(3, request.roomEpoch());
+      statement.setLong(4, request.fencingToken());
       try (ResultSet row = statement.executeQuery()) {
         if (!row.next()
             || row.getLong(1) != request.fencingToken()
-            || !"ACTIVE".equals(row.getString(2))
-            || !"TEMPORAL".equals(row.getString(3))
+            || !allowedEpochState(row.getString(2), row.getString(3), row.getString(5))
+            || !"TEMPORAL".equals(row.getString(4))
             || row.next()) {
           throw new IllegalStateException("target Evidence epoch authority is invalid");
         }
@@ -79,28 +85,88 @@ public final class JdbcTargetEvidenceParticipantBindingActivities
     }
   }
 
-  private static String participant(Connection connection, String caseId, String role) throws SQLException {
+  static boolean allowedEpochState(
+      String lifecycleStatus, String provisioningStatus, String roomRunId) {
+    boolean runAbsent = roomRunId == null || roomRunId.isBlank();
+    return ("PROVISIONING".equals(lifecycleStatus)
+            && "PROVISIONING".equals(provisioningStatus)
+            && runAbsent)
+        || ("ACTIVE".equals(lifecycleStatus)
+            && "READY".equals(provisioningStatus)
+            && !runAbsent);
+  }
+
+  private static CaseParties caseParties(Connection connection, String caseId) throws SQLException {
     try (PreparedStatement statement =
         connection.prepareStatement(
             """
-            select actor_id
-              from case_participant
-             where case_id = ? and participant_role = ? and participant_status = 'ACTIVE'
-             for update
+            select dispute.user_id, dispute.merchant_id,
+                   dispute.initiator_id, dispute.initiator_role,
+                   dispute.respondent_id, dispute.respondent_role
+              from fulfillment_dispute_case dispute
+              join case_participant initiator
+                on initiator.case_id = dispute.id
+               and initiator.actor_id = dispute.initiator_id
+               and initiator.participant_role = dispute.initiator_role
+               and initiator.participant_status = 'ACTIVE'
+              join case_participant respondent
+                on respondent.case_id = dispute.id
+               and respondent.actor_id = dispute.respondent_id
+               and respondent.participant_role = dispute.respondent_role
+               and respondent.participant_status = 'ACTIVE'
+             where dispute.id = ?
+             for update of dispute, initiator, respondent
             """)) {
       statement.setString(1, caseId);
-      statement.setString(2, role);
       try (ResultSet row = statement.executeQuery()) {
         if (!row.next()) {
-          throw new IllegalStateException("target Evidence " + role + " participant is absent");
+          throw new IllegalStateException("target Evidence case parties are absent");
         }
-        String actorId = row.getString(1);
+        CaseParties parties =
+            exactCaseParties(
+                row.getString(1),
+                row.getString(2),
+                row.getString(3),
+                row.getString(4),
+                row.getString(5),
+                row.getString(6));
         if (row.next()) {
-          throw new IllegalStateException("target Evidence " + role + " participant is ambiguous");
+          throw new IllegalStateException("target Evidence case parties are ambiguous");
         }
-        return actorId;
+        return parties;
       }
     }
+  }
+
+  static CaseParties exactCaseParties(
+      String userId,
+      String merchantId,
+      String initiatorId,
+      String initiatorRole,
+      String respondentId,
+      String respondentRole) {
+    boolean userInitiated =
+        "USER".equals(initiatorRole)
+            && Objects.equals(userId, initiatorId)
+            && "MERCHANT".equals(respondentRole)
+            && Objects.equals(merchantId, respondentId);
+    boolean merchantInitiated =
+        "MERCHANT".equals(initiatorRole)
+            && Objects.equals(merchantId, initiatorId)
+            && "USER".equals(respondentRole)
+            && Objects.equals(userId, respondentId);
+    if (userId == null
+        || userId.isBlank()
+        || merchantId == null
+        || merchantId.isBlank()
+        || userId.equals(merchantId)
+        || initiatorId == null
+        || respondentId == null
+        || initiatorId.equals(respondentId)
+        || (!userInitiated && !merchantInitiated)) {
+      throw new IllegalStateException("target Evidence case party assignment is invalid");
+    }
+    return new CaseParties(initiatorId, respondentId);
   }
 
   private static String hash(Request request, String initiator, String respondent) {
@@ -112,9 +178,9 @@ public final class JdbcTargetEvidenceParticipantBindingActivities
             request.caseId(),
             Long.toString(request.roomEpoch()),
             Long.toString(request.fencingToken()),
-            "USER",
+            "INITIATOR",
             initiator,
-            "MERCHANT",
+            "RESPONDENT",
             respondent);
     try {
       return HexFormat.of().formatHex(
@@ -123,4 +189,6 @@ public final class JdbcTargetEvidenceParticipantBindingActivities
       throw new IllegalStateException("SHA-256 is unavailable", failure);
     }
   }
+
+  record CaseParties(String initiatorId, String respondentId) {}
 }

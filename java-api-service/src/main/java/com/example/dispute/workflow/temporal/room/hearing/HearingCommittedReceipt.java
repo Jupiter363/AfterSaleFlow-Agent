@@ -61,7 +61,7 @@ public record HearingCommittedReceipt(
     Objects.requireNonNull(writerMode, "writerMode must not be null");
     Objects.requireNonNull(sourceStage, "sourceStage must not be null");
     Objects.requireNonNull(stage, "stage must not be null");
-    if (roomEpoch < 1
+    if (roomEpoch < 0
         || fencingToken < 1
         || roomEpoch > MAX_SAFE_INTEGER
         || fencingToken > MAX_SAFE_INTEGER) {

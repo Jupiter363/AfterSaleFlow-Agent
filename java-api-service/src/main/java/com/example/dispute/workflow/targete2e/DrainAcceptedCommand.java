@@ -16,7 +16,7 @@ public record DrainAcceptedCommand(
     TargetE2eActivationContract.identifier(commandId, "commandId");
     TargetE2eActivationContract.sha256(commandHash, "commandHash");
     TargetE2eActivationContract.sha256(commandEnvelopeHash, "commandEnvelopeHash");
-    if (roomEpoch < 1 || fencingToken < 1) {
+    if (roomEpoch < 0 || fencingToken < 1) {
       throw new IllegalArgumentException("room epoch and fencing token must be positive");
     }
     Objects.requireNonNull(admittedAt, "admittedAt");

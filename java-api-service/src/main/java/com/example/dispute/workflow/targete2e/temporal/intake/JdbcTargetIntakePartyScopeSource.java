@@ -45,8 +45,15 @@ public final class JdbcTargetIntakePartyScopeSource implements TargetIntakeParty
          and epoch.room_epoch = :roomEpoch
          and epoch.fencing_token = :roomFencingToken
          and epoch.writer_mode = 'TEMPORAL'
-         and epoch.lifecycle_status = 'ACTIVE'
-         and epoch.provisioning_status = 'READY'
+         and (
+              (epoch.lifecycle_status = 'PROVISIONING'
+               and epoch.provisioning_status = 'PROVISIONING'
+               and epoch.room_temporal_run_id is null)
+              or
+              (epoch.lifecycle_status = 'ACTIVE'
+               and epoch.provisioning_status = 'READY'
+               and coalesce(btrim(epoch.room_temporal_run_id), '') <> '')
+         )
          and binding.execution_lane = 'TARGET_E2E_CANDIDATE'
          and binding.room_type = 'INTAKE'
          and activation.execution_lane = 'TARGET_E2E_CANDIDATE'

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Annotated, Any, Literal
 
 from langgraph.channels import UntrackedValue
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing_extensions import NotRequired, TypedDict
 
 from app.graphs.outcome.contracts import OUTCOME_REVIEW_IDENTITY, OutcomeReviewGraphIdentity
@@ -21,9 +21,7 @@ MAX_OUTCOME_REVIEW_REFS = 256
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _IMMUTABLE_REF = re.compile(r"^(?:urn:|[A-Za-z0-9])[A-Za-z0-9._:/-]{0,511}$")
-_RFC3339 = re.compile(
-    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$"
-)
+_RFC3339 = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$")
 _AUTHORIZED_ARTIFACT_CATEGORIES = frozenset(
     {
         "case_summary",
@@ -120,10 +118,11 @@ class OutcomeReviewPrivateCommand(BaseModel):
     frozen_packet_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     frozen_packet_version: int = Field(ge=1)
     action_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    event_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     review_task_status: str = Field(min_length=1, max_length=64)
     review_deadline: str = Field(min_length=20, max_length=35)
     authorized_artifact_refs: dict[str, str]
-    room_epoch: int = Field(ge=1)
+    room_epoch: int = Field(ge=0)
     process_revision: int = Field(ge=0)
     fencing_token: int = Field(ge=1)
     fact_refs: tuple[str, ...] = ()
@@ -133,6 +132,13 @@ class OutcomeReviewPrivateCommand(BaseModel):
     question_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     request_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     version_pins: dict[str, str]
+
+    @field_validator("fact_refs", "rule_refs", "draft_refs", "deliberation_refs", mode="before")
+    @classmethod
+    def _decode_wire_ref_array(cls, value: object) -> object:
+        # JSON has arrays but no tuple type. Convert only the four explicitly bounded wire fields;
+        # strict validation still rejects scalars, mappings, and malformed members.
+        return tuple(value) if isinstance(value, list) else value
 
 
 class OutcomeReviewProjection(BaseModel):
@@ -161,9 +167,7 @@ class OutcomeReviewProjection(BaseModel):
 
 
 ReviewAnswerer = Callable[[ReviewCopilotRequest], ReviewCopilotAnswer]
-ReviewAnswerValidator = Callable[
-    [ReviewCopilotRequest, ReviewCopilotAnswer], ReviewCopilotAnswer
-]
+ReviewAnswerValidator = Callable[[ReviewCopilotRequest, ReviewCopilotAnswer], ReviewCopilotAnswer]
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,6 +252,7 @@ def new_outcome_review_state(
             "frozen_packet_hash": command.frozen_packet_hash,
             "frozen_packet_version": command.frozen_packet_version,
             "action_hash": command.action_hash,
+            "event_hash": command.event_hash,
             "review_task_status": command.review_task_status,
             "review_deadline": command.review_deadline,
             "authorized_artifact_refs": dict(sorted(command.authorized_artifact_refs.items())),
@@ -394,12 +399,9 @@ def _validate_command(command: OutcomeReviewPrivateCommand) -> None:
         raise OutcomeReviewContractError("OUTCOME_REVIEW_AUTHORIZED_REFS_INVALID")
     if _RFC3339.fullmatch(command.review_deadline) is None:
         raise OutcomeReviewContractError("OUTCOME_REVIEW_DEADLINE_INVALID")
-    if (
-        set(command.authorized_artifact_refs) - _AUTHORIZED_ARTIFACT_CATEGORIES
-        or any(
-            not isinstance(ref, str) or _IMMUTABLE_REF.fullmatch(ref) is None
-            for ref in command.authorized_artifact_refs.values()
-        )
+    if set(command.authorized_artifact_refs) - _AUTHORIZED_ARTIFACT_CATEGORIES or any(
+        not isinstance(ref, str) or _IMMUTABLE_REF.fullmatch(ref) is None
+        for ref in command.authorized_artifact_refs.values()
     ):
         raise OutcomeReviewContractError("OUTCOME_REVIEW_ARTIFACT_CAPABILITY_INVALID")
 

@@ -176,7 +176,7 @@ public final class OutcomeWireTypes {
     }
 
     static void coordinates(long epoch, long revision, long fence) {
-        if (epoch < 1 || epoch > MAX_SAFE_INTEGER) {
+        if (epoch < 0 || epoch > MAX_SAFE_INTEGER) {
             throw new IllegalArgumentException("epoch is outside the safe range");
         }
         if (revision < 0 || revision > MAX_SAFE_INTEGER) {

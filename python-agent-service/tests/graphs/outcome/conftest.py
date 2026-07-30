@@ -78,6 +78,7 @@ def private_command(
         frozen_packet_hash=packet_hash(review_request),
         frozen_packet_version=review_request.review_packet_version,
         action_hash="b" * 64,
+        event_hash="e" * 64,
         review_task_status="ASSIGNED",
         review_deadline="2026-07-24T12:00:00Z",
         authorized_artifact_refs={

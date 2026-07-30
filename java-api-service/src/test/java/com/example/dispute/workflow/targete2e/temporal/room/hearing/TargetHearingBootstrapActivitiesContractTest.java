@@ -14,7 +14,7 @@ class TargetHearingBootstrapActivitiesContractTest {
             new TargetHearingBootstrapActivities.Binding(
                 "hearing-room-1",
                 "epoch-1",
-                1,
+                0,
                 9,
                 12,
                 7,
@@ -52,5 +52,39 @@ class TargetHearingBootstrapActivitiesContractTest {
                 1,
                 "target-e2e-initiator",
                 "target-e2e-respondent"));
+  }
+
+  @Test
+  void activationRequestAcceptsTheInitialEpochAndRequiresTheRealChildRun() {
+    assertDoesNotThrow(
+        () ->
+            new TargetHearingBootstrapActivities.ActivationRequest(
+                "tenant-1",
+                "case-1",
+                "hearing-room-1",
+                "epoch-1",
+                0,
+                9,
+                12,
+                7,
+                "room-workflow:case-1:HEARING:0",
+                "room-run-1",
+                "hearing-build.v1"));
+
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            new TargetHearingBootstrapActivities.ActivationRequest(
+                "tenant-1",
+                "case-1",
+                "hearing-room-1",
+                "epoch-1",
+                0,
+                9,
+                12,
+                7,
+                "room-workflow:case-1:HEARING:0",
+                "",
+                "hearing-build.v1"));
   }
 }

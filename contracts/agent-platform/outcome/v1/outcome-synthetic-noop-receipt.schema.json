@@ -69,7 +69,7 @@
     "packet_ref": {"$ref": "#/$defs/opaque_ref"},
     "packet_hash": {"$ref": "#/$defs/sha256"},
     "request_hash": {"$ref": "#/$defs/sha256"},
-    "epoch": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "epoch": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
     "revision": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
     "fence": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
     "synthetic_only": {"const": true},

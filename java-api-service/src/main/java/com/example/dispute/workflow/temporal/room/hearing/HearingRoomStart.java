@@ -42,7 +42,7 @@ public record HearingRoomStart(
     if (writerMode != HearingWriterMode.TEMPORAL) {
       throw new IllegalArgumentException("HearingRoomWorkflow accepts only a pinned TEMPORAL epoch");
     }
-    requirePositive(roomEpoch, "roomEpoch");
+    requireNonNegative(roomEpoch, "roomEpoch");
     requirePositive(fencingToken, "fencingToken");
     requireOperationComponent(initiatorParticipantId, "initiatorParticipantId");
     requireOperationComponent(respondentParticipantId, "respondentParticipantId");
@@ -87,6 +87,12 @@ public record HearingRoomStart(
   private static void requirePositive(long value, String field) {
     if (value < 1 || value > MAX_SAFE_INTEGER) {
       throw new IllegalArgumentException(field + " must be a positive safe integer");
+    }
+  }
+
+  private static void requireNonNegative(long value, String field) {
+    if (value < 0 || value > MAX_SAFE_INTEGER) {
+      throw new IllegalArgumentException(field + " must be a non-negative safe integer");
     }
   }
 }

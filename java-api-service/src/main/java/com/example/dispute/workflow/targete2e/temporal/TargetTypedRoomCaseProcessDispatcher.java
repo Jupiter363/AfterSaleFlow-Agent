@@ -384,7 +384,7 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
   }
 
   private TargetTypedRoomChildHandle startHearing(ProvisionRoomEpoch request) {
-    requirePositiveEpoch(request);
+    requireNonNegativeEpoch(request);
     TargetHearingBootstrapActivities.Binding binding = targetHearingBootstrap.bootstrap(request);
     requireExactHearingBinding(request, binding);
     Instant openedAt = request.requestedAt();
@@ -471,6 +471,13 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
     if (request.roomEpoch() < 1) {
       throw new IllegalArgumentException(
           request.roomType() + " target room epoch must be positive");
+    }
+  }
+
+  private static void requireNonNegativeEpoch(ProvisionRoomEpoch request) {
+    if (request.roomEpoch() < 0) {
+      throw new IllegalArgumentException(
+          request.roomType() + " target room epoch must not be negative");
     }
   }
 

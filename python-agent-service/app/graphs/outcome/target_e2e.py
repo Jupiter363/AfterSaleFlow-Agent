@@ -66,9 +66,7 @@ class OutcomeTargetE2EProposal(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    schema_version: Literal["target-e2e-review-proposal.v1"] = (
-        "target-e2e-review-proposal.v1"
-    )
+    schema_version: Literal["target-e2e-review-proposal.v1"] = "target-e2e-review-proposal.v1"
     proposal_id: str = Field(
         min_length=1,
         max_length=128,
@@ -77,9 +75,7 @@ class OutcomeTargetE2EProposal(BaseModel):
     command_id: str = Field(min_length=1, max_length=128)
     logical_run_id: str = Field(min_length=1, max_length=128)
     attempt_id: str = Field(min_length=1, max_length=128)
-    payload_schema_version: Literal["outcome-review-proposal.v1"] = (
-        "outcome-review-proposal.v1"
-    )
+    payload_schema_version: Literal["outcome-review-proposal.v1"] = "outcome-review-proposal.v1"
     payload_ref: str = Field(
         min_length=1,
         max_length=512,
@@ -135,9 +131,7 @@ class LoadedOutcomeTargetE2EInvocation:
     request: ReviewCopilotRequest
     reviewer_actor_hash: str
     answerer: Callable[[ReviewCopilotRequest], ReviewCopilotAnswer]
-    validate_answer: Callable[
-        [ReviewCopilotRequest, ReviewCopilotAnswer], ReviewCopilotAnswer
-    ]
+    validate_answer: Callable[[ReviewCopilotRequest, ReviewCopilotAnswer], ReviewCopilotAnswer]
     snapshot_uri: str
     snapshot_hash: str
     event_uri: str | None
@@ -265,12 +259,7 @@ class OutcomeTargetE2EExecutorRegistration:
 
     def __post_init__(self) -> None:
         require_exact_outcome_target_e2e_registry_binding(self.binding)
-        if (
-            not self.provider
-            or len(self.provider) > 64
-            or not self.model
-            or len(self.model) > 128
-        ):
+        if not self.provider or len(self.provider) > 64 or not self.model or len(self.model) > 128:
             raise OutcomeReviewContractError("OUTCOME_TARGET_E2E_PROVIDER_BINDING_INVALID")
 
 
@@ -546,7 +535,7 @@ def _require_loaded_invocation(
         or private.reviewer_actor_hash != actor_hash
         or loaded.reviewer_actor_hash != actor_hash
         or private.frozen_packet_ref != graph_command.domain_snapshot_ref.uri
-        or private.action_hash != (event.sha256 if event is not None else graph_command.request_hash)
+        or private.event_hash != (event.sha256 if event is not None else None)
     ):
         raise OutcomeReviewContractError("OUTCOME_TARGET_E2E_LOADED_INPUT_MISMATCH")
     new_outcome_review_state(command=private, request=loaded.request)
@@ -630,8 +619,7 @@ def _reconstruct_projection(
     if (
         state.get("advisory_hash") != advisory_hash
         or state.get("citation_refs") != citations
-        or state.get("result_hash")
-        != canonical_sha256(projection.model_dump(mode="json"))
+        or state.get("result_hash") != canonical_sha256(projection.model_dump(mode="json"))
     ):
         raise OutcomeReviewContractError("OUTCOME_TARGET_E2E_DETERMINISTIC_REPLAY_MISMATCH")
     _require_proposal_only_projection(projection)
@@ -650,7 +638,11 @@ def _proposal_payload(projection: OutcomeReviewProjection) -> OutcomeTargetE2EPr
 
 
 def _require_proposal_only_projection(projection: OutcomeReviewProjection) -> None:
-    if projection.approval_performed or projection.execution_triggered or projection.is_final_decision:
+    if (
+        projection.approval_performed
+        or projection.execution_triggered
+        or projection.is_final_decision
+    ):
         raise OutcomeReviewContractError("OUTCOME_TARGET_E2E_FORMAL_AUTHORITY_FORBIDDEN")
 
 

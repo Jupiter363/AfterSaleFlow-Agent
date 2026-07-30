@@ -7,6 +7,7 @@ import com.example.dispute.infrastructure.persistence.repository.FulfillmentCase
 import com.example.dispute.workflow.application.epoch.ConfiguredRoomEpochSelector;
 import com.example.dispute.workflow.application.epoch.RoomEpochSelection;
 import com.example.dispute.workflow.contract.v1.CaseProcessWorkflowProtocol;
+import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
 import com.example.dispute.workflow.contract.v1.ProvisionRoomEpoch;
 import com.example.dispute.workflow.contract.v1.ProvisionRoomEpochReceipt;
@@ -15,6 +16,7 @@ import com.example.dispute.workflow.infrastructure.persistence.entity.CaseRoomEp
 import com.example.dispute.workflow.infrastructure.persistence.entity.RoomEpochBootstrapOutboxEntity;
 import com.example.dispute.workflow.infrastructure.persistence.repository.CaseProcessProjectionRepository;
 import com.example.dispute.workflow.infrastructure.persistence.repository.RoomEpochBootstrapOutboxRepository;
+import com.example.dispute.workflow.targete2e.temporal.room.hearing.TargetHearingProvisioningRunIds;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.LockModeType;
 import java.nio.charset.StandardCharsets;
@@ -231,6 +233,7 @@ public class RoomEpochBootstrapStore implements RoomEpochBootstrapEnqueuer {
                         delivery.command().roomEpoch(),
                         delivery.command().fencingToken(),
                         delivery.command().writerMode().name());
+        int hearingProjectionRows = bindHearingRoomRun(delivery, receipt, finalizedAt);
         int outboxRows =
                 jdbcTemplate.update(
                         """
@@ -259,8 +262,64 @@ public class RoomEpochBootstrapStore implements RoomEpochBootstrapEnqueuer {
                         finalizedAt);
         requireSingle(epochRows, "epoch activation");
         requireSingle(projectionRows, "projection activation");
+        if (requiresHearingActivationBinding(delivery.command())) {
+            requireSingle(hearingProjectionRows, "Hearing projection activation");
+        }
         requireSingle(outboxRows, "bootstrap delivery completion");
         return true;
+    }
+
+    private int bindHearingRoomRun(
+            ClaimedRoomEpochBootstrap delivery,
+            ProvisionRoomEpochReceipt receipt,
+            OffsetDateTime finalizedAt) {
+        ProvisionRoomEpoch command = delivery.command();
+        if (!requiresHearingActivationBinding(command)) {
+            return 0;
+        }
+        jdbcTemplate.queryForObject(
+                "select set_config('app.hearing_activation_commit', 'on', true)", String.class);
+        return jdbcTemplate.update(
+                """
+                update hearing_temporal_projection
+                   set temporal_run_id = ?,
+                       updated_at = ?
+                 where flow_instance_id = ?
+                   and case_id = ?
+                   and tenant_surrogate = ?
+                   and epoch_id = ?
+                   and room_type = 'HEARING'
+                   and hearing_epoch = ?
+                   and writer_mode = 'TEMPORAL'
+                   and process_revision = ?
+                   and room_revision = ?
+                   and fencing_token = ?
+                   and current_stage = 'COURT_PREPARING'
+                   and stage_sequence = 1
+                   and temporal_workflow_id = ?
+                   and temporal_run_id = ?
+                   and temporal_build_or_deployment = ?
+                   and last_acknowledged_receipt_id is null
+                   and last_acknowledged_receipt_hash is null
+                   and last_acknowledged_history_event_id is null
+                """,
+                receipt.roomWorkflowRunId(),
+                finalizedAt,
+                command.roomId(),
+                command.caseId(),
+                command.tenantSurrogate(),
+                command.epochId(),
+                command.roomEpoch(),
+                command.initialProcessRevision(),
+                command.initialRoomRevision(),
+                command.fencingToken(),
+                command.roomWorkflowId(),
+                TargetHearingProvisioningRunIds.provisional(command.epochId()),
+                command.roomWorkflowBuildId());
+    }
+
+    static boolean requiresHearingActivationBinding(ProvisionRoomEpoch command) {
+        return command.roomType() == RoomType.HEARING && command.writerMode() == WriterMode.TEMPORAL;
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)

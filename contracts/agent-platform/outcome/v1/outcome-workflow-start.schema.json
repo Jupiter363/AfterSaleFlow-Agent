@@ -14,7 +14,7 @@
     "adjudication_draft_ref": {"$ref": "#/$defs/ref"}, "adjudication_draft_hash": {"$ref": "#/$defs/hash"},
     "action_snapshot_ref": {"$ref": "#/$defs/ref"}, "action_snapshot_hash": {"$ref": "#/$defs/hash"},
     "required_operation_set_ref": {"$ref": "#/$defs/ref"}, "required_operation_set_hash": {"$ref": "#/$defs/hash"}, "required_operation_count": {"$ref": "#/$defs/operation_count"},
-    "epoch": {"$ref": "#/$defs/positive"}, "revision": {"$ref": "#/$defs/count"}, "fence": {"$ref": "#/$defs/positive"},
+    "epoch": {"$ref": "#/$defs/count"}, "revision": {"$ref": "#/$defs/count"}, "fence": {"$ref": "#/$defs/positive"},
     "review_opened_at": {"$ref": "#/$defs/timestamp"}, "review_deadline_at": {"$ref": "#/$defs/timestamp"},
     "runtime_mode": {"enum": ["DISABLED", "JAVA_SIGNED_SYNTHETIC_NOOP_SHADOW", "TEMPORAL"]},
     "workflow_build": {"$ref": "#/$defs/id"}, "policy_version": {"$ref": "#/$defs/id"}, "graph_version": {"$ref": "#/$defs/id"}, "prompt_version": {"$ref": "#/$defs/id"}, "model_profile": {"$ref": "#/$defs/id"},

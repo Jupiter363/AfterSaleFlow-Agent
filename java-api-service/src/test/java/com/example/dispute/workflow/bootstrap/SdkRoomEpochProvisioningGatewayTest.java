@@ -165,7 +165,7 @@ class SdkRoomEpochProvisioningGatewayTest {
     }
 
     @Test
-    void transientWorkflowSwitchRemainsRetryable() {
+    void completedNonRetryableWorkflowSwitchIsPermanentForTheSameUpdateId() {
         var command = RoomEpochProvisioningFixtures.command("EPOCH_1", "CASE_1");
         stubWorkflowFailure(
                 ApplicationFailure.newNonRetryableFailure(
@@ -176,9 +176,27 @@ class SdkRoomEpochProvisioningGatewayTest {
                 .isInstanceOfSatisfying(
                         RoomEpochProvisioningException.class,
                         failure -> {
-                            assertThat(failure.retryable()).isTrue();
+                            assertThat(failure.retryable()).isFalse();
                             assertThat(failure.errorCode())
                                     .isEqualTo("ROOM_EPOCH_SWITCH_IN_PROGRESS");
+                        });
+    }
+
+    @Test
+    void runtimeProvisioningFailureCannotBeRetriedWithTheCompletedUpdateId() {
+        var command = RoomEpochProvisioningFixtures.command("EPOCH_1", "CASE_1");
+        stubWorkflowFailure(
+                ApplicationFailure.newNonRetryableFailure(
+                        "room epoch provisioning failed",
+                        "ROOM_EPOCH_PROVISIONING_RUNTIME_FAILURE"));
+
+        assertThatThrownBy(() -> gateway.provision(request(command)))
+                .isInstanceOfSatisfying(
+                        RoomEpochProvisioningException.class,
+                        failure -> {
+                            assertThat(failure.retryable()).isFalse();
+                            assertThat(failure.errorCode())
+                                    .isEqualTo("ROOM_EPOCH_PROVISIONING_RUNTIME_FAILURE");
                         });
     }
 

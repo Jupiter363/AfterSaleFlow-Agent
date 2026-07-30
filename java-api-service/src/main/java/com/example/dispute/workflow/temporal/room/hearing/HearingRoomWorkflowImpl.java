@@ -15,7 +15,9 @@ import com.example.dispute.workflow.temporal.caseprocess.CaseProcessWorkflow;
 import com.example.dispute.workflow.temporal.caseprocess.TargetRoomProgressReceipt;
 import com.example.dispute.workflow.targete2e.rooms.hearing.TargetHearingFormalizationActivities;
 import com.example.dispute.workflow.targete2e.temporal.room.TargetRoomAgentRunFinalizationReceipt;
+import com.example.dispute.workflow.targete2e.temporal.room.hearing.TargetHearingBootstrapActivities;
 import io.temporal.activity.ActivityOptions;
+import io.temporal.common.RetryOptions;
 import io.temporal.workflow.ChildWorkflowOptions;
 import io.temporal.workflow.CancellationScope;
 import io.temporal.workflow.Promise;
@@ -46,6 +48,20 @@ public final class HearingRoomWorkflowImpl implements HearingRoomWorkflow {
               .setTaskQueue(CASE_CONTROL_TASK_QUEUE)
               .setStartToCloseTimeout(Duration.ofSeconds(30))
               .setScheduleToCloseTimeout(Duration.ofMinutes(5))
+              .build());
+  private final TargetHearingBootstrapActivities activation =
+      Workflow.newActivityStub(
+          TargetHearingBootstrapActivities.class,
+          ActivityOptions.newBuilder()
+              .setTaskQueue(CASE_CONTROL_TASK_QUEUE)
+              .setStartToCloseTimeout(Duration.ofSeconds(10))
+              .setScheduleToCloseTimeout(Duration.ofMinutes(30))
+              .setRetryOptions(
+                  RetryOptions.newBuilder()
+                      .setInitialInterval(Duration.ofMillis(250))
+                      .setMaximumInterval(Duration.ofSeconds(5))
+                      .setDoNotRetry(TargetHearingBootstrapActivities.ACTIVATION_INVALID)
+                      .build())
               .build());
 
   private final ArrayDeque<WorkflowEvent> inbox = new ArrayDeque<>();
@@ -92,6 +108,22 @@ public final class HearingRoomWorkflowImpl implements HearingRoomWorkflow {
     stageOpenedAt = start.openedAt();
     processRevision = start.initialProcessRevision();
     roomRevision = start.initialRoomRevision();
+    if (isTargetChild()) {
+      status = "ACTIVATING";
+      activation.awaitActivation(
+          new TargetHearingBootstrapActivities.ActivationRequest(
+              start.tenantSurrogate(),
+              start.caseId(),
+              start.flowInstanceId(),
+              start.epochId(),
+              start.roomEpoch(),
+              start.fencingToken(),
+              start.initialProcessRevision(),
+              start.initialRoomRevision(),
+              Workflow.getInfo().getWorkflowId(),
+              Workflow.getInfo().getRunId(),
+              start.workflowBuildId()));
+    }
     status = "RUNNING";
 
     while (stage != HearingWorkflowStage.CLOSED && "RUNNING".equals(status)) {

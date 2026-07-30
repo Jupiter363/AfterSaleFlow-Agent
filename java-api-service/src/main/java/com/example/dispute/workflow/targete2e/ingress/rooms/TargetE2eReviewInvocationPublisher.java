@@ -24,7 +24,10 @@ public final class TargetE2eReviewInvocationPublisher {
 
   public MinioTargetE2eRoomCommandPayloadPublisher.PublishedObject publish(
       RoomGraphCommand command, JdbcTargetReviewInvocationFactsLoader.Facts facts) {
-    if (command.roomType().name().equals("REVIEW") == false || !facts.actionHash().matches("[0-9a-f]{64}")) {
+    if (command.roomType().name().equals("REVIEW") == false
+        || command.eventRef() == null
+        || !command.eventRef().sha256().equals(facts.eventHash())
+        || !facts.actionHash().matches("[0-9a-f]{64}")) {
       throw new IllegalArgumentException("Review invocation authority is invalid");
     }
     String artifactId = "review-invocation:" + command.commandId();
@@ -45,7 +48,9 @@ public final class TargetE2eReviewInvocationPublisher {
     privateCommand.put("review_task_id", facts.reviewTaskId()); privateCommand.put("reviewer_actor_hash", facts.reviewerActorHash());
     privateCommand.put("packet_id", facts.packetId()); privateCommand.put("frozen_packet_ref", ref);
     privateCommand.put("frozen_packet_hash", facts.frozenPacketHash()); privateCommand.put("frozen_packet_version", facts.packetVersion());
-    privateCommand.put("action_hash", facts.actionHash()); privateCommand.put("review_task_status", facts.taskStatus());
+    privateCommand.put("action_hash", facts.actionHash());
+    privateCommand.put("event_hash", facts.eventHash());
+    privateCommand.put("review_task_status", facts.taskStatus());
     privateCommand.put("review_deadline", facts.deadline().toString()); privateCommand.putObject("authorized_artifact_refs");
     privateCommand.put("room_epoch", command.roomEpoch()); privateCommand.put("process_revision", command.processRevision());
     privateCommand.put("fencing_token", facts.fencingToken()); privateCommand.set("fact_refs", facts.refs().facts());
