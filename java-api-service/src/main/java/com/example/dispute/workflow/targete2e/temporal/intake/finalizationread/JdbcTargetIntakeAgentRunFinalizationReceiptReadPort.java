@@ -23,6 +23,7 @@ import com.example.dispute.workflow.temporal.room.intake.IntakeAgentRunRef;
 import com.example.dispute.workflow.temporal.room.intake.IntakeCommandExecutionContext;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.OffsetDateTime;
@@ -169,12 +170,20 @@ public final class JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
             PlatformTransactionManager transactionManager,
             ObjectMapper objectMapper) {
         this.jdbc = Objects.requireNonNull(jdbc, "jdbc");
-        this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper");
+        this.objectMapper = targetMaterialObjectMapper(objectMapper);
         this.envelopes = new TargetE2EGraphEnvelopeCodec(objectMapper);
         this.transactions = new TransactionTemplate(
                 Objects.requireNonNull(transactionManager, "transactionManager"));
         this.transactions.setReadOnly(true);
         this.transactions.setIsolationLevel(TransactionDefinition.ISOLATION_REPEATABLE_READ);
+    }
+
+    static ObjectMapper targetMaterialObjectMapper(ObjectMapper objectMapper) {
+        return Objects.requireNonNull(objectMapper, "objectMapper")
+                .copy()
+                // V049 stores the unannotated Intake execution envelope as camelCase.
+                // Explicitly annotated nested graph and receipt contracts remain snake_case.
+                .setPropertyNamingStrategy(PropertyNamingStrategies.LOWER_CAMEL_CASE);
     }
 
     @Override

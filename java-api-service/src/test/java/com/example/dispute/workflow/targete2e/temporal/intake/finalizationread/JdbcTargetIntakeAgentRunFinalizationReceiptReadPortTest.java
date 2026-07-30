@@ -7,9 +7,12 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationRejectedException;
+import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.RetryBudget;
 import com.example.dispute.workflow.temporal.room.intake.IntakeAgentRunFinalizationReceiptReadPort;
+import com.example.dispute.workflow.temporal.room.intake.IntakeCommandExecutionContext;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.nio.file.Path;
@@ -158,6 +161,31 @@ class JdbcTargetIntakeAgentRunFinalizationReceiptReadPortTest {
                 .hasMessage("winning attempt command self-hash is invalid")
                 .extracting(failure -> ((TargetE2eFinalizationRejectedException) failure).code())
                 .isEqualTo("TARGET_E2E_FINALIZATION_ATTEMPT_COMMAND_INVALID");
+    }
+
+    @Test
+    void decodesCamelCaseIntakeMaterialWithAnInjectedSnakeCaseMapper() throws Exception {
+        IntakeCommandExecutionContext expected = new IntakeCommandExecutionContext(
+                "intake-command-execution-context.v1",
+                "grt.v1." + "1".repeat(32),
+                "agent-session-1",
+                1_800_000_000_000L,
+                new RetryBudget("intake-retry-budget.v1", 2, 3, 1),
+                null,
+                null);
+        ObjectMapper camelCaseMapper = MAPPER.copy()
+                .setPropertyNamingStrategy(PropertyNamingStrategies.LOWER_CAMEL_CASE);
+        String canonicalMaterial =
+                ContractJson.canonicalString(camelCaseMapper.valueToTree(expected));
+        ObjectMapper injectedSnakeCaseMapper = MAPPER.copy()
+                .setPropertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE);
+
+        IntakeCommandExecutionContext decoded =
+                JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
+                        .targetMaterialObjectMapper(injectedSnakeCaseMapper)
+                        .readValue(canonicalMaterial, IntakeCommandExecutionContext.class);
+
+        assertThat(decoded).isEqualTo(expected);
     }
 
     private static ObjectNode commandJson() throws Exception {
