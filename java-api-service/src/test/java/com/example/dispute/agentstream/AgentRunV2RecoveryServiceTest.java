@@ -34,6 +34,7 @@ import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.lang.reflect.Modifier;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Instant;
@@ -44,6 +45,11 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 class AgentRunV2RecoveryServiceTest {
+
+    @Test
+    void serviceRemainsSubclassableForSpringTransactionProxying() {
+        assertThat(Modifier.isFinal(AgentRunV2RecoveryService.class.getModifiers())).isFalse();
+    }
 
     private static final ObjectMapper MAPPER = JsonMapper.builder()
             .findAndAddModules()

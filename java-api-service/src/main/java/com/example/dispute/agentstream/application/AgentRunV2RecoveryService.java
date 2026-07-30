@@ -18,7 +18,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 /** Transactional Java authority for allocating or replaying one AgentRun attempt. */
 @Service
-public final class AgentRunV2RecoveryService {
+public class AgentRunV2RecoveryService {
 
     private final AgentRunLedger ledger;
     private final AgentRunV2NextAttemptFactory nextAttemptFactory;
