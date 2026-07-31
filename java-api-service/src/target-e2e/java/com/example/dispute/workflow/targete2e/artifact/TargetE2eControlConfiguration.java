@@ -25,6 +25,7 @@ import com.example.dispute.workflow.application.EvidenceWindowCoordinator;
 import com.example.dispute.workflow.application.epoch.RoomEpochAllocator;
 import com.example.dispute.workflow.application.intake.IntakeFormalBranchCommandResolver;
 import com.example.dispute.workflow.application.intake.IntakeFormalBranchCommitPort;
+import com.example.dispute.workflow.targete2e.TargetE2eActivationAuthority;
 import com.example.dispute.workflow.targete2e.persistence.TargetE2EActivationLedger;
 import com.example.dispute.workflow.targete2e.persistence.material.JdbcTargetIntakeCommandMaterialStore;
 import com.example.dispute.workflow.targete2e.persistence.material.TargetIntakeCommandMaterialStore;
@@ -98,6 +99,7 @@ import java.time.Clock;
 import java.util.List;
 import javax.sql.DataSource;
 import io.minio.MinioClient;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -480,6 +482,7 @@ public class TargetE2eControlConfiguration {
   TargetTemporalWorkerRegistration targetTemporalWorkerRegistration(
       Environment environment,
       TemporalWorkerProperties workerProperties,
+      ObjectProvider<TargetE2eActivationAuthority> targetE2eActivationAuthorityProvider,
       TargetIntakeCommandBridgeActivity targetIntakeCommandBridgeActivity,
       TargetIntakePartyScopeSource targetIntakePartyScopeSource,
       IntakeRoomActivities targetE2eIntakeRoomActivities,
@@ -496,6 +499,8 @@ public class TargetE2eControlConfiguration {
       TargetReviewOutcomeStartBindingActivities targetReviewOutcomeStartBindingActivity,
       TargetReviewNonExecutionActivities targetReviewNonExecutionActivities,
       TargetOutcomeCompletionActivities targetOutcomeCompletionActivities) {
+    requireArmedActivationAuthorityIfEnabled(
+        environment, targetE2eActivationAuthorityProvider);
     String activationId = required(environment, "target.e2e.activation.id");
     TargetTemporalWorkerRegistration.Registration registration =
         new TargetTemporalWorkerRegistration.Registration(
@@ -524,6 +529,17 @@ public class TargetE2eControlConfiguration {
                 targetOutcomeCompletionActivities),
             List.of());
     return () -> registration;
+  }
+
+  private static void requireArmedActivationAuthorityIfEnabled(
+      Environment environment,
+      ObjectProvider<TargetE2eActivationAuthority> targetE2eActivationAuthorityProvider) {
+    boolean activationEnabled =
+        environment.getProperty("app.target-e2e.enabled", Boolean.class, false);
+    if (activationEnabled && targetE2eActivationAuthorityProvider.getIfUnique() == null) {
+      throw new IllegalStateException(
+          "target E2E CONTROL registration requires an armed activation authority");
+    }
   }
 
   private static String required(Environment environment, String property) {

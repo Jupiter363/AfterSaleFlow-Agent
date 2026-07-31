@@ -36,7 +36,8 @@ import org.springframework.web.bind.annotation.RestController;
 @RequestMapping("/internal/target-e2e/activation/lifecycle")
 public final class TargetE2eActivationLifecycleController {
 
-  private static final String SERVICE_SECRET_HEADER = "X-Service-Secret";
+  private static final String LIFECYCLE_CAPABILITY_HEADER =
+      "X-Target-E2E-Lifecycle-Capability";
 
   private final TargetE2eActivationLifecycleControl control;
   private final TargetE2eActivationLifecycleReceiptSigner receiptSigner;
@@ -64,7 +65,8 @@ public final class TargetE2eActivationLifecycleController {
       consumes = MediaType.APPLICATION_JSON_VALUE,
       produces = MediaType.APPLICATION_JSON_VALUE)
   public ResponseEntity<LifecycleResponse> refreshToDrainOnly(
-      @RequestHeader(value = SERVICE_SECRET_HEADER, required = false) String suppliedCapability,
+      @RequestHeader(value = LIFECYCLE_CAPABILITY_HEADER, required = false)
+          String suppliedCapability,
       @RequestBody RefreshCommand command) {
     requireCapability(suppliedCapability);
     try {
@@ -99,7 +101,8 @@ public final class TargetE2eActivationLifecycleController {
       consumes = MediaType.APPLICATION_JSON_VALUE,
       produces = MediaType.APPLICATION_JSON_VALUE)
   public ResponseEntity<LifecycleResponse> markDrained(
-      @RequestHeader(value = SERVICE_SECRET_HEADER, required = false) String suppliedCapability,
+      @RequestHeader(value = LIFECYCLE_CAPABILITY_HEADER, required = false)
+          String suppliedCapability,
       @RequestBody DrainRequest request) {
     requireCapability(suppliedCapability);
     DrainCommand command;
@@ -132,7 +135,8 @@ public final class TargetE2eActivationLifecycleController {
       consumes = MediaType.APPLICATION_JSON_VALUE,
       produces = MediaType.APPLICATION_JSON_VALUE)
   public ResponseEntity<LifecycleResponse> revokeTerminal(
-      @RequestHeader(value = SERVICE_SECRET_HEADER, required = false) String suppliedCapability,
+      @RequestHeader(value = LIFECYCLE_CAPABILITY_HEADER, required = false)
+          String suppliedCapability,
       @RequestBody RevokeCommand command) {
     requireCapability(suppliedCapability);
     Instant observedAt = clock.instant();
@@ -187,7 +191,7 @@ public final class TargetE2eActivationLifecycleController {
   private void requireCapability(String suppliedCapability) {
     if (!TargetE2eActivationLifecycleControl.serviceCapabilityMatches(
         serviceCapability, suppliedCapability)) {
-      throw new ForbiddenException("invalid Java service credential");
+      throw new ForbiddenException("invalid target E2E lifecycle capability");
     }
   }
 

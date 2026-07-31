@@ -13,7 +13,16 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[2]
-BASE_URL = os.getenv("ACCEPTANCE_BASE_URL", "http://127.0.0.1:8080")
+BASE_URL = os.getenv("ACCEPTANCE_BASE_URL", "http://127.0.0.1:8080").rstrip("/")
+JAVA_BASE_URL = os.getenv(
+    "ACCEPTANCE_JAVA_BASE_URL", "http://127.0.0.1:8080"
+).rstrip("/")
+INTERNAL_BASE_URL = os.getenv("ACCEPTANCE_INTERNAL_BASE_URL", JAVA_BASE_URL).rstrip(
+    "/"
+)
+HEALTH_BASE_URL = os.getenv("ACCEPTANCE_HEALTH_BASE_URL", JAVA_BASE_URL).rstrip(
+    "/"
+)
 LIVE_ENABLED = os.getenv("RUN_LIVE_HEARING_V2_E2E") == "1"
 
 
@@ -38,7 +47,14 @@ def test_response_decoder_preserves_non_json_gateway_errors():
 # 具体功能：`request` 围绕被测业务场景计算该函数独立负责的业务派生值；关键协作调用：`urllib.request.Request`、`encode`、`urllib.request.urlopen`。
 # 上下游：上游为 本文件的 `test_seeded_disputes_are_listed_and_enterable_through_nginx`、`test_live_room_flow_reaches_confirmed_settlement_idempotently`；下游为 协作调用 `urllib.request.Request`、`encode`、`urllib.request.urlopen`、`decode`。
 # 系统意义：该函数在系统中的业务边界是：只锁定公共契约，不锁死内部实现。
-def request(method: str, path: str, *, payload: dict | None = None, headers: dict | None = None):
+def request(
+    method: str,
+    path: str,
+    *,
+    payload: dict | None = None,
+    headers: dict | None = None,
+    base_url: str = BASE_URL,
+):
     data = None if payload is None else json.dumps(payload).encode("utf-8")
     provided_headers = headers or {}
     request_headers = {"Content-Type": "application/json"}
@@ -51,7 +67,7 @@ def request(method: str, path: str, *, payload: dict | None = None, headers: dic
         )
     request_headers.update(provided_headers)
     req = urllib.request.Request(
-        BASE_URL + path,
+        base_url.rstrip("/") + path,
         data=data,
         method=method,
         headers=request_headers,
@@ -128,7 +144,9 @@ def upload_text_evidence(case_id: str, user_id: str, content: str):
 # 系统意义：失败显式映射为 `OSError`，避免错误状态被当成成功结果。
 def require_gateway() -> None:
     try:
-        with urllib.request.urlopen(BASE_URL + "/actuator/health", timeout=3) as response:
+        with urllib.request.urlopen(
+            HEALTH_BASE_URL + "/actuator/health", timeout=3
+        ) as response:
             if response.status != 200:
                 raise OSError(f"unexpected status {response.status}")
             payload = json.loads(response.read().decode("utf-8"))
@@ -136,6 +154,47 @@ def require_gateway() -> None:
                 raise OSError(f"unexpected health payload {payload!r}")
     except OSError as exc:
         pytest.skip(f"local Java API is not ready: {exc}")
+
+
+def test_public_internal_and_health_requests_use_separate_origins(monkeypatch):
+    requested_urls: list[str] = []
+
+    class Response:
+        status = 200
+
+        def __init__(self, body: bytes):
+            self.body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self):
+            return self.body
+
+    def fake_urlopen(operation, timeout):
+        url = operation if isinstance(operation, str) else operation.full_url
+        requested_urls.append(url)
+        body = b'{"status":"UP"}' if url.endswith("/actuator/health") else b"{}"
+        return Response(body)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    request("GET", "/api/disputes")
+    request(
+        "POST",
+        "/internal/disputes/import",
+        base_url=INTERNAL_BASE_URL,
+    )
+    require_gateway()
+
+    assert requested_urls == [
+        BASE_URL + "/api/disputes",
+        INTERNAL_BASE_URL + "/internal/disputes/import",
+        HEALTH_BASE_URL + "/actuator/health",
+    ]
 
 
 # 所属模块：跨服务契约测试 > test_main_flows；函数角色：回归测试用例。
@@ -277,6 +336,7 @@ def test_live_internal_external_import_requires_service_identity() -> None:
             "X-Role": "USER",
             "Idempotency-Key": f"{idempotency_key}-user",
         },
+        base_url=INTERNAL_BASE_URL,
     )
     assert status == 403, forbidden
     assert forbidden.get("success") is False, forbidden
@@ -288,6 +348,7 @@ def test_live_internal_external_import_requires_service_identity() -> None:
         "/internal/disputes/import",
         payload=payload,
         headers={**service_headers, "Idempotency-Key": idempotency_key},
+        base_url=INTERNAL_BASE_URL,
     )
     assert status == 201, imported
     imported_case_id = imported["data"]["id"]
@@ -298,6 +359,7 @@ def test_live_internal_external_import_requires_service_identity() -> None:
         "/internal/disputes/import",
         payload=payload,
         headers={**service_headers, "Idempotency-Key": idempotency_key},
+        base_url=INTERNAL_BASE_URL,
     )
     assert status == 201, replayed
     assert replayed["data"]["id"] == imported_case_id, replayed
@@ -308,6 +370,7 @@ def test_live_internal_external_import_requires_service_identity() -> None:
         "/internal/disputes/import",
         payload=conflicting_payload,
         headers={**service_headers, "Idempotency-Key": idempotency_key},
+        base_url=INTERNAL_BASE_URL,
     )
     assert status == 409, conflict
     assert conflict.get("success") is False, conflict

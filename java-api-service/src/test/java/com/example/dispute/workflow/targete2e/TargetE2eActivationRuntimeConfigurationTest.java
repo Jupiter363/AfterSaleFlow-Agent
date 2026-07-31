@@ -20,6 +20,11 @@ import org.springframework.mock.env.MockEnvironment;
 
 class TargetE2eActivationRuntimeConfigurationTest {
 
+  private static final Path TARGET_CONTROL_CONFIGURATION =
+      Path.of(
+          "src/target-e2e/java/com/example/dispute/workflow/targete2e/artifact/"
+              + "TargetE2eControlConfiguration.java");
+
   @TempDir Path temporaryDirectory;
 
   @Test
@@ -123,6 +128,25 @@ class TargetE2eActivationRuntimeConfigurationTest {
 
     assertThat(lazy).isNotNull();
     assertThat(lazy.value()).isFalse();
+  }
+
+  @Test
+  void targetControlRegistrationResolvesActivationAuthorityBeforeWorkerRegistration()
+      throws Exception {
+    String configuration = Files.readString(TARGET_CONTROL_CONFIGURATION);
+    int authorityRequirement =
+        configuration.indexOf("requireArmedActivationAuthorityIfEnabled(");
+    int registrationConstruction =
+        configuration.indexOf("new TargetTemporalWorkerRegistration.Registration(");
+
+    assertThat(configuration)
+        .contains(
+            "ObjectProvider<TargetE2eActivationAuthority> "
+                + "targetE2eActivationAuthorityProvider")
+        .contains("targetE2eActivationAuthorityProvider.getIfUnique()")
+        .contains("environment.getProperty(\"app.target-e2e.enabled\", Boolean.class, false)");
+    assertThat(authorityRequirement).isGreaterThanOrEqualTo(0);
+    assertThat(registrationConstruction).isGreaterThan(authorityRequirement);
   }
 
   private KeyPair p256() throws Exception {
