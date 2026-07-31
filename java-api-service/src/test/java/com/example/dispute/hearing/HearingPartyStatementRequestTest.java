@@ -81,4 +81,27 @@ class HearingPartyStatementRequestTest {
         assertThat(validator.validate(canonical)).isEmpty();
         assertThat(canonical.issueSetId()).isEqualTo("LEGACY_QUESTION_SET_1");
     }
+
+    @Test
+    void publishesTheCanonicalIssueSetPropertyWithoutGlobalNamingConfiguration()
+            throws Exception {
+        ObjectMapper objectMapper = new ObjectMapper();
+
+        HearingPartyStatementRequest request =
+                objectMapper.readValue(
+                        """
+                        {
+                          "schemaVersion": "hearing_party_statement.v1",
+                          "issue_set_id": "ISSUE_SET_1",
+                          "statementText": "A free-form statement.",
+                          "sourceMessageIds": []
+                        }
+                        """,
+                        HearingPartyStatementRequest.class);
+
+        assertThat(request.issueSetId()).isEqualTo("ISSUE_SET_1");
+        assertThat(objectMapper.writeValueAsString(request))
+                .contains("\"issue_set_id\":\"ISSUE_SET_1\"")
+                .doesNotContain("\"issueSetId\"");
+    }
 }

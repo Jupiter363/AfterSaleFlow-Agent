@@ -13,7 +13,7 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[2]
-BASE_URL = os.getenv("ACCEPTANCE_BASE_URL", "http://127.0.0.1:18080")
+BASE_URL = os.getenv("ACCEPTANCE_BASE_URL", "http://127.0.0.1:8080")
 LIVE_ENABLED = os.getenv("RUN_LIVE_HEARING_V2_E2E") == "1"
 
 
@@ -91,11 +91,14 @@ def upload_text_evidence(case_id: str, user_id: str, content: str):
 # 系统意义：失败显式映射为 `OSError`，避免错误状态被当成成功结果。
 def require_gateway() -> None:
     try:
-        with urllib.request.urlopen(BASE_URL + "/healthz", timeout=3) as response:
+        with urllib.request.urlopen(BASE_URL + "/actuator/health", timeout=3) as response:
             if response.status != 200:
                 raise OSError(f"unexpected status {response.status}")
+            payload = json.loads(response.read().decode("utf-8"))
+            if payload.get("status") != "UP":
+                raise OSError(f"unexpected health payload {payload!r}")
     except OSError as exc:
-        pytest.skip(f"local acceptance gateway is not running: {exc}")
+        pytest.skip(f"local Java API is not ready: {exc}")
 
 
 # 所属模块：跨服务契约测试 > test_main_flows；函数角色：回归测试用例。

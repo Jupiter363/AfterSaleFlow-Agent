@@ -76,5 +76,12 @@ class DisputeApplicationTest {
         Map<?, ?> info = (Map<?, ?>) response.getBody().get("info");
         assertThat(info.get("title")).isEqualTo("Order Fulfillment Dispute API");
         assertThat(info.get("version")).isEqualTo("v1");
+
+        Map<?, ?> components = (Map<?, ?>) response.getBody().get("components");
+        Map<?, ?> schemas = (Map<?, ?>) components.get("schemas");
+        Map<?, ?> request = (Map<?, ?>) schemas.get("HearingPartyStatementRequest");
+        Map<?, ?> properties = (Map<?, ?>) request.get("properties");
+        assertThat(properties.containsKey("issue_set_id")).isTrue();
+        assertThat(properties.containsKey("issueSetId")).isFalse();
     }
 }
