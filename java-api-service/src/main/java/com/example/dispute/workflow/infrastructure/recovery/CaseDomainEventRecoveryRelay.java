@@ -10,6 +10,7 @@ import com.example.dispute.workflow.temporal.caseprocess.CaseProcessLedgerActivi
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessSnapshot;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessWorkflow;
 import io.temporal.client.WorkflowClient;
+import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.slf4j.Logger;
@@ -54,6 +55,7 @@ public class CaseDomainEventRecoveryRelay {
             int failedWorkflows = 0;
             for (ClaimedRoomEpoch candidate : candidates) {
                 boolean failed = false;
+                Duration nextScanDelay = properties.pollInterval();
                 try {
                     RecoveryAttempt attempt = recover(candidate);
                     if (attempt.deferred()) {
@@ -66,11 +68,16 @@ public class CaseDomainEventRecoveryRelay {
                     }
                 } catch (RuntimeException failure) {
                     failed = true;
+                    nextScanDelay = properties.claimDuration();
                     log.warn(
-                            "Case domain event recovery candidate failed: {}",
-                            failure.getClass().getSimpleName());
+                            "Case domain event recovery candidate failed: caseId={}, workflowId={}, failure={}: {}",
+                            candidate.caseId(),
+                            candidate.temporalWorkflowId(),
+                            failure.getClass().getSimpleName(),
+                            failure.getMessage(),
+                            failure);
                 }
-                if (!completeClaim(candidate)) {
+                if (!completeClaim(candidate, nextScanDelay)) {
                     failed = true;
                 }
                 if (failed) {
@@ -88,11 +95,11 @@ public class CaseDomainEventRecoveryRelay {
         }
     }
 
-    private boolean completeClaim(ClaimedRoomEpoch candidate) {
+    private boolean completeClaim(ClaimedRoomEpoch candidate, Duration nextScanDelay) {
         try {
             boolean completed =
                     scanClaimStore.completeDomainEventRecovery(
-                            candidate, properties.pollInterval());
+                            candidate, nextScanDelay);
             if (!completed) {
                 log.warn("Case domain event recovery claim ownership was lost before completion");
             }

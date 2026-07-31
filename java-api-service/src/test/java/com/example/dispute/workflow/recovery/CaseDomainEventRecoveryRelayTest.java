@@ -76,7 +76,7 @@ class CaseDomainEventRecoveryRelayTest {
         when(scanClaimStore.renewDomainEventRecovery(
                         CLAIM, Duration.ofMinutes(5)))
                 .thenReturn(true);
-        when(scanClaimStore.completeDomainEventRecovery(
+        lenient().when(scanClaimStore.completeDomainEventRecovery(
                         CLAIM, Duration.ofSeconds(5)))
                 .thenReturn(true);
         lenient().when(workflowClient.newWorkflowStub(CaseProcessWorkflow.class, WORKFLOW_ID))
@@ -153,6 +153,23 @@ class CaseDomainEventRecoveryRelayTest {
                 .newWorkflowStub(CaseProcessWorkflow.class, WORKFLOW_ID);
         verify(ledgerActivities, never()).loadDomainEvents(any());
         verify(workflow, never()).domainEventCommitted(any());
+    }
+
+    @Test
+    void failedTemporalCandidateUsesClaimDurationAsRetryBackoff() {
+        when(workflow.state()).thenThrow(new RuntimeException("no compatible poller"));
+        when(scanClaimStore.completeDomainEventRecovery(
+                        CLAIM, Duration.ofMinutes(5)))
+                .thenReturn(true);
+
+        var result = relay.recoverAvailable();
+
+        assertThat(result.failedWorkflows()).isEqualTo(1);
+        assertThat(result.deliveredEvents()).isZero();
+        verify(scanClaimStore)
+                .completeDomainEventRecovery(CLAIM, Duration.ofMinutes(5));
+        verify(scanClaimStore, never())
+                .completeDomainEventRecovery(CLAIM, Duration.ofSeconds(5));
     }
 
     private static LoadSequenceRange range(long from, long to) {
