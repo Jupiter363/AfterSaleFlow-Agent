@@ -57,12 +57,14 @@ import org.springframework.test.web.servlet.MockMvc;
 // 协作关系：由 JUnit 发现并执行其中带 @Test 的场景。
 // 边界意义：Java/PostgreSQL 是案件状态事实源，导入重试不能创建重复案件
 // Java 语法：class 同时封装状态与方法；final 依赖通过构造器注入后不可重新指向。
-@WebMvcTest({
-    DisputeController.class,
-    DisputeImportSimulationController.class,
-    InternalDisputeImportController.class,
-    IntakeRoomController.class
-})
+@WebMvcTest(
+        value = {
+            DisputeController.class,
+            DisputeImportSimulationController.class,
+            InternalDisputeImportController.class,
+            IntakeRoomController.class
+        },
+        properties = "app.security.service-secret=test-service-secret")
 @Import({
     CommonConfiguration.class,
     TraceIdFilter.class,
@@ -186,6 +188,7 @@ class DisputeControllerTest {
         mockMvc.perform(
                         post("/internal/disputes/import")
                                 .header("X-Service-Identity", "external-dispute-adapter")
+                                .header("X-Service-Secret", "test-service-secret")
                                 .header("Idempotency-Key", "import-ext-1001")
                                 .contentType(MediaType.APPLICATION_JSON)
                                 .content(
@@ -221,6 +224,7 @@ class DisputeControllerTest {
         mockMvc.perform(
                         post("/internal/disputes/import")
                                 .header("X-Service-Identity", "external-dispute-adapter")
+                                .header("X-Service-Secret", "test-service-secret")
                                 .header("Idempotency-Key", "import-wrong-party")
                                 .contentType(MediaType.APPLICATION_JSON)
                                 .content(
@@ -253,6 +257,7 @@ class DisputeControllerTest {
         mockMvc.perform(
                         post("/internal/disputes/import")
                                 .header("X-Service-Identity", "external-dispute-adapter")
+                                .header("X-Service-Secret", "test-service-secret")
                                 .header("Idempotency-Key", "import-long-description")
                                 .contentType(MediaType.APPLICATION_JSON)
                                 .content(
@@ -315,6 +320,7 @@ class DisputeControllerTest {
         mockMvc.perform(
                         post("/internal/disputes/import/simulate")
                                 .header("X-Service-Identity", "external-dispute-adapter")
+                                .header("X-Service-Secret", "test-service-secret")
                                 .header("Idempotency-Key", "simulate-import-001")
                                 .contentType(MediaType.APPLICATION_JSON)
                                 .content(
@@ -344,6 +350,7 @@ class DisputeControllerTest {
         mockMvc.perform(
                         post("/internal/disputes/import/simulate")
                                 .header("X-Service-Identity", "external-dispute-adapter")
+                                .header("X-Service-Secret", "test-service-secret")
                                 .header("Idempotency-Key", "simulate-import-too-many")
                                 .contentType(MediaType.APPLICATION_JSON)
                                 .content(

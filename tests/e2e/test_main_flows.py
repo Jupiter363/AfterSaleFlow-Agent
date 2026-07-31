@@ -17,30 +17,67 @@ BASE_URL = os.getenv("ACCEPTANCE_BASE_URL", "http://127.0.0.1:8080")
 LIVE_ENABLED = os.getenv("RUN_LIVE_HEARING_V2_E2E") == "1"
 
 
+def decode_response_body(body: str):
+    if not body:
+        return {}
+    try:
+        return json.loads(body)
+    except json.JSONDecodeError:
+        return {"raw_body": body}
+
+
+def test_response_decoder_preserves_non_json_gateway_errors():
+    assert decode_response_body("") == {}
+    assert decode_response_body('{"error":"bad gateway"}') == {"error": "bad gateway"}
+    assert decode_response_body("<html>502 Bad Gateway</html>") == {
+        "raw_body": "<html>502 Bad Gateway</html>"
+    }
+
+
 # 所属模块：跨服务契约测试 > test_main_flows；函数角色：模块公开业务函数。
 # 具体功能：`request` 围绕被测业务场景计算该函数独立负责的业务派生值；关键协作调用：`urllib.request.Request`、`encode`、`urllib.request.urlopen`。
 # 上下游：上游为 本文件的 `test_seeded_disputes_are_listed_and_enterable_through_nginx`、`test_live_room_flow_reaches_confirmed_settlement_idempotently`；下游为 协作调用 `urllib.request.Request`、`encode`、`urllib.request.urlopen`、`decode`。
 # 系统意义：该函数在系统中的业务边界是：只锁定公共契约，不锁死内部实现。
 def request(method: str, path: str, *, payload: dict | None = None, headers: dict | None = None):
     data = None if payload is None else json.dumps(payload).encode("utf-8")
+    provided_headers = headers or {}
+    request_headers = {"Content-Type": "application/json"}
+    if "X-Service-Identity" not in provided_headers:
+        request_headers.update(
+            {
+                "X-User-Id": "user-local",
+                "X-Role": "USER",
+            }
+        )
+    request_headers.update(provided_headers)
     req = urllib.request.Request(
         BASE_URL + path,
         data=data,
         method=method,
-        headers={
-            "Content-Type": "application/json",
-            "X-User-Id": "user-local",
-            "X-Role": "USER",
-            **(headers or {}),
-        },
+        headers=request_headers,
     )
     try:
         with urllib.request.urlopen(req, timeout=45) as response:
             body = response.read().decode("utf-8")
-            return response.status, json.loads(body) if body else {}
+            return response.status, decode_response_body(body)
     except urllib.error.HTTPError as error:
         body = error.read().decode("utf-8")
-        return error.code, json.loads(body) if body else {}
+        return error.code, decode_response_body(body)
+
+
+def system_headers() -> dict[str, str]:
+    secret = os.getenv("JAVA_SERVICE_SECRET") or os.getenv(
+        "TARGET_E2E_JAVA_SERVICE_SECRET"
+    )
+    if not secret:
+        pytest.skip(
+            "JAVA_SERVICE_SECRET or TARGET_E2E_JAVA_SERVICE_SECRET is required "
+            "for internal import E2E"
+        )
+    return {
+        "X-Service-Identity": "external-dispute-adapter",
+        "X-Service-Secret": secret,
+    }
 
 
 def upload_text_evidence(case_id: str, user_id: str, content: str):
@@ -79,10 +116,10 @@ def upload_text_evidence(case_id: str, user_id: str, content: str):
     try:
         with urllib.request.urlopen(operation, timeout=120) as response:
             body = response.read().decode("utf-8")
-            return response.status, json.loads(body) if body else {}
+            return response.status, decode_response_body(body)
     except urllib.error.HTTPError as error:
         body = error.read().decode("utf-8")
-        return error.code, json.loads(body) if body else {}
+        return error.code, decode_response_body(body)
 
 
 # 所属模块：跨服务契约测试 > test_main_flows；函数角色：模块公开业务函数。
@@ -145,6 +182,136 @@ def test_repository_e2e_flow_coverage_is_not_only_happy_path() -> None:
         "closesExecutedCaseAndCreatesExactlyOneCompletedEvaluation",
     ):
         assert required in java_tests
+
+
+@pytest.mark.skipif(
+    not LIVE_ENABLED,
+    reason="set RUN_LIVE_HEARING_V2_E2E=1 to exercise real Java/Python/model services",
+)
+def test_live_external_import_simulation_is_idempotent() -> None:
+    """Exercise the public external-import adapter and its replay boundary."""
+    require_gateway()
+    suffix = uuid.uuid4().hex[:16]
+    user_id = f"import-user-{suffix}"
+    merchant_id = f"import-merchant-{suffix}"
+    idempotency_key = f"simulate-import-{suffix}"
+    payload = {
+        "count": 1,
+        "scenario": "watch dispute",
+        "risk_level_hint": "MEDIUM",
+        "initiator_role_hint": "USER",
+        "current_actor_id": user_id,
+        "counterparty_actor_id": merchant_id,
+        "simulation_batch_id": f"batch-{suffix}",
+    }
+    actor_headers = {"X-User-Id": user_id, "X-Role": "USER"}
+
+    status, created = request(
+        "POST",
+        "/api/disputes/import/simulate",
+        payload=payload,
+        headers={**actor_headers, "Idempotency-Key": idempotency_key},
+    )
+    assert status == 201, created
+    items = created["data"]["items"]
+    assert len(items) == 1, created
+    imported = items[0]
+    assert imported["source_type"] == "EXTERNAL_IMPORT", imported
+    assert imported["initiator_role"] == "USER", imported
+    case_id = imported["id"]
+
+    status, replayed = request(
+        "POST",
+        "/api/disputes/import/simulate",
+        payload=payload,
+        headers={**actor_headers, "Idempotency-Key": idempotency_key},
+    )
+    assert status == 201, replayed
+    assert replayed["data"]["items"][0]["id"] == case_id, replayed
+
+    conflicting_payload = {**payload, "scenario": "different dispute"}
+    status, conflict = request(
+        "POST",
+        "/api/disputes/import/simulate",
+        payload=conflicting_payload,
+        headers={**actor_headers, "Idempotency-Key": idempotency_key},
+    )
+    assert status == 409, conflict
+    assert conflict.get("success") is False, conflict
+    assert conflict.get("code") == "IDEMPOTENCY_CONFLICT", conflict
+
+
+@pytest.mark.skipif(
+    not LIVE_ENABLED,
+    reason="set RUN_LIVE_HEARING_V2_E2E=1 to exercise real Java/Python/model services",
+)
+def test_live_internal_external_import_requires_service_identity() -> None:
+    """Keep the internal OMS boundary authenticated and idempotent in live E2E."""
+    require_gateway()
+    suffix = uuid.uuid4().hex[:16]
+    user_id = f"internal-import-user-{suffix}"
+    merchant_id = f"internal-import-merchant-{suffix}"
+    idempotency_key = f"internal-import-{suffix}"
+    payload = {
+        "source_system": "external-dispute-adapter",
+        "external_case_reference": f"EXT-{suffix}",
+        "order_reference": f"ORDER-{suffix}",
+        "after_sales_reference": f"AFTER-{suffix}",
+        "logistics_reference": f"LOG-{suffix}",
+        "user_id": user_id,
+        "merchant_id": merchant_id,
+        "initiator_role": "USER",
+        "dispute_type": "SIGNED_NOT_RECEIVED",
+        "title": "External dispute import E2E",
+        "description": "External adapter import contract verification.",
+        "requested_outcome_hint": "REFUND",
+        "risk_level": "LOW",
+    }
+
+    status, forbidden = request(
+        "POST",
+        "/internal/disputes/import",
+        payload=payload,
+        headers={
+            "X-User-Id": user_id,
+            "X-Role": "USER",
+            "Idempotency-Key": f"{idempotency_key}-user",
+        },
+    )
+    assert status == 403, forbidden
+    assert forbidden.get("success") is False, forbidden
+    assert forbidden.get("code") == "FORBIDDEN", forbidden
+
+    service_headers = system_headers()
+    status, imported = request(
+        "POST",
+        "/internal/disputes/import",
+        payload=payload,
+        headers={**service_headers, "Idempotency-Key": idempotency_key},
+    )
+    assert status == 201, imported
+    imported_case_id = imported["data"]["id"]
+    assert imported["data"]["source_type"] == "EXTERNAL_IMPORT", imported
+
+    status, replayed = request(
+        "POST",
+        "/internal/disputes/import",
+        payload=payload,
+        headers={**service_headers, "Idempotency-Key": idempotency_key},
+    )
+    assert status == 201, replayed
+    assert replayed["data"]["id"] == imported_case_id, replayed
+
+    conflicting_payload = {**payload, "title": "Changed external dispute import"}
+    status, conflict = request(
+        "POST",
+        "/internal/disputes/import",
+        payload=conflicting_payload,
+        headers={**service_headers, "Idempotency-Key": idempotency_key},
+    )
+    assert status == 409, conflict
+    assert conflict.get("success") is False, conflict
+    assert conflict.get("code") == "IDEMPOTENCY_CONFLICT", conflict
 
 
 # 所属模块：跨服务契约测试 > test_main_flows；函数角色：回归测试用例。

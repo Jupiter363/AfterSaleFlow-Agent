@@ -11,8 +11,11 @@ import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.List;
 import java.util.regex.Pattern;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
@@ -30,8 +33,17 @@ public final class HeaderAuthenticationFilter extends OncePerRequestFilter {
     public static final String USER_ID_HEADER = "X-User-Id";
     public static final String ROLE_HEADER = "X-Role";
     public static final String SERVICE_IDENTITY_HEADER = "X-Service-Identity";
+    public static final String SERVICE_SECRET_HEADER = "X-Service-Secret";
 
     private static final Pattern SAFE_ACTOR_ID = Pattern.compile("[A-Za-z0-9][A-Za-z0-9_.-]{0,127}");
+    private final byte[] serviceSecret;
+
+    public HeaderAuthenticationFilter(@Value("${app.security.service-secret:}") String serviceSecret) {
+        this.serviceSecret =
+                serviceSecret == null
+                        ? new byte[0]
+                        : serviceSecret.getBytes(StandardCharsets.UTF_8);
+    }
 
     // 所属模块：【身份鉴权与运行配置 / 核心业务层】「HeaderAuthenticationFilter.doFilterInternal(HttpServletRequest,HttpServletResponse,FilterChain)」。
     // 具体功能：「HeaderAuthenticationFilter.doFilterInternal(HttpServletRequest,HttpServletResponse,FilterChain)」：执行do过滤器内部：先把已认证操作者放入当前请求安全上下文；实际协作者为 「SecurityContextHolder.clearContext」、「request.getHeader」、「filterChain.doFilter」、「isValidActorId」，最终返回「void」。
@@ -45,13 +57,19 @@ public final class HeaderAuthenticationFilter extends OncePerRequestFilter {
         String actorId = request.getHeader(USER_ID_HEADER);
         String roleValue = request.getHeader(ROLE_HEADER);
         String serviceIdentity = request.getHeader(SERVICE_IDENTITY_HEADER);
+        String suppliedServiceSecret = request.getHeader(SERVICE_SECRET_HEADER);
 
-        if (isValidActorId(actorId)
-                && roleValue != null
-                && !ActorRole.SYSTEM.name().equals(roleValue)) {
-            authenticate(actorId, roleValue);
-        } else if (isValidActorId(serviceIdentity)) {
-            authenticate(serviceIdentity, ActorRole.SYSTEM.name());
+        boolean actorIdentityDeclared = actorId != null || roleValue != null;
+        boolean serviceIdentityDeclared = serviceIdentity != null;
+        if (!(actorIdentityDeclared && serviceIdentityDeclared)) {
+            if (isValidActorId(actorId)
+                    && roleValue != null
+                    && !ActorRole.SYSTEM.name().equals(roleValue)) {
+                authenticate(actorId, roleValue);
+            } else if (isValidActorId(serviceIdentity)
+                    && hasValidServiceSecret(suppliedServiceSecret)) {
+                authenticate(serviceIdentity, ActorRole.SYSTEM.name());
+            }
         }
 
         try {
@@ -68,6 +86,13 @@ public final class HeaderAuthenticationFilter extends OncePerRequestFilter {
     // 系统意义：「HeaderAuthenticationFilter.isValidActorId(String)」负责主链路中的“Valid操作者标识”；调用方身份只能来自可信请求头映射，不能由业务请求体自行声明
     private static boolean isValidActorId(String actorId) {
         return actorId != null && SAFE_ACTOR_ID.matcher(actorId).matches();
+    }
+
+    private boolean hasValidServiceSecret(String suppliedServiceSecret) {
+        return serviceSecret.length > 0
+                && suppliedServiceSecret != null
+                && MessageDigest.isEqual(
+                        serviceSecret, suppliedServiceSecret.getBytes(StandardCharsets.UTF_8));
     }
 
     // 所属模块：【身份鉴权与运行配置 / 核心业务层】「HeaderAuthenticationFilter.authenticate(String,String)」。

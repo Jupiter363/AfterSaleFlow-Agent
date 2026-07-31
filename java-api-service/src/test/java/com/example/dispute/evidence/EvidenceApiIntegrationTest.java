@@ -60,7 +60,8 @@ import org.testcontainers.utility.DockerImageName;
             "spring.data.redis.repositories.enabled=false",
             "management.health.redis.enabled=false",
             "management.health.elasticsearch.enabled=false",
-            "app.ocr.service-secret=test-ocr-callback-secret"
+            "app.ocr.service-secret=test-ocr-callback-secret",
+            "app.security.service-secret=test-ocr-callback-secret"
         })
 @Testcontainers
 @SuppressWarnings({"rawtypes", "unchecked"})
@@ -261,7 +262,9 @@ class EvidenceApiIntegrationTest {
         headers.set(
                 HeaderAuthenticationFilter.SERVICE_IDENTITY_HEADER,
                 "ocr-parser-service");
-        headers.set("X-Service-Secret", "test-ocr-callback-secret");
+        headers.set(
+                HeaderAuthenticationFilter.SERVICE_SECRET_HEADER,
+                "test-ocr-callback-secret");
         return headers;
     }
 

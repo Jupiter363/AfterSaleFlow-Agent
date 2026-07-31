@@ -36,7 +36,9 @@ import org.springframework.test.web.servlet.MockMvc;
 // 协作关系：由 JUnit 发现并执行其中带 @Test 的场景。
 // 边界意义：工具必须白名单注册且参数受 Schema 约束，不能执行任意模型文本
 // Java 语法：class 同时封装状态与方法；final 依赖通过构造器注入后不可重新指向。
-@WebMvcTest(InternalToolCatalogController.class)
+@WebMvcTest(
+        value = InternalToolCatalogController.class,
+        properties = "app.security.service-secret=test-service-secret")
 @Import({
     CommonConfiguration.class,
     TraceIdFilter.class,
@@ -76,7 +78,10 @@ class InternalToolCatalogControllerTest {
                         get("/internal/tools/execution")
                                 .header(
                                         HeaderAuthenticationFilter.SERVICE_IDENTITY_HEADER,
-                                        "python-agent-service"))
+                                        "python-agent-service")
+                                .header(
+                                        HeaderAuthenticationFilter.SERVICE_SECRET_HEADER,
+                                        "test-service-secret"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data[0].action_type").value("REFUND"))
                 .andExpect(jsonPath("$.data[0].tool_name").value("after_sale_tool"))

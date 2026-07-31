@@ -20,7 +20,7 @@ POLL_SECONDS = float(os.getenv("HEARING_V2_E2E_POLL_SECONDS", "2"))
 TIMEOUT_SECONDS = int(os.getenv("HEARING_V2_E2E_TIMEOUT_SECONDS", "1200"))
 
 
-def request(
+def request_result(
     method: str,
     path: str,
     *,
@@ -28,7 +28,7 @@ def request(
     role: str,
     payload: dict[str, Any] | None = None,
     idempotency_key: str | None = None,
-) -> dict[str, Any]:
+) -> tuple[int, dict[str, Any]]:
     body = None if payload is None else json.dumps(payload).encode("utf-8")
     headers = {
         "Content-Type": "application/json",
@@ -45,14 +45,201 @@ def request(
     )
     try:
         with urllib.request.urlopen(operation, timeout=120) as response:
-            envelope = json.loads(response.read().decode("utf-8"))
+            status = response.status
+            response_body = response.read().decode("utf-8")
+            try:
+                envelope = json.loads(response_body)
+            except json.JSONDecodeError:
+                envelope = {"raw_body": response_body}
     except urllib.error.HTTPError as error:
+        status = error.code
         failure_body = error.read().decode("utf-8")
-        raise AssertionError(
-            f"{method} {path} returned HTTP {error.code}: {failure_body}"
-        ) from error
+        try:
+            envelope = json.loads(failure_body)
+        except json.JSONDecodeError:
+            envelope = {"raw_body": failure_body}
+    return status, envelope
+
+
+def request(
+    method: str,
+    path: str,
+    *,
+    actor_id: str,
+    role: str,
+    payload: dict[str, Any] | None = None,
+    idempotency_key: str | None = None,
+) -> Any:
+    status, envelope = request_result(
+        method,
+        path,
+        actor_id=actor_id,
+        role=role,
+        payload=payload,
+        idempotency_key=idempotency_key,
+    )
+    assert 200 <= status < 300, {"status": status, "response": envelope}
     assert envelope.get("success") is True, envelope
     return envelope.get("data")
+
+
+def read_sse_events(
+    path: str,
+    *,
+    actor_id: str,
+    role: str,
+    last_event_id: str,
+    max_events: int = 1,
+) -> list[dict[str, Any]]:
+    operation = urllib.request.Request(
+        BASE_URL + path,
+        method="GET",
+        headers={
+            "Accept": "text/event-stream",
+            "Cache-Control": "no-cache",
+            "Last-Event-ID": last_event_id,
+            "X-User-Id": actor_id,
+            "X-Role": role,
+        },
+    )
+    events: list[dict[str, Any]] = []
+    with urllib.request.urlopen(operation, timeout=120) as response:
+        assert response.status == 200
+        assert response.headers.get_content_type() == "text/event-stream"
+        frame: dict[str, Any] = {"data_lines": []}
+        for raw_line in response:
+            line = raw_line.decode("utf-8").rstrip("\r\n")
+            if not line:
+                if frame["data_lines"]:
+                    raw_data = "\n".join(frame.pop("data_lines"))
+                    try:
+                        frame["data"] = json.loads(raw_data)
+                    except json.JSONDecodeError:
+                        frame["data"] = raw_data
+                    events.append(frame)
+                    if len(events) >= max_events:
+                        break
+                frame = {"data_lines": []}
+                continue
+            if line.startswith(":"):
+                continue
+            field, separator, value = line.partition(":")
+            if separator and value.startswith(" "):
+                value = value[1:]
+            if field == "data":
+                frame["data_lines"].append(value)
+            elif field in {"id", "event", "retry"}:
+                frame[field] = value
+    assert len(events) == max_events, events
+    return events
+
+
+def assert_error(
+    result: tuple[int, dict[str, Any]], expected_status: int, expected_code: str
+) -> None:
+    status, envelope = result
+    assert status == expected_status, envelope
+    assert envelope.get("success") is False, envelope
+    assert envelope.get("code") == expected_code, envelope
+
+
+def verify_agent_run_stream_contract(
+    run_id: str,
+    *,
+    actor_id: str,
+    role: str,
+    outsider_id: str,
+) -> None:
+    replay = request(
+        "GET",
+        f"/api/agent-runs/{run_id}/events/replay?after_sequence=-1",
+        actor_id=actor_id,
+        role=role,
+    )
+    assert len(replay) >= 2, replay
+    sequences = [item["sequence"] for item in replay]
+    assert sequences == sorted(set(sequences)), replay
+    assert replay[-1]["type"].lower() in {"final", "error"}, replay[-1]
+
+    first_cursor = replay[0].get("cursor") or str(replay[0]["sequence"])
+    resumed = request(
+        "GET",
+        "/api/agent-runs/"
+        f"{run_id}/events/replay?after_cursor={urllib.parse.quote(first_cursor)}",
+        actor_id=actor_id,
+        role=role,
+    )
+    assert resumed, replay
+    assert resumed[0]["sequence"] > replay[0]["sequence"], resumed
+
+    streamed = read_sse_events(
+        f"/api/agent-runs/{run_id}/events",
+        actor_id=actor_id,
+        role=role,
+        last_event_id=first_cursor,
+    )
+    streamed_data = streamed[0]["data"]
+    assert isinstance(streamed_data, dict), streamed[0]
+    assert streamed_data["sequence"] > replay[0]["sequence"], streamed[0]
+
+    assert_error(
+        request_result(
+            "GET",
+            f"/api/agent-runs/{run_id}/events/replay?after_sequence=-1",
+            actor_id=outsider_id,
+            role="USER",
+        ),
+        403,
+        "FORBIDDEN",
+    )
+
+
+def verify_case_event_stream_contract(
+    case_id: str,
+    *,
+    actor_id: str,
+    role: str,
+    outsider_id: str,
+) -> list[dict[str, Any]]:
+    replay = request(
+        "GET",
+        f"/api/disputes/{case_id}/events/replay?after_sequence=0",
+        actor_id=actor_id,
+        role=role,
+    )
+    assert len(replay) >= 2, replay
+    sequences = [item["sequence_no"] for item in replay]
+    assert sequences == sorted(set(sequences)), replay
+
+    first_sequence = replay[0]["sequence_no"]
+    resumed = request(
+        "GET",
+        f"/api/disputes/{case_id}/events/replay?after_sequence={first_sequence}",
+        actor_id=actor_id,
+        role=role,
+    )
+    assert resumed, replay
+    assert resumed[0]["sequence_no"] > first_sequence, resumed
+
+    streamed = read_sse_events(
+        f"/api/disputes/{case_id}/events",
+        actor_id=actor_id,
+        role=role,
+        last_event_id=str(first_sequence),
+    )
+    assert int(streamed[0]["id"]) > first_sequence, streamed[0]
+
+    assert_error(
+        request_result(
+            "GET",
+            f"/api/disputes/{case_id}/events/replay?after_sequence=0",
+            actor_id=outsider_id,
+            role="USER",
+        ),
+        403,
+        "FORBIDDEN",
+    )
+    return replay
 
 
 def wait_until(
@@ -415,6 +602,21 @@ def test_live_hearing_flow_v2_reaches_execution_assistant_handoff() -> None:
     assert packet["case_id"] == case_id
     assert packet["prompt_version"] == "hearing-flow.v2"
     assert len(packet["agent_run_refs"]) == 3
+    approved_plan = packet["remedy"]
+    assert isinstance(approved_plan, dict), packet
+    assert approved_plan.get("id"), approved_plan
+    assert approved_plan.get("actions"), approved_plan
+
+    assert_error(
+        request_result(
+            "GET",
+            f"/api/reviews/{task_id}/packet",
+            actor_id=user_id,
+            role="USER",
+        ),
+        403,
+        "FORBIDDEN",
+    )
 
     started = request(
         "POST",
@@ -433,20 +635,135 @@ def test_live_hearing_flow_v2_reaches_execution_assistant_handoff() -> None:
         payload={
             "decision": "APPROVE",
             "reason": "V2 live E2E verified the frozen dossier and complete decision chain.",
-            "approved_plan": None,
+            "approved_plan": approved_plan,
         },
     )
     assert decision["case_status"] == "APPROVED_FOR_EXECUTION"
     assert decision["execution_allowed"] is True
 
-    events = request(
-        "GET",
-        f"/api/disputes/{case_id}/events/replay?after_sequence=0",
+    handoff_events = verify_case_event_stream_contract(
+        case_id,
         actor_id=user_id,
         role="USER",
+        outsider_id=f"outsider-{suffix}",
     )
     event_types = {
         item.get("event_type") or item.get("eventType") or item.get("type")
-        for item in events
+        for item in handoff_events
     }
     assert "EXECUTION_ASSISTANT_HANDOFF" in event_types
+
+    assert_error(
+        request_result(
+            "POST",
+            f"/api/disputes/{case_id}/execution/execute",
+            actor_id=user_id,
+            role="USER",
+            idempotency_key=f"execute-unauthorized-{suffix}",
+        ),
+        403,
+        "FORBIDDEN",
+    )
+    admin_id = f"admin-{suffix}"
+    execution_key = f"execute-v2-{suffix}"
+    executed = request(
+        "POST",
+        f"/api/disputes/{case_id}/execution/execute",
+        actor_id=admin_id,
+        role="ADMIN",
+        idempotency_key=execution_key,
+    )
+    assert executed["case_id"] == case_id, executed
+    assert executed["all_succeeded"] is True, executed
+    assert executed["actions"], executed
+    assert all(
+        action["execution_status"] == "SUCCEEDED" for action in executed["actions"]
+    ), executed
+
+    replayed_execution = request(
+        "POST",
+        f"/api/disputes/{case_id}/execution/execute",
+        actor_id=admin_id,
+        role="ADMIN",
+        idempotency_key=execution_key,
+    )
+    assert replayed_execution == executed
+
+    action_records = request(
+        "GET",
+        f"/api/disputes/{case_id}/actions",
+        actor_id=admin_id,
+        role="ADMIN",
+    )
+    assert action_records, action_records
+    assert {item["execution_status"] for item in action_records} == {"SUCCEEDED"}
+
+    outcome = request(
+        "GET",
+        f"/api/disputes/{case_id}/outcome",
+        actor_id=user_id,
+        role="USER",
+    )
+    assert outcome["case_id"] == case_id, outcome
+    assert outcome["actions"], outcome
+    assert outcome["final_decision"]["human_confirmed"] is True, outcome
+
+    assert_error(
+        request_result(
+            "POST",
+            f"/api/disputes/{case_id}/close",
+            actor_id=user_id,
+            role="USER",
+            idempotency_key=f"close-unauthorized-{suffix}",
+        ),
+        403,
+        "FORBIDDEN",
+    )
+    close_key = f"close-v2-{suffix}"
+    closed_case = request(
+        "POST",
+        f"/api/disputes/{case_id}/close",
+        actor_id=admin_id,
+        role="ADMIN",
+        idempotency_key=close_key,
+    )
+    assert closed_case["case_id"] == case_id, closed_case
+    assert closed_case["case_status"] == "CLOSED", closed_case
+    assert closed_case["evaluation_status"] == "COMPLETED", closed_case
+
+    replayed_close = request(
+        "POST",
+        f"/api/disputes/{case_id}/close",
+        actor_id=admin_id,
+        role="ADMIN",
+        idempotency_key=close_key,
+    )
+    assert replayed_close == closed_case
+
+    evaluation = wait_until(
+        "completed case evaluation",
+        lambda: request(
+            "GET",
+            f"/api/disputes/{case_id}/evaluation",
+            actor_id=admin_id,
+            role="ADMIN",
+        ),
+        lambda value: value["evaluation_status"] == "COMPLETED",
+        timeout=120,
+    )
+    assert evaluation["case_id"] == case_id, evaluation
+    metrics = request(
+        "GET",
+        "/api/reviews/evaluations/metrics",
+        actor_id=admin_id,
+        role="ADMIN",
+    )
+    assert metrics["total_evaluations"] >= 1, metrics
+    assert metrics["completed_evaluations"] >= 1, metrics
+
+    verify_agent_run_stream_contract(
+        evidence_run_id,
+        actor_id=user_id,
+        role="USER",
+        outsider_id=f"outsider-{suffix}",
+    )

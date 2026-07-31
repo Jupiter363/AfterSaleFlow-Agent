@@ -27,7 +27,10 @@ import org.springframework.test.web.servlet.MockMvc;
 @ActiveProfiles("mig001-driver")
 @WebMvcTest(
         value = Mig001ScenarioController.class,
-        properties = "app.orchestration.mig001-driver-enabled=true")
+        properties = {
+            "app.orchestration.mig001-driver-enabled=true",
+            "app.security.service-secret=test-service-secret"
+        })
 @Import({
     CommonConfiguration.class,
     TraceIdFilter.class,
@@ -50,6 +53,9 @@ class Mig001ScenarioControllerTest {
 
         mvc.perform(post("/internal/orchestration/mig001/scenarios")
                         .header(HeaderAuthenticationFilter.SERVICE_IDENTITY_HEADER, "mig001-driver")
+                        .header(
+                                HeaderAuthenticationFilter.SERVICE_SECRET_HEADER,
+                                "test-service-secret")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"scenario_id\":\"" + token + "\"}"))
                 .andExpect(status().isCreated())
@@ -72,6 +78,9 @@ class Mig001ScenarioControllerTest {
     void rejectsReadableOrMalformedScenarioIdentifiers() throws Exception {
         mvc.perform(post("/internal/orchestration/mig001/scenarios")
                         .header(HeaderAuthenticationFilter.SERVICE_IDENTITY_HEADER, "mig001-driver")
+                        .header(
+                                HeaderAuthenticationFilter.SERVICE_SECRET_HEADER,
+                                "test-service-secret")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"scenario_id\":\"customer-order-123\"}"))
                 .andExpect(status().isBadRequest());

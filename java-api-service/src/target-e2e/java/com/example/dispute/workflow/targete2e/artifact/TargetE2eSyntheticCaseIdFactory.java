@@ -1,11 +1,15 @@
 package com.example.dispute.workflow.targete2e.artifact;
 
 import com.example.dispute.casecore.application.ImportedCaseIdFactory;
+import com.example.dispute.common.api.ErrorCode;
+import com.example.dispute.common.exception.BusinessException;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Clock;
+import java.time.Instant;
+import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 import javax.sql.DataSource;
@@ -89,7 +93,11 @@ final class TargetE2eSyntheticCaseIdFactory implements ImportedCaseIdFactory {
       statement.setString(1, activationId);
       try (ResultSet result = statement.executeQuery()) {
         if (!result.next()) {
-          throw new IllegalStateException("target E2E activation is not registered");
+          throw activationUnavailable("NOT_REGISTERED", null);
+        }
+        java.sql.Timestamp expiresAt = result.getTimestamp("expires_at");
+        if (expiresAt == null) {
+          throw activationUnavailable("EXPIRY_MISSING", null);
         }
         Scope scope = new Scope(
             result.getString("environment_id"),
@@ -102,14 +110,24 @@ final class TargetE2eSyntheticCaseIdFactory implements ImportedCaseIdFactory {
             result.getString("synthetic_fixture_set_id"),
             result.getString("synthetic_fixture_set_hash"),
             result.getString("lifecycle_status"),
-            result.getTimestamp("expires_at").toInstant());
+            expiresAt.toInstant());
+        if (!scope.expiresAt().isAfter(clock.instant())) {
+          throw new BusinessException(
+              ErrorCode.TARGET_E2E_ACTIVATION_EXPIRED,
+              "target E2E activation has expired",
+              Map.of(
+                  "activation_id", activationId,
+                  "expired_at", scope.expiresAt().toString()));
+        }
+        if (!"ACTIVE".equals(scope.lifecycleStatus())) {
+          throw activationUnavailable("LIFECYCLE_" + scope.lifecycleStatus(), scope.expiresAt());
+        }
         if (!"ISOLATED_SYNTHETIC_NEW_CASES".equals(scope.mode())
-            || !"ACTIVE".equals(scope.lifecycleStatus())
-            || !scope.expiresAt().isAfter(clock.instant())
             || scope.maximumCases() < 1
             || scope.maximumCases() > 16
+            || scope.caseIdPrefix() == null
             || !scope.caseIdPrefix().matches("[A-Z][A-Z0-9_]{2,31}")) {
-          throw new IllegalStateException("target E2E synthetic activation scope is not live and exact");
+          throw activationUnavailable("SCOPE_MISMATCH", scope.expiresAt());
         }
         return scope;
       }
@@ -122,11 +140,27 @@ final class TargetE2eSyntheticCaseIdFactory implements ImportedCaseIdFactory {
       statement.setString(2, activationId);
       try (ResultSet result = statement.executeQuery()) {
         if (!result.next()) {
-          throw new IllegalStateException("target E2E synthetic case capacity is exhausted");
+          throw new BusinessException(
+              ErrorCode.TARGET_E2E_CASE_CAPACITY_EXHAUSTED,
+              "target E2E synthetic case capacity is exhausted",
+              Map.of("activation_id", activationId, "maximum_cases", maximumCases));
         }
         return result.getInt(1);
       }
     }
+  }
+
+  private BusinessException activationUnavailable(String reason, Instant expiresAt) {
+    Map<String, Object> details = new java.util.LinkedHashMap<>();
+    details.put("activation_id", activationId);
+    details.put("reason", reason);
+    if (expiresAt != null) {
+      details.put("expires_at", expiresAt.toString());
+    }
+    return new BusinessException(
+        ErrorCode.TARGET_E2E_ACTIVATION_UNAVAILABLE,
+        "target E2E activation is unavailable",
+        details);
   }
 
   private void insertReservation(Connection connection, Scope scope, int slot, String caseId)

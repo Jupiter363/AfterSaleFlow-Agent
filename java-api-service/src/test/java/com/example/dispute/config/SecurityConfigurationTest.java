@@ -31,6 +31,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.scheduling.annotation.ScheduledAnnotationBeanPostProcessor;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -50,7 +51,8 @@ import org.springframework.web.bind.annotation.RestController;
             "spring.data.redis.repositories.enabled=false",
             "management.health.redis.enabled=false",
             "management.health.elasticsearch.enabled=false",
-            "dispute.scheduling.enabled=false"
+            "dispute.scheduling.enabled=false",
+            "app.security.service-secret=java-service-secret"
         })
 @Import(SecurityConfigurationTest.TestEndpointConfiguration.class)
 @SuppressWarnings({"rawtypes", "unchecked"})
@@ -135,6 +137,9 @@ class SecurityConfigurationTest {
         headers.set(
                 HeaderAuthenticationFilter.SERVICE_IDENTITY_HEADER,
                 "trusted-platform-adapter");
+        headers.set(
+                HeaderAuthenticationFilter.SERVICE_SECRET_HEADER,
+                "java-service-secret");
 
         ResponseEntity<String> response =
                 restTemplate.exchange(
@@ -144,6 +149,72 @@ class SecurityConfigurationTest {
                         String.class);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+    }
+
+    @Test
+    void serviceIdentityWithoutSecretCannotCallInternalServiceRoutes() {
+        HttpHeaders headers = new HttpHeaders();
+        headers.set(
+                HeaderAuthenticationFilter.SERVICE_IDENTITY_HEADER,
+                "trusted-platform-adapter");
+
+        ResponseEntity<Map> response = internalRequest(headers);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+        assertThat(response.getBody()).containsEntry("code", "UNAUTHORIZED");
+    }
+
+    @Test
+    void serviceIdentityWithWrongSecretCannotCallInternalServiceRoutes() {
+        HttpHeaders headers = new HttpHeaders();
+        headers.set(
+                HeaderAuthenticationFilter.SERVICE_IDENTITY_HEADER,
+                "trusted-platform-adapter");
+        headers.set(HeaderAuthenticationFilter.SERVICE_SECRET_HEADER, "wrong-secret");
+
+        ResponseEntity<Map> response = internalRequest(headers);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+        assertThat(response.getBody()).containsEntry("code", "UNAUTHORIZED");
+    }
+
+    @Test
+    void actorAndServiceIdentityHeadersCannotAuthenticateTogether() {
+        HttpHeaders headers = new HttpHeaders();
+        headers.set(HeaderAuthenticationFilter.USER_ID_HEADER, "reviewer_001");
+        headers.set(HeaderAuthenticationFilter.ROLE_HEADER, "PLATFORM_REVIEWER");
+        headers.set(
+                HeaderAuthenticationFilter.SERVICE_IDENTITY_HEADER,
+                "trusted-platform-adapter");
+        headers.set(
+                HeaderAuthenticationFilter.SERVICE_SECRET_HEADER,
+                "java-service-secret");
+
+        ResponseEntity<Map> response = internalRequest(headers);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+        assertThat(response.getBody()).containsEntry("code", "UNAUTHORIZED");
+    }
+
+    @Test
+    void emptyConfiguredServiceSecretFailsClosed() throws Exception {
+        HeaderAuthenticationFilter filter = new HeaderAuthenticationFilter("");
+        MockHttpServletRequest request =
+                new MockHttpServletRequest("GET", "/internal/security-test");
+        request.addHeader(
+                HeaderAuthenticationFilter.SERVICE_IDENTITY_HEADER,
+                "trusted-platform-adapter");
+        request.addHeader(HeaderAuthenticationFilter.SERVICE_SECRET_HEADER, "supplied-secret");
+        AtomicBoolean authenticated = new AtomicBoolean(false);
+
+        filter.doFilter(
+                request,
+                new MockHttpServletResponse(),
+                (servletRequest, servletResponse) ->
+                        authenticated.set(
+                                SecurityContextHolder.getContext().getAuthentication() != null));
+
+        assertThat(authenticated).isFalse();
     }
 
     // 所属模块：【身份鉴权与运行配置 / 自动化测试层】「SecurityConfigurationTest.partyRolesCannotEnterReviewApis()」。
@@ -233,6 +304,14 @@ class SecurityConfigurationTest {
     // 系统意义：「SecurityConfigurationTest.url(String)」守住「身份鉴权与运行配置」的可执行规格；后续重构若破坏契约会在进入集成环境前失败。
     private String url(String path) {
         return "http://localhost:" + port + path;
+    }
+
+    private ResponseEntity<Map> internalRequest(HttpHeaders headers) {
+        return restTemplate.exchange(
+                url("/internal/security-test"),
+                HttpMethod.GET,
+                new HttpEntity<>(headers),
+                Map.class);
     }
 
     // 所属模块：【身份鉴权与运行配置 / 自动化测试层】类型「TestEndpointConfiguration」。

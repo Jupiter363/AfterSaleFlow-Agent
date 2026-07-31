@@ -13,6 +13,10 @@ class TargetE2eApiConfigurationAssemblyTest {
       Path.of(
           "src/target-e2e/java/com/example/dispute/workflow/targete2e/artifact/"
               + "TargetE2eApiConfiguration.java");
+  private static final Path SYNTHETIC_CASE_ID_FACTORY_SOURCE =
+      Path.of(
+          "src/target-e2e/java/com/example/dispute/workflow/targete2e/artifact/"
+              + "TargetE2eSyntheticCaseIdFactory.java");
 
   @Test
   void exchangeAssemblyReadsBrowserMessagesAndWritesGraphProposals() throws IOException {
@@ -50,6 +54,18 @@ class TargetE2eApiConfigurationAssemblyTest {
     assertThat(preparation)
         .contains("new TargetE2EGraphEnvelopeCodec(objectMapper)")
         .doesNotContain("TargetE2EGraphEnvelopeCodec envelopes");
+  }
+
+  @Test
+  void syntheticCaseAllocationPublishesStableActivationFailureCodes() throws IOException {
+    String source = Files.readString(SYNTHETIC_CASE_ID_FACTORY_SOURCE);
+
+    assertThat(source)
+        .contains("ErrorCode.TARGET_E2E_ACTIVATION_UNAVAILABLE")
+        .contains("ErrorCode.TARGET_E2E_ACTIVATION_EXPIRED")
+        .contains("ErrorCode.TARGET_E2E_CASE_CAPACITY_EXHAUSTED")
+        .doesNotContain("target E2E activation is not registered")
+        .doesNotContain("target E2E synthetic activation scope is not live and exact");
   }
 
   private static String method(String source, String methodName) {
