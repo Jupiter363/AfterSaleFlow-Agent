@@ -109,8 +109,7 @@ public final class IntakeUnilateralMatrixPolicy {
         if (authority.actorRole() != authority.initiatorRole()) {
             throw rejected(
                     "INTAKE_MATRIX_FORMAL_TRANSITION_FORBIDDEN",
-                    "respondent matrix changes require the later Java confirm command; "
-                            + "result finalization only persists an initiator unilateral draft");
+                    "unilateral matrix drafts require the Java-authorized initiator actor");
         }
         if (!candidate.isObject()) {
             throw rejected("INTAKE_MATRIX_PATCH_INVALID", "matrix patch is not an object");
@@ -119,14 +118,8 @@ public final class IntakeUnilateralMatrixPolicy {
                 || candidate.has("matrix_kind")) {
             throw rejected(
                     "INTAKE_MATRIX_FORMAL_TRANSITION_FORBIDDEN",
-                    "result finalization cannot create or revise a frozen case matrix; "
-                            + "a later Java accept or confirm command owns matrix freezing");
-        }
-        if (dossier.path("case_fact_matrix").isObject()) {
-            throw rejected(
-                    "INTAKE_MATRIX_FORMAL_TRANSITION_FORBIDDEN",
-                    "result finalization cannot create or revise case_fact_matrix.v2; "
-                            + "a later Java accept or confirm command owns matrix freezing");
+                    "model output cannot create or revise a formal case matrix; "
+                            + "Java result finalization owns deterministic matrix conversion");
         }
         ObjectNode draft = (ObjectNode) candidate;
         requireExactFields(draft, DRAFT_FIELDS, "matrix draft");
@@ -137,12 +130,15 @@ public final class IntakeUnilateralMatrixPolicy {
         }
 
         ObjectNode previous = null;
-        if (dossier.path("unilateral_case_matrix").isObject()) {
+        if (dossier.path("case_fact_matrix").isObject()) {
+            previous = projectionFromInitiatorMatrix(
+                    dossier, (ObjectNode) dossier.path("case_fact_matrix"), authority);
+        } else if (dossier.path("unilateral_case_matrix").isObject()) {
             previous = (ObjectNode) dossier.path("unilateral_case_matrix");
             validatePrevious(previous, authority);
         }
         PreviousIndex index = PreviousIndex.from(previous);
-        ArrayNode draftRows = requireArray(draft, "fact_rows", 1, 100);
+        ArrayNode draftRows = requireArray(draft, "fact_rows", 1, 200);
         Map<String, String> resolvedKeys = new HashMap<>();
         Set<String> resolvedIds = new HashSet<>();
         ArrayNode factRows = dossier.arrayNode();
@@ -206,7 +202,7 @@ public final class IntakeUnilateralMatrixPolicy {
                     authority));
         }
 
-        ArrayNode summaryKeys = requireArray(draft, "summary_source_fact_keys", 1, 100);
+        ArrayNode summaryKeys = requireArray(draft, "summary_source_fact_keys", 1, 200);
         ArrayNode summaryIds = dossier.arrayNode();
         Set<String> seenSummary = new HashSet<>();
         for (JsonNode value : summaryKeys) {
@@ -250,6 +246,79 @@ public final class IntakeUnilateralMatrixPolicy {
         return matrix;
     }
 
+    private static ObjectNode projectionFromInitiatorMatrix(
+            ObjectNode dossier, ObjectNode formal, MatrixAuthority authority) {
+        if (!"case_fact_matrix.v2".equals(formal.path("schema_version").asText())
+                || !"INITIATOR_FROZEN".equals(formal.path("matrix_kind").asText())
+                || !authority.caseId().equals(formal.path("case_id").asText())) {
+            throw rejected(
+                    "INTAKE_MATRIX_FORMAL_TRANSITION_FORBIDDEN",
+                    "initiator revisions require the current INITIATOR_FROZEN matrix");
+        }
+        ObjectNode projection = dossier.objectNode();
+        projection.put("schema_version", "unilateral_case_matrix.v1");
+        projection.set("matrix_version", formal.required("matrix_version").deepCopy());
+
+        ObjectNode sourceBinding = projection.putObject("source_binding");
+        sourceBinding.put("case_id", authority.caseId());
+        sourceBinding.put("source_stage", "INTAKE");
+        sourceBinding.set("source_refs", formal.required("source_refs").deepCopy());
+        JsonNode generation = formal.required("generation_ref");
+        sourceBinding.set(
+                "latest_source_ref", generation.required("latest_source_ref").deepCopy());
+        sourceBinding.set(
+                "source_context_hash", generation.required("source_context_hash").deepCopy());
+        projection.set("party_map", formal.required("party_map").deepCopy());
+
+        JsonNode overview = formal.required("case_overview");
+        projection.set("case_summary", overview.required("neutral_summary").deepCopy());
+        projection.set(
+                "summary_source_fact_ids",
+                overview.required("summary_source_fact_ids").deepCopy());
+        JsonNode claims = formal.required("claims");
+        projection.set("claim_resolution", claims.required("initiator_claim").deepCopy());
+        if (claims.path("respondent_reported_by_initiator").isObject()) {
+            projection.set(
+                    "reported_respondent_attitude",
+                    claims.required("respondent_reported_by_initiator").deepCopy());
+        }
+
+        if (dossier.path("dispute_core_state").isObject()) {
+            projection.set("dispute_core_state", disputeCoreState(dossier));
+        } else {
+            ObjectNode core = projection.putObject("dispute_core_state");
+            core.set("core_conflict", overview.required("core_conflict").deepCopy());
+            core.putArray("facts_in_dispute");
+            core.putArray("next_verification_focus");
+        }
+
+        ArrayNode rows = projection.putArray("fact_rows");
+        for (JsonNode candidate : formal.withArray("fact_rows")) {
+            ObjectNode formalRow = (ObjectNode) candidate;
+            ObjectNode row = rows.addObject();
+            for (String field : List.of("fact_id", "category", "fact_target", "materiality")) {
+                row.set(field, formalRow.required(field).deepCopy());
+            }
+            ObjectNode origin = row.putObject("origin");
+            origin.put("source_stage", "INTAKE");
+            origin.set(
+                    "source_refs",
+                    formalRow.required("origin").required("source_refs").deepCopy());
+            JsonNode direct = formalRow
+                    .required("positions")
+                    .required(authority.initiatorRole().name());
+            ObjectNode initiatorPosition = row.putObject("initiator_position");
+            for (String field : List.of(
+                    "stance", "position_summary", "asserted_value", "source_refs")) {
+                initiatorPosition.set(field, direct.required(field).deepCopy());
+            }
+            row.set("truth_status", formalRow.required("truth_status").deepCopy());
+        }
+        projection.put("content_hash", ContractJson.sha256Hex(projection));
+        validateProjection(projection, authority);
+        return projection;
+    }
+
     private static ObjectNode buildFactRow(
             ObjectNode dossier,
             ObjectNode prior,
@@ -263,13 +332,13 @@ public final class IntakeUnilateralMatrixPolicy {
             MatrixAuthority authority) {
         List<String> priorOriginRefs = prior == null
                 ? List.of()
-                : textArray(prior.path("origin").path("source_refs"), "prior fact source refs", 20);
+                : textArray(prior.path("origin").path("source_refs"), "prior fact source refs", 50);
         List<String> priorPositionRefs = prior == null
                 ? List.of()
                 : textArray(
                         prior.path("initiator_position").path("source_refs"),
                         "prior position source refs",
-                        20);
+                        50);
         List<String> originRefs = prior == null
                 ? List.of(authority.sourceRef())
                 : priorOriginRefs;
@@ -308,7 +377,7 @@ public final class IntakeUnilateralMatrixPolicy {
             refs.addAll(textArray(
                     previous.path("source_binding").path("source_refs"),
                     "matrix source refs",
-                    128));
+                    256));
         }
         refs.add(authority.sourceRef());
         ObjectNode binding = dossier.objectNode();
@@ -479,7 +548,7 @@ public final class IntakeUnilateralMatrixPolicy {
                     "unilateral matrix source binding conflicts with Java case authority");
         }
         Set<String> declaredSources = new LinkedHashSet<>(projectionTextArray(
-                sourceBinding.path("source_refs"), "matrix source refs", 1, 128, 128, true));
+                sourceBinding.path("source_refs"), "matrix source refs", 1, 256, 128, true));
         String latestSource = projectionIdentifier(sourceBinding, "latest_source_ref");
         if (!declaredSources.contains(latestSource)
                 || !projectionText(sourceBinding, "source_context_hash", 64)
@@ -500,7 +569,7 @@ public final class IntakeUnilateralMatrixPolicy {
         projectionText(matrix, "case_summary", 20_000);
 
         JsonNode rows = matrix.path("fact_rows");
-        if (!rows.isArray() || rows.isEmpty() || rows.size() > 100) {
+        if (!rows.isArray() || rows.isEmpty() || rows.size() > 200) {
             throw projectionInvalid("unilateral matrix fact rows are invalid");
         }
         Set<String> factIds = new LinkedHashSet<>();
@@ -526,7 +595,7 @@ public final class IntakeUnilateralMatrixPolicy {
             }
             requireDeclaredSources(
                     projectionTextArray(
-                            origin.path("source_refs"), "fact origin source refs", 1, 20, 128, true),
+                            origin.path("source_refs"), "fact origin source refs", 1, 50, 128, true),
                     declaredSources);
             ObjectNode position = projectionObject(row, "initiator_position");
             requireExactProjectionFields(position, POSITION_FIELDS, "matrix fact position");
@@ -540,7 +609,7 @@ public final class IntakeUnilateralMatrixPolicy {
                             position.path("source_refs"),
                             "fact position source refs",
                             1,
-                            20,
+                            50,
                             128,
                             true),
                     declaredSources);
@@ -550,7 +619,7 @@ public final class IntakeUnilateralMatrixPolicy {
                 matrix.path("summary_source_fact_ids"),
                 "matrix summary source fact ids",
                 1,
-                100,
+                200,
                 128,
                 true);
         if (!factIds.containsAll(summaryIds)) {
@@ -577,7 +646,7 @@ public final class IntakeUnilateralMatrixPolicy {
         projectionText(claim, "position_summary", 20_000);
         requireDeclaredSources(
                 projectionTextArray(
-                        claim.path("source_refs"), "claim source refs", 1, 20, 128, true),
+                        claim.path("source_refs"), "claim source refs", 1, 50, 128, true),
                 declaredSources);
 
         if (matrix.hasNonNull("reported_respondent_attitude")) {
@@ -598,7 +667,7 @@ public final class IntakeUnilateralMatrixPolicy {
                             attitude.path("source_refs"),
                             "respondent attitude source refs",
                             1,
-                            20,
+                            50,
                             128,
                             true),
                     declaredSources);
@@ -899,7 +968,7 @@ public final class IntakeUnilateralMatrixPolicy {
             Map<String, ObjectNode> byId = new HashMap<>();
             Map<String, String> byFingerprint = new HashMap<>();
             JsonNode rows = previous.path("fact_rows");
-            if (!rows.isArray() || rows.isEmpty() || rows.size() > 100) {
+            if (!rows.isArray() || rows.isEmpty() || rows.size() > 200) {
                 throw rejected(
                         "INTAKE_MATRIX_CURRENT_INVALID",
                         "persisted unilateral matrix fact rows are invalid");

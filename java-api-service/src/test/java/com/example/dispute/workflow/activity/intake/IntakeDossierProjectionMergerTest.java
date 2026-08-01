@@ -6,12 +6,12 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.example.dispute.workflow.application.intake.IntakeDossierProjectionMerger;
 import com.example.dispute.workflow.application.intake.IntakeDossierProjectionMerger.MatrixAuthority;
 import com.example.dispute.workflow.application.intake.IntakeFinalizationRejectedException;
-import com.example.dispute.workflow.application.intake.IntakeInitiatorMatrixFreezer;
 import com.example.dispute.workflow.application.intake.IntakeTurnProposal;
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.math.BigDecimal;
 import java.util.List;
@@ -89,7 +89,7 @@ class IntakeDossierProjectionMergerTest {
     }
 
     @Test
-    void derivesAJavaOwnedUnilateralProjectionFromTheFrozenDraftShape() throws Exception {
+    void derivesAndPersistsOnlyTheUnifiedInitiatorMatrixFromTheDraftShape() throws Exception {
         JsonNode dossierPatch = completeDossierPatch();
         JsonNode matrixPatch = unilateralDraft();
 
@@ -98,14 +98,24 @@ class IntakeDossierProjectionMergerTest {
                 proposal(dossierPatch, matrixPatch),
                 matrixAuthority(ActorRole.USER));
 
-        ObjectNode matrix = (ObjectNode) result.dossier().path("unilateral_case_matrix");
+        ObjectNode matrix = (ObjectNode) result.dossier().path("case_fact_matrix");
         assertThat(result.matrixVersion()).isEqualTo(1);
         assertThat(matrix.path("schema_version").asText())
-                .isEqualTo("unilateral_case_matrix.v1");
-        assertThat(matrix.has("matrix_kind")).isFalse();
+                .isEqualTo("case_fact_matrix.v2");
+        assertThat(matrix.path("matrix_kind").asText()).isEqualTo("INITIATOR_FROZEN");
+        assertThat(result.dossier().has("unilateral_case_matrix")).isFalse();
+        assertThat(matrix.path("parent_ref").isNull()).isTrue();
         assertThat(matrix.at("/fact_rows/0/fact_id").asText()).startsWith("FACT_");
         assertThat(matrix.at("/fact_rows/0/origin/source_refs/0").asText())
                 .isEqualTo("MESSAGE_P4_USER_2");
+        assertThat(matrix.at("/fact_rows/0/positions/USER/stance").asText())
+                .isEqualTo("CONFIRM");
+        assertThat(matrix.at("/fact_rows/0/positions/MERCHANT/stance").asText())
+                .isEqualTo("NOT_ADDRESSED");
+        assertThat(matrix.at("/fact_rows/0/positions/MERCHANT/position_summary").asText())
+                .isEqualTo("该方尚未直接陈述。");
+        assertThat(matrix.at("/fact_rows/0/party_alignment/status").asText())
+                .isEqualTo("NOT_COMPUTED");
         ObjectNode hashInput = matrix.deepCopy();
         String contentHash = hashInput.remove("content_hash").asText();
         assertThat(contentHash).isEqualTo(ContractJson.sha256Hex(hashInput));
@@ -117,9 +127,8 @@ class IntakeDossierProjectionMergerTest {
                 JSON.createObjectNode(),
                 proposal(completeDossierPatch(), unilateralDraft()),
                 matrixAuthority(ActorRole.USER));
-        String factId = first.dossier()
-                .at("/unilateral_case_matrix/fact_rows/0/fact_id")
-                .asText();
+        ObjectNode firstMatrix = (ObjectNode) first.dossier().path("case_fact_matrix");
+        String factId = firstMatrix.at("/fact_rows/0/fact_id").asText();
         ObjectNode nextDraft = JSON.createObjectNode();
         nextDraft.put("schema_version", "unilateral_case_matrix.draft.v1");
         ObjectNode row = nextDraft.putArray("fact_rows").addObject();
@@ -132,14 +141,128 @@ class IntakeDossierProjectionMergerTest {
         row.put("source_scope", "PREVIOUS_MATRIX");
         nextDraft.putArray("summary_source_fact_keys").add(factId);
 
+        MatrixAuthority secondAuthority = new MatrixAuthority(
+                "CASE_P4_SYNTHETIC_1",
+                ActorRole.USER,
+                ActorRole.USER,
+                ActorRole.MERCHANT,
+                "MESSAGE_P4_USER_3",
+                "f".repeat(64));
         var second = merger.merge(
                 first.dossier(),
                 proposal(completeDossierPatch(), nextDraft),
-                matrixAuthority(ActorRole.USER));
+                secondAuthority);
 
         assertThat(second.matrixVersion()).isEqualTo(2);
-        assertThat(second.dossier().at("/unilateral_case_matrix/fact_rows/0/fact_id").asText())
+        ObjectNode secondMatrix = (ObjectNode) second.dossier().path("case_fact_matrix");
+        assertThat(second.dossier().has("unilateral_case_matrix")).isFalse();
+        assertThat(secondMatrix.at("/fact_rows/0/fact_id").asText())
                 .isEqualTo(factId);
+        assertThat(secondMatrix.at("/parent_ref/matrix_id"))
+                .isEqualTo(firstMatrix.path("matrix_id"));
+        assertThat(secondMatrix.at("/parent_ref/matrix_version").asLong()).isEqualTo(1);
+        assertThat(secondMatrix.at("/parent_ref/content_hash"))
+                .isEqualTo(firstMatrix.path("content_hash"));
+        assertThat(secondMatrix.path("source_refs")).contains(firstMatrix.path("source_refs").get(0));
+        assertThat(secondMatrix.path("source_refs").toString()).contains("MESSAGE_P4_USER_3");
+    }
+
+    @Test
+    void bridgesADeployedLegacyProjectionIntoTheUnifiedVersionChain() throws Exception {
+        ObjectNode current = dossierWithInitiatorMatrix();
+        ObjectNode legacy = legacyProjectionFrom(current);
+        current.remove("case_fact_matrix");
+        current.set("unilateral_case_matrix", legacy);
+        String factId = legacy.at("/fact_rows/0/fact_id").asText();
+        MatrixAuthority authority = new MatrixAuthority(
+                "CASE_P4_SYNTHETIC_1",
+                ActorRole.USER,
+                ActorRole.USER,
+                ActorRole.MERCHANT,
+                "MESSAGE_P4_USER_3",
+                "f".repeat(64));
+
+        var result = merger.merge(
+                current,
+                proposal(completeDossierPatch(), carryForwardDraft(factId)),
+                authority);
+
+        JsonNode formal = result.dossier().path("case_fact_matrix");
+        assertThat(result.dossier().has("unilateral_case_matrix")).isFalse();
+        assertThat(formal.path("matrix_version").asLong())
+                .isEqualTo(legacy.path("matrix_version").asLong() + 1);
+        assertThat(formal.at("/parent_ref/matrix_version"))
+                .isEqualTo(legacy.path("matrix_version"));
+        assertThat(formal.at("/parent_ref/content_hash"))
+                .isEqualTo(legacy.path("content_hash"));
+        assertThat(formal.at("/fact_rows/0/fact_id").asText()).isEqualTo(factId);
+    }
+
+    @Test
+    void continuesAnInitiatorMatrixAfterMoreThanTwentyAuthorizedSources() throws Exception {
+        ObjectNode current = dossierWithInitiatorMatrix();
+        ObjectNode formal = (ObjectNode) current.path("case_fact_matrix");
+        for (int index = 2; index <= 21; index++) {
+            String sourceRef = "MESSAGE_P4_USER_HISTORY_" + index;
+            formal.withArray("source_refs").add(sourceRef);
+            ((ArrayNode) formal.at("/fact_rows/0/origin/source_refs")).add(sourceRef);
+            ((ArrayNode) formal.at("/fact_rows/0/positions/USER/source_refs")).add(sourceRef);
+            ((ArrayNode) formal.at("/claims/initiator_claim/source_refs")).add(sourceRef);
+        }
+        formal.remove("content_hash");
+        formal.put("content_hash", ContractJson.sha256Hex(formal));
+        String factId = formal.at("/fact_rows/0/fact_id").asText();
+        MatrixAuthority authority = new MatrixAuthority(
+                "CASE_P4_SYNTHETIC_1",
+                ActorRole.USER,
+                ActorRole.USER,
+                ActorRole.MERCHANT,
+                "MESSAGE_P4_USER_3",
+                "f".repeat(64));
+
+        var result = merger.merge(
+                current,
+                proposal(completeDossierPatch(), carryForwardDraft(factId)),
+                authority);
+
+        assertThat(result.dossier().at("/case_fact_matrix/source_refs").size()).isEqualTo(22);
+        assertThat(result.dossier().at("/case_fact_matrix/matrix_version").asLong())
+                .isEqualTo(2);
+    }
+
+    @Test
+    void removesAStaleLegacyBranchAfterRespondentParentValidation() throws Exception {
+        ObjectNode current = dossierWithInitiatorMatrix();
+        ObjectNode parent = ((ObjectNode) current.path("case_fact_matrix")).deepCopy();
+        current.set("unilateral_case_matrix", legacyProjectionFrom(current));
+
+        var result = merger.merge(
+                current,
+                proposal(
+                        JSON.createObjectNode(),
+                        respondentDelta(parent.at("/fact_rows/0/fact_id").asText()),
+                        IntakeTurnProposal.Readiness.INCOMPLETE,
+                        List.of("respondent_supporting_evidence")),
+                matrixAuthority(ActorRole.MERCHANT));
+
+        assertThat(result.dossier().path("case_fact_matrix")).isEqualTo(parent);
+        assertThat(result.dossier().has("unilateral_case_matrix")).isFalse();
+    }
+
+    @Test
+    void retainsLegacyAuthorityWhenAnObjectShapedFormalBranchWasNotValidated() throws Exception {
+        ObjectNode current = dossierWithInitiatorMatrix();
+        current.set("unilateral_case_matrix", legacyProjectionFrom(current));
+        current.set(
+                "case_fact_matrix",
+                JSON.createObjectNode()
+                        .put("schema_version", "case_fact_matrix.v2")
+                        .put("matrix_kind", "INITIATOR_FROZEN"));
+
+        var result = merger.merge(
+                current, proposal(JSON.createObjectNode(), null));
+
+        assertThat(result.dossier().has("unilateral_case_matrix")).isTrue();
     }
 
     @Test
@@ -149,13 +272,13 @@ class IntakeDossierProjectionMergerTest {
                         proposal(completeDossierPatch(), unilateralDraft()),
                         matrixAuthority(ActorRole.USER))
                 .dossier();
-        ObjectNode matrix = (ObjectNode) current.path("unilateral_case_matrix");
+        ObjectNode matrix = (ObjectNode) current.path("case_fact_matrix");
         ((ObjectNode) matrix.at("/fact_rows/0")).put("internal_notes", "must not propagate");
         matrix.remove("content_hash");
         matrix.put("content_hash", ContractJson.sha256Hex(matrix));
 
         assertRejected(
-                "INTAKE_MATRIX_CURRENT_INVALID",
+                "INTAKE_INITIATOR_MATRIX_STRUCTURE_INVALID",
                 () -> merger.merge(
                         current,
                         proposal(completeDossierPatch(), unilateralDraft()),
@@ -211,7 +334,7 @@ class IntakeDossierProjectionMergerTest {
     }
 
     @Test
-    void respondentMatrixDraftRequiresTheLaterJavaConfirmCommand() throws Exception {
+    void rejectsMatrixPatchSchemasFromTheWrongPartyAuthority() throws Exception {
         assertRejected(
                 "INTAKE_MATRIX_FORMAL_TRANSITION_FORBIDDEN",
                 () -> merger.merge(
@@ -457,20 +580,76 @@ class IntakeDossierProjectionMergerTest {
                 """);
     }
 
+    private static ObjectNode carryForwardDraft(String factId) {
+        ObjectNode draft = JSON.createObjectNode();
+        draft.put("schema_version", "unilateral_case_matrix.draft.v1");
+        ObjectNode row = draft.putArray("fact_rows").addObject();
+        row.put("fact_key", factId);
+        row.put("category", "PRODUCT_PAGE");
+        row.put("fact_target", "The listing included basic installation.");
+        row.put("materiality", "CORE");
+        row.put("position_summary", "The buyer relied on the listing.");
+        row.put("asserted_value", "Installation included");
+        row.put("source_scope", "PREVIOUS_MATRIX");
+        draft.putArray("summary_source_fact_keys").add(factId);
+        return draft;
+    }
+
+    private static ObjectNode legacyProjectionFrom(ObjectNode dossier) {
+        ObjectNode formal = (ObjectNode) dossier.path("case_fact_matrix");
+        ObjectNode legacy = JSON.createObjectNode();
+        legacy.put("schema_version", "unilateral_case_matrix.v1");
+        legacy.set("matrix_version", formal.required("matrix_version").deepCopy());
+        ObjectNode sourceBinding = legacy.putObject("source_binding");
+        sourceBinding.set("case_id", formal.required("case_id").deepCopy());
+        sourceBinding.put("source_stage", "INTAKE");
+        sourceBinding.set("source_refs", formal.required("source_refs").deepCopy());
+        sourceBinding.set(
+                "latest_source_ref",
+                formal.required("generation_ref").required("latest_source_ref").deepCopy());
+        sourceBinding.set(
+                "source_context_hash",
+                formal.required("generation_ref").required("source_context_hash").deepCopy());
+        legacy.set("party_map", formal.required("party_map").deepCopy());
+        legacy.set(
+                "case_summary",
+                formal.required("case_overview").required("neutral_summary").deepCopy());
+        legacy.set(
+                "summary_source_fact_ids",
+                formal.required("case_overview").required("summary_source_fact_ids").deepCopy());
+        legacy.set(
+                "claim_resolution",
+                formal.required("claims").required("initiator_claim").deepCopy());
+        legacy.set("dispute_core_state", dossier.required("dispute_core_state").deepCopy());
+        var rows = legacy.putArray("fact_rows");
+        for (JsonNode candidate : formal.withArray("fact_rows")) {
+            ObjectNode row = rows.addObject();
+            for (String field : List.of("fact_id", "category", "fact_target", "materiality")) {
+                row.set(field, candidate.required(field).deepCopy());
+            }
+            row.putObject("origin")
+                    .put("source_stage", "INTAKE")
+                    .set(
+                            "source_refs",
+                            candidate.required("origin").required("source_refs").deepCopy());
+            ObjectNode position = row.putObject("initiator_position");
+            JsonNode direct = candidate.required("positions").required("USER");
+            for (String field : List.of(
+                    "stance", "position_summary", "asserted_value", "source_refs")) {
+                position.set(field, direct.required(field).deepCopy());
+            }
+            row.set("truth_status", candidate.required("truth_status").deepCopy());
+        }
+        legacy.put("content_hash", ContractJson.sha256Hex(legacy));
+        return legacy;
+    }
+
     private ObjectNode dossierWithInitiatorMatrix() throws Exception {
-        ObjectNode dossier = merger.merge(
+        return merger.merge(
                         JSON.createObjectNode(),
                         proposal(completeDossierPatch(), unilateralDraft()),
                         matrixAuthority(ActorRole.USER))
                 .dossier();
-        ObjectNode formal = new IntakeInitiatorMatrixFreezer()
-                .freeze(
-                        "CASE_P4_SYNTHETIC_1",
-                        ActorRole.USER,
-                        ActorRole.MERCHANT,
-                        (ObjectNode) dossier.path("unilateral_case_matrix"));
-        dossier.set("case_fact_matrix", formal);
-        return dossier;
     }
 
     private static JsonNode respondentDelta(String factId) {

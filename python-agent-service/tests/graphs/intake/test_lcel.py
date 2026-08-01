@@ -137,11 +137,50 @@ def _policy() -> ModelInvocationPolicy:
     )
 
 
-def test_system_prompt_preserves_matrix_binding_and_source_scope_semantics() -> None:
+def test_system_prompt_preserves_case_language_dossier_and_matrix_semantics() -> None:
     normalized_prompt = " ".join(INTAKE_SYSTEM_PROMPT.split())
     assert (
-        "preserve the frozen prior materiality for CURRENT_SOURCE, PREVIOUS_MATRIX, and "
-        "PREVIOUS_AND_CURRENT_SOURCE" in normalized_prompt
+        "same language as the latest authorized human message" in normalized_prompt
+    )
+    assert "Every fact, party position, amount, date, item" in normalized_prompt
+    assert "Never reuse a narrative, fact pattern, or default resolution" in normalized_prompt
+    assert (
+        "case_story, references, party_positions, dispute_focus, requested_resolution or "
+        "claim_resolution, respondent_attitude, dispute_core_state, risk_assessment, "
+        "missing_information, intake_quality, and admission" in normalized_prompt
+    )
+    assert "never emit null or placeholder branches" in normalized_prompt
+    assert "unilateral_case_matrix.draft.v1" in normalized_prompt
+    assert "On every initiator turn with material asserted facts" in normalized_prompt
+    assert "already contains an INITIATOR_FROZEN matrix" in normalized_prompt
+    assert (
+        "carry every material prior FACT_* row using its stable fact key, category, fact target, "
+        "and materiality" in normalized_prompt
+    )
+    assert "add NEW_* rows only for genuinely new facts" in normalized_prompt
+    assert "case_fact_matrix.delta.v2" in normalized_prompt
+    assert "Only an authorized respondent may use case_fact_matrix.delta.v2" in normalized_prompt
+    assert "only against a frozen initiator matrix" in normalized_prompt
+    assert "address every material prior FACT_* row" in normalized_prompt
+    assert "internal semantic proposals" in normalized_prompt
+    assert (
+        "only in the top-level matrix_patch field, never inside dossier_patch"
+        in normalized_prompt
+    )
+    assert (
+        "never present either as a persisted or externally authoritative matrix"
+        in normalized_prompt
+    )
+    assert "Do not emit case_fact_matrix.v2" in normalized_prompt
+    assert (
+        "Java alone validates the current actor and source authority and deterministically "
+        "converts "
+        "accepted semantic patches into the single unified formal case matrix"
+        in normalized_prompt
+    )
+    assert (
+        "preserve the frozen prior category, fact target, and materiality for CURRENT_SOURCE, "
+        "PREVIOUS_MATRIX, and PREVIOUS_AND_CURRENT_SOURCE" in normalized_prompt
     )
     assert "A NEW_* row may not use PREVIOUS_MATRIX" in normalized_prompt
     assert "contributes only the current authorized source" in normalized_prompt

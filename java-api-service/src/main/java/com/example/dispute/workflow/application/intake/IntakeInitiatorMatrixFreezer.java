@@ -33,6 +33,8 @@ public final class IntakeInitiatorMatrixFreezer {
             "fact_indexes");
     private static final Set<String> PARTY_MAP_FIELDS =
             Set.of("initiator_role", "respondent_role");
+    private static final Set<String> PARENT_FIELDS =
+            Set.of("matrix_id", "matrix_version", "content_hash");
     private static final Set<String> OVERVIEW_FIELDS =
             Set.of("neutral_summary", "core_conflict", "summary_source_fact_ids");
     private static final Set<String> CLAIM_FIELDS = Set.of(
@@ -112,6 +114,15 @@ public final class IntakeInitiatorMatrixFreezer {
             ActorRole initiatorRole,
             ActorRole respondentRole,
             ObjectNode unilateral) {
+        return freeze(caseId, initiatorRole, respondentRole, unilateral, null);
+    }
+
+    public ObjectNode freeze(
+            String caseId,
+            ActorRole initiatorRole,
+            ActorRole respondentRole,
+            ObjectNode unilateral,
+            ObjectNode previousFrozen) {
         Objects.requireNonNull(unilateral, "unilateral");
         JsonNode sourceBinding = unilateral.path("source_binding");
         MatrixAuthority authority = new MatrixAuthority(
@@ -122,6 +133,9 @@ public final class IntakeInitiatorMatrixFreezer {
                 requiredIdentifier(sourceBinding, "latest_source_ref"),
                 requiredHash(sourceBinding, "source_context_hash"));
         unilateralPolicy.validateExisting(unilateral, authority);
+        if (previousFrozen != null) {
+            validateFrozen(previousFrozen, caseId, initiatorRole, respondentRole);
+        }
 
         ObjectNode matrix = unilateral.objectNode();
         matrix.put("schema_version", "case_fact_matrix.v2");
@@ -130,9 +144,20 @@ public final class IntakeInitiatorMatrixFreezer {
                 "matrix_id",
                 "CASE_MATRIX_"
                         + ContractJson.sha256Hex(unilateral).substring(0, 20).toUpperCase());
-        matrix.put("matrix_version", 1);
+        long matrixVersion = nextVersion(previousFrozen);
+        if (previousFrozen != null
+                && unilateral.path("matrix_version").longValue() != matrixVersion) {
+            throw rejected(
+                    "INTAKE_INITIATOR_MATRIX_VERSION_INVALID",
+                    "initiator projection version does not advance its formal parent");
+        }
+        matrix.put("matrix_version", matrixVersion);
         matrix.put("matrix_kind", "INITIATOR_FROZEN");
-        matrix.putNull("parent_ref");
+        if (previousFrozen == null) {
+            matrix.putNull("parent_ref");
+        } else {
+            matrix.set("parent_ref", parentRef(previousFrozen));
+        }
         matrix.set("party_map", unilateral.required("party_map").deepCopy());
         matrix.set("source_refs", unilateral.required("source_binding").required("source_refs").deepCopy());
         matrix.set("case_overview", caseOverview(unilateral));
@@ -143,7 +168,74 @@ public final class IntakeInitiatorMatrixFreezer {
         matrix.set("fact_indexes", factIndexes(matrix.withArray("fact_rows")));
         matrix.put("content_hash", ContractJson.sha256Hex(matrix));
         validateFrozen(matrix, caseId, initiatorRole, respondentRole);
+        if (previousFrozen != null) {
+            validateRevision(matrix, previousFrozen, initiatorRole);
+        }
         return matrix;
+    }
+
+    /**
+     * Bridges a deployed unilateral projection into the unified formal lineage on its next turn.
+     * The legacy projection remains the authoritative parent, so its version is neither reset nor
+     * discarded.
+     */
+    public ObjectNode freezeLegacyRevision(
+            String caseId,
+            ActorRole initiatorRole,
+            ActorRole respondentRole,
+            ObjectNode unilateral,
+            ObjectNode previousLegacy) {
+        Objects.requireNonNull(unilateral, "unilateral");
+        Objects.requireNonNull(previousLegacy, "previousLegacy");
+        validateUnilateral(caseId, initiatorRole, respondentRole, unilateral);
+        validateUnilateral(caseId, initiatorRole, respondentRole, previousLegacy);
+        long previousVersion = previousLegacy.path("matrix_version").longValue();
+        if (previousVersion == Long.MAX_VALUE
+                || unilateral.path("matrix_version").longValue() != previousVersion + 1) {
+            throw rejected(
+                    "INTAKE_INITIATOR_MATRIX_VERSION_INVALID",
+                    "initiator projection version does not advance its legacy parent");
+        }
+
+        ObjectNode matrix = buildFrozen(
+                caseId,
+                initiatorRole,
+                respondentRole,
+                unilateral,
+                previousVersion + 1,
+                legacyParentRef(previousLegacy));
+        validateLegacyRevision(matrix, previousLegacy, initiatorRole);
+        return matrix;
+    }
+
+    /**
+     * Upgrades a deployed unilateral authority during confirmation without resetting its version
+     * history. The schema transition is represented as the next version and binds the legacy
+     * content hash as its parent.
+     */
+    public ObjectNode migrateLegacy(
+            String caseId,
+            ActorRole initiatorRole,
+            ActorRole respondentRole,
+            ObjectNode previousLegacy) {
+        Objects.requireNonNull(previousLegacy, "previousLegacy");
+        validateUnilateral(caseId, initiatorRole, respondentRole, previousLegacy);
+        long previousVersion = previousLegacy.path("matrix_version").longValue();
+        if (previousVersion == Long.MAX_VALUE) {
+            throw rejected(
+                    "INTAKE_INITIATOR_MATRIX_VERSION_INVALID",
+                    "legacy initiator matrix version cannot advance safely");
+        }
+        ObjectNode migrationProjection = previousLegacy.deepCopy();
+        migrationProjection.put("matrix_version", previousVersion + 1);
+        migrationProjection.remove("content_hash");
+        migrationProjection.put("content_hash", ContractJson.sha256Hex(migrationProjection));
+        return freezeLegacyRevision(
+                caseId,
+                initiatorRole,
+                respondentRole,
+                migrationProjection,
+                previousLegacy);
     }
 
     public void validateFrozen(
@@ -157,13 +249,14 @@ public final class IntakeInitiatorMatrixFreezer {
                 || !caseId.equals(requiredIdentifier(matrix, "case_id"))
                 || !"INITIATOR_FROZEN".equals(requiredText(matrix, "matrix_kind", 64))
                 || !matrix.path("matrix_version").isIntegralNumber()
-                || matrix.path("matrix_version").longValue() != 1
+                || !matrix.path("matrix_version").canConvertToLong()
+                || matrix.path("matrix_version").longValue() < 1
                 || !requiredIdentifier(matrix, "matrix_id").matches("CASE_MATRIX_[A-F0-9]{20}")) {
             throw rejected(
                     "INTAKE_INITIATOR_MATRIX_AUTHORITY_INVALID",
                     "initiator matrix does not match current Java case authority");
         }
-        requireNull(matrix, "parent_ref", "initiator matrix parent reference");
+        validateParentRef(matrix);
         ObjectNode hashInput = matrix.deepCopy();
         JsonNode storedHash = hashInput.remove("content_hash");
         if (storedHash == null
@@ -226,6 +319,227 @@ public final class IntakeInitiatorMatrixFreezer {
         validateIndexes(matrix, ids, coreIds);
     }
 
+    private static long nextVersion(ObjectNode previous) {
+        if (previous == null) {
+            return 1;
+        }
+        long version = previous.path("matrix_version").longValue();
+        if (version == Long.MAX_VALUE) {
+            throw rejected(
+                    "INTAKE_INITIATOR_MATRIX_VERSION_INVALID",
+                    "initiator matrix version cannot advance safely");
+        }
+        return version + 1;
+    }
+
+    private static ObjectNode parentRef(ObjectNode previous) {
+        ObjectNode parent = previous.objectNode();
+        parent.set("matrix_id", previous.required("matrix_id").deepCopy());
+        parent.set("matrix_version", previous.required("matrix_version").deepCopy());
+        parent.set("content_hash", previous.required("content_hash").deepCopy());
+        return parent;
+    }
+
+    private static void validateParentRef(ObjectNode matrix) {
+        long version = matrix.path("matrix_version").longValue();
+        JsonNode parent = matrix.path("parent_ref");
+        if (version == 1) {
+            requireNull(matrix, "parent_ref", "initiator matrix parent reference");
+            return;
+        }
+        if (!parent.isObject()) {
+            throw rejected(
+                    "INTAKE_INITIATOR_MATRIX_PARENT_INVALID",
+                    "revised initiator matrix requires a formal parent reference");
+        }
+        ObjectNode parentObject = (ObjectNode) parent;
+        requireExactFields(parentObject, PARENT_FIELDS, "initiator matrix parent reference");
+        if (!requiredIdentifier(parentObject, "matrix_id").matches("CASE_MATRIX_[A-F0-9]{20}")
+                || !parentObject.path("matrix_version").isIntegralNumber()
+                || parentObject.path("matrix_version").longValue() != version - 1
+                || !requiredHash(parentObject, "content_hash").matches("[0-9a-f]{64}")) {
+            throw rejected(
+                    "INTAKE_INITIATOR_MATRIX_PARENT_INVALID",
+                    "initiator matrix parent reference is invalid");
+        }
+    }
+
+    private static void validateRevision(
+            ObjectNode matrix, ObjectNode previous, ActorRole initiatorRole) {
+        if (!matrix.path("parent_ref").path("matrix_id").equals(previous.path("matrix_id"))
+                || !matrix.path("parent_ref")
+                        .path("matrix_version")
+                        .equals(previous.path("matrix_version"))
+                || !matrix.path("parent_ref")
+                        .path("content_hash")
+                        .equals(previous.path("content_hash"))) {
+            throw rejected(
+                    "INTAKE_INITIATOR_MATRIX_PARENT_INVALID",
+                    "initiator matrix parent reference does not match current authority");
+        }
+        Set<String> currentSources = new HashSet<>(requiredTextArray(
+                matrix, "source_refs", 1, 256, 128, "initiator matrix source refs"));
+        Set<String> previousSources = new HashSet<>(requiredTextArray(
+                previous, "source_refs", 1, 256, 128, "initiator matrix source refs"));
+        if (!currentSources.containsAll(previousSources)) {
+            throw rejected(
+                    "INTAKE_INITIATOR_MATRIX_SOURCE_INVALID",
+                    "initiator revision drops prior matrix source authority");
+        }
+
+        java.util.Map<String, JsonNode> currentRows = new java.util.HashMap<>();
+        matrix.withArray("fact_rows")
+                .forEach(row -> currentRows.put(row.path("fact_id").asText(), row));
+        for (JsonNode previousRow : previous.withArray("fact_rows")) {
+            JsonNode currentRow = currentRows.get(previousRow.path("fact_id").asText());
+            if (currentRow == null
+                    || !currentRow.path("category").equals(previousRow.path("category"))
+                    || !currentRow.path("fact_target").equals(previousRow.path("fact_target"))
+                    || !currentRow.path("materiality").equals(previousRow.path("materiality"))
+                    || !containsAllText(
+                            currentRow.path("origin").path("source_refs"),
+                            previousRow.path("origin").path("source_refs"))
+                    || !containsAllText(
+                            currentRow
+                                    .path("positions")
+                                    .path(initiatorRole.name())
+                                    .path("source_refs"),
+                            previousRow
+                                    .path("positions")
+                                    .path(initiatorRole.name())
+                                    .path("source_refs"))) {
+                throw rejected(
+                        "INTAKE_INITIATOR_MATRIX_STABLE_AUTHORITY_INVALID",
+                        "initiator revision drops or rebinds a stable fact authority");
+            }
+        }
+    }
+
+    private static void validateLegacyRevision(
+            ObjectNode matrix, ObjectNode previous, ActorRole initiatorRole) {
+        JsonNode parent = matrix.path("parent_ref");
+        if (!parent.path("matrix_id").equals(legacyMatrixId(previous))
+                || !parent.path("matrix_version").equals(previous.path("matrix_version"))
+                || !parent.path("content_hash").equals(previous.path("content_hash"))) {
+            throw rejected(
+                    "INTAKE_INITIATOR_MATRIX_PARENT_INVALID",
+                    "initiator matrix parent reference does not match legacy authority");
+        }
+        Set<String> currentSources = new HashSet<>(requiredTextArray(
+                matrix, "source_refs", 1, 256, 128, "initiator matrix source refs"));
+        Set<String> previousSources = new HashSet<>(requiredTextArray(
+                requiredObject(previous, "source_binding", "legacy initiator matrix source binding"),
+                "source_refs",
+                1,
+                256,
+                128,
+                "legacy initiator matrix source refs"));
+        if (!currentSources.containsAll(previousSources)) {
+            throw rejected(
+                    "INTAKE_INITIATOR_MATRIX_SOURCE_INVALID",
+                    "initiator revision drops prior legacy source authority");
+        }
+
+        java.util.Map<String, JsonNode> currentRows = new java.util.HashMap<>();
+        matrix.withArray("fact_rows")
+                .forEach(row -> currentRows.put(row.path("fact_id").asText(), row));
+        for (JsonNode previousRow : previous.withArray("fact_rows")) {
+            JsonNode currentRow = currentRows.get(previousRow.path("fact_id").asText());
+            if (currentRow == null
+                    || !currentRow.path("category").equals(previousRow.path("category"))
+                    || !currentRow.path("fact_target").equals(previousRow.path("fact_target"))
+                    || !currentRow.path("materiality").equals(previousRow.path("materiality"))
+                    || !containsAllText(
+                            currentRow.path("origin").path("source_refs"),
+                            previousRow.path("origin").path("source_refs"))
+                    || !containsAllText(
+                            currentRow
+                                    .path("positions")
+                                    .path(initiatorRole.name())
+                                    .path("source_refs"),
+                            previousRow.path("initiator_position").path("source_refs"))) {
+                throw rejected(
+                        "INTAKE_INITIATOR_MATRIX_STABLE_AUTHORITY_INVALID",
+                        "initiator revision drops or rebinds legacy fact authority");
+            }
+        }
+    }
+
+    private ObjectNode buildFrozen(
+            String caseId,
+            ActorRole initiatorRole,
+            ActorRole respondentRole,
+            ObjectNode unilateral,
+            long matrixVersion,
+            JsonNode parentRef) {
+        ObjectNode matrix = unilateral.objectNode();
+        matrix.put("schema_version", "case_fact_matrix.v2");
+        matrix.put("case_id", caseId);
+        matrix.put(
+                "matrix_id",
+                "CASE_MATRIX_"
+                        + ContractJson.sha256Hex(unilateral).substring(0, 20).toUpperCase());
+        matrix.put("matrix_version", matrixVersion);
+        matrix.put("matrix_kind", "INITIATOR_FROZEN");
+        matrix.set("parent_ref", parentRef.deepCopy());
+        matrix.set("party_map", unilateral.required("party_map").deepCopy());
+        matrix.set(
+                "source_refs",
+                unilateral.required("source_binding").required("source_refs").deepCopy());
+        matrix.set("case_overview", caseOverview(unilateral));
+        matrix.set("claims", claims(unilateral));
+        matrix.set("fact_rows", factRows(unilateral, initiatorRole, respondentRole));
+        matrix.putArray("fact_relationships");
+        matrix.set("generation_ref", generationRef(unilateral, initiatorRole));
+        matrix.set("fact_indexes", factIndexes(matrix.withArray("fact_rows")));
+        matrix.put("content_hash", ContractJson.sha256Hex(matrix));
+        validateFrozen(matrix, caseId, initiatorRole, respondentRole);
+        return matrix;
+    }
+
+    private void validateUnilateral(
+            String caseId,
+            ActorRole initiatorRole,
+            ActorRole respondentRole,
+            ObjectNode unilateral) {
+        JsonNode sourceBinding = unilateral.path("source_binding");
+        MatrixAuthority authority = new MatrixAuthority(
+                caseId,
+                initiatorRole,
+                initiatorRole,
+                respondentRole,
+                requiredIdentifier(sourceBinding, "latest_source_ref"),
+                requiredHash(sourceBinding, "source_context_hash"));
+        unilateralPolicy.validateExisting(unilateral, authority);
+    }
+
+    private static ObjectNode legacyParentRef(ObjectNode previous) {
+        ObjectNode parent = previous.objectNode();
+        parent.set("matrix_id", legacyMatrixId(previous));
+        parent.set("matrix_version", previous.required("matrix_version").deepCopy());
+        parent.set("content_hash", previous.required("content_hash").deepCopy());
+        return parent;
+    }
+
+    private static JsonNode legacyMatrixId(ObjectNode previous) {
+        return previous.textNode(
+                "CASE_MATRIX_"
+                        + requiredHash(previous, "content_hash")
+                                .substring(0, 20)
+                                .toUpperCase());
+    }
+
+    private static boolean containsAllText(JsonNode current, JsonNode previous) {
+        Set<String> currentValues = new HashSet<>();
+        current.forEach(value -> currentValues.add(value.asText()));
+        for (JsonNode value : previous) {
+            if (!currentValues.contains(value.asText())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     private static ObjectNode caseOverview(ObjectNode unilateral) {
         ObjectNode overview = unilateral.objectNode();
         overview.put("neutral_summary", requiredText(unilateral, "case_summary", 20_000));
@@ -274,7 +588,7 @@ public final class IntakeInitiatorMatrixFreezer {
             direct.set("source_refs", position.required("source_refs").deepCopy());
             ObjectNode absent = positions.putObject(respondentRole.name());
             absent.put("stance", "NOT_ADDRESSED");
-            absent.put("position_summary", "No direct respondent position is recorded.");
+            absent.put("position_summary", "该方尚未直接陈述。");
             absent.putNull("asserted_value");
             absent.put("source_type", "NO_DIRECT_POSITION");
             absent.putArray("source_refs");
@@ -485,7 +799,7 @@ public final class IntakeInitiatorMatrixFreezer {
                 positions, respondentRole.name(), "initiator matrix absent respondent position");
         requireExactFields(respondent, POSITION_FIELDS, "initiator matrix absent respondent position");
         if (!"NOT_ADDRESSED".equals(requiredText(respondent, "stance", 64))
-                || !"No direct respondent position is recorded.".equals(
+                || !"该方尚未直接陈述。".equals(
                         requiredText(respondent, "position_summary", 20_000))
                 || !respondent.path("asserted_value").isNull()
                 || !"NO_DIRECT_POSITION".equals(requiredText(respondent, "source_type", 64))

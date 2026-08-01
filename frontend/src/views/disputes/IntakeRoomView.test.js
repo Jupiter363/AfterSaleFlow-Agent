@@ -1753,6 +1753,142 @@ describe("IntakeRoomView", () => {
   });
 
   // 业务位置：【前端接待室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
+  it("renders the live v2 product-quality dossier on the right-side board", async () => {
+    const productQualityDispute = {
+      ...dispute,
+      order_id: "ORDER-T05-50465E63B684EB3081A33203",
+      after_sale_id: "AFTER-T05-50465E63B684EB3081A33203",
+      logistics_id: "LOG-T05-50465E63B684EB3081A33203",
+      title: "使用短期后出现质量故障",
+      description: "商品正常使用十天后频繁自动关机，远程排障和恢复出厂设置均未解决。",
+      dispute_type: "PRODUCT_QUALITY",
+    };
+    const wrapper = await mountInteractiveView({
+      initialDispute: productQualityDispute,
+      initialAnalysis: {
+        ...analysis,
+        initiator_role: "USER",
+        order_reference: productQualityDispute.order_id,
+        after_sales_reference: productQualityDispute.after_sale_id,
+        logistics_reference: productQualityDispute.logistics_id,
+        requested_outcome: "换货或维修",
+      },
+      initialTurnMemory: {
+        turn_no: 1,
+        case_intake_dossier: {
+          dossier_version: 1,
+          quality_score: 72,
+          ready_for_next_step: false,
+          admission_recommendation: "NEED_MORE_INFO",
+          dossier: {
+            schema_version: "intake-dossier.v2",
+            case_story: {
+              one_sentence_summary:
+                "商品正常使用十天后频繁自动关机，远程排障和恢复出厂设置均未解决。",
+            },
+            claim_resolution: {
+              initiator_role: "USER",
+              requested_resolution: "REPLACE_OR_REPAIR",
+              normalized_statement: "用户请求换货或维修，并核验商品频繁自动关机的原因。",
+              original_statement: productQualityDispute.description,
+            },
+            respondent_attitude: {
+              respondent_role: "MERCHANT",
+              attitude: "NOT_RESPONDED",
+            },
+            dispute_core_state: {
+              core_conflict: "商品在正常使用十天后是否存在质量故障。",
+              facts_in_dispute: ["频繁自动关机是否可以稳定复现"],
+              next_verification_focus: ["核验故障复现视频", "核验远程排障记录"],
+            },
+            intake_quality: {
+              score: 72,
+              threshold: 85,
+              ready_for_next_step: false,
+            },
+            admission: {
+              recommendation: "NEED_MORE_INFO",
+            },
+            case_fact_matrix: {
+              schema_version: "case_fact_matrix.v2",
+              matrix_kind: "INITIATOR_FROZEN",
+            },
+          },
+        },
+      },
+    });
+
+    const disputeDetail = wrapper.get("[data-dispute-detail-card]");
+    expect(disputeDetail.get("[data-dispute-detail-summary]").text()).toContain(
+      "商品正常使用十天后频繁自动关机",
+    );
+    expect(disputeDetail.get("[data-dispute-detail-claim]").text()).toContain(
+      "用户请求换货或维修",
+    );
+    expect(wrapper.get("[data-verification-gaps]").text()).toContain("核验故障复现视频");
+    expect(wrapper.get("[data-verification-gaps]").text()).toContain("核验远程排障记录");
+    expect(disputeDetail.text()).not.toContain("等待接待官整理");
+    expect(wrapper.get("[data-case-index-strip]").text()).toContain(
+      "ORDER-T05-50465E63B684EB3081A33203",
+    );
+  });
+
+  it("keeps the legacy v1 rich dossier visible after schema normalization", async () => {
+    actor.id = "merchant-local";
+    actor.role = "MERCHANT";
+    const legacyMemory = structuredClone(readyTurnMemory);
+    legacyMemory.case_intake_dossier.dossier.caseFactMatrix = {
+      schemaVersion: "case_fact_matrix.v2",
+      matrixKind: "BILATERAL_FROZEN",
+    };
+    const wrapper = await mountInteractiveView({
+      initialTurnMemory: legacyMemory,
+      initialIntakeStatus: {
+        initiator_role: "USER",
+        respondent_role: "MERCHANT",
+        initiator_status: "COMPLETED",
+        respondent_status: "OPEN",
+        current_actor_completed: false,
+        can_use_intake: true,
+        can_enter_evidence: false,
+      },
+    });
+
+    expect(wrapper.get("[data-dispute-detail-summary]").text()).toContain("物流显示签收");
+    expect(wrapper.get("[data-dispute-detail-claim]").text()).not.toContain("等待接待官整理");
+    expect(wrapper.get("[data-verification-gaps]").text()).toContain("签收人身份");
+    expect(wrapper.get("[data-dossier-status-rail]").text()).toContain("完善度 88%");
+    expect(wrapper.get("[data-confirm-admission]").attributes("disabled")).toBeUndefined();
+  });
+
+  it("ignores legacy unilateral branches when deriving formal matrix readiness", async () => {
+    actor.id = "merchant-local";
+    actor.role = "MERCHANT";
+    const unilateralMemory = structuredClone(readyTurnMemory);
+    unilateralMemory.case_intake_dossier.quality_score = 100;
+    unilateralMemory.case_intake_dossier.ready_for_next_step = true;
+    unilateralMemory.case_intake_dossier.dossier.schema_version = "intake-dossier.v2";
+    unilateralMemory.case_intake_dossier.dossier.unilateralCaseMatrix = {
+      schemaVersion: "unilateral_case_matrix.v1",
+      factRows: [],
+    };
+    const wrapper = await mountInteractiveView({
+      initialTurnMemory: unilateralMemory,
+      initialIntakeStatus: {
+        initiator_role: "USER",
+        respondent_role: "MERCHANT",
+        initiator_status: "COMPLETED",
+        respondent_status: "OPEN",
+        current_actor_completed: false,
+        can_use_intake: true,
+        can_enter_evidence: false,
+      },
+    });
+
+    expect(wrapper.get("[data-dossier-status-rail]").text()).toContain("完善度 0%");
+    expect(wrapper.get("[data-confirm-admission]").attributes("disabled")).toBeDefined();
+  });
+
   it("renders the current case-detail dossier as the right-side board", async () => {
     const wrapper = await mountInteractiveView({
       initialAnalysis: {

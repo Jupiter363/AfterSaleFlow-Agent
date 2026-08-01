@@ -42,9 +42,16 @@ public class IntakeMatrixLifecycleService {
         ObjectNode root = readObject(dossier.getDossierJson());
         JsonNode existing = root.path("case_fact_matrix");
         if (existing.isObject()) {
-            // Legacy Intake already treated any case_fact_matrix projection as immutable here. The
-            // unreachable formal adapter performs its stricter INITIATOR_FROZEN validation after
-            // this domain call, inside the same transaction.
+            // Graph finalization already materializes the Java-owned unified matrix. Confirmation
+            // is therefore idempotent; it may only remove a stale pre-baseline unilateral branch.
+            initiatorFreezer.validateFrozen(
+                    (ObjectNode) existing,
+                    dispute.getId(),
+                    toContractRole(dispute.getInitiatorRole()),
+                    toContractRole(dispute.getRespondentRole()));
+            if (root.remove("unilateral_case_matrix") != null) {
+                persistProjection(dispute, actorId, dossier, root);
+            }
             return new FreezeResult(
                     false,
                     existing.path("matrix_kind").asText(null),
@@ -54,12 +61,22 @@ public class IntakeMatrixLifecycleService {
         if (!unilateral.isObject()) {
             return new FreezeResult(false, null, null);
         }
-        ObjectNode frozen = initiatorFreezer.freeze(
+        ObjectNode frozen = initiatorFreezer.migrateLegacy(
                 dispute.getId(),
                 toContractRole(dispute.getInitiatorRole()),
                 toContractRole(dispute.getRespondentRole()),
                 (ObjectNode) unilateral);
         root.set("case_fact_matrix", frozen);
+        root.remove("unilateral_case_matrix");
+        persistProjection(dispute, actorId, dossier, root);
+        return new FreezeResult(true, "INITIATOR_FROZEN", frozen.path("content_hash").asText());
+    }
+
+    private void persistProjection(
+            FulfillmentCaseEntity dispute,
+            String actorId,
+            CaseIntakeDossierEntity dossier,
+            ObjectNode root) {
         String updated = write(root);
         dossier.replaceWith(
                 updated,
@@ -70,7 +87,6 @@ public class IntakeMatrixLifecycleService {
                 actorId);
         repository.save(dossier);
         dispute.refreshIntakeResult(updated, actorId);
-        return new FreezeResult(true, "INITIATOR_FROZEN", frozen.path("content_hash").asText());
     }
 
     /** Strict formal check used by the TEMPORAL branch authority after all rows are locked. */

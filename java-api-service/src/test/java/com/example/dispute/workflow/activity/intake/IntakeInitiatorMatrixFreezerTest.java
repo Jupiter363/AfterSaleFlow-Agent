@@ -80,6 +80,67 @@ class IntakeInitiatorMatrixFreezerTest {
                 matrix, CASE_ID, ActorRole.MERCHANT, ActorRole.USER));
     }
 
+    @Test
+    void advancesASecondInitiatorTurnWithStableFactsSourcesAndParentAuthority() {
+        ObjectNode first = freezer.freeze(
+                CASE_ID, ActorRole.USER, ActorRole.MERCHANT, unilateral());
+        ObjectNode revised = unilateral();
+        revised.put("matrix_version", 2);
+        revised.withObjectProperty("source_binding")
+                .withArray("source_refs")
+                .add("MESSAGE_INITIATOR_2");
+        revised.withObjectProperty("source_binding")
+                .put("latest_source_ref", "MESSAGE_INITIATOR_2")
+                .put("source_context_hash", "b".repeat(64));
+        revised.withArray("fact_rows")
+                .get(0)
+                .withObjectProperty("initiator_position")
+                .withArray("source_refs")
+                .add("MESSAGE_INITIATOR_2");
+        revised.withObjectProperty("claim_resolution")
+                .withArray("source_refs")
+                .add("MESSAGE_INITIATOR_2");
+        rehash(revised);
+
+        ObjectNode second = freezer.freeze(
+                CASE_ID, ActorRole.USER, ActorRole.MERCHANT, revised, first);
+
+        assertThat(second.path("schema_version").asText()).isEqualTo("case_fact_matrix.v2");
+        assertThat(second.path("matrix_kind").asText()).isEqualTo("INITIATOR_FROZEN");
+        assertThat(second.path("matrix_version").asLong()).isEqualTo(2);
+        assertThat(second.at("/parent_ref/matrix_id")).isEqualTo(first.path("matrix_id"));
+        assertThat(second.at("/parent_ref/matrix_version")).isEqualTo(first.path("matrix_version"));
+        assertThat(second.at("/parent_ref/content_hash")).isEqualTo(first.path("content_hash"));
+        assertThat(second.at("/fact_rows/0/fact_id"))
+                .isEqualTo(first.at("/fact_rows/0/fact_id"));
+        assertThat(second.path("source_refs").toString())
+                .contains("MESSAGE_INITIATOR_1", "MESSAGE_INITIATOR_2");
+        assertThat(second.at("/fact_rows/0/positions/MERCHANT/stance").asText())
+                .isEqualTo("NOT_ADDRESSED");
+        assertThat(second.at("/fact_rows/0/positions/MERCHANT/position_summary").asText())
+                .isEqualTo("该方尚未直接陈述。");
+        assertThat(second.at("/fact_rows/0/party_alignment/status").asText())
+                .isEqualTo("NOT_COMPUTED");
+        freezer.validateFrozen(second, CASE_ID, ActorRole.USER, ActorRole.MERCHANT);
+    }
+
+    @Test
+    void rejectsASecondInitiatorTurnThatRebindsStableFactMateriality() {
+        ObjectNode first = freezer.freeze(
+                CASE_ID, ActorRole.USER, ActorRole.MERCHANT, unilateral());
+        ObjectNode revised = unilateral();
+        revised.put("matrix_version", 2);
+        ((ObjectNode) revised.withArray("fact_rows").get(0)).put("materiality", "SUPPORTING");
+        rehash(revised);
+
+        assertThatThrownBy(() -> freezer.freeze(
+                        CASE_ID, ActorRole.USER, ActorRole.MERCHANT, revised, first))
+                .isInstanceOf(IntakeFinalizationRejectedException.class)
+                .satisfies(failure -> assertThat(
+                                ((IntakeFinalizationRejectedException) failure).code())
+                        .isEqualTo("INTAKE_INITIATOR_MATRIX_STABLE_AUTHORITY_INVALID"));
+    }
+
     private static ObjectNode unilateral() {
         ObjectNode matrix = JsonMapper.builder().build().createObjectNode();
         matrix.put("schema_version", "unilateral_case_matrix.v1");

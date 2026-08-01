@@ -109,6 +109,8 @@ public final class IntakeDossierProjectionMerger {
             "case_fact_matrix.delta.v2");
 
     private final IntakeUnilateralMatrixPolicy matrixPolicy = new IntakeUnilateralMatrixPolicy();
+    private final IntakeInitiatorMatrixFreezer initiatorMatrixFreezer =
+            new IntakeInitiatorMatrixFreezer();
     private final IntakeRespondentMatrixFreezer respondentMatrixFreezer =
             new IntakeRespondentMatrixFreezer();
 
@@ -144,6 +146,7 @@ public final class IntakeDossierProjectionMerger {
         ObjectNode merged = (ObjectNode) current.deepCopy();
         deepMerge(merged, (ObjectNode) patch);
         boolean matrixChanged = false;
+        boolean formalAuthorityValidated = false;
 
         JsonNode matrixPatch = proposal.matrixPatch();
         if (matrixPatch != null) {
@@ -155,10 +158,37 @@ public final class IntakeDossierProjectionMerger {
             rejectForbiddenKeys(matrixPatch);
             String matrixSchema = matrixPatch.path("schema_version").asText();
             if ("unilateral_case_matrix.draft.v1".equals(matrixSchema)) {
-                merged.set(
-                        "unilateral_case_matrix",
-                        matrixPolicy.apply(merged, matrixPatch, matrixAuthority));
+                ObjectNode previousFormal = null;
+                ObjectNode previousLegacy = null;
+                if (merged.path("case_fact_matrix").isObject()) {
+                    previousFormal = ((ObjectNode) merged.path("case_fact_matrix")).deepCopy();
+                    initiatorMatrixFreezer.validateFrozen(
+                            previousFormal,
+                            matrixAuthority.caseId(),
+                            matrixAuthority.initiatorRole(),
+                            matrixAuthority.respondentRole());
+                } else if (merged.path("unilateral_case_matrix").isObject()) {
+                    previousLegacy =
+                            ((ObjectNode) merged.path("unilateral_case_matrix")).deepCopy();
+                }
+                ObjectNode unilateral = matrixPolicy.apply(merged, matrixPatch, matrixAuthority);
+                ObjectNode frozen = previousLegacy == null
+                        ? initiatorMatrixFreezer.freeze(
+                                matrixAuthority.caseId(),
+                                matrixAuthority.initiatorRole(),
+                                matrixAuthority.respondentRole(),
+                                unilateral,
+                                previousFormal)
+                        : initiatorMatrixFreezer.freezeLegacyRevision(
+                                matrixAuthority.caseId(),
+                                matrixAuthority.initiatorRole(),
+                                matrixAuthority.respondentRole(),
+                                unilateral,
+                                previousLegacy);
+                merged.set("case_fact_matrix", frozen);
+                merged.remove("unilateral_case_matrix");
                 matrixChanged = true;
+                formalAuthorityValidated = true;
             } else if ("case_fact_matrix.delta.v2".equals(matrixSchema)) {
                 if (matrixAuthority.actorRole() != matrixAuthority.respondentRole()) {
                     throw rejected(
@@ -173,6 +203,7 @@ public final class IntakeDossierProjectionMerger {
                 }
                 ObjectNode bilateralCandidate = respondentMatrixFreezer.deriveCandidate(
                         (ObjectNode) currentFormalMatrix, matrixPatch, matrixAuthority);
+                formalAuthorityValidated = true;
                 if (proposal.readiness() == IntakeTurnProposal.Readiness.READY_TO_CONFIRM
                         && proposal.missingFields().isEmpty()) {
                     respondentMatrixFreezer.requireCompleteForFreeze(
@@ -191,9 +222,31 @@ public final class IntakeDossierProjectionMerger {
                         "INTAKE_MATRIX_PATCH_INVALID",
                         "matrix patch is not a supported semantic proposal");
             }
-        } else if (matrixAuthority != null && merged.path("unilateral_case_matrix").isObject()) {
-            matrixPolicy.validateExisting(
-                    (ObjectNode) merged.path("unilateral_case_matrix"), matrixAuthority);
+        } else if (matrixAuthority != null) {
+            if (merged.path("case_fact_matrix").isObject()) {
+                JsonNode existingMatrix = merged.path("case_fact_matrix");
+                if ("INITIATOR_FROZEN".equals(existingMatrix.path("matrix_kind").asText())) {
+                    initiatorMatrixFreezer.validateFrozen(
+                            (ObjectNode) existingMatrix,
+                            matrixAuthority.caseId(),
+                            matrixAuthority.initiatorRole(),
+                            matrixAuthority.respondentRole());
+                    formalAuthorityValidated = true;
+                }
+            } else if (merged.path("unilateral_case_matrix").isObject()) {
+                // Preserve deployed pre-unification dossiers until their next matrix draft or the
+                // existing confirmation lifecycle migrates them. In particular, do not reset a
+                // multi-turn legacy projection to formal version 1 here.
+                matrixPolicy.validateExisting(
+                        (ObjectNode) merged.path("unilateral_case_matrix"), matrixAuthority);
+            }
+        }
+
+        // A formal matrix is the only externally visible authority. Clean up a stale legacy
+        // projection only after the current Java case/party authority has validated that formal
+        // matrix; an untrusted object-shaped branch must never discard the legacy authority.
+        if (formalAuthorityValidated) {
+            merged.remove("unilateral_case_matrix");
         }
 
         if (proposal.readiness() == IntakeTurnProposal.Readiness.READY_TO_CONFIRM
@@ -344,7 +397,7 @@ public final class IntakeDossierProjectionMerger {
     }
 
     private static Long matrixVersion(ObjectNode dossier) {
-        for (String branch : List.of("case_fact_matrix", "unilateral_case_matrix")) {
+        for (String branch : List.of("case_fact_matrix")) {
             JsonNode matrix = dossier.path(branch);
             if (!matrix.isObject()) {
                 continue;
@@ -423,6 +476,9 @@ public final class IntakeDossierProjectionMerger {
                         ObjectNode binding = ((ObjectNode) value).objectNode();
                         binding.set("category", value.path("category").deepCopy());
                         binding.set("fact_target", value.path("fact_target").deepCopy());
+                        if (value.has("materiality")) {
+                            binding.set("materiality", value.path("materiality").deepCopy());
+                        }
                         register("fact:" + factId, binding);
                         bound = true;
                     }

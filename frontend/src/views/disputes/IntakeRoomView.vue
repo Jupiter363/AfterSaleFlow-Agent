@@ -620,8 +620,20 @@ const connectionState = computed(() => {
   if (eventState.reconnecting) return "reconnecting";
   return "offline";
 });
-const scrollSnapshot = computed(() => turnMemory.value?.scroll_snapshot || null);
-const currentCaseDossier = computed(() => turnMemory.value?.case_intake_dossier || null);
+const scrollSnapshot = computed(() =>
+  turnMemory.value?.scroll_snapshot || turnMemory.value?.scrollSnapshot || null,
+);
+const currentCaseDossier = computed(() =>
+  turnMemory.value?.case_intake_dossier || turnMemory.value?.caseIntakeDossier || null,
+);
+const supportedCaseDetailSchemas = new Set([
+  "intake_case_detail.v1",
+  "intake-dossier.v2",
+]);
+function isSupportedCaseDetailDossier(value) {
+  const schemaVersion = value?.schema_version || value?.schemaVersion;
+  return Boolean(value && supportedCaseDetailSchemas.has(schemaVersion));
+}
 function mergeStreamedCaseDetail(base, sections) {
   const streamedEntries = Object.entries(sections || {});
   if (!streamedEntries.length) return base;
@@ -641,18 +653,24 @@ function mergeStreamedCaseDetail(base, sections) {
 }
 const caseDetailDossier = computed(() => {
   const current = currentCaseDossier.value?.dossier;
-  const persisted = current?.schema_version === "intake_case_detail.v1"
+  const persisted = isSupportedCaseDetailDossier(current)
     ? current
-    : scrollSnapshot.value?.schema_version === "intake_case_detail.v1"
+    : isSupportedCaseDetailDossier(scrollSnapshot.value)
       ? scrollSnapshot.value
       : null;
   return mergeStreamedCaseDetail(persisted, streamedCaseDetailSections.value);
 });
 const isCaseDetailDossier = computed(() => Boolean(caseDetailDossier.value));
 const initialAgentReady = computed(() => Boolean(caseDetailDossier.value));
-const currentMatrixKind = computed(() => String(
-  caseDetailDossier.value?.case_fact_matrix?.matrix_kind || "",
-).toUpperCase());
+const currentMatrixKind = computed(() => {
+  const detail = caseDetailDossier.value;
+  const caseFactMatrix = detail?.case_fact_matrix || detail?.caseFactMatrix;
+  const schemaVersion = caseFactMatrix?.schema_version || caseFactMatrix?.schemaVersion;
+  if (schemaVersion !== "case_fact_matrix.v2") return "";
+  return String(
+    caseFactMatrix.matrix_kind || caseFactMatrix.matrixKind || "",
+  ).toUpperCase();
+});
 const currentActorMatrixReady = computed(() =>
   currentActorIsInitiator.value || currentMatrixKind.value === "BILATERAL_FROZEN",
 );

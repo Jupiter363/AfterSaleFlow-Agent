@@ -70,11 +70,6 @@ from app.graph_runtime.target_e2e_composite import (
 from app.graph_runtime.target_e2e_room_adapters import (
     build_target_e2e_intake_provider,
 )
-from app.graph_runtime.target_e2e_fixture_transport import (
-    TARGET_E2E_FIXTURE_MODEL,
-    TARGET_E2E_FIXTURE_PROVIDER,
-    build_target_e2e_fixture_transport,
-)
 from app.graph_runtime.topology import build_shadow_kernel_graph
 from app.security.invocation_envelope import (
     InvocationClaims,
@@ -256,19 +251,14 @@ def build_graph_runtime_bindings(
     structured_client: LiteLlmProxyClient | None = None
     intake_transport: Any = None
     intake_exchange: JavaIntakeExchangeClient | None = None
-    if settings.graph_gateway_mode == "TARGET_E2E_CANDIDATE":
-        context = settings.graph_target_e2e_runtime_context
-        if context is None:
-            raise ValueError("target-E2E fixture runtime context is required")
-        intake_transport = build_target_e2e_fixture_transport(
-            context=context,
-            binding=settings.graph_target_e2e_bindings[0],
-        )
-        intake_exchange = JavaIntakeExchangeClient(
-            java_api_service_url=settings.java_api_service_url,
-            java_service_secret=settings.java_service_secret,
-        )
-    elif any(binding.graph_key == "intake.v2" for binding in bindings):
+    target_uses_default_providers = (
+        settings.graph_gateway_mode == "TARGET_E2E_CANDIDATE"
+        and target_e2e_provider_factory is None
+    )
+    shadow_has_intake = settings.graph_gateway_mode == "SHADOW" and any(
+        binding.graph_key == "intake.v2" for binding in bindings
+    )
+    if target_uses_default_providers or shadow_has_intake:
         structured_client = LiteLlmProxyClient(
             settings.resolved_llm_base_url,
             settings.resolved_llm_model,
@@ -292,8 +282,16 @@ def build_graph_runtime_bindings(
                     kernel,
                     intake_transport=intake_transport,
                     intake_exchange=intake_exchange,
-                    intake_provider=TARGET_E2E_FIXTURE_PROVIDER,
-                    intake_model=TARGET_E2E_FIXTURE_MODEL,
+                    intake_provider=(
+                        structured_client.governed_provider
+                        if structured_client is not None
+                        else None
+                    ),
+                    intake_model=(
+                        structured_client.governed_model
+                        if structured_client is not None
+                        else None
+                    ),
                     specialized_provider_factory=target_e2e_specialized_provider_factory,
                 )
             )

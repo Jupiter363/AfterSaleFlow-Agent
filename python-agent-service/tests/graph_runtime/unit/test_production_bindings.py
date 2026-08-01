@@ -12,6 +12,7 @@ import httpx
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 
+import app.graph_runtime.production_bindings as production_bindings
 from app.api.graph_lifecycle import GraphExecutorKernel
 from app.config import GraphShadowBindingSettings, Settings
 from app.contracts.v1.codec import canonical_sha256_omitting, canonicalize
@@ -64,7 +65,7 @@ from app.security.invocation_envelope import (
     VerifiedReconciliation,
     invocation_binding_claims,
 )
-from app.model_runtime.transports import ModelTransportRequest
+from app.model_runtime.transports import ModelTransportRequest, StructuredClientTransport
 
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -253,6 +254,96 @@ def _settings(
         graph_expected_restore_verification_hash="c" * 64,
         graph_shadow_bindings=[binding or _binding(selected)],
         graph_shadow_threads=[_thread(selected)],
+    )
+
+
+def _target_settings() -> Settings:
+    activation_manifest_hash = "e" * 64
+    return Settings(
+        **BASE_SETTINGS,
+        litellm_base_url="http://model-runtime:4000",
+        litellm_model="qwen3.7-plus-target",
+        graph_gateway_mode="TARGET_E2E_CANDIDATE",
+        graph_database_dsn=(
+            "postgresql://graph_runtime:secret@postgresql:5432/dispute_graph"
+        ),
+        graph_jwks_url="http://java-api-service:8080/.well-known/graph-jwks.json",
+        graph_expected_environment_generation="7",
+        graph_expected_restore_verification_hash="a" * 64,
+        graph_target_e2e_isolated=True,
+        target_e2e_activation_manifest_hash=activation_manifest_hash,
+        graph_target_e2e_bindings=[
+            {
+                "graph_key": "all-rooms.target-e2e.v1",
+                "graph_version": "target-e2e-graph.2026-07-27.1",
+                "checkpoint_schema_version": "target-e2e-checkpoint.v1",
+                "state_schema_version": "target-e2e-room-state.v1",
+                "state_schema_hash": "b" * 64,
+                "command_schema_version": "room-graph-command.v1",
+                "result_schema_version": "room-graph-result.v1",
+                "agent_profile_id": "all-rooms-agent.target-e2e.v1",
+                "prompt_version": "all-rooms-prompt.target-e2e.v1",
+                "model_profile_id": "qwen3.7-plus.structured.v1",
+                "output_schema_version": "target-e2e-room-proposal-source.v1",
+                "policy_version": "all-rooms-policy.target-e2e.v1",
+                "guardrail_version": "all-rooms-guardrail.target-e2e.v1",
+                "tool_policy_version": "tools.none.v1",
+                "binding_hash": "c" * 64,
+                "code_build_id": "candidate-build-1",
+                "allowed_room_types": ["INTAKE", "EVIDENCE", "HEARING", "REVIEW"],
+                "allowed_stage_codes": ["INTAKE_MESSAGE"],
+            }
+        ],
+        graph_target_e2e_runtime_context={
+            "schemaVersion": "graph-target-e2e-runtime-context.v1",
+            "executionLane": "TARGET_E2E_CANDIDATE",
+            "activationId": f"p9act.v1.{'1' * 32}",
+            "activationManifestHash": activation_manifest_hash,
+            "environmentId": "target-e2e-local",
+            "environmentGeneration": 7,
+            "candidateSha": "d" * 40,
+            "issuedAt": "2026-07-27T10:00:00Z",
+            "expiresAt": "2026-07-27T11:00:00Z",
+            "runNonce": "runtime-projection-nonce-0123456789abcdef",
+            "tenantSurrogate": "tenant-p9-isolated",
+            "caseScope": {
+                "mode": "EXPLICIT_CASE_IDS",
+                "allowedCaseIds": ["case-p9-001"],
+            },
+            "allowedRoomTypes": ["INTAKE"],
+            "composeProject": "p9_target_e2e",
+            "temporalNamespace": "target-e2e-p9",
+            "buildBindings": {
+                "caseBuildId": "case-build-1",
+                "controlBuildId": "control-build-1",
+                "agentBuildId": "agent-build-1",
+            },
+            "imageDigests": {
+                "javaApi": f"sha256:{'1' * 64}",
+                "temporalControlWorker": f"sha256:{'2' * 64}",
+                "temporalAgentWorker": f"sha256:{'3' * 64}",
+                "pythonAgent": f"sha256:{'4' * 64}",
+                "frontend": f"sha256:{'5' * 64}",
+            },
+            "databaseIdentities": {
+                "domain": {
+                    "service": "domain-db",
+                    "database": "isolated_domain",
+                    "schema": "domain_runtime",
+                    "expectedUser": "java_domain_runtime",
+                },
+                "graph": {
+                    "service": "postgresql",
+                    "database": "dispute_graph",
+                    "schema": "graph_runtime",
+                    "runtimeUser": "graph_runtime",
+                    "environmentGeneration": 7,
+                    "restoreVerificationHash": "a" * 64,
+                },
+            },
+            "trustedSigningKeyIds": ["java-command-key-1"],
+            "perCommandManifestAllowed": False,
+        },
     )
 
 
@@ -518,6 +609,104 @@ def test_executor_factory_registers_a_real_exact_compiled_executor() -> None:
     drifted = replace(record, binding=replace(record.binding, binding_hash="e" * 64))
     with pytest.raises(GraphVersionUnavailableError):
         registry.resolve_registration(drifted)
+
+
+def test_target_e2e_default_intake_uses_configured_structured_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    class FakeLiteLlmProxyClient:
+        def __init__(
+            self,
+            base_url: str,
+            model: str,
+            api_key: str,
+            timeout_seconds: float,
+        ) -> None:
+            captured["client_args"] = (base_url, model, api_key, timeout_seconds)
+            self.governed_provider = "litellm"
+            self.governed_model = model
+
+    class DefaultProvidersCaptured(Exception):
+        pass
+
+    def capture_default_providers(
+        kernel: GraphExecutorKernel,
+        **kwargs: Any,
+    ) -> tuple[Any, ...]:
+        captured["kernel"] = kernel
+        captured.update(kwargs)
+        raise DefaultProvidersCaptured
+
+    monkeypatch.setattr(
+        production_bindings,
+        "LiteLlmProxyClient",
+        FakeLiteLlmProxyClient,
+    )
+    monkeypatch.setattr(
+        production_bindings,
+        "_build_target_e2e_room_providers",
+        capture_default_providers,
+    )
+    settings = _target_settings()
+
+    runtime = build_graph_runtime_bindings(
+        settings,
+        target_e2e_specialized_provider_factory=lambda _kernel: (),
+    )
+    kernel = GraphExecutorKernel(
+        saver=cast(Any, InMemorySaver()),
+        gateway=cast(Any, object()),
+        durable_bulkhead=cast(Any, object()),
+    )
+
+    with pytest.raises(DefaultProvidersCaptured):
+        runtime.executor_registry_factory(kernel)
+
+    assert captured["client_args"] == (
+        settings.resolved_llm_base_url,
+        settings.resolved_llm_model,
+        settings.resolved_llm_api_key,
+        settings.llm_timeout_seconds,
+    )
+    assert captured["kernel"] is kernel
+    assert isinstance(captured["intake_transport"], StructuredClientTransport)
+    assert captured["intake_provider"] == "litellm"
+    assert captured["intake_model"] == "qwen3.7-plus-target"
+
+
+def test_target_e2e_explicit_provider_factory_bypasses_live_model_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class UnexpectedLiveClient:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            raise AssertionError("explicit target provider injection must not build a live client")
+
+    class ExplicitProviderFactoryUsed(Exception):
+        pass
+
+    def explicit_provider_factory(_kernel: GraphExecutorKernel) -> tuple[Any, ...]:
+        raise ExplicitProviderFactoryUsed
+
+    monkeypatch.setattr(
+        production_bindings,
+        "LiteLlmProxyClient",
+        UnexpectedLiveClient,
+    )
+    runtime = build_graph_runtime_bindings(
+        _target_settings(),
+        target_e2e_provider_factory=explicit_provider_factory,
+    )
+
+    with pytest.raises(ExplicitProviderFactoryUsed):
+        runtime.executor_registry_factory(
+            GraphExecutorKernel(
+                saver=cast(Any, InMemorySaver()),
+                gateway=cast(Any, object()),
+                durable_bulkhead=cast(Any, object()),
+            )
+        )
 
 
 def test_exact_intake_graph_key_requires_all_durable_executor_dependencies() -> None:
