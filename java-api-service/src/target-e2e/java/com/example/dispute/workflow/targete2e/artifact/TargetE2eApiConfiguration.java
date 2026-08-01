@@ -59,6 +59,8 @@ import com.example.dispute.workflow.application.intake.IntakeTurnEventPublisher;
 import com.example.dispute.room.application.AccessSessionResolver;
 import com.example.dispute.room.application.AgentSessionResolver;
 import com.example.dispute.room.application.ParticipantService;
+import com.example.dispute.room.infrastructure.persistence.repository.CaseIntakeDossierRepository;
+import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.minio.MinioClient;
 import java.nio.file.Path;
@@ -309,6 +311,8 @@ public class TargetE2eApiConfiguration {
       AgentRunLedger ledger,
       TargetIntakeCommandMaterialStore materialStore,
       JdbcTargetE2eApiAuthority activationAuthority,
+      FulfillmentCaseRepository cases,
+      CaseIntakeDossierRepository dossiers,
       CaseRoomEpochRepository epochs,
       CaseProcessProjectionRepository projections,
       TargetIntakeRuntimePins pins,
@@ -319,7 +323,8 @@ public class TargetE2eApiConfiguration {
         new IntakeDomainSnapshotPublisher(payloadPublisher, bindingStore),
         new IntakeTurnEventPublisher(payloadPublisher, bindingStore), new IntakeGraphCommandFactory(),
         new AgentRunCommandBindingFactory(objectMapper), ledger,
-        new TargetE2EGraphEnvelopeCodec(objectMapper), materialStore, activationAuthority, epochs, projections, pins, clock);
+        new TargetE2EGraphEnvelopeCodec(objectMapper), materialStore, activationAuthority, cases, dossiers,
+        epochs, projections, pins, objectMapper, clock);
   }
 
   @Bean

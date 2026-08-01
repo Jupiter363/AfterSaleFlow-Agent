@@ -5,6 +5,7 @@ import inspect
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from langchain_core.messages import HumanMessage
 
 from app.contracts.v1.codec import canonicalize
 from app.contracts.v1.models import SnapshotRef
@@ -105,9 +106,10 @@ def test_target_fixture_transport_emits_a_valid_intake_cognition_draft_without_n
         binding_hash="c" * 64,
         candidate_sha="d" * 40,
     )
-    request = ModelTransportRequest(
+    def request_for(content: str) -> ModelTransportRequest:
+        return ModelTransportRequest(
         node_name="intake_lcel",
-        messages=(),
+        messages=(HumanMessage(content="trusted system placeholder"), HumanMessage(content=content)),
         output_type=IntakeCognitionDraft,
         governed_request=GovernedProviderRequest(
             provider=TARGET_E2E_FIXTURE_PROVIDER,
@@ -122,8 +124,28 @@ def test_target_fixture_transport_emits_a_valid_intake_cognition_draft_without_n
         ),
     )
 
-    result = transport.generate(request)
+    initiator = transport.generate(
+        request_for(
+            "Authorized audience: USER\n"
+            "<authorized_dossier_json>{}</authorized_dossier_json>"
+        )
+    )
+    respondent = transport.generate(
+        request_for(
+            "Authorized audience: MERCHANT\n"
+            "<authorized_dossier_json>{\"case_fact_matrix\":{\"schema_version\":\"case_fact_matrix.v2\",\"fact_rows\":[{\"fact_id\":\"FACT_TARGET_E2E_DELIVERY\",\"category\":\"FULFILLMENT\",\"fact_target\":\"Whether the signed parcel was received by the user.\",\"materiality\":\"CORE\"}]}}</authorized_dossier_json>"
+        )
+    )
 
-    assert result.model == TARGET_E2E_FIXTURE_MODEL
-    assert IntakeCognitionDraft.model_validate_json(result.json_document).recommendation == "NEED_MORE_INFO"
+    assert initiator.model == TARGET_E2E_FIXTURE_MODEL
+    assert (
+        IntakeCognitionDraft.model_validate_json(initiator.json_document)
+        .matrix_patch.schema_version
+        == "unilateral_case_matrix.draft.v1"
+    )
+    assert (
+        IntakeCognitionDraft.model_validate_json(respondent.json_document)
+        .matrix_patch.schema_version
+        == "case_fact_matrix.delta.v2"
+    )
     assert transport.fixture_binding_hash == transport.fixture_binding_hash

@@ -6,6 +6,8 @@ import com.example.dispute.agentstream.application.AgentRunLedger.Attempt;
 import com.example.dispute.agentstream.application.AgentRunLedger.AttemptAllocation;
 import com.example.dispute.agentstream.application.AgentRunLedger.CreateLogicalRun;
 import com.example.dispute.agentstream.application.AgentRunLedger.LogicalRun;
+import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
+import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.room.application.AccessSessionResolver;
 import com.example.dispute.room.application.AgentSessionResolver;
 import com.example.dispute.room.application.IntakeAgentTurnService;
@@ -13,6 +15,7 @@ import com.example.dispute.room.application.ParticipantService;
 import com.example.dispute.room.domain.RoomType;
 import com.example.dispute.room.infrastructure.persistence.entity.AgentConversationSessionEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseAccessSessionEntity;
+import com.example.dispute.room.infrastructure.persistence.repository.CaseIntakeDossierRepository;
 import com.example.dispute.workflow.application.intake.IntakeDomainSnapshotPublisher;
 import com.example.dispute.workflow.application.intake.IntakeGraphCommandFactory;
 import com.example.dispute.workflow.application.intake.IntakeGraphThreadBinding;
@@ -44,7 +47,10 @@ import com.example.dispute.workflow.targete2e.persistence.material.TargetIntakeC
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.RetryBudget;
 import com.example.dispute.workflow.temporal.room.intake.IntakeCommandExecutionContext;
 import com.example.dispute.workflow.temporal.room.intake.IntakeTargetAgentRunContext;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.OffsetDateTime;
@@ -74,9 +80,12 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
     private final TargetE2EGraphEnvelopeCodec envelopes;
     private final TargetIntakeCommandMaterialStore materialStore;
     private final JdbcTargetE2eApiAuthority activationAuthority;
+    private final FulfillmentCaseRepository cases;
+    private final CaseIntakeDossierRepository dossiers;
     private final CaseRoomEpochRepository epochs;
     private final CaseProcessProjectionRepository projections;
     private final TargetIntakeRuntimePins pins;
+    private final ObjectMapper objectMapper;
     private final Clock clock;
 
     public CanonicalTargetIntakeMaterializer(
@@ -92,9 +101,12 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
             TargetE2EGraphEnvelopeCodec envelopes,
             TargetIntakeCommandMaterialStore materialStore,
             JdbcTargetE2eApiAuthority activationAuthority,
+            FulfillmentCaseRepository cases,
+            CaseIntakeDossierRepository dossiers,
             CaseRoomEpochRepository epochs,
             CaseProcessProjectionRepository projections,
             TargetIntakeRuntimePins pins,
+            ObjectMapper objectMapper,
             Clock clock) {
         this.accessSessions = Objects.requireNonNull(accessSessions, "accessSessions");
         this.agentSessions = Objects.requireNonNull(agentSessions, "agentSessions");
@@ -108,9 +120,12 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
         this.envelopes = Objects.requireNonNull(envelopes, "envelopes");
         this.materialStore = Objects.requireNonNull(materialStore, "materialStore");
         this.activationAuthority = Objects.requireNonNull(activationAuthority, "activationAuthority");
+        this.cases = Objects.requireNonNull(cases, "cases");
+        this.dossiers = Objects.requireNonNull(dossiers, "dossiers");
         this.epochs = Objects.requireNonNull(epochs, "epochs");
         this.projections = Objects.requireNonNull(projections, "projections");
         this.pins = Objects.requireNonNull(pins, "pins");
+        this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper");
         this.clock = Objects.requireNonNull(clock, "clock");
     }
 
@@ -135,6 +150,8 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
                 .orElseThrow(() -> new IllegalStateException(
                         "target Intake activation has no persisted process projection authority"));
         ProjectionStage stage = requireProjectionAuthority(projection, request, activation);
+        FulfillmentCaseEntity dispute = cases.findByIdForUpdate(request.caseId())
+                .orElseThrow(() -> new IllegalStateException("target Intake case is missing"));
         CaseAccessSessionEntity access = accessSessions.resolve(
                 activation.tenantSurrogate(), request.caseId(), request.actor());
         requireActor(
@@ -166,8 +183,8 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
         IntakeSnapshotReference snapshot = snapshots.publishOrLoad(new IntakeDomainSnapshotPublisher.SnapshotRequest(
                 "target-intake-snapshot:" + token(registrationId), thread,
                 activation.processRevision(), activation.processRevision(), activation.processRevision(),
-                List.of(request.messageId()), JsonNodeFactory.instance.objectNode(),
-                JsonNodeFactory.instance.objectNode(), List.of(), JsonNodeFactory.instance.objectNode(),
+                List.of(request.messageId()), initialCaseFacts(dispute),
+                shareableProjection(dispute), List.of(), currentDossier(request.caseId()),
                 request.createdAt())).value();
         String eventId = "target-intake-event:" + messageIdentity;
         var allocation = events.allocate(thread, eventId, request.messageId());
@@ -292,6 +309,57 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
                     "target Intake activation conflicts with persisted process projection authority");
         }
         return new ProjectionStage(projection.getRoomPhase(), projection.getLastCommandSequence());
+    }
+
+    private ObjectNode initialCaseFacts(FulfillmentCaseEntity dispute) {
+        ObjectNode facts = JsonNodeFactory.instance.objectNode();
+        putIfPresent(facts, "form_source", "TARGET_E2E_INTAKE");
+        putIfPresent(facts, "form_description", dispute.getDescription());
+        putIfPresent(facts, "order_reference", dispute.getOrderId());
+        putIfPresent(facts, "after_sales_reference", dispute.getAfterSaleId());
+        putIfPresent(facts, "logistics_reference", dispute.getLogisticsId());
+        putIfPresent(facts, "initiator_role", dispute.getInitiatorRole().name());
+        putIfPresent(facts, "requested_outcome_hint", dispute.getDisputeType());
+        putIfPresent(facts, "case_type", dispute.getCaseType());
+        putIfPresent(facts, "case_title", dispute.getTitle());
+        return facts;
+    }
+
+    private ObjectNode shareableProjection(FulfillmentCaseEntity dispute) {
+        ObjectNode projection = JsonNodeFactory.instance.objectNode();
+        putIfPresent(projection, "case_id", dispute.getId());
+        putIfPresent(projection, "title", dispute.getTitle());
+        putIfPresent(projection, "description", dispute.getDescription());
+        putIfPresent(projection, "order_reference", dispute.getOrderId());
+        putIfPresent(projection, "after_sales_reference", dispute.getAfterSaleId());
+        putIfPresent(projection, "logistics_reference", dispute.getLogisticsId());
+        putIfPresent(projection, "initiator_role", dispute.getInitiatorRole().name());
+        putIfPresent(projection, "respondent_role", dispute.getRespondentRole().name());
+        return projection;
+    }
+
+    private JsonNode currentDossier(String caseId) {
+        return dossiers.findByCaseIdAndRoomType(caseId, RoomType.INTAKE)
+                .map(dossier -> parseDossier(dossier.getDossierJson()))
+                .orElseGet(() -> JsonNodeFactory.instance.objectNode());
+    }
+
+    private JsonNode parseDossier(String serialized) {
+        try {
+            JsonNode parsed = objectMapper.readTree(serialized);
+            if (parsed == null || !parsed.isObject()) {
+                throw new IllegalStateException("target Intake dossier must be a JSON object");
+            }
+            return parsed;
+        } catch (java.io.IOException error) {
+            throw new IllegalStateException("target Intake dossier is not valid JSON", error);
+        }
+    }
+
+    private static void putIfPresent(ObjectNode target, String field, String value) {
+        if (value != null && !value.isBlank()) {
+            target.put(field, value);
+        }
     }
 
     record ProjectionStage(String code, long sequence) {}

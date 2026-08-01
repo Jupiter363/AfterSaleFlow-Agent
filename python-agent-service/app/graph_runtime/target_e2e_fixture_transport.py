@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
 import json
+import re
+from typing import Any
 
 from app.config import (
     GraphTargetE2EBindingSettings,
@@ -67,16 +69,7 @@ class TargetE2EDeterministicFixtureTransport:
 
     def _result(self, request: ModelTransportRequest) -> ModelTransportResult:
         _require_fixture_request(request)
-        draft = IntakeCognitionDraft(
-            room_utterance="Target E2E fixture requires additional intake details.",
-            dossier_patch={},
-            matrix_patch=None,
-            readiness="INCOMPLETE",
-            missing_fields=("FIXTURE_CONTEXT_REQUIRED",),
-            recommendation="NEED_MORE_INFO",
-            knowledge_answer_mode="STUB",
-            confidence=0.0,
-        )
+        draft = _fixture_draft(request)
         return ModelTransportResult(
             json_document=json.dumps(
                 draft.model_dump(mode="json", exclude_none=True),
@@ -130,6 +123,120 @@ def _require_fixture_request(request: ModelTransportRequest) -> None:
         or governed.response_format != "STRICT_JSON_SCHEMA"
     ):
         raise GraphContractError("TARGET_E2E_FIXTURE_MODEL_REQUEST_REJECTED")
+
+
+def _fixture_draft(request: ModelTransportRequest) -> IntakeCognitionDraft:
+    """Emit the two valid Intake proposals exercised by the target E2E lane.
+
+    The fixture is deterministic, but it must still honour the same unilateral-then-
+    respondent-delta authority model as the production graph.  Returning a no-op
+    proposal here makes a completed target run unusable by every downstream room.
+    """
+    content = _fixture_human_prompt(request)
+    _fixture_audience(content)
+    matrix = _fixture_frozen_initiator_matrix(content)
+    if matrix is None:
+        return IntakeCognitionDraft(
+            room_utterance="The initiator's signed-but-not-received claim is ready for confirmation.",
+            dossier_patch={"schema_version": "intake-dossier.v2"},
+            matrix_patch={
+                "schema_version": "unilateral_case_matrix.draft.v1",
+                "fact_rows": [
+                    {
+                        "fact_key": "NEW_TARGET_E2E_DELIVERY",
+                        "category": "FULFILLMENT",
+                        "fact_target": "Whether the signed parcel was received by the user.",
+                        "materiality": "CORE",
+                        "position_summary": "The initiator reports that the signed parcel was not received.",
+                        "asserted_value": "not received",
+                        "source_scope": "CURRENT_SOURCE",
+                    }
+                ],
+                "summary_source_fact_keys": ["NEW_TARGET_E2E_DELIVERY"],
+            },
+            readiness="READY_TO_CONFIRM",
+            missing_fields=(),
+            recommendation="ACCEPTED",
+            knowledge_answer_mode="STUB",
+            confidence=1.0,
+        )
+
+    rows = matrix.get("fact_rows")
+    if not isinstance(rows, list) or not rows:
+        raise GraphContractError("TARGET_E2E_FIXTURE_FROZEN_INITIATOR_MATRIX_REQUIRED")
+    delta_rows: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            raise GraphContractError("TARGET_E2E_FIXTURE_FROZEN_INITIATOR_MATRIX_REQUIRED")
+        fact_id = row.get("fact_id")
+        category = row.get("category")
+        fact_target = row.get("fact_target")
+        materiality = row.get("materiality")
+        if not all(isinstance(value, str) and value for value in (fact_id, category, fact_target, materiality)):
+            raise GraphContractError("TARGET_E2E_FIXTURE_FROZEN_INITIATOR_MATRIX_REQUIRED")
+        delta_rows.append(
+            {
+                "fact_key": fact_id,
+                "category": category,
+                "fact_target": fact_target,
+                "materiality": materiality,
+                "stance": "CONFIRM",
+                "position_summary": "The respondent confirms the delivery record for the target E2E case.",
+                "asserted_value": "delivery record confirmed",
+                "source_scope": "CURRENT_SOURCE",
+            }
+        )
+    return IntakeCognitionDraft(
+        room_utterance="The respondent's position is ready for confirmation.",
+        dossier_patch={"schema_version": "intake-dossier.v2"},
+        matrix_patch={
+            "schema_version": "case_fact_matrix.delta.v2",
+            "fact_rows": delta_rows,
+            "summary_source_fact_keys": [row["fact_key"] for row in delta_rows],
+            "respondent_claim": {
+                "attitude": "AGREE",
+                "position_summary": "The respondent accepts the target E2E intake record.",
+            },
+        },
+        readiness="READY_TO_CONFIRM",
+        missing_fields=(),
+        recommendation="ACCEPTED",
+        knowledge_answer_mode="STUB",
+        confidence=1.0,
+    )
+
+
+def _fixture_human_prompt(request: ModelTransportRequest) -> str:
+    if len(request.messages) != 2 or not isinstance(request.messages[1].content, str):
+        raise GraphContractError("TARGET_E2E_FIXTURE_PROMPT_REQUIRED")
+    return request.messages[1].content
+
+
+def _fixture_audience(content: str) -> str:
+    match = re.match(r"Authorized audience: (USER|MERCHANT)\n", content)
+    if match is None:
+        raise GraphContractError("TARGET_E2E_FIXTURE_AUDIENCE_REQUIRED")
+    return match.group(1)
+
+
+def _fixture_frozen_initiator_matrix(content: str) -> dict[str, Any] | None:
+    match = re.search(
+        r"<authorized_dossier_json>(.*?)</authorized_dossier_json>",
+        content,
+        flags=re.DOTALL,
+    )
+    if match is None:
+        raise GraphContractError("TARGET_E2E_FIXTURE_DOSSIER_REQUIRED")
+    try:
+        dossier = json.loads(match.group(1))
+    except json.JSONDecodeError as error:
+        raise GraphContractError("TARGET_E2E_FIXTURE_DOSSIER_REQUIRED") from error
+    matrix = dossier.get("case_fact_matrix") if isinstance(dossier, dict) else None
+    if matrix is None:
+        return None
+    if not isinstance(matrix, dict) or matrix.get("schema_version") != "case_fact_matrix.v2":
+        raise GraphContractError("TARGET_E2E_FIXTURE_FROZEN_INITIATOR_MATRIX_REQUIRED")
+    return matrix
 
 
 __all__ = [

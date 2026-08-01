@@ -14,12 +14,15 @@ import com.example.dispute.agentstream.application.AgentRunLedger.CreateLogicalR
 import com.example.dispute.agentstream.application.AgentRunLedger.LogicalRun;
 import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.config.ActorRole;
+import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
+import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.room.application.AccessSessionResolver;
 import com.example.dispute.room.application.AgentSessionResolver;
 import com.example.dispute.room.application.ParticipantService;
 import com.example.dispute.room.domain.PermissionLevel;
 import com.example.dispute.room.infrastructure.persistence.entity.AgentConversationSessionEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseAccessSessionEntity;
+import com.example.dispute.room.infrastructure.persistence.repository.CaseIntakeDossierRepository;
 import com.example.dispute.workflow.application.intake.IntakeDomainSnapshotPublisher;
 import com.example.dispute.workflow.application.intake.IntakeGraphBindingStore;
 import com.example.dispute.workflow.application.intake.IntakeGraphCommandFactory;
@@ -46,6 +49,7 @@ import com.example.dispute.workflow.targete2e.ingress.TargetIntakeActivationGran
 import com.example.dispute.workflow.targete2e.ingress.TargetIntakeMessageRequest;
 import com.example.dispute.workflow.targete2e.persistence.JdbcTargetE2eApiAuthority;
 import com.example.dispute.workflow.targete2e.persistence.material.TargetIntakeCommandMaterialStore;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
@@ -133,6 +137,8 @@ class CanonicalTargetIntakeMaterializerTest {
         TargetE2EGraphEnvelopeCodec envelopes = Mockito.mock(TargetE2EGraphEnvelopeCodec.class);
         TargetIntakeCommandMaterialStore materialStore = Mockito.mock(TargetIntakeCommandMaterialStore.class);
         JdbcTargetE2eApiAuthority activationAuthority = Mockito.mock(JdbcTargetE2eApiAuthority.class);
+        FulfillmentCaseRepository cases = Mockito.mock(FulfillmentCaseRepository.class);
+        CaseIntakeDossierRepository dossiers = Mockito.mock(CaseIntakeDossierRepository.class);
         CaseRoomEpochRepository epochs = Mockito.mock(CaseRoomEpochRepository.class);
         CaseProcessProjectionRepository projections = Mockito.mock(CaseProcessProjectionRepository.class);
         CaseProcessProjectionEntity projection = matchingProjection("OPEN", 0L);
@@ -145,6 +151,20 @@ class CanonicalTargetIntakeMaterializerTest {
                         CASE_ID, RoomType.INTAKE, activation.roomEpoch()))
                 .thenReturn(Optional.of(epoch));
         when(projections.findByIdForUpdate(CASE_ID)).thenReturn(Optional.of(projection));
+        FulfillmentCaseEntity dispute = Mockito.mock(FulfillmentCaseEntity.class);
+        when(dispute.getId()).thenReturn(CASE_ID);
+        when(dispute.getDescription()).thenReturn("The signed parcel was not received.");
+        when(dispute.getOrderId()).thenReturn("ORDER_1");
+        when(dispute.getAfterSaleId()).thenReturn("AFTER_SALE_1");
+        when(dispute.getLogisticsId()).thenReturn("LOGISTICS_1");
+        when(dispute.getInitiatorRole()).thenReturn(ActorRole.USER);
+        when(dispute.getRespondentRole()).thenReturn(ActorRole.MERCHANT);
+        when(dispute.getDisputeType()).thenReturn("SIGNED_NOT_RECEIVED");
+        when(dispute.getCaseType()).thenReturn("FULFILLMENT_DISPUTE");
+        when(dispute.getTitle()).thenReturn("Target E2E case");
+        when(cases.findByIdForUpdate(CASE_ID)).thenReturn(Optional.of(dispute));
+        when(dossiers.findByCaseIdAndRoomType(CASE_ID, com.example.dispute.room.domain.RoomType.INTAKE))
+                .thenReturn(Optional.empty());
         when(accessSessions.resolve(activation.tenantSurrogate(), CASE_ID, request.actor()))
                 .thenReturn(access(TARGET_TENANT_SURROGATE, CASE_ID, ACTOR_ID, ActorRole.USER));
         AgentConversationSessionEntity session = Mockito.mock(AgentConversationSessionEntity.class);
@@ -211,8 +231,8 @@ class CanonicalTargetIntakeMaterializerTest {
 
         CanonicalTargetIntakeMaterializer materializer = new CanonicalTargetIntakeMaterializer(
                 accessSessions, agentSessions, participants, threadRegistrar, snapshots, events, commands,
-                bindings, ledger, envelopes, materialStore, activationAuthority, epochs, projections, pins,
-                Clock.fixed(request.createdAt(), ZoneOffset.UTC));
+                bindings, ledger, envelopes, materialStore, activationAuthority, cases, dossiers, epochs,
+                projections, pins, new ObjectMapper(), Clock.fixed(request.createdAt(), ZoneOffset.UTC));
 
         materializer.materialize(request);
         when(projection.getRoomPhase()).thenReturn("WAITING_PARTY");
@@ -232,6 +252,13 @@ class CanonicalTargetIntakeMaterializerTest {
                 .containsExactly(
                         org.assertj.core.groups.Tuple.tuple("OPEN", 0L),
                         org.assertj.core.groups.Tuple.tuple("WAITING_PARTY", 7L));
+        ArgumentCaptor<IntakeDomainSnapshotPublisher.SnapshotRequest> snapshotRequest =
+                ArgumentCaptor.forClass(IntakeDomainSnapshotPublisher.SnapshotRequest.class);
+        verify(snapshots, times(2)).publishOrLoad(snapshotRequest.capture());
+        assertThat(snapshotRequest.getValue().initialCaseFacts().path("initiator_role").asText())
+                .isEqualTo("USER");
+        assertThat(snapshotRequest.getValue().initialCaseFacts().path("order_reference").asText())
+                .isEqualTo("ORDER_1");
     }
 
     @Test

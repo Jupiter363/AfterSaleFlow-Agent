@@ -461,19 +461,15 @@ def test_live_room_flow_reaches_confirmed_settlement_idempotently() -> None:
         )
         if status == 200 and initiator_memory_response.get("data") is not None:
             initiator_memory = initiator_memory_response["data"]
-            matrix_kind = (
-                ((initiator_memory or {}).get("scroll_snapshot") or {})
-                .get("case_fact_matrix", {})
-                .get("matrix_kind")
-            )
-            if matrix_kind == "INITIATOR_FROZEN":
+            snapshot = (initiator_memory or {}).get("scroll_snapshot") or {}
+            if snapshot.get("unilateral_case_matrix", {}).get("schema_version") == "unilateral_case_matrix.v1":
                 break
         time.sleep(2)
     assert status == 200, initiator_memory_response
     assert initiator_memory is not None
     assert (
-        initiator_memory["scroll_snapshot"]["case_fact_matrix"]["matrix_kind"]
-        == "INITIATOR_FROZEN"
+        initiator_memory["scroll_snapshot"]["unilateral_case_matrix"]["schema_version"]
+        == "unilateral_case_matrix.v1"
     )
 
     status, accepted = request(
@@ -490,6 +486,31 @@ def test_live_room_flow_reaches_confirmed_settlement_idempotently() -> None:
     assert status == 200, accepted
     assert accepted["data"]["case_status"] == "INTAKE_COMPLETED"
     assert accepted["data"]["current_room"] == "INTAKE"
+
+    deadline = time.monotonic() + 120
+    initiator_frozen_memory = None
+    while time.monotonic() < deadline:
+        status, initiator_frozen_response = request(
+            "GET",
+            f"/api/disputes/{case_id}/rooms/INTAKE/turn-memory/latest",
+            headers=user_headers,
+        )
+        if status == 200 and initiator_frozen_response.get("data") is not None:
+            initiator_frozen_memory = initiator_frozen_response["data"]
+            matrix_kind = (
+                (initiator_frozen_memory.get("scroll_snapshot") or {})
+                .get("case_fact_matrix", {})
+                .get("matrix_kind")
+            )
+            if matrix_kind == "INITIATOR_FROZEN":
+                break
+        time.sleep(2)
+    assert status == 200, initiator_frozen_response
+    assert initiator_frozen_memory is not None
+    assert (
+        initiator_frozen_memory["scroll_snapshot"]["case_fact_matrix"]["matrix_kind"]
+        == "INITIATOR_FROZEN"
+    )
 
     status, merchant_statement = request(
         "POST",
