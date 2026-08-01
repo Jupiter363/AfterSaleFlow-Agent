@@ -52,6 +52,8 @@ from app.graphs.intake.lcel import (
     _TARGET_INTAKE_VISIBLE_FIELDS,
     _contains_forbidden_evidence_request,
     _is_evidence_material_gap,
+    _nested_strings,
+    _normalized_intake_room_utterance,
     _respondent_attitude_discriminator,
 )
 from app.graphs.intake.contracts import IntakeTurnProposal
@@ -158,7 +160,7 @@ class CompiledIntakeGraphShadowExecutor:
         try:
             async for candidate in source:
                 for update in self._public_updates(candidate):
-                    self._validate_public_update(update)
+                    self._validate_public_update(update, enforce_evidence_policy=False)
                     if update.event_type == "usage":
                         if pending_usage_update is not None:
                             raise GraphContractError("INTAKE_USAGE_STREAM_DUPLICATE")
@@ -171,6 +173,7 @@ class CompiledIntakeGraphShadowExecutor:
                         if room_utterance_emitted:
                             raise GraphContractError("INTAKE_ROOM_UTTERANCE_STREAM_DUPLICATE")
                         safe_update = self._validated_room_utterance_update(update)
+                        self._validate_public_update(safe_update)
                         yield self._event(
                             execution,
                             sequence,
@@ -191,6 +194,9 @@ class CompiledIntakeGraphShadowExecutor:
                         # incremental generation and may contain legacy aliases.
                         # Publish it only from the normalized terminal proposal.
                         continue
+                    if self._should_suppress_evidence_dossier_update(update):
+                        continue
+                    self._validate_public_update(update)
                     # The frontend treats streamed dossier sections as a provisional
                     # view and discards them on ERROR, attempt reset, workspace change,
                     # or failed formal-readiness reconciliation.  Publish each complete
@@ -357,7 +363,11 @@ class CompiledIntakeGraphShadowExecutor:
         return tuple(updates)
 
     @staticmethod
-    def _validate_public_update(update: GraphPublicUpdate) -> None:
+    def _validate_public_update(
+        update: GraphPublicUpdate,
+        *,
+        enforce_evidence_policy: bool = True,
+    ) -> None:
         if update.event_type != "visible_delta":
             if update.event_type != "usage":
                 raise GraphContractError("compiled Intake Graph public update is invalid")
@@ -371,8 +381,10 @@ class CompiledIntakeGraphShadowExecutor:
         # publication; do not inspect the quoted transport representation here.
         if field == "room_utterance":
             return
-        if _contains_forbidden_evidence_request(delta) or (
-            field == "case_detail.missing_information" and _is_evidence_material_gap(delta)
+        if (
+            enforce_evidence_policy
+            and field == "case_detail.missing_information"
+            and (_contains_forbidden_evidence_request(delta) or _is_evidence_material_gap(delta))
         ):
             raise GraphContractError("INTAKE_EVIDENCE_REQUEST_FORBIDDEN")
 
@@ -394,12 +406,28 @@ class CompiledIntakeGraphShadowExecutor:
             raise GraphContractError("INTAKE_ROOM_UTTERANCE_STREAM_INVALID") from error
         if not isinstance(room_utterance, str) or not room_utterance.strip():
             raise GraphContractError("INTAKE_ROOM_UTTERANCE_STREAM_INVALID")
-        if _contains_forbidden_evidence_request(room_utterance):
-            raise GraphContractError("INTAKE_EVIDENCE_REQUEST_FORBIDDEN")
+        room_utterance = _normalized_intake_room_utterance(room_utterance)
         return GraphPublicUpdate.visible_delta(
             node=payload.node,
             field=payload.field,
             delta=room_utterance,
+        )
+
+    @staticmethod
+    def _should_suppress_evidence_dossier_update(update: GraphPublicUpdate) -> bool:
+        payload = update.payload
+        field = payload.field
+        if not field.startswith("case_detail."):
+            return False
+        try:
+            document = json.loads(payload.delta or "")
+        except (TypeError, json.JSONDecodeError) as error:
+            raise GraphContractError("INTAKE_DOSSIER_STREAM_INVALID") from error
+        texts = tuple(_nested_strings(document))
+        return any(
+            _contains_forbidden_evidence_request(text)
+            or (field == "case_detail.missing_information" and _is_evidence_material_gap(text))
+            for text in texts
         )
 
     @staticmethod

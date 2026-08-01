@@ -29,8 +29,11 @@ from app.graphs.intake.graph import (
 )
 from app.graphs.intake.lcel import (
     INTAKE_SYSTEM_PROMPT,
+    _SAFE_INTAKE_CASE_SUMMARY,
+    _SAFE_INTAKE_ROOM_UTTERANCE,
     _generation_parts,
     _is_vetted_intake_model_runnable,
+    _normalize_model_evidence_boundaries,
     _validate_business_output,
     build_intake_model_node,
 )
@@ -536,6 +539,206 @@ def test_model_partial_dispute_core_state_is_projected_to_the_baseline_contract(
             "距离上次维修完成的具体天数",
             "用户明确的首选处理方案（换货或维修）",
         ],
+    }
+
+
+def test_model_null_and_malformed_core_aliases_fall_back_without_aborting_first_turn(
+    bindings,
+    version_pins,
+) -> None:
+    state = _state_with_matrix_roles(bindings, version_pins, actor="USER", initiator="USER")
+    draft = IntakeCognitionDraft.model_validate(
+        _draft(
+            dossier_patch={
+                "case_story": {"one_sentence_summary": "用户称赠品未随主商品发放。"},
+                "dispute_core_state": {
+                    "core_conflict": None,
+                    "facts_in_dispute": [{"fact": "untrusted shape"}],
+                    "fact_disputes": ["订单是否满足赠品活动条件"],
+                    "next_verification_focus": None,
+                },
+                "missing_information": {
+                    "missing_facts": ["活动适用时间和赠品库存状态"],
+                },
+            },
+            readiness="INCOMPLETE",
+            missing_fields=["promotion_window"],
+            recommendation="NEED_MORE_INFO",
+        )
+    )
+
+    _, _, projected = _generation_parts(
+        {
+            "state": state,
+            "generation": {"message": AIMessage(content="{}"), "draft": draft},
+        }
+    )
+
+    assert projected.dossier_patch.dispute_core_state == {
+        "core_conflict": "用户称赠品未随主商品发放。",
+        "facts_in_dispute": ["订单是否满足赠品活动条件"],
+        "next_verification_focus": ["活动适用时间和赠品库存状态"],
+    }
+
+
+def test_model_ungrounded_optional_core_branch_is_discarded_for_java_baseline_fallback(
+    bindings,
+    version_pins,
+) -> None:
+    state = _state_with_matrix_roles(bindings, version_pins, actor="USER", initiator="USER")
+    draft = IntakeCognitionDraft.model_validate(
+        _draft(
+            dossier_patch={
+                "dispute_core_state": {
+                    "blocker": "provider-only operational commentary",
+                    "current_status": "INITIATED",
+                }
+            }
+        )
+    )
+
+    _, _, projected = _generation_parts(
+        {
+            "state": state,
+            "generation": {"message": AIMessage(content="{}"), "draft": draft},
+        }
+    )
+
+    assert projected.dossier_patch.dispute_core_state is None
+
+
+def test_model_evidence_request_is_replaced_by_safe_fact_question_and_removed_from_dossier(
+    bindings,
+    version_pins,
+) -> None:
+    state = _state_with_matrix_roles(bindings, version_pins, actor="USER", initiator="USER")
+    draft = IntakeCognitionDraft.model_validate(
+        _draft(
+            room_utterance="请上传活动页面截图作为证据？",
+            dossier_patch={
+                "missing_information": {
+                    "missing_facts": ["活动页面截图", "下单时活动是否仍在进行"],
+                    "next_questions": [
+                        "能否提供活动页面截图？",
+                        "请说明下单时活动是否仍在进行？",
+                    ],
+                }
+            },
+            readiness="INCOMPLETE",
+            missing_fields=["screenshot", "promotion_window"],
+            recommendation="NEED_MORE_INFO",
+        )
+    )
+
+    _, _, projected = _generation_parts(
+        {
+            "state": state,
+            "generation": {"message": AIMessage(content="{}"), "draft": draft},
+        }
+    )
+
+    assert projected.room_utterance == _SAFE_INTAKE_ROOM_UTTERANCE
+    assert projected.missing_fields == ("promotion_window",)
+    assert projected.dossier_patch.missing_information == {
+        "missing_facts": ["下单时活动是否仍在进行"],
+        "next_questions": ["请说明下单时活动是否仍在进行？"],
+    }
+
+
+def test_model_evidence_requests_are_removed_from_non_question_dossier_branches(
+    bindings,
+    version_pins,
+) -> None:
+    state = _state_with_matrix_roles(bindings, version_pins, actor="USER", initiator="USER")
+    draft = IntakeCognitionDraft.model_validate(
+        _draft(
+            dossier_patch={
+                "case_story": {
+                    "one_sentence_summary": "请上传截图作为证据。",
+                    "timeline": ["用户称商品未按约定送达。"],
+                },
+                "party_positions": {
+                    "initiator_statements": ["用户主张商品未按约定送达。"],
+                    "platform_note": "请提供物流凭证。",
+                    "请上传截图作为证据。": "untrusted key",
+                },
+            }
+        )
+    )
+
+    _, _, projected = _generation_parts(
+        {
+            "state": state,
+            "generation": {"message": AIMessage(content="{}"), "draft": draft},
+        }
+    )
+
+    assert projected.dossier_patch.case_story == {
+        "one_sentence_summary": _SAFE_INTAKE_CASE_SUMMARY,
+        "timeline": ["用户称商品未按约定送达。"],
+    }
+    assert projected.dossier_patch.party_positions == {
+        "initiator_statements": ["用户主张商品未按约定送达。"]
+    }
+
+
+def test_model_evidence_cleanup_omits_linked_semantic_branch_instead_of_truncating_it() -> None:
+    draft = IntakeCognitionDraft.model_validate(
+        _draft(
+            dossier_patch={
+                "case_story": {"one_sentence_summary": "用户称商品未按约定送达。"},
+                "respondent_attitude": {
+                    "attitude": "NEED_MORE_INFO",
+                    "position_summary": "请提供物流凭证后再处理。",
+                },
+            }
+        )
+    )
+
+    normalized = _normalize_model_evidence_boundaries(draft)
+
+    assert normalized.dossier_patch.case_story == {
+        "one_sentence_summary": "用户称商品未按约定送达。"
+    }
+    assert normalized.dossier_patch.respondent_attitude is None
+
+
+def test_model_empty_core_arrays_cannot_clear_existing_canonical_state(
+    bindings,
+    version_pins,
+) -> None:
+    state = _state_with_matrix_roles(bindings, version_pins, actor="USER", initiator="USER")
+    state["dossier_draft"] = {
+        "case_story": {"one_sentence_summary": "既有案情摘要。"},
+        "dispute_core_state": {
+            "core_conflict": "既有核心争议。",
+            "facts_in_dispute": ["既有争议事实"],
+            "next_verification_focus": ["既有核验重点"],
+        },
+    }
+    draft = IntakeCognitionDraft.model_validate(
+        _draft(
+            dossier_patch={
+                "dispute_core_state": {
+                    "current_status": "INITIATED",
+                    "facts_in_dispute": [],
+                    "next_verification_focus": [],
+                }
+            }
+        )
+    )
+
+    _, _, projected = _generation_parts(
+        {
+            "state": state,
+            "generation": {"message": AIMessage(content="{}"), "draft": draft},
+        }
+    )
+
+    assert projected.dossier_patch.dispute_core_state == {
+        "core_conflict": "既有核心争议。",
+        "facts_in_dispute": ["既有争议事实"],
+        "next_verification_focus": ["既有核验重点"],
     }
 
 

@@ -53,6 +53,7 @@ from app.graph_runtime.postgres_bulkhead import PostgresGraphFanoutBulkhead
 from app.graph_runtime.intake_executor import CompiledIntakeGraphShadowExecutor
 from app.graph_runtime.persistence_models import GraphFenceContext
 from app.graph_runtime.checkpoint import FENCE_CONTEXT_KEY, bind_fence_context
+from app.graphs.intake.lcel import _SAFE_INTAKE_ROOM_UTTERANCE
 from app.graphs.intake.runtime import IntakeRuntimeBundle
 from app.graph_runtime.production_bindings import (
     _advance_revision,
@@ -876,6 +877,7 @@ async def test_compiled_intake_executor_persists_one_pointer_without_replacing_s
     }
     for branch in ("terminal_draft", "result_json"):
         proposal_document = durable_state[branch]
+        proposal_document["room_utterance"] = _SAFE_INTAKE_ROOM_UTTERANCE
         proposal_document["dossier_patch"]["dispute_core_state"] = {
             "core_conflict": "The requested resolution remains disputed.",
             "facts_in_dispute": ["Whether the repair resolved the recurring fault."],
@@ -973,7 +975,30 @@ async def test_compiled_intake_executor_persists_one_pointer_without_replacing_s
                                     "event_type": "visible_delta",
                                     "node_name": "intake_lcel",
                                     "field": "room_utterance",
-                                    "delta": json.dumps("Please confirm the requested resolution."),
+                                    "delta": json.dumps("请上传截图作为证据。", ensure_ascii=False),
+                                }
+                            ]
+                        },
+                    ),
+                    {"langgraph_node": "intake_lcel"},
+                ),
+            )
+            yield (
+                "messages",
+                (
+                    AIMessageChunk(
+                        content="",
+                        additional_kwargs={
+                            "governed_events": [
+                                {
+                                    "schema_version": "governed-model-event.v1",
+                                    "event_type": "visible_delta",
+                                    "node_name": "intake_lcel",
+                                    "field": "case_detail.missing_information",
+                                    "delta": json.dumps(
+                                        {"next_questions": ["请上传截图作为证据。"]},
+                                        ensure_ascii=False,
+                                    ),
                                 }
                             ]
                         },
@@ -1050,9 +1075,11 @@ async def test_compiled_intake_executor_persists_one_pointer_without_replacing_s
     class Store:
         def __init__(self) -> None:
             self.calls = 0
+            self.proposals = []
 
         async def put(self, selected_execution, *, proposal, **kwargs):
             self.calls += 1
+            self.proposals.append(proposal)
             return StoredIntakeProposal(
                 artifact_id=proposal.artifact_id,
                 schema_version=proposal.schema_version,
@@ -1091,6 +1118,7 @@ async def test_compiled_intake_executor_persists_one_pointer_without_replacing_s
             "visible_delta",
         ]
         assert events[1].payload.field == "room_utterance"
+        assert events[1].payload.delta == _SAFE_INTAKE_ROOM_UTTERANCE
         assert events[2].payload.field == "case_detail.case_story"
         assert events[3].payload.field == "case_detail.references"
         assert visible_commit_states == [
@@ -1100,6 +1128,9 @@ async def test_compiled_intake_executor_persists_one_pointer_without_replacing_s
         ]
         assert saver.preflights == 1
         assert store.calls == 1
+        assert json.loads(store.proposals[0].canonical_payload)["room_utterance"] == (
+            _SAFE_INTAKE_ROOM_UTTERANCE
+        )
         assert len(saver.commits) == 1
         assert not saver.terminal_commit_succeeded
         return
@@ -1115,7 +1146,7 @@ async def test_compiled_intake_executor_persists_one_pointer_without_replacing_s
         "final",
     ]
     assert events[1].payload.field == "room_utterance"
-    assert events[1].payload.delta == "Please confirm the requested resolution."
+    assert events[1].payload.delta == _SAFE_INTAKE_ROOM_UTTERANCE
     assert events[2].payload.field == "case_detail.case_story"
     assert events[2].payload.delta == '{"one_sentence_summary":"Case summary."}'
     assert events[3].payload.field == "case_detail.references"
@@ -1135,6 +1166,9 @@ async def test_compiled_intake_executor_persists_one_pointer_without_replacing_s
     ]
     assert saver.preflights == 1
     assert store.calls == 1
+    assert json.loads(store.proposals[0].canonical_payload)["room_utterance"] == (
+        _SAFE_INTAKE_ROOM_UTTERANCE
+    )
     assert len(saver.commits) == 1
     assert saver.terminal_commit_succeeded
     result_json = saver.commits[0].result.result_json
@@ -1333,15 +1367,48 @@ def test_compiled_intake_executor_rejects_dual_respondent_attitude_discriminator
         CompiledIntakeGraphShadowExecutor._should_suppress_respondent_attitude_update(update)
 
 
-def test_compiled_intake_executor_rejects_forbidden_room_utterance_before_publication() -> None:
+def test_compiled_intake_executor_replaces_forbidden_room_utterance_before_publication() -> None:
     update = GraphPublicUpdate.visible_delta(
         node="intake_lcel",
         field="room_utterance",
         delta=json.dumps("请上传截图作为证据。", ensure_ascii=False),
     )
 
-    with pytest.raises(GraphContractError, match="INTAKE_EVIDENCE_REQUEST_FORBIDDEN"):
-        CompiledIntakeGraphShadowExecutor._validated_room_utterance_update(update)
+    safe = CompiledIntakeGraphShadowExecutor._validated_room_utterance_update(update)
+
+    assert safe.payload.delta == (
+        "您好，我是小衡。为了准确梳理争议，请您补充说明事件发生的时间、"
+        "当前处理进展，以及您希望平台解决的核心问题？"
+    )
+
+
+def test_compiled_intake_executor_suppresses_provisional_evidence_dossier_update() -> None:
+    update = GraphPublicUpdate.visible_delta(
+        node="intake_lcel",
+        field="case_detail.missing_information",
+        delta=json.dumps(
+            {
+                "missing_facts": ["活动页面截图"],
+                "next_questions": ["能否提供活动页面截图？"],
+            },
+            ensure_ascii=False,
+        ),
+    )
+
+    assert CompiledIntakeGraphShadowExecutor._should_suppress_evidence_dossier_update(update)
+
+    non_question_branch = GraphPublicUpdate.visible_delta(
+        node="intake_lcel",
+        field="case_detail.case_story",
+        delta=json.dumps(
+            {"请上传截图作为证据。": "untrusted key"},
+            ensure_ascii=False,
+        ),
+    )
+
+    assert CompiledIntakeGraphShadowExecutor._should_suppress_evidence_dossier_update(
+        non_question_branch
+    )
 
 
 def test_compiled_intake_executor_rejects_forged_custom_visible_delta() -> None:

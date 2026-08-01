@@ -58,6 +58,12 @@ from app.streaming import VisibleFieldSpec
 # the sole governed response contract for this graph.
 INTAKE_SYSTEM_PROMPT = PromptComposer().render_system_prompt("target_intake_cognition")
 
+_SAFE_INTAKE_ROOM_UTTERANCE = (
+    "您好，我是小衡。为了准确梳理争议，请您补充说明事件发生的时间、"
+    "当前处理进展，以及您希望平台解决的核心问题？"
+)
+_SAFE_INTAKE_CASE_SUMMARY = "当前争议围绕已导入案件事实、处理经过及发起方诉求展开。"
+
 _TARGET_INTAKE_VISIBLE_FIELDS = (
     # The full JSON string closes before the remaining dossier branches.  Keeping it
     # atomic lets the executor validate the complete question before it becomes
@@ -1270,6 +1276,7 @@ def _generation_parts(
     typed_state = cast(IntakeGraphStateV2, state)
     normalized = _normalize_model_matrix_fact_keys(typed_state, draft)
     normalized = _normalize_model_respondent_attitude(typed_state, normalized)
+    normalized = _normalize_model_evidence_boundaries(normalized)
     return typed_state, message, _normalize_model_dispute_core_state(typed_state, normalized)
 
 
@@ -1314,6 +1321,125 @@ def _normalize_model_respondent_attitude(
     return _pin_model_respondent_attitude_position(draft, grounded_position)
 
 
+_DROP_EVIDENCE_VALUE = object()
+_ATOMIC_EVIDENCE_SANITIZE_BRANCHES = frozenset(
+    {
+        "requested_resolution",
+        "claim_resolution",
+        "respondent_attitude",
+        "risk_assessment",
+        "intake_quality",
+        "admission",
+    }
+)
+
+
+def _normalized_intake_room_utterance(value: str) -> str:
+    """Keep the Intake reply proactive without publishing an evidence request."""
+
+    if _contains_forbidden_evidence_request(value):
+        return _SAFE_INTAKE_ROOM_UTTERANCE
+    return value
+
+
+def _normalize_model_evidence_boundaries(
+    draft: IntakeCognitionDraft,
+) -> IntakeCognitionDraft:
+    """Discard untrusted evidence-collection suggestions before formal validation.
+
+    Intake may ask for facts, but evidence collection belongs to the later Evidence
+    room.  A provider violation must therefore never become public or durable, and
+    must not abort an otherwise usable first turn.  The replacement question is
+    deterministic so the early stream and terminal proposal remain identical.
+    """
+
+    normalized = draft.model_dump(mode="json", exclude_none=True, exclude_unset=True)
+    room_utterance = normalized.get("room_utterance")
+    if not isinstance(room_utterance, str):
+        raise IntakeGraphContractError("INTAKE_ROOM_UTTERANCE_STREAM_INVALID")
+    normalized["room_utterance"] = _normalized_intake_room_utterance(room_utterance)
+
+    missing_fields = normalized.get("missing_fields")
+    if isinstance(missing_fields, list):
+        normalized["missing_fields"] = [
+            field
+            for field in missing_fields
+            if isinstance(field, str) and not _is_evidence_material_gap(field)
+        ]
+
+    dossier_patch = normalized.get("dossier_patch")
+    if not isinstance(dossier_patch, dict):
+        raise IntakeGraphContractError("INTAKE_LCEL_DOSSIER_PATCH_INVALID")
+    sanitized: dict[str, Any] = {}
+    for branch, branch_value in dossier_patch.items():
+        if branch in _ATOMIC_EVIDENCE_SANITIZE_BRANCHES and any(
+            _contains_forbidden_evidence_request(text) for text in _nested_strings(branch_value)
+        ):
+            # These envelopes carry linked semantic fields.  Removing one leaf
+            # could leave a discriminator without its required explanation (or
+            # an admission/risk decision without its basis), so omit the whole
+            # optional patch branch and preserve any already-authorized state.
+            continue
+        candidate = branch_value
+        if branch == "case_story" and isinstance(branch_value, Mapping):
+            candidate = dict(branch_value)
+            for summary_field in ("one_sentence_summary", "summary"):
+                summary = candidate.get(summary_field)
+                if isinstance(summary, str) and _contains_forbidden_evidence_request(summary):
+                    candidate[summary_field] = _SAFE_INTAKE_CASE_SUMMARY
+        cleaned = _sanitize_model_dossier_value(
+            candidate,
+            in_missing_information=(branch == "missing_information"),
+        )
+        if cleaned is not _DROP_EVIDENCE_VALUE:
+            sanitized[branch] = cleaned
+    normalized["dossier_patch"] = sanitized
+    return IntakeCognitionDraft.model_validate(normalized)
+
+
+def _sanitize_model_dossier_value(
+    value: Any,
+    *,
+    in_missing_information: bool,
+) -> Any:
+    if isinstance(value, str):
+        if _contains_forbidden_evidence_request(value) or (
+            in_missing_information and _is_evidence_material_gap(value)
+        ):
+            return _DROP_EVIDENCE_VALUE
+        return value
+    if isinstance(value, Mapping):
+        sanitized: dict[str, Any] = {}
+        for key, child in value.items():
+            if isinstance(key, str) and (
+                _contains_forbidden_evidence_request(key)
+                or (in_missing_information and _is_evidence_material_gap(key))
+            ):
+                continue
+            cleaned = _sanitize_model_dossier_value(
+                child,
+                in_missing_information=(in_missing_information or key == "missing_information"),
+            )
+            if cleaned is not _DROP_EVIDENCE_VALUE:
+                sanitized[key] = cleaned
+        if value and not sanitized:
+            return _DROP_EVIDENCE_VALUE
+        return sanitized
+    if isinstance(value, list | tuple):
+        sanitized_items: list[Any] = []
+        for child in value:
+            cleaned = _sanitize_model_dossier_value(
+                child,
+                in_missing_information=in_missing_information,
+            )
+            if cleaned is not _DROP_EVIDENCE_VALUE:
+                sanitized_items.append(cleaned)
+        if value and not sanitized_items:
+            return _DROP_EVIDENCE_VALUE
+        return sanitized_items
+    return value
+
+
 def _normalize_model_dispute_core_state(
     state: IntakeGraphStateV2,
     draft: IntakeCognitionDraft,
@@ -1356,7 +1482,11 @@ def _normalize_model_dispute_core_state(
         or _first_nonblank_field(current_story, "one_sentence_summary", "summary")
     )
     if core_conflict is None:
-        raise IntakeGraphContractError("INTAKE_DISPUTE_CORE_STATE_INVALID")
+        # The branch is optional model commentary, not formal matrix authority.
+        # If it cannot be grounded to a canonical conflict, discard it and let
+        # the Java formalizer derive the baseline from authorized case facts.
+        dossier_patch.pop("dispute_core_state", None)
+        return IntakeCognitionDraft.model_validate(normalized)
 
     facts_in_dispute = _coalesced_string_list(
         (
@@ -1431,19 +1561,27 @@ def _first_string_list(
         if field not in owner:
             continue
         value = owner[field]
+        if value is None:
+            continue
         if not isinstance(value, list):
-            raise IntakeGraphContractError("INTAKE_DISPUTE_CORE_STATE_INVALID")
+            continue
+        if not value:
+            # Model output has no authority to clear an already canonical list.
+            # Treat an explicit empty collection as an absent candidate and keep
+            # searching the current dossier and grounded fallback branches.
+            continue
         normalized: list[str] = []
         seen: set[str] = set()
         for item in value:
             if not isinstance(item, str) or not item.strip():
-                raise IntakeGraphContractError("INTAKE_DISPUTE_CORE_STATE_INVALID")
+                normalized = []
+                break
             text = item.strip()
             if text not in seen:
                 normalized.append(text)
                 seen.add(text)
-        if len(normalized) > limit:
-            raise IntakeGraphContractError("INTAKE_DISPUTE_CORE_STATE_INVALID")
+        if len(normalized) > limit or (value and not normalized):
+            continue
         return normalized
     return None
 
@@ -1849,7 +1987,9 @@ def _nested_strings(value: Any) -> Iterator[str]:
     if isinstance(value, str):
         yield value
     elif isinstance(value, Mapping):
-        for child in value.values():
+        for key, child in value.items():
+            if isinstance(key, str):
+                yield key
             yield from _nested_strings(child)
     elif isinstance(value, list | tuple):
         for child in value:
