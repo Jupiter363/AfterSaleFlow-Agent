@@ -147,6 +147,8 @@ def test_system_prompt_preserves_case_language_dossier_and_matrix_semantics() ->
     )
     assert "Every fact, party position, amount, date, item" in normalized_prompt
     assert "Never reuse a narrative, fact pattern, or default resolution" in normalized_prompt
+    assert "authorized_initial_case_facts" in normalized_prompt
+    assert "never ask the party to provide them again" in normalized_prompt
     assert (
         "case_story, references, party_positions, dispute_focus, requested_resolution or "
         "claim_resolution, respondent_attitude, dispute_core_state, risk_assessment, "
@@ -175,6 +177,11 @@ def test_system_prompt_preserves_case_language_dossier_and_matrix_semantics() ->
         in normalized_prompt
     )
     assert "Do not emit case_fact_matrix.v2" in normalized_prompt
+    assert (
+        "also emit a nonblank case_story summary and dispute_core_state.core_conflict"
+        in normalized_prompt
+    )
+    assert "without inventing a respondent position" in normalized_prompt
     assert (
         "Java alone validates the current actor and source authority and deterministically "
         "converts "
@@ -1083,6 +1090,8 @@ def test_state_lens_exposes_only_authorized_window_summary_dossier_refs_and_vers
     snapshot,
     event,
 ) -> None:
+    snapshot["initial_case_facts"]["order_reference"] = "ORDER_CURRENT_CASE_2"
+    snapshot["snapshot_hash"] = canonical_sha256_omitting(snapshot, "snapshot_hash")
     state = _event_state(bindings, version_pins, snapshot, event)
     state["other_party_private_messages"] = ["MUST_NOT_LEAK"]
     state["system_prompt"] = "MUST_NOT_REPLACE_SYSTEM"
@@ -1103,6 +1112,7 @@ def test_state_lens_exposes_only_authorized_window_summary_dossier_refs_and_vers
         "version_ids_json",
     }
     assert "MESSAGE_P4_USER_2" in prompt_input["messages_json"]
+    assert "ORDER_CURRENT_CASE_2" in prompt_input["memory_summary"]
     assert "MUST_NOT_LEAK" not in repr(prompt_input)
     assert "MUST_NOT_REPLACE_SYSTEM" not in repr(prompt_input)
     assert bindings["private"]["agent_session_id"] not in repr(prompt_input)

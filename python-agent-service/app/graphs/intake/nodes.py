@@ -7,7 +7,7 @@ from typing import Any, TypeAlias, cast
 
 from langgraph.runtime import Runtime
 
-from app.contracts.v1.codec import canonical_sha256
+from app.contracts.v1.codec import canonical_sha256, canonicalize
 from app.graph_runtime.reducers import merge_node_results
 from app.graphs.intake.errors import IntakeGraphContractError
 from app.graphs.intake.state import (
@@ -53,6 +53,18 @@ _DOSSIER_BRANCHES = frozenset(
         "intake_quality",
         "admission",
     }
+)
+
+_AUTHORIZED_INITIAL_CONTEXT_FIELDS = (
+    "form_source",
+    "form_description",
+    "order_reference",
+    "after_sales_reference",
+    "logistics_reference",
+    "initiator_role",
+    "requested_outcome_hint",
+    "case_type",
+    "case_title",
 )
 
 
@@ -317,11 +329,28 @@ def _import_snapshot(
         "initial_snapshot_hash": snapshot_hash,
         "initial_domain_revision": snapshot["domain_revision"],
         "messages": messages,
+        "memory_summary": _authorized_initial_context_summary(snapshot),
         "node_results": stable_records,
         "last_event_sequence": last_sequence,
         "dossier_draft": deepcopy(snapshot["current_dossier"]),
         "route": "initialize",
     }
+
+
+def _authorized_initial_context_summary(snapshot: Mapping[str, Any]) -> str:
+    """Persist only the bounded form fields that the model may reuse on later turns."""
+
+    initial = snapshot.get("initial_case_facts")
+    if not isinstance(initial, Mapping):
+        raise IntakeGraphContractError("INTAKE_SNAPSHOT_INITIAL_FACTS_INVALID")
+    projected: dict[str, str] = {}
+    for field in _AUTHORIZED_INITIAL_CONTEXT_FIELDS:
+        value = initial.get(field)
+        if isinstance(value, str) and value.strip():
+            projected[field] = value
+    if not projected:
+        return ""
+    return canonicalize({"authorized_initial_case_facts": projected}).decode("utf-8")
 
 
 def _apply_event(

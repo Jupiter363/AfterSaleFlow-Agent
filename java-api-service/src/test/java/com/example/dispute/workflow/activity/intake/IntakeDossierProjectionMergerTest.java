@@ -165,6 +165,49 @@ class IntakeDossierProjectionMergerTest {
     }
 
     @Test
+    void derivesTheBaselineCoreStateWhenTheModelProvidesMatrixSemanticsWithoutTheBranch()
+            throws Exception {
+        JsonNode modelPatch = JSON.readTree(
+                """
+                {
+                  "case_story":{"one_sentence_summary":"The product repeatedly shuts down after ten days."},
+                  "dispute_focus":{"focus_points":["Recurring shutdown","Troubleshooting did not resolve it"]},
+                  "missing_information":{"missing_fields":["product_model","purchase_date"]}
+                }
+                """);
+        MatrixAuthority authority = new MatrixAuthority(
+                "CASE_PRODUCT_QUALITY_2",
+                ActorRole.USER,
+                ActorRole.USER,
+                ActorRole.MERCHANT,
+                "MESSAGE_PRODUCT_QUALITY_2",
+                "b".repeat(64),
+                new ClaimResolutionAuthority(
+                        "REPLACE_OR_REPAIR", null, null, null));
+
+        var result = merger.merge(
+                JSON.createObjectNode(),
+                proposal(modelPatch, unilateralDraft()),
+                authority);
+
+        assertThat(result.dossier().at("/dispute_core_state/core_conflict").asText())
+                .isEqualTo("The product repeatedly shuts down after ten days.");
+        assertThat(result.dossier().at("/dispute_core_state/facts_in_dispute/0").asText())
+                .isEqualTo("Recurring shutdown");
+        assertThat(result.dossier().at("/dispute_core_state/next_verification_focus/0").asText())
+                .isEqualTo("product_model");
+        assertThat(result.dossier().at("/case_fact_matrix/case_overview/core_conflict").asText())
+                .isEqualTo("The product repeatedly shuts down after ten days.");
+        assertThat(result.dossier()
+                        .at("/case_fact_matrix/claims/initiator_claim/requested_resolution")
+                        .asText())
+                .isEqualTo("REPLACE_OR_REPAIR");
+        assertThat(result.dossier().at("/case_fact_matrix/matrix_kind").asText())
+                .isEqualTo("INITIATOR_FROZEN");
+        assertThat(result.dossier().has("unilateral_case_matrix")).isFalse();
+    }
+
+    @Test
     void incrementsTheJavaVersionAndPreservesStableFactIds() throws Exception {
         var first = merger.merge(
                 JSON.createObjectNode(),

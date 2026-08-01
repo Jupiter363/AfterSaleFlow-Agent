@@ -499,9 +499,13 @@ public final class IntakeUnilateralMatrixPolicy {
     private static ObjectNode disputeCoreState(ObjectNode dossier) {
         JsonNode state = dossier.path("dispute_core_state");
         if (!state.isObject()) {
-            throw rejected(
-                    "INTAKE_MATRIX_DOSSIER_INCOMPLETE",
-                    "unilateral matrix requires a dispute core state branch");
+            if (dossier.has("dispute_core_state")) {
+                throw rejected(
+                        "INTAKE_MATRIX_DOSSIER_INCOMPLETE",
+                        "unilateral matrix dispute core state branch is invalid");
+            }
+            state = deriveBaselineDisputeCoreState(dossier);
+            dossier.set("dispute_core_state", state.deepCopy());
         }
         ObjectNode result = dossier.objectNode();
         result.put(
@@ -515,6 +519,56 @@ public final class IntakeUnilateralMatrixPolicy {
                 "next_verification_focus",
                 optionalTextArray(dossier, state.path("next_verification_focus"), 20));
         return result;
+    }
+
+    private static ObjectNode deriveBaselineDisputeCoreState(ObjectNode dossier) {
+        JsonNode focus = dossier.path("dispute_focus");
+        String coreConflict = firstNonNull(
+                firstText(focus, "core_conflict", "core_issue"),
+                firstText(dossier.path("case_story"), "one_sentence_summary", "summary"));
+        if (coreConflict == null) {
+            throw rejected(
+                    "INTAKE_MATRIX_DOSSIER_INCOMPLETE",
+                    "unilateral matrix requires a dispute core state or case summary");
+        }
+
+        ObjectNode derived = dossier.objectNode();
+        derived.put(
+                "core_conflict",
+                requireBoundedValue(coreConflict, 20_000, "core conflict"));
+        derived.set(
+                "facts_in_dispute",
+                optionalTextArray(
+                        dossier,
+                        firstPresent(focus, "facts_in_dispute", "focus_points"),
+                        50));
+
+        JsonNode verification = firstPresent(
+                focus, "next_verification_focus", "facts_to_verify");
+        if (verification.isMissingNode()) {
+            verification = firstPresent(
+                    dossier.path("missing_information"),
+                    "next_verification_focus",
+                    "blocking_gaps",
+                    "missing_fields",
+                    "next_questions");
+        }
+        derived.set(
+                "next_verification_focus",
+                optionalTextArray(dossier, verification, 20));
+        return derived;
+    }
+
+    private static JsonNode firstPresent(JsonNode owner, String... fields) {
+        if (owner != null && owner.isObject()) {
+            for (String field : fields) {
+                JsonNode value = owner.get(field);
+                if (value != null && !value.isNull()) {
+                    return value;
+                }
+            }
+        }
+        return JsonNodeFactory.instance.missingNode();
     }
 
     private static void validateProjection(ObjectNode matrix, MatrixAuthority authority) {

@@ -100,6 +100,7 @@ def test_snapshot_import_produces_schema_valid_proposal(
     snapshot,
 ) -> None:
     snapshot["initial_case_facts"]["private_loader_marker"] = "NOT_CHECKPOINTED"
+    snapshot["initial_case_facts"]["order_reference"] = "ORDER_CURRENT_CASE_1"
     snapshot["snapshot_hash"] = canonical_sha256_omitting(snapshot, "snapshot_hash")
     _, result = _run_snapshot(bindings, version_pins, snapshot)
 
@@ -109,6 +110,10 @@ def test_snapshot_import_produces_schema_valid_proposal(
     assert len(result["messages"]) == 1
     assert "memory_frame" not in repr(result)
     assert "NOT_CHECKPOINTED" not in repr(result)
+    initial_context = json.loads(result["memory_summary"])["authorized_initial_case_facts"]
+    assert initial_context["order_reference"] == "ORDER_CURRENT_CASE_1"
+    assert initial_context["form_description"] == "Synthetic order arrived damaged."
+    assert "private_loader_marker" not in initial_context
     jsonschema.Draft202012Validator(SCHEMA).validate(result["result_json"])
 
 
