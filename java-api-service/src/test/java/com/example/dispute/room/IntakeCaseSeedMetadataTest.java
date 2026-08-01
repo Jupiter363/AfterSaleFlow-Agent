@@ -29,8 +29,8 @@ class IntakeCaseSeedMetadataTest {
                 new IntakeLobbySeed.RespondentAttitudeSeed(
                         "MERCHANT", "NOT_RESPONDED", "尚未回应", "IMPORT", 0.5));
 
-        var decoded = IntakeCaseSeedMetadata.decode(
-                        IntakeCaseSeedMetadata.encode(seed, "EXTERNAL_IMPORT"))
+        String encoded = IntakeCaseSeedMetadata.encode(seed, "EXTERNAL_IMPORT");
+        var decoded = IntakeCaseSeedMetadata.decode(encoded)
                 .orElseThrow();
 
         assertThat(decoded.formSource()).isEqualTo("EXTERNAL_IMPORT");
@@ -41,6 +41,22 @@ class IntakeCaseSeedMetadataTest {
                 .isEqualByComparingTo("299.00");
         assertThat(decoded.claimResolutionSeed().originalStatement()).isNull();
         assertThat(decoded.respondentAttitudeSeed()).isNull();
+
+        String rebound = IntakeCaseSeedMetadata.bind(
+                "\n  " + encoded + "  \n", seed, "EXTERNAL_IMPORT");
+        assertThat(IntakeCaseSeedMetadata.decode(rebound)).contains(decoded);
+
+        IntakeLobbySeed conflicting = new IntakeLobbySeed(
+                "ORDER_1",
+                "AFTER_1",
+                "LOG_1",
+                "USER",
+                "商品频繁自动关机",
+                "REFUND");
+        assertThatThrownBy(() ->
+                        IntakeCaseSeedMetadata.bind(encoded, conflicting, "EXTERNAL_IMPORT"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("immutable");
     }
 
     @Test

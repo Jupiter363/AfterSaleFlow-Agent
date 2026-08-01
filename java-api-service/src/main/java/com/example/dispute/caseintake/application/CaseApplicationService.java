@@ -346,7 +346,8 @@ public class CaseApplicationService {
                         analysis.riskLevel(),
                         actor.actorId());
         entity.bindIntakeSeedMetadata(
-                IntakeCaseSeedMetadata.encode(intakeSeed, "FORM_SUBMISSION"));
+                IntakeCaseSeedMetadata.bind(
+                        entity.getMetadataJson(), intakeSeed, "FORM_SUBMISSION"));
         entity.completeIntake(
                 analysis.disputeType(),
                 status,

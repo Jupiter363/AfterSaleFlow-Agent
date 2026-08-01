@@ -17,12 +17,31 @@ public final class IntakeCaseSeedMetadata {
 
     private IntakeCaseSeedMetadata() {}
 
+    public static String bind(
+            String currentMetadataJson, IntakeLobbySeed seed, String formSource) {
+        IntakeInitialCaseFacts expected = IntakeInitialCaseFacts.from(seed, formSource);
+        decode(currentMetadataJson).ifPresent(current -> {
+            if (!factsHash(current).equals(factsHash(expected))) {
+                throw new IllegalStateException("Intake seed metadata is immutable");
+            }
+        });
+        return encode(expected);
+    }
+
     public static String encode(IntakeLobbySeed seed, String formSource) {
         Objects.requireNonNull(seed, "seed");
+        return encode(IntakeInitialCaseFacts.from(seed, formSource));
+    }
+
+    private static String encode(IntakeInitialCaseFacts facts) {
         ObjectNode metadata = JSON.createObjectNode();
         metadata.put("schema_version", SCHEMA_VERSION);
-        metadata.set(FACTS_FIELD, JSON.valueToTree(IntakeInitialCaseFacts.from(seed, formSource)));
+        metadata.set(FACTS_FIELD, JSON.valueToTree(facts));
         return ContractJson.canonicalString(metadata);
+    }
+
+    private static String factsHash(IntakeInitialCaseFacts facts) {
+        return ContractJson.sha256Hex(JSON.valueToTree(facts));
     }
 
     public static Optional<IntakeInitialCaseFacts> decode(String metadataJson) {

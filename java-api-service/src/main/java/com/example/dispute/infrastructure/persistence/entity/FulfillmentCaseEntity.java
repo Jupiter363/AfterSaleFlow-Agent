@@ -1017,13 +1017,7 @@ public class FulfillmentCaseEntity extends AbstractEntity {
 
     /** Binds the immutable trusted form facts used by asynchronous Intake execution. */
     public void bindIntakeSeedMetadata(String canonicalMetadataJson) {
-        String requiredMetadata = required(canonicalMetadataJson, "canonicalMetadataJson");
-        if (metadataJson != null
-                && !"{}".equals(metadataJson)
-                && !metadataJson.equals(requiredMetadata)) {
-            throw new IllegalStateException("Intake seed metadata is immutable");
-        }
-        metadataJson = requiredMetadata;
+        metadataJson = required(canonicalMetadataJson, "canonicalMetadataJson");
     }
 
     public String getMetadataJson() {

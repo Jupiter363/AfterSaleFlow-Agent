@@ -412,8 +412,10 @@ public class ExternalCaseImportTransactionService {
             FulfillmentCaseEntity dispute,
             ImportDisputeCommand command,
             ActorRole initiatorRole) {
-        dispute.bindIntakeSeedMetadata(IntakeCaseSeedMetadata.encode(
-                intakeLobbySeed(command, initiatorRole), "EXTERNAL_IMPORT"));
+        dispute.bindIntakeSeedMetadata(IntakeCaseSeedMetadata.bind(
+                dispute.getMetadataJson(),
+                intakeLobbySeed(command, initiatorRole),
+                "EXTERNAL_IMPORT"));
     }
 
     private static IntakeLobbySeed intakeLobbySeed(
