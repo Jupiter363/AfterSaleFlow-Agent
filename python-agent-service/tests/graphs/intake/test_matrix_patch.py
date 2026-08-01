@@ -234,6 +234,37 @@ def test_conflicting_matrix_patch_envelope_locations_are_rejected() -> None:
         IntakeCognitionDraft.model_validate(cognition)
 
 
+def test_provider_null_dossier_branches_are_treated_as_omitted() -> None:
+    cognition = _cognition(_unilateral_patch())
+    cognition["dossier_patch"]["case_story"] = {"summary": "商品未收到"}
+    cognition["dossier_patch"].update(
+        schema_version=None,
+        references=None,
+        claim_resolution=None,
+        respondent_attitude=None,
+        dispute_core_state=None,
+        admission=None,
+    )
+
+    parsed = IntakeCognitionDraft.model_validate(cognition)
+    dossier = parsed.dossier_patch.model_dump(
+        mode="json",
+        exclude_none=True,
+        exclude_unset=True,
+    )
+
+    assert dossier == {"case_story": {"summary": "商品未收到"}}
+    assert parsed.matrix_patch is not None
+
+
+def test_unknown_null_dossier_key_is_not_canonicalized_away() -> None:
+    cognition = _cognition(_unilateral_patch())
+    cognition["dossier_patch"]["case_fact_matrix"] = None
+
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        IntakeCognitionDraft.model_validate(cognition)
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

@@ -380,26 +380,48 @@ class IntakeCognitionDraft(StrictIntakeModel):
     @model_validator(mode="before")
     @classmethod
     def canonicalize_matrix_proposal_envelope(cls, value: Any) -> Any:
-        """Lift one narrowly bounded provider-envelope mistake before validation.
+        """Canonicalize narrowly bounded provider-envelope mistakes before validation.
 
         Some strict-JSON providers place the already typed internal ``matrix_patch``
         beside dossier branches instead of beside ``dossier_patch``.  Accept only
         that exact, unambiguous shape and immediately move it back across the typed
-        boundary.  The normal MatrixPatch validation still runs afterwards, while
-        every formal matrix authority field remains forbidden inside the dossier.
+        boundary.  They can also materialize every nullable dossier branch as JSON
+        ``null``; at this model-output boundary only, a null patch branch means
+        "omitted" and is removed.  Unknown null keys remain untouched and fail the
+        strict dossier contract.  The normal MatrixPatch validation still runs
+        afterwards, while every formal matrix authority field remains forbidden
+        inside the dossier.
         """
 
         if not isinstance(value, dict):
             return value
         dossier_patch = value.get("dossier_patch")
-        if not isinstance(dossier_patch, dict) or "matrix_patch" not in dossier_patch:
+        if not isinstance(dossier_patch, dict):
             return value
-        if "matrix_patch" in value:
-            raise ValueError("matrix_patch cannot be present in both envelope locations")
 
         canonical = dict(value)
         canonical_dossier = dict(dossier_patch)
-        canonical["matrix_patch"] = canonical_dossier.pop("matrix_patch")
+        for field_name in (
+            "schema_version",
+            "case_story",
+            "references",
+            "party_positions",
+            "dispute_focus",
+            "requested_resolution",
+            "claim_resolution",
+            "respondent_attitude",
+            "dispute_core_state",
+            "risk_assessment",
+            "missing_information",
+            "intake_quality",
+            "admission",
+        ):
+            if field_name in canonical_dossier and canonical_dossier[field_name] is None:
+                canonical_dossier.pop(field_name)
+        if "matrix_patch" in canonical_dossier:
+            if "matrix_patch" in value:
+                raise ValueError("matrix_patch cannot be present in both envelope locations")
+            canonical["matrix_patch"] = canonical_dossier.pop("matrix_patch")
         canonical["dossier_patch"] = canonical_dossier
         return canonical
 
