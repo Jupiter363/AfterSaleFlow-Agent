@@ -24,6 +24,86 @@ class IntakeDossierProjectionMergerTest {
     private final IntakeDossierProjectionMerger merger = new IntakeDossierProjectionMerger();
 
     @Test
+    void addsTheFormalDossierSchemaWhenTheModelPatchOmitsIt() {
+        var result = merger.merge(
+                JSON.createObjectNode(),
+                proposal(JSON.createObjectNode(), null));
+
+        assertThat(result.dossier().path("schema_version").asText())
+                .isEqualTo("intake-dossier.v2");
+    }
+
+    @Test
+    void acceptsTheExactFormalDossierSchemaFromTheModelPatch() throws Exception {
+        JsonNode patch = JSON.readTree(
+                """
+                {
+                  "schema_version":"intake-dossier.v2",
+                  "case_story":{"summary":"schema-bound"}
+                }
+                """);
+
+        var result = merger.merge(JSON.createObjectNode(), proposal(patch, null));
+
+        assertThat(result.dossier().path("schema_version").asText())
+                .isEqualTo("intake-dossier.v2");
+        assertThat(result.dossier().at("/case_story/summary").asText())
+                .isEqualTo("schema-bound");
+    }
+
+    @Test
+    void rejectsConflictingOrUnknownModelDossierSchemas() {
+        for (String schema : List.of("intake_case_detail.v1", "intake-dossier.v3")) {
+            ObjectNode patch = JSON.createObjectNode();
+            patch.put("schema_version", schema);
+
+            assertRejected(
+                    "INTAKE_DOSSIER_SCHEMA_INVALID",
+                    () -> merger.merge(JSON.createObjectNode(), proposal(patch, null)));
+        }
+
+        ObjectNode nonTextual = JSON.createObjectNode();
+        nonTextual.put("schema_version", 2);
+        assertRejected(
+                "INTAKE_DOSSIER_SCHEMA_INVALID",
+                () -> merger.merge(JSON.createObjectNode(), proposal(nonTextual, null)));
+    }
+
+    @Test
+    void preservesExistingProjectionAndMatrixMetadataWhileNormalizingTheRootSchema()
+            throws Exception {
+        JsonNode current = JSON.readTree(
+                """
+                {
+                  "schema_version":"intake-dossier.v2",
+                  "case_fact_matrix":{
+                    "schema_version":"case_fact_matrix.v2",
+                    "matrix_kind":"INITIATOR_FROZEN"
+                  },
+                  "intake_quality":{
+                    "score":61,
+                    "ready_for_next_step":false
+                  },
+                  "admission":{"recommendation":"NEED_MORE_INFO"}
+                }
+                """);
+
+        var result = merger.merge(current, proposal(JSON.createObjectNode(), null));
+
+        assertThat(result.dossier().path("schema_version").asText())
+                .isEqualTo("intake-dossier.v2");
+        assertThat(result.dossier().at("/case_fact_matrix/schema_version").asText())
+                .isEqualTo("case_fact_matrix.v2");
+        assertThat(result.dossier().at("/case_fact_matrix/matrix_kind").asText())
+                .isEqualTo("INITIATOR_FROZEN");
+        assertThat(result.dossier().at("/intake_quality/score").asInt()).isEqualTo(61);
+        assertThat(result.dossier().at("/intake_quality/ready_for_next_step").asBoolean())
+                .isFalse();
+        assertThat(result.dossier().at("/admission/recommendation").asText())
+                .isEqualTo("NEED_MORE_INFO");
+    }
+
+    @Test
     void deepMergesApprovedBranchesAndDerivesProjectionMetadata() throws Exception {
         JsonNode current = JSON.readTree(
                 """
@@ -53,6 +133,8 @@ class IntakeDossierProjectionMergerTest {
                 .isFalse();
         assertThat(result.dossier().at("/admission/recommendation").asText())
                 .isEqualTo("NEED_MORE_INFO");
+        assertThat(result.dossier().path("schema_version").asText())
+                .isEqualTo("intake-dossier.v2");
         assertThat(result.qualityScore()).isEqualTo(82);
     }
 

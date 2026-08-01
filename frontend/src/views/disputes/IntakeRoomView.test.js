@@ -13,6 +13,7 @@ import {
   agentStreamStore,
   clearAgentStreams,
 } from "../../stores/agentStream";
+import DigitalHuman from "../../components/avatar/DigitalHuman.vue";
 import ConversationStream from "../../components/room/ConversationStream.vue";
 import { disputeStore } from "../../stores/dispute";
 import IntakeRoomView from "./IntakeRoomView.vue";
@@ -86,6 +87,23 @@ const readyTurnMemory = {
     },
   },
 };
+
+function formalTurnMemory(summary, dossierVersion = 1, sourceTurnNo = 1) {
+  return {
+    turn_no: sourceTurnNo,
+    case_intake_dossier: {
+      dossier_version: dossierVersion,
+      source_turn_no: sourceTurnNo,
+      quality_score: 100,
+      ready_for_next_step: true,
+      admission_recommendation: "ACCEPTED",
+      dossier: {
+        schema_version: "intake-dossier.v2",
+        case_story: { one_sentence_summary: summary },
+      },
+    },
+  };
+}
 
 const connectedModelHealth = vi.fn().mockResolvedValue({
   status: "UP",
@@ -206,6 +224,81 @@ function terminalStreamResponse(runId) {
   });
 }
 
+function dossierStreamResponse(runId, summary) {
+  const frames = [
+    "id: 1",
+    "event: visible_delta",
+    `data: ${JSON.stringify({
+      schemaVersion: "agent_stream.v1",
+      runId,
+      sequence: 1,
+      type: "visible_delta",
+      field: "case_detail.case_story",
+      delta: JSON.stringify({ one_sentence_summary: summary }),
+    })}`,
+    "",
+    "id: 2",
+    "event: final",
+    `data: ${JSON.stringify({
+      schemaVersion: "agent_stream.v1",
+      runId,
+      sequence: 2,
+      type: "final",
+      result: {},
+    })}`,
+    "",
+    "",
+  ].join("\n");
+  return new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(frames));
+      controller.close();
+    },
+  }), {
+    status: 200,
+    headers: { "Content-Type": "text/event-stream" },
+  });
+}
+
+function failedDossierStreamResponse(runId, summary) {
+  const frames = [
+    "id: 1",
+    "event: visible_delta",
+    `data: ${JSON.stringify({
+      schemaVersion: "agent_stream.v1",
+      runId,
+      sequence: 1,
+      type: "visible_delta",
+      field: "case_detail.case_story",
+      delta: JSON.stringify({ one_sentence_summary: summary }),
+    })}`,
+    "",
+    "id: 2",
+    "event: error",
+    `data: ${JSON.stringify({
+      schemaVersion: "agent_stream.v1",
+      runId,
+      sequence: 2,
+      type: "error",
+      error: {
+        code: "INTAKE_TEST_FAILURE",
+        message: "target intake stream failed",
+      },
+    })}`,
+    "",
+    "",
+  ].join("\n");
+  return new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(frames));
+      controller.close();
+    },
+  }), {
+    status: 200,
+    headers: { "Content-Type": "text/event-stream" },
+  });
+}
+
 function installIntakeApiFetch({
   status,
   activeRuns = [],
@@ -306,6 +399,8 @@ async function mountInteractiveView(options = {}) {
       modelHealthLoader: options.modelHealthLoader || connectedModelHealth,
       evidenceReadyPollAttempts: options.evidenceReadyPollAttempts,
       evidenceReadyPollDelayMs: options.evidenceReadyPollDelayMs,
+      formalReadinessPollAttempts: options.formalReadinessPollAttempts,
+      formalReadinessPollDelayMs: options.formalReadinessPollDelayMs,
     },
     global: { plugins: [router] },
     attachTo: options.attachTo,
@@ -679,6 +774,555 @@ describe("IntakeRoomView", () => {
       "INTAKE",
     );
     expect(messagesLoader).toHaveBeenCalledTimes(2);
+    wrapper.unmount();
+  });
+
+  it("consumes an AgentRun descriptor returned directly by the TEMPORAL opening", async () => {
+    const runId = "run-temporal-opening-response";
+    const streamUrl = `/api/private-agent-streams/${runId}/events`;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      if (String(input).startsWith(streamUrl)) return terminalStreamResponse(runId);
+      throw new Error(`unexpected fetch: ${String(input)}`);
+    });
+    const formalMemory = formalTurnMemory("正式首轮卷宗已同步", 1, 1);
+    const messagesLoader = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([
+        {
+          id: "MESSAGE_AGENT_OPENING_FINAL",
+          sequence_no: 2,
+          sender_type: "AGENT",
+          sender_role: "CUSTOMER_SERVICE",
+          agent_run_id: runId,
+          message_text: "formal opening reply",
+        },
+      ]);
+    const openingAction = vi.fn().mockResolvedValue({
+      accepted_run: { run_id: runId, stream_url: streamUrl },
+    });
+
+    const wrapper = await mountInteractiveView({
+      initialMessages: null,
+      initialTurnMemory: null,
+      initialIntakeStatus: intakeStatusWithProjection(
+        currentProcessProjection({ writer_mode: "TEMPORAL" }),
+      ),
+      messagesLoader,
+      turnMemoryLoader: vi.fn().mockResolvedValue(formalMemory),
+      openingAction,
+      eventStreamer: vi.fn(async () => {}),
+      formalReadinessPollAttempts: 1,
+      formalReadinessPollDelayMs: 0,
+    });
+
+    expect(openingAction).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls.some(([input]) => String(input).startsWith(streamUrl)))
+      .toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => {
+      expect(agentStreamStore.runs[runId]?.status).toBe("COMPLETED");
+    });
+    expect(wrapper.text()).toContain("正式首轮卷宗已同步");
+    wrapper.unmount();
+  });
+
+  it("uses the default AgentRun events URL when Java opening returns only runId", async () => {
+    const runId = "run-temporal-opening-run-id-only";
+    const defaultStreamUrl = `/api/agent-runs/${runId}/events`;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      if (String(input).startsWith(defaultStreamUrl)) return terminalStreamResponse(runId);
+      throw new Error(`unexpected fetch: ${String(input)}`);
+    });
+    const formalMemory = formalTurnMemory("正式首轮卷宗已同步", 1, 1);
+    const messagesLoader = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([
+        {
+          id: "MESSAGE_AGENT_OPENING_RUN_ID_ONLY",
+          sequence_no: 2,
+          sender_type: "AGENT",
+          sender_role: "CUSTOMER_SERVICE",
+          agent_run_id: runId,
+          message_text: "formal opening reply",
+        },
+      ]);
+    const openingAction = vi.fn().mockResolvedValue({ runId });
+
+    const wrapper = await mountInteractiveView({
+      initialMessages: null,
+      initialTurnMemory: null,
+      initialIntakeStatus: intakeStatusWithProjection(
+        currentProcessProjection({ writer_mode: "TEMPORAL" }),
+      ),
+      messagesLoader,
+      turnMemoryLoader: vi.fn().mockResolvedValue(formalMemory),
+      openingAction,
+      eventStreamer: vi.fn(async () => {}),
+      formalReadinessPollAttempts: 1,
+      formalReadinessPollDelayMs: 0,
+    });
+
+    expect(openingAction).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls.some(([input]) =>
+      String(input).startsWith(defaultStreamUrl),
+    )).toBe(true);
+    await vi.waitFor(() => {
+      expect(agentStreamStore.runs[runId]?.status).toBe("COMPLETED");
+    });
+    wrapper.unmount();
+  });
+
+  it("retries a TEMPORAL final until the formal dossier becomes visible", async () => {
+    const runId = "run-temporal-formal-retry";
+    const streamUrl = `/api/private-agent-streams/${runId}/events`;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      if (String(input).startsWith(streamUrl)) {
+        return dossierStreamResponse(runId, "流式草稿卷宗");
+      }
+      throw new Error(`unexpected fetch: ${String(input)}`);
+    });
+    const messagesLoader = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          id: "MESSAGE_AGENT_FORMAL_RETRY",
+          sequence_no: 3,
+          sender_type: "AGENT",
+          sender_role: "CUSTOMER_SERVICE",
+          agent_run_id: runId,
+          message_text: "正式回复已持久化",
+        },
+      ]);
+    const turnMemoryLoader = vi
+      .fn()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(formalTurnMemory("正式持久卷宗已可见", 1, 1));
+    const wrapper = await mountInteractiveView({
+      initialMessages: [],
+      initialTurnMemory: null,
+      initialIntakeStatus: intakeStatusWithProjection(
+        currentProcessProjection({ writer_mode: "TEMPORAL" }),
+      ),
+      postMessageAction: vi.fn().mockResolvedValue({
+        agent_run: { run_id: runId, stream_url: streamUrl },
+      }),
+      messagesLoader,
+      turnMemoryLoader,
+      eventStreamer: vi.fn(async () => {}),
+      formalReadinessPollAttempts: 3,
+      formalReadinessPollDelayMs: 0,
+    });
+
+    wrapper.findComponent(ConversationStream).vm.$emit("submit", {
+      message_type: "PARTY_TEXT",
+      text: "start a target intake turn",
+      attachment_refs: [],
+    });
+    await flushPromises();
+    await flushPromises();
+
+    await vi.waitFor(() => {
+      expect(turnMemoryLoader).toHaveBeenCalledTimes(2);
+    });
+
+    expect(turnMemoryLoader).toHaveBeenCalledTimes(2);
+    expect(messagesLoader).toHaveBeenCalledTimes(2);
+    expect(wrapper.text()).toContain("正式持久卷宗已可见");
+    expect(wrapper.text()).not.toContain("流式草稿卷宗");
+    wrapper.unmount();
+  });
+
+  it("cancels formal readiness retries when the workspace changes", async () => {
+    vi.useFakeTimers();
+    const runId = "run-temporal-workspace-cancel";
+    const streamUrl = `/api/private-agent-streams/${runId}/events`;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      if (String(input).startsWith(streamUrl)) {
+        return dossierStreamResponse(runId, "workspace-scoped stream");
+      }
+      throw new Error(`unexpected fetch: ${String(input)}`);
+    });
+    const messagesLoader = vi.fn().mockResolvedValue([]);
+    const turnMemoryLoader = vi.fn().mockResolvedValue(null);
+    const wrapper = await mountInteractiveView({
+      initialMessages: [],
+      initialTurnMemory: null,
+      initialIntakeStatus: intakeStatusWithProjection(
+        currentProcessProjection({ writer_mode: "TEMPORAL" }),
+      ),
+      postMessageAction: vi.fn().mockResolvedValue({
+        run_id: runId,
+        stream_url: streamUrl,
+      }),
+      messagesLoader,
+      turnMemoryLoader,
+      eventStreamer: vi.fn(async () => {}),
+      formalReadinessPollAttempts: 5,
+      formalReadinessPollDelayMs: 1_000,
+    });
+
+    wrapper.findComponent(ConversationStream).vm.$emit("submit", {
+      message_type: "PARTY_TEXT",
+      text: "switch workspace while finalizing",
+      attachment_refs: [],
+    });
+    await flushPromises();
+    await vi.waitFor(() => {
+      expect(turnMemoryLoader).toHaveBeenCalledTimes(1);
+    });
+
+    actor.id = "user-other";
+    await wrapper.vm.$nextTick();
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await flushPromises();
+
+    expect(turnMemoryLoader).toHaveBeenCalledTimes(1);
+    expect(messagesLoader).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+  });
+
+  it("clears a provisional dossier when formal readiness reaches the retry limit", async () => {
+    vi.useFakeTimers();
+    const runId = "run-temporal-retry-limit";
+    const streamUrl = `/api/private-agent-streams/${runId}/events`;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      if (String(input).startsWith(streamUrl)) {
+        return dossierStreamResponse(runId, "流式草稿保持到重试上限");
+      }
+      throw new Error(`unexpected fetch: ${String(input)}`);
+    });
+    const messagesLoader = vi.fn().mockResolvedValue([]);
+    const turnMemoryLoader = vi.fn().mockResolvedValue(null);
+    const wrapper = await mountInteractiveView({
+      initialMessages: [],
+      initialTurnMemory: null,
+      initialIntakeStatus: intakeStatusWithProjection(
+        currentProcessProjection({ writer_mode: "TEMPORAL" }),
+      ),
+      postMessageAction: vi.fn().mockResolvedValue({
+        run_id: runId,
+        stream_url: streamUrl,
+      }),
+      messagesLoader,
+      turnMemoryLoader,
+      eventStreamer: vi.fn(async () => {}),
+      formalReadinessPollAttempts: 3,
+      formalReadinessPollDelayMs: 25,
+    });
+
+    wrapper.findComponent(ConversationStream).vm.$emit("submit", {
+      message_type: "PARTY_TEXT",
+      text: "reach bounded retry limit",
+      attachment_refs: [],
+    });
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(100);
+    await flushPromises();
+
+    expect(turnMemoryLoader).toHaveBeenCalledTimes(3);
+    expect(messagesLoader).toHaveBeenCalledTimes(3);
+    expect(wrapper.text()).not.toContain("流式草稿保持到重试上限");
+    expect(wrapper.get("[data-intake-error-dialog]").text())
+      .toContain("正式卷宗尚未同步完成");
+    await vi.advanceTimersByTimeAsync(500);
+    expect(turnMemoryLoader).toHaveBeenCalledTimes(3);
+    wrapper.unmount();
+  });
+
+  it("clears provisional Intake output when that run fails", async () => {
+    const runId = "run-temporal-provisional-failure";
+    const streamUrl = `/api/private-agent-streams/${runId}/events`;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      if (String(input).startsWith(streamUrl)) {
+        return failedDossierStreamResponse(runId, "failed provisional dossier");
+      }
+      throw new Error(`unexpected fetch: ${String(input)}`);
+    });
+    const wrapper = await mountInteractiveView({
+      initialMessages: [],
+      initialTurnMemory: null,
+      initialIntakeStatus: intakeStatusWithProjection(
+        currentProcessProjection({ writer_mode: "TEMPORAL" }),
+      ),
+      postMessageAction: vi.fn().mockResolvedValue({
+        run_id: runId,
+        stream_url: streamUrl,
+      }),
+      messagesLoader: vi.fn().mockResolvedValue([]),
+      turnMemoryLoader: vi.fn().mockResolvedValue(null),
+      eventStreamer: vi.fn(async () => {}),
+    });
+
+    wrapper.findComponent(ConversationStream).vm.$emit("submit", {
+      message_type: "PARTY_TEXT",
+      text: "trigger target stream failure",
+      attachment_refs: [],
+    });
+
+    await vi.waitFor(() => {
+      expect(wrapper.find("[data-intake-error-dialog]").exists()).toBe(true);
+    });
+
+    expect(agentStreamStore.runs[runId]?.status).toBe("ERROR");
+    expect(wrapper.text()).not.toContain("failed provisional dossier");
+    wrapper.unmount();
+  });
+
+  it("keeps formal readiness bound to the latest target Intake run", async () => {
+    const runA = "run-temporal-overlap-a";
+    const runB = "run-temporal-overlap-b";
+    const streamA = `/api/private-agent-streams/${runA}/events`;
+    const streamB = `/api/private-agent-streams/${runB}/events`;
+    let formalPhase = "A_PENDING";
+    let resolveRunAMessages;
+    let resolveRunAMemory;
+    const runAMessages = new Promise((resolve) => {
+      resolveRunAMessages = resolve;
+    });
+    const runAMemory = new Promise((resolve) => {
+      resolveRunAMemory = resolve;
+    });
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.startsWith(streamA)) return dossierStreamResponse(runA, "run A draft");
+      if (url.startsWith(streamB)) return dossierStreamResponse(runB, "run B draft");
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+    const messagesLoader = vi.fn(() => {
+      if (formalPhase === "B") {
+        return Promise.resolve([{
+          id: "MESSAGE_FORMAL_B",
+          sequence_no: 3,
+          sender_type: "AGENT",
+          sender_role: "CUSTOMER_SERVICE",
+          agent_run_id: runB,
+          message_text: "formal B reply",
+        }]);
+      }
+      return runAMessages;
+    });
+    const turnMemoryLoader = vi.fn(() => {
+      if (formalPhase === "B") {
+        return Promise.resolve(formalTurnMemory("正式 B 卷宗", 2, 2));
+      }
+      return runAMemory;
+    });
+    const postMessageAction = vi.fn()
+      .mockResolvedValueOnce({ run_id: runA, stream_url: streamA })
+      .mockResolvedValueOnce({ run_id: runB, stream_url: streamB });
+    const wrapper = await mountInteractiveView({
+      initialMessages: [],
+      initialTurnMemory: null,
+      initialIntakeStatus: intakeStatusWithProjection(
+        currentProcessProjection({ writer_mode: "TEMPORAL" }),
+      ),
+      postMessageAction,
+      messagesLoader,
+      turnMemoryLoader,
+      eventStreamer: vi.fn(async () => {}),
+      formalReadinessPollAttempts: 3,
+      formalReadinessPollDelayMs: 10,
+    });
+
+    wrapper.findComponent(ConversationStream).vm.$emit("submit", {
+      message_type: "PARTY_TEXT",
+      text: "start run A",
+      attachment_refs: [],
+    });
+    await flushPromises();
+    await vi.waitFor(() => {
+      expect(turnMemoryLoader).toHaveBeenCalledTimes(1);
+    });
+
+    formalPhase = "B";
+    wrapper.findComponent(ConversationStream).vm.$emit("submit", {
+      message_type: "PARTY_TEXT",
+      text: "start run B",
+      attachment_refs: [],
+    });
+    await flushPromises();
+    await vi.waitFor(() => {
+      expect(turnMemoryLoader).toHaveBeenCalledTimes(2);
+      expect(wrapper.text()).toContain("正式 B 卷宗");
+    });
+
+    resolveRunAMessages([{
+      id: "MESSAGE_FORMAL_A",
+      sequence_no: 2,
+      sender_type: "AGENT",
+      sender_role: "CUSTOMER_SERVICE",
+      agent_run_id: runA,
+      message_text: "formal A reply",
+    }]);
+    resolveRunAMemory(formalTurnMemory("正式 A 卷宗", 1, 1));
+    await flushPromises();
+    await vi.waitFor(() => {
+      expect(agentStreamStore.runs[runB]?.status).toBe("COMPLETED");
+    });
+
+    expect(postMessageAction).toHaveBeenCalledTimes(2);
+    expect(agentStreamStore.runs[runA]?.status).toBe("ABORTED");
+    await vi.waitFor(() => {
+      expect(wrapper.text()).toContain("正式 B 卷宗");
+      expect(wrapper.text()).not.toContain("正式 A 卷宗");
+    });
+    expect(wrapper.find("[data-intake-error-dialog]").exists()).toBe(false);
+    expect(turnMemoryLoader).toHaveBeenCalledTimes(2);
+    wrapper.unmount();
+  });
+
+  it("rejects a stale room-event snapshot after the latest target run becomes formal", async () => {
+    const runId = "run-temporal-event-snapshot-race";
+    const streamUrl = `/api/private-agent-streams/${runId}/events`;
+    let resolveStaleMessages;
+    let resolveStaleMemory;
+    let eventSnapshotLoader;
+    const staleMessages = new Promise((resolve) => {
+      resolveStaleMessages = resolve;
+    });
+    const staleMemory = new Promise((resolve) => {
+      resolveStaleMemory = resolve;
+    });
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      if (String(input).startsWith(streamUrl)) {
+        return dossierStreamResponse(runId, "目标 run 流式草稿");
+      }
+      throw new Error(`unexpected fetch: ${String(input)}`);
+    });
+    const messagesLoader = vi.fn()
+      .mockImplementationOnce(() => staleMessages)
+      .mockResolvedValueOnce([{
+        id: "MESSAGE_FORMAL_EVENT_RACE",
+        sequence_no: 3,
+        sender_type: "AGENT",
+        sender_role: "CUSTOMER_SERVICE",
+        agent_run_id: runId,
+        message_text: "目标 run 正式回复",
+      }]);
+    const turnMemoryLoader = vi.fn()
+      .mockImplementationOnce(() => staleMemory)
+      .mockResolvedValueOnce(formalTurnMemory("最新正式卷宗", 2, 2));
+    const eventStreamer = vi.fn(async ({ snapshotLoader }) => {
+      eventSnapshotLoader = snapshotLoader;
+    });
+    const wrapper = await mountInteractiveView({
+      initialMessages: [],
+      initialTurnMemory: null,
+      initialIntakeStatus: intakeStatusWithProjection(
+        currentProcessProjection({ writer_mode: "TEMPORAL" }),
+      ),
+      postMessageAction: vi.fn().mockResolvedValue({
+        run_id: runId,
+        stream_url: streamUrl,
+      }),
+      messagesLoader,
+      turnMemoryLoader,
+      eventStreamer,
+      formalReadinessPollAttempts: 1,
+      formalReadinessPollDelayMs: 0,
+    });
+
+    await vi.waitFor(() => expect(eventSnapshotLoader).toBeTypeOf("function"));
+    const staleRefresh = eventSnapshotLoader();
+    await vi.waitFor(() => {
+      expect(messagesLoader).toHaveBeenCalledTimes(1);
+      expect(turnMemoryLoader).toHaveBeenCalledTimes(1);
+    });
+
+    wrapper.findComponent(ConversationStream).vm.$emit("submit", {
+      message_type: "PARTY_TEXT",
+      text: "启动最新 target run",
+      attachment_refs: [],
+    });
+    await vi.waitFor(() => {
+      expect(wrapper.text()).toContain("最新正式卷宗");
+      expect(agentStreamStore.runs[runId]?.status).toBe("COMPLETED");
+    });
+
+    resolveStaleMessages([{
+      id: "MESSAGE_STALE_EVENT_RACE",
+      sequence_no: 1,
+      sender_type: "AGENT",
+      sender_role: "CUSTOMER_SERVICE",
+      agent_run_id: "run-stale-event-snapshot",
+      message_text: "旧事件回复",
+    }]);
+    resolveStaleMemory(formalTurnMemory("旧事件卷宗", 1, 1));
+    await staleRefresh;
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("最新正式卷宗");
+    expect(wrapper.text()).not.toContain("旧事件卷宗");
+    expect(wrapper.text()).not.toContain("旧事件回复");
+    wrapper.unmount();
+  });
+
+  it("ignores a non-TEMPORAL run final after the workspace changes", async () => {
+    const runId = "run-shadow-workspace-switch";
+    const streamUrl = `/api/private-agent-streams/${runId}/events`;
+    let resolveOldMessages;
+    let resolveOldMemory;
+    const oldMessages = new Promise((resolve) => {
+      resolveOldMessages = resolve;
+    });
+    const oldMemory = new Promise((resolve) => {
+      resolveOldMemory = resolve;
+    });
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      if (String(input).startsWith(streamUrl)) return terminalStreamResponse(runId);
+      throw new Error(`unexpected fetch: ${String(input)}`);
+    });
+    const messagesLoader = vi.fn(() => oldMessages);
+    const turnMemoryLoader = vi.fn(() => oldMemory);
+    const wrapper = await mountInteractiveView({
+      initialMessages: [],
+      initialTurnMemory: readyTurnMemory,
+      initialIntakeStatus: intakeStatusWithProjection(
+        currentProcessProjection({ writer_mode: "SHADOW" }),
+      ),
+      postMessageAction: vi.fn().mockResolvedValue({
+        run_id: runId,
+        stream_url: streamUrl,
+      }),
+      messagesLoader,
+      turnMemoryLoader,
+      eventStreamer: vi.fn(async () => {}),
+    });
+
+    wrapper.findComponent(ConversationStream).vm.$emit("submit", {
+      message_type: "PARTY_TEXT",
+      text: "旧工作区请求",
+      attachment_refs: [],
+    });
+    await vi.waitFor(() => {
+      expect(messagesLoader).toHaveBeenCalledTimes(1);
+      expect(turnMemoryLoader).toHaveBeenCalledTimes(1);
+    });
+
+    actor.id = "user-new-workspace";
+    await wrapper.vm.$nextTick();
+    await flushPromises();
+    expect(wrapper.findComponent(DigitalHuman).props("state")).toBe("LISTENING");
+
+    resolveOldMessages([{
+      id: "MESSAGE_OLD_WORKSPACE",
+      sender_type: "AGENT",
+      sender_role: "CUSTOMER_SERVICE",
+      message_text: "旧工作区正式回复",
+    }]);
+    resolveOldMemory(formalTurnMemory("旧工作区正式卷宗", 2, 2));
+    await flushPromises();
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+    await flushPromises();
+
+    expect(wrapper.findComponent(DigitalHuman).props("state")).toBe("LISTENING");
+    expect(wrapper.text()).not.toContain("旧工作区正式回复");
+    expect(wrapper.text()).not.toContain("旧工作区正式卷宗");
+    expect(wrapper.find("[data-intake-error-dialog]").exists()).toBe(false);
     wrapper.unmount();
   });
 

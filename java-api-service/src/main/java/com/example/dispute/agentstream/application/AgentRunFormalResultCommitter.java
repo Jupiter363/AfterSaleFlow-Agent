@@ -24,16 +24,19 @@ public class AgentRunFormalResultCommitter {
     private final AgentRunLedger ledger;
     private final AgentRunDomainResultCommitterRegistry domainCommitters;
     private final AgentExecutionManifestStore manifestStore;
+    private final AgentRunStreamEventService streamEvents;
     private final ObjectMapper objectMapper;
 
     public AgentRunFormalResultCommitter(
             AgentRunLedger ledger,
             AgentRunDomainResultCommitterRegistry domainCommitters,
             AgentExecutionManifestStore manifestStore,
+            AgentRunStreamEventService streamEvents,
             ObjectMapper objectMapper) {
         this.ledger = Objects.requireNonNull(ledger, "ledger");
         this.domainCommitters = Objects.requireNonNull(domainCommitters, "domainCommitters");
         this.manifestStore = Objects.requireNonNull(manifestStore, "manifestStore");
+        this.streamEvents = Objects.requireNonNull(streamEvents, "streamEvents");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper").copy();
         this.objectMapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
     }
@@ -45,8 +48,10 @@ public class AgentRunFormalResultCommitter {
         validateInput(command);
         validateManifestHash(command.manifestCommit());
         if (committed.isPresent()) {
-            validateReceipt(committed.orElseThrow(), command);
-            return replay(committed.orElseThrow());
+            AgentRunFinalizationReceipt receipt = committed.orElseThrow();
+            validateReceipt(receipt, command);
+            wakeUpFinalStream(receipt);
+            return replay(receipt);
         }
 
         AgentRunDomainResultCommitter domainCommitter =
@@ -60,7 +65,13 @@ public class AgentRunFormalResultCommitter {
 
         AgentRunFinalizationReceipt receipt = manifestStore.append(command.manifestCommit());
         validateReceipt(receipt, command);
+        wakeUpFinalStream(receipt);
         return receipt;
+    }
+
+    private void wakeUpFinalStream(AgentRunFinalizationReceipt receipt) {
+        streamEvents.wakeUpAfterCommit(
+                receipt.agentRunId(), receipt.attemptId(), receipt.finalStreamSequenceNo());
     }
 
     private void validateManifestHash(ManifestCommit manifestCommit) {

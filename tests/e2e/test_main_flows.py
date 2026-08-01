@@ -427,10 +427,10 @@ def test_live_room_flow_reaches_confirmed_settlement_idempotently() -> None:
     assert status == 201, replayed_create
     assert replayed_create["data"]["id"] == case_id
 
-    # The target Temporal Intake lane deliberately materializes the initial
-    # description through the idempotent opening endpoint.  Creating a case
-    # only provisions the room epoch; this call is the first accepted room
-    # command and must precede polling for the generated private memory.
+    # The target Temporal Intake lane materializes the imported form as a hidden
+    # INITIAL_FORM source.  It is the first accepted command, but it must never
+    # masquerade as a visible participant chat message: the Intake officer asks
+    # the first room question and the opening response exposes the stable run.
     opening_deadline = time.monotonic() + 60
     opening = None
     while time.monotonic() < opening_deadline:
@@ -449,6 +449,30 @@ def test_live_room_flow_reaches_confirmed_settlement_idempotently() -> None:
             break
         time.sleep(1)
     assert status == 200, opening
+    opening_data = opening["data"]
+    opening_run_id = opening_data.get("run_id") or opening_data.get("runId")
+    assert isinstance(opening_run_id, str) and opening_run_id, opening
+
+    status, opening_replay = request(
+        "POST",
+        f"/api/disputes/{case_id}/rooms/INTAKE/messages/opening",
+        headers=user_headers,
+    )
+    assert status == 200, opening_replay
+    replay_data = opening_replay["data"]
+    assert (replay_data.get("run_id") or replay_data.get("runId")) == opening_run_id
+
+    status, opening_messages = request(
+        "GET",
+        f"/api/disputes/{case_id}/rooms/INTAKE/messages",
+        headers=user_headers,
+    )
+    assert status == 200, opening_messages
+    assert all(
+        (message.get("sender_type") or message.get("senderType")) != "PARTY"
+        and (message.get("message_type") or message.get("messageType")) != "PARTY_TEXT"
+        for message in opening_messages["data"]
+    ), opening_messages
 
     deadline = time.monotonic() + 300
     initiator_memory = None
@@ -477,6 +501,7 @@ def test_live_room_flow_reaches_confirmed_settlement_idempotently() -> None:
     assert status == 200, initiator_memory_response
     assert initiator_memory is not None
     initiator_dossier = initiator_memory["case_intake_dossier"]["dossier"]
+    assert initiator_dossier["schema_version"] == "intake-dossier.v2"
     initiator_matrix = initiator_dossier["case_fact_matrix"]
     assert "unilateral_case_matrix" not in initiator_dossier
     assert "unilateral_case_matrix" not in initiator_memory["scroll_snapshot"]
@@ -490,6 +515,17 @@ def test_live_room_flow_reaches_confirmed_settlement_idempotently() -> None:
         set(row["positions"]) == {"USER", "MERCHANT"}
         for row in initiator_matrix["fact_rows"]
     )
+
+    status, initiated_messages = request(
+        "GET",
+        f"/api/disputes/{case_id}/rooms/INTAKE/messages",
+        headers=user_headers,
+    )
+    assert status == 200, initiated_messages
+    assert initiated_messages["data"], initiated_messages
+    first_message = initiated_messages["data"][0]
+    assert (first_message.get("sender_type") or first_message.get("senderType")) == "AGENT"
+    assert (first_message.get("agent_run_id") or first_message.get("agentRunId")) == opening_run_id
     initiator_matrix_before_confirmation = json.loads(json.dumps(initiator_matrix))
     initiator_matrix_identity = (
         initiator_matrix["matrix_version"],

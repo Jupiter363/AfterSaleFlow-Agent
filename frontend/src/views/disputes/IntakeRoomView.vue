@@ -31,6 +31,7 @@ import {
 } from "../../stores/room";
 import {
   activeAgentStreams,
+  abortAgentStream,
   clearAgentStreams,
   consumeAgentRun,
 } from "../../stores/agentStream";
@@ -70,6 +71,11 @@ const PROJECTION_MISSING = Symbol("projection-missing");
 const READINESS_RETRY_FAST_ATTEMPTS = 40;
 const READINESS_RETRY_FAST_DELAY_MS = 250;
 const READINESS_RETRY_SLOW_DELAY_MS = 1_000;
+const FORMAL_AGENT_SENDER_ROLES = new Set([
+  "CUSTOMER_SERVICE",
+  "INTAKE_OFFICER",
+  "DISPUTE_INTAKE_OFFICER",
+]);
 
 function projectionValuesEqual(left, right) {
   if (Object.is(left, right)) return true;
@@ -326,6 +332,8 @@ const props = defineProps({
   modelHealthLoader: { type: Function, default: null },
   evidenceReadyPollAttempts: { type: Number, default: 4 },
   evidenceReadyPollDelayMs: { type: Number, default: 200 },
+  formalReadinessPollAttempts: { type: Number, default: 20 },
+  formalReadinessPollDelayMs: { type: Number, default: 250 },
 });
 
 const route = useRoute();
@@ -357,6 +365,13 @@ let projectionStatusRetryAttempts = 0;
 let openingRunRetryTimer = null;
 let openingRunRetryInFlight = null;
 let openingRunRetryAttempts = 0;
+let formalReadinessRetryTimer = null;
+let formalReadinessRetryCancel = null;
+let formalReadinessRetryToken = 0;
+let formalReadinessActiveRunId = "";
+let roomMessagesRefreshToken = 0;
+let roomTurnMemoryRefreshToken = 0;
+let roomSnapshotWriteBarrier = 0;
 let awaitingTemporalInitiatorRun = false;
 let componentUnmounted = false;
 
@@ -690,7 +705,7 @@ const caseDetailQuality = computed(() => {
   const respondentStartsIndependently =
     !currentActorIsInitiator.value &&
     partyCanChat.value &&
-    currentMatrixKind.value === "INITIATOR_FROZEN";
+    currentMatrixKind.value !== "BILATERAL_FROZEN";
   if (respondentStartsIndependently) {
     return {
       score: 0,
@@ -1252,6 +1267,7 @@ function isCurrentWorkspace(snapshot) {
 function resetWorkspaceForActorChange() {
   clearProjectionStatusRetry();
   clearOpeningRunRetry();
+  clearFormalReadinessRetry();
   awaitingTemporalInitiatorRun = false;
   clearAgentStreams({ caseId: caseId.value, roomType: "INTAKE" });
   workspaceGeneration.value += 1;
@@ -1433,8 +1449,16 @@ async function load(snapshot = currentWorkspaceSnapshot()) {
 
 // 业务位置：【前端接待室】refreshMessages：重新加载 房间消息和对话记录，确保页面和下一次 Agent 调用基于最新案件版本。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 async function refreshMessages(snapshot = currentWorkspaceSnapshot()) {
+  if (formalReadinessActiveRunId) return messages.value;
+  const writeBarrier = roomSnapshotWriteBarrier;
+  const refreshToken = ++roomMessagesRefreshToken;
   const loadedMessages = await loadMessages(snapshot);
-  if (isCurrentWorkspace(snapshot)) {
+  if (
+    refreshToken === roomMessagesRefreshToken &&
+    writeBarrier === roomSnapshotWriteBarrier &&
+    !formalReadinessActiveRunId &&
+    isCurrentWorkspace(snapshot)
+  ) {
     messages.value = loadedMessages;
   }
   return loadedMessages;
@@ -1499,13 +1523,20 @@ async function ensureIntakeOpening(snapshot = currentWorkspaceSnapshot()) {
     props.openingAction ||
     ((openingActor, openingCaseId, roomType) =>
       roomApi.ensureOpening(openingActor, openingCaseId, roomType));
-  await ensure(snapshot.actor, snapshot.caseId, "INTAKE");
+  const result = await ensure(snapshot.actor, snapshot.caseId, "INTAKE");
   if (!isCurrentWorkspace(snapshot)) return;
-  if (awaitTemporalInitiatorRun) awaitingTemporalInitiatorRun = true;
+  const descriptor = extractAgentRunDescriptor(result);
+  if (descriptor) {
+    clearOpeningRunRetry();
+    awaitingTemporalInitiatorRun = false;
+    await consumeIntakeAgentRun(descriptor, snapshot);
+  } else if (awaitTemporalInitiatorRun) {
+    awaitingTemporalInitiatorRun = true;
+  }
   try {
     await refreshMessages(snapshot);
   } finally {
-    if (awaitTemporalInitiatorRun && isCurrentWorkspace(snapshot)) {
+    if (awaitTemporalInitiatorRun && !descriptor && isCurrentWorkspace(snapshot)) {
       scheduleOpeningRunRetry(snapshot);
     }
   }
@@ -1529,20 +1560,370 @@ async function loadMessages(snapshot = currentWorkspaceSnapshot()) {
   return loader(snapshot);
 }
 
-// 业务位置：【前端接待室】refreshTurnMemory：重新加载 案件会话和上下文快照，确保页面和下一次 Agent 调用基于最新案件版本。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
-async function refreshTurnMemory(snapshot = currentWorkspaceSnapshot()) {
+async function loadTurnMemory(snapshot = currentWorkspaceSnapshot()) {
   const loader =
     props.turnMemoryLoader ||
     (() => roomApi.latestTurnMemory(snapshot.actor, snapshot.caseId, "INTAKE"));
-  const loadedMemory = await loader(snapshot);
-  if (isCurrentWorkspace(snapshot)) {
+  return loader(snapshot);
+}
+
+// 业务位置：【前端接待室】refreshTurnMemory：重新加载 案件会话和上下文快照，确保页面和下一次 Agent 调用基于最新案件版本。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
+async function refreshTurnMemory(snapshot = currentWorkspaceSnapshot()) {
+  if (formalReadinessActiveRunId) return turnMemory.value;
+  const writeBarrier = roomSnapshotWriteBarrier;
+  const refreshToken = ++roomTurnMemoryRefreshToken;
+  const loadedMemory = await loadTurnMemory(snapshot);
+  if (
+    refreshToken === roomTurnMemoryRefreshToken &&
+    writeBarrier === roomSnapshotWriteBarrier &&
+    !formalReadinessActiveRunId &&
+    isCurrentWorkspace(snapshot)
+  ) {
     turnMemory.value = loadedMemory;
   }
+  return loadedMemory;
 }
 
 // 业务位置：【前端接待室】refreshRoomSnapshot：重新加载 页面工作区和业务快照，确保页面和下一次 Agent 调用基于最新案件版本。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 async function refreshRoomSnapshot(snapshot = currentWorkspaceSnapshot()) {
-  await Promise.all([refreshMessages(snapshot), refreshTurnMemory(snapshot)]);
+  if (formalReadinessActiveRunId) return false;
+  const writeBarrier = roomSnapshotWriteBarrier;
+  const messagesToken = ++roomMessagesRefreshToken;
+  const turnMemoryToken = ++roomTurnMemoryRefreshToken;
+  const [loadedMessages, loadedMemory] = await Promise.all([
+    loadMessages(snapshot),
+    loadTurnMemory(snapshot),
+  ]);
+  if (
+    messagesToken !== roomMessagesRefreshToken ||
+    turnMemoryToken !== roomTurnMemoryRefreshToken ||
+    writeBarrier !== roomSnapshotWriteBarrier ||
+    formalReadinessActiveRunId ||
+    !isCurrentWorkspace(snapshot)
+  ) return false;
+  messages.value = loadedMessages;
+  turnMemory.value = loadedMemory;
+  return true;
+}
+
+async function refreshFormalRoomSnapshot(snapshot, context) {
+  const messagesToken = ++roomMessagesRefreshToken;
+  const turnMemoryToken = ++roomTurnMemoryRefreshToken;
+  const [loadedMessages, loadedMemory] = await Promise.all([
+    loadMessages(snapshot),
+    loadTurnMemory(snapshot),
+  ]);
+  if (
+    messagesToken !== roomMessagesRefreshToken ||
+    turnMemoryToken !== roomTurnMemoryRefreshToken ||
+    !isCurrentFormalReadinessContext(context, snapshot)
+  ) return false;
+  // Commit both halves together only while this exact run/token still owns the
+  // formal-readiness gate. A superseded run must never overwrite the latest
+  // run's persisted message or dossier with a late HTTP response.
+  messages.value = loadedMessages;
+  turnMemory.value = loadedMemory;
+  return true;
+}
+
+function normalizeAgentRunId(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : "";
+}
+
+function formalMessageAgentRunId(message) {
+  if (!message || typeof message !== "object" || Array.isArray(message)) return "";
+  const declaredFields = ["agent_run_id", "agentRunId"]
+    .filter((field) => Object.hasOwn(message, field));
+  if (!declaredFields.length) return "";
+  const runIds = declaredFields.map((field) => normalizeAgentRunId(message[field]));
+  if (runIds.some((runId) => !runId)) return "";
+  return new Set(runIds).size === 1 ? runIds[0] : "";
+}
+
+function formalAgentMessageIdentity(message, index, expectedRunId) {
+  if (!message || typeof message !== "object") return null;
+  const expected = normalizeAgentRunId(expectedRunId);
+  if (!expected || formalMessageAgentRunId(message) !== expected) return null;
+  const senderRole = String(message.sender_role || message.senderRole || "")
+    .trim()
+    .toUpperCase();
+  const senderType = String(message.sender_type || message.senderType || "")
+    .trim()
+    .toUpperCase();
+  if (senderType !== "AGENT" && !FORMAL_AGENT_SENDER_ROLES.has(senderRole)) {
+    return null;
+  }
+  const id = message.id || message.message_id || message.messageId;
+  if (id !== undefined && id !== null && String(id).trim()) {
+    return `id:${String(id).trim()}`;
+  }
+  const sequence = message.sequence_no ?? message.sequenceNo;
+  if (sequence !== undefined && sequence !== null) {
+    return `sequence:${String(sequence)}:${senderRole}`;
+  }
+  return `fallback:${index}:${senderRole}:${String(
+    message.created_at || message.createdAt || message.message_text || message.messageText || "",
+  )}`;
+}
+
+function persistedDossierMarker() {
+  const envelope = currentCaseDossier.value;
+  const dossier = envelope?.dossier;
+  if (!isSupportedCaseDetailDossier(dossier)) return null;
+  const numberOrNull = (value) => {
+    const number = Number(value);
+    return Number.isInteger(number) && number >= 0 ? number : null;
+  };
+  return {
+    version: numberOrNull(envelope.dossier_version ?? envelope.dossierVersion),
+    sourceTurn: numberOrNull(envelope.source_turn_no ?? envelope.sourceTurnNo),
+  };
+}
+
+function captureFormalReadinessBaseline(expectedRunId) {
+  return {
+    agentMessages: new Set(
+      (messages.value || [])
+        .map((message, index) =>
+          formalAgentMessageIdentity(message, index, expectedRunId))
+        .filter(Boolean),
+    ),
+    dossier: persistedDossierMarker(),
+  };
+}
+
+function formalReadinessVisible(context) {
+  if (!isCurrentFormalReadinessContext(context)) return false;
+  const baseline = context.baseline;
+  const hasNewAgentMessage = (messages.value || []).some((message, index) => {
+    const identity = formalAgentMessageIdentity(
+      message,
+      index,
+      context.expectedRunId,
+    );
+    return identity && !baseline.agentMessages.has(identity);
+  });
+  const current = persistedDossierMarker();
+  if (!hasNewAgentMessage || !current) return false;
+  const hasNewDossier = !baseline.dossier || (
+    (
+      current.version !== null &&
+      (baseline.dossier.version === null || current.version > baseline.dossier.version)
+    ) ||
+    (
+      current.sourceTurn !== null &&
+      (
+        baseline.dossier.sourceTurn === null ||
+        current.sourceTurn > baseline.dossier.sourceTurn
+      )
+    )
+  );
+  return hasNewDossier;
+}
+
+function isCurrentFormalReadinessContext(context, snapshot = currentWorkspaceSnapshot()) {
+  return Boolean(
+    context?.requiresFormalReadiness &&
+    isCurrentWorkspace(snapshot) &&
+    context.expectedRunId &&
+    context.expectedRunId === formalReadinessActiveRunId &&
+    context.readinessToken === formalReadinessRetryToken,
+  );
+}
+
+function isCurrentIntakeRunContext(context, snapshot = currentWorkspaceSnapshot()) {
+  if (!isCurrentWorkspace(snapshot)) return false;
+  return !context?.requiresFormalReadiness ||
+    isCurrentFormalReadinessContext(context, snapshot);
+}
+
+function clearFormalReadinessRetry() {
+  roomSnapshotWriteBarrier += 1;
+  formalReadinessRetryToken += 1;
+  formalReadinessActiveRunId = "";
+  if (formalReadinessRetryTimer !== null) {
+    window.clearTimeout(formalReadinessRetryTimer);
+    formalReadinessRetryTimer = null;
+  }
+  const cancel = formalReadinessRetryCancel;
+  formalReadinessRetryCancel = null;
+  cancel?.();
+}
+
+function createIntakeRunFinalizationContext(runId) {
+  const expectedRunId = normalizeAgentRunId(runId);
+  const requiresFormalReadiness = requiresFormalReadinessRetry();
+  if (requiresFormalReadiness) {
+    // A target Intake run has exactly one authoritative formal result. Starting
+    // a new run invalidates any older polling loop before it can touch the
+    // shared provisional dossier.
+    clearFormalReadinessRetry();
+    formalReadinessActiveRunId = expectedRunId;
+  }
+  return {
+    requiresFormalReadiness,
+    expectedRunId,
+    readinessToken: formalReadinessRetryToken,
+    baseline: captureFormalReadinessBaseline(expectedRunId),
+  };
+}
+
+function completeFormalReadinessContext(context, snapshot = currentWorkspaceSnapshot()) {
+  if (!isCurrentFormalReadinessContext(context, snapshot)) return false;
+  clearFormalReadinessRetry();
+  return true;
+}
+
+function abortSupersededTemporalIntakeStreams(expectedRunId, snapshot) {
+  if (!expectedRunId || !isCurrentWorkspace(snapshot)) return;
+  intakeStreamingRuns.value
+    .filter((run) => run.runId !== expectedRunId)
+    .forEach((run) => abortAgentStream(run.runId));
+}
+
+function discardProvisionalIntakeRun(context, snapshot, failure = null) {
+  if (!isCurrentIntakeRunContext(context, snapshot)) return false;
+  abortAgentStream(context.expectedRunId);
+  resetStreamedCaseDetail();
+  pendingOriginalStatement.value = "";
+  if (context.requiresFormalReadiness) completeFormalReadinessContext(context, snapshot);
+  if (failure) {
+    error.value = failure.message || "数字人生成失败，已隐藏流式草稿。请稍后重试。";
+    agentState.value = "ERROR";
+  }
+  return true;
+}
+
+function waitForFormalReadinessRetry(snapshot, token) {
+  const delay = Math.max(0, Number(props.formalReadinessPollDelayMs) || 0);
+  if (delay === 0) return Promise.resolve(isCurrentWorkspace(snapshot));
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (ready) => {
+      if (settled) return;
+      settled = true;
+      if (formalReadinessRetryTimer !== null) {
+        window.clearTimeout(formalReadinessRetryTimer);
+        formalReadinessRetryTimer = null;
+      }
+      if (formalReadinessRetryCancel === cancel) {
+        formalReadinessRetryCancel = null;
+      }
+      resolve(ready);
+    };
+    const cancel = () => finish(false);
+    formalReadinessRetryCancel = cancel;
+    formalReadinessRetryTimer = window.setTimeout(
+      () => finish(
+        token === formalReadinessRetryToken && isCurrentWorkspace(snapshot),
+      ),
+      delay,
+    );
+  });
+}
+
+async function refreshUntilFormalReadiness(snapshot, context) {
+  const token = context.readinessToken;
+  const configuredAttempts = Number(props.formalReadinessPollAttempts);
+  const attempts = Number.isFinite(configuredAttempts)
+    ? Math.max(1, Math.floor(configuredAttempts))
+    : 1;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (
+      historyMode.value ||
+      !isCurrentFormalReadinessContext(context, snapshot)
+    ) {
+      return false;
+    }
+    try {
+      await refreshFormalRoomSnapshot(snapshot, context);
+    } catch (_failure) {
+      // A formal commit may become readable after a transient projection miss.
+    }
+    if (
+      !isCurrentFormalReadinessContext(context, snapshot)
+    ) {
+      return false;
+    }
+    if (formalReadinessVisible(context)) return true;
+    if (attempt < attempts - 1) {
+      const shouldContinue = await waitForFormalReadinessRetry(snapshot, token);
+      if (!shouldContinue) return false;
+    }
+  }
+  return false;
+}
+
+function requiresFormalReadinessRetry() {
+  const projection = intakeProcessProjection.value;
+  return projection.mode === "CURRENT" && projection.writerMode === "TEMPORAL";
+}
+
+async function refreshAfterAgentFinal(snapshot, context) {
+  if (!isCurrentIntakeRunContext(context, snapshot)) return false;
+  let ready = true;
+  try {
+    if (context.requiresFormalReadiness) {
+      ready = await refreshUntilFormalReadiness(snapshot, context);
+    } else {
+      await refreshRoomSnapshot(snapshot);
+    }
+  } catch (failure) {
+    if (!isCurrentIntakeRunContext(context, snapshot)) return false;
+    discardProvisionalIntakeRun(
+      context,
+      snapshot,
+      failure instanceof Error
+        ? failure
+        : new Error("正式卷宗同步失败，已隐藏流式草稿。请稍后刷新重试。"),
+    );
+    return false;
+  }
+  if (!isCurrentIntakeRunContext(context, snapshot)) return false;
+  if (ready) {
+    resetStreamedCaseDetail();
+    pendingOriginalStatement.value = "";
+    if (context.requiresFormalReadiness) {
+      completeFormalReadinessContext(context, snapshot);
+    }
+    agentState.value = "SPEAKING";
+  } else {
+    // A terminal stream is only a provisional view. Never retain it once the
+    // bounded formal-readiness check fails, otherwise a completed AgentRun can
+    // make an uncommitted draft look like the authoritative dossier.
+    discardProvisionalIntakeRun(context, snapshot);
+    error.value = "正式卷宗尚未同步完成，已隐藏流式草稿。请稍后刷新重试。";
+    agentState.value = "ERROR";
+  }
+  return ready;
+}
+
+async function consumeIntakeAgentRun(descriptor, snapshot = currentWorkspaceSnapshot()) {
+  if (!descriptor || !isCurrentWorkspace(snapshot)) return false;
+  const normalizedDescriptor = extractAgentRunDescriptor(descriptor) || descriptor;
+  const context = createIntakeRunFinalizationContext(normalizedDescriptor.runId);
+  if (context.requiresFormalReadiness) {
+    abortSupersededTemporalIntakeStreams(context.expectedRunId, snapshot);
+  }
+  resetStreamedCaseDetail();
+  agentState.value = "STREAMING";
+  await consumeAgentRun({
+    actor: snapshot.actor,
+    caseId: snapshot.caseId,
+    roomType: "INTAKE",
+    descriptor: normalizedDescriptor,
+    agentLabel: "争议接待官",
+    senderRole: "INTAKE_OFFICER",
+    signal: eventAbortController.signal,
+    onEvent: (event) => {
+      if (isCurrentIntakeRunContext(context, snapshot)) {
+        applyStreamedCaseDetailEvent(event, snapshot);
+      }
+    },
+    onError: (failure) => discardProvisionalIntakeRun(context, snapshot, failure),
+    onFinal: () => refreshAfterAgentFinal(snapshot, context),
+  });
+  return true;
 }
 
 async function refreshIntakeStatus(snapshot = currentWorkspaceSnapshot()) {
@@ -1843,12 +2224,10 @@ async function resumeActiveIntakeRuns(snapshot = currentWorkspaceSnapshot()) {
       run.runId !== projection.activeLogicalRunId,
     )
   ) {
-    clearAgentStreams({
-      caseId: snapshot.caseId,
-      roomType: "INTAKE",
-      actorId: snapshot.actor.id,
-      actorRole: snapshot.actor.role,
-    });
+    abortSupersededTemporalIntakeStreams(
+      projection.activeLogicalRunId,
+      snapshot,
+    );
   }
 
   const activeRuns = await loadActiveAgentRuns(
@@ -1879,9 +2258,24 @@ async function resumeActiveIntakeRuns(snapshot = currentWorkspaceSnapshot()) {
     ? projectedRun ? [projectedRun.descriptor] : []
     : activeRuns;
   if (!recoverableRuns.length) return false;
+  const requiresFormalReadiness = requiresFormalReadinessRetry();
+  if (requiresFormalReadiness && recoverableRuns.length !== 1) {
+    clearFormalReadinessRetry();
+    resetStreamedCaseDetail();
+    error.value = "检测到多个接待生成任务，已停止展示草稿。请刷新后重试。";
+    agentState.value = "ERROR";
+    return false;
+  }
+  const recoveryPlans = recoverableRuns.map((descriptor) => {
+    const normalizedDescriptor = extractAgentRunDescriptor(descriptor) || descriptor;
+    return {
+      descriptor: normalizedDescriptor,
+      context: createIntakeRunFinalizationContext(normalizedDescriptor.runId),
+    };
+  });
   resetStreamedCaseDetail();
   agentState.value = "STREAMING";
-  await Promise.all(recoverableRuns.map((descriptor) => consumeAgentRun({
+  await Promise.all(recoveryPlans.map(({ descriptor, context }) => consumeAgentRun({
     actor: snapshot.actor,
     caseId: snapshot.caseId,
     roomType: "INTAKE",
@@ -1889,21 +2283,18 @@ async function resumeActiveIntakeRuns(snapshot = currentWorkspaceSnapshot()) {
     agentLabel: "争议接待官",
     senderRole: "INTAKE_OFFICER",
     signal: eventAbortController.signal,
-    onEvent: (event) => applyStreamedCaseDetailEvent(event, snapshot),
-    onError: () => {
-      if (isCurrentWorkspace(snapshot)) resetStreamedCaseDetail();
-    },
-    onFinal: async () => {
-      if (isCurrentWorkspace(snapshot)) {
-        await refreshRoomSnapshot(snapshot);
-        resetStreamedCaseDetail();
-        pendingOriginalStatement.value = "";
+    onEvent: (event) => {
+      if (isCurrentIntakeRunContext(context, snapshot)) {
+        applyStreamedCaseDetailEvent(event, snapshot);
       }
     },
+    onError: (failure) => discardProvisionalIntakeRun(context, snapshot, failure),
+    onFinal: () => refreshAfterAgentFinal(snapshot, context),
   })));
   if (
     isCurrentWorkspace(snapshot) &&
-    intakeProcessProjection.value.mode !== "PROCESSING"
+    intakeProcessProjection.value.mode !== "PROCESSING" &&
+    agentState.value !== "ERROR"
   ) {
     agentState.value = "SPEAKING";
   }
@@ -2054,7 +2445,15 @@ async function postMessage(command) {
       ((payload) => roomApi.postMessage(snapshot.actor, snapshot.caseId, "INTAKE", payload));
     const result = await submit(command);
     const descriptor = extractAgentRunDescriptor(result);
+    let finalizationContext = null;
     if (descriptor) {
+      finalizationContext = createIntakeRunFinalizationContext(descriptor.runId);
+      if (finalizationContext.requiresFormalReadiness) {
+        abortSupersededTemporalIntakeStreams(
+          finalizationContext.expectedRunId,
+          snapshot,
+        );
+      }
       resetStreamedCaseDetail();
       agentState.value = "STREAMING";
       await consumeAgentRun({
@@ -2065,24 +2464,29 @@ async function postMessage(command) {
         agentLabel: "争议接待官",
         senderRole: "INTAKE_OFFICER",
         signal: eventAbortController.signal,
-        onEvent: (event) => applyStreamedCaseDetailEvent(event, snapshot),
-        onError: () => {
-          if (isCurrentWorkspace(snapshot)) resetStreamedCaseDetail();
-        },
-        onFinal: async () => {
-          if (isCurrentWorkspace(snapshot)) {
-            await refreshRoomSnapshot(snapshot);
-            resetStreamedCaseDetail();
-            pendingOriginalStatement.value = "";
+        onEvent: (event) => {
+          if (isCurrentIntakeRunContext(finalizationContext, snapshot)) {
+            applyStreamedCaseDetailEvent(event, snapshot);
           }
         },
+        onError: (failure) =>
+          discardProvisionalIntakeRun(finalizationContext, snapshot, failure),
+        onFinal: () => refreshAfterAgentFinal(snapshot, finalizationContext),
       });
     } else {
       await refreshRoomSnapshot(snapshot);
       resetStreamedCaseDetail();
       pendingOriginalStatement.value = "";
     }
-    if (isCurrentWorkspace(snapshot)) {
+    if (
+      isCurrentWorkspace(snapshot) &&
+      agentState.value !== "ERROR" &&
+      (
+        !finalizationContext ||
+        !finalizationContext.requiresFormalReadiness ||
+        isCurrentFormalReadinessContext(finalizationContext, snapshot)
+      )
+    ) {
       agentState.value = "SPEAKING";
     }
   } catch (failure) {
@@ -2284,6 +2688,7 @@ watch(historyMode, (historical) => {
   stopModelHealthPolling();
   clearProjectionStatusRetry();
   clearOpeningRunRetry();
+  clearFormalReadinessRetry();
   awaitingTemporalInitiatorRun = false;
   workspaceGeneration.value += 1;
   submitting.value = false;
@@ -2297,6 +2702,7 @@ onBeforeUnmount(() => {
   componentUnmounted = true;
   clearProjectionStatusRetry();
   clearOpeningRunRetry();
+  clearFormalReadinessRetry();
   awaitingTemporalInitiatorRun = false;
   stopModelHealthPolling();
   eventAbortController.abort();

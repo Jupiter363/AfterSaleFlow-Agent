@@ -155,6 +155,8 @@ def test_event_applies_once_and_uses_injected_cognition(
     assert result["route"] == "message"
     assert result["last_event_sequence"] == 2
     assert result["last_event_hash"] == event["event_hash"]
+    assert result["messages"][event["message_id"]]["role"] == "HUMAN"
+    assert event["source_type"] == "ROOM_MESSAGE"
     assert result["readiness"]["status"] == "READY_TO_CONFIRM"
     assert result["dossier_draft"]["requested_resolution"] == {"kind": "REFUND"}
     jsonschema.Draft202012Validator(SCHEMA).validate(result["result_json"])
@@ -211,6 +213,7 @@ def test_bootstrap_event_imports_snapshot_before_first_event(
     snapshot["source_refs"] = ["SNAPSHOT_SOURCE_P4"]
     snapshot["snapshot_hash"] = canonical_sha256_omitting(snapshot, "snapshot_hash")
     event["sequence_no"] = 1
+    event["source_type"] = "INITIAL_FORM"
     event["event_hash"] = canonical_sha256_omitting(event, "event_hash")
     graph = compile_intake_v2_graph(
         intake_lcel=_create_test_only_intake_cognition(deterministic_message_fallback)
@@ -228,8 +231,47 @@ def test_bootstrap_event_imports_snapshot_before_first_event(
     assert result["initial_snapshot_hash"] == snapshot["snapshot_hash"]
     assert result["last_event_hash"] == event["event_hash"]
     assert result["last_event_sequence"] == 1
-    assert result["messages"][event["message_id"]]["sequence"] == 1
+    assert result["messages"] == {}
+    assert event["text"] not in result["memory_summary"]
+    assert "authorized_initial_case_facts" in result["memory_summary"]
+    source_records = [
+        record
+        for record in result["node_results"].values()
+        if record.get("kind") == "INITIAL_FORM_SOURCE"
+    ]
+    assert source_records == [
+        {
+            "kind": "INITIAL_FORM_SOURCE",
+            "stable_id": event["message_id"],
+            "content_hash": event["event_hash"],
+            "sequence": 1,
+            "source_type": "INITIAL_FORM",
+        }
+    ]
     assert result["route"] == "message"
+
+
+def test_initial_form_is_rejected_outside_the_fresh_bootstrap_contract(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+) -> None:
+    snapshot["own_messages"] = []
+    snapshot["source_refs"] = ["SNAPSHOT_SOURCE_P4"]
+    snapshot["snapshot_hash"] = canonical_sha256_omitting(snapshot, "snapshot_hash")
+    event["sequence_no"] = 1
+    event["source_type"] = "INITIAL_FORM"
+    event["event_hash"] = canonical_sha256_omitting(event, "event_hash")
+    graph, state = _run_snapshot(bindings, version_pins, snapshot)
+    state["bindings"]["command"].update(
+        command_id="COMMAND_P4_INITIAL_FORM_INVALID",
+        logical_run_id="RUN_P4_INITIAL_FORM_INVALID",
+        attempt_id="ATTEMPT_P4_INITIAL_FORM_INVALID_1",
+    )
+
+    with pytest.raises(IntakeGraphContractError, match="INTAKE_INITIAL_FORM_EVENT_INVALID"):
+        graph.invoke(state, context=IntakeTurnContext("EVENT", event))
 
 
 def test_identical_event_replay_uses_cached_proposal(

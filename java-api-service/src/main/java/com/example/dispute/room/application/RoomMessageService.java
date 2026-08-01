@@ -36,6 +36,7 @@ import com.example.dispute.workflow.infrastructure.persistence.repository.CaseRo
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.util.List;
 import java.util.Objects;
@@ -296,17 +297,7 @@ public class RoomMessageService {
                 if (actor.role() != dispute.getInitiatorRole()) {
                     return null;
                 }
-                return post(
-                        caseId,
-                        RoomType.INTAKE,
-                        new RoomMessageCommand(
-                                MessageType.PARTY_TEXT,
-                                dispute.getDescription(),
-                                List.of()),
-                        actor,
-                        "target-intake-opening:" + caseId,
-                        traceId,
-                        false);
+                return dispatchTargetIntakeOpening(dispute, actor, selection);
             }
             legacyIntakeWriterGuard.assertLegacyWriteAllowed(caseId);
             return intakeAgentTurnService.ensureRespondentOpening(
@@ -324,6 +315,46 @@ public class RoomMessageService {
                     caseId, roomType, actor, traceId, requestId);
         }
         throw new IllegalArgumentException("room opening is not supported for " + roomType);
+    }
+
+    private Object dispatchTargetIntakeOpening(
+            FulfillmentCaseEntity dispute,
+            AuthenticatedActor actor,
+            IntakeIngressSelection selection) {
+        CaseAccessSessionEntity accessSession = accessSessionResolver.resolve(dispute.getId(), actor);
+        permissionService.requireRoomRead(accessSession, RoomType.INTAKE);
+        permissionService.require(accessSession, PermissionScope.ROOM_MESSAGE_WRITE);
+        assertCanRead(dispute, actor);
+        CaseRoomEntity room =
+                roomRepository
+                        .findByCaseIdAndRoomType(dispute.getId(), RoomType.INTAKE)
+                        .orElseThrow(() -> new IllegalArgumentException("room not found"));
+        if (room.getRoomStatus() != RoomStatus.OPEN) {
+            throw new IllegalStateException("room is not open");
+        }
+        String formSourceId = "INTAKE_FORM_" + dispute.getId();
+        String stableTraceId =
+                "TRACE_"
+                        + UUID.nameUUIDFromBytes(
+                                        ("target-intake-opening\n" + dispute.getId())
+                                                .getBytes(StandardCharsets.UTF_8))
+                                .toString()
+                                .replace("-", "");
+        return intakeMessageIngressRouter.dispatchTarget(
+                selection,
+                TargetIntakeMessageRequest.initialForm(
+                        dispute.getId(),
+                        room.getId(),
+                        formSourceId,
+                        dispute.getDescription(),
+                        actor,
+                        "target-intake-opening:" + dispute.getId(),
+                        stableTraceId,
+                        Objects.requireNonNull(
+                                        dispute.getCreatedAt(),
+                                        "target Intake case createdAt must not be null")
+                                .toInstant(),
+                        selection.targetGrant()));
     }
 
     private boolean isTargetEvidenceEpoch(String caseId) {
@@ -418,6 +449,24 @@ public class RoomMessageService {
         if (accepted != null) {
             message.attachAgentRun(accepted.runId());
         }
+        if (targetIntake) {
+            var receipt =
+                    intakeMessageIngressRouter.dispatchTarget(
+                            intakeIngressSelection,
+                            TargetIntakeMessageRequest.roomMessage(
+                                    message.getCaseId(),
+                                    message.getRoomId(),
+                                    message.getId(),
+                                    message.getMessageType(),
+                                    message.getMessageText(),
+                                    command.attachmentRefs(),
+                                    actor,
+                                    idempotencyKey,
+                                    traceId,
+                                    message.getCreatedAt(),
+                                    intakeIngressSelection.targetGrant()));
+            message.attachAgentRun(receipt.runId());
+        }
         RoomMessageEntity saved = messageRepository.save(message);
         eventService.recordRoomMessage(
                 dispute.getId(),
@@ -427,22 +476,6 @@ public class RoomMessageService {
                 audienceJson,
                 audienceActorIdsJson,
                 actor.actorId());
-        if (targetIntake) {
-            intakeMessageIngressRouter.dispatchTarget(
-                    intakeIngressSelection,
-                    new TargetIntakeMessageRequest(
-                            saved.getCaseId(),
-                            saved.getRoomId(),
-                            saved.getId(),
-                            saved.getMessageType(),
-                            saved.getMessageText(),
-                            command.attachmentRefs(),
-                            actor,
-                            idempotencyKey,
-                            traceId,
-                            saved.getCreatedAt(),
-                            intakeIngressSelection.targetGrant()));
-        }
         return view(saved);
     }
 

@@ -9,6 +9,7 @@ from typing import Any, TypedDict, cast
 
 import pytest
 import httpx
+from langchain_core.messages import AIMessageChunk
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 
@@ -16,10 +17,14 @@ import app.graph_runtime.production_bindings as production_bindings
 from app.api.graph_lifecycle import GraphExecutorKernel
 from app.config import GraphShadowBindingSettings, Settings
 from app.contracts.v1.codec import canonical_sha256_omitting, canonicalize
-from app.contracts.v1.models import RoomGraphCommand, SnapshotRef
-from app.graph_runtime.compiled_executor import CompiledGraphShadowExecutor
+from app.contracts.v1.models import RoomGraphCommand, SnapshotRef, Usage
+from app.graph_runtime.compiled_executor import (
+    CompiledGraphShadowExecutor,
+    GraphPublicUpdate,
+)
 from app.graph_runtime.errors import (
     GraphContractError,
+    GraphTerminalBindingError,
     GraphThreadBindingError,
     GraphVersionUnavailableError,
 )
@@ -48,6 +53,7 @@ from app.graph_runtime.postgres_bulkhead import PostgresGraphFanoutBulkhead
 from app.graph_runtime.intake_executor import CompiledIntakeGraphShadowExecutor
 from app.graph_runtime.persistence_models import GraphFenceContext
 from app.graph_runtime.checkpoint import FENCE_CONTEXT_KEY, bind_fence_context
+from app.graphs.intake.runtime import IntakeRuntimeBundle
 from app.graph_runtime.production_bindings import (
     _advance_revision,
     _initial_state,
@@ -265,9 +271,7 @@ def _target_settings() -> Settings:
         litellm_base_url="http://model-runtime:4000",
         litellm_model="qwen3.7-plus-target",
         graph_gateway_mode="TARGET_E2E_CANDIDATE",
-        graph_database_dsn=(
-            "postgresql://graph_runtime:secret@postgresql:5432/dispute_graph"
-        ),
+        graph_database_dsn=("postgresql://graph_runtime:secret@postgresql:5432/dispute_graph"),
         graph_jwks_url="http://java-api-service:8080/.well-known/graph-jwks.json",
         graph_expected_environment_generation="7",
         graph_expected_restore_verification_hash="a" * 64,
@@ -832,8 +836,14 @@ async def test_authorized_intake_adapter_builds_the_real_governed_graph_proposal
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "commit_fails",
+    [False, True],
+    ids=("success", "commit_failure"),
+)
 async def test_compiled_intake_executor_persists_one_pointer_without_replacing_state(
     monkeypatch: pytest.MonkeyPatch,
+    commit_fails: bool,
 ) -> None:
     command, _, payload = _intake_command()
     execution = _intake_execution(command)
@@ -859,18 +869,27 @@ async def test_compiled_intake_executor_persists_one_pointer_without_replacing_s
         {"configurable": {"thread_id": command.thread_id}},
         context=context,
     )
+    durable_state["usage_by_invocation"][command.attempt_id] = {
+        "input_tokens": 3,
+        "output_tokens": 2,
+        "total_tokens": 5,
+    }
     proposal_before = dict(durable_state["result_json"])
 
     class Saver:
-        def __init__(self) -> None:
+        def __init__(self, *, fail_commit: bool) -> None:
             self.preflights = 0
             self.commits = []
+            self.fail_commit = fail_commit
+            self.terminal_commit_succeeded = False
 
         async def avalidate_external_terminal_checkpoint(self, config, **kwargs):
             self.preflights += 1
 
         async def acommit_external_terminal(self, config, commit):
             self.commits.append(commit)
+            if self.fail_commit:
+                raise GraphTerminalBindingError("terminal commit failed")
             effective = replace(
                 execution.fence,
                 result_ref=commit.result.result_ref,
@@ -878,9 +897,10 @@ async def test_compiled_intake_executor_persists_one_pointer_without_replacing_s
             )
             configurable = dict(config["configurable"])
             configurable[FENCE_CONTEXT_KEY] = effective
+            self.terminal_commit_succeeded = True
             return {"configurable": configurable}
 
-    saver = Saver()
+    saver = Saver(fail_commit=commit_fails)
     final_config = bind_fence_context(
         {
             "configurable": {
@@ -896,8 +916,81 @@ async def test_compiled_intake_executor_persists_one_pointer_without_replacing_s
         checkpointer = saver
 
         async def astream(self, input, config, **kwargs):
-            if False:
-                yield None
+            assert kwargs["stream_mode"] == ["messages", "custom"]
+            yield (
+                "messages",
+                (
+                    AIMessageChunk(
+                        content='{"room_utterance":"private raw completion"}',
+                        additional_kwargs={"reasoning_content": "private reasoning"},
+                    ),
+                    {"langgraph_node": "intake_lcel"},
+                ),
+            )
+            yield (
+                "messages",
+                (
+                    AIMessageChunk(
+                        content="",
+                        additional_kwargs={
+                            "governed_events": [
+                                {
+                                    "schema_version": "governed-model-event.v1",
+                                    "event_type": "visible_delta",
+                                    "node_name": "intake_lcel",
+                                    "field": "room_utterance",
+                                    "delta": json.dumps("Please confirm the requested resolution."),
+                                }
+                            ]
+                        },
+                    ),
+                    {"langgraph_node": "intake_lcel"},
+                ),
+            )
+            yield (
+                "messages",
+                (
+                    AIMessageChunk(
+                        content="",
+                        additional_kwargs={
+                            "governed_events": [
+                                {
+                                    "schema_version": "governed-model-event.v1",
+                                    "event_type": "visible_delta",
+                                    "node_name": "intake_lcel",
+                                    "field": "case_detail.case_story",
+                                    "delta": '{"one_sentence_summary":"Case summary."}',
+                                }
+                            ]
+                        },
+                    ),
+                    {"langgraph_node": "intake_lcel"},
+                ),
+            )
+            yield (
+                "messages",
+                (
+                    AIMessageChunk(
+                        content="",
+                        additional_kwargs={
+                            "governed_events": [
+                                {
+                                    "schema_version": "governed-model-event.v1",
+                                    "event_type": "visible_delta",
+                                    "node_name": "intake_lcel",
+                                    "field": "case_detail.references",
+                                    "delta": '{"order_reference":"ORDER-1"}',
+                                }
+                            ]
+                        },
+                    ),
+                    {"langgraph_node": "intake_lcel"},
+                ),
+            )
+            yield (
+                "custom",
+                GraphPublicUpdate.usage(Usage(input_tokens=3, output_tokens=2, total_tokens=5)),
+            )
 
         async def aget_state(self, config):
             return SimpleNamespace(
@@ -945,17 +1038,208 @@ async def test_compiled_intake_executor_persists_one_pointer_without_replacing_s
         proposal_store=store,
     )
 
-    events = [event async for event in executor.stream(execution)]
+    events = []
+    visible_commit_states = []
 
-    assert [event.event_type for event in events] == ["attempt_started", "final"]
+    async def collect() -> None:
+        async for event in executor.stream(execution):
+            events.append(event)
+            if event.event_type == "visible_delta":
+                visible_commit_states.append((event.payload.field, saver.terminal_commit_succeeded))
+
+    if commit_fails:
+        with pytest.raises(GraphTerminalBindingError, match="terminal commit failed"):
+            await collect()
+        assert [event.event_type for event in events] == [
+            "attempt_started",
+            "visible_delta",
+        ]
+        assert events[1].payload.field == "room_utterance"
+        assert visible_commit_states == [("room_utterance", False)]
+        assert saver.preflights == 1
+        assert store.calls == 1
+        assert len(saver.commits) == 1
+        assert not saver.terminal_commit_succeeded
+        return
+
+    await collect()
+    assert [event.event_type for event in events] == [
+        "attempt_started",
+        "visible_delta",
+        "visible_delta",
+        "visible_delta",
+        "usage",
+        "final",
+    ]
+    assert events[1].payload.field == "room_utterance"
+    assert events[1].payload.delta == "Please confirm the requested resolution."
+    assert events[2].payload.field == "case_detail.case_story"
+    assert events[2].payload.delta == '{"one_sentence_summary":"Case summary."}'
+    assert events[3].payload.field == "case_detail.references"
+    assert events[3].payload.delta == '{"order_reference":"ORDER-1"}'
+    assert events[4].payload.usage == Usage(input_tokens=3, output_tokens=2, total_tokens=5)
+    assert visible_commit_states == [
+        ("room_utterance", False),
+        ("case_detail.case_story", True),
+        ("case_detail.references", True),
+    ]
     assert saver.preflights == 1
     assert store.calls == 1
     assert len(saver.commits) == 1
+    assert saver.terminal_commit_succeeded
     result_json = saver.commits[0].result.result_json
     assert len(result_json["artifact_operations"]) == 1
     assert result_json["artifact_operations"][0]["operation"] == "PROPOSE_PATCH"
     assert durable_state["terminal_draft"] == proposal_before
     assert durable_state["result_json"] == proposal_before
+
+
+@pytest.mark.asyncio
+async def test_compiled_intake_executor_withholds_dossier_when_terminal_guard_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command, _, _ = _intake_command()
+    execution = _intake_execution(command)
+    saver = object()
+
+    class Graph:
+        async def astream(self, input, config, **kwargs):
+            assert kwargs["stream_mode"] == ["messages", "custom"]
+            yield (
+                "messages",
+                (
+                    AIMessageChunk(
+                        content="",
+                        additional_kwargs={
+                            "governed_events": [
+                                {
+                                    "schema_version": "governed-model-event.v1",
+                                    "event_type": "visible_delta",
+                                    "node_name": "intake_lcel",
+                                    "field": "room_utterance",
+                                    "delta": json.dumps("Please confirm the requested resolution."),
+                                }
+                            ]
+                        },
+                    ),
+                    {"langgraph_node": "intake_lcel"},
+                ),
+            )
+            yield (
+                "messages",
+                (
+                    AIMessageChunk(
+                        content="",
+                        additional_kwargs={
+                            "governed_events": [
+                                {
+                                    "schema_version": "governed-model-event.v1",
+                                    "event_type": "visible_delta",
+                                    "node_name": "intake_lcel",
+                                    "field": "case_detail.case_story",
+                                    "delta": '{"one_sentence_summary":"uncommitted"}',
+                                }
+                            ]
+                        },
+                    ),
+                    {"langgraph_node": "intake_lcel"},
+                ),
+            )
+
+        async def aget_state(self, config):
+            return object()
+
+    graph = Graph()
+    graph.checkpointer = saver
+    monkeypatch.setattr(
+        "app.graph_runtime.intake_executor.build_governed_intake_runtime",
+        lambda **kwargs: SimpleNamespace(graph=graph),
+    )
+
+    async def load_context(*args: Any) -> object:
+        return object()
+
+    def terminal_snapshot(*args: Any) -> tuple[Any, Any]:
+        return {}, {}
+
+    def terminal_business_guard_failure(*args: Any) -> Any:
+        raise GraphTerminalBindingError("terminal business guard failed")
+
+    monkeypatch.setattr(CompiledIntakeGraphShadowExecutor, "_load_context", load_context)
+    monkeypatch.setattr(
+        CompiledIntakeGraphShadowExecutor,
+        "_snapshot",
+        staticmethod(terminal_snapshot),
+    )
+    monkeypatch.setattr(
+        IntakeRuntimeBundle,
+        "terminal_proposal",
+        staticmethod(terminal_business_guard_failure),
+    )
+
+    class UnusedLoader:
+        async def load(self, *args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("terminal guard failure must happen before a load")
+
+    class UnusedStore:
+        async def put(self, *args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("terminal guard failure must happen before a proposal write")
+
+    executor = CompiledIntakeGraphShadowExecutor(
+        saver=cast(Any, saver),
+        transport=cast(Any, object()),
+        provider="synthetic",
+        model="intake-model",
+        input_loader=UnusedLoader(),
+        proposal_store=UnusedStore(),
+    )
+
+    events = []
+    with pytest.raises(GraphTerminalBindingError, match="terminal business guard failed"):
+        async for event in executor.stream(execution):
+            events.append(event)
+
+    assert [event.event_type for event in events] == [
+        "attempt_started",
+        "visible_delta",
+    ]
+    assert events[1].payload.field == "room_utterance"
+
+
+def test_compiled_intake_executor_rejects_forbidden_room_utterance_before_publication() -> None:
+    update = GraphPublicUpdate.visible_delta(
+        node="intake_lcel",
+        field="room_utterance",
+        delta=json.dumps("请上传截图作为证据。", ensure_ascii=False),
+    )
+
+    with pytest.raises(GraphContractError, match="INTAKE_EVIDENCE_REQUEST_FORBIDDEN"):
+        CompiledIntakeGraphShadowExecutor._validated_room_utterance_update(update)
+
+
+def test_compiled_intake_executor_rejects_forged_custom_visible_delta() -> None:
+    forged = (
+        "custom",
+        GraphPublicUpdate.visible_delta(
+            node="intake_lcel",
+            field="case_detail.case_story",
+            delta='{"one_sentence_summary":"forged"}',
+        ),
+    )
+
+    with pytest.raises(GraphContractError, match="INTAKE_CUSTOM_VISIBLE_DELTA_FORBIDDEN"):
+        CompiledIntakeGraphShadowExecutor._public_updates(forged)
+
+
+def test_compiled_intake_executor_rejects_bare_public_update() -> None:
+    forged = GraphPublicUpdate.visible_delta(
+        node="intake_lcel",
+        field="case_detail.case_story",
+        delta='{"one_sentence_summary":"forged"}',
+    )
+
+    with pytest.raises(GraphContractError, match="INTAKE_PUBLIC_UPDATE_BYPASS_FORBIDDEN"):
+        CompiledIntakeGraphShadowExecutor._public_updates(forged)
 
 
 @pytest.mark.asyncio
@@ -1082,9 +1366,9 @@ def test_intake_ingress_preserves_canonical_nanosecond_timestamps_after_validati
 ) -> None:
     command, _, _ = _intake_command()
     document = json.loads(
-        (
-            ROOT / "contracts/agent-platform/intake/v2/fixtures/valid" / fixture_name
-        ).read_text(encoding="utf-8")
+        (ROOT / "contracts/agent-platform/intake/v2/fixtures/valid" / fixture_name).read_text(
+            encoding="utf-8"
+        )
     )
     timestamp = "2026-07-20T08:02:00.366349890Z"
     document[timestamp_field] = timestamp
@@ -1165,8 +1449,7 @@ async def test_intake_executor_bootstraps_with_two_exact_loads_then_resumes_with
     command, snapshot, snapshot_payload = _intake_command()
     event = json.loads(
         (
-            ROOT
-            / "contracts/agent-platform/intake/v2/fixtures/valid/intake-turn-event-valid.json"
+            ROOT / "contracts/agent-platform/intake/v2/fixtures/valid/intake-turn-event-valid.json"
         ).read_text(encoding="utf-8")
     )
     event_payload = canonicalize(event)
@@ -1373,9 +1656,9 @@ def test_intake_dispatch_rejects_version_relabeling_before_registration() -> Non
         _executor_registration(
             drifted,
             GraphExecutorKernel(
-                    saver=cast(Any, InMemorySaver()),
-                    gateway=cast(Any, object()),
-                    durable_bulkhead=cast(Any, object()),
+                saver=cast(Any, InMemorySaver()),
+                gateway=cast(Any, object()),
+                durable_bulkhead=cast(Any, object()),
             ),
         )
 

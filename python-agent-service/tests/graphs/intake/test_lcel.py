@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 from langchain_core.exceptions import OutputParserException
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import (
@@ -20,6 +20,7 @@ from langchain_core.runnables import (
 
 from app.contracts.v1.codec import canonical_sha256_omitting
 from app.graph_runtime.state_lens import StateLens
+from app.harness.prompt_composer import PromptComposer
 from app.graphs.intake.errors import IntakeGraphContractError
 from app.graphs.intake.graph import (
     _create_test_only_intake_cognition,
@@ -46,7 +47,9 @@ from app.model_runtime.transports import (
     ModelTransportCompleted,
     ModelTransportRequest,
     ModelTransportResult,
+    ModelTransportVisibleDelta,
 )
+from app.model_runtime.callbacks import governed_events_from_chunk
 
 
 def _draft(**overrides: Any) -> dict[str, Any]:
@@ -101,8 +104,7 @@ class IntakeTransport:
         raise AssertionError("stream is outside this focused contract")
 
     async def astream(self, request: ModelTransportRequest):
-        raise AssertionError("stream is outside this focused contract")
-        yield
+        yield ModelTransportCompleted(result=await self.agenerate(request))
 
 
 class StreamingIntakeTransport(IntakeTransport):
@@ -111,6 +113,21 @@ class StreamingIntakeTransport(IntakeTransport):
 
     async def astream(self, request: ModelTransportRequest):
         yield ModelTransportCompleted(result=await self.agenerate(request))
+
+
+class GovernedStreamingIntakeTransport(IntakeTransport):
+    async def astream(self, request: ModelTransportRequest):
+        self.requests.append(request)
+        yield ModelTransportVisibleDelta(
+            field="room_utterance",
+            delta='"Please confirm the requested resolution."',
+        )
+        yield ModelTransportVisibleDelta(
+            field="case_detail.case_story",
+            delta='{"one_sentence_summary":"Case summary."}',
+        )
+        result = self.generate(request)
+        yield ModelTransportCompleted(result=result)
 
 
 def _profile() -> ModelProfile:
@@ -140,61 +157,21 @@ def _policy() -> ModelInvocationPolicy:
     )
 
 
-def test_system_prompt_preserves_case_language_dossier_and_matrix_semantics() -> None:
+def test_system_prompt_reuses_the_baseline_intake_rules_with_only_target_mapping() -> None:
+    baseline = PromptComposer().render_system_prompt("intake_turn_case_detail")
     normalized_prompt = " ".join(INTAKE_SYSTEM_PROMPT.split())
-    assert (
-        "same language as the latest authorized human message" in normalized_prompt
-    )
-    assert "Every fact, party position, amount, date, item" in normalized_prompt
-    assert "Never reuse a narrative, fact pattern, or default resolution" in normalized_prompt
+    assert INTAKE_SYSTEM_PROMPT.startswith(baseline)
+    assert "首轮只有 initial_case_facts" in INTAKE_SYSTEM_PROMPT
+    assert "主动提出第一轮案情问题" in INTAKE_SYSTEM_PROMPT
+    assert "最多追问 2 个" in INTAKE_SYSTEM_PROMPT
+    assert "不得索要截图、照片、视频、聊天记录、物流凭证等证据材料" in INTAKE_SYSTEM_PROMPT
+    assert "统一双方案情事实矩阵" in INTAKE_SYSTEM_PROMPT
     assert "authorized_initial_case_facts" in normalized_prompt
-    assert "never ask the party to provide them again" in normalized_prompt
-    assert (
-        "case_story, references, party_positions, dispute_focus, requested_resolution or "
-        "claim_resolution, respondent_attitude, dispute_core_state, risk_assessment, "
-        "missing_information, intake_quality, and admission" in normalized_prompt
-    )
-    assert "never emit null or placeholder branches" in normalized_prompt
+    assert "Map the baseline case_detail patch to dossier_patch" in normalized_prompt
+    assert "Do not emit baseline-only case_detail" in normalized_prompt
     assert "unilateral_case_matrix.draft.v1" in normalized_prompt
-    assert "On every initiator turn with material asserted facts" in normalized_prompt
-    assert "already contains an INITIATOR_FROZEN matrix" in normalized_prompt
-    assert (
-        "carry every material prior FACT_* row using its stable fact key, category, fact target, "
-        "and materiality" in normalized_prompt
-    )
-    assert "add NEW_* rows only for genuinely new facts" in normalized_prompt
     assert "case_fact_matrix.delta.v2" in normalized_prompt
-    assert "Only an authorized respondent may use case_fact_matrix.delta.v2" in normalized_prompt
-    assert "only against a frozen initiator matrix" in normalized_prompt
-    assert "address every material prior FACT_* row" in normalized_prompt
-    assert "internal semantic proposals" in normalized_prompt
-    assert (
-        "only in the top-level matrix_patch field, never inside dossier_patch"
-        in normalized_prompt
-    )
-    assert (
-        "never present either as a persisted or externally authoritative matrix"
-        in normalized_prompt
-    )
-    assert "Do not emit case_fact_matrix.v2" in normalized_prompt
-    assert (
-        "also emit a nonblank case_story summary and dispute_core_state.core_conflict"
-        in normalized_prompt
-    )
-    assert "silence is not a reported attitude" in normalized_prompt
-    assert "never invent a respondent position" in normalized_prompt
-    assert (
-        "Java alone validates the current actor and source authority and deterministically "
-        "converts "
-        "accepted semantic patches into the single unified formal case matrix"
-        in normalized_prompt
-    )
-    assert (
-        "preserve the frozen prior category, fact target, and materiality for CURRENT_SOURCE, "
-        "PREVIOUS_MATRIX, and PREVIOUS_AND_CURRENT_SOURCE" in normalized_prompt
-    )
-    assert "A NEW_* row may not use PREVIOUS_MATRIX" in normalized_prompt
-    assert "contributes only the current authorized source" in normalized_prompt
+    assert "one formal unified bilateral case matrix" in normalized_prompt
 
 
 def _event_state(bindings, version_pins, snapshot, event):
@@ -269,6 +246,80 @@ def test_real_intake_lcel_is_governed_object_flow_with_human_text_isolation(
     assert marker in str(messages[1].content)
     assert bindings["private"]["actor_scope_hash"] not in str(messages)
     assert bindings["private"]["agent_session_id"] not in str(messages)
+    assert [
+        (spec.property_name, spec.field, spec.value_mode)
+        for spec in transport.requests[0].visible_fields
+    ] == [
+        ("room_utterance", "room_utterance", "json_value"),
+        ("case_story", "case_detail.case_story", "json_value"),
+        ("references", "case_detail.references", "json_value"),
+        ("party_positions", "case_detail.party_positions", "json_value"),
+        ("dispute_focus", "case_detail.dispute_focus", "json_value"),
+        ("requested_resolution", "case_detail.requested_resolution", "json_value"),
+        ("claim_resolution", "case_detail.claim_resolution", "json_value"),
+        ("respondent_attitude", "case_detail.respondent_attitude", "json_value"),
+        ("dispute_core_state", "case_detail.dispute_core_state", "json_value"),
+        ("risk_assessment", "case_detail.risk_assessment", "json_value"),
+        ("missing_information", "case_detail.missing_information", "json_value"),
+        ("intake_quality", "case_detail.intake_quality", "json_value"),
+        ("admission", "case_detail.admission", "json_value"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_async_graph_emits_only_governed_model_deltas_before_terminal_patch(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+) -> None:
+    document = _draft()
+    document["dossier_patch"]["requested_resolution"]["source_hash"] = event["event_hash"]
+    transport = GovernedStreamingIntakeTransport(document)
+    built = build_intake_model_node(
+        transport=transport,
+        profile=_profile(),
+        policy=_policy(),
+    )
+    graph = compile_intake_v2_graph(intake_lcel=built.runnable)
+    state = graph.invoke(
+        new_intake_graph_state(bindings=bindings, version_pins=version_pins),
+        context=IntakeTurnContext("SNAPSHOT", snapshot),
+    )
+    state["bindings"]["command"].update(
+        command_id="COMMAND_P4_USER_2",
+        logical_run_id="RUN_P4_USER_2",
+        attempt_id="ATTEMPT_P4_USER_2_1",
+    )
+
+    candidates = [
+        candidate
+        async for candidate in graph.astream(
+            state,
+            {"configurable": {"thread_id": snapshot["thread_id"]}},
+            context=IntakeTurnContext("EVENT", event),
+            stream_mode=["messages", "custom"],
+        )
+    ]
+
+    governed = []
+    for candidate in candidates:
+        if not (
+            isinstance(candidate, tuple)
+            and len(candidate) == 2
+            and candidate[0] == "messages"
+            and isinstance(candidate[1], tuple)
+            and len(candidate[1]) == 2
+            and isinstance(candidate[1][0], AIMessageChunk)
+        ):
+            continue
+        governed.extend(governed_events_from_chunk(candidate[1][0]))
+
+    assert [(event["field"], event["delta"]) for event in governed] == [
+        ("room_utterance", '"Please confirm the requested resolution."'),
+        ("case_detail.case_story", '{"one_sentence_summary":"Case summary."}'),
+    ]
+    assert transport.generate_calls == 1
 
 
 def test_model_minted_fact_key_is_demoted_before_projection(
@@ -295,12 +346,10 @@ def test_model_minted_fact_key_is_demoted_before_projection(
     document = _draft(
         matrix_patch=matrix_patch,
         readiness="INCOMPLETE",
-        missing_fields=["supporting_evidence"],
+        missing_fields=["delivery_time"],
         recommendation="NEED_MORE_INFO",
     )
-    document["dossier_patch"]["requested_resolution"]["source_hash"] = event[
-        "event_hash"
-    ]
+    document["dossier_patch"]["requested_resolution"]["source_hash"] = event["event_hash"]
     transport = IntakeTransport(document)
     built = build_intake_model_node(
         transport=transport,
@@ -362,7 +411,7 @@ def test_model_fact_key_normalization_preserves_authorized_stable_keys(
                 "summary_source_fact_keys": ["FACT_DAMAGE", "FACT_COLOR"],
             },
             readiness="INCOMPLETE",
-            missing_fields=["supporting_evidence"],
+            missing_fields=["delivery_time"],
             recommendation="NEED_MORE_INFO",
         )
     )
@@ -1195,7 +1244,7 @@ def test_strict_parser_accepts_delta_but_requires_explicit_stance() -> None:
             _draft(
                 matrix_patch=matrix_patch,
                 readiness="INCOMPLETE",
-                missing_fields=["supporting_evidence"],
+                missing_fields=["delivery_time"],
                 recommendation="NEED_MORE_INFO",
             )
         )
@@ -1210,7 +1259,7 @@ def test_strict_parser_accepts_delta_but_requires_explicit_stance() -> None:
                 _draft(
                     matrix_patch=matrix_patch,
                     readiness="INCOMPLETE",
-                    missing_fields=["supporting_evidence"],
+                    missing_fields=["delivery_time"],
                     recommendation="NEED_MORE_INFO",
                 )
             )
@@ -1290,9 +1339,7 @@ def test_guardrail_still_rejects_an_invalid_typed_readiness_pair(
 ) -> None:
     state = _event_state(bindings, version_pins, snapshot, event)
     valid = IntakeCognitionDraft.model_validate(_draft())
-    invalid = valid.model_copy(
-        update={"readiness": "INCOMPLETE", "recommendation": "ACCEPTED"}
-    )
+    invalid = valid.model_copy(update={"readiness": "INCOMPLETE", "recommendation": "ACCEPTED"})
 
     with pytest.raises(
         IntakeGraphContractError,

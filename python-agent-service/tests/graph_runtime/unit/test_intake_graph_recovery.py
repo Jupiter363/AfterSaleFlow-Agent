@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 
 from app.contracts.v1.codec import canonical_sha256_omitting
+import app.graph_runtime.intake_executor as intake_executor
 from app.graphs.intake.errors import IntakeGraphContractError
 from app.graphs.intake.graph import compile_intake_v2_graph
 from app.graphs.intake.lcel import (
@@ -28,7 +31,11 @@ from app.model_runtime.profiles import (
     ModelProfile,
     system_prompt_sha256,
 )
-from app.model_runtime.transports import ModelTransportRequest, ModelTransportResult
+from app.model_runtime.transports import (
+    ModelTransportCompleted,
+    ModelTransportRequest,
+    ModelTransportResult,
+)
 
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -130,8 +137,7 @@ class RecoveryTransport:
         raise AssertionError("stream is outside this recovery contract")
 
     async def astream(self, request: ModelTransportRequest):
-        raise AssertionError("stream is outside this recovery contract")
-        yield
+        yield ModelTransportCompleted(result=await self.agenerate(request))
 
 
 class CrashBoundaryHook:
@@ -397,3 +403,221 @@ def test_cached_replay_with_different_event_hash_fails_without_model(
             context=IntakeTurnContext("EVENT", conflicting),
         )
     assert transport.generate_calls == 1
+
+
+def _bootstrap_execution(snapshot_ref: object, event_ref: object) -> SimpleNamespace:
+    return SimpleNamespace(
+        admission=SimpleNamespace(
+            command=SimpleNamespace(
+                domain_snapshot_ref=snapshot_ref,
+                event_ref=event_ref,
+            )
+        ),
+        thread_record=SimpleNamespace(last_checkpoint_id=None),
+    )
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_context_loads_exact_inputs_concurrently_then_decodes_in_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot_ref = object()
+    event_ref = object()
+    execution = _bootstrap_execution(snapshot_ref, event_ref)
+
+    class Loader:
+        def __init__(self) -> None:
+            self.started: set[object] = set()
+            self.completed: set[object] = set()
+            self.both_started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def load(self, selected_execution, *, object_ref=None):
+            assert selected_execution is execution
+            assert object_ref in {snapshot_ref, event_ref}
+            self.started.add(object_ref)
+            if self.started == {snapshot_ref, event_ref}:
+                self.both_started.set()
+            await self.release.wait()
+            self.completed.add(object_ref)
+            return object_ref
+
+    loader = Loader()
+    decoded: list[object] = []
+
+    def decode(*, command, loaded, object_ref):
+        assert command is execution.admission.command
+        assert loaded is object_ref
+        assert loader.completed == {snapshot_ref, event_ref}
+        decoded.append(object_ref)
+        return IntakeTurnContext(
+            "SNAPSHOT" if object_ref is snapshot_ref else "EVENT",
+            {"reference": "snapshot" if object_ref is snapshot_ref else "event"},
+        )
+
+    monkeypatch.setattr(intake_executor, "decode_authorized_intake_ingress", decode)
+    executor = object.__new__(intake_executor.CompiledIntakeGraphShadowExecutor)
+    executor._input_loader = loader
+    task = asyncio.create_task(executor._load_context(execution, execution))
+    try:
+        await asyncio.wait_for(loader.both_started.wait(), timeout=0.5)
+        loader.release.set()
+        context = await task
+    finally:
+        loader.release.set()
+        if not task.done():
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    assert context.ingress_kind == "BOOTSTRAP_EVENT"
+    assert context.ingress_payload == {
+        "snapshot": {"reference": "snapshot"},
+        "event": {"reference": "event"},
+    }
+    assert decoded == [snapshot_ref, event_ref]
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_context_preserves_snapshot_decode_error_priority_over_event_load_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot_ref = object()
+    event_ref = object()
+    execution = _bootstrap_execution(snapshot_ref, event_ref)
+
+    class EventLoadFailure(Exception):
+        pass
+
+    class SnapshotDecodeFailure(Exception):
+        pass
+
+    class Loader:
+        def __init__(self) -> None:
+            self.event_failed = asyncio.Event()
+
+        async def load(self, selected_execution, *, object_ref=None):
+            assert selected_execution is execution
+            if object_ref is event_ref:
+                self.event_failed.set()
+                raise EventLoadFailure("event load failed first")
+            assert object_ref is snapshot_ref
+            await self.event_failed.wait()
+            return snapshot_ref
+
+    loader = Loader()
+
+    def decode(*, command, loaded, object_ref):
+        assert command is execution.admission.command
+        assert loaded is snapshot_ref
+        assert object_ref is snapshot_ref
+        raise SnapshotDecodeFailure("snapshot decode wins")
+
+    monkeypatch.setattr(intake_executor, "decode_authorized_intake_ingress", decode)
+    executor = object.__new__(intake_executor.CompiledIntakeGraphShadowExecutor)
+    executor._input_loader = loader
+    task = asyncio.create_task(executor._load_context(execution, execution))
+    try:
+        await asyncio.wait_for(loader.event_failed.wait(), timeout=0.5)
+        with pytest.raises(SnapshotDecodeFailure, match="snapshot decode wins"):
+            await task
+    finally:
+        if not task.done():
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_context_cancellation_cancels_both_inflight_exchange_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot_ref = object()
+    event_ref = object()
+    execution = _bootstrap_execution(snapshot_ref, event_ref)
+
+    class Loader:
+        def __init__(self) -> None:
+            self.started: set[object] = set()
+            self.cancelled: set[object] = set()
+            self.both_started = asyncio.Event()
+            self.never = asyncio.Event()
+
+        async def load(self, selected_execution, *, object_ref=None):
+            assert selected_execution is execution
+            assert object_ref in {snapshot_ref, event_ref}
+            self.started.add(object_ref)
+            if self.started == {snapshot_ref, event_ref}:
+                self.both_started.set()
+            try:
+                await self.never.wait()
+            except asyncio.CancelledError:
+                self.cancelled.add(object_ref)
+                raise
+
+    loader = Loader()
+    monkeypatch.setattr(
+        intake_executor,
+        "decode_authorized_intake_ingress",
+        lambda **_: pytest.fail("cancelled reads must never decode"),
+    )
+    executor = object.__new__(intake_executor.CompiledIntakeGraphShadowExecutor)
+    executor._input_loader = loader
+    task = asyncio.create_task(executor._load_context(execution, execution))
+    try:
+        await asyncio.wait_for(loader.both_started.wait(), timeout=0.5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        if not task.done():
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    assert loader.cancelled == {snapshot_ref, event_ref}
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_context_snapshot_failure_cancels_inflight_event_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot_ref = object()
+    event_ref = object()
+    execution = _bootstrap_execution(snapshot_ref, event_ref)
+
+    class SnapshotLoadFailure(Exception):
+        pass
+
+    class Loader:
+        def __init__(self) -> None:
+            self.event_started = asyncio.Event()
+            self.event_cancelled = asyncio.Event()
+            self.never = asyncio.Event()
+
+        async def load(self, selected_execution, *, object_ref=None):
+            assert selected_execution is execution
+            if object_ref is snapshot_ref:
+                await self.event_started.wait()
+                raise SnapshotLoadFailure("snapshot load failed")
+            assert object_ref is event_ref
+            self.event_started.set()
+            try:
+                await self.never.wait()
+            except asyncio.CancelledError:
+                self.event_cancelled.set()
+                raise
+
+    loader = Loader()
+    monkeypatch.setattr(
+        intake_executor,
+        "decode_authorized_intake_ingress",
+        lambda **_: pytest.fail("failed bootstrap reads must never decode"),
+    )
+    executor = object.__new__(intake_executor.CompiledIntakeGraphShadowExecutor)
+    executor._input_loader = loader
+
+    with pytest.raises(SnapshotLoadFailure, match="snapshot load failed"):
+        await executor._load_context(execution, execution)
+
+    assert loader.event_cancelled.is_set()

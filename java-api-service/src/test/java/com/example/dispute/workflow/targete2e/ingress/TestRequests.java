@@ -11,7 +11,7 @@ final class TestRequests {
     private TestRequests() {}
 
     static TargetIntakeMessageRequest message(TargetIntakeActivationGrant grant) {
-        return new TargetIntakeMessageRequest(
+        return TargetIntakeMessageRequest.roomMessage(
                 grant.caseId(),
                 "ROOM_INTAKE",
                 "MESSAGE_1",

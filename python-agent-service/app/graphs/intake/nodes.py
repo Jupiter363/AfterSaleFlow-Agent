@@ -103,11 +103,14 @@ def import_snapshot_once_or_apply_event(
     if kind == "SNAPSHOT":
         return validate_node_patch(state, _import_snapshot(state, payload))
     if kind == "EVENT":
-        return validate_node_patch(state, _apply_event(state, payload))
+        return validate_node_patch(
+            state,
+            _apply_event(state, payload, allow_initial_form=False),
+        )
     snapshot, event = bootstrap_event_ingress(runtime.context)
     snapshot_patch = _import_snapshot(state, snapshot)
     imported = _state_after_patch(state, snapshot_patch)
-    event_patch = _apply_event(imported, event)
+    event_patch = _apply_event(imported, event, allow_initial_form=True)
     return validate_node_patch(state, _merge_bootstrap_patches(snapshot_patch, event_patch))
 
 
@@ -356,6 +359,8 @@ def _authorized_initial_context_summary(snapshot: Mapping[str, Any]) -> str:
 def _apply_event(
     state: IntakeGraphStateV2,
     event: Mapping[str, Any],
+    *,
+    allow_initial_form: bool,
 ) -> dict[str, Any]:
     if state.get("initial_snapshot_hash") is None:
         raise IntakeGraphContractError("INTAKE_EVENT_BEFORE_SNAPSHOT")
@@ -363,6 +368,7 @@ def _apply_event(
     event_hash = cast(str, event["event_hash"])
     event_id = cast(str, event["event_id"])
     message_id = cast(str, event["message_id"])
+    source_type = cast(str, event["source_type"])
     previous_sequence = state.get("last_event_sequence", 0)
     _reject_stable_record_rebinding(state, "event", event_id, event_hash)
     _reject_stable_record_rebinding(state, "message", message_id, event_hash)
@@ -376,6 +382,44 @@ def _apply_event(
         raise IntakeGraphContractError("INTAKE_EVENT_REPLAY_CONFLICT")
     if sequence != previous_sequence + 1:
         raise IntakeGraphContractError("INTAKE_EVENT_SEQUENCE_INVALID")
+    initial_form = source_type == "INITIAL_FORM"
+    if initial_form and (
+        not allow_initial_form or sequence != 1 or previous_sequence != 0 or bool(state["messages"])
+    ):
+        raise IntakeGraphContractError("INTAKE_INITIAL_FORM_EVENT_INVALID")
+
+    event_record: JsonObject = {
+        "kind": "EVENT",
+        "stable_id": event_id,
+        "content_hash": event_hash,
+        "sequence": sequence,
+        "message_id": message_id,
+        "source_type": source_type,
+        "source_refs": deepcopy(cast(list[str], event["source_refs"])),
+    }
+    source_record: JsonObject = {
+        "kind": "INITIAL_FORM_SOURCE" if initial_form else "MESSAGE",
+        "stable_id": message_id,
+        "content_hash": event_hash,
+        "sequence": sequence,
+        "source_type": source_type,
+    }
+    patch: dict[str, Any] = {
+        "last_event_ref": event_id,
+        "last_event_hash": event_hash,
+        "last_event_sequence": sequence,
+        "node_results": {
+            _stable_record_key("event", event_id): event_record,
+            _stable_record_key("message", message_id): source_record,
+        },
+        "route": "message",
+    }
+    if initial_form:
+        # The form is already represented by the bounded authorized_initial_case_facts
+        # summary.  Keeping its cursor/source receipts without inserting a HUMAN message
+        # preserves replay and provenance while matching the baseline first-turn contract.
+        return patch
+
     message: IntakeMessageState = {
         "message_id": message_id,
         "role": "HUMAN",
@@ -384,28 +428,8 @@ def _apply_event(
         "sequence": sequence,
         "source_hash": event_hash,
     }
-    return {
-        "last_event_ref": event_id,
-        "last_event_hash": event_hash,
-        "last_event_sequence": sequence,
-        "messages": {message["message_id"]: message},
-        "node_results": {
-            _stable_record_key("event", event_id): {
-                "kind": "EVENT",
-                "stable_id": event_id,
-                "content_hash": event_hash,
-                "sequence": sequence,
-                "message_id": message_id,
-            },
-            _stable_record_key("message", message_id): {
-                "kind": "MESSAGE",
-                "stable_id": message_id,
-                "content_hash": event_hash,
-                "sequence": sequence,
-            },
-        },
-        "route": "message",
-    }
+    patch["messages"] = {message["message_id"]: message}
+    return patch
 
 
 def _state_after_patch(
@@ -438,7 +462,10 @@ def _merge_bootstrap_patches(
 ) -> dict[str, Any]:
     """Preserve reducer semantics while making snapshot import precede the first event."""
     patch = deepcopy(dict(snapshot_patch))
-    for field, reducer in (("messages", merge_intake_messages), ("node_results", merge_node_results)):
+    for field, reducer in (
+        ("messages", merge_intake_messages),
+        ("node_results", merge_node_results),
+    ):
         left = patch.get(field)
         right = event_patch.get(field)
         if right is not None:

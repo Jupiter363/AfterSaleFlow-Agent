@@ -350,6 +350,10 @@ public class AgentRunStreamEventService {
                         .orElseThrow(() -> new IllegalArgumentException(
                                 "V2 cursor does not identify a persisted event"));
                 cursorEvent = viewV2(entity, attempt.getAttemptNo(), runAudience);
+                if (!requireFinalCommitFence(run, cursorEvent)) {
+                    throw new IllegalArgumentException(
+                            "V2 cursor identifies a final event that is not formally committed");
+                }
             }
         }
 
@@ -382,7 +386,7 @@ public class AgentRunStreamEventService {
                     afterSequence,
                     attemptCursor,
                     attemptEvents);
-            events.addAll(attemptEvents);
+            events.addAll(applyFinalCommitFence(run, attemptEvents));
             globalTerminal = globalTerminal
                     || attemptEvents.stream().anyMatch(AgentRunStreamEventService::isGlobalTerminal);
             if (globalTerminal && index + 1 < attempts.size()) {
@@ -390,6 +394,33 @@ public class AgentRunStreamEventService {
             }
         }
         return List.copyOf(events);
+    }
+
+    private static List<AgentRunEventView> applyFinalCommitFence(
+            AgentRunEntity run, List<AgentRunEventView> events) {
+        List<AgentRunEventView> visible = new java.util.ArrayList<>(events.size());
+        for (AgentRunEventView event : events) {
+            if (requireFinalCommitFence(run, event)) {
+                visible.add(event);
+            }
+        }
+        return List.copyOf(visible);
+    }
+
+    private static boolean requireFinalCommitFence(
+            AgentRunEntity run, AgentRunEventView event) {
+        if (event == null || !"final".equals(event.type())) {
+            return true;
+        }
+        if (!"COMMITTED".equals(Objects.toString(run.getFinalizationStatus(), null))) {
+            return false;
+        }
+        if (!Objects.equals(run.getCommittedAttemptId(), event.attemptId())
+                || !Objects.equals(run.getFinalStreamSequenceNo(), event.sequence())) {
+            throw new IllegalStateException(
+                    "committed V2 final event conflicts with the formal commit fence");
+        }
+        return true;
     }
 
     private void validateAttemptPage(

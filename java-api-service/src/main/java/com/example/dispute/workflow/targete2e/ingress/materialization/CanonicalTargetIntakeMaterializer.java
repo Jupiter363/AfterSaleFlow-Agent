@@ -47,6 +47,8 @@ import com.example.dispute.workflow.targete2e.ingress.TargetIntakeMessageRequest
 import com.example.dispute.workflow.targete2e.persistence.TargetE2EActivationLedger.CommandAdmission;
 import com.example.dispute.workflow.targete2e.persistence.JdbcTargetE2eApiAuthority;
 import com.example.dispute.workflow.targete2e.persistence.material.TargetIntakeCommandMaterialStore;
+import com.example.dispute.workflow.targete2e.persistence.material.TargetIntakeCommandMaterialStore.CommandLookup;
+import com.example.dispute.workflow.targete2e.persistence.material.TargetIntakeCommandMaterialStore.MaterialSnapshot;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.RetryBudget;
 import com.example.dispute.workflow.temporal.room.intake.IntakeCommandExecutionContext;
 import com.example.dispute.workflow.temporal.room.intake.IntakeTargetAgentRunContext;
@@ -163,14 +165,20 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
                 request.caseId(),
                 request.actor().actorId(),
                 request.actor().role());
+        String messageIdentity = durableMessageIdentity(activation, request);
+        String commandId = "intake-message:" + messageIdentity;
+        String logicalRunId = "target-intake-run:" + messageIdentity;
+        MaterializedIntake replay =
+                replayInitialForm(request, activation, commandId, logicalRunId);
+        if (replay != null) {
+            return replay;
+        }
         participants.activateExistingParty(
                 request.caseId(), request.actor(), OffsetDateTime.ofInstant(now, ZoneOffset.UTC));
         AgentConversationSessionEntity session = agentSessions.resolve(
                 access, RoomType.INTAKE, IntakeAgentTurnService.AGENT_ROLE,
                 activePins.promptVersion(), activePins.memoryPolicyVersion());
 
-        String messageIdentity = token(activation.activationId() + "\n" + request.messageId());
-        String commandId = "intake-message:" + messageIdentity;
         IntakePrivateThreadRegistration.ActorScope actorScope = new IntakePrivateThreadRegistration.ActorScope(
                 request.actor().actorId(),
                 com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole.valueOf(request.actor().role().name()),
@@ -195,10 +203,9 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
                 new IntakeTurnEventPublisher.EventRequest(
                         eventId, request.messageId(), thread, allocation.sequenceNo(),
                         activation.processRevision(), audience(request),
-                        IntakeTurnEventPublisher.SourceType.ROOM_MESSAGE, request.text(),
+                        eventSourceType(request), request.text(),
                         List.of(request.messageId()), request.createdAt(), now)).value());
 
-        String logicalRunId = "target-intake-run:" + messageIdentity;
         String attemptId = "target-intake-attempt:" + messageIdentity + ":1";
         Instant deadline = request.commandDeadlineAt();
         RoomGraphCommand graph = commands.create(new IntakeGraphCommandFactory.CommandRequest(
@@ -244,7 +251,45 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
                 envelope.commandHash(), envelope.commandEnvelopeHash(), activation.roomEpoch(),
                 activation.roomFencingToken());
         var appended = materialStore.append(admission, context);
-        return new MaterializedIntake(commandId, event.payloadRef(), appended.admittedAt());
+        return new MaterializedIntake(
+                commandId, logicalRunId, event.payloadRef(), appended.admittedAt(), deadline);
+    }
+
+    private MaterializedIntake replayInitialForm(
+            TargetIntakeMessageRequest request,
+            TargetIntakeActivationGrant activation,
+            String commandId,
+            String logicalRunId) {
+        if (request.sourceType() != TargetIntakeMessageRequest.SourceType.INITIAL_FORM) {
+            return null;
+        }
+        MaterialSnapshot material =
+                materialStore
+                        .readByRoute(
+                                new CommandLookup(
+                                        activation.tenantSurrogate(),
+                                        request.caseId(),
+                                        commandId,
+                                        activation.roomEpoch(),
+                                        activation.roomFencingToken()))
+                        .orElse(null);
+        if (material == null) {
+            return null;
+        }
+        RoomGraphCommand graph = material.context().targetAgentRun().request().command();
+        if (!commandId.equals(graph.commandId())
+                || !logicalRunId.equals(graph.logicalRunId())
+                || graph.eventRef() == null
+                || graph.deadlineAt() == null) {
+            throw new IllegalStateException(
+                    "persisted target Intake opening identity does not match the active authority");
+        }
+        return new MaterializedIntake(
+                commandId,
+                logicalRunId,
+                graph.eventRef(),
+                material.storedAt(),
+                graph.deadlineAt());
     }
 
     static void requireActor(CaseAccessSessionEntity access, String tenantId, String caseId, String actorId,
@@ -392,6 +437,14 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
         return request.actor().role() == com.example.dispute.config.ActorRole.USER ? Audience.USER : Audience.MERCHANT;
     }
 
+    private static IntakeTurnEventPublisher.SourceType eventSourceType(
+            TargetIntakeMessageRequest request) {
+        return switch (request.sourceType()) {
+            case INITIAL_FORM -> IntakeTurnEventPublisher.SourceType.INITIAL_FORM;
+            case ROOM_MESSAGE -> IntakeTurnEventPublisher.SourceType.ROOM_MESSAGE;
+        };
+    }
+
     private static String nonce(TargetIntakeMessageRequest request) {
         return "target-intake-nonce:" + token(request.messageId());
     }
@@ -404,13 +457,29 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
             TargetIntakeRuntimePins pins) {
         var graphPins = pins.registrationPins();
         return String.join("\n",
-                activation.activationId(), activation.tenantSurrogate(), request.caseId(),
+                activation.tenantSurrogate(), request.caseId(),
                 Long.toString(activation.roomEpoch()), Long.toString(activation.roomFencingToken()),
                 actorScope.actorId(), actorScope.actorRole().name(), actorScope.audience().name(), agentSessionId,
                 graphPins.graphKey(), graphPins.graphVersion(), graphPins.checkpointSchemaVersion(),
                 graphPins.stateSchemaVersion(), graphPins.promptVersion(), graphPins.modelProfileId(),
                 graphPins.outputSchemaVersion(), graphPins.policyVersion(), graphPins.guardrailVersion(),
                 graphPins.toolPolicyVersion(), WriterMode.TEMPORAL.name());
+    }
+
+    static String durableMessageIdentity(
+            TargetIntakeActivationGrant activation, TargetIntakeMessageRequest request) {
+        return token(
+                String.join(
+                        "\n",
+                        activation.tenantSurrogate(),
+                        request.caseId(),
+                        request.roomId(),
+                        Long.toString(activation.roomEpoch()),
+                        Long.toString(activation.roomFencingToken()),
+                        request.actor().actorId(),
+                        request.actor().role().name(),
+                        request.sourceType().name(),
+                        request.messageId()));
     }
 
     private static String caseCapability(String caseId) {

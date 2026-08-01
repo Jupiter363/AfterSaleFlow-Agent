@@ -109,6 +109,7 @@ class EpochAwareIntakeMessageIngressRouterTest {
         TargetIntakeIngressReceipt expected =
                 new TargetIntakeIngressReceipt(
                         "intake-message:MESSAGE_1",
+                        "target-intake-run:MESSAGE_1",
                         HASH,
                         "PENDING_ORCHESTRATION",
                         false,

@@ -255,6 +255,158 @@ class AgentRunStreamEventServiceTest {
     }
 
     @Test
+    void v2FinalRemainsHiddenUntilItsFormalCommitIsVisible() throws Exception {
+        AgentRunEntity run = v2Run();
+        AuthenticatedActor actor = allowV2(run);
+        AgentRunAttemptEntity attempt = v2Attempt(1, "ATTEMPT_UNCOMMITTED_FINAL");
+        when(attemptRepository.findAllByAgentRunIdOrderByAttemptNoAsc(run.getId()))
+                .thenReturn(List.of(attempt));
+        when(eventRepository.findV2ReplayPage(
+                        org.mockito.ArgumentMatchers.eq(run.getId()),
+                        org.mockito.ArgumentMatchers.eq(attempt.getId()),
+                        org.mockito.ArgumentMatchers.eq(-1L),
+                        any()))
+                .thenReturn(List.of(
+                        v2Event(
+                                run.getId(),
+                                attempt.getId(),
+                                0,
+                                StreamEventType.ATTEMPT_STARTED,
+                                emptyV2Payload()),
+                        finalV2Event(run.getId(), attempt.getId(), 1)));
+
+        assertThat(service.replay(run.getId(), -1L, actor))
+                .extracting(value -> value.type())
+                .containsExactly("attempt_started");
+    }
+
+    @Test
+    void matchingFormalCommitMakesV2FinalVisible() throws Exception {
+        AgentRunEntity run = v2Run();
+        AgentRunAttemptEntity attempt = v2Attempt(1, "ATTEMPT_COMMITTED_FINAL");
+        markFinalCommitted(run, attempt.getId(), 1L);
+        AuthenticatedActor actor = allowV2(run);
+        when(attemptRepository.findAllByAgentRunIdOrderByAttemptNoAsc(run.getId()))
+                .thenReturn(List.of(attempt));
+        when(eventRepository.findV2ReplayPage(
+                        org.mockito.ArgumentMatchers.eq(run.getId()),
+                        org.mockito.ArgumentMatchers.eq(attempt.getId()),
+                        org.mockito.ArgumentMatchers.eq(-1L),
+                        any()))
+                .thenReturn(List.of(
+                        v2Event(
+                                run.getId(),
+                                attempt.getId(),
+                                0,
+                                StreamEventType.ATTEMPT_STARTED,
+                                emptyV2Payload()),
+                        finalV2Event(run.getId(), attempt.getId(), 1)));
+
+        assertThat(service.replay(run.getId(), -1L, actor))
+                .extracting(value -> value.type())
+                .containsExactly("attempt_started", "final");
+    }
+
+    @Test
+    void committedV2FinalWithWrongAttemptFailsClosed() throws Exception {
+        AgentRunEntity run = v2Run();
+        AgentRunAttemptEntity attempt = v2Attempt(1, "ATTEMPT_FINAL_WRONG_ATTEMPT");
+        markFinalCommitted(run, "ANOTHER_ATTEMPT", 1L);
+        AuthenticatedActor actor = allowV2(run);
+        when(attemptRepository.findAllByAgentRunIdOrderByAttemptNoAsc(run.getId()))
+                .thenReturn(List.of(attempt));
+        when(eventRepository.findV2ReplayPage(
+                        org.mockito.ArgumentMatchers.eq(run.getId()),
+                        org.mockito.ArgumentMatchers.eq(attempt.getId()),
+                        org.mockito.ArgumentMatchers.eq(-1L),
+                        any()))
+                .thenReturn(List.of(
+                        v2Event(
+                                run.getId(),
+                                attempt.getId(),
+                                0,
+                                StreamEventType.ATTEMPT_STARTED,
+                                emptyV2Payload()),
+                        finalV2Event(run.getId(), attempt.getId(), 1)));
+
+        assertThatThrownBy(() -> service.replay(run.getId(), -1L, actor))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("formal commit fence");
+    }
+
+    @Test
+    void committedV2FinalWithWrongSequenceFailsClosed() throws Exception {
+        AgentRunEntity run = v2Run();
+        AgentRunAttemptEntity attempt = v2Attempt(1, "ATTEMPT_FINAL_WRONG_SEQUENCE");
+        markFinalCommitted(run, attempt.getId(), 2L);
+        AuthenticatedActor actor = allowV2(run);
+        when(attemptRepository.findAllByAgentRunIdOrderByAttemptNoAsc(run.getId()))
+                .thenReturn(List.of(attempt));
+        when(eventRepository.findV2ReplayPage(
+                        org.mockito.ArgumentMatchers.eq(run.getId()),
+                        org.mockito.ArgumentMatchers.eq(attempt.getId()),
+                        org.mockito.ArgumentMatchers.eq(-1L),
+                        any()))
+                .thenReturn(List.of(
+                        v2Event(
+                                run.getId(),
+                                attempt.getId(),
+                                0,
+                                StreamEventType.ATTEMPT_STARTED,
+                                emptyV2Payload()),
+                        finalV2Event(run.getId(), attempt.getId(), 1)));
+
+        assertThatThrownBy(() -> service.replay(run.getId(), -1L, actor))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("formal commit fence");
+    }
+
+    @Test
+    void reconnectFromCommittedTerminalCursorDoesNotRepeatFinal() throws Exception {
+        AgentRunEntity run = v2Run();
+        AgentRunAttemptEntity attempt = v2Attempt(1, "ATTEMPT_TERMINAL_CURSOR");
+        markFinalCommitted(run, attempt.getId(), 1L);
+        AuthenticatedActor actor = allowV2(run);
+        AgentRunStreamEventEntity terminal = finalV2Event(run.getId(), attempt.getId(), 1);
+        when(attemptRepository.findAllByAgentRunIdOrderByAttemptNoAsc(run.getId()))
+                .thenReturn(List.of(attempt));
+        when(eventRepository.findV2Event(run.getId(), attempt.getId(), 1L))
+                .thenReturn(Optional.of(terminal));
+        when(eventRepository.findV2ReplayPage(
+                        org.mockito.ArgumentMatchers.eq(run.getId()),
+                        org.mockito.ArgumentMatchers.eq(attempt.getId()),
+                        org.mockito.ArgumentMatchers.eq(1L),
+                        any()))
+                .thenReturn(List.of());
+
+        assertThat(service.replay(
+                        run.getId(), "v2:" + attempt.getId() + ":1", actor))
+                .isEmpty();
+    }
+
+    @Test
+    void uncommittedTerminalCursorCannotAdvanceReplay() throws Exception {
+        AgentRunEntity run = v2Run();
+        AgentRunAttemptEntity attempt = v2Attempt(1, "ATTEMPT_UNCOMMITTED_CURSOR");
+        AuthenticatedActor actor = allowV2(run);
+        AgentRunStreamEventEntity terminal = finalV2Event(run.getId(), attempt.getId(), 1);
+        when(attemptRepository.findAllByAgentRunIdOrderByAttemptNoAsc(run.getId()))
+                .thenReturn(List.of(attempt));
+        when(eventRepository.findV2Event(run.getId(), attempt.getId(), 1L))
+                .thenReturn(Optional.of(terminal));
+
+        assertThatThrownBy(() -> service.replay(
+                        run.getId(), "v2:" + attempt.getId() + ":1", actor))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("not formally committed");
+        verify(eventRepository, never()).findV2ReplayPage(
+                org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.anyLong(),
+                any());
+    }
+
+    @Test
     void v2EventAudienceMustMatchTheRunAudience() throws Exception {
         AgentRunEntity run = v2Run();
         AuthenticatedActor actor = allowV2(run);
@@ -901,6 +1053,39 @@ class AgentRunStreamEventServiceTest {
     private static AgentStreamEvent.Payload emptyV2Payload() {
         return new AgentStreamEvent.Payload(
                 null, null, null, null, null, null, null, null, null, null);
+    }
+
+    private AgentRunStreamEventEntity finalV2Event(
+            String runId, String attemptId, long sequence) throws Exception {
+        return v2Event(
+                runId,
+                attemptId,
+                sequence,
+                StreamEventType.FINAL,
+                new AgentStreamEvent.Payload(
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        "result-ref",
+                        "result-hash",
+                        null,
+                        null));
+    }
+
+    private static void markFinalCommitted(
+            AgentRunEntity run, String attemptId, long finalSequence) throws Exception {
+        setField(run, "finalizationStatus", "COMMITTED");
+        setField(run, "committedAttemptId", attemptId);
+        setField(run, "finalStreamSequenceNo", finalSequence);
+    }
+
+    private static void setField(Object target, String name, Object value) throws Exception {
+        Field field = AgentRunEntity.class.getDeclaredField(name);
+        field.setAccessible(true);
+        field.set(target, value);
     }
 
     // 所属模块：【Agent 流式运行 / 自动化测试层】「AgentRunStreamEventServiceTest.jsonArray(List)」。

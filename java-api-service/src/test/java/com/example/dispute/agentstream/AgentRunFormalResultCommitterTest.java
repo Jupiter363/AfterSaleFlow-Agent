@@ -15,6 +15,7 @@ import com.example.dispute.agentstream.application.AgentRunDomainResultCommitter
 import com.example.dispute.agentstream.application.AgentRunFormalResultCommitter;
 import com.example.dispute.agentstream.application.AgentRunFormalResultCommitter.FormalResultCommit;
 import com.example.dispute.agentstream.application.AgentRunLedger;
+import com.example.dispute.agentstream.application.AgentRunStreamEventService;
 import com.example.dispute.workflow.application.TemporalAgentRunV2WorkflowLauncher;
 import com.example.dispute.workflow.contract.v1.AgentExecutionManifest;
 import com.example.dispute.workflow.contract.v1.AgentRunFinalizationReceipt;
@@ -56,6 +57,7 @@ class AgentRunFormalResultCommitterTest {
     @Mock private AgentRunLedger ledger;
     @Mock private AgentExecutionManifestStore manifestStore;
     @Mock private AgentRunDomainResultCommitter domainCommitter;
+    @Mock private AgentRunStreamEventService streamEvents;
 
     private AgentRunFormalResultCommitter committer;
 
@@ -65,6 +67,7 @@ class AgentRunFormalResultCommitterTest {
                 ledger,
                 new AgentRunDomainResultCommitterRegistry(List.of(domainCommitter)),
                 manifestStore,
+                streamEvents,
                 MAPPER);
     }
 
@@ -84,9 +87,11 @@ class AgentRunFormalResultCommitterTest {
 
         assertThat(committer.commit(command)).isEqualTo(receipt);
 
-        InOrder order = inOrder(domainCommitter, manifestStore);
+        InOrder order = inOrder(domainCommitter, manifestStore, streamEvents);
         order.verify(domainCommitter).commit(org.mockito.ArgumentMatchers.any());
         order.verify(manifestStore).append(command.manifestCommit());
+        order.verify(streamEvents).wakeUpAfterCommit(
+                receipt.agentRunId(), receipt.attemptId(), receipt.finalStreamSequenceNo());
     }
 
     @Test
@@ -104,6 +109,8 @@ class AgentRunFormalResultCommitterTest {
         assertThat(replay.committedAt()).isEqualTo(committed.committedAt());
         verify(domainCommitter, never()).commit(org.mockito.ArgumentMatchers.any());
         verify(manifestStore, never()).append(org.mockito.ArgumentMatchers.any());
+        verify(streamEvents).wakeUpAfterCommit(
+                committed.agentRunId(), committed.attemptId(), committed.finalStreamSequenceNo());
     }
 
     @Test
@@ -145,6 +152,7 @@ class AgentRunFormalResultCommitterTest {
                 ledger,
                 new AgentRunDomainResultCommitterRegistry(List.of()),
                 manifestStore,
+                streamEvents,
                 MAPPER);
 
         assertThatThrownBy(() -> committer.commit(command))

@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from datetime import datetime, timezone
 from typing import Any, Literal, Protocol, cast
 
+from langchain_core.messages import AIMessageChunk
 from langchain_core.runnables import RunnableConfig
 
 from app.contracts.v1.models import (
@@ -43,10 +46,19 @@ from app.graph_runtime.target_e2e import (
     TargetE2ERoomProposal,
     TargetE2ERoomProposalSource,
 )
+from app.graphs.intake.lcel import (
+    _TARGET_INTAKE_VISIBLE_FIELDS,
+    _contains_forbidden_evidence_request,
+    _is_evidence_material_gap,
+)
 from app.graphs.intake.runtime import IntakeRuntimeBundle
 from app.graphs.intake.state import IntakeGraphStateV2, IntakeTurnContext
 from app.graphs.intake.validators import validate_state
+from app.model_runtime.callbacks import governed_events_from_chunk
 from app.model_runtime.transports import ModelTransport
+
+
+_INTAKE_VISIBLE_FIELDS = frozenset(spec.field for spec in _TARGET_INTAKE_VISIBLE_FIELDS)
 
 
 class CompiledIntakeStateGraphPort(Protocol):
@@ -58,7 +70,7 @@ class CompiledIntakeStateGraphPort(Protocol):
         config: RunnableConfig,
         *,
         context: IntakeTurnContext,
-        stream_mode: str,
+        stream_mode: str | list[str],
     ) -> AsyncIterator[Any]: ...
 
     async def aget_state(self, config: RunnableConfig) -> Any: ...
@@ -77,9 +89,7 @@ class CompiledIntakeGraphShadowExecutor:
         input_loader: IntakeInputLoader,
         proposal_store: IntakeProposalStore,
         clock: Callable[[], datetime] | None = None,
-        runtime_execution_projector: (
-            Callable[[GatewayExecution], GatewayExecution] | None
-        ) = None,
+        runtime_execution_projector: (Callable[[GatewayExecution], GatewayExecution] | None) = None,
     ) -> None:
         if not provider or len(provider) > 64 or not model or len(model) > 128:
             raise ValueError("Intake provider binding is invalid")
@@ -130,28 +140,53 @@ class CompiledIntakeGraphShadowExecutor:
         graph_input = self._graph_input(runtime_execution)
         config = self._graph_config(runtime_execution)
         emitted_usage: list[Usage] = []
+        pending_usage_update: GraphPublicUpdate | None = None
+        pending_dossier_updates: list[GraphPublicUpdate] = []
+        room_utterance_emitted = False
         source = graph.astream(
             graph_input,
             config,
             context=context,
-            stream_mode="custom",
+            stream_mode=["messages", "custom"],
         )
         close = getattr(source, "aclose", None)
         if not callable(close):
             raise GraphContractError("compiled Intake Graph stream is not closable")
         try:
             async for candidate in source:
-                if not isinstance(candidate, GraphPublicUpdate):
-                    raise GraphContractError("compiled Intake Graph emitted an untyped update")
-                if candidate.payload.usage is not None:
-                    emitted_usage.append(candidate.payload.usage)
-                yield self._event(
-                    execution,
-                    sequence,
-                    candidate.event_type,
-                    candidate.payload,
-                )
-                sequence += 1
+                for update in self._public_updates(candidate):
+                    self._validate_public_update(update)
+                    if update.event_type == "usage":
+                        if pending_usage_update is not None:
+                            raise GraphContractError("INTAKE_USAGE_STREAM_DUPLICATE")
+                        usage_update = update.payload.usage
+                        assert usage_update is not None
+                        emitted_usage.append(usage_update)
+                        pending_usage_update = update
+                        continue
+                    if update.payload.field == "room_utterance":
+                        if room_utterance_emitted:
+                            raise GraphContractError("INTAKE_ROOM_UTTERANCE_STREAM_DUPLICATE")
+                        safe_update = self._validated_room_utterance_update(update)
+                        yield self._event(
+                            execution,
+                            sequence,
+                            safe_update.event_type,
+                            safe_update.payload,
+                        )
+                        room_utterance_emitted = True
+                        sequence += 1
+                        continue
+                    if not update.payload.field.startswith("case_detail."):
+                        raise GraphContractError(
+                            "compiled Intake Graph emitted an unsupported visible field"
+                        )
+                    # The dossier is a provisional view of the terminal proposal.
+                    # Hold it until the typed/business guards, immutable proposal
+                    # write, result materialization, and fenced terminal commit all
+                    # succeed.  This makes cancellation and any terminal failure
+                    # fail closed without a cross-service reset protocol.
+                    pending_dossier_updates.append(update)
         finally:
             await cast(Callable[[], Awaitable[None]], close)()
 
@@ -217,6 +252,22 @@ class CompiledIntakeGraphShadowExecutor:
             raise GraphTerminalBindingError(
                 "Intake generic result was not bound to the terminal fence"
             )
+        for update in pending_dossier_updates:
+            yield self._event(
+                execution,
+                sequence,
+                update.event_type,
+                update.payload,
+            )
+            sequence += 1
+        if pending_usage_update is not None:
+            yield self._event(
+                execution,
+                sequence,
+                pending_usage_update.event_type,
+                pending_usage_update.payload,
+            )
+            sequence += 1
         if not emitted_usage and usage.total_tokens > 0:
             yield self._event(
                 execution,
@@ -236,6 +287,103 @@ class CompiledIntakeGraphShadowExecutor:
         )
 
     @staticmethod
+    def _public_updates(candidate: Any) -> tuple[GraphPublicUpdate, ...]:
+        if isinstance(candidate, GraphPublicUpdate):
+            # A graph-local object is not evidence that a user-visible field came
+            # from the governed model callback.  Intake must never accept a
+            # bare update because doing so lets a node bypass the callback
+            # provenance boundary below.
+            raise GraphContractError("INTAKE_PUBLIC_UPDATE_BYPASS_FORBIDDEN")
+        if not isinstance(candidate, tuple) or len(candidate) != 2:
+            raise GraphContractError("compiled Intake Graph emitted an untyped update")
+        mode, payload = candidate
+        if mode == "custom":
+            if not isinstance(payload, GraphPublicUpdate):
+                raise GraphContractError("compiled Intake Graph emitted an untyped custom update")
+            # ``custom`` is retained only for the bounded usage telemetry that
+            # LangGraph may expose outside the message stream.  Visible content
+            # has a stricter provenance requirement: it must originate in an
+            # AIMessageChunk's governed callback event.
+            if payload.event_type != "usage":
+                raise GraphContractError("INTAKE_CUSTOM_VISIBLE_DELTA_FORBIDDEN")
+            return (payload,)
+        if mode != "messages":
+            raise GraphContractError("compiled Intake Graph emitted an unsupported stream mode")
+        if not isinstance(payload, tuple) or len(payload) != 2:
+            raise GraphContractError("compiled Intake Graph emitted an invalid message update")
+        chunk, metadata = payload
+        if not isinstance(chunk, AIMessageChunk):
+            return ()
+        events = governed_events_from_chunk(chunk)
+        if not events:
+            # Raw model tokens, completion JSON, reasoning, and metadata are private.
+            return ()
+        if not isinstance(metadata, Mapping):
+            raise GraphContractError("compiled Intake Graph message metadata is invalid")
+        updates: list[GraphPublicUpdate] = []
+        for event in events:
+            if (
+                event.get("schema_version") != "governed-model-event.v1"
+                or event.get("node_name") != "intake_lcel"
+                or event.get("field") not in _INTAKE_VISIBLE_FIELDS
+            ):
+                raise GraphContractError("compiled Intake Graph governed event is invalid")
+            updates.append(
+                GraphPublicUpdate.visible_delta(
+                    node=event["node_name"],
+                    field=event["field"],
+                    delta=event["delta"],
+                )
+            )
+        return tuple(updates)
+
+    @staticmethod
+    def _validate_public_update(update: GraphPublicUpdate) -> None:
+        if update.event_type != "visible_delta":
+            if update.event_type != "usage":
+                raise GraphContractError("compiled Intake Graph public update is invalid")
+            return
+        field = update.payload.field
+        delta = update.payload.delta
+        if field not in _INTAKE_VISIBLE_FIELDS or not isinstance(delta, str) or not delta:
+            raise GraphContractError("compiled Intake Graph visible update is invalid")
+        # room_utterance is intentionally a complete JSON string.  Its decoded
+        # text is validated by _validated_room_utterance_update immediately before
+        # publication; do not inspect the quoted transport representation here.
+        if field == "room_utterance":
+            return
+        if _contains_forbidden_evidence_request(delta) or (
+            field == "case_detail.missing_information" and _is_evidence_material_gap(delta)
+        ):
+            raise GraphContractError("INTAKE_EVIDENCE_REQUEST_FORBIDDEN")
+
+    @staticmethod
+    def _validated_room_utterance_update(
+        update: GraphPublicUpdate,
+    ) -> GraphPublicUpdate:
+        payload = update.payload
+        if (
+            update.event_type != "visible_delta"
+            or payload.node != "intake_lcel"
+            or payload.field != "room_utterance"
+            or not isinstance(payload.delta, str)
+        ):
+            raise GraphContractError("compiled Intake Graph room utterance is invalid")
+        try:
+            room_utterance = json.loads(payload.delta)
+        except (TypeError, json.JSONDecodeError) as error:
+            raise GraphContractError("INTAKE_ROOM_UTTERANCE_STREAM_INVALID") from error
+        if not isinstance(room_utterance, str) or not room_utterance.strip():
+            raise GraphContractError("INTAKE_ROOM_UTTERANCE_STREAM_INVALID")
+        if _contains_forbidden_evidence_request(room_utterance):
+            raise GraphContractError("INTAKE_EVIDENCE_REQUEST_FORBIDDEN")
+        return GraphPublicUpdate.visible_delta(
+            node=payload.node,
+            field=payload.field,
+            delta=room_utterance,
+        )
+
+    @staticmethod
     def _graph_input(execution: GatewayExecution) -> Mapping[str, Any]:
         record = execution.thread_record
         if record.last_checkpoint_id is None:
@@ -252,18 +400,44 @@ class CompiledIntakeGraphShadowExecutor:
         if fresh and command.domain_snapshot_ref is not None and command.event_ref is not None:
             snapshot_ref = command.domain_snapshot_ref
             event_ref = command.event_ref
-            snapshot = decode_authorized_intake_ingress(
-                command=command,
-                loaded=await self._input_loader.load(execution, object_ref=snapshot_ref),
-                object_ref=snapshot_ref,
+            # The bootstrap snapshot and event are immutable, independently
+            # authorized Java-exchange reads.  Start both reads before awaiting
+            # either one to avoid serial pre-model latency, but retain the legacy
+            # validation/error order below: snapshot load/decode always wins over
+            # event load/decode when both are invalid.  Failure or outer
+            # cancellation also cancels the independent peer request.
+            snapshot_task = asyncio.create_task(
+                self._input_loader.load(execution, object_ref=snapshot_ref)
             )
-            event = decode_authorized_intake_ingress(
-                command=command,
-                loaded=await self._input_loader.load(execution, object_ref=event_ref),
-                object_ref=event_ref,
+            event_task = asyncio.create_task(
+                self._input_loader.load(execution, object_ref=event_ref)
             )
+            try:
+                loaded_snapshot = await snapshot_task
+                snapshot = decode_authorized_intake_ingress(
+                    command=command,
+                    loaded=loaded_snapshot,
+                    object_ref=snapshot_ref,
+                )
+                loaded_event = await event_task
+                event = decode_authorized_intake_ingress(
+                    command=command,
+                    loaded=loaded_event,
+                    object_ref=event_ref,
+                )
+            except BaseException:
+                # Preserve the snapshot-first contract without leaving the
+                # independent peer request running after an early failure or
+                # outer cancellation.
+                for task in (snapshot_task, event_task):
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(snapshot_task, event_task, return_exceptions=True)
+                raise
             if snapshot.ingress_kind != "SNAPSHOT" or event.ingress_kind != "EVENT":
-                raise GraphContractError("fresh Intake command did not load its exact bootstrap inputs")
+                raise GraphContractError(
+                    "fresh Intake command did not load its exact bootstrap inputs"
+                )
             return IntakeTurnContext(
                 "BOOTSTRAP_EVENT",
                 {"snapshot": snapshot.ingress_payload, "event": event.ingress_payload},

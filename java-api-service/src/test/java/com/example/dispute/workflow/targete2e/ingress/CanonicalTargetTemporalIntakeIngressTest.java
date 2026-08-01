@@ -31,7 +31,9 @@ class CanonicalTargetTemporalIntakeIngressTest {
 
     private static final String HASH = "c".repeat(64);
     private static final String COMMAND_ID = "intake-message:0123456789abcdef0123456789abcdef";
+    private static final String RUN_ID = "target-intake-run:0123456789abcdef0123456789abcdef";
     private static final Instant ADMITTED_AT = Instant.parse("2026-07-27T01:00:01Z");
+    private static final Instant MATERIAL_DEADLINE = Instant.parse("2026-07-27T01:45:00Z");
 
     @Mock private CaseCommandService commandService;
     @Mock private TargetIntakeMaterializer materializer;
@@ -48,7 +50,13 @@ class CanonicalTargetTemporalIntakeIngressTest {
                         HASH,
                         512);
         when(materializer.materialize(request))
-                .thenReturn(new MaterializedIntake(COMMAND_ID, event, ADMITTED_AT));
+                .thenReturn(
+                        new MaterializedIntake(
+                                COMMAND_ID,
+                                RUN_ID,
+                                event,
+                                ADMITTED_AT,
+                                MATERIAL_DEADLINE));
         when(commandService.accept(
                         eq(request.caseId()),
                         eq(COMMAND_ID),
@@ -80,11 +88,12 @@ class CanonicalTargetTemporalIntakeIngressTest {
         assertThat(command.getValue().roomEpoch()).isEqualTo(7L);
         assertThat(command.getValue().expectedProcessRevision()).isEqualTo(13L);
         assertThat(command.getValue().deadlineAt())
-                .isEqualTo(request.commandDeadlineAt())
-                .isEqualTo(Instant.parse("2026-07-27T02:00:00.123456Z"));
+                .isEqualTo(MATERIAL_DEADLINE)
+                .isNotEqualTo(request.commandDeadlineAt());
         assertThat(command.getValue().payloadRef().uri()).isEqualTo(event.uri());
         assertThat(command.getValue().payloadRef().sha256()).isEqualTo(event.sha256());
         assertThat(receipt.commandId()).isEqualTo(COMMAND_ID);
+        assertThat(receipt.runId()).isEqualTo(RUN_ID);
         assertThat(receipt.payloadSha256()).isEqualTo(HASH);
         assertThat(receipt.admittedAt()).isEqualTo(ADMITTED_AT);
     }

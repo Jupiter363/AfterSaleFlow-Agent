@@ -40,13 +40,14 @@ public class CanonicalTargetTemporalIntakeIngress implements TargetTemporalIntak
                                         material.eventPayload().sha256(),
                                         material.eventPayload().sizeBytes()),
                                 request.activation().processRevision(),
-                                request.commandDeadlineAt()),
+                                material.deadlineAt()),
                         request.actor(),
                         request.traceId(),
                         request.idempotencyKey(),
                         null);
         return new TargetIntakeIngressReceipt(
                 acceptance.command().commandId(),
+                material.runId(),
                 material.eventPayload().sha256(),
                 acceptance.commandStatus(),
                 acceptance.idempotentReplay(),

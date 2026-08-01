@@ -18,6 +18,8 @@ import java.util.Set;
 /** Deterministically applies an approved Intake patch without weakening stable fact bindings. */
 public final class IntakeDossierProjectionMerger {
 
+    private static final String DOSSIER_SCHEMA_VERSION = "intake-dossier.v2";
+
     private static final Set<String> DOSSIER_BRANCHES = Set.of(
             "schema_version",
             "case_story",
@@ -323,6 +325,16 @@ public final class IntakeDossierProjectionMerger {
 
     private static void normalizeProjectionMetadata(
             ObjectNode dossier, ObjectNode patch, IntakeTurnProposal proposal) {
+        JsonNode proposedSchema = patch.get("schema_version");
+        if (proposedSchema != null
+                && (!proposedSchema.isTextual()
+                        || !DOSSIER_SCHEMA_VERSION.equals(proposedSchema.textValue()))) {
+            throw rejected(
+                    "INTAKE_DOSSIER_SCHEMA_INVALID",
+                    "dossier patch schema is not the formal Intake dossier schema");
+        }
+        dossier.put("schema_version", DOSSIER_SCHEMA_VERSION);
+
         boolean ready = proposal.readiness() == IntakeTurnProposal.Readiness.READY_TO_CONFIRM;
         JsonNode proposedReady = patch.path("intake_quality").path("ready_for_next_step");
         if (!proposedReady.isMissingNode()

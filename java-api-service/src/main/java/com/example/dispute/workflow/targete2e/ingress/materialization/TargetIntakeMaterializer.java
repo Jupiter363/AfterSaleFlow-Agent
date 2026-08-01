@@ -1,5 +1,6 @@
 package com.example.dispute.workflow.targete2e.ingress.materialization;
 
+import com.example.dispute.workflow.targete2e.ingress.TargetIntakeIngressReceipt;
 import com.example.dispute.workflow.targete2e.ingress.TargetIntakeMessageRequest;
 
 /** Creates the durable target-lane material that a case command is allowed to reference. */
@@ -9,6 +10,20 @@ public interface TargetIntakeMaterializer {
 
     record MaterializedIntake(
             String commandId,
+            String runId,
             com.example.dispute.workflow.contract.v1.RoomGraphCommand.SnapshotRef eventPayload,
-            java.time.Instant admittedAt) {}
+            java.time.Instant admittedAt,
+            java.time.Instant deadlineAt) {
+
+        public MaterializedIntake {
+            if (!TargetIntakeIngressReceipt.runIdForCommand(commandId).equals(runId)) {
+                throw new IllegalArgumentException("runId does not match commandId");
+            }
+            if (eventPayload == null || admittedAt == null || deadlineAt == null) {
+                throw new IllegalArgumentException(
+                        "eventPayload, admittedAt and deadlineAt must not be null");
+            }
+            deadlineAt = deadlineAt.truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+        }
+    }
 }
