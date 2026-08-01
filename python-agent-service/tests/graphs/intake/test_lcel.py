@@ -181,7 +181,8 @@ def test_system_prompt_preserves_case_language_dossier_and_matrix_semantics() ->
         "also emit a nonblank case_story summary and dispute_core_state.core_conflict"
         in normalized_prompt
     )
-    assert "without inventing a respondent position" in normalized_prompt
+    assert "silence is not a reported attitude" in normalized_prompt
+    assert "never invent a respondent position" in normalized_prompt
     assert (
         "Java alone validates the current actor and source authority and deterministically "
         "converts "

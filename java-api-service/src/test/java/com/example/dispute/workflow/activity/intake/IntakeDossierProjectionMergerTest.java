@@ -172,7 +172,11 @@ class IntakeDossierProjectionMergerTest {
                 {
                   "case_story":{"one_sentence_summary":"The product repeatedly shuts down after ten days."},
                   "dispute_focus":{"focus_points":["Recurring shutdown","Troubleshooting did not resolve it"]},
-                  "missing_information":{"missing_fields":["product_model","purchase_date"]}
+                  "missing_information":{"missing_fields":["product_model","purchase_date"]},
+                  "respondent_attitude":{
+                    "status":"NOT_RESPONDED",
+                    "note":"The merchant has not provided a direct statement."
+                  }
                 }
                 """);
         MatrixAuthority authority = new MatrixAuthority(
@@ -204,6 +208,14 @@ class IntakeDossierProjectionMergerTest {
                 .isEqualTo("REPLACE_OR_REPAIR");
         assertThat(result.dossier().at("/case_fact_matrix/matrix_kind").asText())
                 .isEqualTo("INITIATOR_FROZEN");
+        assertThat(result.dossier()
+                        .at("/case_fact_matrix/claims/respondent_reported_by_initiator")
+                        .isNull())
+                .isTrue();
+        assertThat(result.dossier()
+                        .at("/case_fact_matrix/fact_rows/0/positions/MERCHANT/stance")
+                        .asText())
+                .isEqualTo("NOT_ADDRESSED");
         assertThat(result.dossier().has("unilateral_case_matrix")).isFalse();
     }
 

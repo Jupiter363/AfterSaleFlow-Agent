@@ -477,8 +477,13 @@ public final class IntakeUnilateralMatrixPolicy {
         }
         ObjectNode result = dossier.objectNode();
         result.put("respondent_role", authority.respondentRole().name());
-        String normalizedAttitude = requireIdentifierValue(
-                firstText(attitude, "attitude"), "respondent attitude");
+        String proposedAttitude = firstText(attitude, "attitude", "status");
+        if ("NOT_RESPONDED".equals(proposedAttitude)
+                || "NOT_ADDRESSED".equals(proposedAttitude)) {
+            return null;
+        }
+        String normalizedAttitude =
+                requireIdentifierValue(proposedAttitude, "respondent attitude");
         if (!CLAIM_ATTITUDES.contains(normalizedAttitude)) {
             throw rejected(
                     "INTAKE_MATRIX_DOSSIER_INCOMPLETE",
@@ -488,7 +493,7 @@ public final class IntakeUnilateralMatrixPolicy {
         result.put(
                 "position_summary",
                 requireBoundedValue(
-                        firstText(attitude, "position_summary", "position"),
+                        firstText(attitude, "position_summary", "position", "note"),
                         20_000,
                         "respondent position"));
         result.put("source_type", "INITIATOR_SUBJECTIVE_REPORT");
