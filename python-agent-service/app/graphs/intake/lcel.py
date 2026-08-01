@@ -25,6 +25,7 @@ from app.graph_runtime.state_lens import StateLens
 from app.graphs.intake.contracts import (
     MODEL_CONTROLLED_FORBIDDEN_FIELDS,
     IntakeCognitionDraft,
+    UnilateralCaseMatrixDraftV1,
 )
 from app.graphs.intake.errors import IntakeGraphContractError
 from app.graphs.intake.state import IntakeGraphStateV2
@@ -1189,7 +1190,62 @@ def _generation_parts(
     draft = generation.get("draft")
     if not isinstance(message, AIMessage) or not isinstance(draft, IntakeCognitionDraft):
         raise IntakeGraphContractError("INTAKE_LCEL_GENERATION_INVALID")
-    return cast(IntakeGraphStateV2, state), message, draft
+    typed_state = cast(IntakeGraphStateV2, state)
+    return typed_state, message, _normalize_model_matrix_fact_keys(typed_state, draft)
+
+
+def _normalize_model_matrix_fact_keys(
+    state: IntakeGraphStateV2,
+    draft: IntakeCognitionDraft,
+) -> IntakeCognitionDraft:
+    """Demote model-minted formal-looking fact keys to proposal-local keys.
+
+    A model has no authority to mint a stable ``FACT_*`` identifier.  Providers
+    nevertheless sometimes use that prefix for a genuinely new unilateral fact,
+    even when the prompt requires ``NEW_*``.  Preserve every FACT key that is
+    already visible in the authorized dossier, but deterministically rewrite an
+    unknown one to the proposal-local namespace before the normal matrix policy
+    validates fingerprints, sources, membership, and summary references.  Any
+    ambiguous collision remains a hard contract failure.
+    """
+
+    matrix_patch = draft.matrix_patch
+    if not isinstance(matrix_patch, UnilateralCaseMatrixDraftV1):
+        return draft
+
+    existing_fact_ids = _fact_ids(state.get("dossier_draft", {}))
+    proposed_keys = {row.fact_key for row in matrix_patch.fact_rows}
+    replacements: dict[str, str] = {}
+    for row in matrix_patch.fact_rows:
+        fact_key = row.fact_key
+        if not fact_key.startswith("FACT_") or fact_key in existing_fact_ids:
+            continue
+        replacement = f"NEW_{fact_key.removeprefix('FACT_')}"
+        if replacement in proposed_keys or replacement in replacements.values():
+            raise IntakeGraphContractError("INTAKE_MATRIX_FACT_ID_CONFLICT")
+        replacements[fact_key] = replacement
+
+    if not replacements:
+        return draft
+
+    normalized = draft.model_dump(mode="json", exclude_none=True, exclude_unset=True)
+    normalized_patch = normalized["matrix_patch"]
+    if not isinstance(normalized_patch, dict):
+        raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_INVALID")
+    rows = normalized_patch.get("fact_rows")
+    summary_keys = normalized_patch.get("summary_source_fact_keys")
+    if not isinstance(rows, list) or not isinstance(summary_keys, list):
+        raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_INVALID")
+    for row in rows:
+        if not isinstance(row, dict):
+            raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_INVALID")
+        fact_key = row.get("fact_key")
+        if isinstance(fact_key, str) and fact_key in replacements:
+            row["fact_key"] = replacements[fact_key]
+    normalized_patch["summary_source_fact_keys"] = [
+        replacements.get(fact_key, fact_key) for fact_key in summary_keys
+    ]
+    return IntakeCognitionDraft.model_validate(normalized)
 
 
 def _validated_model_metadata(

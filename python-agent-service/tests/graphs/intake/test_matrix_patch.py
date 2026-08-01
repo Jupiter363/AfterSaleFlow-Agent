@@ -265,6 +265,62 @@ def test_unknown_null_dossier_key_is_not_canonicalized_away() -> None:
         IntakeCognitionDraft.model_validate(cognition)
 
 
+def test_incomplete_provider_acceptance_is_normalized_conservatively() -> None:
+    cognition = _cognition(_unilateral_patch())
+    cognition["recommendation"] = "ACCEPTED"
+
+    parsed = IntakeCognitionDraft.model_validate(cognition)
+
+    assert parsed.readiness == "INCOMPLETE"
+    assert parsed.missing_fields == ("supporting_evidence",)
+    assert parsed.recommendation == "NEED_MORE_INFO"
+
+
+@pytest.mark.parametrize(
+    ("readiness", "missing_fields", "recommendation", "expected_readiness", "expected_recommendation"),
+    [
+        ("INCOMPLETE", [], "ACCEPTED", "INCOMPLETE", "NEED_MORE_INFO"),
+        (
+            "READY_TO_CONFIRM",
+            ["supporting_evidence"],
+            "ACCEPTED",
+            "INCOMPLETE",
+            "NEED_MORE_INFO",
+        ),
+        (
+            "READY_TO_CONFIRM",
+            [],
+            "NEED_MORE_INFO",
+            "INCOMPLETE",
+            "NEED_MORE_INFO",
+        ),
+        (
+            "INCOMPLETE",
+            [],
+            "NOT_ADMISSIBLE",
+            "NEEDS_REVIEW",
+            "NOT_ADMISSIBLE",
+        ),
+    ],
+)
+def test_provider_readiness_pairs_are_normalized_without_auto_admission(
+    readiness: str,
+    missing_fields: list[str],
+    recommendation: str,
+    expected_readiness: str,
+    expected_recommendation: str,
+) -> None:
+    cognition = _cognition(_unilateral_patch())
+    cognition["readiness"] = readiness
+    cognition["missing_fields"] = missing_fields
+    cognition["recommendation"] = recommendation
+
+    parsed = IntakeCognitionDraft.model_validate(cognition)
+
+    assert parsed.readiness == expected_readiness
+    assert parsed.recommendation == expected_recommendation
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

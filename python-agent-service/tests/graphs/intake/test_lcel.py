@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 from langchain_core.exceptions import OutputParserException
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import (
@@ -28,9 +28,12 @@ from app.graphs.intake.graph import (
 )
 from app.graphs.intake.lcel import (
     INTAKE_SYSTEM_PROMPT,
+    _generation_parts,
     _is_vetted_intake_model_runnable,
+    _validate_business_output,
     build_intake_model_node,
 )
+from app.graphs.intake.contracts import IntakeCognitionDraft
 from app.graphs.intake.nodes import deterministic_message_fallback
 from app.graphs.intake.state import IntakeTurnContext, new_intake_graph_state
 from app.model_runtime.governed_chat_model import GovernedChatModel
@@ -258,6 +261,120 @@ def test_real_intake_lcel_is_governed_object_flow_with_human_text_isolation(
     assert marker in str(messages[1].content)
     assert bindings["private"]["actor_scope_hash"] not in str(messages)
     assert bindings["private"]["agent_session_id"] not in str(messages)
+
+
+def test_model_minted_fact_key_is_demoted_before_projection(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+) -> None:
+    matrix_patch = {
+        "schema_version": "unilateral_case_matrix.draft.v1",
+        "fact_rows": [
+            {
+                "fact_key": "FACT_DAMAGE",
+                "category": "PRODUCT_STATE",
+                "fact_target": "Whether the order arrived damaged.",
+                "materiality": "CORE",
+                "position_summary": "The current actor reports visible damage.",
+                "asserted_value": "damaged",
+                "source_scope": "CURRENT_SOURCE",
+            }
+        ],
+        "summary_source_fact_keys": ["FACT_DAMAGE"],
+    }
+    document = _draft(
+        matrix_patch=matrix_patch,
+        readiness="INCOMPLETE",
+        missing_fields=["supporting_evidence"],
+        recommendation="NEED_MORE_INFO",
+    )
+    document["dossier_patch"]["requested_resolution"]["source_hash"] = event[
+        "event_hash"
+    ]
+    transport = IntakeTransport(document)
+    built = build_intake_model_node(
+        transport=transport,
+        profile=_profile(),
+        policy=_policy(),
+    )
+    graph = compile_intake_v2_graph(intake_lcel=built.runnable)
+    state = graph.invoke(
+        new_intake_graph_state(bindings=bindings, version_pins=version_pins),
+        context=IntakeTurnContext("SNAPSHOT", snapshot),
+    )
+    state["bindings"]["command"].update(
+        command_id="COMMAND_P4_USER_2",
+        logical_run_id="RUN_P4_USER_2",
+        attempt_id="ATTEMPT_P4_USER_2_1",
+    )
+
+    result = graph.invoke(state, context=IntakeTurnContext("EVENT", event))
+
+    projected = result["result_json"]["matrix_patch"]
+    assert projected["fact_rows"][0]["fact_key"] == "NEW_DAMAGE"
+    assert projected["summary_source_fact_keys"] == ["NEW_DAMAGE"]
+
+
+def test_model_fact_key_normalization_preserves_authorized_stable_keys(
+    bindings,
+    version_pins,
+) -> None:
+    state = new_intake_graph_state(bindings=bindings, version_pins=version_pins)
+    state["dossier_draft"] = {
+        "case_fact_matrix": {
+            "fact_rows": [{"fact_id": "FACT_DAMAGE"}],
+        }
+    }
+    draft = IntakeCognitionDraft.model_validate(
+        _draft(
+            matrix_patch={
+                "schema_version": "unilateral_case_matrix.draft.v1",
+                "fact_rows": [
+                    {
+                        "fact_key": "FACT_DAMAGE",
+                        "category": "PRODUCT_STATE",
+                        "fact_target": "Whether the order arrived damaged.",
+                        "materiality": "CORE",
+                        "position_summary": "The damage remains asserted.",
+                        "asserted_value": "damaged",
+                        "source_scope": "CURRENT_SOURCE",
+                    },
+                    {
+                        "fact_key": "FACT_COLOR",
+                        "category": "PRODUCT_STATE",
+                        "fact_target": "The delivered item's color.",
+                        "materiality": "SUPPORTING",
+                        "position_summary": "The delivered color is disputed.",
+                        "asserted_value": "blue",
+                        "source_scope": "CURRENT_SOURCE",
+                    },
+                ],
+                "summary_source_fact_keys": ["FACT_DAMAGE", "FACT_COLOR"],
+            },
+            readiness="INCOMPLETE",
+            missing_fields=["supporting_evidence"],
+            recommendation="NEED_MORE_INFO",
+        )
+    )
+
+    _, _, normalized = _generation_parts(
+        {
+            "state": state,
+            "generation": {"message": AIMessage(content="{}"), "draft": draft},
+        }
+    )
+
+    assert normalized.matrix_patch is not None
+    assert [row.fact_key for row in normalized.matrix_patch.fact_rows] == [
+        "FACT_DAMAGE",
+        "NEW_COLOR",
+    ]
+    assert normalized.matrix_patch.summary_source_fact_keys == (
+        "FACT_DAMAGE",
+        "NEW_COLOR",
+    )
 
 
 @pytest.mark.parametrize(
@@ -1124,13 +1241,6 @@ def test_strict_parser_rejects_non_numeric_confidence(confidence) -> None:
             ),
             "INTAKE_LCEL_ACTOR_ISOLATION_VIOLATION",
         ),
-        (
-            _draft(
-                readiness="INCOMPLETE",
-                recommendation="ACCEPTED",
-            ),
-            "INTAKE_LCEL_READINESS_PRECONDITION_FAILED",
-        ),
     ],
 )
 def test_guardrail_rejects_reference_actor_and_readiness_violations(
@@ -1159,6 +1269,25 @@ def test_guardrail_rejects_reference_actor_and_readiness_violations(
 
     with pytest.raises(IntakeGraphContractError, match=error_code):
         graph.invoke(state, context=IntakeTurnContext("EVENT", event))
+
+
+def test_guardrail_still_rejects_an_invalid_typed_readiness_pair(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+) -> None:
+    state = _event_state(bindings, version_pins, snapshot, event)
+    valid = IntakeCognitionDraft.model_validate(_draft())
+    invalid = valid.model_copy(
+        update={"readiness": "INCOMPLETE", "recommendation": "ACCEPTED"}
+    )
+
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_LCEL_READINESS_PRECONDITION_FAILED",
+    ):
+        _validate_business_output(state, invalid)
 
 
 def test_version_or_tool_profile_drift_fails_before_transport(

@@ -388,9 +388,13 @@ class IntakeCognitionDraft(StrictIntakeModel):
         boundary.  They can also materialize every nullable dossier branch as JSON
         ``null``; at this model-output boundary only, a null patch branch means
         "omitted" and is removed.  Unknown null keys remain untouched and fail the
-        strict dossier contract.  The normal MatrixPatch validation still runs
-        afterwards, while every formal matrix authority field remains forbidden
-        inside the dossier.
+        strict dossier contract.  Providers can also return mutually contradictory
+        readiness and recommendation enums.  Reconcile only those enum pairs at
+        this model-output boundary, always toward the non-admitting state: missing
+        information remains incomplete, a rejection remains reviewable, and an
+        inconsistent acceptance becomes ``NEED_MORE_INFO``.  The normal MatrixPatch
+        validation still runs afterwards, while every formal matrix authority field
+        remains forbidden inside the dossier.
         """
 
         if not isinstance(value, dict):
@@ -423,6 +427,22 @@ class IntakeCognitionDraft(StrictIntakeModel):
                 raise ValueError("matrix_patch cannot be present in both envelope locations")
             canonical["matrix_patch"] = canonical_dossier.pop("matrix_patch")
         canonical["dossier_patch"] = canonical_dossier
+        missing_fields = canonical.get("missing_fields")
+        has_missing_fields = isinstance(missing_fields, list | tuple) and bool(
+            missing_fields
+        )
+        readiness = canonical.get("readiness")
+        recommendation = canonical.get("recommendation")
+        if has_missing_fields and readiness == "READY_TO_CONFIRM":
+            readiness = "INCOMPLETE"
+        if recommendation == "NOT_ADMISSIBLE":
+            readiness = "NEEDS_REVIEW"
+        elif recommendation == "NEED_MORE_INFO" and readiness == "READY_TO_CONFIRM":
+            readiness = "INCOMPLETE"
+        elif recommendation == "ACCEPTED" and readiness != "READY_TO_CONFIRM":
+            recommendation = "NEED_MORE_INFO"
+        canonical["readiness"] = readiness
+        canonical["recommendation"] = recommendation
         return canonical
 
     @model_validator(mode="after")
