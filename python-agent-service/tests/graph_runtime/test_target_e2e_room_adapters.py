@@ -138,11 +138,21 @@ def test_target_fixture_transport_emits_a_valid_intake_cognition_draft_without_n
     )
 
     assert initiator.model == TARGET_E2E_FIXTURE_MODEL
-    assert (
-        IntakeCognitionDraft.model_validate_json(initiator.json_document)
-        .matrix_patch.schema_version
-        == "unilateral_case_matrix.draft.v1"
-    )
+    initiator_draft = IntakeCognitionDraft.model_validate_json(initiator.json_document)
+    assert initiator_draft.matrix_patch.schema_version == "unilateral_case_matrix.draft.v1"
+    assert initiator_draft.dossier_patch.case_story == {
+        "one_sentence_summary": "The parties ask the platform to resolve a signed-but-not-received parcel dispute."
+    }
+    assert initiator_draft.dossier_patch.claim_resolution == {
+        "requested_resolution": "REFUND",
+        "reason_summary": "The initiator reports that the signed parcel was not received.",
+        "position_summary": "The initiator requests a refund for the undelivered parcel.",
+    }
+    assert initiator_draft.dossier_patch.dispute_core_state == {
+        "core_conflict": "Whether the signed parcel was actually received by the user.",
+        "facts_in_dispute": ["Parcel receipt after a signed delivery record."],
+        "next_verification_focus": ["Delivery record and recipient confirmation."],
+    }
     assert (
         IntakeCognitionDraft.model_validate_json(respondent.json_document)
         .matrix_patch.schema_version

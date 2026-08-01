@@ -138,7 +138,7 @@ def _fixture_draft(request: ModelTransportRequest) -> IntakeCognitionDraft:
     if matrix is None:
         return IntakeCognitionDraft(
             room_utterance="The initiator's signed-but-not-received claim is ready for confirmation.",
-            dossier_patch={"schema_version": "intake-dossier.v2"},
+            dossier_patch=_fixture_dossier_patch(),
             matrix_patch={
                 "schema_version": "unilateral_case_matrix.draft.v1",
                 "fact_rows": [
@@ -188,7 +188,7 @@ def _fixture_draft(request: ModelTransportRequest) -> IntakeCognitionDraft:
         )
     return IntakeCognitionDraft(
         room_utterance="The respondent's position is ready for confirmation.",
-        dossier_patch={"schema_version": "intake-dossier.v2"},
+        dossier_patch=_fixture_dossier_patch(),
         matrix_patch={
             "schema_version": "case_fact_matrix.delta.v2",
             "fact_rows": delta_rows,
@@ -210,6 +210,28 @@ def _fixture_human_prompt(request: ModelTransportRequest) -> str:
     if len(request.messages) != 2 or not isinstance(request.messages[1].content, str):
         raise GraphContractError("TARGET_E2E_FIXTURE_PROMPT_REQUIRED")
     return request.messages[1].content
+
+
+def _fixture_dossier_patch() -> dict[str, Any]:
+    """Supply the non-model-controlled facts required by the formal matrix reducer."""
+    return {
+        "schema_version": "intake-dossier.v2",
+        "case_story": {
+            "one_sentence_summary": (
+                "The parties ask the platform to resolve a signed-but-not-received parcel dispute."
+            )
+        },
+        "claim_resolution": {
+            "requested_resolution": "REFUND",
+            "reason_summary": "The initiator reports that the signed parcel was not received.",
+            "position_summary": "The initiator requests a refund for the undelivered parcel.",
+        },
+        "dispute_core_state": {
+            "core_conflict": "Whether the signed parcel was actually received by the user.",
+            "facts_in_dispute": ["Parcel receipt after a signed delivery record."],
+            "next_verification_focus": ["Delivery record and recipient confirmation."],
+        },
+    }
 
 
 def _fixture_audience(content: str) -> str:
