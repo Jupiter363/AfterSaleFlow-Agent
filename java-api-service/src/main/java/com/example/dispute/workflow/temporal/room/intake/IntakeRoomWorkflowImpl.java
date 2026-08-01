@@ -1497,6 +1497,18 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
             context.retryBudget().providerAttemptsRemaining(),
             invocation.mode() == ActivityInvocationMode.RECONCILE_ONLY ? 0 : 1,
             context.retryBudget().repairsRemaining());
+    long activityProcessRevision = processRevision;
+    long activityRoomRevision = roomRevision;
+    if (context.hasPinnedTargetBranchAuthority()) {
+      long expectedProcessRevision = context.expectedProcessRevision();
+      long expectedRoomRevision = context.expectedRoomRevision();
+      if (expectedProcessRevision < processRevision || expectedRoomRevision < roomRevision) {
+        throw new IllegalArgumentException(
+            "target branch authority revisions are behind the Intake workflow");
+      }
+      activityProcessRevision = expectedProcessRevision;
+      activityRoomRevision = expectedRoomRevision;
+    }
     return new ActivityEnvelope(
         "intake-activity-envelope.v1",
         command.tenantSurrogate(),
@@ -1510,8 +1522,8 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
         command.actorScopeHash(),
         command.payloadRef(),
         command.payloadHash(),
-        processRevision,
-        roomRevision,
+        activityProcessRevision,
+        activityRoomRevision,
         context.deadlineEpochMillis(),
         invocationBudget,
         versions,

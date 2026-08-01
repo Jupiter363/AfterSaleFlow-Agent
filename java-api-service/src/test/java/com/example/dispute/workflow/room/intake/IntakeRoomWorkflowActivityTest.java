@@ -146,6 +146,85 @@ class IntakeRoomWorkflowActivityTest {
   }
 
   @Test
+  void targetBranchUsesPinnedAuthorityAheadOfTheLocalWorkflowRevisions() {
+    try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+      String workflowQueue = "target-intake-branch-pinned-authority";
+      FakeActivities activities = new FakeActivities();
+      Worker workflowWorker = environment.newWorker(workflowQueue);
+      workflowWorker.registerWorkflowImplementationTypes(IntakeRoomWorkflowImpl.class);
+      Worker activityWorker = environment.newWorker(CASE_CONTROL);
+      activityWorker.registerActivitiesImplementations(activities);
+      environment.start();
+
+      IntakeRoomWorkflow workflow = workflow(environment, workflowQueue, "branch-pinned-authority");
+      WorkflowClient.start(workflow::run, start());
+      IntakeWorkflowCommand message = rootCommand(1, "CMD_ROOT_MESSAGE");
+      workflow.commandAccepted(message);
+      workflow.domainEventCommitted(
+          rootTurnEvent(message, "EVENT_ROOT_MESSAGE", 1, 0, 0));
+      IntakeRoomSnapshot locallyBehind =
+          awaitState(workflow, state -> state.roomPhase() == IntakeRoomPhase.READY_TO_CONFIRM);
+      assertThat(locallyBehind.processRevision()).isZero();
+      assertThat(locallyBehind.roomRevision()).isZero();
+
+      IntakeWorkflowCommand accept =
+          pinnedBranchCommand(
+              2,
+              "CMD_PINNED_ACCEPT",
+              BranchOperation.INITIATOR_ACCEPT,
+              1,
+              1);
+      workflow.commandAccepted(accept);
+
+      IntakeRoomSnapshot applied =
+          awaitState(workflow, state -> state.roomPhase() == IntakeRoomPhase.WAITING_PARTY);
+      assertThat(applied.protocolErrorCode()).isNull();
+      assertThat(activities.acceptRequests).hasSize(1);
+      ActivityEnvelope envelope = activities.acceptRequests.getFirst().envelope();
+      assertThat(envelope.processRevision()).isEqualTo(1);
+      assertThat(envelope.roomRevision()).isEqualTo(1);
+    }
+  }
+
+  @Test
+  void targetBranchRejectsPinnedAuthorityBehindTheLocalWorkflowRevisions() {
+    try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+      String workflowQueue = "target-intake-branch-stale-authority";
+      FakeActivities activities = new FakeActivities();
+      Worker workflowWorker = environment.newWorker(workflowQueue);
+      workflowWorker.registerWorkflowImplementationTypes(IntakeRoomWorkflowImpl.class);
+      Worker activityWorker = environment.newWorker(CASE_CONTROL);
+      activityWorker.registerActivitiesImplementations(activities);
+      environment.start();
+
+      IntakeRoomWorkflow workflow = workflow(environment, workflowQueue, "branch-stale-authority");
+      WorkflowClient.start(workflow::run, start(1));
+      IntakeWorkflowCommand message = rootCommand(1, "CMD_ROOT_MESSAGE_STALE_AUTHORITY");
+      workflow.commandAccepted(message);
+      workflow.domainEventCommitted(
+          rootTurnEvent(message, "EVENT_ROOT_MESSAGE_STALE_AUTHORITY", 1, 1, 1));
+      awaitState(workflow, state -> state.roomPhase() == IntakeRoomPhase.READY_TO_CONFIRM);
+
+      workflow.commandAccepted(
+          pinnedBranchCommand(
+              2,
+              "CMD_STALE_PINNED_ACCEPT",
+              BranchOperation.INITIATOR_ACCEPT,
+              0,
+              0));
+
+      IntakeRoomSnapshot rejected =
+          awaitState(
+              workflow,
+              state -> "INTAKE_ACTIVITY_RECEIPT_INVALID".equals(state.protocolErrorCode()));
+      assertThat(rejected.processRevision()).isEqualTo(1);
+      assertThat(rejected.roomRevision()).isEqualTo(1);
+      assertThat(rejected.pendingCommandId()).isEqualTo("CMD_STALE_PINNED_ACCEPT");
+      assertThat(activities.acceptRequests).isEmpty();
+    }
+  }
+
+  @Test
   void policyCapsAndPropagatesTheFrozenActivityRetryBudget() {
     ActivityOptions options =
         IntakeActivityTemporalPolicy.options(
@@ -1121,6 +1200,106 @@ class IntakeRoomWorkflowActivityTest {
   private static IntakeWorkflowCommand command(
       long sequence, String commandId, IntakeCommandType type, BranchOperation branchOperation) {
     return command(sequence, commandId, type, branchOperation, 2);
+  }
+
+  private static IntakeWorkflowCommand rootCommand(long sequence, String commandId) {
+    return new IntakeWorkflowCommand(
+        "intake-workflow-command.v1",
+        commandId,
+        TENANT,
+        CASE_ID,
+        EPOCH,
+        FENCE,
+        sequence,
+        IntakeCommandType.INTAKE_MESSAGE,
+        IntakeParty.INITIATOR,
+        INITIATOR_SCOPE,
+        "urn:after-sale-flow:intake-command:" + commandId,
+        hash(sequence),
+        "intake.operation:" + CASE_ID + ":" + commandId,
+        hash(sequence + 1));
+  }
+
+  private static IntakeWorkflowCommand pinnedBranchCommand(
+      long sequence,
+      String commandId,
+      BranchOperation operation,
+      long expectedProcessRevision,
+      long expectedRoomRevision) {
+    return new IntakeWorkflowCommand(
+        "intake-workflow-command.v1",
+        commandId,
+        TENANT,
+        CASE_ID,
+        EPOCH,
+        FENCE,
+        sequence,
+        IntakeCommandType.INTAKE_CONFIRM,
+        IntakeParty.INITIATOR,
+        INITIATOR_SCOPE,
+        "urn:after-sale-flow:intake-command:" + commandId,
+        hash(sequence),
+        "intake.operation:" + CASE_ID + ":" + commandId,
+        hash(sequence + 1),
+        new IntakeCommandExecutionContext(
+            "intake-command-execution-context.v4",
+            THREAD_ID,
+            AGENT_SESSION,
+            Long.MAX_VALUE,
+            new com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.RetryBudget(
+                "intake-retry-budget.v1", 0, 2, 0),
+            operation,
+            null,
+            expectedProcessRevision,
+            expectedRoomRevision));
+  }
+
+  private static IntakeDomainEventRef rootTurnEvent(
+      IntakeWorkflowCommand command,
+      String eventId,
+      long eventSequence,
+      long processRevision,
+      long roomRevision) {
+    String resultHash = hash(eventSequence + 4);
+    IntakeAgentRunRef agentRun =
+        new IntakeAgentRunRef(
+            "intake-agent-run-ref.v1",
+            "RUN_" + command.commandId(),
+            "ATTEMPT_" + command.commandId(),
+            resultHash);
+    IntakeGraphExecutionRef graph =
+        new IntakeGraphExecutionRef(
+            "intake-graph-execution-ref.v1",
+            THREAD_ID,
+            command.commandId(),
+            "intake.v2",
+            "2.0.0",
+            "CHECKPOINT_" + command.commandId(),
+            "urn:after-sale-flow:graph-result:" + command.commandId(),
+            resultHash,
+            "urn:after-sale-flow:intake-proposal:" + command.commandId(),
+            hash(eventSequence + 5));
+    return new IntakeDomainEventRef(
+        "intake-domain-event-ref.v1",
+        eventId,
+        "urn:after-sale-flow:intake-event:" + eventId,
+        hash(eventSequence + 3),
+        eventSequence,
+        IntakeDomainEventType.TURN_READY_TO_CONFIRM,
+        command.party(),
+        command.commandId(),
+        command.tenantSurrogate(),
+        command.caseId(),
+        command.roomEpoch(),
+        command.fencingToken(),
+        command.actorScopeHash(),
+        command.operationKey(),
+        command.requestHash(),
+        resultHash,
+        processRevision,
+        roomRevision,
+        agentRun,
+        graph);
   }
 
   private static IntakeWorkflowCommand command(

@@ -6,6 +6,7 @@ import static com.example.dispute.workflow.temporal.room.intake.IntakeProtocolVa
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.BranchOperation;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.RetryBudget;
 import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import java.util.Objects;
 
 /** Reference-only metadata that opts an admitted command into the Temporal Activity path. */
@@ -16,7 +17,29 @@ public record IntakeCommandExecutionContext(
     long deadlineEpochMillis,
     RetryBudget retryBudget,
     BranchOperation branchOperation,
-    IntakeTargetAgentRunContext targetAgentRun) {
+    IntakeTargetAgentRunContext targetAgentRun,
+    @JsonInclude(JsonInclude.Include.NON_NULL) Long expectedProcessRevision,
+    @JsonInclude(JsonInclude.Include.NON_NULL) Long expectedRoomRevision) {
+
+  public IntakeCommandExecutionContext(
+      String schemaVersion,
+      String threadId,
+      String agentSessionId,
+      long deadlineEpochMillis,
+      RetryBudget retryBudget,
+      BranchOperation branchOperation,
+      IntakeTargetAgentRunContext targetAgentRun) {
+    this(
+        schemaVersion,
+        threadId,
+        agentSessionId,
+        deadlineEpochMillis,
+        retryBudget,
+        branchOperation,
+        targetAgentRun,
+        null,
+        null);
+  }
 
   public IntakeCommandExecutionContext(
       String schemaVersion,
@@ -38,9 +61,10 @@ public record IntakeCommandExecutionContext(
   public IntakeCommandExecutionContext {
     if (!"intake-command-execution-context.v1".equals(schemaVersion)
         && !"intake-command-execution-context.v2".equals(schemaVersion)
-        && !"intake-command-execution-context.v3".equals(schemaVersion)) {
+        && !"intake-command-execution-context.v3".equals(schemaVersion)
+        && !"intake-command-execution-context.v4".equals(schemaVersion)) {
       throw new IllegalArgumentException(
-          "schemaVersion must be intake-command-execution-context.v1, v2, or v3");
+          "schemaVersion must be intake-command-execution-context.v1, v2, v3, or v4");
     }
     requireThreadId(threadId, "threadId");
     requireIdentifier(agentSessionId, "agentSessionId");
@@ -62,6 +86,24 @@ public record IntakeCommandExecutionContext(
         throw new IllegalArgumentException("v3 execution context requires a branch operation");
       }
     }
+    if ("intake-command-execution-context.v4".equals(schemaVersion)) {
+      if (targetAgentRun != null) {
+        throw new IllegalArgumentException("v4 execution context cannot carry target AgentRun state");
+      }
+      if (branchOperation == null) {
+        throw new IllegalArgumentException("v4 execution context requires a branch operation");
+      }
+      if (expectedProcessRevision == null
+          || expectedRoomRevision == null
+          || expectedProcessRevision < 0
+          || expectedRoomRevision < 0) {
+        throw new IllegalArgumentException(
+            "v4 execution context requires non-negative branch authority revisions");
+      }
+    } else if (expectedProcessRevision != null || expectedRoomRevision != null) {
+      throw new IllegalArgumentException(
+          "only v4 execution context may carry branch authority revisions");
+    }
   }
 
   @JsonIgnore
@@ -71,7 +113,13 @@ public record IntakeCommandExecutionContext(
 
   @JsonIgnore
   public boolean isTargetBranch() {
-    return "intake-command-execution-context.v3".equals(schemaVersion);
+    return "intake-command-execution-context.v3".equals(schemaVersion)
+        || "intake-command-execution-context.v4".equals(schemaVersion);
+  }
+
+  @JsonIgnore
+  public boolean hasPinnedTargetBranchAuthority() {
+    return "intake-command-execution-context.v4".equals(schemaVersion);
   }
 
   void requireCompatible(IntakeCommandType commandType, IntakeParty party) {

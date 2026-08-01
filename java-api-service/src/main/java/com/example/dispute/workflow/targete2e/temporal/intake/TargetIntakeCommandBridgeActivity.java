@@ -108,12 +108,15 @@ public final class TargetIntakeCommandBridgeActivity implements TargetIntakeComm
             : IntakeCommandType.INTAKE_CANCEL;
     IntakeCommandExecutionContext context =
         new IntakeCommandExecutionContext(
-            "intake-command-execution-context.v3",
+            "intake-command-execution-context.v4",
             resolved.threadId(),
             resolved.agentSessionId(),
             command.deadlineAt().toEpochMilli(),
             new RetryBudget("intake-retry-budget.v1", 0, 3, 0),
-            resolved.operation());
+            resolved.operation(),
+            null,
+            command.expectedProcessRevision(),
+            request.expectedRoomRevision());
     return new IntakeWorkflowCommand(
         "intake-workflow-command.v1",
         command.commandId(),

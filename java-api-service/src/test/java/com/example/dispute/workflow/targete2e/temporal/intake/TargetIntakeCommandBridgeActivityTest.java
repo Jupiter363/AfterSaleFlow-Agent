@@ -131,7 +131,7 @@ class TargetIntakeCommandBridgeActivityTest {
   }
 
   @Test
-  void bindsInitiatorRejectFromTheImmutableBranchSourceWithV3ActivityContext() {
+  void bindsInitiatorRejectWithExactV4BranchAuthority() {
     Fixture fixture = fixture();
     CaseCommandRef command = branchCommand(CommandType.INTAKE_CONFIRM, ActorRole.USER);
     TargetIntakeCommandBridgeActivity activity =
@@ -146,13 +146,35 @@ class TargetIntakeCommandBridgeActivityTest {
                     BranchOperation.INITIATOR_REJECT));
 
     var bound =
-        activity.bindCommand(new TargetIntakeCommandBridgeActivities.BindRequest(command, 17, 3));
+        activity.bindCommand(new TargetIntakeCommandBridgeActivities.BindRequest(command, 17, 1));
 
     assertThat(bound.executionContext()).isNotNull();
-    assertThat(bound.executionContext().schemaVersion()).isEqualTo("intake-command-execution-context.v3");
+    assertThat(bound.executionContext().schemaVersion()).isEqualTo("intake-command-execution-context.v4");
     assertThat(bound.executionContext().branchOperation()).isEqualTo(BranchOperation.INITIATOR_REJECT);
     assertThat(bound.executionContext().threadId()).isEqualTo(INITIATOR_THREAD_ID);
+    assertThat(bound.executionContext().expectedProcessRevision()).isEqualTo(1);
+    assertThat(bound.executionContext().expectedRoomRevision()).isEqualTo(1);
     assertThat(bound.operationKey()).contains("initiator.reject");
+  }
+
+  @Test
+  void oldExecutionContextsDoNotSerializeTheNewBranchAuthorityFields() {
+    ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+    IntakeCommandExecutionContext v2 = fixture().context();
+    IntakeCommandExecutionContext v3 =
+        new IntakeCommandExecutionContext(
+            "intake-command-execution-context.v3",
+            INITIATOR_THREAD_ID,
+            "session-initiator",
+            DEADLINE.toEpochMilli(),
+            new RetryBudget("intake-retry-budget.v1", 0, 3, 0),
+            BranchOperation.INITIATOR_ACCEPT);
+
+    assertThat(mapper.valueToTree(v2).has("expectedProcessRevision")).isFalse();
+    assertThat(mapper.valueToTree(v2).has("expectedRoomRevision")).isFalse();
+    assertThat(mapper.valueToTree(v3).has("expectedProcessRevision")).isFalse();
+    assertThat(mapper.valueToTree(v3).has("expectedRoomRevision")).isFalse();
+    assertThat(mapper.valueToTree(v3).has("targetAgentRun")).isTrue();
   }
 
   @Test
@@ -266,7 +288,7 @@ class TargetIntakeCommandBridgeActivityTest {
                 + ".json",
             hash,
             1),
-        9,
+        1,
         DEADLINE.minusSeconds(60),
         DEADLINE,
         "00-" + HASH_A.substring(0, 32) + "-" + HASH_B.substring(0, 16) + "-01",
