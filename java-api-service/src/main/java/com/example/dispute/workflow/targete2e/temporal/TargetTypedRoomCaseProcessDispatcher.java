@@ -30,6 +30,7 @@ import com.example.dispute.workflow.temporal.room.hearing.HearingPartyCommand;
 import com.example.dispute.workflow.temporal.room.intake.IntakeRoomStart;
 import com.example.dispute.workflow.temporal.room.intake.IntakeRoomWorkflow;
 import com.example.dispute.workflow.temporal.room.intake.IntakeWorkflowCommand;
+import com.example.dispute.workflow.temporal.room.intake.TargetIntakeSourceEventRef;
 import com.example.dispute.workflow.temporal.room.outcome.OutcomeRoomWorkflow;
 import com.example.dispute.workflow.temporal.room.outcome.OutcomeCompletionRequest;
 import com.example.dispute.workflow.temporal.room.outcome.OutcomeCompletionResult;
@@ -86,6 +87,8 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
   private static final String TARGET_INTAKE_TOOL_POLICY_VERSION = "tools.none.v1";
   public static final String TARGET_INTAKE_PARTY_SCOPE_AUTHORITY_CHANGE_ID =
       "target-intake-party-scope-authority-v1";
+  public static final String TARGET_INTAKE_SOURCE_EVENT_CURSOR_CHANGE_ID =
+      "target-intake-source-event-cursor-v1";
   public static final String TARGET_REVIEW_NON_EXECUTION_CHANGE_ID =
       "target-review-non-execution-v1";
 
@@ -331,6 +334,14 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
         request.caseId(),
         request.roomEpoch(),
         request.fencingToken());
+  }
+
+  static TargetIntakeSourceEventRef targetIntakeSourceCursorObservation(
+      CaseDomainEventRef event, long fencingToken) {
+    Objects.requireNonNull(event, "event");
+    return TargetIntakeSourceEventRef.ROOM_MESSAGE_CREATED.equals(event.eventType())
+        ? TargetIntakeSourceEventRef.from(event, fencingToken)
+        : null;
   }
 
   private TargetTypedRoomChildHandle startEvidence(ProvisionRoomEpoch request) {
@@ -678,6 +689,22 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
       child.commandAccepted(bound);
       advanceRoomRevision();
       return true;
+    }
+
+    @Override
+    protected void onDomainEvent(CaseDomainEventRef event) {
+      TargetIntakeSourceEventRef sourceEvent =
+          targetIntakeSourceCursorObservation(event, fencingToken);
+      if (sourceEvent == null) {
+        return;
+      }
+      int sourceCursorVersion =
+          Workflow.getVersion(
+              TARGET_INTAKE_SOURCE_EVENT_CURSOR_CHANGE_ID, Workflow.DEFAULT_VERSION, 1);
+      if (sourceCursorVersion == Workflow.DEFAULT_VERSION) {
+        return;
+      }
+      child.targetSourceEventObserved(sourceEvent);
     }
 
     @Override

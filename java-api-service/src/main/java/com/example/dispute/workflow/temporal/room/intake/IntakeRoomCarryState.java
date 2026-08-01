@@ -29,7 +29,8 @@ public record IntakeRoomCarryState(
     List<ObservedCommand> observedCommands,
     List<ObservedEvent> observedEvents,
     List<IntakeThreadInitialization> threadInitializations,
-    IntakeAgentRunChildState targetAgentRunChild) {
+    IntakeAgentRunChildState targetAgentRunChild,
+    List<ObservedTargetSourceEvent> observedTargetSourceEvents) {
 
   public static final int MAX_OBSERVED = 256;
   public static final int MAX_THREAD_INITIALIZATIONS = 2;
@@ -86,13 +87,73 @@ public record IntakeRoomCarryState(
         observedCommands,
         observedEvents,
         threadInitializations,
-        null);
+        null,
+        List.of());
+  }
+
+  public IntakeRoomCarryState(
+      String schemaVersion,
+      IntakeRoomPhase roomPhase,
+      IntakeParty activeParty,
+      long nextCommandSequence,
+      long nextEventSequence,
+      long processedCommandCount,
+      long processedEventCount,
+      boolean initiatorComplete,
+      boolean respondentUnlocked,
+      boolean respondentComplete,
+      IntakeParty readinessParty,
+      String lastEventId,
+      String lastEventRef,
+      String lastEventHash,
+      IntakeAgentRunRef lastAgentRunRef,
+      IntakeGraphExecutionRef lastGraphExecutionRef,
+      IntakeTerminalReason terminalReason,
+      long processRevision,
+      long roomRevision,
+      String protocolErrorCode,
+      int runGeneration,
+      IntakeCommandDecision lastDecision,
+      List<ObservedCommand> observedCommands,
+      List<ObservedEvent> observedEvents,
+      List<IntakeThreadInitialization> threadInitializations,
+      IntakeAgentRunChildState targetAgentRunChild) {
+    this(
+        schemaVersion,
+        roomPhase,
+        activeParty,
+        nextCommandSequence,
+        nextEventSequence,
+        processedCommandCount,
+        processedEventCount,
+        initiatorComplete,
+        respondentUnlocked,
+        respondentComplete,
+        readinessParty,
+        lastEventId,
+        lastEventRef,
+        lastEventHash,
+        lastAgentRunRef,
+        lastGraphExecutionRef,
+        terminalReason,
+        processRevision,
+        roomRevision,
+        protocolErrorCode,
+        runGeneration,
+        lastDecision,
+        observedCommands,
+        observedEvents,
+        threadInitializations,
+        targetAgentRunChild,
+        List.of());
   }
 
   public IntakeRoomCarryState {
     if (!"intake-room-carry-state.v1".equals(schemaVersion)
-        && !"intake-room-carry-state.v2".equals(schemaVersion)) {
-      throw new IllegalArgumentException("schemaVersion must be intake-room-carry-state.v1 or v2");
+        && !"intake-room-carry-state.v2".equals(schemaVersion)
+        && !"intake-room-carry-state.v3".equals(schemaVersion)) {
+      throw new IllegalArgumentException(
+          "schemaVersion must be intake-room-carry-state.v1, v2, or v3");
     }
     if ("intake-room-carry-state.v1".equals(schemaVersion) && targetAgentRunChild != null) {
       throw new IllegalArgumentException("v1 carry state cannot contain target child identity");
@@ -114,10 +175,20 @@ public record IntakeRoomCarryState(
     }
     observedCommands = List.copyOf(observedCommands == null ? List.of() : observedCommands);
     observedEvents = List.copyOf(observedEvents == null ? List.of() : observedEvents);
+    observedTargetSourceEvents =
+        List.copyOf(
+            observedTargetSourceEvents == null ? List.of() : observedTargetSourceEvents);
     threadInitializations =
         List.copyOf(threadInitializations == null ? List.of() : threadInitializations);
-    if (observedCommands.size() > MAX_OBSERVED || observedEvents.size() > MAX_OBSERVED) {
+    if (observedCommands.size() > MAX_OBSERVED
+        || observedEvents.size() > MAX_OBSERVED
+        || observedTargetSourceEvents.size() > MAX_OBSERVED) {
       throw new IllegalArgumentException("intake observation cache exceeds the bound");
+    }
+    if (!"intake-room-carry-state.v3".equals(schemaVersion)
+        && !observedTargetSourceEvents.isEmpty()) {
+      throw new IllegalArgumentException(
+          "target source event observations require intake-room-carry-state.v3");
     }
     if (threadInitializations.size() > MAX_THREAD_INITIALIZATIONS) {
       throw new IllegalArgumentException("intake thread initialization cache exceeds the bound");
@@ -143,6 +214,19 @@ public record IntakeRoomCarryState(
       }
       if (event == null) {
         throw new IllegalArgumentException("observed event must not be null");
+      }
+    }
+  }
+
+  public record ObservedTargetSourceEvent(
+      String schemaVersion, TargetIntakeSourceEventRef event) {
+    public ObservedTargetSourceEvent {
+      if (!"intake-observed-target-source-event.v1".equals(schemaVersion)) {
+        throw new IllegalArgumentException(
+            "schemaVersion must be intake-observed-target-source-event.v1");
+      }
+      if (event == null) {
+        throw new IllegalArgumentException("observed target source event must not be null");
       }
     }
   }

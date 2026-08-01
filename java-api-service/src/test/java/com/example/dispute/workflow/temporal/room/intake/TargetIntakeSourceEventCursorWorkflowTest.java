@@ -1,0 +1,261 @@
+package com.example.dispute.workflow.temporal.room.intake;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
+import io.temporal.client.WorkflowClient;
+import io.temporal.client.WorkflowOptions;
+import io.temporal.testing.TestWorkflowEnvironment;
+import io.temporal.worker.Worker;
+import java.time.Duration;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+class TargetIntakeSourceEventCursorWorkflowTest {
+
+  private static final String TASK_QUEUE = "target-intake-source-cursor-test";
+  private static final String TENANT = "tenant-target-cursor";
+  private static final String CASE_ID = "CASE_TARGET_CURSOR_1";
+  private static final long ROOM_EPOCH = 1;
+  private static final long FENCE = 17;
+  private static final String INITIATOR_SCOPE = "8".repeat(64);
+  private static final String RESPONDENT_SCOPE = "9".repeat(64);
+
+  private TestWorkflowEnvironment environment;
+  private IntakeRoomWorkflow workflow;
+
+  @BeforeEach
+  void setUp() {
+    environment = TestWorkflowEnvironment.newInstance();
+    Worker worker = environment.newWorker(TASK_QUEUE);
+    worker.registerWorkflowImplementationTypes(IntakeRoomWorkflowImpl.class);
+    environment.start();
+    workflow =
+        environment
+            .getWorkflowClient()
+            .newWorkflowStub(
+                IntakeRoomWorkflow.class,
+                WorkflowOptions.newBuilder()
+                    .setWorkflowId("target-intake-source-cursor:" + CASE_ID)
+                    .setTaskQueue(TASK_QUEUE)
+                    .build());
+    WorkflowClient.start(workflow::run, start());
+    tick();
+  }
+
+  @AfterEach
+  void tearDown() {
+    environment.close();
+  }
+
+  @Test
+  void twoSourceFormalPairsRecoverBufferedGapsAndReplayWithoutFixedOffset() {
+    IntakeWorkflowCommand first = message(1, "CMD_SOURCE_1");
+    workflow.commandAccepted(first);
+    tick();
+    workflow.domainEventCommitted(formalTurn(2, "EVENT_FORMAL_2", first));
+    tick();
+
+    assertThat(workflow.state().protocolErrorCode()).isEqualTo("EVENT_SEQUENCE_GAP");
+    assertThat(workflow.state().nextEventSequence()).isEqualTo(1);
+    assertThat(workflow.state().pendingCommandId()).isEqualTo(first.commandId());
+
+    TargetIntakeSourceEventRef sourceOne = source(1, "EVENT_SOURCE_1");
+    workflow.targetSourceEventObserved(sourceOne);
+    tick();
+
+    assertThat(workflow.state().protocolErrorCode()).isNull();
+    assertThat(workflow.state().nextEventSequence()).isEqualTo(3);
+    assertThat(workflow.state().processedEventCount()).isEqualTo(1);
+    assertThat(workflow.state().pendingCommand()).isNull();
+    assertThat(workflow.state().roomPhase()).isEqualTo(IntakeRoomPhase.READY_TO_CONFIRM);
+
+    workflow.targetSourceEventObserved(sourceOne);
+    tick();
+    assertThat(workflow.state().nextEventSequence()).isEqualTo(3);
+    assertThat(workflow.state().processedEventCount()).isEqualTo(1);
+
+    IntakeWorkflowCommand second = message(2, "CMD_SOURCE_2");
+    workflow.commandAccepted(second);
+    tick();
+    workflow.domainEventCommitted(formalTurn(4, "EVENT_FORMAL_4", second));
+    tick();
+
+    assertThat(workflow.state().protocolErrorCode()).isEqualTo("EVENT_SEQUENCE_GAP");
+    assertThat(workflow.state().nextEventSequence()).isEqualTo(3);
+    assertThat(workflow.state().pendingCommandId()).isEqualTo(second.commandId());
+
+    workflow.targetSourceEventObserved(source(3, "EVENT_SOURCE_3"));
+    tick();
+
+    assertThat(workflow.state().protocolErrorCode()).isNull();
+    assertThat(workflow.state().nextEventSequence()).isEqualTo(5);
+    assertThat(workflow.state().processedEventCount()).isEqualTo(2);
+    assertThat(workflow.state().pendingCommand()).isNull();
+    assertThat(workflow.state().lastEventId()).isEqualTo("EVENT_FORMAL_4");
+  }
+
+  @Test
+  void unknownGapAndScopeMismatchFailClosedWithoutClearingPendingCommand() {
+    IntakeWorkflowCommand pending = message(1, "CMD_FAIL_CLOSED");
+    workflow.commandAccepted(pending);
+    tick();
+
+    workflow.targetSourceEventObserved(
+        new TargetIntakeSourceEventRef(
+            TargetIntakeSourceEventRef.SCHEMA_VERSION,
+            "EVENT_UNKNOWN",
+            1,
+            "SOMETHING_ELSE",
+            TENANT,
+            CASE_ID,
+            RoomType.INTAKE,
+            ROOM_EPOCH,
+            FENCE,
+            hash(1)));
+    tick();
+    assertFailClosed("TARGET_SOURCE_EVENT_TYPE_NOT_ALLOWED", pending.commandId(), 1);
+
+    workflow.targetSourceEventObserved(source(2, "EVENT_GAP"));
+    tick();
+    assertFailClosed("TARGET_SOURCE_EVENT_SEQUENCE_GAP", pending.commandId(), 1);
+
+    workflow.targetSourceEventObserved(
+        new TargetIntakeSourceEventRef(
+            TargetIntakeSourceEventRef.SCHEMA_VERSION,
+            "EVENT_WRONG_CASE",
+            1,
+            TargetIntakeSourceEventRef.ROOM_MESSAGE_CREATED,
+            TENANT,
+            "CASE_OTHER",
+            RoomType.INTAKE,
+            ROOM_EPOCH,
+            FENCE,
+            hash(1)));
+    tick();
+    assertFailClosed("TARGET_SOURCE_EVENT_SCOPE_MISMATCH", pending.commandId(), 1);
+
+    workflow.targetSourceEventObserved(source(1, "EVENT_SOURCE_1"));
+    tick();
+    assertThat(workflow.state().protocolErrorCode()).isNull();
+    assertThat(workflow.state().nextEventSequence()).isEqualTo(2);
+    assertThat(workflow.state().pendingCommandId()).isEqualTo(pending.commandId());
+
+    workflow.targetSourceEventObserved(source(1, "EVENT_UNKNOWN_REPLAY"));
+    tick();
+    assertFailClosed(
+        "TARGET_SOURCE_EVENT_SEQUENCE_REPLAY_UNKNOWN", pending.commandId(), 2);
+  }
+
+  private void assertFailClosed(String error, String pendingCommandId, long nextEventSequence) {
+    assertThat(workflow.state().protocolErrorCode()).isEqualTo(error);
+    assertThat(workflow.state().nextEventSequence()).isEqualTo(nextEventSequence);
+    assertThat(workflow.state().processedEventCount()).isZero();
+    assertThat(workflow.state().pendingCommandId()).isEqualTo(pendingCommandId);
+  }
+
+  private void tick() {
+    environment.sleep(Duration.ofSeconds(1));
+  }
+
+  private static IntakeRoomStart start() {
+    return new IntakeRoomStart(
+        "intake-room-start.v1",
+        TENANT,
+        CASE_ID,
+        ROOM_EPOCH,
+        FENCE,
+        3,
+        2,
+        1,
+        1,
+        "target-control-build",
+        "2.0.0",
+        "intake-checkpoint.v2",
+        "all-rooms-prompt.target-e2e.v1",
+        "target-e2e.contract-blocked",
+        "target-e2e-intake-output.v1",
+        "all-rooms-policy.target-e2e.v1",
+        "all-rooms-guardrail.target-e2e.v1",
+        "tools.none.v1",
+        INITIATOR_SCOPE,
+        RESPONDENT_SCOPE);
+  }
+
+  private static IntakeWorkflowCommand message(long sequence, String commandId) {
+    return new IntakeWorkflowCommand(
+        "intake-workflow-command.v1",
+        commandId,
+        TENANT,
+        CASE_ID,
+        ROOM_EPOCH,
+        FENCE,
+        sequence,
+        IntakeCommandType.INTAKE_MESSAGE,
+        IntakeParty.INITIATOR,
+        INITIATOR_SCOPE,
+        "urn:after-sale-flow:intake-command:" + commandId,
+        hash(sequence),
+        "intake.operation:" + CASE_ID + ":" + commandId,
+        hash(sequence + 1));
+  }
+
+  private static IntakeDomainEventRef formalTurn(
+      long sequence, String eventId, IntakeWorkflowCommand command) {
+    String resultHash = hash(sequence + 2);
+    return new IntakeDomainEventRef(
+        "intake-domain-event-ref.v1",
+        eventId,
+        "urn:after-sale-flow:intake-event:" + eventId,
+        hash(sequence + 3),
+        sequence,
+        IntakeDomainEventType.TURN_READY_TO_CONFIRM,
+        IntakeParty.INITIATOR,
+        command.commandId(),
+        TENANT,
+        CASE_ID,
+        ROOM_EPOCH,
+        FENCE,
+        INITIATOR_SCOPE,
+        command.operationKey(),
+        command.requestHash(),
+        resultHash,
+        3 + sequence,
+        2 + sequence,
+        new IntakeAgentRunRef(
+            "intake-agent-run-ref.v1",
+            "RUN_" + command.commandId(),
+            "ATTEMPT_" + command.commandId(),
+            resultHash),
+        new IntakeGraphExecutionRef(
+            "intake-graph-execution-ref.v1",
+            "grt.v1." + "a".repeat(32),
+            command.commandId(),
+            "intake.v2",
+            "2.0.0",
+            "CHECKPOINT_" + command.commandId(),
+            "urn:after-sale-flow:graph-result:" + command.commandId(),
+            resultHash,
+            "urn:after-sale-flow:intake-proposal:" + command.commandId(),
+            hash(sequence + 4)));
+  }
+
+  private static TargetIntakeSourceEventRef source(long sequence, String eventId) {
+    return new TargetIntakeSourceEventRef(
+        TargetIntakeSourceEventRef.SCHEMA_VERSION,
+        eventId,
+        sequence,
+        TargetIntakeSourceEventRef.ROOM_MESSAGE_CREATED,
+        TENANT,
+        CASE_ID,
+        RoomType.INTAKE,
+        ROOM_EPOCH,
+        FENCE,
+        hash(sequence));
+  }
+
+  private static String hash(long value) {
+    return Integer.toString((int) (Math.abs(value) % 10)).repeat(64);
+  }
+}

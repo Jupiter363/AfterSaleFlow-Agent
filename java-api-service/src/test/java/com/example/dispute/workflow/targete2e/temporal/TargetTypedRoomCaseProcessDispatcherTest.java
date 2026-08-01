@@ -7,8 +7,11 @@ import com.example.dispute.workflow.contract.v1.CaseProcessWorkflowProtocol;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
 import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
+import com.example.dispute.workflow.contract.v1.ContractTypes.PayloadRef;
 import com.example.dispute.workflow.contract.v1.ProvisionRoomEpoch;
+import com.example.dispute.workflow.temporal.caseprocess.CaseDomainEventRef;
 import com.example.dispute.workflow.temporal.room.intake.IntakeRoomStart;
+import com.example.dispute.workflow.temporal.room.intake.TargetIntakeSourceEventRef;
 import com.example.dispute.workflow.temporal.room.evidence.EvidenceRoomStart;
 import com.example.dispute.workflow.temporal.room.evidence.EvidenceRoomStart.ExecutionLane;
 import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceParticipantBindingActivities;
@@ -144,6 +147,31 @@ class TargetTypedRoomCaseProcessDispatcherTest {
     assertThat(start.targetE2eCandidate()).isTrue();
   }
 
+  @Test
+  void targetIntakeForwardsOnlyTheSourceTimelineEventIntoTheChildCursor() {
+    CaseDomainEventRef source = caseEvent(1, "ROOM_MESSAGE_CREATED");
+    CaseDomainEventRef formal = caseEvent(2, "TURN_READY_TO_CONFIRM");
+
+    TargetIntakeSourceEventRef observation =
+        TargetTypedRoomCaseProcessDispatcher.targetIntakeSourceCursorObservation(source, 11);
+
+    assertThat(observation.eventId()).isEqualTo(source.eventId());
+    assertThat(observation.eventSequence()).isEqualTo(1);
+    assertThat(observation.eventType()).isEqualTo("ROOM_MESSAGE_CREATED");
+    assertThat(observation.tenantSurrogate()).isEqualTo(source.tenantSurrogate());
+    assertThat(observation.caseId()).isEqualTo(source.caseId());
+    assertThat(observation.roomEpoch()).isEqualTo(source.roomEpoch());
+    assertThat(observation.fencingToken()).isEqualTo(11);
+    assertThat(observation.payloadHash()).isEqualTo(source.payloadRef().sha256());
+    assertThat(
+            TargetTypedRoomCaseProcessDispatcher.targetIntakeSourceCursorObservation(
+                formal, 11))
+        .isNull();
+    assertThat(
+            TargetTypedRoomCaseProcessDispatcher.TARGET_INTAKE_SOURCE_EVENT_CURSOR_CHANGE_ID)
+        .isEqualTo("target-intake-source-event-cursor-v1");
+  }
+
   private static TargetIntakePartyScopeSource.ResolvedPartyScopes partyScopes(
       ProvisionRoomEpoch request, ActorRole initiatorRole) {
     TargetIntakePartyScopeSource.Request route =
@@ -245,6 +273,25 @@ class TargetTypedRoomCaseProcessDispatcherTest {
         null,
         null,
         requestedAt);
+  }
+
+  private static CaseDomainEventRef caseEvent(long sequence, String eventType) {
+    return new CaseDomainEventRef(
+        "case-domain-event-ref.v1",
+        "EVENT_TARGET_SOURCE_" + sequence,
+        "tenant-run001",
+        "QA_TARGET_INTAKE_1",
+        sequence,
+        eventType,
+        RoomType.INTAKE,
+        1,
+        new PayloadRef(
+            "payload-ref.v1",
+            "urn:after-sale-flow:case-event:" + sequence,
+            Integer.toString((int) sequence).repeat(64),
+            0),
+        Instant.parse("2026-07-30T01:00:00Z").plusSeconds(sequence),
+        "00-" + "a".repeat(32) + "-" + "b".repeat(16) + "-01");
   }
 
   public static final class ConcreteTargetCaseProcessWorkflow

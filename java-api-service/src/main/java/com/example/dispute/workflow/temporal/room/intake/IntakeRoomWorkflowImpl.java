@@ -59,6 +59,8 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
   private final ArrayDeque<InboxItem> inbox = new ArrayDeque<>();
   private final Map<String, CommandObservation> commandObservations = new LinkedHashMap<>();
   private final Map<String, EventObservation> eventObservations = new LinkedHashMap<>();
+  private final Map<String, TargetIntakeSourceEventRef> targetSourceEventObservations =
+      new LinkedHashMap<>();
   private final Map<IntakeParty, IntakeThreadInitialization> threadInitializations =
       new EnumMap<>(IntakeParty.class);
 
@@ -177,6 +179,13 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
   }
 
   @Override
+  public void targetSourceEventObserved(TargetIntakeSourceEventRef event) {
+    inbox.addLast(
+        new TargetSourceEventInput(
+            Objects.requireNonNull(event, "target source event must not be null")));
+  }
+
+  @Override
   public void requestContinueAsNew() {
     continueAsNewRequested = true;
   }
@@ -225,7 +234,11 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
       processCommand(commandInput.command());
       return;
     }
-    processEvent(((EventInput) input).event());
+    if (input instanceof EventInput eventInput) {
+      processEvent(eventInput.event());
+      return;
+    }
+    processTargetSourceEvent(((TargetSourceEventInput) input).event());
   }
 
   private InboxItem pollInterruptingInput() {
@@ -245,11 +258,62 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
   }
 
   private boolean isInterruptingInput(InboxItem input) {
-    if (input instanceof EventInput) {
+    if (input instanceof EventInput || input instanceof TargetSourceEventInput) {
       return true;
     }
     return input instanceof CommandInput commandInput
         && preemptsActivityCommand(commandInput.command());
+  }
+
+  private void processTargetSourceEvent(TargetIntakeSourceEventRef event) {
+    TargetIntakeSourceEventRef observed = targetSourceEventObservations.get(event.eventId());
+    if (observed != null) {
+      if (!observed.equals(event)) {
+        protocolErrorCode = "TARGET_SOURCE_EVENT_ID_REUSE_CONFLICT";
+        return;
+      }
+      protocolErrorCode = null;
+      return;
+    }
+    if (!TargetIntakeSourceEventRef.ROOM_MESSAGE_CREATED.equals(event.eventType())) {
+      protocolErrorCode = "TARGET_SOURCE_EVENT_TYPE_NOT_ALLOWED";
+      return;
+    }
+    if (!matchesEnvelope(event)) {
+      protocolErrorCode = "TARGET_SOURCE_EVENT_SCOPE_MISMATCH";
+      return;
+    }
+    if (event.eventSequence() < nextEventSequence) {
+      protocolErrorCode = "TARGET_SOURCE_EVENT_SEQUENCE_REPLAY_UNKNOWN";
+      return;
+    }
+    if (event.eventSequence() > nextEventSequence) {
+      protocolErrorCode = "TARGET_SOURCE_EVENT_SEQUENCE_GAP";
+      return;
+    }
+
+    targetSourceEventObservations.put(event.eventId(), event);
+    trim(targetSourceEventObservations);
+    nextEventSequence++;
+    protocolErrorCode = null;
+    retryBufferedFormalEventAtCursor();
+  }
+
+  private void retryBufferedFormalEventAtCursor() {
+    var candidates =
+        eventObservations.values().stream()
+            .filter(
+                observation ->
+                    !observation.applied()
+                        && observation.event().eventSequence() == nextEventSequence)
+            .map(EventObservation::event)
+            .toList();
+    for (IntakeDomainEventRef candidate : candidates) {
+      if (candidate.eventSequence() != nextEventSequence) {
+        return;
+      }
+      processEvent(candidate);
+    }
   }
 
   private void processCommand(IntakeWorkflowCommand command) {
@@ -1847,7 +1911,12 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
         .forEach(
             observed ->
                 eventObservations.put(
-                    observed.event().eventId(), new EventObservation(observed.event(), observed.applied())));
+                observed.event().eventId(), new EventObservation(observed.event(), observed.applied())));
+    carry.observedTargetSourceEvents()
+        .forEach(
+            observed ->
+                targetSourceEventObservations.put(
+                    observed.event().eventId(), observed.event()));
     carry.threadInitializations()
         .forEach(initialization -> threadInitializations.put(initialization.party(), initialization));
   }
@@ -1875,9 +1944,11 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
     Workflow.await(Workflow::isEveryHandlerFinished);
     IntakeRoomCarryState carry =
         new IntakeRoomCarryState(
-            targetAgentRunChild == null
-                ? "intake-room-carry-state.v1"
-                : "intake-room-carry-state.v2",
+            targetSourceEventObservations.isEmpty()
+                ? targetAgentRunChild == null
+                    ? "intake-room-carry-state.v1"
+                    : "intake-room-carry-state.v2"
+                : "intake-room-carry-state.v3",
             roomPhase,
             activeParty,
             nextCommandSequence,
@@ -1912,7 +1983,13 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
                             "intake-observed-event.v1", observed.event(), observed.applied()))
                 .toList(),
             new ArrayList<>(threadInitializations.values()),
-            targetAgentRunChild);
+            targetAgentRunChild,
+            targetSourceEventObservations.values().stream()
+                .map(
+                    event ->
+                        new IntakeRoomCarryState.ObservedTargetSourceEvent(
+                            "intake-observed-target-source-event.v1", event))
+                .toList());
     ContinueAsNewOptions options =
         ContinueAsNewOptions.newBuilder().setMemo(Map.of(CARRY_STATE_MEMO_KEY, carry)).build();
     Workflow.continueAsNew(options, start.withCarryState(carry));
@@ -1928,6 +2005,15 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
   private boolean matchesEnvelope(IntakeDomainEventRef event) {
     return start.tenantSurrogate().equals(event.tenantSurrogate())
         && start.caseId().equals(event.caseId())
+        && start.roomEpoch() == event.roomEpoch()
+        && start.fencingToken() == event.fencingToken();
+  }
+
+  private boolean matchesEnvelope(TargetIntakeSourceEventRef event) {
+    return start.tenantSurrogate().equals(event.tenantSurrogate())
+        && start.caseId().equals(event.caseId())
+        && event.roomType()
+            == com.example.dispute.workflow.contract.v1.ContractTypes.RoomType.INTAKE
         && start.roomEpoch() == event.roomEpoch()
         && start.fencingToken() == event.fencingToken();
   }
@@ -1948,11 +2034,13 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
     }
   }
 
-  private sealed interface InboxItem permits CommandInput, EventInput {}
+  private sealed interface InboxItem permits CommandInput, EventInput, TargetSourceEventInput {}
 
   private record CommandInput(IntakeWorkflowCommand command) implements InboxItem {}
 
   private record EventInput(IntakeDomainEventRef event) implements InboxItem {}
+
+  private record TargetSourceEventInput(TargetIntakeSourceEventRef event) implements InboxItem {}
 
   private record CommandObservation(
       IntakeWorkflowCommand command, IntakeCommandDecision decision) {}
