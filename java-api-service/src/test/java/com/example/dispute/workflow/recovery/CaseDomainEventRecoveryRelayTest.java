@@ -4,6 +4,7 @@ import static com.example.dispute.workflow.contract.v1.ContractTypes.RoomType.EV
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -29,6 +30,7 @@ import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -39,6 +41,9 @@ class CaseDomainEventRecoveryRelayTest {
     private static final String CASE_ID = "CASE_EventRecovery";
     private static final String WORKFLOW_ID =
             CaseProcessWorkflowProtocol.caseWorkflowId(TENANT, CASE_ID);
+    private static final String SECOND_CASE_ID = "CASE_EventRecoverySecond";
+    private static final String SECOND_WORKFLOW_ID =
+            CaseProcessWorkflowProtocol.caseWorkflowId(TENANT, SECOND_CASE_ID);
     private static final ClaimedRoomEpoch CLAIM =
             new ClaimedRoomEpoch(
                     "claim-event-recovery",
@@ -49,11 +54,32 @@ class CaseDomainEventRecoveryRelayTest {
                     2,
                     17,
                     WORKFLOW_ID);
+    private static final ClaimedRoomEpoch SECOND_CLAIM =
+            new ClaimedRoomEpoch(
+                    "claim-event-recovery-second",
+                    "EPOCH_EventRecoverySecond",
+                    TENANT,
+                    SECOND_CASE_ID,
+                    EVIDENCE,
+                    2,
+                    17,
+                    SECOND_WORKFLOW_ID);
+    private static final ClaimedRoomEpoch INVALID_CLAIM =
+            new ClaimedRoomEpoch(
+                    "claim-event-recovery-invalid",
+                    "EPOCH_EventRecoveryInvalid",
+                    " ",
+                    "CASE_EventRecoveryInvalid",
+                    EVIDENCE,
+                    2,
+                    17,
+                    "case-process:invalid");
 
     @Mock private RoomEpochScanClaimStore scanClaimStore;
     @Mock private CaseProcessLedgerActivities ledgerActivities;
     @Mock private WorkflowClient workflowClient;
     @Mock private CaseProcessWorkflow workflow;
+    @Mock private CaseProcessWorkflow secondWorkflow;
 
     private CaseDomainEventRecoveryRelay relay;
 
@@ -70,10 +96,13 @@ class CaseDomainEventRecoveryRelayTest {
                                 23,
                                 Duration.ofMinutes(5),
                                 Duration.ofSeconds(5)));
-        when(scanClaimStore.claimDomainEventRecovery(
-                        17, Duration.ofMinutes(5)))
+        lenient().when(scanClaimStore.claimPriorityDomainEventRecovery(
+                        1, Duration.ofMinutes(5)))
                 .thenReturn(List.of(CLAIM));
-        when(scanClaimStore.renewDomainEventRecovery(
+        lenient().when(scanClaimStore.claimDomainEventRecovery(
+                        1, Duration.ofMinutes(5)))
+                .thenReturn(List.of());
+        lenient().when(scanClaimStore.renewDomainEventRecovery(
                         CLAIM, Duration.ofMinutes(5)))
                 .thenReturn(true);
         lenient().when(scanClaimStore.completeDomainEventRecovery(
@@ -117,6 +146,9 @@ class CaseDomainEventRecoveryRelayTest {
     @Test
     void retryUsesTheSameDurableEnvelopeAndReliesOnWorkflowSequenceIdempotency() {
         CaseDomainEventRef first = event(1);
+        when(scanClaimStore.claimPriorityDomainEventRecovery(
+                        1, Duration.ofMinutes(5)))
+                .thenReturn(List.of(CLAIM), List.of(CLAIM));
         when(workflow.state()).thenReturn(boundSnapshot(2, 1, 0));
         when(ledgerActivities.loadDomainEvents(range(1, 23)))
                 .thenReturn(List.of(first));
@@ -172,6 +204,132 @@ class CaseDomainEventRecoveryRelayTest {
                 .completeDomainEventRecovery(CLAIM, Duration.ofSeconds(5));
     }
 
+    @Test
+    void completesPriorityBeforeClaimingTheFairLane() {
+        when(scanClaimStore.claimPriorityDomainEventRecovery(
+                        1, Duration.ofMinutes(5)))
+                .thenReturn(List.of(CLAIM));
+        when(scanClaimStore.claimDomainEventRecovery(
+                        1, Duration.ofMinutes(5)))
+                .thenReturn(List.of(SECOND_CLAIM));
+        when(scanClaimStore.renewDomainEventRecovery(
+                        SECOND_CLAIM, Duration.ofMinutes(5)))
+                .thenReturn(true);
+        when(scanClaimStore.completeDomainEventRecovery(
+                        SECOND_CLAIM, Duration.ofSeconds(5)))
+                .thenReturn(true);
+        when(workflow.state()).thenReturn(boundSnapshot(2, 1, 0));
+        when(workflowClient.newWorkflowStub(CaseProcessWorkflow.class, SECOND_WORKFLOW_ID))
+                .thenReturn(secondWorkflow);
+        when(secondWorkflow.state())
+                .thenReturn(boundSnapshot(SECOND_CASE_ID, SECOND_WORKFLOW_ID, 2, 1, 0));
+        when(ledgerActivities.loadDomainEvents(any())).thenReturn(List.of());
+
+        var result = relay.recoverAvailable();
+
+        assertThat(result.scannedWorkflows()).isEqualTo(2);
+        assertThat(result.failedWorkflows()).isZero();
+        InOrder ordered = inOrder(scanClaimStore, workflow, secondWorkflow);
+        ordered.verify(scanClaimStore)
+                .claimPriorityDomainEventRecovery(1, Duration.ofMinutes(5));
+        ordered.verify(workflow).state();
+        ordered.verify(scanClaimStore)
+                .completeDomainEventRecovery(CLAIM, Duration.ofSeconds(5));
+        ordered.verify(scanClaimStore)
+                .claimDomainEventRecovery(1, Duration.ofMinutes(5));
+        ordered.verify(secondWorkflow).state();
+        ordered.verify(scanClaimStore)
+                .completeDomainEventRecovery(SECOND_CLAIM, Duration.ofSeconds(5));
+    }
+
+    @Test
+    void isolatesAFailedPriorityCandidateAndClaimsFairAfterCompletion() {
+        when(scanClaimStore.claimPriorityDomainEventRecovery(
+                        1, Duration.ofMinutes(5)))
+                .thenReturn(List.of(CLAIM));
+        when(scanClaimStore.claimDomainEventRecovery(
+                        1, Duration.ofMinutes(5)))
+                .thenReturn(List.of(SECOND_CLAIM));
+        when(scanClaimStore.renewDomainEventRecovery(
+                        SECOND_CLAIM, Duration.ofMinutes(5)))
+                .thenReturn(true);
+        when(scanClaimStore.completeDomainEventRecovery(
+                        CLAIM, Duration.ofMinutes(5)))
+                .thenReturn(true);
+        when(scanClaimStore.completeDomainEventRecovery(
+                        SECOND_CLAIM, Duration.ofSeconds(5)))
+                .thenReturn(true);
+        when(workflow.state()).thenThrow(new RuntimeException("no compatible poller"));
+        when(workflowClient.newWorkflowStub(CaseProcessWorkflow.class, SECOND_WORKFLOW_ID))
+                .thenReturn(secondWorkflow);
+        when(secondWorkflow.state())
+                .thenReturn(boundSnapshot(SECOND_CASE_ID, SECOND_WORKFLOW_ID, 2, 1, 0));
+        when(ledgerActivities.loadDomainEvents(any())).thenReturn(List.of());
+
+        var result = relay.recoverAvailable();
+
+        assertThat(result.scannedWorkflows()).isEqualTo(2);
+        assertThat(result.failedWorkflows()).isEqualTo(1);
+        InOrder ordered = inOrder(scanClaimStore, workflow, secondWorkflow);
+        ordered.verify(workflow).state();
+        ordered.verify(scanClaimStore)
+                .completeDomainEventRecovery(CLAIM, Duration.ofMinutes(5));
+        ordered.verify(scanClaimStore)
+                .claimDomainEventRecovery(1, Duration.ofMinutes(5));
+        ordered.verify(secondWorkflow).state();
+    }
+
+    @Test
+    void targetConstructionFailureStillCompletesBeforeTheFairClaim() {
+        when(scanClaimStore.claimPriorityDomainEventRecovery(
+                        1, Duration.ofMinutes(5)))
+                .thenReturn(List.of(INVALID_CLAIM));
+        when(scanClaimStore.claimDomainEventRecovery(
+                        1, Duration.ofMinutes(5)))
+                .thenReturn(List.of(CLAIM));
+        when(scanClaimStore.completeDomainEventRecovery(
+                        INVALID_CLAIM, Duration.ofMinutes(5)))
+                .thenReturn(true);
+        when(workflow.state()).thenReturn(boundSnapshot(2, 1, 0));
+        when(ledgerActivities.loadDomainEvents(any())).thenReturn(List.of());
+
+        var result = relay.recoverAvailable();
+
+        assertThat(result.scannedWorkflows()).isEqualTo(2);
+        assertThat(result.failedWorkflows()).isEqualTo(1);
+        InOrder ordered = inOrder(scanClaimStore, workflow);
+        ordered.verify(scanClaimStore)
+                .claimPriorityDomainEventRecovery(1, Duration.ofMinutes(5));
+        ordered.verify(scanClaimStore)
+                .completeDomainEventRecovery(INVALID_CLAIM, Duration.ofMinutes(5));
+        ordered.verify(scanClaimStore)
+                .claimDomainEventRecovery(1, Duration.ofMinutes(5));
+        ordered.verify(workflow).state();
+    }
+
+    @Test
+    void emptyPriorityLaneFallsBackToTheFairLane() {
+        when(scanClaimStore.claimPriorityDomainEventRecovery(
+                        1, Duration.ofMinutes(5)))
+                .thenReturn(List.of());
+        when(scanClaimStore.claimDomainEventRecovery(
+                        1, Duration.ofMinutes(5)))
+                .thenReturn(List.of(CLAIM));
+        when(workflow.state()).thenReturn(boundSnapshot(2, 1, 0));
+        when(ledgerActivities.loadDomainEvents(any())).thenReturn(List.of());
+
+        var result = relay.recoverAvailable();
+
+        assertThat(result.scannedWorkflows()).isEqualTo(1);
+        assertThat(result.failedWorkflows()).isZero();
+        InOrder ordered = inOrder(scanClaimStore, workflow);
+        ordered.verify(scanClaimStore)
+                .claimPriorityDomainEventRecovery(1, Duration.ofMinutes(5));
+        ordered.verify(scanClaimStore)
+                .claimDomainEventRecovery(1, Duration.ofMinutes(5));
+        ordered.verify(workflow).state();
+    }
+
     private static LoadSequenceRange range(long from, long to) {
         return argThat(
                 request ->
@@ -189,9 +347,24 @@ class CaseDomainEventRecoveryRelayTest {
 
     private static CaseProcessSnapshot boundSnapshot(
             long roomEpoch, long nextEventSequence, long highestObservedSequence) {
+        return boundSnapshot(
+                CASE_ID,
+                WORKFLOW_ID,
+                roomEpoch,
+                nextEventSequence,
+                highestObservedSequence);
+    }
+
+    private static CaseProcessSnapshot boundSnapshot(
+            String caseId,
+            String workflowId,
+            long roomEpoch,
+            long nextEventSequence,
+            long highestObservedSequence) {
         return snapshot(
                 TENANT,
-                CASE_ID,
+                caseId,
+                workflowId,
                 EVIDENCE,
                 roomEpoch,
                 nextEventSequence,
@@ -205,9 +378,27 @@ class CaseDomainEventRecoveryRelayTest {
             long roomEpoch,
             long nextEventSequence,
             long highestObservedSequence) {
+        return snapshot(
+                tenant,
+                caseId,
+                WORKFLOW_ID,
+                roomType,
+                roomEpoch,
+                nextEventSequence,
+                highestObservedSequence);
+    }
+
+    private static CaseProcessSnapshot snapshot(
+            String tenant,
+            String caseId,
+            String workflowId,
+            com.example.dispute.workflow.contract.v1.ContractTypes.RoomType roomType,
+            long roomEpoch,
+            long nextEventSequence,
+            long highestObservedSequence) {
         return new CaseProcessSnapshot(
                 "case-process-snapshot.v1",
-                WORKFLOW_ID,
+                workflowId,
                 "run-event-recovery-1",
                 tenant,
                 caseId,

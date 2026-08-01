@@ -6,7 +6,9 @@ import com.example.dispute.workflow.config.ProcessProjectionReconciliationProper
 import com.example.dispute.workflow.infrastructure.persistence.RoomEpochScanClaimStore;
 import com.example.dispute.workflow.infrastructure.persistence.RoomEpochScanClaimStore.ClaimedRoomEpoch;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -42,16 +44,27 @@ public class ProcessProjectionReconciler {
         if (limit < 1 || limit > MAX_SCAN_SIZE) {
             throw new IllegalArgumentException("limit must be between 1 and " + MAX_SCAN_SIZE);
         }
-        List<ProcessProjectionReconciliationResult> results = new ArrayList<>(limit);
-        for (int claimedCount = 0; claimedCount < limit; claimedCount++) {
+        int claimBudget = Math.min(limit, 2);
+        List<ProcessProjectionReconciliationResult> results = new ArrayList<>(claimBudget);
+        Set<String> claimedEpochIds = new HashSet<>(claimBudget);
+        int claimedCount = 0;
+        for (int lane = 0; lane < 2 && claimedCount < claimBudget; lane++) {
             List<ClaimedRoomEpoch> candidates =
-                    scanClaimStore.claimProjectionReconciliation(
-                            1, properties.claimDuration());
+                    lane == 0
+                            ? scanClaimStore.claimPriorityProjectionReconciliation(
+                                    1, properties.claimDuration())
+                            : scanClaimStore.claimProjectionReconciliation(
+                                    1, properties.claimDuration());
             if (candidates.isEmpty()) {
-                break;
+                continue;
             }
             ClaimedRoomEpoch candidate = candidates.get(0);
+            claimedCount++;
             try {
+                if (!claimedEpochIds.add(candidate.epochId())) {
+                    throw new IllegalStateException(
+                            "scan lanes claimed the same room epoch twice");
+                }
                 ReconciliationTarget target =
                         new ReconciliationTarget(
                                 candidate.tenantSurrogate(),

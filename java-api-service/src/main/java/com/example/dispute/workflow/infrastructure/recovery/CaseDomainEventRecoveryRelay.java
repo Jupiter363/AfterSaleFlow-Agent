@@ -11,7 +11,9 @@ import com.example.dispute.workflow.temporal.caseprocess.CaseProcessSnapshot;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessWorkflow;
 import io.temporal.client.WorkflowClient;
 import java.time.Duration;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -44,19 +46,31 @@ public class CaseDomainEventRecoveryRelay {
             return RecoveryRun.skipped();
         }
         try {
-            List<ClaimedRoomEpoch> candidates =
-                    scanClaimStore.claimDomainEventRecovery(
-                            properties.workflowBatchSize(),
-                            properties.claimDuration());
-
+            int scannedWorkflows = 0;
             int recoveredWorkflows = 0;
             int deferredWorkflows = 0;
             int deliveredEvents = 0;
             int failedWorkflows = 0;
-            for (ClaimedRoomEpoch candidate : candidates) {
+            Set<String> claimedEpochIds = new HashSet<>(2);
+            for (int lane = 0; lane < 2; lane++) {
+                List<ClaimedRoomEpoch> candidates =
+                        lane == 0
+                                ? scanClaimStore.claimPriorityDomainEventRecovery(
+                                        1, properties.claimDuration())
+                                : scanClaimStore.claimDomainEventRecovery(
+                                        1, properties.claimDuration());
+                if (candidates.isEmpty()) {
+                    continue;
+                }
+                ClaimedRoomEpoch candidate = candidates.get(0);
+                scannedWorkflows++;
                 boolean failed = false;
                 Duration nextScanDelay = properties.pollInterval();
                 try {
+                    if (!claimedEpochIds.add(candidate.epochId())) {
+                        throw new IllegalStateException(
+                                "scan lanes claimed the same room epoch twice");
+                    }
                     RecoveryAttempt attempt = recover(candidate);
                     if (attempt.deferred()) {
                         deferredWorkflows++;
@@ -76,16 +90,17 @@ public class CaseDomainEventRecoveryRelay {
                             failure.getClass().getSimpleName(),
                             failure.getMessage(),
                             failure);
-                }
-                if (!completeClaim(candidate, nextScanDelay)) {
-                    failed = true;
+                } finally {
+                    if (!completeClaim(candidate, nextScanDelay)) {
+                        failed = true;
+                    }
                 }
                 if (failed) {
                     failedWorkflows++;
                 }
             }
             return RecoveryRun.completed(
-                    candidates.size(),
+                    scannedWorkflows,
                     recoveredWorkflows,
                     deferredWorkflows,
                     deliveredEvents,

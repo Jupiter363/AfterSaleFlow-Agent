@@ -35,7 +35,7 @@ class ProcessProjectionReconcilerLeaseTest {
     @Mock private RoomEpochScanClaimStore scanClaimStore;
 
     @Test
-    void claimsAndCompletesEachCandidateBeforeClaimingTheNextOne() {
+    void completesPriorityBeforeClaimingTheFairLane() {
         ClaimedRoomEpoch first = candidate("first");
         ClaimedRoomEpoch second = candidate("second");
         ReconciliationTarget firstTarget = target(first);
@@ -44,8 +44,10 @@ class ProcessProjectionReconcilerLeaseTest {
         ReadResult secondRead = unavailable();
         ProcessProjectionReconciliationResult firstResult = result("FIRST_UNAVAILABLE");
         ProcessProjectionReconciliationResult secondResult = result("SECOND_UNAVAILABLE");
+        when(scanClaimStore.claimPriorityProjectionReconciliation(1, CLAIM_DURATION))
+                .thenReturn(List.of(first));
         when(scanClaimStore.claimProjectionReconciliation(1, CLAIM_DURATION))
-                .thenReturn(List.of(first), List.of(second));
+                .thenReturn(List.of(second));
         when(scanClaimStore.renewProjectionReconciliation(first, CLAIM_DURATION))
                 .thenReturn(true);
         when(scanClaimStore.renewProjectionReconciliation(second, CLAIM_DURATION))
@@ -65,7 +67,7 @@ class ProcessProjectionReconcilerLeaseTest {
         InOrder ordered =
                 inOrder(scanClaimStore, authoritativeStateReader, reconciliationService);
         ordered.verify(scanClaimStore)
-                .claimProjectionReconciliation(1, CLAIM_DURATION);
+                .claimPriorityProjectionReconciliation(1, CLAIM_DURATION);
         ordered.verify(scanClaimStore)
                 .renewProjectionReconciliation(first, CLAIM_DURATION);
         ordered.verify(authoritativeStateReader).read(firstTarget);
@@ -87,15 +89,17 @@ class ProcessProjectionReconcilerLeaseTest {
     }
 
     @Test
-    void completesAFailedCandidateBeforeContinuingWithTheNextClaim() {
+    void completesAFailedPriorityCandidateBeforeClaimingFair() {
         ClaimedRoomEpoch failed = candidate("failed");
         ClaimedRoomEpoch succeeding = candidate("succeeding");
         ReconciliationTarget failedTarget = target(failed);
         ReconciliationTarget succeedingTarget = target(succeeding);
         ReadResult succeedingRead = unavailable();
         ProcessProjectionReconciliationResult succeedingResult = result("SUCCEEDING_UNAVAILABLE");
+        when(scanClaimStore.claimPriorityProjectionReconciliation(1, CLAIM_DURATION))
+                .thenReturn(List.of(failed));
         when(scanClaimStore.claimProjectionReconciliation(1, CLAIM_DURATION))
-                .thenReturn(List.of(failed), List.of(succeeding));
+                .thenReturn(List.of(succeeding));
         when(scanClaimStore.renewProjectionReconciliation(failed, CLAIM_DURATION))
                 .thenReturn(true);
         when(scanClaimStore.renewProjectionReconciliation(succeeding, CLAIM_DURATION))
@@ -115,7 +119,7 @@ class ProcessProjectionReconcilerLeaseTest {
         assertThat(results).containsExactly(succeedingResult);
         InOrder ordered = inOrder(scanClaimStore, authoritativeStateReader);
         ordered.verify(scanClaimStore)
-                .claimProjectionReconciliation(1, CLAIM_DURATION);
+                .claimPriorityProjectionReconciliation(1, CLAIM_DURATION);
         ordered.verify(scanClaimStore)
                 .renewProjectionReconciliation(failed, CLAIM_DURATION);
         ordered.verify(authoritativeStateReader).read(failedTarget);
@@ -128,7 +132,7 @@ class ProcessProjectionReconcilerLeaseTest {
     }
 
     @Test
-    void targetConstructionFailureStillCompletesTheClaimAndContinues() {
+    void targetConstructionFailureStillCompletesBeforeTheFairClaim() {
         ClaimedRoomEpoch invalid =
                 new ClaimedRoomEpoch(
                         "claim-invalid",
@@ -143,8 +147,10 @@ class ProcessProjectionReconcilerLeaseTest {
         ReconciliationTarget succeedingTarget = target(succeeding);
         ReadResult succeedingRead = unavailable();
         ProcessProjectionReconciliationResult succeedingResult = result("TARGET_RECOVERED");
+        when(scanClaimStore.claimPriorityProjectionReconciliation(1, CLAIM_DURATION))
+                .thenReturn(List.of(invalid));
         when(scanClaimStore.claimProjectionReconciliation(1, CLAIM_DURATION))
-                .thenReturn(List.of(invalid), List.of(succeeding));
+                .thenReturn(List.of(succeeding));
         when(scanClaimStore.completeProjectionReconciliation(invalid, POLL_INTERVAL))
                 .thenReturn(true);
         when(scanClaimStore.renewProjectionReconciliation(succeeding, CLAIM_DURATION))
@@ -160,7 +166,7 @@ class ProcessProjectionReconcilerLeaseTest {
         assertThat(results).containsExactly(succeedingResult);
         InOrder ordered = inOrder(scanClaimStore, authoritativeStateReader);
         ordered.verify(scanClaimStore)
-                .claimProjectionReconciliation(1, CLAIM_DURATION);
+                .claimPriorityProjectionReconciliation(1, CLAIM_DURATION);
         ordered.verify(scanClaimStore)
                 .completeProjectionReconciliation(invalid, POLL_INTERVAL);
         ordered.verify(scanClaimStore)
@@ -177,8 +183,10 @@ class ProcessProjectionReconcilerLeaseTest {
         ReconciliationTarget succeedingTarget = target(succeeding);
         ReadResult succeedingRead = unavailable();
         ProcessProjectionReconciliationResult succeedingResult = result("RENEWAL_RECOVERED");
+        when(scanClaimStore.claimPriorityProjectionReconciliation(1, CLAIM_DURATION))
+                .thenReturn(List.of(lost));
         when(scanClaimStore.claimProjectionReconciliation(1, CLAIM_DURATION))
-                .thenReturn(List.of(lost), List.of(succeeding));
+                .thenReturn(List.of(succeeding));
         when(scanClaimStore.renewProjectionReconciliation(lost, CLAIM_DURATION))
                 .thenReturn(false);
         when(scanClaimStore.completeProjectionReconciliation(lost, POLL_INTERVAL))
@@ -216,8 +224,10 @@ class ProcessProjectionReconcilerLeaseTest {
         ReadResult secondRead = unavailable();
         ProcessProjectionReconciliationResult firstResult = result("FIRST_COMPLETED");
         ProcessProjectionReconciliationResult secondResult = result("SECOND_COMPLETED");
+        when(scanClaimStore.claimPriorityProjectionReconciliation(1, CLAIM_DURATION))
+                .thenReturn(List.of(first));
         when(scanClaimStore.claimProjectionReconciliation(1, CLAIM_DURATION))
-                .thenReturn(List.of(first), List.of(second));
+                .thenReturn(List.of(second));
         when(scanClaimStore.renewProjectionReconciliation(first, CLAIM_DURATION))
                 .thenReturn(true);
         when(scanClaimStore.renewProjectionReconciliation(second, CLAIM_DURATION))
@@ -252,8 +262,10 @@ class ProcessProjectionReconcilerLeaseTest {
         ReadResult secondRead = unavailable();
         ProcessProjectionReconciliationResult firstResult = result("FIRST_COMPLETED");
         ProcessProjectionReconciliationResult secondResult = result("SECOND_COMPLETED");
+        when(scanClaimStore.claimPriorityProjectionReconciliation(1, CLAIM_DURATION))
+                .thenReturn(List.of(first));
         when(scanClaimStore.claimProjectionReconciliation(1, CLAIM_DURATION))
-                .thenReturn(List.of(first), List.of(second));
+                .thenReturn(List.of(second));
         when(scanClaimStore.renewProjectionReconciliation(first, CLAIM_DURATION))
                 .thenReturn(true);
         when(scanClaimStore.renewProjectionReconciliation(second, CLAIM_DURATION))
@@ -276,6 +288,34 @@ class ProcessProjectionReconcilerLeaseTest {
         ordered.verify(scanClaimStore)
                 .claimProjectionReconciliation(1, CLAIM_DURATION);
         ordered.verify(authoritativeStateReader).read(secondTarget);
+    }
+
+    @Test
+    void emptyPriorityLaneFallsBackToTheFairLane() {
+        ClaimedRoomEpoch fair = candidate("fair-fallback");
+        ReconciliationTarget fairTarget = target(fair);
+        ReadResult fairRead = unavailable();
+        ProcessProjectionReconciliationResult fairResult = result("FAIR_FALLBACK");
+        when(scanClaimStore.claimPriorityProjectionReconciliation(1, CLAIM_DURATION))
+                .thenReturn(List.of());
+        when(scanClaimStore.claimProjectionReconciliation(1, CLAIM_DURATION))
+                .thenReturn(List.of(fair));
+        when(scanClaimStore.renewProjectionReconciliation(fair, CLAIM_DURATION))
+                .thenReturn(true);
+        when(scanClaimStore.completeProjectionReconciliation(fair, POLL_INTERVAL))
+                .thenReturn(true);
+        when(authoritativeStateReader.read(fairTarget)).thenReturn(fairRead);
+        when(reconciliationService.reconcile(fairTarget, fairRead)).thenReturn(fairResult);
+
+        var results = reconciler().scan(2);
+
+        assertThat(results).containsExactly(fairResult);
+        InOrder ordered = inOrder(scanClaimStore, authoritativeStateReader);
+        ordered.verify(scanClaimStore)
+                .claimPriorityProjectionReconciliation(1, CLAIM_DURATION);
+        ordered.verify(scanClaimStore)
+                .claimProjectionReconciliation(1, CLAIM_DURATION);
+        ordered.verify(authoritativeStateReader).read(fairTarget);
     }
 
     private ProcessProjectionReconciler reconciler() {

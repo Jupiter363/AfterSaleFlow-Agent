@@ -24,12 +24,26 @@ public class RoomEpochScanClaimStore {
 
     public List<ClaimedRoomEpoch> claimDomainEventRecovery(
             int batchSize, Duration claimDuration) {
-        return claim(DOMAIN_EVENT_RECOVERY, batchSize, claimDuration);
+        return claim(DOMAIN_EVENT_RECOVERY, ClaimOrder.FAIR, batchSize, claimDuration);
+    }
+
+    public List<ClaimedRoomEpoch> claimPriorityDomainEventRecovery(
+            int batchSize, Duration claimDuration) {
+        return claim(DOMAIN_EVENT_RECOVERY, ClaimOrder.DOMAIN_PRIORITY, batchSize, claimDuration);
     }
 
     public List<ClaimedRoomEpoch> claimProjectionReconciliation(
             int batchSize, Duration claimDuration) {
-        return claim(PROJECTION_RECONCILIATION, batchSize, claimDuration);
+        return claim(PROJECTION_RECONCILIATION, ClaimOrder.FAIR, batchSize, claimDuration);
+    }
+
+    public List<ClaimedRoomEpoch> claimPriorityProjectionReconciliation(
+            int batchSize, Duration claimDuration) {
+        return claim(
+                PROJECTION_RECONCILIATION,
+                ClaimOrder.PROJECTION_PRIORITY,
+                batchSize,
+                claimDuration);
     }
 
     public boolean renewDomainEventRecovery(
@@ -53,7 +67,10 @@ public class RoomEpochScanClaimStore {
     }
 
     private List<ClaimedRoomEpoch> claim(
-            String scanPrefix, int batchSize, Duration claimDuration) {
+            String scanPrefix,
+            ClaimOrder claimOrder,
+            int batchSize,
+            Duration claimDuration) {
         if (batchSize < 1 || batchSize > 1_000) {
             throw new IllegalArgumentException("batchSize must be between 1 and 1000");
         }
@@ -63,23 +80,30 @@ public class RoomEpochScanClaimStore {
         String nextScanColumn = scanPrefix + "_next_scan_at";
         String claimTokenColumn = scanPrefix + "_claim_token";
         String claimedUntilColumn = scanPrefix + "_claimed_until";
+        String priorityJoin = priorityJoin(claimOrder);
+        String projectionPredicate =
+                claimOrder == ClaimOrder.DOMAIN_PRIORITY
+                        ? ""
+                        : projectionReadyPredicate(scanPrefix, "epoch");
+        String orderBy = claimOrder(claimOrder, nextScanColumn);
         String sql =
                 """
                 with candidates as (
                     select epoch.id
                       from case_room_epoch epoch
+                      %s
                      where epoch.lifecycle_status = 'ACTIVE'
                         and epoch.writer_mode in ('SHADOW', 'TEMPORAL')
                         and epoch.provisioning_status = 'READY'
                         and epoch.temporal_workflow_id is not null
                         and epoch.temporal_run_id is not null
-                        and epoch.room_temporal_workflow_id is not null
-                        and epoch.room_temporal_run_id is not null
+                       and epoch.room_temporal_workflow_id is not null
+                       and epoch.room_temporal_run_id is not null
                        %s
                        and epoch.%s <= clock_timestamp()
                        and (epoch.%s is null or epoch.%s <= clock_timestamp())
-                     order by epoch.%s, epoch.updated_at, epoch.id
-                     for update skip locked
+                     order by %s
+                     for update of epoch skip locked
                      limit :batchSize
                 )
                 update case_room_epoch epoch
@@ -97,11 +121,12 @@ public class RoomEpochScanClaimStore {
                           epoch.temporal_workflow_id
                 """
                         .formatted(
-                                projectionReadyPredicate(scanPrefix, "epoch"),
+                                priorityJoin,
+                                projectionPredicate,
                                 nextScanColumn,
                                 claimedUntilColumn,
                                 claimedUntilColumn,
-                                nextScanColumn,
+                                orderBy,
                                 claimTokenColumn,
                                 claimedUntilColumn);
         Map<String, Object> parameters =
@@ -111,6 +136,64 @@ public class RoomEpochScanClaimStore {
                         "batchSize", batchSize);
         return jdbc.query(
                 sql, parameters, (resultSet, rowNumber) -> mapClaim(resultSet, claimToken));
+    }
+
+    private static String priorityJoin(ClaimOrder claimOrder) {
+        return switch (claimOrder) {
+            case FAIR -> "";
+            case DOMAIN_PRIORITY ->
+                    """
+                    join case_process_projection priority_projection
+                      on priority_projection.case_id = epoch.case_id
+                     and priority_projection.writer_activation_status = 'READY'
+                     and priority_projection.writer_mode = epoch.writer_mode
+                     and priority_projection.room_epoch = epoch.room_epoch
+                     and priority_projection.fencing_token = epoch.fencing_token
+                     and priority_projection.process_revision = epoch.process_revision
+                     and priority_projection.temporal_workflow_id = epoch.temporal_workflow_id
+                     and priority_projection.temporal_run_id = epoch.temporal_run_id
+                    join lateral (
+                        select timeline.sequence_no, timeline.created_at
+                          from case_timeline_event timeline
+                         where timeline.case_id = epoch.case_id
+                         order by timeline.sequence_no desc,
+                                  timeline.created_at desc,
+                                  timeline.id
+                         limit 1
+                    ) priority_timeline
+                      on priority_timeline.sequence_no
+                         > priority_projection.last_case_event_sequence
+                    """;
+            case PROJECTION_PRIORITY ->
+                    """
+                    join lateral (
+                        select command.deadline_at, command.accepted_at
+                          from case_command command
+                         where command.tenant_surrogate = epoch.tenant_surrogate
+                           and command.case_id = epoch.case_id
+                           and command.command_status in (
+                               'PENDING_ORCHESTRATION', 'ORCHESTRATION_ACCEPTED'
+                           )
+                           and command.deadline_at > clock_timestamp()
+                         order by command.deadline_at,
+                                  command.accepted_at desc,
+                                  command.id
+                         limit 1
+                    ) priority_command on true
+                    """;
+        };
+    }
+
+    private static String claimOrder(ClaimOrder claimOrder, String nextScanColumn) {
+        return switch (claimOrder) {
+            case FAIR -> "epoch." + nextScanColumn + ", epoch.updated_at, epoch.id";
+            case DOMAIN_PRIORITY ->
+                    "priority_timeline.created_at desc, "
+                            + "priority_timeline.sequence_no desc, epoch.updated_at desc, epoch.id";
+            case PROJECTION_PRIORITY ->
+                    "priority_command.deadline_at, priority_command.accepted_at desc, "
+                            + "epoch.updated_at desc, epoch.id";
+        };
     }
 
     private boolean renew(
@@ -272,4 +355,10 @@ public class RoomEpochScanClaimStore {
             long roomEpoch,
             long fencingToken,
             String temporalWorkflowId) {}
+
+    private enum ClaimOrder {
+        FAIR,
+        DOMAIN_PRIORITY,
+        PROJECTION_PRIORITY
+    }
 }
