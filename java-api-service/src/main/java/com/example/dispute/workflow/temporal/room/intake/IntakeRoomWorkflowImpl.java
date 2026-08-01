@@ -51,6 +51,8 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
   private static final String AGENT_RUN_CHILD_CHANGE_ID = "intake-room-agent-run-v2-child-v1";
   private static final String AGENT_RUN_WINNING_ATTEMPT_CHANGE_ID =
       "intake-room-agent-run-winning-attempt-v1";
+  private static final String TARGET_SOURCE_EVENT_HARDENING_CHANGE_ID =
+      "target-intake-source-event-hardening-v1";
   private static final String TARGET_BRANCH_OUTPUT_SCHEMA_VERSION =
       "target-e2e-room-proposal-source.v1";
   private static final long HISTORY_EVENT_LIMIT = 2_000;
@@ -94,6 +96,7 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
   private io.temporal.workflow.Promise<Void> runMaxAgeTimer;
   private boolean rolloverEnabled;
   private boolean winningAttemptEnabled;
+  private boolean targetSourceEventHardeningEnabled;
   private boolean continueAsNewRequested;
   private Promise<Void> activeOrchestration;
   private CancellationScope activeCancellationScope;
@@ -110,6 +113,10 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
     winningAttemptEnabled =
         Workflow.getVersion(
                 AGENT_RUN_WINNING_ATTEMPT_CHANGE_ID, Workflow.DEFAULT_VERSION, 1)
+            == 1;
+    targetSourceEventHardeningEnabled =
+        Workflow.getVersion(
+                TARGET_SOURCE_EVENT_HARDENING_CHANGE_ID, Workflow.DEFAULT_VERSION, 1)
             == 1;
     if (rolloverEnabled) {
       runMaxAgeTimer = Workflow.newTimer(RUN_MAX_AGE);
@@ -266,6 +273,57 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
   }
 
   private void processTargetSourceEvent(TargetIntakeSourceEventRef event) {
+    if (!targetSourceEventHardeningEnabled) {
+      processTargetSourceEventLegacy(event);
+      return;
+    }
+    if (!start.targetE2eCandidate()) {
+      protocolErrorCode = "TARGET_SOURCE_EVENT_LANE_NOT_AUTHORIZED";
+      return;
+    }
+    if (eventObservations.containsKey(event.eventId())) {
+      protocolErrorCode = "EVENT_ID_REUSE_CONFLICT";
+      return;
+    }
+    TargetIntakeSourceEventRef observed = targetSourceEventObservations.get(event.eventId());
+    if (observed != null) {
+      if (!observed.equals(event)) {
+        protocolErrorCode = "TARGET_SOURCE_EVENT_ID_REUSE_CONFLICT";
+        return;
+      }
+      retryBufferedFormalEventAtCursor();
+      return;
+    }
+    if (!TargetIntakeSourceEventRef.ROOM_MESSAGE_CREATED.equals(event.eventType())) {
+      protocolErrorCode = "TARGET_SOURCE_EVENT_TYPE_NOT_ALLOWED";
+      return;
+    }
+    if (!matchesEnvelope(event)) {
+      protocolErrorCode = "TARGET_SOURCE_EVENT_SCOPE_MISMATCH";
+      return;
+    }
+    if (hasSourceEventSequenceConflict(event)
+        || hasFormalEventSequenceConflict(event.eventSequence(), event.eventId())) {
+      protocolErrorCode = "TARGET_SOURCE_EVENT_SEQUENCE_ID_CONFLICT";
+      return;
+    }
+    if (event.eventSequence() < nextEventSequence) {
+      protocolErrorCode = "TARGET_SOURCE_EVENT_SEQUENCE_REPLAY_UNKNOWN";
+      return;
+    }
+    if (event.eventSequence() > nextEventSequence) {
+      protocolErrorCode = "TARGET_SOURCE_EVENT_SEQUENCE_GAP";
+      return;
+    }
+
+    targetSourceEventObservations.put(event.eventId(), event);
+    trim(targetSourceEventObservations);
+    nextEventSequence++;
+    protocolErrorCode = null;
+    retryBufferedFormalEventAtCursor();
+  }
+
+  private void processTargetSourceEventLegacy(TargetIntakeSourceEventRef event) {
     TargetIntakeSourceEventRef observed = targetSourceEventObservations.get(event.eventId());
     if (observed != null) {
       if (!observed.equals(event)) {
@@ -291,7 +349,6 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
       protocolErrorCode = "TARGET_SOURCE_EVENT_SEQUENCE_GAP";
       return;
     }
-
     targetSourceEventObservations.put(event.eventId(), event);
     trim(targetSourceEventObservations);
     nextEventSequence++;
@@ -308,12 +365,44 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
                         && observation.event().eventSequence() == nextEventSequence)
             .map(EventObservation::event)
             .toList();
-    for (IntakeDomainEventRef candidate : candidates) {
-      if (candidate.eventSequence() != nextEventSequence) {
-        return;
+    if (!targetSourceEventHardeningEnabled) {
+      for (IntakeDomainEventRef candidate : candidates) {
+        if (candidate.eventSequence() != nextEventSequence) {
+          return;
+        }
+        processEvent(candidate);
       }
-      processEvent(candidate);
+      return;
     }
+    if (candidates.size() > 1) {
+      protocolErrorCode = "EVENT_SEQUENCE_ID_CONFLICT";
+      return;
+    }
+    if (candidates.isEmpty()) {
+      return;
+    }
+    long cursor = nextEventSequence;
+    processEvent(candidates.get(0));
+    if (nextEventSequence != cursor) {
+      return;
+    }
+  }
+
+  private boolean hasSourceEventSequenceConflict(TargetIntakeSourceEventRef event) {
+    return targetSourceEventObservations.values().stream()
+        .anyMatch(
+            observed ->
+                observed.eventSequence() == event.eventSequence()
+                    && !observed.eventId().equals(event.eventId()));
+  }
+
+  private boolean hasFormalEventSequenceConflict(long eventSequence, String eventId) {
+    return eventObservations.values().stream()
+        .map(EventObservation::event)
+        .anyMatch(
+            observed ->
+                observed.eventSequence() == eventSequence
+                    && !observed.eventId().equals(eventId));
   }
 
   private void processCommand(IntakeWorkflowCommand command) {
@@ -416,6 +505,11 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
 
   private void processEvent(
       IntakeDomainEventRef event, String expectedActivityOperationKey) {
+    if (targetSourceEventHardeningEnabled
+        && targetSourceEventObservations.containsKey(event.eventId())) {
+      protocolErrorCode = "EVENT_ID_REUSE_CONFLICT";
+      return;
+    }
     EventObservation observed = eventObservations.get(event.eventId());
     if (observed != null) {
       if (!observed.event().equals(event)) {
@@ -427,6 +521,13 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
         return;
       }
     } else {
+      if (targetSourceEventHardeningEnabled
+          && (hasFormalEventSequenceConflict(event.eventSequence(), event.eventId())
+              || targetSourceEventObservations.values().stream()
+                  .anyMatch(source -> source.eventSequence() == event.eventSequence()))) {
+        protocolErrorCode = "EVENT_SEQUENCE_ID_CONFLICT";
+        return;
+      }
       observed = new EventObservation(event, false);
       eventObservations.put(event.eventId(), observed);
       trim(eventObservations);

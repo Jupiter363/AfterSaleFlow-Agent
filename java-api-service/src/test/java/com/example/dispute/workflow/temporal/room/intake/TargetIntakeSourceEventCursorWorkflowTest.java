@@ -145,7 +145,107 @@ class TargetIntakeSourceEventCursorWorkflowTest {
     workflow.targetSourceEventObserved(source(1, "EVENT_UNKNOWN_REPLAY"));
     tick();
     assertFailClosed(
-        "TARGET_SOURCE_EVENT_SEQUENCE_REPLAY_UNKNOWN", pending.commandId(), 2);
+        "TARGET_SOURCE_EVENT_SEQUENCE_ID_CONFLICT", pending.commandId(), 2);
+  }
+
+  @Test
+  void duplicateSourceRetriesBufferedFormalWithoutMaskingItsExactFailure() {
+    IntakeWorkflowCommand pending = message(1, "CMD_DUPLICATE_RETRY");
+    workflow.commandAccepted(pending);
+    tick();
+    workflow.domainEventCommitted(
+        nonTurnFormal(2, "EVENT_INVALID_FORMAL_2", pending, IntakeDomainEventType.CANCELLED));
+    tick();
+    assertThat(workflow.state().protocolErrorCode()).isEqualTo("EVENT_SEQUENCE_GAP");
+
+    TargetIntakeSourceEventRef source = source(1, "EVENT_SOURCE_RETRY_1");
+    workflow.targetSourceEventObserved(source);
+    tick();
+    assertThat(workflow.state().protocolErrorCode())
+        .isEqualTo("EVENT_TYPE_NOT_ALLOWED_FOR_COMMAND");
+    assertThat(workflow.state().nextEventSequence()).isEqualTo(2);
+    assertThat(workflow.state().pendingCommandId()).isEqualTo(pending.commandId());
+
+    workflow.targetSourceEventObserved(source);
+    tick();
+    assertThat(workflow.state().protocolErrorCode())
+        .isEqualTo("EVENT_TYPE_NOT_ALLOWED_FOR_COMMAND");
+    assertThat(workflow.state().nextEventSequence()).isEqualTo(2);
+    assertThat(workflow.state().pendingCommandId()).isEqualTo(pending.commandId());
+  }
+
+  @Test
+  void ordinaryIntakeLaneCannotUseTheTargetSourceCursorSignal() {
+    IntakeRoomStart ordinaryProfile = ordinaryStart();
+    assertThat(ordinaryProfile.targetE2eCandidate()).isFalse();
+    IntakeRoomWorkflow ordinary = newWorkflow("ordinary", ordinaryProfile);
+
+    ordinary.targetSourceEventObserved(source(1, "EVENT_ORDINARY_SOURCE_1"));
+    tick();
+
+    assertThat(ordinary.state().protocolErrorCode())
+        .isEqualTo("TARGET_SOURCE_EVENT_LANE_NOT_AUTHORIZED");
+    assertThat(ordinary.state().nextEventSequence()).isEqualTo(1);
+    assertThat(ordinary.state().processedEventCount()).isZero();
+    assertThat(ordinary.state().pendingCommand()).isNull();
+  }
+
+  @Test
+  void sourceAndFormalEventIdsCannotBeReusedAcrossObservationTypes() {
+    IntakeWorkflowCommand pending = message(1, "CMD_CROSS_TYPE_ID");
+    workflow.commandAccepted(pending);
+    tick();
+    workflow.targetSourceEventObserved(source(1, "EVENT_CROSS_TYPE_ID"));
+    tick();
+
+    workflow.domainEventCommitted(formalTurn(2, "EVENT_CROSS_TYPE_ID", pending));
+    tick();
+
+    assertThat(workflow.state().protocolErrorCode()).isEqualTo("EVENT_ID_REUSE_CONFLICT");
+    assertThat(workflow.state().nextEventSequence()).isEqualTo(2);
+    assertThat(workflow.state().pendingCommandId()).isEqualTo(pending.commandId());
+
+    IntakeRoomWorkflow reverse = newWorkflow("reverse-id", start());
+    IntakeWorkflowCommand reversePending = message(1, "CMD_REVERSE_CROSS_TYPE_ID");
+    reverse.commandAccepted(reversePending);
+    tick();
+    reverse.domainEventCommitted(
+        formalTurn(2, "EVENT_REVERSE_CROSS_TYPE_ID", reversePending));
+    tick();
+    reverse.targetSourceEventObserved(source(1, "EVENT_REVERSE_CROSS_TYPE_ID"));
+    tick();
+
+    assertThat(reverse.state().protocolErrorCode()).isEqualTo("EVENT_ID_REUSE_CONFLICT");
+    assertThat(reverse.state().nextEventSequence()).isEqualTo(1);
+    assertThat(reverse.state().pendingCommandId()).isEqualTo(reversePending.commandId());
+  }
+
+  @Test
+  void differentIdsCannotOccupyOneSourceOrFormalSequence() {
+    IntakeWorkflowCommand pending = message(1, "CMD_SEQUENCE_ID_CONFLICT");
+    workflow.commandAccepted(pending);
+    tick();
+    workflow.domainEventCommitted(formalTurn(2, "EVENT_FORMAL_2_A", pending));
+    tick();
+    workflow.domainEventCommitted(formalTurn(2, "EVENT_FORMAL_2_B", pending));
+    tick();
+    assertThat(workflow.state().protocolErrorCode()).isEqualTo("EVENT_SEQUENCE_ID_CONFLICT");
+
+    workflow.targetSourceEventObserved(source(1, "EVENT_SOURCE_1_A"));
+    tick();
+    assertThat(workflow.state().protocolErrorCode()).isNull();
+    assertThat(workflow.state().nextEventSequence()).isEqualTo(3);
+    assertThat(workflow.state().lastEventId()).isEqualTo("EVENT_FORMAL_2_A");
+
+    IntakeRoomWorkflow sourceConflict = newWorkflow("source-conflict", start());
+    sourceConflict.targetSourceEventObserved(source(1, "EVENT_SOURCE_SAME_SEQUENCE_A"));
+    tick();
+    sourceConflict.targetSourceEventObserved(source(1, "EVENT_SOURCE_SAME_SEQUENCE_B"));
+    tick();
+
+    assertThat(sourceConflict.state().protocolErrorCode())
+        .isEqualTo("TARGET_SOURCE_EVENT_SEQUENCE_ID_CONFLICT");
+    assertThat(sourceConflict.state().nextEventSequence()).isEqualTo(2);
   }
 
   private void assertFailClosed(String error, String pendingCommandId, long nextEventSequence) {
@@ -157,6 +257,21 @@ class TargetIntakeSourceEventCursorWorkflowTest {
 
   private void tick() {
     environment.sleep(Duration.ofSeconds(1));
+  }
+
+  private IntakeRoomWorkflow newWorkflow(String suffix, IntakeRoomStart workflowStart) {
+    IntakeRoomWorkflow created =
+        environment
+            .getWorkflowClient()
+            .newWorkflowStub(
+                IntakeRoomWorkflow.class,
+                WorkflowOptions.newBuilder()
+                    .setWorkflowId("target-intake-source-cursor:" + CASE_ID + ":" + suffix)
+                    .setTaskQueue(TASK_QUEUE)
+                    .build());
+    WorkflowClient.start(created::run, workflowStart);
+    tick();
+    return created;
   }
 
   private static IntakeRoomStart start() {
@@ -179,6 +294,30 @@ class TargetIntakeSourceEventCursorWorkflowTest {
         "all-rooms-policy.target-e2e.v1",
         "all-rooms-guardrail.target-e2e.v1",
         "tools.none.v1",
+        INITIATOR_SCOPE,
+        RESPONDENT_SCOPE);
+  }
+
+  private static IntakeRoomStart ordinaryStart() {
+    return new IntakeRoomStart(
+        "intake-room-start.v1",
+        TENANT,
+        CASE_ID,
+        ROOM_EPOCH,
+        FENCE,
+        3,
+        2,
+        1,
+        1,
+        "ordinary-control-build",
+        "2.0.0",
+        "intake-checkpoint.v2",
+        "intake-prompt.v2",
+        "intake-model.synthetic.v1",
+        "intake-turn-proposal.v2",
+        "intake-policy.v2",
+        "intake-guardrail.v2",
+        "no-tools.v1",
         INITIATOR_SCOPE,
         RESPONDENT_SCOPE);
   }
@@ -239,6 +378,34 @@ class TargetIntakeSourceEventCursorWorkflowTest {
             resultHash,
             "urn:after-sale-flow:intake-proposal:" + command.commandId(),
             hash(sequence + 4)));
+  }
+
+  private static IntakeDomainEventRef nonTurnFormal(
+      long sequence,
+      String eventId,
+      IntakeWorkflowCommand command,
+      IntakeDomainEventType eventType) {
+    return new IntakeDomainEventRef(
+        "intake-domain-event-ref.v1",
+        eventId,
+        "urn:after-sale-flow:intake-event:" + eventId,
+        hash(sequence + 3),
+        sequence,
+        eventType,
+        IntakeParty.INITIATOR,
+        command.commandId(),
+        TENANT,
+        CASE_ID,
+        ROOM_EPOCH,
+        FENCE,
+        INITIATOR_SCOPE,
+        command.operationKey(),
+        command.requestHash(),
+        hash(sequence + 2),
+        3 + sequence,
+        2 + sequence,
+        null,
+        null);
   }
 
   private static TargetIntakeSourceEventRef source(long sequence, String eventId) {

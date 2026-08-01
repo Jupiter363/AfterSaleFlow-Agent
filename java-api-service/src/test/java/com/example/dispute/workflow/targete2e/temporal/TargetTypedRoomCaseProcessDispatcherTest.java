@@ -79,6 +79,7 @@ class TargetTypedRoomCaseProcessDispatcherTest {
     assertThat(first.policyVersion()).isEqualTo("all-rooms-policy.target-e2e.v1");
     assertThat(first.guardrailVersion()).isEqualTo("all-rooms-guardrail.target-e2e.v1");
     assertThat(first.toolPolicyVersion()).isEqualTo("tools.none.v1");
+    assertThat(first.targetE2eCandidate()).isTrue();
     assertThat(first.initiatorActorScopeHash())
         .isEqualTo(TargetIntakeActorScopes.hash(request.caseId(), "user-local", ActorRole.USER));
     assertThat(first.respondentActorScopeHash())
@@ -96,6 +97,7 @@ class TargetTypedRoomCaseProcessDispatcherTest {
         TargetTypedRoomCaseProcessDispatcher.legacyTargetIntakeStart(request);
 
     assertThat(replay).isEqualTo(first);
+    assertThat(first.targetE2eCandidate()).isTrue();
     assertThat(first.initiatorActorScopeHash())
         .isEqualTo(TargetIntakeActorScopes.hash(request.caseId(), "user-local", ActorRole.USER));
     assertThat(first.respondentActorScopeHash())

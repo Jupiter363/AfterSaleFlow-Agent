@@ -28,6 +28,12 @@ public record IntakeRoomStart(
     IntakeRoomCarryState carryState) {
 
   private static final Pattern IDENTIFIER = Pattern.compile("[A-Za-z0-9][A-Za-z0-9._:-]{0,127}");
+  private static final String TARGET_PROMPT_VERSION = "all-rooms-prompt.target-e2e.v1";
+  private static final String TARGET_MODEL_PROFILE_ID = "target-e2e.contract-blocked";
+  private static final String TARGET_OUTPUT_SCHEMA_VERSION = "target-e2e-intake-output.v1";
+  private static final String TARGET_POLICY_VERSION = "all-rooms-policy.target-e2e.v1";
+  private static final String TARGET_GUARDRAIL_VERSION = "all-rooms-guardrail.target-e2e.v1";
+  private static final String TARGET_TOOL_POLICY_VERSION = "tools.none.v1";
 
   public IntakeRoomStart(
       String schemaVersion,
@@ -128,6 +134,16 @@ public record IntakeRoomStart(
         initiatorActorScopeHash,
         respondentActorScopeHash,
         nextCarryState);
+  }
+
+  /** True only for the target artifact's fully pinned Intake execution profile. */
+  public boolean targetE2eCandidate() {
+    return TARGET_PROMPT_VERSION.equals(promptVersion)
+        && TARGET_MODEL_PROFILE_ID.equals(modelProfileId)
+        && TARGET_OUTPUT_SCHEMA_VERSION.equals(outputSchemaVersion)
+        && TARGET_POLICY_VERSION.equals(policyVersion)
+        && TARGET_GUARDRAIL_VERSION.equals(guardrailVersion)
+        && TARGET_TOOL_POLICY_VERSION.equals(toolPolicyVersion);
   }
 
   private static void requireIdentifier(String value, String field) {

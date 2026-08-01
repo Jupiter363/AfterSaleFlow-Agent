@@ -693,9 +693,7 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
 
     @Override
     protected void onDomainEvent(CaseDomainEventRef event) {
-      TargetIntakeSourceEventRef sourceEvent =
-          targetIntakeSourceCursorObservation(event, fencingToken);
-      if (sourceEvent == null) {
+      if (!TargetIntakeSourceEventRef.ROOM_MESSAGE_CREATED.equals(event.eventType())) {
         return;
       }
       int sourceCursorVersion =
@@ -704,7 +702,8 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
       if (sourceCursorVersion == Workflow.DEFAULT_VERSION) {
         return;
       }
-      child.targetSourceEventObserved(sourceEvent);
+      child.targetSourceEventObserved(
+          targetIntakeSourceCursorObservation(event, fencingToken));
     }
 
     @Override
