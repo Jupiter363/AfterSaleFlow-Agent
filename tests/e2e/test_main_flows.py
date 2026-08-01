@@ -431,11 +431,23 @@ def test_live_room_flow_reaches_confirmed_settlement_idempotently() -> None:
     # description through the idempotent opening endpoint.  Creating a case
     # only provisions the room epoch; this call is the first accepted room
     # command and must precede polling for the generated private memory.
-    status, opening = request(
-        "POST",
-        f"/api/disputes/{case_id}/rooms/INTAKE/messages/opening",
-        headers=user_headers,
-    )
+    opening_deadline = time.monotonic() + 60
+    opening = None
+    while time.monotonic() < opening_deadline:
+        status, opening = request(
+            "POST",
+            f"/api/disputes/{case_id}/rooms/INTAKE/messages/opening",
+            headers=user_headers,
+        )
+        if status == 200:
+            break
+        if (
+            status != 409
+            or opening.get("details", {}).get("reason_code")
+            != "TARGET_E2E_INTAKE_EPOCH_NOT_READY"
+        ):
+            break
+        time.sleep(1)
     assert status == 200, opening
 
     deadline = time.monotonic() + 300
