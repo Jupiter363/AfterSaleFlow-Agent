@@ -12,6 +12,7 @@ import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.GraphReconcileResponse;
 import com.example.dispute.workflow.contract.v1.RoomGraphResult;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -105,13 +106,16 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
             }
             boolean terminalReconciliation = failure instanceof AgentRunExecutionException typed
                     && typed.recoveryAction() == AgentRunRecoveryAction.RECONCILE_TERMINAL;
+            boolean pendingFinalLogicalFailure = state.hasPendingFinal()
+                    && failure instanceof AgentRunExecutionException typed
+                    && typed.recoveryAction() == AgentRunRecoveryAction.FAIL_LOGICAL_RUN;
             flushBatch(
                     batch,
                     state,
                     state.hasPendingFinal() || terminalReconciliation,
                     progressListener,
                     cancellationToken);
-            if (terminalReconciliation
+            if ((terminalReconciliation || pendingFinalLogicalFailure)
                     && reconciliationClient != null
                     && reconciledFinalStore != null) {
                 return reconcileOnly(
@@ -123,6 +127,14 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
                         state.publicOutputEmitted,
                         true);
             }
+            if (pendingFinalLogicalFailure) {
+                throw AgentRunExecutionException.reconcileTerminal(
+                        "AGENT_RUN_RECONCILIATION_NOT_CONFIGURED",
+                        "a graph failure after an observed final requires result reconciliation",
+                        state.durableSequence(),
+                        state.publicOutputEmitted,
+                        failure);
+            }
             if (state.hasPendingFinal()
                     && !(failure instanceof AgentRunExecutionException)) {
                 throw AgentRunExecutionException.reconcileTerminal(
@@ -131,6 +143,14 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
                         state.durableSequence(),
                         state.publicOutputEmitted,
                         failure);
+            }
+            if (failure instanceof AgentRunExecutionException typed
+                    && shouldMaterializeLocalFailureTerminal(typed, state)) {
+                throw materializeLocalFailureTerminal(
+                        typed,
+                        state,
+                        progressListener,
+                        cancellationToken);
             }
             throw failure;
         }
@@ -143,9 +163,35 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
             flushBatch(
                     batch,
                     state,
-                    false,
+                    state.hasPendingFinal(),
                     progressListener,
                     cancellationToken);
+            if (state.hasPendingFinal()) {
+                if (reconciliationClient != null && reconciledFinalStore != null) {
+                    return reconcileOnly(
+                            request,
+                            progressListener,
+                            cancellationToken,
+                            state.pendingFinal(),
+                            state.durableSequence(),
+                            state.publicOutputEmitted,
+                            true);
+                }
+                throw AgentRunExecutionException.reconcileTerminal(
+                        "AGENT_RUN_RECONCILIATION_NOT_CONFIGURED",
+                        "a graph result failure after an observed final requires result reconciliation",
+                        state.durableSequence(),
+                        state.publicOutputEmitted,
+                        failure);
+            }
+            if (failure instanceof AgentRunExecutionException typed
+                    && shouldMaterializeLocalFailureTerminal(typed, state)) {
+                throw materializeLocalFailureTerminal(
+                        typed,
+                        state,
+                        progressListener,
+                        cancellationToken);
+            }
             throw failure;
         }
         batch.add(finalEvent);
@@ -156,6 +202,33 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
                 progressListener,
                 cancellationToken);
         return new Completion(result, state.lastSequence, state.publicOutputEmitted);
+    }
+
+    private static boolean shouldMaterializeLocalFailureTerminal(
+            AgentRunExecutionException failure, ProgressState state) {
+        return failure.recoveryAction() == AgentRunRecoveryAction.FAIL_LOGICAL_RUN
+                && !state.hasObservedTerminal();
+    }
+
+    private AgentRunExecutionException materializeLocalFailureTerminal(
+            AgentRunExecutionException failure,
+            ProgressState state,
+            ProgressListener progressListener,
+            AgentRunCancellationToken cancellationToken) {
+        PendingBatch terminalBatch = new PendingBatch();
+        terminalBatch.add(state.localFailureError(failure.errorCode()));
+        flushBatch(
+                terminalBatch,
+                state,
+                false,
+                progressListener,
+                cancellationToken);
+        return AgentRunExecutionException.failLogicalRun(
+                failure.errorCode(),
+                "agent run failed after a non-recoverable graph error",
+                state.durableSequence(),
+                state.publicOutputEmitted,
+                failure);
     }
 
     private Completion reconcileOnly(
@@ -656,12 +729,49 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
             return pendingFinal != null;
         }
 
+        private boolean hasObservedTerminal() {
+            return acceptedTerminal || finalObserved;
+        }
+
         private AgentStreamEvent pendingFinal() {
             return pendingFinal;
         }
 
         private long durableSequence() {
             return Math.max(0, lastSequence);
+        }
+
+        private AgentStreamEvent localFailureError(String errorCode) {
+            long nextSequence;
+            try {
+                nextSequence = Math.addExact(durableSequence(), 1L);
+            } catch (ArithmeticException failure) {
+                throw AgentRunExecutionException.failLogicalRun(
+                        "AGENT_RUN_STREAM_SEQUENCE_EXHAUSTED",
+                        "agent run stream cannot append a terminal error",
+                        durableSequence(),
+                        publicOutputEmitted,
+                        failure);
+            }
+            return new AgentStreamEvent(
+                    request.streamProtocol(),
+                    request.agentRunId(),
+                    request.attemptId(),
+                    nextSequence,
+                    StreamEventType.ERROR,
+                    request.command().actorScope().audience(),
+                    Instant.now(),
+                    new AgentStreamEvent.Payload(
+                            null,
+                            null,
+                            null,
+                            null,
+                            null,
+                            null,
+                            null,
+                            null,
+                            errorCode,
+                            false));
         }
 
         private boolean executionMetadataMatches(RoomGraphResult.ExecutionMetadata metadata) {

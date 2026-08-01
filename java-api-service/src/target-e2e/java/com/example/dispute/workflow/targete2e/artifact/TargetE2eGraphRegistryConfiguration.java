@@ -4,6 +4,7 @@ import com.example.dispute.workflow.activity.agent.GraphRegistryBindingPolicy;
 import com.example.dispute.workflow.activity.agent.GraphStreamVisibilityPolicy;
 import com.example.dispute.workflow.config.GraphShadowRegistryProperties;
 import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
+import com.example.dispute.workflow.targete2e.graph.TargetE2EGraphStreamVisibility;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.Map;
@@ -30,7 +31,7 @@ public class TargetE2eGraphRegistryConfiguration {
     for (Audience audience : EnumSet.allOf(Audience.class)) {
       catalog.put(
           binding(template, audience),
-          GraphStreamVisibilityPolicy.immutablePolicy(template.visibleFieldsByNode()));
+          TargetE2EGraphStreamVisibility.requireExactPolicy(template.visibleFieldsByNode()));
     }
     Map<GraphStreamVisibilityPolicy.Binding, Map<String, Set<String>>> snapshot =
         Map.copyOf(catalog);

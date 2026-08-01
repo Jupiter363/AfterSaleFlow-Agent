@@ -215,17 +215,17 @@ class DurableAgentRunExecutionGatewayTest {
     }
 
     @Test
-    void rejectsPythonAttemptResetWithoutPersistingIt() throws Exception {
+    void rejectsPythonAttemptResetAndMaterializesOnlyASanitizedTerminalError() throws Exception {
         ExecuteAgentRunRequest request = requestWithReset();
-        AtomicInteger storeCalls = new AtomicInteger();
+        List<AgentStreamEvent> persisted = new ArrayList<>();
         AgentGraphCommandClient client = (actualRequest, mode, eventSink, cancellationToken) -> {
             eventSink.accept(event(request, 0, StreamEventType.ATTEMPT_STARTED, null));
             eventSink.accept(event(request, 1, StreamEventType.ATTEMPT_RESET, null));
             throw new AssertionError("attempt_reset must fail in the governed gateway");
         };
         AgentRunV2StreamStore store = batchStore(events -> {
-            storeCalls.incrementAndGet();
-            throw new AssertionError("the Python reset must never reach durable storage");
+            persisted.addAll(events);
+            return receipt(events, true, events.getLast().sequenceNo());
         });
 
         AgentRunExecutionException failure = catchThrowableOfType(
@@ -241,8 +241,278 @@ class DurableAgentRunExecutionGatewayTest {
                 .isEqualTo("AGENT_RUN_STREAM_RESET_AUTHORITY_VIOLATION");
         assertThat(failure.retryable()).isFalse();
         assertThat(failure.commandReplaySafe()).isFalse();
+        assertThat(failure.lastSequenceNo()).isEqualTo(2);
+        assertThat(persisted)
+                .singleElement()
+                .satisfies(error -> {
+                    assertThat(error.sequenceNo()).isEqualTo(2);
+                    assertThat(error.eventType()).isEqualTo(StreamEventType.ERROR);
+                    assertThat(error.payload().errorCode())
+                            .isEqualTo("AGENT_RUN_STREAM_RESET_AUTHORITY_VIOLATION");
+                    assertThat(error.payload().retryable()).isFalse();
+                    assertThat(error.payload().resetAttemptId()).isNull();
+                });
+    }
+
+    @Test
+    void materializesFirstAttemptLocalLogicalFailureAsDurableSanitizedError()
+            throws Exception {
+        ExecuteAgentRunRequest request = request();
+        AgentRunExecutionException original = AgentRunExecutionException.failLogicalRun(
+                "TARGET_E2E_GRAPH_PROTOCOL_REJECTED",
+                "private target protocol detail",
+                0,
+                false,
+                null);
+        List<AgentStreamEvent> persisted = new ArrayList<>();
+        AgentGraphCommandClient client = (actualRequest, mode, eventSink, cancellationToken) -> {
+            eventSink.accept(event(request, 0, StreamEventType.ATTEMPT_STARTED, null));
+            throw original;
+        };
+        AgentRunV2StreamStore store = batchStore(events -> {
+            persisted.addAll(events);
+            return receipt(events, true, events.getLast().sequenceNo());
+        });
+
+        AgentRunExecutionException failure = catchThrowableOfType(
+                AgentRunExecutionException.class,
+                () -> new DurableAgentRunExecutionGateway(client, store)
+                        .execute(
+                                request,
+                                ExecutionMode.EXECUTE_OR_RECONCILE,
+                                ignored -> {},
+                                new AgentRunCancellationToken()));
+
+        assertThat(failure).isNotSameAs(original);
+        assertThat(failure.getCause()).isSameAs(original);
+        assertThat(failure.errorCode()).isEqualTo("TARGET_E2E_GRAPH_PROTOCOL_REJECTED");
+        assertThat(failure.recoveryAction()).isEqualTo(AgentRunRecoveryAction.FAIL_LOGICAL_RUN);
         assertThat(failure.lastSequenceNo()).isEqualTo(1);
-        assertThat(storeCalls).hasValue(0);
+        assertThat(failure.publicOutputEmitted()).isFalse();
+        assertThat(persisted)
+                .singleElement()
+                .satisfies(error -> {
+                    assertThat(error.schemaVersion()).isEqualTo("agent-stream.v2");
+                    assertThat(error.runId()).isEqualTo(request.agentRunId());
+                    assertThat(error.attemptId()).isEqualTo(request.attemptId());
+                    assertThat(error.sequenceNo()).isEqualTo(1);
+                    assertThat(error.eventType()).isEqualTo(StreamEventType.ERROR);
+                    assertThat(error.audience()).isEqualTo(request.command().actorScope().audience());
+                    assertThat(error.occurredAt()).isNotNull();
+                    assertThat(error.payload().node()).isNull();
+                    assertThat(error.payload().field()).isNull();
+                    assertThat(error.payload().delta()).isNull();
+                    assertThat(error.payload().usage()).isNull();
+                    assertThat(error.payload().reasonCode()).isNull();
+                    assertThat(error.payload().resetAttemptId()).isNull();
+                    assertThat(error.payload().finalResultRef()).isNull();
+                    assertThat(error.payload().finalResultHash()).isNull();
+                    assertThat(error.payload().errorCode())
+                            .isEqualTo("TARGET_E2E_GRAPH_PROTOCOL_REJECTED");
+                    assertThat(error.payload().retryable()).isFalse();
+                });
+    }
+
+    @Test
+    void doesNotDuplicateAValidRemoteErrorTerminal() throws Exception {
+        ExecuteAgentRunRequest request = request();
+        AgentStreamEvent remoteError = errorEvent(request, 1, "TARGET_E2E_GRAPH_PROTOCOL_REJECTED");
+        AgentRunExecutionException original = AgentRunExecutionException.failLogicalRun(
+                "TARGET_E2E_GRAPH_PROTOCOL_REJECTED",
+                "target Graph returned a terminal error",
+                1,
+                false,
+                null);
+        List<AgentStreamEvent> persisted = new ArrayList<>();
+        AgentGraphCommandClient client = (actualRequest, mode, eventSink, cancellationToken) -> {
+            eventSink.accept(event(request, 0, StreamEventType.ATTEMPT_STARTED, null));
+            eventSink.accept(remoteError);
+            throw original;
+        };
+        AgentRunV2StreamStore store = batchStore(events -> {
+            persisted.addAll(events);
+            return receipt(events, true, events.getLast().sequenceNo());
+        });
+
+        AgentRunExecutionException failure = catchThrowableOfType(
+                AgentRunExecutionException.class,
+                () -> new DurableAgentRunExecutionGateway(client, store)
+                        .execute(
+                                request,
+                                ExecutionMode.EXECUTE_OR_RECONCILE,
+                                ignored -> {},
+                                new AgentRunCancellationToken()));
+
+        assertThat(failure).isSameAs(original);
+        assertThat(persisted).containsExactly(remoteError);
+    }
+
+    @Test
+    void reconcilesAnObservedFinalWhenTheCommandRaisesALogicalFailure() throws Exception {
+        ExecuteAgentRunRequest request = request();
+        GraphReconcileResponse reconciliation = reconciliation(request);
+        AgentStreamEvent observedFinal = reconciledFinal(request, reconciliation, 1, NOW);
+        AgentRunExecutionException original = AgentRunExecutionException.failLogicalRun(
+                "TARGET_E2E_GRAPH_PROTOCOL_REJECTED",
+                "the result was unavailable after its final frame",
+                0,
+                false,
+                null);
+        AtomicInteger reconciliationCalls = new AtomicInteger();
+        AtomicInteger finalStoreCalls = new AtomicInteger();
+        List<Long> streamWrites = new ArrayList<>();
+        var gateway = new DurableAgentRunExecutionGateway(
+                (actualRequest, mode, eventSink, cancellationToken) -> {
+                    eventSink.accept(event(request, 0, StreamEventType.ATTEMPT_STARTED, null));
+                    eventSink.accept(observedFinal);
+                    throw original;
+                },
+                (actualRequest, cancellationToken) -> {
+                    reconciliationCalls.incrementAndGet();
+                    return reconciliation;
+                },
+                recordingStore(streamWrites),
+                candidate -> {
+                    finalStoreCalls.incrementAndGet();
+                    return new AgentRunReconciledFinalStore.Receipt(observedFinal, true, 1, false);
+                });
+
+        var completion = gateway.execute(
+                request,
+                ExecutionMode.EXECUTE_OR_RECONCILE,
+                ignored -> {},
+                new AgentRunCancellationToken());
+
+        assertThat(reconciliationCalls).hasValue(1);
+        assertThat(finalStoreCalls).hasValue(1);
+        assertThat(streamWrites).isEmpty();
+        assertThat(completion.graphResult()).isEqualTo(reconciliation.result());
+        assertThat(completion.lastSequenceNo()).isEqualTo(1);
+    }
+
+    @Test
+    void exposesAnExplicitReconciliationFailureForLogicalFailureAfterObservedFinal()
+            throws Exception {
+        ExecuteAgentRunRequest request = request();
+        GraphReconcileResponse reconciliation = reconciliation(request);
+        AgentStreamEvent observedFinal = reconciledFinal(request, reconciliation, 1, NOW);
+        AgentRunExecutionException original = AgentRunExecutionException.failLogicalRun(
+                "TARGET_E2E_GRAPH_PROTOCOL_REJECTED",
+                "the result was unavailable after its final frame",
+                0,
+                false,
+                null);
+        List<Long> streamWrites = new ArrayList<>();
+        AgentGraphCommandClient client = (actualRequest, mode, eventSink, cancellationToken) -> {
+            eventSink.accept(event(request, 0, StreamEventType.ATTEMPT_STARTED, null));
+            eventSink.accept(observedFinal);
+            throw original;
+        };
+
+        AgentRunExecutionException failure = catchThrowableOfType(
+                AgentRunExecutionException.class,
+                () -> new DurableAgentRunExecutionGateway(client, recordingStore(streamWrites))
+                        .execute(
+                                request,
+                                ExecutionMode.EXECUTE_OR_RECONCILE,
+                                ignored -> {},
+                                new AgentRunCancellationToken()));
+
+        assertThat(failure.errorCode()).isEqualTo("AGENT_RUN_RECONCILIATION_NOT_CONFIGURED");
+        assertThat(failure.recoveryAction())
+                .isEqualTo(AgentRunRecoveryAction.RECONCILE_TERMINAL);
+        assertThat(failure.lastSequenceNo()).isZero();
+        assertThat(failure.getCause()).isSameAs(original);
+        assertThat(streamWrites).isEmpty();
+    }
+
+    @Test
+    void doesNotMaterializeGlobalErrorForNonTerminalRecoveryActions() throws Exception {
+        ExecuteAgentRunRequest request = request();
+        for (AgentRunExecutionException original : List.of(
+                AgentRunExecutionException.retrySameCommand(
+                        "TARGET_E2E_GRAPH_RETRY",
+                        "retry the sealed command",
+                        0,
+                        false,
+                        null),
+                AgentRunExecutionException.createNextAttempt(
+                        "TARGET_E2E_GRAPH_ABORTED",
+                        "the remote terminal authorizes a successor attempt",
+                        0,
+                        false,
+                        null),
+                AgentRunExecutionException.reconcileTerminal(
+                        "TARGET_E2E_GRAPH_RECONCILE",
+                        "the remote terminal requires reconciliation",
+                        0,
+                        false,
+                        null))) {
+            AtomicInteger appendCalls = new AtomicInteger();
+            AgentGraphCommandClient client = (actualRequest, mode, eventSink, cancellationToken) -> {
+                eventSink.accept(event(request, 0, StreamEventType.ATTEMPT_STARTED, null));
+                throw original;
+            };
+            AgentRunV2StreamStore store = batchStore(events -> {
+                appendCalls.incrementAndGet();
+                throw new AssertionError("non-terminal recovery actions must not append global errors");
+            });
+
+            AgentRunExecutionException failure = catchThrowableOfType(
+                    AgentRunExecutionException.class,
+                    () -> new DurableAgentRunExecutionGateway(client, store)
+                            .execute(
+                                    request,
+                                    ExecutionMode.EXECUTE_OR_RECONCILE,
+                                    ignored -> {},
+                                    new AgentRunCancellationToken()));
+
+            assertThat(failure).isSameAs(original);
+            assertThat(appendCalls).hasValue(0);
+        }
+    }
+
+    @Test
+    void preservesDurableAppendFailureWhenSyntheticErrorWasNotCommitted() throws Exception {
+        ExecuteAgentRunRequest request = request();
+        AgentRunExecutionException original = AgentRunExecutionException.failLogicalRun(
+                "TARGET_E2E_GRAPH_PROTOCOL_REJECTED",
+                "private target protocol detail",
+                0,
+                false,
+                null);
+        List<AgentStreamEvent> attempted = new ArrayList<>();
+        IllegalStateException appendFailure = new IllegalStateException("postgres unavailable");
+        AgentGraphCommandClient client = (actualRequest, mode, eventSink, cancellationToken) -> {
+            eventSink.accept(event(request, 0, StreamEventType.ATTEMPT_STARTED, null));
+            throw original;
+        };
+        AgentRunV2StreamStore store = batchStore(events -> {
+            attempted.addAll(events);
+            throw appendFailure;
+        });
+
+        AgentRunExecutionException failure = catchThrowableOfType(
+                AgentRunExecutionException.class,
+                () -> new DurableAgentRunExecutionGateway(client, store)
+                        .execute(
+                                request,
+                                ExecutionMode.EXECUTE_OR_RECONCILE,
+                                ignored -> {},
+                                new AgentRunCancellationToken()));
+
+        assertThat(attempted)
+                .singleElement()
+                .satisfies(error -> {
+                    assertThat(error.eventType()).isEqualTo(StreamEventType.ERROR);
+                    assertThat(error.sequenceNo()).isEqualTo(1);
+                });
+        assertThat(failure.errorCode()).isEqualTo("AGENT_RUN_DURABLE_APPEND_FAILED");
+        assertThat(failure.recoveryAction())
+                .isEqualTo(AgentRunRecoveryAction.RETRY_SAME_COMMAND);
+        assertThat(failure.lastSequenceNo()).isZero();
+        assertThat(failure.publicOutputEmitted()).isFalse();
+        assertThat(failure.getCause()).isSameAs(appendFailure);
     }
 
     @Test
@@ -262,13 +532,20 @@ class DurableAgentRunExecutionGatewayTest {
                 mismatchedResult.outputHash(),
                 recordingStore(persisted));
 
-        assertThatThrownBy(() -> gateway.execute(
+        AgentRunExecutionException failure = catchThrowableOfType(
+                AgentRunExecutionException.class,
+                () -> gateway.execute(
                         request,
                         ExecutionMode.EXECUTE_OR_RECONCILE,
                         ignored -> {},
-                        new AgentRunCancellationToken()))
+                        new AgentRunCancellationToken()));
+
+        assertThat(failure.errorCode()).isEqualTo("AGENT_RUN_RECONCILIATION_NOT_CONFIGURED");
+        assertThat(failure.recoveryAction())
+                .isEqualTo(AgentRunRecoveryAction.RECONCILE_TERMINAL);
+        assertThat(failure.getCause())
                 .isInstanceOf(AgentRunExecutionException.class)
-                .extracting(failure -> ((AgentRunExecutionException) failure).errorCode())
+                .extracting(cause -> ((AgentRunExecutionException) cause).errorCode())
                 .isEqualTo("AGENT_RUN_STREAM_V2_INVALID");
         assertThat(persisted).isEmpty();
     }
@@ -281,11 +558,16 @@ class DurableAgentRunExecutionGatewayTest {
         var gateway = gatewayReturning(
                 request, result, "0".repeat(64), recordingStore(persisted));
 
-        assertThatThrownBy(() -> gateway.execute(
+        AgentRunExecutionException failure = catchThrowableOfType(
+                AgentRunExecutionException.class,
+                () -> gateway.execute(
                         request,
                         ExecutionMode.EXECUTE_OR_RECONCILE,
                         ignored -> {},
-                        new AgentRunCancellationToken()))
+                        new AgentRunCancellationToken()));
+
+        assertThat(failure.errorCode()).isEqualTo("AGENT_RUN_RECONCILIATION_NOT_CONFIGURED");
+        assertThat(failure.getCause())
                 .isInstanceOf(AgentRunExecutionException.class)
                 .hasMessageContaining("does not match the final stream");
         assertThat(persisted).isEmpty();
@@ -307,14 +589,110 @@ class DurableAgentRunExecutionGatewayTest {
                 mismatchedResult.outputHash(),
                 recordingStore(persisted));
 
-        assertThatThrownBy(() -> gateway.execute(
+        AgentRunExecutionException failure = catchThrowableOfType(
+                AgentRunExecutionException.class,
+                () -> gateway.execute(
                         request,
                         ExecutionMode.EXECUTE_OR_RECONCILE,
                         ignored -> {},
-                        new AgentRunCancellationToken()))
+                        new AgentRunCancellationToken()));
+
+        assertThat(failure.errorCode()).isEqualTo("AGENT_RUN_RECONCILIATION_NOT_CONFIGURED");
+        assertThat(failure.getCause())
                 .isInstanceOf(AgentRunExecutionException.class)
                 .hasMessageContaining("does not match the final stream");
         assertThat(persisted).isEmpty();
+    }
+
+    @Test
+    void reconcilesObservedFinalWhenReturnedResultFailsValidation() throws Exception {
+        ExecuteAgentRunRequest request = request();
+        GraphReconcileResponse reconciliation = reconciliation(request);
+        AgentStreamEvent observedFinal = reconciledFinal(request, reconciliation, 1, NOW);
+        JsonNode wrapper = MAPPER.readTree(
+                FIXTURES.resolve("room-graph-result-valid.json").toFile());
+        ((com.fasterxml.jackson.databind.node.ObjectNode)
+                        wrapper.required("instance").required("execution_metadata"))
+                .put("model_profile_id", "unauthorized-model.v1");
+        RoomGraphResult mismatchedResult =
+                MAPPER.treeToValue(wrapper.required("instance"), RoomGraphResult.class);
+        AtomicInteger reconciliationCalls = new AtomicInteger();
+        AtomicInteger finalStoreCalls = new AtomicInteger();
+        List<Long> streamWrites = new ArrayList<>();
+        var gateway = new DurableAgentRunExecutionGateway(
+                (actualRequest, mode, eventSink, cancellationToken) -> {
+                    eventSink.accept(event(request, 0, StreamEventType.ATTEMPT_STARTED, null));
+                    eventSink.accept(observedFinal);
+                    return mismatchedResult;
+                },
+                (actualRequest, cancellationToken) -> {
+                    reconciliationCalls.incrementAndGet();
+                    return reconciliation;
+                },
+                recordingStore(streamWrites),
+                candidate -> {
+                    finalStoreCalls.incrementAndGet();
+                    return new AgentRunReconciledFinalStore.Receipt(
+                            observedFinal, true, observedFinal.sequenceNo(), false);
+                });
+
+        var completion = gateway.execute(
+                request,
+                ExecutionMode.EXECUTE_OR_RECONCILE,
+                ignored -> {},
+                new AgentRunCancellationToken());
+
+        assertThat(reconciliationCalls).hasValue(1);
+        assertThat(finalStoreCalls).hasValue(1);
+        assertThat(streamWrites).isEmpty();
+        assertThat(completion.graphResult()).isEqualTo(reconciliation.result());
+        assertThat(completion.lastSequenceNo()).isEqualTo(observedFinal.sequenceNo());
+    }
+
+    @Test
+    void preservesTerminalReconciliationWhenBufferedDeltaFailsDuringFinalValidation()
+            throws Exception {
+        ExecuteAgentRunRequest request = request();
+        JsonNode wrapper = MAPPER.readTree(
+                FIXTURES.resolve("room-graph-result-valid.json").toFile());
+        ((com.fasterxml.jackson.databind.node.ObjectNode)
+                        wrapper.required("instance").required("execution_metadata"))
+                .put("model_profile_id", "unauthorized-model.v1");
+        RoomGraphResult mismatchedResult =
+                MAPPER.treeToValue(wrapper.required("instance"), RoomGraphResult.class);
+        List<AgentStreamEvent> attempted = new ArrayList<>();
+        IllegalStateException appendFailure = new IllegalStateException("postgres unavailable");
+        AgentGraphCommandClient client = (actualRequest, mode, eventSink, cancellationToken) -> {
+            eventSink.accept(event(request, 0, StreamEventType.ATTEMPT_STARTED, null));
+            eventSink.accept(event(request, 1, StreamEventType.VISIBLE_DELTA, null));
+            eventSink.accept(event(request, 2, StreamEventType.FINAL, mismatchedResult.outputHash()));
+            return mismatchedResult;
+        };
+        AgentRunV2StreamStore store = batchStore(events -> {
+            attempted.addAll(events);
+            throw appendFailure;
+        });
+
+        AgentRunExecutionException failure = catchThrowableOfType(
+                AgentRunExecutionException.class,
+                () -> new DurableAgentRunExecutionGateway(client, store)
+                        .execute(
+                                request,
+                                ExecutionMode.EXECUTE_OR_RECONCILE,
+                                ignored -> {},
+                                new AgentRunCancellationToken()));
+
+        assertThat(attempted)
+                .singleElement()
+                .satisfies(delta -> {
+                    assertThat(delta.sequenceNo()).isEqualTo(1);
+                    assertThat(delta.eventType()).isEqualTo(StreamEventType.VISIBLE_DELTA);
+                });
+        assertThat(failure.errorCode()).isEqualTo("AGENT_RUN_DURABLE_APPEND_FAILED");
+        assertThat(failure.recoveryAction())
+                .isEqualTo(AgentRunRecoveryAction.RECONCILE_TERMINAL);
+        assertThat(failure.lastSequenceNo()).isZero();
+        assertThat(failure.getCause()).isSameAs(appendFailure);
     }
 
     @Test
@@ -338,21 +716,22 @@ class DurableAgentRunExecutionGatewayTest {
                                 new AgentRunCancellationToken()));
 
         assertThat(failure.errorCode()).isEqualTo("AGENT_RUN_STREAM_V2_INVALID");
-        assertThat(persisted).containsExactly(1L);
+        assertThat(failure.lastSequenceNo()).isEqualTo(2);
+        assertThat(persisted).containsExactly(1L, 2L);
     }
 
     @Test
     void rejectsACandidateSequenceGapBeforeDurableStorage() throws Exception {
         ExecuteAgentRunRequest request = request();
-        AtomicInteger storeCalls = new AtomicInteger();
+        List<AgentStreamEvent> persisted = new ArrayList<>();
         AgentGraphCommandClient client = (actualRequest, mode, eventSink, cancellationToken) -> {
             eventSink.accept(event(request, 0, StreamEventType.ATTEMPT_STARTED, null));
             eventSink.accept(event(request, 2, StreamEventType.VISIBLE_DELTA, null));
             throw new AssertionError("the sequence gap must fail in the governed gateway");
         };
         AgentRunV2StreamStore store = batchStore(events -> {
-            storeCalls.incrementAndGet();
-            throw new AssertionError("an invalid candidate must not reach durable storage");
+            persisted.addAll(events);
+            return receipt(events, true, events.getLast().sequenceNo());
         });
 
         AgentRunExecutionException failure = catchThrowableOfType(
@@ -366,8 +745,13 @@ class DurableAgentRunExecutionGatewayTest {
 
         assertThat(failure.errorCode()).isEqualTo("AGENT_RUN_STREAM_V2_INVALID");
         assertThat(failure.retryable()).isFalse();
-        assertThat(failure.lastSequenceNo()).isZero();
-        assertThat(storeCalls).hasValue(0);
+        assertThat(failure.lastSequenceNo()).isEqualTo(1);
+        assertThat(persisted)
+                .singleElement()
+                .satisfies(error -> {
+                    assertThat(error.sequenceNo()).isEqualTo(1);
+                    assertThat(error.eventType()).isEqualTo(StreamEventType.ERROR);
+                });
     }
 
     @Test
@@ -1324,6 +1708,29 @@ class DurableAgentRunExecutionGatewayTest {
                         finalHash,
                         null,
                 null));
+    }
+
+    private static AgentStreamEvent errorEvent(
+            ExecuteAgentRunRequest request, long sequenceNo, String errorCode) {
+        return new AgentStreamEvent(
+                "agent-stream.v2",
+                request.agentRunId(),
+                request.attemptId(),
+                sequenceNo,
+                StreamEventType.ERROR,
+                request.command().actorScope().audience(),
+                NOW.plusSeconds(sequenceNo),
+                new AgentStreamEvent.Payload(
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        errorCode,
+                        false));
     }
 
     private static AgentStreamEvent reconciledFinal(
