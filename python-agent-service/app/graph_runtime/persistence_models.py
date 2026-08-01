@@ -63,7 +63,9 @@ class GraphPoolConfig:
     reconnect_timeout_seconds: float = 60.0
     statement_timeout_ms: int = 5_000
     lock_timeout_ms: int = 2_000
-    idle_in_transaction_timeout_ms: int = 5_000
+    # Checkpoint writes can be cooperatively suspended while a graph model call runs.
+    # Keep this above the default 120-second model deadline without disabling the guard.
+    idle_in_transaction_timeout_ms: int = 150_000
     application_name: str = "python-agent-graph-runtime"
 
     def __post_init__(self) -> None:

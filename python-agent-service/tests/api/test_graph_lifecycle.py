@@ -186,6 +186,7 @@ def _install_open_dependencies(
 
         @classmethod
         async def open(cls, dsn: str, config: Any) -> CheckpointRuntime:
+            assert config.idle_in_transaction_timeout_ms == 150_000
             events.append("checkpoint_open")
             return cls()
 

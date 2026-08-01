@@ -376,6 +376,11 @@ class Settings(BaseSettings):
     graph_pool_acquire_timeout_seconds: float = Field(default=3.0, gt=0, le=30)
     graph_pool_max_idle_seconds: float = Field(default=300.0, gt=0, le=3600)
     graph_pool_max_lifetime_seconds: float = Field(default=1800.0, gt=0, le=86400)
+    graph_idle_in_transaction_timeout_seconds: float = Field(
+        default=150.0,
+        gt=0,
+        le=360,
+    )
     graph_readiness_timeout_seconds: float = Field(default=2.0, gt=0, le=30)
     graph_jwks_url: AnyHttpUrl | None = None
     graph_jwks_refresh_seconds: float = Field(default=30.0, ge=5, le=3600)
@@ -443,6 +448,15 @@ class Settings(BaseSettings):
         if not self.graph_expected_spiffe_id.startswith("spiffe://"):
             raise ValueError("graph_expected_spiffe_id must be a SPIFFE URI")
         if self.graph_gateway_mode in {"SHADOW", "TARGET_E2E_CANDIDATE"}:
+            minimum_idle_transaction_timeout = self.llm_timeout_seconds + 30.0
+            if (
+                self.graph_idle_in_transaction_timeout_seconds
+                < minimum_idle_transaction_timeout
+            ):
+                raise ValueError(
+                    "active graph mode requires the idle-in-transaction timeout to "
+                    "cover the LLM timeout plus 30 seconds"
+                )
             if self.graph_database_dsn is None:
                 raise ValueError("active graph mode requires graph_database_dsn")
             if self.graph_jwks_url is None:

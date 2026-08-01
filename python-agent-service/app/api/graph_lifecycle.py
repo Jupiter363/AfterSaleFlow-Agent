@@ -264,6 +264,9 @@ class GraphApplicationRuntime:
             acquire_timeout_seconds=settings.graph_pool_acquire_timeout_seconds,
             max_idle_seconds=settings.graph_pool_max_idle_seconds,
             max_lifetime_seconds=settings.graph_pool_max_lifetime_seconds,
+            idle_in_transaction_timeout_ms=int(
+                settings.graph_idle_in_transaction_timeout_seconds * 1_000
+            ),
         )
         checkpoint_runtime = await GraphCheckpointRuntime.open(
             settings.graph_database_dsn.get_secret_value(),

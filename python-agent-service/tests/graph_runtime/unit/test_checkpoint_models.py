@@ -134,3 +134,4 @@ def test_graph_pool_search_path_puts_temporary_objects_last() -> None:
     )
 
     assert "-csearch_path=graph_runtime,pg_catalog,pg_temp" in pool.kwargs["options"]
+    assert "-cidle_in_transaction_session_timeout=150000" in pool.kwargs["options"]

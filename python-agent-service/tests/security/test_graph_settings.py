@@ -71,6 +71,27 @@ def test_shadow_requires_isolated_runtime_dsn_and_jwks() -> None:
     assert configured.graph_database_dsn.get_secret_value().startswith("postgresql://")
 
 
+def test_active_graph_transaction_timeout_covers_the_model_deadline() -> None:
+    active = {
+        "graph_gateway_mode": "SHADOW",
+        "graph_database_dsn": (
+            "postgresql://graph_runtime:secret@postgresql:5432/dispute_graph"
+        ),
+        "graph_jwks_url": "http://java-api-service:8080/.well-known/graph-jwks.json",
+        **GRAPH_GENERATION,
+    }
+
+    with pytest.raises(ValidationError, match="LLM timeout plus 30 seconds"):
+        settings(
+            **active,
+            llm_timeout_seconds=120,
+            graph_idle_in_transaction_timeout_seconds=149,
+        )
+
+    configured = settings(**active)
+    assert configured.graph_idle_in_transaction_timeout_seconds == 150
+
+
 @pytest.mark.parametrize(
     "dsn",
     [
