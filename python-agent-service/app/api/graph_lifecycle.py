@@ -48,6 +48,7 @@ from app.graph_runtime.persistence_models import (
     GraphGatewayMode,
     GraphPoolConfig,
     GraphReadinessConfig,
+    GraphReadinessReport,
 )
 from app.graph_runtime.postgres_bulkhead import (
     PostgresBulkheadConfig,
@@ -198,6 +199,52 @@ RuntimeFactory = Callable[
 ]
 
 
+class _PersistenceReadinessProbe(Protocol):
+    async def check(self) -> Any: ...
+
+
+class _CompositeGraphPersistenceReadinessProbe:
+    """Require both isolated pools before exposing one persistence readiness result."""
+
+    def __init__(
+        self,
+        *,
+        checkpoint_probe: _PersistenceReadinessProbe,
+        control_probe: _PersistenceReadinessProbe,
+        mode: GraphGatewayMode,
+    ) -> None:
+        self._checkpoint_probe = checkpoint_probe
+        self._control_probe = control_probe
+        self._mode = mode
+
+    async def check(self) -> Any:
+        if self._checkpoint_probe is self._control_probe:
+            return await self._checkpoint_probe.check()
+        checkpoint, control = await asyncio.gather(
+            self._checkpoint_probe.check(),
+            self._control_probe.check(),
+            return_exceptions=True,
+        )
+        for report in (checkpoint, control):
+            if isinstance(report, asyncio.CancelledError):
+                raise report
+        if isinstance(checkpoint, BaseException) or isinstance(control, BaseException):
+            return GraphReadinessReport(
+                ready=False,
+                mode=self._mode,
+                code="GRAPH_PERSISTENCE_CHECK_FAILED",
+                checks={
+                    "checkpoint_pool_ready": not isinstance(checkpoint, BaseException),
+                    "control_pool_ready": not isinstance(control, BaseException),
+                },
+            )
+        if not checkpoint.ready:
+            return checkpoint
+        if not control.ready:
+            return control
+        return checkpoint
+
+
 class GraphApplicationRuntime:
     """One process-lifetime pool, saver, gateway, key runtime, and admission gate."""
 
@@ -205,7 +252,7 @@ class GraphApplicationRuntime:
         self,
         *,
         checkpoint_runtime: GraphCheckpointRuntime,
-        persistence_probe: GraphPersistenceReadinessProbe,
+        persistence_probe: _PersistenceReadinessProbe,
         durable_bulkhead: PostgresGraphFanoutBulkhead,
         security_runtime: GraphSecurityRuntime,
         gateway: GraphCommandGateway,
@@ -281,9 +328,20 @@ class GraphApplicationRuntime:
             schema=settings.graph_database_schema,
             timeout_seconds=settings.graph_readiness_timeout_seconds,
         )
-        probe = GraphPersistenceReadinessProbe(
+        checkpoint_probe = GraphPersistenceReadinessProbe(
             readiness_config,
             checkpoint_runtime.pool,
+        )
+        control_pool = getattr(checkpoint_runtime, "control_pool", checkpoint_runtime.pool)
+        control_probe = (
+            checkpoint_probe
+            if control_pool is checkpoint_runtime.pool
+            else GraphPersistenceReadinessProbe(readiness_config, control_pool)
+        )
+        probe = _CompositeGraphPersistenceReadinessProbe(
+            checkpoint_probe=checkpoint_probe,
+            control_probe=control_probe,
+            mode=mode,
         )
         security_runtime: GraphSecurityRuntime | None = None
         durable_bulkhead: PostgresGraphFanoutBulkhead | None = None
@@ -305,9 +363,7 @@ class GraphApplicationRuntime:
                 lifecycle_binding = _build_target_e2e_lifecycle_binding(settings)
                 barrier_control = None
                 if settings.graph_target_e2e_checkpoint_barrier_enabled:
-                    barrier_directory = (
-                        settings.graph_target_e2e_checkpoint_barrier_directory
-                    )
+                    barrier_directory = settings.graph_target_e2e_checkpoint_barrier_directory
                     if barrier_directory is None:
                         raise ValueError(
                             "enabled checkpoint recovery barrier has no control directory"
@@ -332,9 +388,7 @@ class GraphApplicationRuntime:
                         barrier_control.is_armed if barrier_control is not None else None
                     ),
                     release_waiter=(
-                        barrier_control.wait_for_release
-                        if barrier_control is not None
-                        else None
+                        barrier_control.wait_for_release if barrier_control is not None else None
                     ),
                 )
                 terminal_result_barrier = TargetE2ECheckpointGatewayBarrier(
@@ -345,7 +399,7 @@ class GraphApplicationRuntime:
                 )
             gateway = GraphCommandGateway(
                 mode=mode,
-                pool=checkpoint_runtime.pool,
+                pool=control_pool,
                 input_authorizer=input_authorizer,
                 terminal_result_barrier=terminal_result_barrier,
                 acquire_timeout_seconds=settings.graph_pool_acquire_timeout_seconds,
@@ -382,14 +436,11 @@ class GraphApplicationRuntime:
                                 connection,
                                 graph_key=configured.graph_key,
                                 graph_version=configured.graph_version,
-                                checkpoint_schema_version=(
-                                    configured.checkpoint_schema_version
-                                ),
+                                checkpoint_schema_version=(configured.checkpoint_schema_version),
                             )
                             registered_binding.require_new_candidate_command()
                             if (
-                                registered_binding.binding.binding_hash
-                                != configured.binding_hash
+                                registered_binding.binding.binding_hash != configured.binding_hash
                                 or registered_binding.binding.code_build_id
                                 != configured.code_build_id
                             ):
@@ -494,7 +545,7 @@ class GraphApplicationRuntime:
     def target_e2e_lifecycle_pool(self) -> Any:
         if self._mode is not GraphGatewayMode.TARGET_E2E_CANDIDATE:
             raise GraphGatewayDisabledError("TARGET_E2E_LIFECYCLE_DISABLED")
-        return self._checkpoint_runtime.pool
+        return getattr(self._checkpoint_runtime, "control_pool", self._checkpoint_runtime.pool)
 
     async def check_readiness(self) -> GraphRuntimeReadiness:
         if self._closed:
@@ -982,12 +1033,10 @@ class _RuntimeReconciliationService:
         verified_invocation: VerifiedTargetE2EInvocation,
         expected_thread: ThreadIdentity,
     ) -> TargetE2EReconciliationArtifacts:
-        return await (
-            self._handle.require_runtime().reconciliation_service.reconcile_target_e2e(
-                command=command,
-                verified_invocation=verified_invocation,
-                expected_thread=expected_thread,
-            )
+        return await self._handle.require_runtime().reconciliation_service.reconcile_target_e2e(
+            command=command,
+            verified_invocation=verified_invocation,
+            expected_thread=expected_thread,
         )
 
     async def retrieve_target_e2e_proposal_source(
@@ -999,15 +1048,12 @@ class _RuntimeReconciliationService:
         expected_result_ref: str,
         expected_proposal_hash: str,
     ) -> TargetE2ERoomProposalSource:
-        return await (
-            self._handle.require_runtime()
-            .reconciliation_service.retrieve_target_e2e_proposal_source(
-                command=command,
-                verified_invocation=verified_invocation,
-                expected_thread=expected_thread,
-                expected_result_ref=expected_result_ref,
-                expected_proposal_hash=expected_proposal_hash,
-            )
+        return await self._handle.require_runtime().reconciliation_service.retrieve_target_e2e_proposal_source(
+            command=command,
+            verified_invocation=verified_invocation,
+            expected_thread=expected_thread,
+            expected_result_ref=expected_result_ref,
+            expected_proposal_hash=expected_proposal_hash,
         )
 
 

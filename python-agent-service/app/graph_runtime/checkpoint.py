@@ -30,6 +30,7 @@ from app.graph_runtime.persistence_models import (
     GraphFenceError,
     GraphGatewayMode,
     GraphPoolConfig,
+    GraphPersistenceConfigurationError,
 )
 from app.graph_runtime.ledger import PostgresCommandLedger, ResultRecord
 from app.graph_runtime.target_e2e import (
@@ -242,6 +243,51 @@ def create_graph_pool(
     )
 
 
+def _runtime_pool_configs(config: GraphPoolConfig) -> tuple[GraphPoolConfig, GraphPoolConfig]:
+    """Reserve a pre-warmed control lane without increasing the connection cap.
+
+    Checkpoint persistence may temporarily consume its entire pool while graph work is
+    streaming.  Lease and durable-provider-intent writes must still be able to make
+    progress, so they run through a separate, small pool.  The two maxima always add
+    up to the configured process budget.
+    """
+
+    if config.max_size < 2:
+        raise GraphPersistenceConfigurationError(
+            "Graph runtime requires at least two connections for checkpoint and control pools"
+        )
+    control_max_size = 2 if config.max_size >= 4 else 1
+    checkpoint_max_size = config.max_size - control_max_size
+    # Preserve existing checkpoint pre-warming, then add the reserved control lane.
+    # This deliberately raises the startup minimum by one while keeping the maximum
+    # process connection budget unchanged.
+    checkpoint_min_size = min(config.min_size, checkpoint_max_size)
+
+    def role_config(
+        *,
+        role: str,
+        min_size: int,
+        max_size: int,
+    ) -> GraphPoolConfig:
+        suffix = f"-{role}"
+        application_name = f"{config.application_name[: 63 - len(suffix)]}{suffix}"
+        return replace(
+            config,
+            min_size=min_size,
+            max_size=max_size,
+            application_name=application_name,
+        )
+
+    return (
+        role_config(
+            role="checkpoint",
+            min_size=checkpoint_min_size,
+            max_size=checkpoint_max_size,
+        ),
+        role_config(role="control", min_size=1, max_size=control_max_size),
+    )
+
+
 def bind_fence_context(config: RunnableConfig, fence: GraphFenceContext) -> RunnableConfig:
     """Attach a non-JSON Python capability after signed-command validation."""
 
@@ -352,9 +398,7 @@ class TerminalResultMaterializer:
                 execution_model=fence.execution_model,
                 proposal_hash=proposal_source.proposal_hash,
             )
-            envelope.require_proposal_hash(
-                proposal_source.proposal.model_dump(mode="json")
-            )
+            envelope.require_proposal_hash(proposal_source.proposal.model_dump(mode="json"))
         except ValueError as error:
             raise GraphBindingError("candidate terminal result binding is invalid") from error
         return replace(
@@ -502,13 +546,11 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
                 async with connection.transaction():
                     await self._lock_fence(connection, fence)
                     if materializer is not None:
-                        terminal_result, checkpoint_to_save = (
-                            self._materialize_terminal_result(
-                                config,
-                                checkpoint,
-                                new_versions,
-                                materializer,
-                            )
+                        terminal_result, checkpoint_to_save = self._materialize_terminal_result(
+                            config,
+                            checkpoint,
+                            new_versions,
+                            materializer,
                         )
                         effective_fence = self._terminal_fence(fence, terminal_result)
                     bound_metadata = self._bind_metadata(
@@ -537,11 +579,7 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
                     checkpoint_config = saved.get("configurable") or {}
                     checkpoint_ns = str(checkpoint_config.get("checkpoint_ns") or "")
                     checkpoint_id = str(checkpoint_config.get("checkpoint_id") or "")
-                    if (
-                        not checkpoint_id
-                        or len(checkpoint_id) > 128
-                        or len(checkpoint_ns) > 128
-                    ):
+                    if not checkpoint_id or len(checkpoint_id) > 128 or len(checkpoint_ns) > 128:
                         raise GraphBindingError(
                             "PostgresSaver returned an invalid checkpoint identity"
                         )
@@ -1421,9 +1459,10 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
 
 @dataclass(slots=True)
 class GraphCheckpointRuntime:
-    """Process-lifetime pool/saver pair for FastAPI lifespan integration."""
+    """Process-lifetime checkpoint and control pools for FastAPI lifespan integration."""
 
     pool: AsyncConnectionPool
+    control_pool: AsyncConnectionPool
     saver: FencedPostgresSaver
     close_timeout_seconds: float = 5.0
 
@@ -1434,14 +1473,21 @@ class GraphCheckpointRuntime:
         config: GraphPoolConfig | None = None,
     ) -> "GraphCheckpointRuntime":
         selected = config or GraphPoolConfig()
-        pool = create_graph_pool(connection_string, selected)
+        checkpoint_config, control_config = _runtime_pool_configs(selected)
+        pool = create_graph_pool(connection_string, checkpoint_config)
+        control_pool = create_graph_pool(connection_string, control_config)
         try:
-            await pool.open(wait=True, timeout=selected.acquire_timeout_seconds)
+            await pool.open(wait=True, timeout=checkpoint_config.acquire_timeout_seconds)
+            await control_pool.open(wait=True, timeout=control_config.acquire_timeout_seconds)
         except BaseException:
-            await pool.close(timeout=selected.acquire_timeout_seconds)
+            try:
+                await control_pool.close(timeout=control_config.acquire_timeout_seconds)
+            finally:
+                await pool.close(timeout=checkpoint_config.acquire_timeout_seconds)
             raise
         return cls(
             pool=pool,
+            control_pool=control_pool,
             saver=FencedPostgresSaver(
                 pool,
                 acquire_timeout_seconds=selected.acquire_timeout_seconds,
@@ -1449,4 +1495,7 @@ class GraphCheckpointRuntime:
         )
 
     async def close(self) -> None:
-        await self.pool.close(timeout=self.close_timeout_seconds)
+        try:
+            await self.control_pool.close(timeout=self.close_timeout_seconds)
+        finally:
+            await self.pool.close(timeout=self.close_timeout_seconds)

@@ -49,9 +49,7 @@ from app.security.invocation_envelope import VerifiedInvocation
 
 
 ROOT = Path(__file__).resolve().parents[3]
-COMMAND_FIXTURE = (
-    ROOT / "contracts/agent-platform/v1/fixtures/valid/room-graph-command-valid.json"
-)
+COMMAND_FIXTURE = ROOT / "contracts/agent-platform/v1/fixtures/valid/room-graph-command-valid.json"
 NOW = datetime(2026, 7, 19, 9, 0, tzinfo=timezone.utc)
 
 
@@ -327,6 +325,7 @@ class _Gateway:
         self.finished = 0
         self.finished_statuses: list[AttemptStatus] = []
         self.provider_calls = 0
+        self.cleaned_execution_leases = 0
 
     async def admit(self, **kwargs: Any) -> GatewayAdmission:
         return self.admission
@@ -345,6 +344,10 @@ class _Gateway:
     async def renew_execution(self, execution: GatewayExecution) -> LeaseRecord:
         self.renewed += 1
         return execution.lease
+
+    def cleanup_execution_lease(self, execution: GatewayExecution) -> None:
+        del execution
+        self.cleaned_execution_leases += 1
 
     async def record_provider_call(self, execution: GatewayExecution) -> GatewayExecution:
         self.provider_calls += 1
@@ -411,6 +414,10 @@ async def _service(
         ),
         gate,
     )
+
+
+async def _collect_stream(stream: Any) -> list[Any]:
+    return [event async for event in stream]
 
 
 def test_executor_registry_requires_the_complete_immutable_binding() -> None:
@@ -881,6 +888,112 @@ async def test_active_execution_renews_lease_before_the_30_second_window() -> No
     assert events[-1].event_type == "final"
     assert gateway.renewed >= 2
     assert gateway.finished == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("event_type", ("final", "attempt_aborted", "error"))
+async def test_terminal_stream_waits_for_inflight_renew_before_exact_cache_cleanup(
+    event_type: str,
+) -> None:
+    admission = _admission(AdmissionAction.ACQUIRE)
+    execution = _execution(admission)
+
+    class DelayedRenewGateway(_Gateway):
+        def __init__(self) -> None:
+            super().__init__(admission)
+            self.renew_started = asyncio.Event()
+            self.renew_cancelled = asyncio.Event()
+            self.release_renew = asyncio.Event()
+            self.lease_cache: dict[tuple[str, str, str, int], LeaseRecord] = {}
+
+        @staticmethod
+        def _key(current: GatewayExecution) -> tuple[str, str, str, int]:
+            return (
+                current.fence.thread_id,
+                current.fence.command_id,
+                current.fence.owner_id,
+                current.fence.fencing_token,
+            )
+
+        async def renew_execution(self, current: GatewayExecution) -> LeaseRecord:
+            self.renewed += 1
+            self.renew_started.set()
+            try:
+                await self.release_renew.wait()
+            except asyncio.CancelledError:
+                self.renew_cancelled.set()
+                await self.release_renew.wait()
+            self.lease_cache[self._key(current)] = current.lease
+            return current.lease
+
+        def cleanup_execution_lease(self, current: GatewayExecution) -> None:
+            super().cleanup_execution_lease(current)
+            self.lease_cache.pop(self._key(current), None)
+
+    gateway = DelayedRenewGateway()
+    service, _ = await _service(gateway, _Executor(), renewal_seconds=0.001)
+
+    async def source():
+        await gateway.renew_started.wait()
+        yield cast(Any, SimpleNamespace(event_type=event_type))
+
+    task = asyncio.create_task(_collect_stream(service._renewing_stream(source(), execution)))
+    await gateway.renew_cancelled.wait()
+    gateway.release_renew.set()
+
+    events = await task
+
+    assert [event.event_type for event in events] == [event_type]
+    assert gateway.lease_cache == {}
+    assert gateway.cleaned_execution_leases == 1
+
+
+@pytest.mark.asyncio
+async def test_exceptional_stream_waits_for_inflight_renew_before_exact_cache_cleanup() -> None:
+    admission = _admission(AdmissionAction.ACQUIRE)
+    execution = _execution(admission)
+
+    class DelayedRenewGateway(_Gateway):
+        def __init__(self) -> None:
+            super().__init__(admission)
+            self.renew_started = asyncio.Event()
+            self.renew_cancelled = asyncio.Event()
+            self.release_renew = asyncio.Event()
+            self.lease_cached = False
+
+        async def renew_execution(self, current: GatewayExecution) -> LeaseRecord:
+            self.renewed += 1
+            self.renew_started.set()
+            try:
+                await self.release_renew.wait()
+            except asyncio.CancelledError:
+                self.renew_cancelled.set()
+                await self.release_renew.wait()
+            self.lease_cached = True
+            return current.lease
+
+        def cleanup_execution_lease(self, current: GatewayExecution) -> None:
+            del current
+            self.cleaned_execution_leases += 1
+            self.lease_cached = False
+
+    gateway = DelayedRenewGateway()
+    service, _ = await _service(gateway, _Executor(), renewal_seconds=0.001)
+
+    async def source():
+        await gateway.renew_started.wait()
+        raise RuntimeError("source failed")
+        yield cast(Any, SimpleNamespace(event_type="final"))
+
+    task = asyncio.create_task(_collect_stream(service._renewing_stream(source(), execution)))
+    await gateway.renew_cancelled.wait()
+    gateway.release_renew.set()
+
+    with pytest.raises(RuntimeError, match="source failed"):
+        await task
+
+    assert gateway.lease_cached is False
+    assert gateway.cleaned_execution_leases == 1
 
 
 @pytest.mark.asyncio

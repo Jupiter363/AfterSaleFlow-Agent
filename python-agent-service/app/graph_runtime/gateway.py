@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+import asyncio
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, replace
+from datetime import datetime, timedelta
 from enum import StrEnum
 import hmac
-from typing import Any, Final, Protocol
+from typing import Any, Final, Protocol, TypeVar
 
 from app.contracts.v1.models import AgentStreamEvent, RoomGraphCommand
 from app.graph_runtime.errors import (
@@ -19,6 +21,7 @@ from app.graph_runtime.errors import (
     GraphRuntimeError,
     GraphTerminalBindingError,
     GraphThreadBindingError,
+    normalize_transient_persistence_error,
 )
 from app.graph_runtime.identity import (
     ActorScopeBinding,
@@ -86,6 +89,12 @@ _STREAM_PAYLOAD_FIELDS: Final[dict[str, frozenset[str]]] = {
     "final": frozenset({"final_result_ref", "final_result_hash"}),
     "error": frozenset({"error_code", "retryable"}),
 }
+
+_ControlPlaneResult = TypeVar("_ControlPlaneResult")
+_CONTROL_PLANE_RETRY_LIMIT: Final[int] = 2
+_CONTROL_PLANE_RETRY_INITIAL_SECONDS: Final[float] = 0.05
+_CONTROL_PLANE_RETRY_MAX_SECONDS: Final[float] = 0.2
+_CONTROL_PLANE_LEASE_SAFETY_MARGIN: Final[timedelta] = timedelta(seconds=2)
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,10 +238,12 @@ class GraphCommandGateway:
         )
         self._input_authorizer = input_authorizer or _FailClosedInputAuthorizer()
         self._audit = audit_sink or _NullAuditSink()
-        self._terminal_result_barrier = (
-            terminal_result_barrier or _NullTerminalResultBarrier()
-        )
+        self._terminal_result_barrier = terminal_result_barrier or _NullTerminalResultBarrier()
         self._acquire_timeout_seconds = acquire_timeout_seconds
+        # A provider-intent recorder keeps its own immutable GatewayExecution.  Keep
+        # the latest successful renewal by fence here so an old recorder snapshot
+        # cannot shorten a still-active database lease during a transient retry.
+        self._latest_leases: dict[tuple[str, str, str, int], LeaseRecord] = {}
 
     async def admit(
         self,
@@ -245,8 +256,8 @@ class GraphCommandGateway:
 
         try:
             self._require_shadow()
-            execution_lane, activation_id, candidate_authority = (
-                self._require_invocation_lane(verified_invocation)
+            execution_lane, activation_id, candidate_authority = self._require_invocation_lane(
+                verified_invocation
             )
             self._require_invocation_binding(command, verified_invocation)
             self._require_command_thread(command, expected_thread)
@@ -261,9 +272,7 @@ class GraphCommandGateway:
                         checkpoint_schema_version=command.checkpoint_schema_version,
                     )
                     version = registry.binding
-                    self._require_registry_profile_binding(
-                        command, verified_invocation, registry
-                    )
+                    self._require_registry_profile_binding(command, verified_invocation, registry)
                     binding = CommandBinding.from_command(
                         command,
                         tool_policy_version=version.tool_policy_version,
@@ -298,9 +307,7 @@ class GraphCommandGateway:
                             command=command,
                             room_fencing_token=verified_invocation.room_fencing_token,
                             command_hash=verified_invocation.command_hash,
-                            command_envelope_hash=(
-                                verified_invocation.command_envelope_hash
-                            ),
+                            command_envelope_hash=(verified_invocation.command_envelope_hash),
                         )
                         await self._target_synthetic_cases.reserve(
                             connection,
@@ -484,6 +491,7 @@ class GraphCommandGateway:
             fence,
             thread_record,
         )
+        self._remember_lease(execution, acquisition.lease)
         await self._emit(
             updated_admission,
             event_type="graph.command.execution_acquired",
@@ -645,9 +653,7 @@ class GraphCommandGateway:
         self._require_shadow()
         if self._mode is not GraphGatewayMode.TARGET_E2E_CANDIDATE:
             raise GraphGatewayDisabledError()
-        lane, activation_id, authority = self._require_invocation_lane(
-            verified_invocation
-        )
+        lane, activation_id, authority = self._require_invocation_lane(verified_invocation)
         if authority is None:
             raise GraphThreadBindingError("TARGET_E2E_CREDENTIAL_REQUIRED")
         self._require_invocation_binding(command, verified_invocation)
@@ -684,29 +690,130 @@ class GraphCommandGateway:
                 )
         return result
 
+    @staticmethod
+    def _lease_key(execution: GatewayExecution) -> tuple[str, str, str, int]:
+        return (
+            execution.fence.thread_id,
+            execution.fence.command_id,
+            execution.fence.owner_id,
+            execution.fence.fencing_token,
+        )
+
+    def _remember_lease(
+        self,
+        execution: GatewayExecution,
+        lease: LeaseRecord,
+    ) -> LeaseRecord:
+        """Retain the newest known lease without allowing stale snapshots to win."""
+
+        key = self._lease_key(execution)
+        current = self._latest_leases.get(key)
+        if current is not None and (
+            current.revision > lease.revision
+            or (current.revision == lease.revision and current.renewed_at >= lease.renewed_at)
+        ):
+            return current
+        self._latest_leases[key] = lease
+        return lease
+
+    def _latest_lease(self, execution: GatewayExecution) -> LeaseRecord:
+        return self._remember_lease(execution, execution.lease)
+
+    def _forget_lease(self, execution: GatewayExecution) -> None:
+        self._latest_leases.pop(self._lease_key(execution), None)
+
+    def cleanup_execution_lease(self, execution: GatewayExecution) -> None:
+        """Forget the exact execution fence after its stream has fully joined."""
+
+        self._forget_lease(execution)
+
+    async def _retry_control_plane_operation(
+        self,
+        execution: GatewayExecution,
+        operation: Callable[[], Awaitable[_ControlPlaneResult]],
+        *,
+        retry_permitted: Callable[[], bool] | None = None,
+    ) -> _ControlPlaneResult:
+        """Retry only proven transient control-plane failures inside a live lease window.
+
+        The durable SQL mutation remains the authority on whether the lease is active.
+        This local bound prevents retry amplification while allowing a pre-warmed
+        control pool to recover from a short connection or lock interruption.
+        """
+
+        retries = 0
+        delay_seconds = _CONTROL_PLANE_RETRY_INITIAL_SECONDS
+        while True:
+            try:
+                return await operation()
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                if normalize_transient_persistence_error(error) is None:
+                    raise
+                if retry_permitted is not None and not retry_permitted():
+                    raise
+                if retries >= _CONTROL_PLANE_RETRY_LIMIT:
+                    raise
+                lease = self._latest_lease(execution)
+                deadline = lease.lease_expires_at - _CONTROL_PLANE_LEASE_SAFETY_MARGIN
+                now = datetime.now(lease.lease_expires_at.tzinfo)
+                remaining_seconds = (deadline - now).total_seconds()
+                if delay_seconds >= remaining_seconds:
+                    raise
+                retries += 1
+                await asyncio.sleep(delay_seconds)
+                delay_seconds = min(
+                    delay_seconds * 2,
+                    _CONTROL_PLANE_RETRY_MAX_SECONDS,
+                )
+
     async def renew_execution(self, execution: GatewayExecution) -> LeaseRecord:
         self._require_shadow()
-        async with self._pool.connection(timeout=self._acquire_timeout_seconds) as connection:
-            async with connection.transaction():
-                return await self._leases.renew(
-                    connection,
-                    thread_id=execution.fence.thread_id,
-                    command_id=execution.fence.command_id,
-                    owner_id=execution.fence.owner_id,
-                    fencing_token=execution.fence.fencing_token,
-                )
+
+        async def renew() -> LeaseRecord:
+            async with self._pool.connection(timeout=self._acquire_timeout_seconds) as connection:
+                async with connection.transaction():
+                    return await self._leases.renew(
+                        connection,
+                        thread_id=execution.fence.thread_id,
+                        command_id=execution.fence.command_id,
+                        owner_id=execution.fence.owner_id,
+                        fencing_token=execution.fence.fencing_token,
+                    )
+
+        lease = await self._retry_control_plane_operation(execution, renew)
+        return self._remember_lease(execution, lease)
 
     async def record_provider_call(self, execution: GatewayExecution) -> GatewayExecution:
         """Persist provider-call intent before transport so crash recovery never guesses."""
 
         self._require_shadow()
-        async with self._pool.connection(timeout=self._acquire_timeout_seconds) as connection:
-            async with connection.transaction():
-                attempt = await self._ledger.record_provider_call(
-                    connection,
-                    execution.attempt,
-                )
-        return replace(execution, attempt=attempt)
+        provider_intent_started = False
+
+        async def record() -> AttemptRecord:
+            nonlocal provider_intent_started
+            async with self._pool.connection(timeout=self._acquire_timeout_seconds) as connection:
+                async with connection.transaction():
+                    # PROVIDER_CALL_SQL increments provider_call_count.  If the
+                    # connection breaks after this point, commit status is ambiguous
+                    # and retrying could record two intents for one HTTP request.
+                    provider_intent_started = True
+                    return await self._ledger.record_provider_call(
+                        connection,
+                        execution.attempt,
+                    )
+
+        attempt = await self._retry_control_plane_operation(
+            execution,
+            record,
+            retry_permitted=lambda: not provider_intent_started,
+        )
+        return replace(
+            execution,
+            attempt=attempt,
+            lease=self._latest_lease(execution),
+        )
 
     async def finish_execution_attempt(
         self,
@@ -766,6 +873,7 @@ class GraphCommandGateway:
             record=command,
             action=self._admission_action(command.status),
         )
+        self.cleanup_execution_lease(execution)
         return replace(execution, admission=admission, attempt=attempt, lease=lease)
 
     async def inspect_recovery(
@@ -836,6 +944,7 @@ class GraphCommandGateway:
                     execution.admission,
                     owner_id=execution.fence.owner_id,
                 )
+                self.cleanup_execution_lease(execution)
                 payload = event.payload
                 if (
                     payload.final_result_ref != result.result_ref

@@ -66,6 +66,8 @@ class GraphGatewayPort(Protocol):
 
     async def renew_execution(self, execution: GatewayExecution) -> Any: ...
 
+    def cleanup_execution_lease(self, execution: GatewayExecution) -> None: ...
+
     async def record_provider_call(
         self,
         execution: GatewayExecution,
@@ -135,9 +137,7 @@ class ShadowExecutorRegistration:
             ):
                 raise GraphContractError("room provider runtime binding is invalid")
             if provider_binding.model_profile_id != self.binding.model_profile_id:
-                raise GraphContractError(
-                    "room provider profile binding conflicts with registry"
-                )
+                raise GraphContractError("room provider profile binding conflicts with registry")
             seen_rooms.add(room_type)
 
     def provider_binding_for(self, room_type: str) -> ProviderRuntimeBinding:
@@ -241,13 +241,7 @@ class GraphStreamAdmissionGate:
                     await self._condition.wait_for(lambda: not self._tokens)
                     return True
             except TimeoutError:
-                pending = tuple(
-                    {
-                        token.task
-                        for token in self._tokens
-                        if token.task is not current
-                    }
-                )
+                pending = tuple({token.task for token in self._tokens if token.task is not current})
         for task in pending:
             task.cancel()
         if pending:
@@ -340,13 +334,8 @@ class GatewayBackedGraphCommandStreamService:
         if decision.action is RecoveryAction.REQUIRE_NEW_AGENT_ATTEMPT:
             raise GraphNewAgentAttemptRequiredError(decision.reason_code)
         if admission.action is AdmissionAction.OBSERVE_OR_TAKEOVER:
-            raise GraphNewAgentAttemptRequiredError(
-                "PUBLIC_ATTEMPT_EXECUTION_ALREADY_STARTED"
-            )
-        if (
-            decision.action is not RecoveryAction.RESUME_BEFORE_MODEL
-            or not decision.invoke_model
-        ):
+            raise GraphNewAgentAttemptRequiredError("PUBLIC_ATTEMPT_EXECUTION_ALREADY_STARTED")
+        if decision.action is not RecoveryAction.RESUME_BEFORE_MODEL or not decision.invoke_model:
             raise GraphContractError("unsupported durable Graph recovery decision")
 
         registration = self._executors.resolve_registration(admission.registry)
@@ -357,9 +346,7 @@ class GatewayBackedGraphCommandStreamService:
         )
         source: AsyncIterator[AgentStreamEvent] | None = None
         try:
-            provider_binding = registration.provider_binding_for(
-                admission.command.room_type
-            )
+            provider_binding = registration.provider_binding_for(admission.command.room_type)
             execution = self._bind_execution_identity(provider_binding, execution)
             source = self._provider_bound_stream(
                 registration.executor,
@@ -484,13 +471,13 @@ class GatewayBackedGraphCommandStreamService:
                         await _cancel_task(renewal)
                         renewal = None
                     elif renewal is not None and renewal in done:
-                        renewal.result()
+                        execution = renewal.result()
                         renewal = asyncio.create_task(self._renew_after(execution))
                     yield event
                     next_event = asyncio.create_task(anext(iterator))
                     continue
                 if renewal is not None and renewal in done:
-                    renewal.result()
+                    execution = renewal.result()
                     renewal = asyncio.create_task(self._renew_after(execution))
             if not terminal_seen:
                 raise GraphContractError("gateway stream ended without a terminal event")
@@ -510,12 +497,19 @@ class GatewayBackedGraphCommandStreamService:
         finally:
             await _cancel_task(next_event)
             await _cancel_task(renewal)
-            if iterator is not None:
-                await _close_iterator(iterator)
+            try:
+                if iterator is not None:
+                    await _close_iterator(iterator)
+            finally:
+                # A renewal task can commit just as a final/error path becomes
+                # terminal.  Join it and close the source first, then clear the
+                # exact fence once so a late renewal cannot reinsert the cache.
+                self._gateway.cleanup_execution_lease(execution)
 
-    async def _renew_after(self, execution: GatewayExecution) -> None:
+    async def _renew_after(self, execution: GatewayExecution) -> GatewayExecution:
         await asyncio.sleep(self._renewal_seconds)
-        await self._gateway.renew_execution(execution)
+        lease = await self._gateway.renew_execution(execution)
+        return replace(execution, lease=lease)
 
     async def _best_effort_abort(
         self,
