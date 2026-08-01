@@ -51,8 +51,6 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
   private static final String AGENT_RUN_CHILD_CHANGE_ID = "intake-room-agent-run-v2-child-v1";
   private static final String AGENT_RUN_WINNING_ATTEMPT_CHANGE_ID =
       "intake-room-agent-run-winning-attempt-v1";
-  private static final String TARGET_SOURCE_EVENT_HARDENING_CHANGE_ID =
-      "target-intake-source-event-hardening-v1";
   private static final String TARGET_BRANCH_OUTPUT_SCHEMA_VERSION =
       "target-e2e-room-proposal-source.v1";
   private static final long HISTORY_EVENT_LIMIT = 2_000;
@@ -96,7 +94,6 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
   private io.temporal.workflow.Promise<Void> runMaxAgeTimer;
   private boolean rolloverEnabled;
   private boolean winningAttemptEnabled;
-  private boolean targetSourceEventHardeningEnabled;
   private boolean continueAsNewRequested;
   private Promise<Void> activeOrchestration;
   private CancellationScope activeCancellationScope;
@@ -113,10 +110,6 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
     winningAttemptEnabled =
         Workflow.getVersion(
                 AGENT_RUN_WINNING_ATTEMPT_CHANGE_ID, Workflow.DEFAULT_VERSION, 1)
-            == 1;
-    targetSourceEventHardeningEnabled =
-        Workflow.getVersion(
-                TARGET_SOURCE_EVENT_HARDENING_CHANGE_ID, Workflow.DEFAULT_VERSION, 1)
             == 1;
     if (rolloverEnabled) {
       runMaxAgeTimer = Workflow.newTimer(RUN_MAX_AGE);
@@ -273,10 +266,6 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
   }
 
   private void processTargetSourceEvent(TargetIntakeSourceEventRef event) {
-    if (!targetSourceEventHardeningEnabled) {
-      processTargetSourceEventLegacy(event);
-      return;
-    }
     if (!start.targetE2eCandidate()) {
       protocolErrorCode = "TARGET_SOURCE_EVENT_LANE_NOT_AUTHORIZED";
       return;
@@ -323,39 +312,6 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
     retryBufferedFormalEventAtCursor();
   }
 
-  private void processTargetSourceEventLegacy(TargetIntakeSourceEventRef event) {
-    TargetIntakeSourceEventRef observed = targetSourceEventObservations.get(event.eventId());
-    if (observed != null) {
-      if (!observed.equals(event)) {
-        protocolErrorCode = "TARGET_SOURCE_EVENT_ID_REUSE_CONFLICT";
-        return;
-      }
-      protocolErrorCode = null;
-      return;
-    }
-    if (!TargetIntakeSourceEventRef.ROOM_MESSAGE_CREATED.equals(event.eventType())) {
-      protocolErrorCode = "TARGET_SOURCE_EVENT_TYPE_NOT_ALLOWED";
-      return;
-    }
-    if (!matchesEnvelope(event)) {
-      protocolErrorCode = "TARGET_SOURCE_EVENT_SCOPE_MISMATCH";
-      return;
-    }
-    if (event.eventSequence() < nextEventSequence) {
-      protocolErrorCode = "TARGET_SOURCE_EVENT_SEQUENCE_REPLAY_UNKNOWN";
-      return;
-    }
-    if (event.eventSequence() > nextEventSequence) {
-      protocolErrorCode = "TARGET_SOURCE_EVENT_SEQUENCE_GAP";
-      return;
-    }
-    targetSourceEventObservations.put(event.eventId(), event);
-    trim(targetSourceEventObservations);
-    nextEventSequence++;
-    protocolErrorCode = null;
-    retryBufferedFormalEventAtCursor();
-  }
-
   private void retryBufferedFormalEventAtCursor() {
     var candidates =
         eventObservations.values().stream()
@@ -365,15 +321,6 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
                         && observation.event().eventSequence() == nextEventSequence)
             .map(EventObservation::event)
             .toList();
-    if (!targetSourceEventHardeningEnabled) {
-      for (IntakeDomainEventRef candidate : candidates) {
-        if (candidate.eventSequence() != nextEventSequence) {
-          return;
-        }
-        processEvent(candidate);
-      }
-      return;
-    }
     if (candidates.size() > 1) {
       protocolErrorCode = "EVENT_SEQUENCE_ID_CONFLICT";
       return;
@@ -505,8 +452,7 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
 
   private void processEvent(
       IntakeDomainEventRef event, String expectedActivityOperationKey) {
-    if (targetSourceEventHardeningEnabled
-        && targetSourceEventObservations.containsKey(event.eventId())) {
+    if (targetSourceEventObservations.containsKey(event.eventId())) {
       protocolErrorCode = "EVENT_ID_REUSE_CONFLICT";
       return;
     }
@@ -521,10 +467,9 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
         return;
       }
     } else {
-      if (targetSourceEventHardeningEnabled
-          && (hasFormalEventSequenceConflict(event.eventSequence(), event.eventId())
-              || targetSourceEventObservations.values().stream()
-                  .anyMatch(source -> source.eventSequence() == event.eventSequence()))) {
+      if (hasFormalEventSequenceConflict(event.eventSequence(), event.eventId())
+          || targetSourceEventObservations.values().stream()
+              .anyMatch(source -> source.eventSequence() == event.eventSequence())) {
         protocolErrorCode = "EVENT_SEQUENCE_ID_CONFLICT";
         return;
       }
