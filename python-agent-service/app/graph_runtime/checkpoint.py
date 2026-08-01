@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
-from contextlib import AbstractAsyncContextManager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, replace
 from typing import Any, Final
 
@@ -385,6 +386,12 @@ class ExternalTerminalCommit:
             raise TypeError("external terminal commit revision is invalid")
 
 
+@dataclass(slots=True)
+class _ThreadWriteLockEntry:
+    lock: asyncio.Lock
+    users: int = 0
+
+
 class FencedPostgresSaver(BaseCheckpointSaver[Any]):
     """Async saver that atomically checks the durable lease before every write.
 
@@ -409,6 +416,7 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
             lambda connection, serde: AsyncPostgresSaver(connection, serde=serde)
         )
         self._ledger = ledger or PostgresCommandLedger()
+        self._thread_write_locks: dict[str, _ThreadWriteLockEntry] = {}
 
     async def aget_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
         fence = self._require_fence(config)
@@ -451,7 +459,7 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
     ) -> RunnableConfig:
         fence = self._require_fence(config)
         materializer = self._terminal_materializer(config)
-        async with self._connection() as connection:
+        async with self._serialized_thread_write(fence.thread_id), self._connection() as connection:
             async with connection.transaction():
                 await self._lock_fence(connection, fence)
                 cognitive_revision = self._checkpoint_revision(checkpoint)
@@ -538,7 +546,7 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
         task_path: str = "",
     ) -> None:
         fence = self._require_fence(config)
-        async with self._connection() as connection:
+        async with self._serialized_thread_write(fence.thread_id), self._connection() as connection:
             async with connection.transaction():
                 await self._lock_fence(connection, fence)
                 await self._validate_pending_write_target(connection, config, fence)
@@ -554,7 +562,7 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
         """Reject stale storage writers before they create an immutable external object."""
 
         fence = self._require_fence(config)
-        async with self._connection() as connection:
+        async with self._serialized_thread_write(fence.thread_id), self._connection() as connection:
             async with connection.transaction():
                 await self._lock_fence(connection, fence)
                 await self._lock_external_terminal_checkpoint(
@@ -589,7 +597,7 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
                 "external terminal result differs from its exact checkpoint fence"
             )
         effective_fence = self._terminal_fence(fence, result)
-        async with self._connection() as connection:
+        async with self._serialized_thread_write(fence.thread_id), self._connection() as connection:
             async with connection.transaction():
                 await self._lock_fence(connection, fence)
                 checkpoint_is_terminal_bound = await self._lock_external_terminal_checkpoint(
@@ -642,6 +650,30 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
 
     def _connection(self) -> AbstractAsyncContextManager[Any]:
         return self._pool.connection(timeout=self._acquire_timeout_seconds)
+
+    @asynccontextmanager
+    async def _serialized_thread_write(self, thread_id: str) -> AsyncIterator[None]:
+        """Serialize one process replica's full fenced transaction per Graph thread.
+
+        LangGraph may schedule ``aput`` and ``aput_writes`` concurrently.  Both
+        transactions lock the same durable lease row, so allowing them to race can
+        strand one pipeline transaction until PostgreSQL's idle timeout.  This
+        process-local gate removes that self-contention while the database fence
+        continues to arbitrate writes across replicas.
+        """
+
+        entry = self._thread_write_locks.get(thread_id)
+        if entry is None:
+            entry = _ThreadWriteLockEntry(lock=asyncio.Lock())
+            self._thread_write_locks[thread_id] = entry
+        entry.users += 1
+        try:
+            async with entry.lock:
+                yield
+        finally:
+            entry.users -= 1
+            if entry.users == 0 and self._thread_write_locks.get(thread_id) is entry:
+                del self._thread_write_locks[thread_id]
 
     @staticmethod
     def _terminal_materializer(

@@ -600,6 +600,12 @@ class LiteLlmProxyClient:
                 "LLM request failed",
                 provider_attempts_used=max(1, provider_attempts_used),
             ) from exception
+        except RuntimeError:
+            # Execution-scoped provider-intent recorders fail with Graph runtime
+            # contract errors.  Those also inherit ValueError for legacy callers,
+            # but they are not malformed model output and must retain their exact
+            # durable-Graph classification.
+            raise
         except (KeyError, IndexError, TypeError, ValidationError, ValueError) as exception:
             raise AgentOutputSchemaError(
                 node_name, f"{node_name} returned invalid structured output"
@@ -731,6 +737,11 @@ class LiteLlmProxyClient:
                 "LLM request failed",
                 provider_attempts_used=max(1, provider_attempts_used),
             ) from exception
+        except RuntimeError:
+            # See the synchronous path above: Graph provider-intent failures are
+            # runtime contract errors, even though their compatibility MRO also
+            # includes ValueError.
+            raise
         except (KeyError, IndexError, TypeError, ValidationError, ValueError) as exception:
             raise AgentOutputSchemaError(
                 node_name, f"{node_name} returned invalid structured output"

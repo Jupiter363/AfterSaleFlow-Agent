@@ -117,12 +117,34 @@ class ShadowExecutorRegistration:
     binding: VersionBinding
     executor: ShadowGraphExecutor
     provider_binding: ProviderRuntimeBinding
+    room_provider_bindings: tuple[tuple[str, ProviderRuntimeBinding], ...] = ()
 
     def __post_init__(self) -> None:
         if not callable(getattr(self.executor, "stream", None)):
             raise GraphContractError("Graph executor must expose an async stream method")
         if self.provider_binding.model_profile_id != self.binding.model_profile_id:
             raise GraphContractError("executor provider profile binding conflicts with registry")
+        seen_rooms: set[str] = set()
+        for room_type, provider_binding in self.room_provider_bindings:
+            if (
+                not isinstance(room_type, str)
+                or not room_type
+                or len(room_type) > 32
+                or room_type in seen_rooms
+                or not isinstance(provider_binding, ProviderRuntimeBinding)
+            ):
+                raise GraphContractError("room provider runtime binding is invalid")
+            if provider_binding.model_profile_id != self.binding.model_profile_id:
+                raise GraphContractError(
+                    "room provider profile binding conflicts with registry"
+                )
+            seen_rooms.add(room_type)
+
+    def provider_binding_for(self, room_type: str) -> ProviderRuntimeBinding:
+        for bound_room_type, provider_binding in self.room_provider_bindings:
+            if bound_room_type == room_type:
+                return provider_binding
+        return self.provider_binding
 
 
 class ExactShadowExecutorRegistry:
@@ -335,8 +357,15 @@ class GatewayBackedGraphCommandStreamService:
         )
         source: AsyncIterator[AgentStreamEvent] | None = None
         try:
-            execution = self._bind_execution_identity(registration, execution)
-            source = self._provider_bound_stream(registration, execution)
+            provider_binding = registration.provider_binding_for(
+                admission.command.room_type
+            )
+            execution = self._bind_execution_identity(provider_binding, execution)
+            source = self._provider_bound_stream(
+                registration.executor,
+                provider_binding,
+                execution,
+            )
             validated = self._gateway.execute_stream(
                 execution=execution,
                 executor=_Executor(source),
@@ -351,7 +380,7 @@ class GatewayBackedGraphCommandStreamService:
 
     @staticmethod
     def _bind_execution_identity(
-        registration: ShadowExecutorRegistration,
+        provider_binding: ProviderRuntimeBinding,
         execution: GatewayExecution,
     ) -> GatewayExecution:
         """Freeze the resolved provider identity into candidate execution before streaming."""
@@ -361,8 +390,8 @@ class GatewayBackedGraphCommandStreamService:
         if execution.fence.execution_lane is not GraphGatewayMode.TARGET_E2E_CANDIDATE:
             raise GraphContractError("execution has an invalid Graph lane")
         expected = (
-            registration.provider_binding.provider,
-            registration.provider_binding.model,
+            provider_binding.provider,
+            provider_binding.model,
         )
         existing = (
             execution.fence.execution_provider,
@@ -381,20 +410,21 @@ class GatewayBackedGraphCommandStreamService:
 
     def _provider_bound_stream(
         self,
-        registration: ShadowExecutorRegistration,
+        executor: ShadowGraphExecutor,
+        provider_binding: ProviderRuntimeBinding,
         execution: GatewayExecution,
     ) -> AsyncIterator[AgentStreamEvent]:
         recorder = GatewayProviderCallIntentRecorder(
             gateway=self._gateway,
             execution=execution,
-            provider=registration.provider_binding.provider,
-            model=registration.provider_binding.model,
-            allowed_nodes=registration.provider_binding.allowed_nodes,
+            provider=provider_binding.provider,
+            model=provider_binding.model,
+            allowed_nodes=provider_binding.allowed_nodes,
         )
 
         async def stream() -> AsyncIterator[AgentStreamEvent]:
             with bind_provider_call_intent_recorder(recorder):
-                iterator = registration.executor.stream(execution).__aiter__()
+                iterator = executor.stream(execution).__aiter__()
             try:
                 while True:
                     try:

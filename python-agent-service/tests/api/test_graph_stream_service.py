@@ -386,6 +386,8 @@ async def _service(
     executor: _Executor,
     *,
     renewal_seconds: float = 10,
+    provider_binding: ProviderRuntimeBinding | None = None,
+    room_provider_bindings: tuple[tuple[str, ProviderRuntimeBinding], ...] = (),
 ) -> tuple[GatewayBackedGraphCommandStreamService, GraphStreamAdmissionGate]:
     gate = GraphStreamAdmissionGate()
     await gate.start()
@@ -394,7 +396,8 @@ async def _service(
             ShadowExecutorRegistration(
                 gateway.admission.registry.binding,
                 executor,
-                _provider_binding(),
+                provider_binding or _provider_binding(),
+                room_provider_bindings,
             )
         ]
     )
@@ -786,6 +789,78 @@ async def test_exact_executor_provider_http_is_ledgered_before_transport() -> No
     assert [event.event_type for event in events] == ["attempt_started", "final"]
     assert gateway.provider_calls == 1
     assert executor.http_calls == 1
+    assert await gate.drain(0.01) is True
+
+
+@pytest.mark.asyncio
+async def test_candidate_room_binding_uses_the_exact_intake_provider_identity() -> None:
+    shadow_admission = _admission(AdmissionAction.ACQUIRE)
+    admission = replace(
+        shadow_admission,
+        registry=replace(
+            shadow_admission.registry,
+            state=RegistryState.ACTIVE_CANDIDATE,
+        ),
+    )
+
+    class CandidateGateway(_Gateway):
+        async def acquire_execution(self, admission: GatewayAdmission, **kwargs: Any):
+            self.acquired += 1
+            return _candidate_execution(admission)
+
+    gateway = CandidateGateway(admission)
+    executor = _ProviderCallingExecutor()
+    composite_binding = ProviderRuntimeBinding(
+        model_profile_id=admission.registry.binding.model_profile_id,
+        provider="target-e2e-composite",
+        model="room-provider-dispatch",
+        allowed_nodes=frozenset({"INTAKE"}),
+    )
+    service, gate = await _service(
+        gateway,
+        executor,
+        provider_binding=composite_binding,
+        room_provider_bindings=(("INTAKE", _provider_binding()),),
+    )
+
+    events = [
+        event
+        async for event in await service.open_stream(
+            command=admission.command,
+            verified_invocation=cast(VerifiedInvocation, object()),
+            expected_thread=admission.thread,
+        )
+    ]
+
+    assert [event.event_type for event in events] == ["attempt_started", "final"]
+    assert gateway.provider_calls == 1
+    assert executor.http_calls == 1
+    assert await gate.drain(0.01) is True
+
+
+@pytest.mark.asyncio
+async def test_provider_intent_mismatch_remains_a_graph_contract_error() -> None:
+    admission = _admission(AdmissionAction.ACQUIRE)
+    gateway = _Gateway(admission)
+    executor = _ProviderCallingExecutor()
+    mismatched = replace(_provider_binding(), provider="another-provider")
+    service, gate = await _service(
+        gateway,
+        executor,
+        provider_binding=mismatched,
+    )
+
+    stream = await service.open_stream(
+        command=admission.command,
+        verified_invocation=cast(VerifiedInvocation, object()),
+        expected_thread=admission.thread,
+    )
+    with pytest.raises(GraphContractError, match="provider call intent conflicts"):
+        _ = [event async for event in stream]
+
+    assert gateway.provider_calls == 0
+    assert executor.http_calls == 0
+    assert gateway.finished == 1
     assert await gate.drain(0.01) is True
 
 

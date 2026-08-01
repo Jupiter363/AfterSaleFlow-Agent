@@ -301,6 +301,16 @@ def build_graph_runtime_bindings(
                         bindings[0],
                         kernel,
                         providers=providers,
+                        intake_provider=(
+                            structured_client.governed_provider
+                            if structured_client is not None
+                            else None
+                        ),
+                        intake_model=(
+                            structured_client.governed_model
+                            if structured_client is not None
+                            else None
+                        ),
                     ),
                 )
             )
@@ -333,6 +343,8 @@ def _target_e2e_executor_registration(
     kernel: GraphExecutorKernel,
     *,
     providers: Iterable[TargetE2ERoomProvider],
+    intake_provider: str | None = None,
+    intake_model: str | None = None,
 ) -> ShadowExecutorRegistration:
     del kernel
     if (
@@ -345,6 +357,23 @@ def _target_e2e_executor_registration(
     ):
         raise GraphContractError("target-E2E executor differs from the frozen composite binding")
     binding = _version_binding(configured)
+    if (intake_provider is None) != (intake_model is None):
+        raise GraphContractError("target-E2E Intake provider binding is incomplete")
+    room_provider_bindings = (
+        (
+            (
+                RoomType.INTAKE.value,
+                ProviderRuntimeBinding(
+                    model_profile_id=binding.model_profile_id,
+                    provider=intake_provider,
+                    model=intake_model,
+                    allowed_nodes=frozenset({"intake_lcel"}),
+                ),
+            ),
+        )
+        if intake_provider is not None and intake_model is not None
+        else ()
+    )
     return ShadowExecutorRegistration(
         binding=binding,
         executor=TargetE2ECompositeExecutor(providers),
@@ -354,6 +383,7 @@ def _target_e2e_executor_registration(
             model="room-provider-dispatch",
             allowed_nodes=frozenset(room.value for room in TARGET_E2E_ROOM_TYPES),
         ),
+        room_provider_bindings=room_provider_bindings,
     )
 
 

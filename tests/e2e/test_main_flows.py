@@ -461,16 +461,41 @@ def test_live_room_flow_reaches_confirmed_settlement_idempotently() -> None:
         )
         if status == 200 and initiator_memory_response.get("data") is not None:
             initiator_memory = initiator_memory_response["data"]
-            snapshot = (initiator_memory or {}).get("scroll_snapshot") or {}
-            if snapshot.get("unilateral_case_matrix", {}).get("schema_version") == "unilateral_case_matrix.v1":
+            dossier = (
+                ((initiator_memory or {}).get("case_intake_dossier") or {}).get(
+                    "dossier"
+                )
+                or {}
+            )
+            matrix = dossier.get("case_fact_matrix") or {}
+            if (
+                matrix.get("schema_version") == "case_fact_matrix.v2"
+                and matrix.get("matrix_kind") == "INITIATOR_FROZEN"
+            ):
                 break
         time.sleep(2)
     assert status == 200, initiator_memory_response
     assert initiator_memory is not None
-    assert (
-        initiator_memory["scroll_snapshot"]["unilateral_case_matrix"]["schema_version"]
-        == "unilateral_case_matrix.v1"
+    initiator_dossier = initiator_memory["case_intake_dossier"]["dossier"]
+    initiator_matrix = initiator_dossier["case_fact_matrix"]
+    assert "unilateral_case_matrix" not in initiator_dossier
+    assert "unilateral_case_matrix" not in initiator_memory["scroll_snapshot"]
+    assert initiator_matrix["schema_version"] == "case_fact_matrix.v2"
+    assert initiator_matrix["matrix_kind"] == "INITIATOR_FROZEN"
+    assert initiator_matrix["party_map"] == {
+        "initiator_role": "USER",
+        "respondent_role": "MERCHANT",
+    }
+    assert all(
+        set(row["positions"]) == {"USER", "MERCHANT"}
+        for row in initiator_matrix["fact_rows"]
     )
+    initiator_matrix_before_confirmation = json.loads(json.dumps(initiator_matrix))
+    initiator_matrix_identity = (
+        initiator_matrix["matrix_version"],
+        initiator_matrix["content_hash"],
+    )
+    initiator_confirmation_key = f"initiator-intake-confirm-{suffix}"
 
     status, accepted = request(
         "POST",
@@ -481,11 +506,25 @@ def test_live_room_flow_reaches_confirmed_settlement_idempotently() -> None:
             "risk_level": "LOW",
             "confirmation_note": "E2E 受理并进入证据室",
         },
-        headers=user_headers,
+        headers={**user_headers, "Idempotency-Key": initiator_confirmation_key},
     )
     assert status == 200, accepted
     assert accepted["data"]["case_status"] == "INTAKE_COMPLETED"
     assert accepted["data"]["current_room"] == "INTAKE"
+
+    status, accepted_replay = request(
+        "POST",
+        f"/api/disputes/{case_id}/intake/confirm",
+        payload={
+            "admissible": True,
+            "dispute_type": "SIGNED_NOT_RECEIVED",
+            "risk_level": "LOW",
+            "confirmation_note": "E2E 受理并进入证据室",
+        },
+        headers={**user_headers, "Idempotency-Key": initiator_confirmation_key},
+    )
+    assert status == 200, accepted_replay
+    assert accepted_replay["data"] == accepted["data"]
 
     deadline = time.monotonic() + 120
     initiator_frozen_memory = None
@@ -498,7 +537,12 @@ def test_live_room_flow_reaches_confirmed_settlement_idempotently() -> None:
         if status == 200 and initiator_frozen_response.get("data") is not None:
             initiator_frozen_memory = initiator_frozen_response["data"]
             matrix_kind = (
-                (initiator_frozen_memory.get("scroll_snapshot") or {})
+                (
+                    (initiator_frozen_memory.get("case_intake_dossier") or {}).get(
+                        "dossier"
+                    )
+                    or {}
+                )
                 .get("case_fact_matrix", {})
                 .get("matrix_kind")
             )
@@ -507,9 +551,18 @@ def test_live_room_flow_reaches_confirmed_settlement_idempotently() -> None:
         time.sleep(2)
     assert status == 200, initiator_frozen_response
     assert initiator_frozen_memory is not None
+    confirmed_matrix = initiator_frozen_memory["case_intake_dossier"]["dossier"][
+        "case_fact_matrix"
+    ]
+    assert confirmed_matrix["matrix_kind"] == "INITIATOR_FROZEN"
     assert (
-        initiator_frozen_memory["scroll_snapshot"]["case_fact_matrix"]["matrix_kind"]
-        == "INITIATOR_FROZEN"
+        confirmed_matrix["matrix_version"],
+        confirmed_matrix["content_hash"],
+    ) == initiator_matrix_identity
+    assert confirmed_matrix == initiator_matrix_before_confirmation
+    assert (
+        "unilateral_case_matrix"
+        not in initiator_frozen_memory["case_intake_dossier"]["dossier"]
     )
 
     status, merchant_statement = request(
@@ -553,7 +606,9 @@ def test_live_room_flow_reaches_confirmed_settlement_idempotently() -> None:
     )
     assert status == 200, merchant_memory
     assert (
-        merchant_memory["data"]["scroll_snapshot"]["case_fact_matrix"]["matrix_kind"]
+        merchant_memory["data"]["case_intake_dossier"]["dossier"]["case_fact_matrix"][
+            "matrix_kind"
+        ]
         == "BILATERAL_FROZEN"
     )
 

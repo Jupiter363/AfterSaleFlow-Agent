@@ -53,6 +53,7 @@ from app.graph_runtime.production_bindings import (
     _initial_state,
     _project_synthetic_result,
     _terminal_plan,
+    _target_e2e_executor_registration,
     _validate_synthetic_state,
     _executor_registration,
     build_graph_runtime_bindings,
@@ -674,6 +675,35 @@ def test_target_e2e_default_intake_uses_configured_structured_client(
     assert isinstance(captured["intake_transport"], StructuredClientTransport)
     assert captured["intake_provider"] == "litellm"
     assert captured["intake_model"] == "qwen3.7-plus-target"
+
+
+def test_target_e2e_composite_registers_the_exact_intake_provider_binding() -> None:
+    class Provider:
+        def __init__(self, room_type: RoomType) -> None:
+            self.room_type = room_type
+
+        async def stream(self, execution: GatewayExecution):
+            if False:
+                yield execution
+
+    settings = _target_settings()
+    registration = _target_e2e_executor_registration(
+        settings.graph_target_e2e_bindings[0],
+        GraphExecutorKernel(
+            saver=cast(Any, InMemorySaver()),
+            gateway=cast(Any, object()),
+            durable_bulkhead=cast(Any, object()),
+        ),
+        providers=tuple(Provider(room_type) for room_type in RoomType),
+        intake_provider="litellm",
+        intake_model="qwen3.7-plus-target",
+    )
+
+    intake_binding = registration.provider_binding_for("INTAKE")
+    assert intake_binding.provider == "litellm"
+    assert intake_binding.model == "qwen3.7-plus-target"
+    assert intake_binding.allowed_nodes == frozenset({"intake_lcel"})
+    assert registration.provider_binding_for("HEARING") is registration.provider_binding
 
 
 def test_target_e2e_explicit_provider_factory_bypasses_live_model_client(

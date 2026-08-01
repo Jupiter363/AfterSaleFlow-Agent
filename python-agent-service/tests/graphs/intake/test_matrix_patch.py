@@ -210,6 +210,30 @@ def test_contract_union_requires_explicit_delta_stance() -> None:
         IntakeCognitionDraft.model_validate(missing_stance)
 
 
+def test_provider_matrix_patch_is_canonicalized_to_the_top_level_envelope() -> None:
+    cognition = _cognition(_unilateral_patch())
+    nested_patch = cognition.pop("matrix_patch")
+    cognition["dossier_patch"]["matrix_patch"] = nested_patch
+
+    parsed = IntakeCognitionDraft.model_validate(cognition)
+
+    assert parsed.matrix_patch is not None
+    assert parsed.matrix_patch.schema_version == "unilateral_case_matrix.draft.v1"
+    assert "matrix_patch" not in parsed.dossier_patch.model_dump(
+        mode="json",
+        exclude_none=True,
+        exclude_unset=True,
+    )
+
+
+def test_conflicting_matrix_patch_envelope_locations_are_rejected() -> None:
+    cognition = _cognition(_unilateral_patch())
+    cognition["dossier_patch"]["matrix_patch"] = _unilateral_patch()
+
+    with pytest.raises(ValidationError, match="both envelope locations"):
+        IntakeCognitionDraft.model_validate(cognition)
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

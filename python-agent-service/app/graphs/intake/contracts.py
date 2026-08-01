@@ -377,6 +377,32 @@ class IntakeCognitionDraft(StrictIntakeModel):
     knowledge_answer_mode: Literal["NONE", "STUB"]
     confidence: float = Field(strict=True, ge=0, le=1, allow_inf_nan=False)
 
+    @model_validator(mode="before")
+    @classmethod
+    def canonicalize_matrix_proposal_envelope(cls, value: Any) -> Any:
+        """Lift one narrowly bounded provider-envelope mistake before validation.
+
+        Some strict-JSON providers place the already typed internal ``matrix_patch``
+        beside dossier branches instead of beside ``dossier_patch``.  Accept only
+        that exact, unambiguous shape and immediately move it back across the typed
+        boundary.  The normal MatrixPatch validation still runs afterwards, while
+        every formal matrix authority field remains forbidden inside the dossier.
+        """
+
+        if not isinstance(value, dict):
+            return value
+        dossier_patch = value.get("dossier_patch")
+        if not isinstance(dossier_patch, dict) or "matrix_patch" not in dossier_patch:
+            return value
+        if "matrix_patch" in value:
+            raise ValueError("matrix_patch cannot be present in both envelope locations")
+
+        canonical = dict(value)
+        canonical_dossier = dict(dossier_patch)
+        canonical["matrix_patch"] = canonical_dossier.pop("matrix_patch")
+        canonical["dossier_patch"] = canonical_dossier
+        return canonical
+
     @model_validator(mode="after")
     def draft_invariants(self) -> IntakeCognitionDraft:
         if len(self.missing_fields) != len(set(self.missing_fields)):

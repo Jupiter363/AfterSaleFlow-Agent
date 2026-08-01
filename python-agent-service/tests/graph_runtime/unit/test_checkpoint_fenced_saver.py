@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from typing import Any
@@ -442,6 +443,59 @@ async def test_checkpoint_write_locks_fence_and_uses_one_connection() -> None:
     assert direct_savers[0].connection is connection
     assert direct_savers[0].put_calls == [_metadata()]
     assert saved["configurable"][FENCE_CONTEXT_KEY] == _fence()
+
+
+@pytest.mark.asyncio
+async def test_same_thread_fenced_transactions_are_serialized_before_pool_acquisition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = _Connection()
+    pool = _Pool(connection)
+    saver = FencedPostgresSaver(
+        pool,  # type: ignore[arg-type]
+        reader=_Reader(),  # type: ignore[arg-type]
+    )
+    first_locked = asyncio.Event()
+    release_first = asyncio.Event()
+    lock_calls = 0
+    original_lock_fence = saver._lock_fence  # noqa: SLF001
+
+    async def blocking_lock_fence(
+        selected_connection: Any,
+        fence: GraphFenceContext,
+    ) -> None:
+        nonlocal lock_calls
+        await original_lock_fence(selected_connection, fence)
+        lock_calls += 1
+        if lock_calls == 1:
+            first_locked.set()
+            await release_first.wait()
+
+    monkeypatch.setattr(saver, "_lock_fence", blocking_lock_fence)
+    first = asyncio.create_task(
+        saver.avalidate_external_terminal_checkpoint(
+            _config(checkpoint=True),
+            cognitive_revision=1,
+        )
+    )
+    await first_locked.wait()
+    second = asyncio.create_task(
+        saver.avalidate_external_terminal_checkpoint(
+            _config(checkpoint=True),
+            cognitive_revision=1,
+        )
+    )
+    await asyncio.sleep(0)
+
+    assert pool.connection_calls == 1
+    assert lock_calls == 1
+
+    release_first.set()
+    await asyncio.gather(first, second)
+
+    assert pool.connection_calls == 2
+    assert lock_calls == 2
+    assert saver._thread_write_locks == {}  # noqa: SLF001
 
 
 @pytest.mark.asyncio
