@@ -427,6 +427,17 @@ def test_live_room_flow_reaches_confirmed_settlement_idempotently() -> None:
     assert status == 201, replayed_create
     assert replayed_create["data"]["id"] == case_id
 
+    # The target Temporal Intake lane deliberately materializes the initial
+    # description through the idempotent opening endpoint.  Creating a case
+    # only provisions the room epoch; this call is the first accepted room
+    # command and must precede polling for the generated private memory.
+    status, opening = request(
+        "POST",
+        f"/api/disputes/{case_id}/rooms/INTAKE/messages/opening",
+        headers=user_headers,
+    )
+    assert status == 200, opening
+
     deadline = time.monotonic() + 300
     initiator_memory = None
     initiator_memory_response = None
