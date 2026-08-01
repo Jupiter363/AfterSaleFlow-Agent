@@ -513,17 +513,47 @@ public final class IntakeUnilateralMatrixPolicy {
             state = deriveBaselineDisputeCoreState(dossier);
             dossier.set("dispute_core_state", state.deepCopy());
         }
+        String coreConflict = firstText(state, "core_conflict", "core_issue");
+        if (coreConflict == null) {
+            ObjectNode baseline = deriveBaselineDisputeCoreState(dossier);
+            coreConflict = firstText(baseline, "core_conflict");
+        }
+
+        JsonNode factsInDispute = firstPresent(
+                state, "facts_in_dispute", "fact_disputes", "factual_disputes");
+        if (factsInDispute.isMissingNode()) {
+            factsInDispute = baselineFactsInDispute(dossier);
+        }
+        JsonNode nextVerificationFocus = firstPresent(
+                state, "next_verification_focus", "verification_focus");
+        if (nextVerificationFocus.isMissingNode()) {
+            nextVerificationFocus = baselineNextVerificationFocus(dossier);
+        }
+
         ObjectNode result = dossier.objectNode();
         result.put(
                 "core_conflict",
-                requireBoundedValue(
-                        firstText(state, "core_conflict"), 20_000, "core conflict"));
+                requireBoundedValue(coreConflict, 20_000, "core conflict"));
         result.set(
                 "facts_in_dispute",
-                optionalTextArray(dossier, state.path("facts_in_dispute"), 50));
+                optionalTextArray(dossier, factsInDispute, 50));
         result.set(
                 "next_verification_focus",
-                optionalTextArray(dossier, state.path("next_verification_focus"), 20));
+                optionalTextArray(dossier, nextVerificationFocus, 20));
+
+        ObjectNode normalizedState = dossier.objectNode();
+        normalizedState.set("core_conflict", result.required("core_conflict").deepCopy());
+        normalizedState.set("facts_in_dispute", result.required("facts_in_dispute").deepCopy());
+        normalizedState.set(
+                "next_verification_focus",
+                result.required("next_verification_focus").deepCopy());
+        String conflictType = firstText(state, "conflict_type");
+        if (conflictType != null) {
+            normalizedState.put(
+                    "conflict_type",
+                    requireIdentifierValue(conflictType, "dispute conflict type"));
+        }
+        dossier.set("dispute_core_state", normalizedState);
         return result;
     }
 
@@ -544,25 +574,32 @@ public final class IntakeUnilateralMatrixPolicy {
                 requireBoundedValue(coreConflict, 20_000, "core conflict"));
         derived.set(
                 "facts_in_dispute",
-                optionalTextArray(
-                        dossier,
-                        firstPresent(focus, "facts_in_dispute", "focus_points"),
-                        50));
-
-        JsonNode verification = firstPresent(
-                focus, "next_verification_focus", "facts_to_verify");
-        if (verification.isMissingNode()) {
-            verification = firstPresent(
-                    dossier.path("missing_information"),
-                    "next_verification_focus",
-                    "blocking_gaps",
-                    "missing_fields",
-                    "next_questions");
-        }
+                optionalTextArray(dossier, baselineFactsInDispute(dossier), 50));
         derived.set(
                 "next_verification_focus",
-                optionalTextArray(dossier, verification, 20));
+                optionalTextArray(dossier, baselineNextVerificationFocus(dossier), 20));
         return derived;
+    }
+
+    private static JsonNode baselineFactsInDispute(ObjectNode dossier) {
+        return firstPresent(
+                dossier.path("dispute_focus"), "facts_in_dispute", "focus_points");
+    }
+
+    private static JsonNode baselineNextVerificationFocus(ObjectNode dossier) {
+        JsonNode verification = firstPresent(
+                dossier.path("dispute_focus"),
+                "next_verification_focus",
+                "facts_to_verify");
+        if (!verification.isMissingNode()) {
+            return verification;
+        }
+        return firstPresent(
+                dossier.path("missing_information"),
+                "next_verification_focus",
+                "blocking_gaps",
+                "missing_fields",
+                "missing_facts");
     }
 
     private static JsonNode firstPresent(JsonNode owner, String... fields) {

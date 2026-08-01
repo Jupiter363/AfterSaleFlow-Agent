@@ -1269,7 +1269,8 @@ def _generation_parts(
         raise IntakeGraphContractError("INTAKE_LCEL_GENERATION_INVALID")
     typed_state = cast(IntakeGraphStateV2, state)
     normalized = _normalize_model_matrix_fact_keys(typed_state, draft)
-    return typed_state, message, _normalize_model_respondent_attitude(typed_state, normalized)
+    normalized = _normalize_model_respondent_attitude(typed_state, normalized)
+    return typed_state, message, _normalize_model_dispute_core_state(typed_state, normalized)
 
 
 def _normalize_model_respondent_attitude(
@@ -1311,6 +1312,152 @@ def _normalize_model_respondent_attitude(
     if proposed != grounded_attitude:
         raise IntakeGraphContractError("INTAKE_RESPONDENT_ATTITUDE_SOURCE_CONFLICT")
     return _pin_model_respondent_attitude_position(draft, grounded_position)
+
+
+def _normalize_model_dispute_core_state(
+    state: IntakeGraphStateV2,
+    draft: IntakeCognitionDraft,
+) -> IntakeCognitionDraft:
+    """Project provider field variants onto the baseline dispute-core contract.
+
+    The model-facing dossier branch remains intentionally open for incremental
+    patches, while Java formalization requires the baseline canonical fields.
+    Normalize only from the current patch or already-authorized dossier state so
+    a provider alias cannot turn a successful first attempt into a non-retryable
+    cross-service contract failure.
+    """
+
+    if draft.dossier_patch.dispute_core_state is None:
+        return draft
+
+    normalized = draft.model_dump(mode="json", exclude_none=True, exclude_unset=True)
+    dossier_patch = normalized.get("dossier_patch")
+    if not isinstance(dossier_patch, dict):
+        raise IntakeGraphContractError("INTAKE_LCEL_DOSSIER_PATCH_INVALID")
+    proposed_core = dossier_patch.get("dispute_core_state")
+    if not isinstance(proposed_core, dict):
+        raise IntakeGraphContractError("INTAKE_DISPUTE_CORE_STATE_INVALID")
+
+    current_dossier = state.get("dossier_draft", {})
+    current_core = _object_branch(current_dossier, "dispute_core_state")
+    proposed_focus = _object_branch(dossier_patch, "dispute_focus")
+    current_focus = _object_branch(current_dossier, "dispute_focus")
+    proposed_story = _object_branch(dossier_patch, "case_story")
+    current_story = _object_branch(current_dossier, "case_story")
+    proposed_missing = _object_branch(dossier_patch, "missing_information")
+    current_missing = _object_branch(current_dossier, "missing_information")
+
+    core_conflict = (
+        _first_nonblank_field(proposed_core, "core_conflict", "core_issue")
+        or _first_nonblank_field(current_core, "core_conflict", "core_issue")
+        or _first_nonblank_field(proposed_focus, "core_conflict", "core_issue")
+        or _first_nonblank_field(proposed_story, "one_sentence_summary", "summary")
+        or _first_nonblank_field(current_focus, "core_conflict", "core_issue")
+        or _first_nonblank_field(current_story, "one_sentence_summary", "summary")
+    )
+    if core_conflict is None:
+        raise IntakeGraphContractError("INTAKE_DISPUTE_CORE_STATE_INVALID")
+
+    facts_in_dispute = _coalesced_string_list(
+        (
+            (proposed_core, ("facts_in_dispute", "fact_disputes", "factual_disputes")),
+            (current_core, ("facts_in_dispute", "fact_disputes", "factual_disputes")),
+            (proposed_focus, ("facts_in_dispute", "focus_points")),
+            (current_focus, ("facts_in_dispute", "focus_points")),
+        ),
+        limit=50,
+    )
+    next_verification_focus = _coalesced_string_list(
+        (
+            (proposed_core, ("next_verification_focus", "verification_focus")),
+            (current_core, ("next_verification_focus", "verification_focus")),
+            (proposed_focus, ("next_verification_focus", "facts_to_verify")),
+            (
+                proposed_missing,
+                (
+                    "next_verification_focus",
+                    "blocking_gaps",
+                    "missing_fields",
+                    "missing_facts",
+                ),
+            ),
+            (current_focus, ("next_verification_focus", "facts_to_verify")),
+            (
+                current_missing,
+                (
+                    "next_verification_focus",
+                    "blocking_gaps",
+                    "missing_fields",
+                    "missing_facts",
+                ),
+            ),
+        ),
+        limit=20,
+    )
+
+    canonical_core: dict[str, Any] = {
+        "core_conflict": core_conflict,
+        "facts_in_dispute": facts_in_dispute,
+        "next_verification_focus": next_verification_focus,
+    }
+    conflict_type = _first_nonblank_field(proposed_core, "conflict_type") or _first_nonblank_field(
+        current_core, "conflict_type"
+    )
+    if conflict_type is not None:
+        canonical_core["conflict_type"] = conflict_type
+    dossier_patch["dispute_core_state"] = canonical_core
+    return IntakeCognitionDraft.model_validate(normalized)
+
+
+def _object_branch(owner: Mapping[str, Any], field: str) -> Mapping[str, Any]:
+    value = owner.get(field)
+    return value if isinstance(value, Mapping) else {}
+
+
+def _first_nonblank_field(owner: Mapping[str, Any], *fields: str) -> str | None:
+    for field in fields:
+        value = owner.get(field)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _first_string_list(
+    owner: Mapping[str, Any],
+    *fields: str,
+    limit: int,
+) -> list[str] | None:
+    for field in fields:
+        if field not in owner:
+            continue
+        value = owner[field]
+        if not isinstance(value, list):
+            raise IntakeGraphContractError("INTAKE_DISPUTE_CORE_STATE_INVALID")
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for item in value:
+            if not isinstance(item, str) or not item.strip():
+                raise IntakeGraphContractError("INTAKE_DISPUTE_CORE_STATE_INVALID")
+            text = item.strip()
+            if text not in seen:
+                normalized.append(text)
+                seen.add(text)
+        if len(normalized) > limit:
+            raise IntakeGraphContractError("INTAKE_DISPUTE_CORE_STATE_INVALID")
+        return normalized
+    return None
+
+
+def _coalesced_string_list(
+    candidates: tuple[tuple[Mapping[str, Any], tuple[str, ...]], ...],
+    *,
+    limit: int,
+) -> list[str]:
+    for owner, fields in candidates:
+        value = _first_string_list(owner, *fields, limit=limit)
+        if value is not None:
+            return value
+    return []
 
 
 def _grounded_respondent_attitude(

@@ -874,6 +874,17 @@ async def test_compiled_intake_executor_persists_one_pointer_without_replacing_s
         "output_tokens": 2,
         "total_tokens": 5,
     }
+    for branch in ("terminal_draft", "result_json"):
+        proposal_document = durable_state[branch]
+        proposal_document["dossier_patch"]["dispute_core_state"] = {
+            "core_conflict": "The requested resolution remains disputed.",
+            "facts_in_dispute": ["Whether the repair resolved the recurring fault."],
+            "next_verification_focus": ["Confirm the elapsed time after repair."],
+        }
+        proposal_document["proposal_hash"] = canonical_sha256_omitting(
+            proposal_document,
+            "proposal_hash",
+        )
     proposal_before = dict(durable_state["result_json"])
 
     class Saver:
@@ -923,6 +934,29 @@ async def test_compiled_intake_executor_persists_one_pointer_without_replacing_s
                     AIMessageChunk(
                         content='{"room_utterance":"private raw completion"}',
                         additional_kwargs={"reasoning_content": "private reasoning"},
+                    ),
+                    {"langgraph_node": "intake_lcel"},
+                ),
+            )
+            yield (
+                "messages",
+                (
+                    AIMessageChunk(
+                        content="",
+                        additional_kwargs={
+                            "governed_events": [
+                                {
+                                    "schema_version": "governed-model-event.v1",
+                                    "event_type": "visible_delta",
+                                    "node_name": "intake_lcel",
+                                    "field": "case_detail.dispute_core_state",
+                                    "delta": (
+                                        '{"blocker":"missing detail","current_status":"INITIATED",'
+                                        '"fact_disputes":["legacy alias"]}'
+                                    ),
+                                }
+                            ]
+                        },
                     ),
                     {"langgraph_node": "intake_lcel"},
                 ),
@@ -1076,6 +1110,7 @@ async def test_compiled_intake_executor_persists_one_pointer_without_replacing_s
         "visible_delta",
         "visible_delta",
         "visible_delta",
+        "visible_delta",
         "usage",
         "final",
     ]
@@ -1085,11 +1120,18 @@ async def test_compiled_intake_executor_persists_one_pointer_without_replacing_s
     assert events[2].payload.delta == '{"one_sentence_summary":"Case summary."}'
     assert events[3].payload.field == "case_detail.references"
     assert events[3].payload.delta == '{"order_reference":"ORDER-1"}'
-    assert events[4].payload.usage == Usage(input_tokens=3, output_tokens=2, total_tokens=5)
+    assert events[4].payload.field == "case_detail.dispute_core_state"
+    assert json.loads(events[4].payload.delta) == {
+        "core_conflict": "The requested resolution remains disputed.",
+        "facts_in_dispute": ["Whether the repair resolved the recurring fault."],
+        "next_verification_focus": ["Confirm the elapsed time after repair."],
+    }
+    assert events[5].payload.usage == Usage(input_tokens=3, output_tokens=2, total_tokens=5)
     assert visible_commit_states == [
         ("room_utterance", False),
         ("case_detail.case_story", False),
         ("case_detail.references", False),
+        ("case_detail.dispute_core_state", True),
     ]
     assert saver.preflights == 1
     assert store.calls == 1

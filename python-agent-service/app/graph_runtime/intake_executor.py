@@ -54,6 +54,7 @@ from app.graphs.intake.lcel import (
     _is_evidence_material_gap,
     _respondent_attitude_discriminator,
 )
+from app.graphs.intake.contracts import IntakeTurnProposal
 from app.graphs.intake.runtime import IntakeRuntimeBundle
 from app.graphs.intake.state import IntakeGraphStateV2, IntakeTurnContext
 from app.graphs.intake.validators import validate_state
@@ -185,6 +186,11 @@ class CompiledIntakeGraphShadowExecutor:
                         )
                     if self._should_suppress_respondent_attitude_update(update):
                         continue
+                    if update.payload.field == "case_detail.dispute_core_state":
+                        # The provider-facing branch is intentionally open for
+                        # incremental generation and may contain legacy aliases.
+                        # Publish it only from the normalized terminal proposal.
+                        continue
                     # The frontend treats streamed dossier sections as a provisional
                     # view and discards them on ERROR, attempt reset, workspace change,
                     # or failed formal-readiness reconciliation.  Publish each complete
@@ -264,6 +270,15 @@ class CompiledIntakeGraphShadowExecutor:
             raise GraphTerminalBindingError(
                 "Intake generic result was not bound to the terminal fence"
             )
+        for update in self._terminal_normalized_dossier_updates(proposal):
+            self._validate_public_update(update)
+            yield self._event(
+                execution,
+                sequence,
+                update.event_type,
+                update.payload,
+            )
+            sequence += 1
         if pending_usage_update is not None:
             yield self._event(
                 execution,
@@ -408,6 +423,48 @@ class CompiledIntakeGraphShadowExecutor:
         # the dossier, while a substantive attitude becomes visible only after
         # the terminal source gate and formal Java commit succeed.
         return True
+
+    @staticmethod
+    def _terminal_normalized_dossier_updates(
+        proposal: IntakeTurnProposal,
+    ) -> tuple[GraphPublicUpdate, ...]:
+        core = proposal.dossier_patch.dispute_core_state
+        if not isinstance(core, Mapping):
+            return ()
+        core_conflict = core.get("core_conflict")
+        facts_in_dispute = core.get("facts_in_dispute")
+        next_verification_focus = core.get("next_verification_focus")
+        if (
+            not isinstance(core_conflict, str)
+            or not core_conflict.strip()
+            or not isinstance(facts_in_dispute, list)
+            or not all(isinstance(item, str) and item.strip() for item in facts_in_dispute)
+            or not isinstance(next_verification_focus, list)
+            or not all(isinstance(item, str) and item.strip() for item in next_verification_focus)
+        ):
+            # Older durable proposals may predate the normalizer.  Never replay
+            # their raw provider shape; Java's formal compatibility boundary can
+            # still canonicalize them before the authoritative dossier is read.
+            return ()
+        canonical_core: dict[str, Any] = {
+            "core_conflict": core_conflict.strip(),
+            "facts_in_dispute": [item.strip() for item in facts_in_dispute],
+            "next_verification_focus": [item.strip() for item in next_verification_focus],
+        }
+        conflict_type = core.get("conflict_type")
+        if isinstance(conflict_type, str) and conflict_type.strip():
+            canonical_core["conflict_type"] = conflict_type.strip()
+        return (
+            GraphPublicUpdate.visible_delta(
+                node="intake_lcel",
+                field="case_detail.dispute_core_state",
+                delta=json.dumps(
+                    canonical_core,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            ),
+        )
 
     @staticmethod
     def _graph_input(execution: GatewayExecution) -> Mapping[str, Any]:

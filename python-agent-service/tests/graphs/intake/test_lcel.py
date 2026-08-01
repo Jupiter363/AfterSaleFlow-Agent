@@ -486,6 +486,104 @@ def test_model_fact_key_normalization_preserves_authorized_stable_keys(
     )
 
 
+def test_model_partial_dispute_core_state_is_projected_to_the_baseline_contract(
+    bindings,
+    version_pins,
+) -> None:
+    state = _state_with_matrix_roles(bindings, version_pins, actor="USER", initiator="USER")
+    draft = IntakeCognitionDraft.model_validate(
+        _draft(
+            dossier_patch={
+                "case_story": {
+                    "one_sentence_summary": "用户称商品在保修维修后不到两周再次出现同一故障。",
+                },
+                "dispute_core_state": {
+                    "blocker": "缺少故障复现的具体时间细节及用户明确的首选解决方案",
+                    "current_status": "INITIATED",
+                    "fact_disputes": [
+                        "故障复现的具体时长",
+                        "用户对处理方案的最终偏好",
+                    ],
+                },
+                "missing_information": {
+                    "missing_facts": [
+                        "距离上次维修完成的具体天数",
+                        "用户明确的首选处理方案（换货或维修）",
+                    ],
+                    "next_questions": ["距离上次维修完成具体过去了多少天？"],
+                },
+            },
+            readiness="INCOMPLETE",
+            missing_fields=["repair_elapsed_days", "preferred_resolution"],
+            recommendation="NEED_MORE_INFO",
+        )
+    )
+
+    _, _, projected = _generation_parts(
+        {
+            "state": state,
+            "generation": {"message": AIMessage(content="{}"), "draft": draft},
+        }
+    )
+
+    assert projected.dossier_patch.dispute_core_state == {
+        "core_conflict": "用户称商品在保修维修后不到两周再次出现同一故障。",
+        "facts_in_dispute": [
+            "故障复现的具体时长",
+            "用户对处理方案的最终偏好",
+        ],
+        "next_verification_focus": [
+            "距离上次维修完成的具体天数",
+            "用户明确的首选处理方案（换货或维修）",
+        ],
+    }
+
+
+def test_model_alias_patch_cannot_implicitly_replace_an_existing_core_conflict(
+    bindings,
+    version_pins,
+) -> None:
+    state = _state_with_matrix_roles(bindings, version_pins, actor="USER", initiator="USER")
+    state["dossier_draft"] = {
+        "case_story": {"one_sentence_summary": "既有案情摘要。"},
+        "dispute_core_state": {
+            "core_conflict": "既有且已正式归一的核心争议。",
+            "facts_in_dispute": ["既有争议事实"],
+            "next_verification_focus": ["核实既有争议事实"],
+        },
+    }
+    draft = IntakeCognitionDraft.model_validate(
+        _draft(
+            dossier_patch={
+                "case_story": {"one_sentence_summary": "模型本轮生成的新摘要。"},
+                "dispute_core_state": {
+                    "current_status": "INITIATED",
+                    "fact_disputes": ["本轮明确更新的争议事实"],
+                },
+                "missing_information": {
+                    "missing_facts": ["模型隐式生成的新核验项"],
+                },
+            },
+            readiness="INCOMPLETE",
+            missing_fields=["new_gap"],
+            recommendation="NEED_MORE_INFO",
+        )
+    )
+
+    _, _, projected = _generation_parts(
+        {
+            "state": state,
+            "generation": {"message": AIMessage(content="{}"), "draft": draft},
+        }
+    )
+
+    assert projected.dossier_patch.dispute_core_state == {
+        "core_conflict": "既有且已正式归一的核心争议。",
+        "facts_in_dispute": ["本轮明确更新的争议事实"],
+        "next_verification_focus": ["核实既有争议事实"],
+    }
+
+
 @pytest.mark.parametrize(
     "absence_marker",
     ["UNKNOWN", "PLATFORM_UNKNOWN", "NOT_RESPONDED", "NOT_ADDRESSED"],

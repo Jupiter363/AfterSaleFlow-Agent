@@ -302,6 +302,98 @@ class IntakeDossierProjectionMergerTest {
     }
 
     @Test
+    void canonicalizesTheObservedPartialCoreStateBeforeFormalMatrixFinalization()
+            throws Exception {
+        JsonNode modelPatch = JSON.readTree(
+                """
+                {
+                  "case_story":{
+                    "one_sentence_summary":"用户称商品在保修维修后不到两周再次出现同一故障。"
+                  },
+                  "dispute_core_state":{
+                    "blocker":"缺少故障复现的具体时间细节及用户明确的首选解决方案",
+                    "current_status":"INITIATED",
+                    "fact_disputes":["故障复现的具体时长","用户对处理方案的最终偏好"]
+                  },
+                  "missing_information":{
+                    "missing_facts":["距离上次维修完成的具体天数"],
+                    "next_questions":["距离上次维修完成具体过去了多少天？"]
+                  }
+                }
+                """);
+        MatrixAuthority authority = new MatrixAuthority(
+                "CASE_PRODUCT_QUALITY_3",
+                ActorRole.USER,
+                ActorRole.USER,
+                ActorRole.MERCHANT,
+                "MESSAGE_PRODUCT_QUALITY_3",
+                "c".repeat(64),
+                new ClaimResolutionAuthority(
+                        "REPLACE_OR_REPAIR", null, null, null));
+
+        var result = merger.merge(
+                JSON.createObjectNode(),
+                proposal(modelPatch, unilateralDraft()),
+                authority);
+
+        assertThat(result.dossier().at("/dispute_core_state/core_conflict").asText())
+                .isEqualTo("用户称商品在保修维修后不到两周再次出现同一故障。");
+        assertThat(result.dossier().at("/dispute_core_state/facts_in_dispute/0").asText())
+                .isEqualTo("故障复现的具体时长");
+        assertThat(result.dossier().at("/dispute_core_state/next_verification_focus/0").asText())
+                .isEqualTo("距离上次维修完成的具体天数");
+        assertThat(result.dossier().at("/case_fact_matrix/case_overview/core_conflict").asText())
+                .isEqualTo("用户称商品在保修维修后不到两周再次出现同一故障。");
+        assertThat(result.dossier().at("/dispute_core_state/facts_in_dispute/1").asText())
+                .isEqualTo("用户对处理方案的最终偏好");
+        assertThat(result.dossier().at("/dispute_core_state/blocker").isMissingNode()).isTrue();
+        assertThat(result.dossier().at("/dispute_core_state/current_status").isMissingNode())
+                .isTrue();
+        assertThat(result.dossier().at("/dispute_core_state/fact_disputes").isMissingNode())
+                .isTrue();
+    }
+
+    @Test
+    void independentlyBackfillsCoreArraysWithoutReplacingAnExplicitCoreConflict()
+            throws Exception {
+        JsonNode modelPatch = JSON.readTree(
+                """
+                {
+                  "case_story":{"one_sentence_summary":"模型案情摘要。"},
+                  "dispute_focus":{"focus_points":["维修后故障是否再次发生"]},
+                  "dispute_core_state":{"core_conflict":"用户请求换货，商家尚未直接回应。"},
+                  "missing_information":{
+                    "missing_facts":["距离上次维修完成的具体天数"],
+                    "next_questions":["距离上次维修完成具体过去了多少天？"]
+                  }
+                }
+                """);
+        MatrixAuthority authority = new MatrixAuthority(
+                "CASE_PRODUCT_QUALITY_4",
+                ActorRole.USER,
+                ActorRole.USER,
+                ActorRole.MERCHANT,
+                "MESSAGE_PRODUCT_QUALITY_4",
+                "d".repeat(64),
+                new ClaimResolutionAuthority(
+                        "REPLACE_OR_REPAIR", null, null, null));
+
+        var result = merger.merge(
+                JSON.createObjectNode(),
+                proposal(modelPatch, unilateralDraft()),
+                authority);
+
+        assertThat(result.dossier().at("/dispute_core_state/core_conflict").asText())
+                .isEqualTo("用户请求换货，商家尚未直接回应。");
+        assertThat(result.dossier().at("/dispute_core_state/facts_in_dispute/0").asText())
+                .isEqualTo("维修后故障是否再次发生");
+        assertThat(result.dossier().at("/dispute_core_state/next_verification_focus/0").asText())
+                .isEqualTo("距离上次维修完成的具体天数");
+        assertThat(result.dossier().at("/dispute_core_state/next_verification_focus/1").isMissingNode())
+                .isTrue();
+    }
+
+    @Test
     void treatsBaselineNoResponseAliasesAsUnaddressedWithoutCreatingAReportedClaim()
             throws Exception {
         for (String status :
