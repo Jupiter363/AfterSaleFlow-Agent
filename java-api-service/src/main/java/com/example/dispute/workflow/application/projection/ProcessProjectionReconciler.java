@@ -42,11 +42,15 @@ public class ProcessProjectionReconciler {
         if (limit < 1 || limit > MAX_SCAN_SIZE) {
             throw new IllegalArgumentException("limit must be between 1 and " + MAX_SCAN_SIZE);
         }
-        List<ClaimedRoomEpoch> candidates =
-                scanClaimStore.claimProjectionReconciliation(
-                        limit, properties.claimDuration());
-        List<ProcessProjectionReconciliationResult> results = new ArrayList<>(candidates.size());
-        for (ClaimedRoomEpoch candidate : candidates) {
+        List<ProcessProjectionReconciliationResult> results = new ArrayList<>(limit);
+        for (int claimedCount = 0; claimedCount < limit; claimedCount++) {
+            List<ClaimedRoomEpoch> candidates =
+                    scanClaimStore.claimProjectionReconciliation(
+                            1, properties.claimDuration());
+            if (candidates.isEmpty()) {
+                break;
+            }
+            ClaimedRoomEpoch candidate = candidates.get(0);
             ReconciliationTarget target =
                     new ReconciliationTarget(
                             candidate.tenantSurrogate(),
