@@ -214,6 +214,15 @@ class _Connection:
         if "from agent_graph_lease" in normalized:
             self.events.append("sql:fence")
             return _Cursor({"fencing_token": 1} if self.fence_current else None)
+        if "insert into checkpoint_blobs" in normalized:
+            self.events.append("sql:checkpoint-blob")
+            return _Cursor()
+        if "insert into checkpoints" in normalized:
+            self.events.append("sql:checkpoint-write")
+            return _Cursor()
+        if "insert into checkpoint_writes" in normalized:
+            self.events.append("sql:pending-write")
+            return _Cursor()
         if "from checkpoints" in normalized:
             self.events.append("sql:checkpoint-metadata")
             self.pending_write_checkpoint_reads += 1
@@ -443,6 +452,129 @@ async def test_checkpoint_write_locks_fence_and_uses_one_connection() -> None:
     assert direct_savers[0].connection is connection
     assert direct_savers[0].put_calls == [_metadata()]
     assert saved["configurable"][FENCE_CONTEXT_KEY] == _fence()
+
+
+@pytest.mark.asyncio
+async def test_native_checkpoint_serialization_finishes_before_fenced_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = _Connection()
+    saver = FencedPostgresSaver(
+        _Pool(connection),  # type: ignore[arg-type]
+        reader=_Reader(),  # type: ignore[arg-type]
+    )
+    original_prepare = saver._prepare_checkpoint_write  # noqa: SLF001
+
+    def recording_prepare(*args: Any, **kwargs: Any) -> Any:
+        connection.events.append("prepare:checkpoint")
+        return original_prepare(*args, **kwargs)
+
+    monkeypatch.setattr(saver, "_prepare_checkpoint_write", recording_prepare)
+
+    saved = await saver.aput(
+        _config(checkpoint=True),
+        _checkpoint(),  # type: ignore[arg-type]
+        {},
+        {},
+    )
+
+    assert connection.events == [
+        "prepare:checkpoint",
+        "transaction:enter",
+        "sql:fence",
+        "sql:checkpoint-write",
+        "sql:bind-command",
+        "sql:advance-thread",
+        "transaction:commit",
+    ]
+    assert saved["configurable"][FENCE_CONTEXT_KEY] == _fence()
+
+
+@pytest.mark.asyncio
+async def test_native_terminal_materialization_remains_behind_fence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = _Connection(checkpoint_revision=4)
+    ledger = _TerminalLedger(connection.events)
+    saver = FencedPostgresSaver(
+        _Pool(connection),  # type: ignore[arg-type]
+        reader=_Reader(),  # type: ignore[arg-type]
+        ledger=ledger,
+    )
+    original_materialize = TerminalResultMaterializer.materialize
+
+    def recording_materialize(
+        materializer: TerminalResultMaterializer,
+        checkpoint_ns: str,
+        checkpoint_id: str,
+        *,
+        fence: GraphFenceContext | None = None,
+    ) -> ResultRecord:
+        connection.events.append("terminal:materialize")
+        return original_materialize(
+            materializer,
+            checkpoint_ns,
+            checkpoint_id,
+            fence=fence,
+        )
+
+    monkeypatch.setattr(
+        TerminalResultMaterializer,
+        "materialize",
+        recording_materialize,
+    )
+
+    await saver.aput(
+        _terminal_config(),
+        _terminal_checkpoint(),  # type: ignore[arg-type]
+        {},
+        {"result_json": "v-result-1"},
+    )
+
+    assert connection.events == [
+        "transaction:enter",
+        "sql:fence",
+        "terminal:materialize",
+        "sql:checkpoint-blob",
+        "sql:checkpoint-write",
+        "sql:bind-command",
+        "sql:advance-thread",
+        "ledger:store-result",
+        "transaction:commit",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_native_pending_write_serialization_finishes_before_fenced_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = _Connection()
+    saver = FencedPostgresSaver(
+        _Pool(connection),  # type: ignore[arg-type]
+        reader=_Reader(),  # type: ignore[arg-type]
+    )
+    original_prepare = saver._prepare_pending_writes  # noqa: SLF001
+
+    def recording_prepare(*args: Any, **kwargs: Any) -> Any:
+        connection.events.append("prepare:writes")
+        return original_prepare(*args, **kwargs)
+
+    monkeypatch.setattr(saver, "_prepare_pending_writes", recording_prepare)
+
+    await saver.aput_writes(
+        _config(checkpoint=True),
+        (("custom-channel", {"value": "prepared"}),),
+        "task-1",
+    )
+
+    assert connection.events == [
+        "prepare:writes",
+        "transaction:enter",
+        "sql:fence",
+        "sql:checkpoint-metadata",
+        "sql:pending-write",
+        "transaction:commit",
+    ]
 
 
 @pytest.mark.asyncio

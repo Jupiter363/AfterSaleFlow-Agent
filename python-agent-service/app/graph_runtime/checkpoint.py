@@ -15,9 +15,13 @@ from langgraph.checkpoint.base import (
     Checkpoint,
     CheckpointMetadata,
     CheckpointTuple,
+    WRITES_IDX_MAP,
+    get_serializable_checkpoint_metadata,
 )
+from langgraph.checkpoint.serde.types import _DeltaSnapshot
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from app.graph_runtime.persistence_models import (
@@ -392,6 +396,19 @@ class _ThreadWriteLockEntry:
     users: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class _PreparedCheckpointWrite:
+    saved_config: RunnableConfig
+    blob_parameters: tuple[tuple[Any, ...], ...]
+    checkpoint_parameters: tuple[Any, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedPendingWrites:
+    query: str
+    parameters: tuple[tuple[Any, ...], ...]
+
+
 class FencedPostgresSaver(BaseCheckpointSaver[Any]):
     """Async saver that atomically checks the durable lease before every write.
 
@@ -412,6 +429,7 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
         self._pool = pool
         self._acquire_timeout_seconds = acquire_timeout_seconds
         self._reader = reader or AsyncPostgresSaver(pool, serde=self.serde)
+        self._uses_native_direct_writes = direct_saver_factory is None
         self._direct_saver_factory = direct_saver_factory or (
             lambda connection, serde: AsyncPostgresSaver(connection, serde=serde)
         )
@@ -459,80 +477,120 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
     ) -> RunnableConfig:
         fence = self._require_fence(config)
         materializer = self._terminal_materializer(config)
-        async with self._serialized_thread_write(fence.thread_id), self._connection() as connection:
-            async with connection.transaction():
-                await self._lock_fence(connection, fence)
-                cognitive_revision = self._checkpoint_revision(checkpoint)
-                terminal_result, checkpoint_to_save = self._materialize_terminal_result(
-                    config,
-                    checkpoint,
-                    new_versions,
-                    materializer,
-                )
-                effective_fence = self._terminal_fence(fence, terminal_result)
-                bound_metadata = self._bind_metadata(
-                    metadata,
-                    effective_fence,
-                    cognitive_revision,
-                )
-                saver = self._direct_saver_factory(connection, self.serde)
-                saved = await saver.aput(
+        cognitive_revision = self._checkpoint_revision(checkpoint)
+        terminal_result: ResultRecord | None = None
+        checkpoint_to_save = checkpoint
+        effective_fence = fence
+        bound_metadata: CheckpointMetadata | None = None
+        async with self._serialized_thread_write(fence.thread_id):
+            prepared = (
+                await asyncio.to_thread(
+                    self._prepare_checkpoint_write,
                     config,
                     checkpoint_to_save,
-                    bound_metadata,
+                    self._bind_metadata(
+                        metadata,
+                        effective_fence,
+                        cognitive_revision,
+                    ),
                     new_versions,
                 )
-                checkpoint_config = saved.get("configurable") or {}
-                checkpoint_ns = str(checkpoint_config.get("checkpoint_ns") or "")
-                checkpoint_id = str(checkpoint_config.get("checkpoint_id") or "")
-                if not checkpoint_id or len(checkpoint_id) > 128 or len(checkpoint_ns) > 128:
-                    raise GraphBindingError("PostgresSaver returned an invalid checkpoint identity")
-                if terminal_result is not None and (
-                    terminal_result.checkpoint_ns != checkpoint_ns
-                    or terminal_result.checkpoint_id != checkpoint_id
-                ):
-                    raise GraphBindingError(
-                        "terminal result conflicts with the saved checkpoint identity"
-                    )
-                await self._bind_command_checkpoint(
-                    connection,
-                    effective_fence,
-                    checkpoint_ns=checkpoint_ns,
-                    checkpoint_id=checkpoint_id,
-                )
-                if self._checkpoint_has_applied_revision(checkpoint_to_save):
-                    parent = config.get("configurable") or {}
-                    parent_checkpoint_ns = parent.get("checkpoint_ns", "")
-                    parent_checkpoint_id = parent.get("checkpoint_id")
-                    if (
-                        not isinstance(parent_checkpoint_ns, str)
-                        or len(parent_checkpoint_ns) > 128
-                        or (
-                            parent_checkpoint_id is not None
-                            and (
-                                not isinstance(parent_checkpoint_id, str)
-                                or not parent_checkpoint_id
-                                or len(parent_checkpoint_id) > 128
+                if self._uses_native_direct_writes and materializer is None
+                else None
+            )
+            async with self._connection() as connection:
+                async with connection.transaction():
+                    await self._lock_fence(connection, fence)
+                    if materializer is not None:
+                        terminal_result, checkpoint_to_save = (
+                            self._materialize_terminal_result(
+                                config,
+                                checkpoint,
+                                new_versions,
+                                materializer,
                             )
                         )
+                        effective_fence = self._terminal_fence(fence, terminal_result)
+                    bound_metadata = self._bind_metadata(
+                        metadata,
+                        effective_fence,
+                        cognitive_revision,
+                    )
+                    if self._uses_native_direct_writes and prepared is None:
+                        prepared = self._prepare_checkpoint_write(
+                            config,
+                            checkpoint_to_save,
+                            bound_metadata,
+                            new_versions,
+                        )
+                    if prepared is None:
+                        saver = self._direct_saver_factory(connection, self.serde)
+                        saved = await saver.aput(
+                            config,
+                            checkpoint_to_save,
+                            bound_metadata,
+                            new_versions,
+                        )
+                    else:
+                        await self._write_prepared_checkpoint(connection, prepared)
+                        saved = prepared.saved_config
+                    checkpoint_config = saved.get("configurable") or {}
+                    checkpoint_ns = str(checkpoint_config.get("checkpoint_ns") or "")
+                    checkpoint_id = str(checkpoint_config.get("checkpoint_id") or "")
+                    if (
+                        not checkpoint_id
+                        or len(checkpoint_id) > 128
+                        or len(checkpoint_ns) > 128
                     ):
-                        raise GraphBindingError("checkpoint parent identity is invalid")
-                    await self._advance_thread_checkpoint(
+                        raise GraphBindingError(
+                            "PostgresSaver returned an invalid checkpoint identity"
+                        )
+                    if terminal_result is not None and (
+                        terminal_result.checkpoint_ns != checkpoint_ns
+                        or terminal_result.checkpoint_id != checkpoint_id
+                    ):
+                        raise GraphBindingError(
+                            "terminal result conflicts with the saved checkpoint identity"
+                        )
+                    await self._bind_command_checkpoint(
                         connection,
                         effective_fence,
-                        cognitive_revision=cognitive_revision,
                         checkpoint_ns=checkpoint_ns,
                         checkpoint_id=checkpoint_id,
-                        parent_checkpoint_ns=parent_checkpoint_ns,
-                        parent_checkpoint_id=parent_checkpoint_id,
                     )
-                if terminal_result is not None:
-                    await self._ledger.store_terminal_result(
-                        connection,
-                        fence=effective_fence,
-                        result=terminal_result,
-                        expected_result_schema_version=ROOM_GRAPH_RESULT_SCHEMA_VERSION,
-                    )
+                    if self._checkpoint_has_applied_revision(checkpoint_to_save):
+                        parent = config.get("configurable") or {}
+                        parent_checkpoint_ns = parent.get("checkpoint_ns", "")
+                        parent_checkpoint_id = parent.get("checkpoint_id")
+                        if (
+                            not isinstance(parent_checkpoint_ns, str)
+                            or len(parent_checkpoint_ns) > 128
+                            or (
+                                parent_checkpoint_id is not None
+                                and (
+                                    not isinstance(parent_checkpoint_id, str)
+                                    or not parent_checkpoint_id
+                                    or len(parent_checkpoint_id) > 128
+                                )
+                            )
+                        ):
+                            raise GraphBindingError("checkpoint parent identity is invalid")
+                        await self._advance_thread_checkpoint(
+                            connection,
+                            effective_fence,
+                            cognitive_revision=cognitive_revision,
+                            checkpoint_ns=checkpoint_ns,
+                            checkpoint_id=checkpoint_id,
+                            parent_checkpoint_ns=parent_checkpoint_ns,
+                            parent_checkpoint_id=parent_checkpoint_id,
+                        )
+                    if terminal_result is not None:
+                        await self._ledger.store_terminal_result(
+                            connection,
+                            fence=effective_fence,
+                            result=terminal_result,
+                            expected_result_schema_version=ROOM_GRAPH_RESULT_SCHEMA_VERSION,
+                        )
         return bind_fence_context(
             self._without_terminal_result_context(saved),
             effective_fence,
@@ -546,12 +604,27 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
         task_path: str = "",
     ) -> None:
         fence = self._require_fence(config)
-        async with self._serialized_thread_write(fence.thread_id), self._connection() as connection:
-            async with connection.transaction():
-                await self._lock_fence(connection, fence)
-                await self._validate_pending_write_target(connection, config, fence)
-                saver = self._direct_saver_factory(connection, self.serde)
-                await saver.aput_writes(config, writes, task_id, task_path)
+        async with self._serialized_thread_write(fence.thread_id):
+            prepared = (
+                await asyncio.to_thread(
+                    self._prepare_pending_writes,
+                    config,
+                    writes,
+                    task_id,
+                    task_path,
+                )
+                if self._uses_native_direct_writes
+                else None
+            )
+            async with self._connection() as connection:
+                async with connection.transaction():
+                    await self._lock_fence(connection, fence)
+                    await self._validate_pending_write_target(connection, config, fence)
+                    if prepared is None:
+                        saver = self._direct_saver_factory(connection, self.serde)
+                        await saver.aput_writes(config, writes, task_id, task_path)
+                    else:
+                        await self._write_prepared_pending_writes(connection, prepared)
 
     async def avalidate_external_terminal_checkpoint(
         self,
@@ -650,6 +723,121 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
 
     def _connection(self) -> AbstractAsyncContextManager[Any]:
         return self._pool.connection(timeout=self._acquire_timeout_seconds)
+
+    def _prepare_checkpoint_write(
+        self,
+        config: RunnableConfig,
+        checkpoint: Checkpoint,
+        metadata: CheckpointMetadata,
+        new_versions: ChannelVersions,
+    ) -> _PreparedCheckpointWrite:
+        """Serialize a checkpoint before opening its lease-fenced transaction."""
+
+        configurable = config["configurable"].copy()
+        thread_id = configurable.pop("thread_id")
+        checkpoint_ns = configurable.pop("checkpoint_ns")
+        parent_checkpoint_id = configurable.pop("checkpoint_id", None)
+        checkpoint_copy = checkpoint.copy()
+        checkpoint_copy["channel_values"] = checkpoint_copy["channel_values"].copy()
+        saved_config: RunnableConfig = {
+            "configurable": {
+                "thread_id": thread_id,
+                "checkpoint_ns": checkpoint_ns,
+                "checkpoint_id": checkpoint["id"],
+            }
+        }
+
+        blob_values: dict[str, Any] = {}
+        for channel, value in checkpoint["channel_values"].items():
+            if isinstance(value, _DeltaSnapshot):
+                blob_values[channel] = checkpoint_copy["channel_values"].pop(channel)
+                checkpoint_copy["channel_values"][channel] = True
+            elif value is None or isinstance(value, (str, int, float, bool)):
+                continue
+            else:
+                blob_values[channel] = checkpoint_copy["channel_values"].pop(channel)
+
+        blob_parameters = tuple(
+            (
+                thread_id,
+                checkpoint_ns,
+                channel,
+                version,
+                *(
+                    self.serde.dumps_typed(blob_values[channel])
+                    if channel in blob_values
+                    else ("empty", None)
+                ),
+            )
+            for channel, version in new_versions.items()
+            if channel in blob_values
+        )
+        checkpoint_parameters = (
+            thread_id,
+            checkpoint_ns,
+            checkpoint["id"],
+            parent_checkpoint_id,
+            Jsonb(checkpoint_copy),
+            Jsonb(get_serializable_checkpoint_metadata(config, metadata)),
+        )
+        return _PreparedCheckpointWrite(
+            saved_config=saved_config,
+            blob_parameters=blob_parameters,
+            checkpoint_parameters=checkpoint_parameters,
+        )
+
+    async def _write_prepared_checkpoint(
+        self,
+        connection: Any,
+        prepared: _PreparedCheckpointWrite,
+    ) -> None:
+        for parameters in prepared.blob_parameters:
+            await connection.execute(
+                AsyncPostgresSaver.UPSERT_CHECKPOINT_BLOBS_SQL,
+                parameters,
+            )
+        await connection.execute(
+            AsyncPostgresSaver.UPSERT_CHECKPOINTS_SQL,
+            prepared.checkpoint_parameters,
+        )
+
+    def _prepare_pending_writes(
+        self,
+        config: RunnableConfig,
+        writes: Sequence[tuple[str, Any]],
+        task_id: str,
+        task_path: str,
+    ) -> _PreparedPendingWrites:
+        """Serialize pending writes before opening their fenced transaction."""
+
+        configurable = config["configurable"]
+        query = (
+            AsyncPostgresSaver.UPSERT_CHECKPOINT_WRITES_SQL
+            if all(channel in WRITES_IDX_MAP for channel, _ in writes)
+            else AsyncPostgresSaver.INSERT_CHECKPOINT_WRITES_SQL
+        )
+        parameters = tuple(
+            (
+                configurable["thread_id"],
+                configurable["checkpoint_ns"],
+                configurable["checkpoint_id"],
+                task_id,
+                task_path,
+                WRITES_IDX_MAP.get(channel, index),
+                channel,
+                *self.serde.dumps_typed(value),
+            )
+            for index, (channel, value) in enumerate(writes)
+        )
+        return _PreparedPendingWrites(query=query, parameters=parameters)
+
+    @staticmethod
+    async def _write_prepared_pending_writes(
+        connection: Any,
+        prepared: _PreparedPendingWrites,
+    ) -> None:
+        for parameters in prepared.parameters:
+            await connection.execute(prepared.query, parameters)
 
     @asynccontextmanager
     async def _serialized_thread_write(self, thread_id: str) -> AsyncIterator[None]:
