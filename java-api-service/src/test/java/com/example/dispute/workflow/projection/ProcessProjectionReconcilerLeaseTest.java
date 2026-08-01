@@ -127,6 +127,157 @@ class ProcessProjectionReconcilerLeaseTest {
                 .renewProjectionReconciliation(succeeding, CLAIM_DURATION);
     }
 
+    @Test
+    void targetConstructionFailureStillCompletesTheClaimAndContinues() {
+        ClaimedRoomEpoch invalid =
+                new ClaimedRoomEpoch(
+                        "claim-invalid",
+                        "epoch-invalid",
+                        " ",
+                        "CASE_invalid",
+                        RoomType.INTAKE,
+                        1,
+                        1,
+                        "case-process:tenant-test:CASE_invalid");
+        ClaimedRoomEpoch succeeding = candidate("after-invalid-target");
+        ReconciliationTarget succeedingTarget = target(succeeding);
+        ReadResult succeedingRead = unavailable();
+        ProcessProjectionReconciliationResult succeedingResult = result("TARGET_RECOVERED");
+        when(scanClaimStore.claimProjectionReconciliation(1, CLAIM_DURATION))
+                .thenReturn(List.of(invalid), List.of(succeeding));
+        when(scanClaimStore.completeProjectionReconciliation(invalid, POLL_INTERVAL))
+                .thenReturn(true);
+        when(scanClaimStore.renewProjectionReconciliation(succeeding, CLAIM_DURATION))
+                .thenReturn(true);
+        when(scanClaimStore.completeProjectionReconciliation(succeeding, POLL_INTERVAL))
+                .thenReturn(true);
+        when(authoritativeStateReader.read(succeedingTarget)).thenReturn(succeedingRead);
+        when(reconciliationService.reconcile(succeedingTarget, succeedingRead))
+                .thenReturn(succeedingResult);
+
+        var results = reconciler().scan(2);
+
+        assertThat(results).containsExactly(succeedingResult);
+        InOrder ordered = inOrder(scanClaimStore, authoritativeStateReader);
+        ordered.verify(scanClaimStore)
+                .claimProjectionReconciliation(1, CLAIM_DURATION);
+        ordered.verify(scanClaimStore)
+                .completeProjectionReconciliation(invalid, POLL_INTERVAL);
+        ordered.verify(scanClaimStore)
+                .claimProjectionReconciliation(1, CLAIM_DURATION);
+        ordered.verify(scanClaimStore)
+                .renewProjectionReconciliation(succeeding, CLAIM_DURATION);
+        ordered.verify(authoritativeStateReader).read(succeedingTarget);
+    }
+
+    @Test
+    void lostRenewalCompletesTheClaimAndContinues() {
+        ClaimedRoomEpoch lost = candidate("lost-renewal");
+        ClaimedRoomEpoch succeeding = candidate("after-lost-renewal");
+        ReconciliationTarget succeedingTarget = target(succeeding);
+        ReadResult succeedingRead = unavailable();
+        ProcessProjectionReconciliationResult succeedingResult = result("RENEWAL_RECOVERED");
+        when(scanClaimStore.claimProjectionReconciliation(1, CLAIM_DURATION))
+                .thenReturn(List.of(lost), List.of(succeeding));
+        when(scanClaimStore.renewProjectionReconciliation(lost, CLAIM_DURATION))
+                .thenReturn(false);
+        when(scanClaimStore.completeProjectionReconciliation(lost, POLL_INTERVAL))
+                .thenReturn(true);
+        when(scanClaimStore.renewProjectionReconciliation(succeeding, CLAIM_DURATION))
+                .thenReturn(true);
+        when(scanClaimStore.completeProjectionReconciliation(succeeding, POLL_INTERVAL))
+                .thenReturn(true);
+        when(authoritativeStateReader.read(succeedingTarget)).thenReturn(succeedingRead);
+        when(reconciliationService.reconcile(succeedingTarget, succeedingRead))
+                .thenReturn(succeedingResult);
+
+        var results = reconciler().scan(2);
+
+        assertThat(results).containsExactly(succeedingResult);
+        InOrder ordered = inOrder(scanClaimStore, authoritativeStateReader);
+        ordered.verify(scanClaimStore)
+                .renewProjectionReconciliation(lost, CLAIM_DURATION);
+        ordered.verify(scanClaimStore)
+                .completeProjectionReconciliation(lost, POLL_INTERVAL);
+        ordered.verify(scanClaimStore)
+                .claimProjectionReconciliation(1, CLAIM_DURATION);
+        ordered.verify(scanClaimStore)
+                .renewProjectionReconciliation(succeeding, CLAIM_DURATION);
+        ordered.verify(authoritativeStateReader).read(succeedingTarget);
+    }
+
+    @Test
+    void completionOwnershipLossDoesNotStopTheNextClaim() {
+        ClaimedRoomEpoch first = candidate("completion-lost");
+        ClaimedRoomEpoch second = candidate("after-completion-lost");
+        ReconciliationTarget firstTarget = target(first);
+        ReconciliationTarget secondTarget = target(second);
+        ReadResult firstRead = unavailable();
+        ReadResult secondRead = unavailable();
+        ProcessProjectionReconciliationResult firstResult = result("FIRST_COMPLETED");
+        ProcessProjectionReconciliationResult secondResult = result("SECOND_COMPLETED");
+        when(scanClaimStore.claimProjectionReconciliation(1, CLAIM_DURATION))
+                .thenReturn(List.of(first), List.of(second));
+        when(scanClaimStore.renewProjectionReconciliation(first, CLAIM_DURATION))
+                .thenReturn(true);
+        when(scanClaimStore.renewProjectionReconciliation(second, CLAIM_DURATION))
+                .thenReturn(true);
+        when(scanClaimStore.completeProjectionReconciliation(first, POLL_INTERVAL))
+                .thenReturn(false);
+        when(scanClaimStore.completeProjectionReconciliation(second, POLL_INTERVAL))
+                .thenReturn(true);
+        when(authoritativeStateReader.read(firstTarget)).thenReturn(firstRead);
+        when(authoritativeStateReader.read(secondTarget)).thenReturn(secondRead);
+        when(reconciliationService.reconcile(firstTarget, firstRead)).thenReturn(firstResult);
+        when(reconciliationService.reconcile(secondTarget, secondRead)).thenReturn(secondResult);
+
+        var results = reconciler().scan(2);
+
+        assertThat(results).containsExactly(firstResult, secondResult);
+        InOrder ordered = inOrder(scanClaimStore, authoritativeStateReader);
+        ordered.verify(scanClaimStore)
+                .completeProjectionReconciliation(first, POLL_INTERVAL);
+        ordered.verify(scanClaimStore)
+                .claimProjectionReconciliation(1, CLAIM_DURATION);
+        ordered.verify(authoritativeStateReader).read(secondTarget);
+    }
+
+    @Test
+    void completionExceptionDoesNotStopTheNextClaim() {
+        ClaimedRoomEpoch first = candidate("completion-exception");
+        ClaimedRoomEpoch second = candidate("after-completion-exception");
+        ReconciliationTarget firstTarget = target(first);
+        ReconciliationTarget secondTarget = target(second);
+        ReadResult firstRead = unavailable();
+        ReadResult secondRead = unavailable();
+        ProcessProjectionReconciliationResult firstResult = result("FIRST_COMPLETED");
+        ProcessProjectionReconciliationResult secondResult = result("SECOND_COMPLETED");
+        when(scanClaimStore.claimProjectionReconciliation(1, CLAIM_DURATION))
+                .thenReturn(List.of(first), List.of(second));
+        when(scanClaimStore.renewProjectionReconciliation(first, CLAIM_DURATION))
+                .thenReturn(true);
+        when(scanClaimStore.renewProjectionReconciliation(second, CLAIM_DURATION))
+                .thenReturn(true);
+        when(scanClaimStore.completeProjectionReconciliation(first, POLL_INTERVAL))
+                .thenThrow(new IllegalStateException("completion unavailable"));
+        when(scanClaimStore.completeProjectionReconciliation(second, POLL_INTERVAL))
+                .thenReturn(true);
+        when(authoritativeStateReader.read(firstTarget)).thenReturn(firstRead);
+        when(authoritativeStateReader.read(secondTarget)).thenReturn(secondRead);
+        when(reconciliationService.reconcile(firstTarget, firstRead)).thenReturn(firstResult);
+        when(reconciliationService.reconcile(secondTarget, secondRead)).thenReturn(secondResult);
+
+        var results = reconciler().scan(2);
+
+        assertThat(results).containsExactly(firstResult, secondResult);
+        InOrder ordered = inOrder(scanClaimStore, authoritativeStateReader);
+        ordered.verify(scanClaimStore)
+                .completeProjectionReconciliation(first, POLL_INTERVAL);
+        ordered.verify(scanClaimStore)
+                .claimProjectionReconciliation(1, CLAIM_DURATION);
+        ordered.verify(authoritativeStateReader).read(secondTarget);
+    }
+
     private ProcessProjectionReconciler reconciler() {
         return new ProcessProjectionReconciler(
                 authoritativeStateReader,

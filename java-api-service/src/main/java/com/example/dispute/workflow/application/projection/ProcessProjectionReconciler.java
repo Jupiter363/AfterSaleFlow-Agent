@@ -51,12 +51,12 @@ public class ProcessProjectionReconciler {
                 break;
             }
             ClaimedRoomEpoch candidate = candidates.get(0);
-            ReconciliationTarget target =
-                    new ReconciliationTarget(
-                            candidate.tenantSurrogate(),
-                            candidate.caseId(),
-                            candidate.temporalWorkflowId());
             try {
+                ReconciliationTarget target =
+                        new ReconciliationTarget(
+                                candidate.tenantSurrogate(),
+                                candidate.caseId(),
+                                candidate.temporalWorkflowId());
                 requireClaimOwnership(candidate);
                 ReadResult authoritativeRead = authoritativeStateReader.read(target);
                 requireClaimOwnership(candidate);
