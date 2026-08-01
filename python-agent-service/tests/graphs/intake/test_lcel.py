@@ -37,6 +37,7 @@ from app.graphs.intake.lcel import (
 from app.graphs.intake.contracts import IntakeCognitionDraft
 from app.graphs.intake.nodes import deterministic_message_fallback
 from app.graphs.intake.state import IntakeTurnContext, new_intake_graph_state
+from app.graphs.intake.validators import MATRIX_AUTHORITY_RECORD_KEY
 from app.model_runtime.governed_chat_model import GovernedChatModel
 from app.model_runtime.profiles import (
     ModelInvocationPolicy,
@@ -180,6 +181,14 @@ def test_system_prompt_keeps_baseline_intake_semantics_with_one_target_contract(
     )
     assert "unilateral_case_matrix.draft.v1" in normalized_prompt
     assert "case_fact_matrix.delta.v2" in normalized_prompt
+    assert "对方未发言时必须省略该分支" in normalized_prompt
+    for absence_marker in (
+        "UNKNOWN",
+        "PLATFORM_UNKNOWN",
+        "NOT_RESPONDED",
+        "NOT_ADDRESSED",
+    ):
+        assert absence_marker in normalized_prompt
     for legacy_field in (
         "case_detail",
         "case_matrix_delta",
@@ -204,6 +213,19 @@ def _event_state(bindings, version_pins, snapshot, event):
         attempt_id="ATTEMPT_P4_USER_2_1",
     )
     return graph.invoke(state, context=IntakeTurnContext("EVENT", event))
+
+
+def _state_with_matrix_roles(bindings, version_pins, *, actor: str, initiator: str):
+    selected_bindings = copy.deepcopy(bindings)
+    selected_bindings["private"]["audience"] = actor
+    state = new_intake_graph_state(bindings=selected_bindings, version_pins=version_pins)
+    state["node_results"][MATRIX_AUTHORITY_RECORD_KEY] = {
+        "schema_version": "intake-matrix-authority.v1",
+        "kind": "MATRIX_AUTHORITY",
+        "actor_role": actor,
+        "initiator_role": initiator,
+    }
+    return state
 
 
 def test_real_intake_lcel_is_governed_object_flow_with_human_text_isolation(
@@ -408,7 +430,7 @@ def test_model_fact_key_normalization_preserves_authorized_stable_keys(
     bindings,
     version_pins,
 ) -> None:
-    state = new_intake_graph_state(bindings=bindings, version_pins=version_pins)
+    state = _state_with_matrix_roles(bindings, version_pins, actor="USER", initiator="USER")
     state["dossier_draft"] = {
         "case_fact_matrix": {
             "fact_rows": [{"fact_id": "FACT_DAMAGE"}],
@@ -462,6 +484,609 @@ def test_model_fact_key_normalization_preserves_authorized_stable_keys(
         "FACT_DAMAGE",
         "NEW_COLOR",
     )
+
+
+@pytest.mark.parametrize(
+    "absence_marker",
+    ["UNKNOWN", "PLATFORM_UNKNOWN", "NOT_RESPONDED", "NOT_ADDRESSED"],
+)
+def test_model_absent_respondent_attitude_is_omitted_from_the_terminal_patch(
+    bindings,
+    version_pins,
+    absence_marker: str,
+) -> None:
+    state = _state_with_matrix_roles(bindings, version_pins, actor="USER", initiator="USER")
+    state["memory_summary"] = (
+        '{"authorized_initial_case_facts":{"form_description":"The subscription was charged after cancellation."}}'
+    )
+    draft = IntakeCognitionDraft.model_validate(
+        _draft(
+            dossier_patch={
+                "party_positions": {
+                    "initiator_statements": ["The initiator disputes the charge."],
+                    "respondent_statements": [],
+                },
+                "respondent_attitude": {
+                    "status": absence_marker,
+                    "description": "待确认",
+                },
+            }
+        )
+    )
+
+    _, _, normalized = _generation_parts(
+        {
+            "state": state,
+            "generation": {"message": AIMessage(content="{}"), "draft": draft},
+        }
+    )
+
+    dossier_patch = normalized.dossier_patch.model_dump(
+        mode="json", exclude_none=True, exclude_unset=True
+    )
+    assert "respondent_attitude" not in dossier_patch
+    assert dossier_patch["party_positions"]["respondent_statements"] == []
+
+
+def test_model_absence_marker_cannot_hide_an_attributed_respondent_statement(
+    bindings,
+    version_pins,
+) -> None:
+    state = _state_with_matrix_roles(bindings, version_pins, actor="USER", initiator="USER")
+    state["memory_summary"] = (
+        '{"authorized_initial_case_facts":{"form_description":"商家明确拒绝退款。"}}'
+    )
+    draft = IntakeCognitionDraft.model_validate(
+        _draft(
+            dossier_patch={
+                "party_positions": {"respondent_statements": []},
+                "respondent_attitude": {
+                    "status": "UNKNOWN",
+                    "description": "待确认",
+                },
+            }
+        )
+    )
+
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_RESPONDENT_ATTITUDE_SOURCE_CONFLICT",
+    ):
+        _generation_parts(
+            {
+                "state": state,
+                "generation": {"message": AIMessage(content="{}"), "draft": draft},
+            }
+        )
+
+
+def test_model_substantive_respondent_attitude_is_preserved(
+    bindings,
+    version_pins,
+) -> None:
+    state = _state_with_matrix_roles(bindings, version_pins, actor="USER", initiator="USER")
+    state["memory_summary"] = (
+        '{"authorized_initial_case_facts":{"form_description":"商家明确拒绝退款。"}}'
+    )
+    draft = IntakeCognitionDraft.model_validate(
+        _draft(
+            dossier_patch={
+                "party_positions": {"respondent_statements": []},
+                "respondent_attitude": {
+                    "attitude": "DISAGREE",
+                    "position": "This untrusted model text must be replaced.",
+                },
+            }
+        )
+    )
+
+    _, _, normalized = _generation_parts(
+        {
+            "state": state,
+            "generation": {"message": AIMessage(content="{}"), "draft": draft},
+        }
+    )
+
+    assert normalized.dossier_patch.respondent_attitude == {
+        "attitude": "DISAGREE",
+        "position": "商家明确拒绝退款。",
+    }
+
+
+def test_model_attitude_code_cannot_contradict_the_authorized_source(
+    bindings,
+    version_pins,
+) -> None:
+    state = _state_with_matrix_roles(bindings, version_pins, actor="USER", initiator="USER")
+    state["memory_summary"] = (
+        '{"authorized_initial_case_facts":{"form_description":"商家明确拒绝退款。"}}'
+    )
+    draft = IntakeCognitionDraft.model_validate(
+        _draft(
+            dossier_patch={
+                "respondent_attitude": {
+                    "attitude": "AGREE",
+                    "position": "The model inverted the source stance.",
+                },
+            }
+        )
+    )
+
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_RESPONDENT_ATTITUDE_SOURCE_CONFLICT",
+    ):
+        _generation_parts(
+            {
+                "state": state,
+                "generation": {"message": AIMessage(content="{}"), "draft": draft},
+            }
+        )
+
+
+def test_model_dual_respondent_attitude_discriminators_are_rejected(
+    bindings,
+    version_pins,
+) -> None:
+    state = _state_with_matrix_roles(bindings, version_pins, actor="USER", initiator="USER")
+    state["memory_summary"] = (
+        '{"authorized_initial_case_facts":{"form_description":"商家明确拒绝退款。"}}'
+    )
+    draft = IntakeCognitionDraft.model_validate(
+        _draft(
+            dossier_patch={
+                "respondent_attitude": {
+                    "attitude": "DISAGREE",
+                    "status": "UNKNOWN",
+                    "position": "Hallucinated model wording.",
+                },
+            }
+        )
+    )
+
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_RESPONDENT_ATTITUDE_INVALID",
+    ):
+        _generation_parts(
+            {
+                "state": state,
+                "generation": {"message": AIMessage(content="{}"), "draft": draft},
+            }
+        )
+
+
+def test_model_substantive_attitude_without_attributable_source_is_rejected(
+    bindings,
+    version_pins,
+) -> None:
+    state = _state_with_matrix_roles(bindings, version_pins, actor="USER", initiator="USER")
+    state["memory_summary"] = (
+        '{"authorized_initial_case_facts":{"form_description":"The subscription was charged after cancellation."}}'
+    )
+    draft = IntakeCognitionDraft.model_validate(
+        _draft(
+            dossier_patch={
+                "party_positions": {
+                    "respondent_statements": ["The merchant rejected the refund."],
+                },
+                "respondent_attitude": {
+                    "attitude": "DISAGREE",
+                    "position": "The merchant rejected the requested refund.",
+                },
+            }
+        )
+    )
+
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_RESPONDENT_ATTITUDE_SOURCE_MISSING",
+    ):
+        _generation_parts(
+            {
+                "state": state,
+                "generation": {"message": AIMessage(content="{}"), "draft": draft},
+            }
+        )
+
+
+def test_initiator_action_is_not_misattributed_to_the_respondent(
+    bindings,
+    version_pins,
+) -> None:
+    state = _state_with_matrix_roles(bindings, version_pins, actor="USER", initiator="USER")
+    state["memory_summary"] = (
+        '{"authorized_initial_case_facts":{"form_description":'
+        '"I rejected the merchant\'s proposed refund."}}'
+    )
+    draft = IntakeCognitionDraft.model_validate(
+        _draft(
+            dossier_patch={
+                "respondent_attitude": {
+                    "attitude": "DISAGREE",
+                    "position": "The merchant rejected the requested refund.",
+                },
+            }
+        )
+    )
+
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_RESPONDENT_ATTITUDE_SOURCE_MISSING",
+    ):
+        _generation_parts(
+            {
+                "state": state,
+                "generation": {"message": AIMessage(content="{}"), "draft": draft},
+            }
+        )
+
+
+def test_chinese_initiator_action_is_not_misattributed_to_the_respondent(
+    bindings,
+    version_pins,
+) -> None:
+    state = _state_with_matrix_roles(bindings, version_pins, actor="USER", initiator="USER")
+    state["memory_summary"] = (
+        '{"authorized_initial_case_facts":{"form_description":"我拒绝了商家的退款方案。"}}'
+    )
+    draft = IntakeCognitionDraft.model_validate(
+        _draft(
+            dossier_patch={
+                "respondent_attitude": {
+                    "attitude": "DISAGREE",
+                    "position": "商家拒绝了退款。",
+                },
+            }
+        )
+    )
+
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_RESPONDENT_ATTITUDE_SOURCE_MISSING",
+    ):
+        _generation_parts(
+            {
+                "state": state,
+                "generation": {"message": AIMessage(content="{}"), "draft": draft},
+            }
+        )
+
+
+def test_initiator_passive_action_is_not_misattributed_to_the_respondent(
+    bindings,
+    version_pins,
+) -> None:
+    state = _state_with_matrix_roles(bindings, version_pins, actor="USER", initiator="USER")
+    state["memory_summary"] = (
+        '{"authorized_initial_case_facts":{"form_description":"The merchant was rejected by me."}}'
+    )
+    draft = IntakeCognitionDraft.model_validate(
+        _draft(
+            dossier_patch={
+                "respondent_attitude": {
+                    "attitude": "DISAGREE",
+                    "position": "The merchant rejected the requested refund.",
+                },
+            }
+        )
+    )
+
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_RESPONDENT_ATTITUDE_SOURCE_MISSING",
+    ):
+        _generation_parts(
+            {
+                "state": state,
+                "generation": {"message": AIMessage(content="{}"), "draft": draft},
+            }
+        )
+
+
+def test_english_counterparty_subject_grounds_the_reported_attitude(
+    bindings,
+    version_pins,
+) -> None:
+    source = "The merchant explicitly rejected the requested refund."
+    state = _state_with_matrix_roles(bindings, version_pins, actor="USER", initiator="USER")
+    state["memory_summary"] = (
+        '{"authorized_initial_case_facts":{"form_description":' + json.dumps(source) + "}}"
+    )
+    draft = IntakeCognitionDraft.model_validate(
+        _draft(
+            dossier_patch={
+                "respondent_attitude": {
+                    "attitude": "DISAGREE",
+                    "position": "Untrusted model wording.",
+                },
+            }
+        )
+    )
+
+    _, _, normalized = _generation_parts(
+        {
+            "state": state,
+            "generation": {"message": AIMessage(content="{}"), "draft": draft},
+        }
+    )
+
+    assert normalized.dossier_patch.respondent_attitude == {
+        "attitude": "DISAGREE",
+        "position": source,
+    }
+
+
+def test_negated_english_passive_does_not_ground_a_reported_attitude(
+    bindings,
+    version_pins,
+) -> None:
+    state = _state_with_matrix_roles(bindings, version_pins, actor="USER", initiator="USER")
+    state["memory_summary"] = (
+        '{"authorized_initial_case_facts":{"form_description":'
+        '"The refund was not previously accepted by the merchant."}}'
+    )
+    draft = IntakeCognitionDraft.model_validate(
+        _draft(
+            dossier_patch={
+                "respondent_attitude": {
+                    "attitude": "AGREE",
+                    "position": "The merchant accepted the refund.",
+                },
+            }
+        )
+    )
+
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_RESPONDENT_ATTITUDE_SOURCE_MISSING",
+    ):
+        _generation_parts(
+            {
+                "state": state,
+                "generation": {"message": AIMessage(content="{}"), "draft": draft},
+            }
+        )
+
+
+def test_post_negated_english_report_does_not_ground_agreement(
+    bindings,
+    version_pins,
+) -> None:
+    state = _state_with_matrix_roles(bindings, version_pins, actor="USER", initiator="USER")
+    state["memory_summary"] = (
+        '{"authorized_initial_case_facts":{"form_description":'
+        '"The merchant accepted no refund request."}}'
+    )
+    draft = IntakeCognitionDraft.model_validate(
+        _draft(
+            dossier_patch={
+                "respondent_attitude": {
+                    "attitude": "AGREE",
+                    "position": "The merchant accepted the refund.",
+                },
+            }
+        )
+    )
+
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_RESPONDENT_ATTITUDE_SOURCE_MISSING",
+    ):
+        _generation_parts(
+            {
+                "state": state,
+                "generation": {"message": AIMessage(content="{}"), "draft": draft},
+            }
+        )
+
+
+def test_merchant_initiator_absence_marker_is_not_misclassified_as_a_response(
+    bindings,
+    version_pins,
+) -> None:
+    state = _state_with_matrix_roles(bindings, version_pins, actor="MERCHANT", initiator="MERCHANT")
+    state["memory_summary"] = (
+        '{"authorized_initial_case_facts":{"form_description":"Merchant initiated dispute."}}'
+    )
+    draft = IntakeCognitionDraft.model_validate(
+        _draft(
+            dossier_patch={
+                "party_positions": {"respondent_statements": []},
+                "respondent_attitude": {"status": "UNKNOWN", "description": "待确认"},
+            }
+        )
+    )
+
+    _, _, normalized = _generation_parts(
+        {
+            "state": state,
+            "generation": {"message": AIMessage(content="{}"), "draft": draft},
+        }
+    )
+
+    assert normalized.dossier_patch.respondent_attitude is None
+
+
+def test_respondent_without_own_message_cannot_inherit_the_initiator_form_attitude(
+    bindings,
+    version_pins,
+) -> None:
+    state = _state_with_matrix_roles(bindings, version_pins, actor="USER", initiator="MERCHANT")
+    state["memory_summary"] = (
+        '{"authorized_initial_case_facts":{"form_description":"我不同意该退款诉求。"}}'
+    )
+    draft = IntakeCognitionDraft.model_validate(
+        _draft(
+            dossier_patch={
+                "respondent_attitude": {
+                    "attitude": "DISAGREE",
+                    "position": "用户不同意该退款诉求。",
+                },
+            }
+        )
+    )
+
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_RESPONDENT_ATTITUDE_SOURCE_MISSING",
+    ):
+        _generation_parts(
+            {
+                "state": state,
+                "generation": {"message": AIMessage(content="{}"), "draft": draft},
+            }
+        )
+
+
+def test_user_respondent_direct_message_cannot_be_hidden_by_an_absence_marker(
+    bindings,
+    version_pins,
+) -> None:
+    state = _state_with_matrix_roles(bindings, version_pins, actor="USER", initiator="MERCHANT")
+    state["messages"] = {
+        "MESSAGE_USER_RESPONSE": {
+            "message_id": "MESSAGE_USER_RESPONSE",
+            "role": "HUMAN",
+            "audience": "USER",
+            "content": "我不同意该退款诉求。",
+            "sequence": 1,
+            "source_hash": "1" * 64,
+        }
+    }
+    draft = IntakeCognitionDraft.model_validate(
+        _draft(
+            dossier_patch={
+                "party_positions": {"respondent_statements": []},
+                "respondent_attitude": {"status": "UNKNOWN", "description": "待确认"},
+            }
+        )
+    )
+
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_RESPONDENT_ATTITUDE_SOURCE_CONFLICT",
+    ):
+        _generation_parts(
+            {
+                "state": state,
+                "generation": {"message": AIMessage(content="{}"), "draft": draft},
+            }
+        )
+
+
+def test_negated_english_direct_response_does_not_ground_agreement(
+    bindings,
+    version_pins,
+) -> None:
+    state = _state_with_matrix_roles(bindings, version_pins, actor="USER", initiator="MERCHANT")
+    state["messages"] = {
+        "MESSAGE_USER_RESPONSE": {
+            "message_id": "MESSAGE_USER_RESPONSE",
+            "role": "HUMAN",
+            "audience": "USER",
+            "content": "I have not accepted the requested refund.",
+            "sequence": 1,
+            "source_hash": "3" * 64,
+        }
+    }
+    draft = IntakeCognitionDraft.model_validate(
+        _draft(
+            dossier_patch={
+                "respondent_attitude": {
+                    "attitude": "AGREE",
+                    "position": "The user accepted the request.",
+                },
+            }
+        )
+    )
+
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_RESPONDENT_ATTITUDE_SOURCE_MISSING",
+    ):
+        _generation_parts(
+            {
+                "state": state,
+                "generation": {"message": AIMessage(content="{}"), "draft": draft},
+            }
+        )
+
+
+def test_post_negated_english_direct_response_does_not_ground_agreement(
+    bindings,
+    version_pins,
+) -> None:
+    state = _state_with_matrix_roles(bindings, version_pins, actor="USER", initiator="MERCHANT")
+    state["messages"] = {
+        "MESSAGE_USER_RESPONSE": {
+            "message_id": "MESSAGE_USER_RESPONSE",
+            "role": "HUMAN",
+            "audience": "USER",
+            "content": "I accept no refund request.",
+            "sequence": 1,
+            "source_hash": "4" * 64,
+        }
+    }
+    draft = IntakeCognitionDraft.model_validate(
+        _draft(
+            dossier_patch={
+                "respondent_attitude": {
+                    "attitude": "AGREE",
+                    "position": "The user accepted the request.",
+                },
+            }
+        )
+    )
+
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_RESPONDENT_ATTITUDE_SOURCE_MISSING",
+    ):
+        _generation_parts(
+            {
+                "state": state,
+                "generation": {"message": AIMessage(content="{}"), "draft": draft},
+            }
+        )
+
+
+def test_respondent_fact_only_message_cannot_ground_a_substantive_attitude(
+    bindings,
+    version_pins,
+) -> None:
+    state = _state_with_matrix_roles(bindings, version_pins, actor="USER", initiator="MERCHANT")
+    state["messages"] = {
+        "MESSAGE_USER_FACT": {
+            "message_id": "MESSAGE_USER_FACT",
+            "role": "HUMAN",
+            "audience": "USER",
+            "content": "订单号是 ORDER-2026-001。",
+            "sequence": 1,
+            "source_hash": "2" * 64,
+        }
+    }
+    draft = IntakeCognitionDraft.model_validate(
+        _draft(
+            dossier_patch={
+                "respondent_attitude": {
+                    "attitude": "DISAGREE",
+                    "position": "The user rejected the request.",
+                },
+            }
+        )
+    )
+
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_RESPONDENT_ATTITUDE_SOURCE_MISSING",
+    ):
+        _generation_parts(
+            {
+                "state": state,
+                "generation": {"message": AIMessage(content="{}"), "draft": draft},
+            }
+        )
 
 
 @pytest.mark.parametrize(

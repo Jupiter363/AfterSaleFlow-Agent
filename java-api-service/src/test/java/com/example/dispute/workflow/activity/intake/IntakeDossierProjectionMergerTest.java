@@ -302,6 +302,50 @@ class IntakeDossierProjectionMergerTest {
     }
 
     @Test
+    void treatsBaselineNoResponseAliasesAsUnaddressedWithoutCreatingAReportedClaim()
+            throws Exception {
+        for (String status :
+                List.of("UNKNOWN", "PLATFORM_UNKNOWN", "NOT_RESPONDED", "NOT_ADDRESSED")) {
+            ObjectNode modelPatch = (ObjectNode) completeDossierPatch();
+            modelPatch.putObject("party_positions").putArray("respondent_statements");
+            modelPatch.putObject("respondent_attitude")
+                    .put("status", status)
+                    .put("description", "待确认");
+
+            var result = merger.merge(
+                    JSON.createObjectNode(),
+                    proposal(modelPatch, unilateralDraft()),
+                    matrixAuthority(ActorRole.USER));
+
+            assertThat(result.dossier().at("/case_fact_matrix/matrix_kind").asText())
+                    .isEqualTo("INITIATOR_FROZEN");
+            assertThat(result.dossier()
+                            .at("/case_fact_matrix/claims/respondent_reported_by_initiator")
+                            .isNull())
+                    .isTrue();
+            assertThat(result.dossier()
+                            .at("/case_fact_matrix/fact_rows/0/positions/MERCHANT/stance")
+                            .asText())
+                    .isEqualTo("NOT_ADDRESSED");
+        }
+    }
+
+    @Test
+    void rejectsArbitraryRespondentAttitudeStatus() throws Exception {
+        ObjectNode modelPatch = (ObjectNode) completeDossierPatch();
+        modelPatch.putObject("respondent_attitude")
+                .put("status", "PENDING_REVIEW")
+                .put("position", "The respondent position is pending review.");
+
+        assertRejected(
+                "INTAKE_MATRIX_DOSSIER_INCOMPLETE",
+                () -> merger.merge(
+                        JSON.createObjectNode(),
+                        proposal(modelPatch, unilateralDraft()),
+                        matrixAuthority(ActorRole.USER)));
+    }
+
+    @Test
     void incrementsTheJavaVersionAndPreservesStableFactIds() throws Exception {
         var first = merger.merge(
                 JSON.createObjectNode(),

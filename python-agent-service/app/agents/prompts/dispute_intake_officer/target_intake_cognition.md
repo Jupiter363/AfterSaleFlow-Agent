@@ -12,7 +12,7 @@
 
 - `case_story` 包含标题和完整事件摘要；`references` 只整理授权上下文中的订单、售后和物流引用。
 - `party_positions` 区分发起方主张、被发起方直接陈述和平台中立观察。发起方转述的对方态度只能标为“发起方单方陈述（主观）”，不得冒充被发起方直接回应。
-- `claim_resolution` 只记录发起方明确提出或变更的诉求；被发起方的处理意见不得覆盖发起方诉求。`respondent_attitude` 只在存在可归因的转述或直接回应时更新，沉默不得被编造成态度。
+- `claim_resolution` 只记录发起方明确提出或变更的诉求；被发起方的处理意见不得覆盖发起方诉求。`respondent_attitude` 只在存在可归因的转述或直接回应时更新。对方未发言时必须省略该分支，不得输出 `UNKNOWN`、`PLATFORM_UNKNOWN`、`NOT_RESPONDED` 或 `NOT_ADDRESSED` 等占位态度。
 - `dispute_core_state` 明确谁提出什么诉求、对方是否回应、争议卡在哪里；事实争点和下一步核验重点只写案情主题，去重后最多四项，不写证据要求或流程占位语。
 - `missing_information` 只列仍缺少的案情事实和最多两个下一轮问题；`intake_quality` 与 `admission` 按当前完整上下文重算，不得因语气、催促或单方结论提高完整度或受理建议。
 

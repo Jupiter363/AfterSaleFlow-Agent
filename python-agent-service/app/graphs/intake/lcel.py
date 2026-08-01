@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from copy import deepcopy
@@ -22,6 +23,10 @@ from typing_extensions import TypedDict
 
 from app.contracts.v1.codec import canonical_sha256, canonicalize
 from app.graph_runtime.state_lens import StateLens
+from app.agents.dispute_intake_officer.skills.dossier.dossier_skill import (
+    _reported_attitude_from_text,
+    _reported_attitude_position,
+)
 from app.harness.prompt_composer import PromptComposer
 from app.graphs.intake.contracts import (
     MODEL_CONTROLLED_FORBIDDEN_FIELDS,
@@ -31,6 +36,7 @@ from app.graphs.intake.contracts import (
 from app.graphs.intake.errors import IntakeGraphContractError
 from app.graphs.intake.state import IntakeGraphStateV2
 from app.graphs.intake.validators import (
+    MATRIX_AUTHORITY_RECORD_KEY,
     validate_cognition_patch,
     validate_dossier_transition,
     validate_matrix_patch,
@@ -102,6 +108,30 @@ _EVIDENCE_REQUEST_EN = re.compile(
     r"[^.!?]{0,32}(?:please provide|please upload|must submit|need to send|required to attach)",
     re.IGNORECASE,
 )
+_DIRECT_RESPONDENT_ATTITUDE_ZH = re.compile(
+    r"(?:^|[。！？!?；;\n])\s*(?:(?:我|本人|我方|我们)\s*)?"
+    r"(?:同意|接受|拒绝|不同意|不支持|不接受|愿意|只同意|只接受|要求|提出|建议)"
+)
+_RESPONDENT_ATTITUDE_TERM_EN = (
+    r"partially\s+(?:agreed|accepted)|agreed|accepted|rejected|refused|disagreed|"
+    r"offered|proposed"
+)
+_DIRECT_ATTITUDE_TERM_EN = (
+    r"partially\s+(?:agree|agreed|accept|accepted)|agree|agreed|accept|accepted|"
+    r"reject|rejected|refuse|refused|disagree|disagreed|offer|offered|propose|proposed"
+)
+_RESPONDENT_ATTITUDE_MODIFIER_EN = (
+    r"has|have|had|explicitly|clearly|already|also|firmly|directly|"
+    r"previously|now"
+)
+_ATTITUDE_NEGATION_EN = re.compile(
+    r"\b(?:not|never|no\s+longer|without|hardly)\b|n['’]t\b",
+    re.IGNORECASE,
+)
+_ATTITUDE_POST_NEGATION_EN = re.compile(
+    r"\b(?:no|none|nothing|neither|not|never|without)\b|n['’]t\b",
+    re.IGNORECASE,
+)
 
 _HUMAN_PROMPT = """Authorized audience: {audience}
 <authorized_messages_json>{messages_json}</authorized_messages_json>
@@ -113,6 +143,31 @@ _HUMAN_PROMPT = """Authorized audience: {audience}
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _NO_TOOLS_POLICY_VERSION = "no-tools.v1"
+_ABSENT_RESPONDENT_ATTITUDES = frozenset(
+    {"UNKNOWN", "PLATFORM_UNKNOWN", "NOT_RESPONDED", "NOT_ADDRESSED"}
+)
+_SUBSTANTIVE_RESPONDENT_ATTITUDES = frozenset(
+    {
+        "AGREE",
+        "PARTIALLY_AGREE",
+        "DISAGREE",
+        "ALTERNATIVE_PROPOSED",
+        "NEED_MORE_INFO",
+    }
+)
+
+
+def _respondent_attitude_discriminator(attitude: Mapping[str, Any]) -> str | None:
+    """Return the sole attitude discriminator, rejecting ambiguous envelopes."""
+
+    has_attitude = "attitude" in attitude
+    has_status = "status" in attitude
+    if has_attitude == has_status:
+        return None
+    proposed = attitude["attitude"] if has_attitude else attitude["status"]
+    return proposed if isinstance(proposed, str) and proposed else None
+
+
 _VETTED_INTAKE_RUNNABLE_TOKEN = object()
 _INTERNAL_OUTPUT_FIELDS = frozenset(
     {
@@ -1213,7 +1268,280 @@ def _generation_parts(
     if not isinstance(message, AIMessage) or not isinstance(draft, IntakeCognitionDraft):
         raise IntakeGraphContractError("INTAKE_LCEL_GENERATION_INVALID")
     typed_state = cast(IntakeGraphStateV2, state)
-    return typed_state, message, _normalize_model_matrix_fact_keys(typed_state, draft)
+    normalized = _normalize_model_matrix_fact_keys(typed_state, draft)
+    return typed_state, message, _normalize_model_respondent_attitude(typed_state, normalized)
+
+
+def _normalize_model_respondent_attitude(
+    state: IntakeGraphStateV2,
+    draft: IntakeCognitionDraft,
+) -> IntakeCognitionDraft:
+    """Keep respondent silence out of the unilateral claim projection.
+
+    The baseline dossier treats silence and platform uncertainty as absence of a
+    reportable respondent position.  Some providers nevertheless materialize an
+    ``UNKNOWN`` placeholder branch.  Remove only those bounded absence aliases
+    when the authorized turn carries no structured respondent statement.  A
+    respondent turn, or an initiator patch that already attributes a statement to
+    the respondent, must instead fail closed so a real position cannot disappear
+    behind an absence marker.
+    """
+
+    attitude = draft.dossier_patch.respondent_attitude
+    if attitude is None:
+        return draft
+    proposed = _respondent_attitude_discriminator(attitude)
+    if proposed is None:
+        raise IntakeGraphContractError("INTAKE_RESPONDENT_ATTITUDE_INVALID")
+    grounded = _grounded_respondent_attitude(state)
+    if proposed in _ABSENT_RESPONDENT_ATTITUDES:
+        if grounded is not None:
+            raise IntakeGraphContractError("INTAKE_RESPONDENT_ATTITUDE_SOURCE_CONFLICT")
+        normalized = draft.model_dump(mode="json", exclude_none=True, exclude_unset=True)
+        dossier_patch = normalized.get("dossier_patch")
+        if not isinstance(dossier_patch, dict):
+            raise IntakeGraphContractError("INTAKE_LCEL_DOSSIER_PATCH_INVALID")
+        dossier_patch.pop("respondent_attitude", None)
+        return IntakeCognitionDraft.model_validate(normalized)
+    if proposed not in _SUBSTANTIVE_RESPONDENT_ATTITUDES:
+        raise IntakeGraphContractError("INTAKE_RESPONDENT_ATTITUDE_INVALID")
+    if grounded is None:
+        raise IntakeGraphContractError("INTAKE_RESPONDENT_ATTITUDE_SOURCE_MISSING")
+    grounded_attitude, grounded_position = grounded
+    if proposed != grounded_attitude:
+        raise IntakeGraphContractError("INTAKE_RESPONDENT_ATTITUDE_SOURCE_CONFLICT")
+    return _pin_model_respondent_attitude_position(draft, grounded_position)
+
+
+def _grounded_respondent_attitude(
+    state: IntakeGraphStateV2,
+) -> tuple[str, str] | None:
+    private = state.get("bindings", {}).get("private", {})
+    authority = state.get("node_results", {}).get(MATRIX_AUTHORITY_RECORD_KEY)
+    if (
+        not isinstance(authority, Mapping)
+        or authority.get("schema_version") != "intake-matrix-authority.v1"
+        or authority.get("kind") != "MATRIX_AUTHORITY"
+        or authority.get("actor_role") not in {"USER", "MERCHANT"}
+        or authority.get("initiator_role") not in {"USER", "MERCHANT"}
+        or authority.get("actor_role") != private.get("audience")
+    ):
+        raise IntakeGraphContractError("INTAKE_RESPONDENT_ATTITUDE_SOURCE_AUTHORITY_INVALID")
+    actor_role = authority["actor_role"]
+    initiator_role = authority["initiator_role"]
+    source_text = _current_authorized_turn_text(
+        state,
+        actor_role,
+        allow_initial_form=actor_role == initiator_role,
+    )
+    if not source_text:
+        return None
+    if actor_role != initiator_role:
+        reported_en = _reported_direct_attitude_from_text_en(source_text)
+        if not _DIRECT_RESPONDENT_ATTITUDE_ZH.search(source_text) and reported_en is None:
+            return None
+        reported = _reported_attitude_from_text(source_text, initiator_role)
+        grounded = _grounded_attitude_value(reported, fallback_position=source_text)
+        if grounded is not None:
+            return grounded
+        return _grounded_attitude_value(
+            reported_en,
+            fallback_position=source_text,
+        )
+    reported_position = _reported_attitude_position(source_text, initiator_role)
+    reported_en = _reported_respondent_attitude_from_text_en(source_text, initiator_role)
+    if not reported_position and reported_en is None:
+        return None
+    reported = (
+        _reported_attitude_from_text(reported_position, initiator_role)
+        if reported_position
+        else None
+    )
+    fallback_position = reported_position or source_text
+    grounded = _grounded_attitude_value(
+        reported,
+        fallback_position=fallback_position,
+    )
+    if grounded is not None:
+        return grounded
+    return _grounded_attitude_value(
+        reported_en,
+        fallback_position=fallback_position,
+    )
+
+
+def _current_authorized_turn_text(
+    state: IntakeGraphStateV2,
+    actor_role: str,
+    *,
+    allow_initial_form: bool,
+) -> str:
+    human_messages = [
+        message
+        for message in state.get("messages", {}).values()
+        if isinstance(message, Mapping)
+        and message.get("role") == "HUMAN"
+        and message.get("audience") == actor_role
+        and isinstance(message.get("content"), str)
+        and message["content"].strip()
+    ]
+    if human_messages:
+        current = max(
+            human_messages,
+            key=lambda message: (message.get("sequence", 0), message.get("message_id", "")),
+        )
+        return cast(str, current["content"]).strip()
+    if not allow_initial_form:
+        return ""
+    summary = state.get("memory_summary", "")
+    if not isinstance(summary, str) or not summary:
+        return ""
+    try:
+        memory = json.loads(summary)
+    except (TypeError, json.JSONDecodeError):
+        return ""
+    initial = memory.get("authorized_initial_case_facts") if isinstance(memory, dict) else None
+    description = initial.get("form_description") if isinstance(initial, Mapping) else None
+    return description.strip() if isinstance(description, str) else ""
+
+
+def _reported_respondent_attitude_from_text_en(
+    text: str,
+    initiator_role: str,
+) -> dict[str, str] | None:
+    """Extract only an attitude grammatically attributed to the counterparty.
+
+    Proximity is insufficient here: ``I rejected the merchant's proposal`` mentions
+    both a merchant and an attitude verb, but it reports the initiator's decision.
+    Accept a counterparty-subject predicate or an explicit passive ``... by`` form.
+    """
+
+    respondent = (
+        r"user|buyer|customer|consumer|counterparty"
+        if initiator_role == "MERCHANT"
+        else r"merchant|seller|store|customer service|counterparty"
+    )
+    subject = re.compile(
+        rf"\b(?:the\s+)?(?:{respondent})\b(?!['’]s)"
+        rf"(?:\s+(?:{_RESPONDENT_ATTITUDE_MODIFIER_EN}))*\s+"
+        rf"(?P<attitude>{_RESPONDENT_ATTITUDE_TERM_EN})\b(?!\s+by\b)",
+        re.IGNORECASE,
+    )
+    passive = re.compile(
+        rf"\b(?P<attitude>{_RESPONDENT_ATTITUDE_TERM_EN})\b"
+        rf"\s+by\s+(?:the\s+)?(?:{respondent})\b",
+        re.IGNORECASE,
+    )
+    matches = [
+        match
+        for pattern in (subject, passive)
+        if (match := pattern.search(text))
+        and not _is_negated_en_attitude(
+            text,
+            match.start("attitude"),
+            match.end("attitude"),
+        )
+    ]
+    if not matches:
+        return None
+    attributed = min(matches, key=lambda match: match.start())
+    attitude = _attitude_code_from_en_term(attributed.group("attitude"))
+    if attitude is None:
+        return None
+    return {"attitude": attitude, "position": text.strip()}
+
+
+def _reported_direct_attitude_from_text_en(text: str) -> dict[str, str] | None:
+    direct = re.compile(
+        rf"\b(?:i|we)\b"
+        rf"(?:\s+(?:{_RESPONDENT_ATTITUDE_MODIFIER_EN}))*\s+"
+        rf"(?P<attitude>{_DIRECT_ATTITUDE_TERM_EN})\b(?!\s+by\b)",
+        re.IGNORECASE,
+    )
+    match = direct.search(text)
+    if match is None or _is_negated_en_attitude(
+        text,
+        match.start("attitude"),
+        match.end("attitude"),
+    ):
+        return None
+    attitude = _attitude_code_from_en_term(match.group("attitude"))
+    if attitude is None:
+        return None
+    return {"attitude": attitude, "position": text.strip()}
+
+
+def _is_negated_en_attitude(text: str, attitude_start: int, attitude_end: int) -> bool:
+    prefix = text[:attitude_start]
+    clause_start = max((prefix.rfind(boundary) for boundary in ".!?;\n"), default=-1)
+    bounded_clause_prefix = prefix[max(clause_start + 1, len(prefix) - 64) :]
+    if _ATTITUDE_NEGATION_EN.search(bounded_clause_prefix) is not None:
+        return True
+    suffix = text[attitude_end:]
+    clause_end_candidates = [
+        index for boundary in ".!?;\n" if (index := suffix.find(boundary)) >= 0
+    ]
+    clause_end = min(clause_end_candidates, default=len(suffix))
+    bounded_clause_suffix = suffix[: min(clause_end, 64)]
+    return _ATTITUDE_POST_NEGATION_EN.search(bounded_clause_suffix) is not None
+
+
+def _attitude_code_from_en_term(value: str) -> str | None:
+    normalized = " ".join(value.lower().split())
+    if normalized in {
+        "partially agree",
+        "partially agreed",
+        "partially accept",
+        "partially accepted",
+    }:
+        return "PARTIALLY_AGREE"
+    if normalized in {"reject", "rejected", "refuse", "refused", "disagree", "disagreed"}:
+        return "DISAGREE"
+    if normalized in {"agree", "agreed", "accept", "accepted"}:
+        return "AGREE"
+    if normalized in {"offer", "offered", "propose", "proposed"}:
+        return "ALTERNATIVE_PROPOSED"
+    return None
+
+
+def _grounded_attitude_value(
+    reported: Mapping[str, Any] | None,
+    *,
+    fallback_position: str,
+) -> tuple[str, str] | None:
+    if not isinstance(reported, Mapping):
+        return None
+    attitude = reported.get("attitude")
+    if attitude not in _SUBSTANTIVE_RESPONDENT_ATTITUDES:
+        return None
+    position = reported.get("position")
+    return (
+        cast(str, attitude),
+        position.strip() if isinstance(position, str) and position.strip() else fallback_position,
+    )
+
+
+def _pin_model_respondent_attitude_position(
+    draft: IntakeCognitionDraft,
+    grounded_position: str,
+) -> IntakeCognitionDraft:
+    normalized = draft.model_dump(mode="json", exclude_none=True, exclude_unset=True)
+    dossier_patch = normalized.get("dossier_patch")
+    attitude = dossier_patch.get("respondent_attitude") if isinstance(dossier_patch, dict) else None
+    if not isinstance(attitude, dict):
+        raise IntakeGraphContractError("INTAKE_RESPONDENT_ATTITUDE_INVALID")
+    position_field = next(
+        (
+            field
+            for field in ("position_summary", "position", "note")
+            if isinstance(attitude.get(field), str) and attitude[field].strip()
+        ),
+        None,
+    )
+    if position_field is None:
+        raise IntakeGraphContractError("INTAKE_RESPONDENT_ATTITUDE_INVALID")
+    attitude[position_field] = grounded_position
+    return IntakeCognitionDraft.model_validate(normalized)
 
 
 def _normalize_model_matrix_fact_keys(

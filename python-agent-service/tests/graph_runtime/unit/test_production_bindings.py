@@ -1153,6 +1153,26 @@ async def test_compiled_intake_executor_streams_provisional_dossier_before_termi
                     {"langgraph_node": "intake_lcel"},
                 ),
             )
+            yield (
+                "messages",
+                (
+                    AIMessageChunk(
+                        content="",
+                        additional_kwargs={
+                            "governed_events": [
+                                {
+                                    "schema_version": "governed-model-event.v1",
+                                    "event_type": "visible_delta",
+                                    "node_name": "intake_lcel",
+                                    "field": "case_detail.respondent_attitude",
+                                    "delta": '{"status":"UNKNOWN","description":"待确认"}',
+                                }
+                            ]
+                        },
+                    ),
+                    {"langgraph_node": "intake_lcel"},
+                ),
+            )
 
         async def aget_state(self, config):
             return object()
@@ -1215,6 +1235,60 @@ async def test_compiled_intake_executor_streams_provisional_dossier_before_termi
     assert events[1].payload.field == "room_utterance"
     assert events[2].payload.field == "case_detail.case_story"
     assert events[2].payload.delta == '{"one_sentence_summary":"uncommitted"}'
+
+
+@pytest.mark.parametrize(
+    "absence_marker",
+    ["UNKNOWN", "PLATFORM_UNKNOWN", "NOT_RESPONDED", "NOT_ADDRESSED"],
+)
+def test_compiled_intake_executor_suppresses_absent_respondent_attitude_updates(
+    absence_marker: str,
+) -> None:
+    update = GraphPublicUpdate.visible_delta(
+        node="intake_lcel",
+        field="case_detail.respondent_attitude",
+        delta=json.dumps(
+            {"status": absence_marker, "description": "待确认"},
+            ensure_ascii=False,
+        ),
+    )
+
+    assert CompiledIntakeGraphShadowExecutor._should_suppress_respondent_attitude_update(update)
+
+
+def test_compiled_intake_executor_defers_substantive_respondent_attitude_to_terminal_gate() -> None:
+    update = GraphPublicUpdate.visible_delta(
+        node="intake_lcel",
+        field="case_detail.respondent_attitude",
+        delta=json.dumps(
+            {
+                "attitude": "DISAGREE",
+                "position": "The merchant rejected the requested refund.",
+            }
+        ),
+    )
+
+    assert CompiledIntakeGraphShadowExecutor._should_suppress_respondent_attitude_update(update)
+
+
+def test_compiled_intake_executor_rejects_dual_respondent_attitude_discriminators() -> None:
+    update = GraphPublicUpdate.visible_delta(
+        node="intake_lcel",
+        field="case_detail.respondent_attitude",
+        delta=json.dumps(
+            {
+                "attitude": "DISAGREE",
+                "status": "UNKNOWN",
+                "position": "The merchant rejected the requested refund.",
+            }
+        ),
+    )
+
+    with pytest.raises(
+        GraphContractError,
+        match="INTAKE_RESPONDENT_ATTITUDE_STREAM_INVALID",
+    ):
+        CompiledIntakeGraphShadowExecutor._should_suppress_respondent_attitude_update(update)
 
 
 def test_compiled_intake_executor_rejects_forbidden_room_utterance_before_publication() -> None:

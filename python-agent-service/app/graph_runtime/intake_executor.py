@@ -47,9 +47,12 @@ from app.graph_runtime.target_e2e import (
     TargetE2ERoomProposalSource,
 )
 from app.graphs.intake.lcel import (
+    _ABSENT_RESPONDENT_ATTITUDES,
+    _SUBSTANTIVE_RESPONDENT_ATTITUDES,
     _TARGET_INTAKE_VISIBLE_FIELDS,
     _contains_forbidden_evidence_request,
     _is_evidence_material_gap,
+    _respondent_attitude_discriminator,
 )
 from app.graphs.intake.runtime import IntakeRuntimeBundle
 from app.graphs.intake.state import IntakeGraphStateV2, IntakeTurnContext
@@ -180,6 +183,8 @@ class CompiledIntakeGraphShadowExecutor:
                         raise GraphContractError(
                             "compiled Intake Graph emitted an unsupported visible field"
                         )
+                    if self._should_suppress_respondent_attitude_update(update):
+                        continue
                     # The frontend treats streamed dossier sections as a provisional
                     # view and discards them on ERROR, attempt reset, workspace change,
                     # or failed formal-readiness reconciliation.  Publish each complete
@@ -381,6 +386,28 @@ class CompiledIntakeGraphShadowExecutor:
             field=payload.field,
             delta=room_utterance,
         )
+
+    @staticmethod
+    def _should_suppress_respondent_attitude_update(update: GraphPublicUpdate) -> bool:
+        payload = update.payload
+        if payload.field != "case_detail.respondent_attitude":
+            return False
+        try:
+            attitude = json.loads(payload.delta or "")
+        except (TypeError, json.JSONDecodeError) as error:
+            raise GraphContractError("INTAKE_RESPONDENT_ATTITUDE_STREAM_INVALID") from error
+        if not isinstance(attitude, Mapping):
+            raise GraphContractError("INTAKE_RESPONDENT_ATTITUDE_STREAM_INVALID")
+        proposed = _respondent_attitude_discriminator(attitude)
+        if proposed is None or proposed not in (
+            _ABSENT_RESPONDENT_ATTITUDES | _SUBSTANTIVE_RESPONDENT_ATTITUDES
+        ):
+            raise GraphContractError("INTAKE_RESPONDENT_ATTITUDE_STREAM_INVALID")
+        # This branch depends on source attribution and therefore cannot be
+        # trusted from a partial model stream.  Silence aliases never belong in
+        # the dossier, while a substantive attitude becomes visible only after
+        # the terminal source gate and formal Java commit succeed.
+        return True
 
     @staticmethod
     def _graph_input(execution: GatewayExecution) -> Mapping[str, Any]:

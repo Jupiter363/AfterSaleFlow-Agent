@@ -95,6 +95,8 @@ public final class IntakeUnilateralMatrixPolicy {
             "ALTERNATIVE_PROPOSED",
             "NEED_MORE_INFO",
             "NOT_ADDRESSED");
+    private static final Set<String> NO_RESPONSE_ATTITUDES =
+            Set.of("UNKNOWN", "PLATFORM_UNKNOWN", "NOT_RESPONDED", "NOT_ADDRESSED");
 
     public void validateExisting(ObjectNode matrix, MatrixAuthority authority) {
         validateProjection(matrix, authority);
@@ -478,8 +480,7 @@ public final class IntakeUnilateralMatrixPolicy {
         ObjectNode result = dossier.objectNode();
         result.put("respondent_role", authority.respondentRole().name());
         String proposedAttitude = firstText(attitude, "attitude", "status");
-        if ("NOT_RESPONDED".equals(proposedAttitude)
-                || "NOT_ADDRESSED".equals(proposedAttitude)) {
+        if (NO_RESPONSE_ATTITUDES.contains(proposedAttitude)) {
             return null;
         }
         String normalizedAttitude =
