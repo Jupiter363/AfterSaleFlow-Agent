@@ -53,6 +53,7 @@ import com.example.dispute.workflow.temporal.room.intake.IntakeRoomStart;
 import com.example.dispute.workflow.temporal.room.intake.IntakeRoomWorkflow;
 import com.example.dispute.workflow.temporal.room.intake.IntakeRoomWorkflowImpl;
 import com.example.dispute.workflow.temporal.room.intake.IntakeWorkflowCommand;
+import com.example.dispute.workflow.temporal.room.intake.TargetIntakeSourceEventRef;
 import io.temporal.activity.Activity;
 import io.temporal.client.UpdateOptions;
 import io.temporal.client.ActivityCompletionException;
@@ -1506,6 +1507,9 @@ class CaseProcessTypedChildDispatchTest {
     public void domainEventCommitted(IntakeDomainEventRef event) {
       eventCount++;
     }
+
+    @Override
+    public void targetSourceEventObserved(TargetIntakeSourceEventRef event) {}
 
     @Override
     public void requestContinueAsNew() {}
