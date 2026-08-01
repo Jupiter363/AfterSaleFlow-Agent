@@ -46,30 +46,11 @@ from app.model_runtime.transports import ModelTransport
 from app.streaming import VisibleFieldSpec
 
 
-_BASELINE_INTAKE_SYSTEM_PROMPT = PromptComposer().render_system_prompt("intake_turn_case_detail")
-
-_TARGET_INTAKE_SCHEMA_SUPPLEMENT = """Target intake.v2 contract adapter.
-Apply all baseline business rules above. The authorized input envelope exposes participant turns in
-authorized_messages_json, the initial form fields inside
-bounded_memory_summary.authorized_initial_case_facts, the current projection in
-authorized_dossier_json, and immutable identifiers in immutable_source_catalog_json. Use no other
-case source.
-
-Return exactly the configured IntakeCognitionDraft JSON. Map the baseline case_detail patch to
-dossier_patch and place it only there. Do not emit baseline-only case_detail, ready_for_next_step,
-handoff_notes, or case_matrix_delta fields.
-
-Map the baseline unified-matrix semantics to the internal matrix_patch proposal: an initiator emits
-unilateral_case_matrix.draft.v1 and a respondent against the frozen initiator matrix emits
-case_fact_matrix.delta.v2. Both remain semantic deltas only. Java validates actor/source authority
-and deterministically materializes the one formal unified bilateral case matrix; never emit the
-formal case_fact_matrix.v2 or its IDs, versions, hashes, alignments, or authority fields."""
-
-# Loaded once from packaged repository assets.  The exact composed bytes are then pinned by
-# trusted_system_sha256, so request data cannot select or mutate the production prompt.
-INTAKE_SYSTEM_PROMPT = (
-    _BASELINE_INTAKE_SYSTEM_PROMPT.strip() + "\n\n" + _TARGET_INTAKE_SCHEMA_SUPPLEMENT.strip()
-)
+# Reuse the same trusted PromptComposer pipeline as the production baseline while
+# selecting a Target-specific single-schema template.  The legacy baseline output
+# envelope is intentionally not concatenated here because IntakeCognitionDraft is
+# the sole governed response contract for this graph.
+INTAKE_SYSTEM_PROMPT = PromptComposer().render_system_prompt("target_intake_cognition")
 
 _TARGET_INTAKE_VISIBLE_FIELDS = (
     # The full JSON string closes before the remaining dossier branches.  Keeping it

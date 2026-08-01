@@ -42,6 +42,10 @@ class PromptComposer:
             "dispute_intake_officer",
             "intake_turn_case_detail.md",
         ),
+        "target_intake_cognition": PromptTemplateRef(
+            "dispute_intake_officer",
+            "target_intake_cognition.md",
+        ),
         "evidence_turn": PromptTemplateRef(
             "evidence_clerk",
             "evidence_turn.md",
@@ -131,14 +135,8 @@ class PromptComposer:
         agent_prompt_root: Path | None = None,
     ) -> None:
         self._app_root = app_root or Path(__file__).resolve().parents[1]
-        self._harness_prompt_dir = (
-            harness_prompt_dir
-            or self._app_root / "harness" / "prompts"
-        )
-        self._agent_prompt_root = (
-            agent_prompt_root
-            or self._app_root / "agents" / "prompts"
-        )
+        self._harness_prompt_dir = harness_prompt_dir or self._app_root / "harness" / "prompts"
+        self._agent_prompt_root = agent_prompt_root or self._app_root / "agents" / "prompts"
 
     # 所属模块：Agent Harness > Prompt 仓库 > 双消息渲染总入口。
     # 具体功能：`render` 分别调用 system 与 user 渲染器，返回 `(system_prompt, user_prompt)`，不把两种信任级别拼成同一段文本。

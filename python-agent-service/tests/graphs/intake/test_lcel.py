@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -20,7 +21,6 @@ from langchain_core.runnables import (
 
 from app.contracts.v1.codec import canonical_sha256_omitting
 from app.graph_runtime.state_lens import StateLens
-from app.harness.prompt_composer import PromptComposer
 from app.graphs.intake.errors import IntakeGraphContractError
 from app.graphs.intake.graph import (
     _create_test_only_intake_cognition,
@@ -50,6 +50,7 @@ from app.model_runtime.transports import (
     ModelTransportVisibleDelta,
 )
 from app.model_runtime.callbacks import governed_events_from_chunk
+from app.streaming import IncrementalVisibleJsonProjector
 
 
 def _draft(**overrides: Any) -> dict[str, Any]:
@@ -88,7 +89,6 @@ class IntakeTransport:
     def generate(self, request: ModelTransportRequest) -> ModelTransportResult:
         self.generate_calls += 1
         self.requests.append(request)
-        import json
 
         return ModelTransportResult(
             json_document=json.dumps(self.document, separators=(",", ":")),
@@ -117,17 +117,21 @@ class StreamingIntakeTransport(IntakeTransport):
 
 class GovernedStreamingIntakeTransport(IntakeTransport):
     async def astream(self, request: ModelTransportRequest):
+        self.generate_calls += 1
         self.requests.append(request)
-        yield ModelTransportVisibleDelta(
-            field="room_utterance",
-            delta='"Please confirm the requested resolution."',
+        document = json.dumps(self.document, ensure_ascii=False, separators=(",", ":"))
+        projector = IncrementalVisibleJsonProjector(request.visible_fields)
+        for offset in range(0, len(document), 19):
+            for field, delta in projector.feed(document[offset : offset + 19]):
+                yield ModelTransportVisibleDelta(field=field, delta=delta)
+        yield ModelTransportCompleted(
+            result=ModelTransportResult(
+                json_document=document,
+                model="intake-model",
+                latency_ms=4,
+                token_usage=self.token_usage,
+            )
         )
-        yield ModelTransportVisibleDelta(
-            field="case_detail.case_story",
-            delta='{"one_sentence_summary":"Case summary."}',
-        )
-        result = self.generate(request)
-        yield ModelTransportCompleted(result=result)
 
 
 def _profile() -> ModelProfile:
@@ -157,21 +161,33 @@ def _policy() -> ModelInvocationPolicy:
     )
 
 
-def test_system_prompt_reuses_the_baseline_intake_rules_with_only_target_mapping() -> None:
-    baseline = PromptComposer().render_system_prompt("intake_turn_case_detail")
+def test_system_prompt_keeps_baseline_intake_semantics_with_one_target_contract() -> None:
     normalized_prompt = " ".join(INTAKE_SYSTEM_PROMPT.split())
-    assert INTAKE_SYSTEM_PROMPT.startswith(baseline)
-    assert "首轮只有 initial_case_facts" in INTAKE_SYSTEM_PROMPT
-    assert "主动提出第一轮案情问题" in INTAKE_SYSTEM_PROMPT
-    assert "最多追问 2 个" in INTAKE_SYSTEM_PROMPT
-    assert "不得索要截图、照片、视频、聊天记录、物流凭证等证据材料" in INTAKE_SYSTEM_PROMPT
+    assert "你是“小衡”" in INTAKE_SYSTEM_PROMPT
+    assert "中立、专业" in INTAKE_SYSTEM_PROMPT
+    assert "没有参与方消息时" in INTAKE_SYSTEM_PROMPT
+    assert "不要虚构用户发言" in INTAKE_SYSTEM_PROMPT
+    assert "主动进行第一轮案情询问" in INTAKE_SYSTEM_PROMPT
+    assert "最多追问两个" in INTAKE_SYSTEM_PROMPT
+    assert "不得索要截图、照片、视频、聊天记录、物流凭证或任何其他证据材料" in INTAKE_SYSTEM_PROMPT
+    assert "简体中文" in INTAKE_SYSTEM_PROMPT
     assert "统一双方案情事实矩阵" in INTAKE_SYSTEM_PROMPT
     assert "authorized_initial_case_facts" in normalized_prompt
-    assert "Map the baseline case_detail patch to dossier_patch" in normalized_prompt
-    assert "Do not emit baseline-only case_detail" in normalized_prompt
+    assert "IntakeCognitionDraft" in normalized_prompt
+    assert (
+        "顶层字段只能是 room_utterance、dossier_patch、matrix_patch、readiness、missing_fields、recommendation、knowledge_answer_mode 和 confidence"
+        in normalized_prompt
+    )
     assert "unilateral_case_matrix.draft.v1" in normalized_prompt
     assert "case_fact_matrix.delta.v2" in normalized_prompt
-    assert "one formal unified bilateral case matrix" in normalized_prompt
+    for legacy_field in (
+        "case_detail",
+        "case_matrix_delta",
+        "ready_for_next_step",
+        "handoff_notes",
+    ):
+        assert legacy_field not in INTAKE_SYSTEM_PROMPT
+    assert len(INTAKE_SYSTEM_PROMPT) < 6_000
 
 
 def _event_state(bindings, version_pins, snapshot, event):
@@ -273,8 +289,13 @@ async def test_async_graph_emits_only_governed_model_deltas_before_terminal_patc
     snapshot,
     event,
 ) -> None:
-    document = _draft()
-    document["dossier_patch"]["requested_resolution"]["source_hash"] = event["event_hash"]
+    document = _draft(
+        room_utterance="我已记录订单相关情况。请问您希望如何解决？",
+        dossier_patch={"case_story": {"one_sentence_summary": "用户就订单商品问题提出售后诉求。"}},
+        readiness="INCOMPLETE",
+        missing_fields=["requested_resolution"],
+        recommendation="NEED_MORE_INFO",
+    )
     transport = GovernedStreamingIntakeTransport(document)
     built = build_intake_model_node(
         transport=transport,
@@ -302,8 +323,9 @@ async def test_async_graph_emits_only_governed_model_deltas_before_terminal_patc
         )
     ]
 
-    governed = []
-    for candidate in candidates:
+    governed: list[tuple[int, str, str]] = []
+    terminal_positions: list[int] = []
+    for position, candidate in enumerate(candidates):
         if not (
             isinstance(candidate, tuple)
             and len(candidate) == 2
@@ -313,12 +335,20 @@ async def test_async_graph_emits_only_governed_model_deltas_before_terminal_patc
             and isinstance(candidate[1][0], AIMessageChunk)
         ):
             continue
-        governed.extend(governed_events_from_chunk(candidate[1][0]))
+        chunk = candidate[1][0]
+        governed.extend(
+            (position, visible_event["field"], visible_event["delta"])
+            for visible_event in governed_events_from_chunk(chunk)
+        )
+        if chunk.content:
+            terminal_positions.append(position)
 
-    assert [(event["field"], event["delta"]) for event in governed] == [
-        ("room_utterance", '"Please confirm the requested resolution."'),
-        ("case_detail.case_story", '{"one_sentence_summary":"Case summary."}'),
+    assert [(field, delta) for _, field, delta in governed] == [
+        ("room_utterance", '"我已记录订单相关情况。请问您希望如何解决？"'),
+        ("case_detail.case_story", '{"one_sentence_summary":"用户就订单商品问题提出售后诉求。"}'),
     ]
+    assert terminal_positions
+    assert all(position < terminal_positions[0] for position, _, _ in governed)
     assert transport.generate_calls == 1
 
 
@@ -1210,10 +1240,42 @@ def test_strict_parser_rejects_unknown_and_formal_action_fields(mutation) -> Non
         profile=_profile(),
         policy=_policy(),
     )
-    import json
-
     with pytest.raises(OutputParserException):
         built.parser.invoke(json.dumps(document))
+
+
+@pytest.mark.parametrize(
+    ("legacy_field", "legacy_value"),
+    [
+        ("case_detail", {"schema_version": "intake_case_detail.v1"}),
+        (
+            "case_matrix_delta",
+            {
+                "schema_version": "case_fact_matrix.delta.v2",
+                "fact_rows": [],
+                "summary_source_fact_keys": [],
+            },
+        ),
+        ("ready_for_next_step", False),
+        ("handoff_notes", {"remark_status": "NOT_READY"}),
+    ],
+)
+def test_strict_parser_rejects_legacy_baseline_envelope(
+    legacy_field: str,
+    legacy_value: Any,
+) -> None:
+    document = _draft()
+    document[legacy_field] = legacy_value
+    built = build_intake_model_node(
+        transport=IntakeTransport(),
+        profile=_profile(),
+        policy=_policy(),
+    )
+
+    with pytest.raises(OutputParserException) as error:
+        built.parser.invoke(json.dumps(document))
+
+    assert legacy_field in str(error.value)
 
 
 def test_strict_parser_accepts_delta_but_requires_explicit_stance() -> None:

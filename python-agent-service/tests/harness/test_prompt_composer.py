@@ -77,6 +77,34 @@ def test_intake_officer_prompt_declares_context_pack_workflow_contract() -> None
     assert len(system_prompt) < 10_000
 
 
+def test_target_intake_prompt_reuses_common_rules_without_legacy_output_envelope() -> None:
+    repository = PromptRepository()
+
+    system_prompt = repository.render_system_prompt("target_intake_cognition")
+
+    assert repository.template_path("target_intake_cognition") == Path(
+        "app/agents/prompts/dispute_intake_officer/target_intake_cognition.md"
+    )
+    assert "人工智能原生编排框架通用安全边界" in system_prompt
+    assert "编排框架业务代码本地化规则" in system_prompt
+    assert "编排框架案情叙述规则" in system_prompt
+    assert "Target Intake 接待认知" in system_prompt
+    assert "统一双方案情事实矩阵" in system_prompt
+    assert "IntakeCognitionDraft" in system_prompt
+    assert "room_utterance 必须是 JSON 对象中的第一个字段" in system_prompt
+    assert "每轮都重新生成完整、去重、第三人称" in system_prompt
+    assert "发起方单方陈述（主观）" in system_prompt
+    assert "沉默不得被编造成态度" in system_prompt
+    assert "NOT_ADDRESSED 与 PREVIOUS_MATRIX" in system_prompt
+    for legacy_field in (
+        "case_detail",
+        "case_matrix_delta",
+        "ready_for_next_step",
+        "handoff_notes",
+    ):
+        assert legacy_field not in system_prompt
+
+
 # 所属模块：Agent Harness > test_prompt_composer；函数角色：回归测试用例。
 # 具体功能：`test_intake_party_profiles_keep_current_message_priority_and_do_not_request_evidence` 验证当前可见证据在固定案例中的输出、边界和失败行为；关键协作调用：`PromptRepository`、`repository.render`。
 # 上下游：上游为 Java 可信快照、调用身份、上下文合同、角色模板；下游为 协作调用 `PromptRepository`、`repository.render`。

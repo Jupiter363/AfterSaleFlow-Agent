@@ -89,7 +89,9 @@ public final class DurableAgentRunExecutionGateway implements AgentRunExecutionG
                         }
                         state.accept(candidate);
                         batch.add(publicEvent);
-                        if (terminal(publicEvent.eventType()) || batch.shouldFlush()) {
+                        if (publicEvent.eventType() == StreamEventType.VISIBLE_DELTA
+                                || terminal(publicEvent.eventType())
+                                || batch.shouldFlush()) {
                             flushBatch(
                                     batch,
                                     state,

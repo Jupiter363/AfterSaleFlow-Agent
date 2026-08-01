@@ -141,7 +141,6 @@ class CompiledIntakeGraphShadowExecutor:
         config = self._graph_config(runtime_execution)
         emitted_usage: list[Usage] = []
         pending_usage_update: GraphPublicUpdate | None = None
-        pending_dossier_updates: list[GraphPublicUpdate] = []
         room_utterance_emitted = False
         source = graph.astream(
             graph_input,
@@ -181,12 +180,20 @@ class CompiledIntakeGraphShadowExecutor:
                         raise GraphContractError(
                             "compiled Intake Graph emitted an unsupported visible field"
                         )
-                    # The dossier is a provisional view of the terminal proposal.
-                    # Hold it until the typed/business guards, immutable proposal
-                    # write, result materialization, and fenced terminal commit all
-                    # succeed.  This makes cancellation and any terminal failure
-                    # fail closed without a cross-service reset protocol.
-                    pending_dossier_updates.append(update)
+                    # The frontend treats streamed dossier sections as a provisional
+                    # view and discards them on ERROR, attempt reset, workspace change,
+                    # or failed formal-readiness reconciliation.  Publish each complete
+                    # governed JSON section as soon as it is available so the board can
+                    # evolve alongside the utterance; the durable proposal and formal
+                    # dossier remain authoritative only after the fenced terminal commit
+                    # below succeeds.
+                    yield self._event(
+                        execution,
+                        sequence,
+                        update.event_type,
+                        update.payload,
+                    )
+                    sequence += 1
         finally:
             await cast(Callable[[], Awaitable[None]], close)()
 
@@ -252,14 +259,6 @@ class CompiledIntakeGraphShadowExecutor:
             raise GraphTerminalBindingError(
                 "Intake generic result was not bound to the terminal fence"
             )
-        for update in pending_dossier_updates:
-            yield self._event(
-                execution,
-                sequence,
-                update.event_type,
-                update.payload,
-            )
-            sequence += 1
         if pending_usage_update is not None:
             yield self._event(
                 execution,

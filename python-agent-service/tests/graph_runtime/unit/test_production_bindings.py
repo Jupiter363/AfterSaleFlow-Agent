@@ -1053,9 +1053,17 @@ async def test_compiled_intake_executor_persists_one_pointer_without_replacing_s
         assert [event.event_type for event in events] == [
             "attempt_started",
             "visible_delta",
+            "visible_delta",
+            "visible_delta",
         ]
         assert events[1].payload.field == "room_utterance"
-        assert visible_commit_states == [("room_utterance", False)]
+        assert events[2].payload.field == "case_detail.case_story"
+        assert events[3].payload.field == "case_detail.references"
+        assert visible_commit_states == [
+            ("room_utterance", False),
+            ("case_detail.case_story", False),
+            ("case_detail.references", False),
+        ]
         assert saver.preflights == 1
         assert store.calls == 1
         assert len(saver.commits) == 1
@@ -1080,8 +1088,8 @@ async def test_compiled_intake_executor_persists_one_pointer_without_replacing_s
     assert events[4].payload.usage == Usage(input_tokens=3, output_tokens=2, total_tokens=5)
     assert visible_commit_states == [
         ("room_utterance", False),
-        ("case_detail.case_story", True),
-        ("case_detail.references", True),
+        ("case_detail.case_story", False),
+        ("case_detail.references", False),
     ]
     assert saver.preflights == 1
     assert store.calls == 1
@@ -1095,7 +1103,7 @@ async def test_compiled_intake_executor_persists_one_pointer_without_replacing_s
 
 
 @pytest.mark.asyncio
-async def test_compiled_intake_executor_withholds_dossier_when_terminal_guard_fails(
+async def test_compiled_intake_executor_streams_provisional_dossier_before_terminal_guard(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     command, _, _ = _intake_command()
@@ -1202,8 +1210,11 @@ async def test_compiled_intake_executor_withholds_dossier_when_terminal_guard_fa
     assert [event.event_type for event in events] == [
         "attempt_started",
         "visible_delta",
+        "visible_delta",
     ]
     assert events[1].payload.field == "room_utterance"
+    assert events[2].payload.field == "case_detail.case_story"
+    assert events[2].payload.delta == '{"one_sentence_summary":"uncommitted"}'
 
 
 def test_compiled_intake_executor_rejects_forbidden_room_utterance_before_publication() -> None:
