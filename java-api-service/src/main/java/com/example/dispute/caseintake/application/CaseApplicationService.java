@@ -24,6 +24,7 @@ import com.example.dispute.infrastructure.persistence.repository.AuditLogReposit
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.room.application.ParticipantService;
 import com.example.dispute.room.application.IntakeAgentTurnService;
+import com.example.dispute.room.application.IntakeCaseSeedMetadata;
 import com.example.dispute.room.application.IntakeProgressService;
 import com.example.dispute.room.application.IntakeLobbySeed;
 import com.example.dispute.room.application.IntakeStatusView;
@@ -319,6 +320,16 @@ public class CaseApplicationService {
                         analysis.potentialDispute(), missingSlots, false, clock.instant());
         String snapshotJson = writeJson(snapshot);
         String caseId = caseIdFactory.nextCaseId();
+        IntakeLobbySeed intakeSeed =
+                new IntakeLobbySeed(
+                        command.orderId(),
+                        command.afterSaleId(),
+                        command.logisticsId(),
+                        intakeInitiatorRole(actor.role(), command.initiatorRole()),
+                        command.description(),
+                        null,
+                        command.claimResolutionSeed(),
+                        command.respondentAttitudeSeed());
         FulfillmentCaseEntity entity =
                 FulfillmentCaseEntity.create(
                         caseId,
@@ -334,6 +345,8 @@ public class CaseApplicationService {
                         required(analysis.normalizedDescription(), "normalizedDescription"),
                         analysis.riskLevel(),
                         actor.actorId());
+        entity.bindIntakeSeedMetadata(
+                IntakeCaseSeedMetadata.encode(intakeSeed, "FORM_SUBMISSION"));
         entity.completeIntake(
                 analysis.disputeType(),
                 status,
@@ -372,15 +385,7 @@ public class CaseApplicationService {
             intakeAgentTurnService.startInitialTurn(
                     saved.getId(),
                     actor,
-                    new IntakeLobbySeed(
-                            command.orderId(),
-                            command.afterSaleId(),
-                            command.logisticsId(),
-                            intakeInitiatorRole(actor.role(), command.initiatorRole()),
-                            command.description(),
-                            null,
-                            command.claimResolutionSeed(),
-                            command.respondentAttitudeSeed()),
+                    intakeSeed,
                     traceId,
                     requestId);
         }

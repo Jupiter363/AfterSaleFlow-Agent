@@ -5,6 +5,7 @@ import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -107,6 +108,16 @@ public final class IntakeDossierProjectionMerger {
             "unilateral_case_matrix.draft.v1",
             "case_fact_matrix.v2",
             "case_fact_matrix.delta.v2");
+    private static final Set<String> REQUESTED_RESOLUTIONS = Set.of(
+            "REFUND",
+            "RETURN_REFUND",
+            "RESHIP",
+            "REPLACE_OR_REPAIR",
+            "COMPENSATION",
+            "CANCEL_ORDER",
+            "VERIFY_OR_EXPLAIN_ONLY",
+            "OTHER",
+            "UNKNOWN");
 
     private final IntakeUnilateralMatrixPolicy matrixPolicy = new IntakeUnilateralMatrixPolicy();
     private final IntakeInitiatorMatrixFreezer initiatorMatrixFreezer =
@@ -143,8 +154,13 @@ public final class IntakeDossierProjectionMerger {
         rejectForbiddenKeys(patch);
         rejectDerivedMatrixDossierKeys(patch);
 
+        boolean hasPersistedClaim = current.path("claim_resolution").isObject()
+                || current.path("requested_resolution").isObject();
         ObjectNode merged = (ObjectNode) current.deepCopy();
         deepMerge(merged, (ObjectNode) patch);
+        if (!hasPersistedClaim) {
+            applyClaimAuthority(merged, matrixAuthority);
+        }
         boolean matrixChanged = false;
         boolean formalAuthorityValidated = false;
 
@@ -546,13 +562,102 @@ public final class IntakeDossierProjectionMerger {
         }
     }
 
+    private static void applyClaimAuthority(ObjectNode dossier, MatrixAuthority authority) {
+        if (authority == null || authority.claimResolutionAuthority() == null) {
+            return;
+        }
+        ClaimResolutionAuthority trusted = authority.claimResolutionAuthority();
+        ObjectNode claim = dossier.path("claim_resolution").isObject()
+                ? (ObjectNode) dossier.path("claim_resolution")
+                : dossier.putObject("claim_resolution");
+        claim.put("initiator_role", authority.initiatorRole().name());
+        claim.put("requested_resolution", trusted.requestedResolution());
+        setOrRemove(claim, "requested_amount", trusted.requestedAmount());
+        setOrRemove(claim, "requested_items", trusted.requestedItems());
+        setOrRemove(claim, "request_reason", trusted.requestReason());
+
+        if (dossier.path("requested_resolution").isObject()) {
+            ObjectNode requested = (ObjectNode) dossier.path("requested_resolution");
+            requested.put("kind", trusted.requestedResolution());
+            requested.put("requested_resolution", trusted.requestedResolution());
+            setOrRemove(requested, "requested_amount", trusted.requestedAmount());
+            setOrRemove(requested, "requested_items", trusted.requestedItems());
+            setOrRemove(requested, "reason", trusted.requestReason());
+        }
+    }
+
+    private static void setOrRemove(ObjectNode target, String field, BigDecimal value) {
+        if (value == null) {
+            target.remove(field);
+        } else {
+            target.put(field, value);
+        }
+    }
+
+    private static void setOrRemove(ObjectNode target, String field, String value) {
+        if (value == null) {
+            target.remove(field);
+        } else {
+            target.put(field, value);
+        }
+    }
+
+    public record ClaimResolutionAuthority(
+            String requestedResolution,
+            BigDecimal requestedAmount,
+            String requestedItems,
+            String requestReason) {
+
+        public ClaimResolutionAuthority {
+            requestedResolution =
+                    IntakeContractSupport.identifier(requestedResolution, "requestedResolution");
+            if (!REQUESTED_RESOLUTIONS.contains(requestedResolution)) {
+                throw new IllegalArgumentException("requestedResolution is unsupported");
+            }
+            if (requestedAmount != null && requestedAmount.signum() < 0) {
+                throw new IllegalArgumentException("requestedAmount must not be negative");
+            }
+            requestedItems = optionalBounded(requestedItems, 2_000, "requestedItems");
+            requestReason = optionalBounded(requestReason, 20_000, "requestReason");
+        }
+
+        private static String optionalBounded(String value, int maxLength, String field) {
+            if (value == null || value.isBlank()) {
+                return null;
+            }
+            String normalized = value.strip();
+            if (normalized.length() > maxLength) {
+                throw new IllegalArgumentException(field + " exceeds " + maxLength + " characters");
+            }
+            return normalized;
+        }
+    }
+
     public record MatrixAuthority(
             String caseId,
             ActorRole actorRole,
             ActorRole initiatorRole,
             ActorRole respondentRole,
             String sourceRef,
-            String sourceContextHash) {
+            String sourceContextHash,
+            ClaimResolutionAuthority claimResolutionAuthority) {
+
+        public MatrixAuthority(
+                String caseId,
+                ActorRole actorRole,
+                ActorRole initiatorRole,
+                ActorRole respondentRole,
+                String sourceRef,
+                String sourceContextHash) {
+            this(
+                    caseId,
+                    actorRole,
+                    initiatorRole,
+                    respondentRole,
+                    sourceRef,
+                    sourceContextHash,
+                    null);
+        }
 
         public MatrixAuthority {
             caseId = IntakeContractSupport.identifier(caseId, "caseId");

@@ -1015,6 +1015,21 @@ public class FulfillmentCaseEntity extends AbstractEntity {
         return intakeResultJson;
     }
 
+    /** Binds the immutable trusted form facts used by asynchronous Intake execution. */
+    public void bindIntakeSeedMetadata(String canonicalMetadataJson) {
+        String requiredMetadata = required(canonicalMetadataJson, "canonicalMetadataJson");
+        if (metadataJson != null
+                && !"{}".equals(metadataJson)
+                && !metadataJson.equals(requiredMetadata)) {
+            throw new IllegalStateException("Intake seed metadata is immutable");
+        }
+        metadataJson = requiredMetadata;
+    }
+
+    public String getMetadataJson() {
+        return metadataJson;
+    }
+
     // 所属模块：【PostgreSQL 事实模型 / JPA 实体层】「FulfillmentCaseEntity.getCreatedAt()」。
     // 具体功能：「FulfillmentCaseEntity.getCreatedAt()」：读取「FulfillmentCaseEntity」中的「createdAt」状态，向 JPA、应用服务或序列化层返回「OffsetDateTime」。
     // 上游调用：「FulfillmentCaseEntity.getCreatedAt()」的上游调用点包括 「CaseApplicationService.toView」。

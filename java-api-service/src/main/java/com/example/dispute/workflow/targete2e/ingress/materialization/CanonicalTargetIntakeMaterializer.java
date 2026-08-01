@@ -6,11 +6,14 @@ import com.example.dispute.agentstream.application.AgentRunLedger.Attempt;
 import com.example.dispute.agentstream.application.AgentRunLedger.AttemptAllocation;
 import com.example.dispute.agentstream.application.AgentRunLedger.CreateLogicalRun;
 import com.example.dispute.agentstream.application.AgentRunLedger.LogicalRun;
+import com.example.dispute.casecore.domain.CaseSourceType;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.room.application.AccessSessionResolver;
 import com.example.dispute.room.application.AgentSessionResolver;
 import com.example.dispute.room.application.IntakeAgentTurnService;
+import com.example.dispute.room.application.IntakeCaseSeedMetadata;
+import com.example.dispute.room.application.IntakeInitialCaseFacts;
 import com.example.dispute.room.application.ParticipantService;
 import com.example.dispute.room.domain.RoomType;
 import com.example.dispute.room.infrastructure.persistence.entity.AgentConversationSessionEntity;
@@ -313,13 +316,34 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
 
     private ObjectNode initialCaseFacts(FulfillmentCaseEntity dispute) {
         ObjectNode facts = JsonNodeFactory.instance.objectNode();
-        putIfPresent(facts, "form_source", "TARGET_E2E_INTAKE");
+        IntakeInitialCaseFacts persisted =
+                IntakeCaseSeedMetadata.decode(dispute.getMetadataJson()).orElse(null);
+        putIfPresent(
+                facts,
+                "form_source",
+                persisted == null
+                        ? (dispute.getSourceType() == CaseSourceType.EXTERNAL_IMPORT
+                                ? "EXTERNAL_IMPORT"
+                                : "FORM_SUBMISSION")
+                        : persisted.formSource());
         putIfPresent(facts, "form_description", dispute.getDescription());
         putIfPresent(facts, "order_reference", dispute.getOrderId());
         putIfPresent(facts, "after_sales_reference", dispute.getAfterSaleId());
         putIfPresent(facts, "logistics_reference", dispute.getLogisticsId());
         putIfPresent(facts, "initiator_role", dispute.getInitiatorRole().name());
-        putIfPresent(facts, "requested_outcome_hint", dispute.getDisputeType());
+        if (persisted != null) {
+            putIfPresent(facts, "requested_outcome_hint", persisted.requestedOutcomeHint());
+            if (persisted.claimResolutionSeed() != null) {
+                facts.set(
+                        "claim_resolution_seed",
+                        objectMapper.valueToTree(persisted.claimResolutionSeed()));
+            }
+            if (persisted.respondentAttitudeSeed() != null) {
+                facts.set(
+                        "respondent_attitude_seed",
+                        objectMapper.valueToTree(persisted.respondentAttitudeSeed()));
+            }
+        }
         putIfPresent(facts, "case_type", dispute.getCaseType());
         putIfPresent(facts, "case_title", dispute.getTitle());
         return facts;

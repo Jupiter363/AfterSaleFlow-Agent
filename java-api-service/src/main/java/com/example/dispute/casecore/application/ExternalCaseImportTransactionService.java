@@ -19,6 +19,7 @@ import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEnti
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.hearing.application.HearingImportedCaseInitializer;
 import com.example.dispute.room.application.IntakeAgentTurnService;
+import com.example.dispute.room.application.IntakeCaseSeedMetadata;
 import com.example.dispute.room.application.IntakeLobbySeed;
 import com.example.dispute.room.application.ParticipantService;
 import com.example.dispute.room.domain.PhaseClockType;
@@ -243,6 +244,7 @@ public class ExternalCaseImportTransactionService {
             FulfillmentCaseEntity existing =
                     lockExisting(requestReplay.orElseThrow().getId());
             assertImportReplayMatches(existing, command);
+            bindIntakeSeed(existing, command, initiatorRole);
             return restoreLockedExisting(existing, actor);
         }
         return repository
@@ -273,6 +275,7 @@ public class ExternalCaseImportTransactionService {
                                             actor.actorId());
                             entity.bindImportRequestFingerprint(
                                     ImportDisputeRequestFingerprint.of(command));
+                            bindIntakeSeed(entity, command, initiatorRole);
                             FulfillmentCaseEntity saved = repository.save(entity);
                             OffsetDateTime now = OffsetDateTime.now(clock);
                             MaterializedRoom materializedRoom =
@@ -300,6 +303,7 @@ public class ExternalCaseImportTransactionService {
             AuthenticatedActor actor) {
         FulfillmentCaseEntity locked = lockExisting(existing.getId());
         assertImportReplayMatches(locked, command);
+        bindIntakeSeed(locked, command, partyInitiatorRole(command.initiatorRole()));
         return restoreLockedExisting(locked, actor);
     }
 
@@ -387,16 +391,7 @@ public class ExternalCaseImportTransactionService {
                                 ? command.merchantId()
                                 : command.userId(),
                         initiatorRole);
-        IntakeLobbySeed seed =
-                new IntakeLobbySeed(
-                        command.orderReference(),
-                        command.afterSalesReference(),
-                        command.logisticsReference(),
-                        initiatorRole.name(),
-                        command.description(),
-                        command.requestedOutcomeHint(),
-                        command.claimResolutionSeed(),
-                        command.respondentAttitudeSeed());
+        IntakeLobbySeed seed = intakeLobbySeed(command, initiatorRole);
         String caseId = saved.getId();
         postCommit.execute(
                 "intake-initial-turn",
@@ -411,6 +406,27 @@ public class ExternalCaseImportTransactionService {
                                 seed,
                                 traceId,
                                 requestId));
+    }
+
+    private static void bindIntakeSeed(
+            FulfillmentCaseEntity dispute,
+            ImportDisputeCommand command,
+            ActorRole initiatorRole) {
+        dispute.bindIntakeSeedMetadata(IntakeCaseSeedMetadata.encode(
+                intakeLobbySeed(command, initiatorRole), "EXTERNAL_IMPORT"));
+    }
+
+    private static IntakeLobbySeed intakeLobbySeed(
+            ImportDisputeCommand command, ActorRole initiatorRole) {
+        return new IntakeLobbySeed(
+                command.orderReference(),
+                command.afterSalesReference(),
+                command.logisticsReference(),
+                initiatorRole.name(),
+                command.description(),
+                command.requestedOutcomeHint(),
+                command.claimResolutionSeed(),
+                command.respondentAttitudeSeed());
     }
 
     // 所属模块：【案件核心与导入 / 应用编排层】「ExternalCaseImportTransactionService.materializeCurrentRoom(FulfillmentCaseEntity,ImportDisputeCommand,String)」。

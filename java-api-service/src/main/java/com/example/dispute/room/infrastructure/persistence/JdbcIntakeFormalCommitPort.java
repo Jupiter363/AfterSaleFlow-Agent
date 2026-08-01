@@ -1,6 +1,7 @@
 package com.example.dispute.room.infrastructure.persistence;
 
 import com.example.dispute.workflow.application.intake.IntakeDossierProjectionMerger;
+import com.example.dispute.workflow.application.intake.IntakeDossierProjectionMerger.ClaimResolutionAuthority;
 import com.example.dispute.workflow.application.intake.IntakeDossierProjectionMerger.MatrixAuthority;
 import com.example.dispute.workflow.application.intake.IntakeDossierProjectionMerger.MergeResult;
 import com.example.dispute.workflow.application.intake.IntakeFinalizationPersistenceException;
@@ -16,6 +17,9 @@ import com.example.dispute.workflow.application.intake.IntakePrivateThreadRegist
 import com.example.dispute.workflow.application.intake.IntakeTurnProposal;
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
+import com.example.dispute.room.application.IntakeCaseSeedMetadata;
+import com.example.dispute.room.application.IntakeInitialCaseFacts;
+import com.example.dispute.room.application.IntakeLobbySeed;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -352,7 +356,8 @@ public final class JdbcIntakeFormalCommitPort
         List<Map<String, Object>> cases = jdbc.queryForList(
                 """
                 select case_status, current_room, current_deadline_at,
-                       initiator_id, initiator_role, respondent_id, respondent_role
+                       initiator_id, initiator_role, respondent_id, respondent_role,
+                       metadata_json::text as metadata_json
                   from fulfillment_dispute_case
                  where id = :caseId
                 """ + (lockRows ? " for update" : ""),
@@ -407,7 +412,7 @@ public final class JdbcIntakeFormalCommitPort
                    and projection.last_command_sequence = :stageSequence
                  """ + (lockRows ? " for update of epoch, room, projection" : ""),
                 parameters,
-                (row, ignored) -> new CurrentRows(row.getString("room_id"), null, null));
+                (row, ignored) -> new CurrentRows(row.getString("room_id"), null, null, null));
         if (rows.size() != 1) {
             throw rejected(
                     "INTAKE_STALE_AUTHORITY",
@@ -509,10 +514,14 @@ public final class JdbcIntakeFormalCommitPort
                     "private thread, participation, access, or Agent Session is no longer active");
         }
         CurrentRows current = rows.getFirst();
+        IntakeInitialCaseFacts initialCaseFacts = IntakeCaseSeedMetadata
+                .decode(string(caseRow, "metadata_json"))
+                .orElse(null);
         return new CurrentRows(
                 current.roomId(),
                 string(caseRow, "initiator_role"),
-                string(caseRow, "respondent_role"));
+                string(caseRow, "respondent_role"),
+                initialCaseFacts);
     }
 
     private void requirePersistedPrivateReferences(
@@ -754,7 +763,8 @@ public final class JdbcIntakeFormalCommitPort
                         ActorRole.valueOf(currentAuthority.initiatorRole()),
                         ActorRole.valueOf(currentAuthority.respondentRole()),
                         sourceRef,
-                        sourceContextHash));
+                        sourceContextHash,
+                        claimResolutionAuthority(currentAuthority)));
         long version = current.version() + 1;
         int sourceTurn = sourceTurn(command.request());
         MapSqlParameterSource parameters = authorityParameters(command.request())
@@ -1175,6 +1185,41 @@ public final class JdbcIntakeFormalCommitPort
         return value == null ? null : value.toString();
     }
 
+    private static ClaimResolutionAuthority claimResolutionAuthority(CurrentRows current) {
+        IntakeInitialCaseFacts facts = current.initialCaseFacts();
+        if (facts == null) {
+            return null;
+        }
+        if (facts.initiatorRole() != null
+                && !facts.initiatorRole().isBlank()
+                && !current.initiatorRole().equals(facts.initiatorRole())) {
+            throw rejected(
+                    "INTAKE_MATRIX_PARTY_MISMATCH",
+                    "persisted Intake claim authority conflicts with the current initiator");
+        }
+        IntakeLobbySeed.ClaimResolutionSeed claim = facts.claimResolutionSeed();
+        if (claim != null
+                && claim.initiatorRole() != null
+                && !claim.initiatorRole().isBlank()
+                && !current.initiatorRole().equals(claim.initiatorRole())) {
+            throw rejected(
+                    "INTAKE_MATRIX_PARTY_MISMATCH",
+                    "persisted Intake claim authority conflicts with the current initiator");
+        }
+        String requestedResolution = claim == null || claim.requestedResolution() == null
+                        || claim.requestedResolution().isBlank()
+                ? facts.requestedOutcomeHint()
+                : claim.requestedResolution();
+        if (requestedResolution == null || requestedResolution.isBlank()) {
+            return null;
+        }
+        return new ClaimResolutionAuthority(
+                requestedResolution,
+                claim == null ? null : claim.requestedAmount(),
+                claim == null ? null : claim.requestedItems(),
+                claim == null ? null : claim.requestReason());
+    }
+
     private static int sourceTurn(IntakeGraphFinalizationRequest request) {
         long value = request.event() == null
                 ? request.authority().cognitiveRevision()
@@ -1227,7 +1272,11 @@ public final class JdbcIntakeFormalCommitPort
             OffsetDateTime completedAt,
             long version) {}
 
-    private record CurrentRows(String roomId, String initiatorRole, String respondentRole) {}
+    private record CurrentRows(
+            String roomId,
+            String initiatorRole,
+            String respondentRole,
+            IntakeInitialCaseFacts initialCaseFacts) {}
 
     private record AgentRunRow(long lastSequenceNo) {}
 

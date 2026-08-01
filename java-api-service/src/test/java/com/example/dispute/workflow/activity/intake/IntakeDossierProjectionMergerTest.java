@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.dispute.workflow.application.intake.IntakeDossierProjectionMerger;
+import com.example.dispute.workflow.application.intake.IntakeDossierProjectionMerger.ClaimResolutionAuthority;
 import com.example.dispute.workflow.application.intake.IntakeDossierProjectionMerger.MatrixAuthority;
 import com.example.dispute.workflow.application.intake.IntakeFinalizationRejectedException;
 import com.example.dispute.workflow.application.intake.IntakeTurnProposal;
@@ -119,6 +120,48 @@ class IntakeDossierProjectionMergerTest {
         ObjectNode hashInput = matrix.deepCopy();
         String contentHash = hashInput.remove("content_hash").asText();
         assertThat(contentHash).isEqualTo(ContractJson.sha256Hex(hashInput));
+    }
+
+    @Test
+    void buildsTheUnifiedMatrixFromTrustedClaimFactsWhenTheModelOmitsTheClaimBranch()
+            throws Exception {
+        JsonNode modelPatch = JSON.readTree(
+                """
+                {
+                  "case_story":{"one_sentence_summary":"商品频繁自动关机，排障后仍未解决。"},
+                  "dispute_core_state":{
+                    "core_conflict":"商品故障是否应当换货或维修。",
+                    "facts_in_dispute":["故障原因"],
+                    "next_verification_focus":["订单与保修信息"]
+                  }
+                }
+                """);
+        MatrixAuthority authority = new MatrixAuthority(
+                "CASE_PRODUCT_QUALITY_1",
+                ActorRole.USER,
+                ActorRole.USER,
+                ActorRole.MERCHANT,
+                "MESSAGE_PRODUCT_QUALITY_1",
+                "a".repeat(64),
+                new ClaimResolutionAuthority(
+                        "REPLACE_OR_REPAIR", null, null, null));
+
+        var result = merger.merge(
+                JSON.createObjectNode(),
+                proposal(modelPatch, unilateralDraft()),
+                authority);
+
+        assertThat(result.dossier().at("/claim_resolution/requested_resolution").asText())
+                .isEqualTo("REPLACE_OR_REPAIR");
+        assertThat(result.dossier()
+                        .at("/case_fact_matrix/claims/initiator_claim/requested_resolution")
+                        .asText())
+                .isEqualTo("REPLACE_OR_REPAIR");
+        assertThat(result.dossier().at("/case_fact_matrix/schema_version").asText())
+                .isEqualTo("case_fact_matrix.v2");
+        assertThat(result.dossier().at("/case_fact_matrix/matrix_kind").asText())
+                .isEqualTo("INITIATOR_FROZEN");
+        assertThat(result.dossier().has("unilateral_case_matrix")).isFalse();
     }
 
     @Test

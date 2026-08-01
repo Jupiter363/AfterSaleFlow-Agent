@@ -12,12 +12,15 @@ import com.example.dispute.agentstream.application.AgentRunCommandBindingFactory
 import com.example.dispute.agentstream.application.AgentRunLedger;
 import com.example.dispute.agentstream.application.AgentRunLedger.CreateLogicalRun;
 import com.example.dispute.agentstream.application.AgentRunLedger.LogicalRun;
+import com.example.dispute.casecore.domain.CaseSourceType;
 import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.config.ActorRole;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.room.application.AccessSessionResolver;
 import com.example.dispute.room.application.AgentSessionResolver;
+import com.example.dispute.room.application.IntakeCaseSeedMetadata;
+import com.example.dispute.room.application.IntakeLobbySeed;
 import com.example.dispute.room.application.ParticipantService;
 import com.example.dispute.room.domain.PermissionLevel;
 import com.example.dispute.room.infrastructure.persistence.entity.AgentConversationSessionEntity;
@@ -159,7 +162,18 @@ class CanonicalTargetIntakeMaterializerTest {
         when(dispute.getLogisticsId()).thenReturn("LOGISTICS_1");
         when(dispute.getInitiatorRole()).thenReturn(ActorRole.USER);
         when(dispute.getRespondentRole()).thenReturn(ActorRole.MERCHANT);
-        when(dispute.getDisputeType()).thenReturn("SIGNED_NOT_RECEIVED");
+        when(dispute.getDisputeType()).thenReturn("PRODUCT_QUALITY");
+        when(dispute.getSourceType()).thenReturn(CaseSourceType.EXTERNAL_IMPORT);
+        when(dispute.getMetadataJson())
+                .thenReturn(IntakeCaseSeedMetadata.encode(
+                        new IntakeLobbySeed(
+                                "ORDER_1",
+                                "AFTER_SALE_1",
+                                "LOGISTICS_1",
+                                "USER",
+                                "The product shuts down repeatedly.",
+                                "REPLACE_OR_REPAIR"),
+                        "EXTERNAL_IMPORT"));
         when(dispute.getCaseType()).thenReturn("FULFILLMENT_DISPUTE");
         when(dispute.getTitle()).thenReturn("Target E2E case");
         when(cases.findByIdForUpdate(CASE_ID)).thenReturn(Optional.of(dispute));
@@ -259,6 +273,18 @@ class CanonicalTargetIntakeMaterializerTest {
                 .isEqualTo("USER");
         assertThat(snapshotRequest.getValue().initialCaseFacts().path("order_reference").asText())
                 .isEqualTo("ORDER_1");
+        assertThat(snapshotRequest
+                        .getValue()
+                        .initialCaseFacts()
+                        .path("requested_outcome_hint")
+                        .asText())
+                .isEqualTo("REPLACE_OR_REPAIR");
+        assertThat(snapshotRequest
+                        .getValue()
+                        .initialCaseFacts()
+                        .path("requested_outcome_hint")
+                        .asText())
+                .isNotEqualTo(dispute.getDisputeType());
     }
 
     @Test

@@ -34,6 +34,7 @@ import com.example.dispute.infrastructure.persistence.repository.AuditLogReposit
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
 import com.example.dispute.room.application.ParticipantService;
 import com.example.dispute.room.application.IntakeAgentTurnService;
+import com.example.dispute.room.application.IntakeCaseSeedMetadata;
 import com.example.dispute.room.application.IntakeProgressService;
 import com.example.dispute.room.application.IntakeLobbySeed;
 import com.example.dispute.room.application.IntakeStatusView;
@@ -368,6 +369,16 @@ class CaseApplicationServiceTest {
         assertThat(lobbySeed.getValue().claimResolutionSeed().originalStatement())
                 .isEqualTo("我没收到包裹，希望退款");
         assertThat(lobbySeed.getValue().respondentAttitudeSeed()).isNull();
+
+        ArgumentCaptor<FulfillmentCaseEntity> persisted =
+                ArgumentCaptor.forClass(FulfillmentCaseEntity.class);
+        verify(caseRepository).save(persisted.capture());
+        var persistedFacts = IntakeCaseSeedMetadata.decode(
+                        persisted.getValue().getMetadataJson())
+                .orElseThrow();
+        assertThat(persistedFacts.requestedOutcomeHint()).isEqualTo("REFUND");
+        assertThat(persistedFacts.claimResolutionSeed().requestedAmount())
+                .isEqualByComparingTo("299");
     }
 
     // 所属模块：【案件受理兼容链路 / 自动化测试层】「CaseApplicationServiceTest.missingOrderIdEntersWaitingSlotCompletionWithoutPromisingAnOutcome()」。

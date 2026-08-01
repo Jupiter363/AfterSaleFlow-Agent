@@ -42,6 +42,7 @@ import com.example.dispute.room.domain.PhaseClockType;
 import com.example.dispute.room.domain.RoomType;
 import com.example.dispute.room.domain.RoomStatus;
 import com.example.dispute.room.application.IntakeAgentTurnService;
+import com.example.dispute.room.application.IntakeCaseSeedMetadata;
 import com.example.dispute.room.application.IntakeLobbySeed;
 import com.example.dispute.room.application.ParticipantService;
 import com.example.dispute.room.infrastructure.persistence.entity.CasePhaseClockEntity;
@@ -373,6 +374,18 @@ class DisputeImportServiceTest {
                 .isEqualTo("儿童手表 1 件");
         assertThat(seed.getValue().respondentAttitudeSeed().attitude())
                 .isEqualTo("NOT_RESPONDED");
+
+        ArgumentCaptor<FulfillmentCaseEntity> persisted =
+                ArgumentCaptor.forClass(FulfillmentCaseEntity.class);
+        verify(repository).save(persisted.capture());
+        var persistedFacts = IntakeCaseSeedMetadata.decode(
+                        persisted.getValue().getMetadataJson())
+                .orElseThrow();
+        assertThat(persistedFacts.requestedOutcomeHint()).isEqualTo("REFUND");
+        assertThat(persistedFacts.claimResolutionSeed().requestedResolution())
+                .isEqualTo("REFUND");
+        assertThat(persistedFacts.claimResolutionSeed().requestReason())
+                .contains("希望退款");
     }
 
     // 所属模块：【案件核心与导入 / 自动化测试层】「DisputeImportServiceTest.importedEvidenceStateHasAnEnterableRoomAndAuthoritativeClock()」。
