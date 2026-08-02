@@ -11,7 +11,7 @@
   "logical_run_id": "RUN_P4_USER_2",
   "attempt_id": "ATTEMPT_P4_USER_2_1",
   "result_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  "proposal_hash": "ef2b73e230b41ee1efe44f05edc7e3e569d53ddbac46d887160e63e0a6921e39",
+  "proposal_hash": "c37196fce02833a2d4486831a1b8ee3a4a6c075d9041909dde99d1edece2e064",
   "process_revision": 6,
   "room_revision": 3,
   "fencing_token": 2,
@@ -21,5 +21,5 @@
   "outbox_ids": ["OUTBOX_P4_2"],
   "status": "COMMITTED",
   "committed_at": "2026-07-20T08:03:00Z",
-  "receipt_hash": "56036569987cc709e6ed72e00f4e06bc0c3d8934580973b52cb5c00606849682"
+  "receipt_hash": "f2ec03f9ad9e32020b2fa2d03bc3e4b1a87ce7e36b101728a6a86f7ef3b589fd"
 }

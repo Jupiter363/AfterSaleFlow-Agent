@@ -41,6 +41,61 @@ def test_state_rejects_memory_frame_at_any_depth(bindings, version_pins) -> None
         validate_state(state)
 
 
+def test_state_accepts_one_human_ai_pair_for_the_same_source_event_sequence(
+    bindings,
+    version_pins,
+) -> None:
+    state = new_intake_graph_state(bindings=bindings, version_pins=version_pins)
+    state["messages"] = {
+        "MESSAGE_USER_2": {
+            "message_id": "MESSAGE_USER_2",
+            "role": "HUMAN",
+            "audience": "USER",
+            "content": "The user supplements the case.",
+            "sequence": 2,
+            "source_hash": "2" * 64,
+        },
+        "MESSAGE_AGENT_2": {
+            "message_id": "MESSAGE_AGENT_2",
+            "role": "AI",
+            "audience": "USER",
+            "content": "The intake officer acknowledges that supplement.",
+            "sequence": 2,
+            "source_hash": "3" * 64,
+        },
+    }
+
+    validate_state(state)
+
+
+def test_state_rejects_two_ai_messages_for_the_same_source_event_sequence(
+    bindings,
+    version_pins,
+) -> None:
+    state = new_intake_graph_state(bindings=bindings, version_pins=version_pins)
+    state["messages"] = {
+        "MESSAGE_AGENT_2_A": {
+            "message_id": "MESSAGE_AGENT_2_A",
+            "role": "AI",
+            "audience": "USER",
+            "content": "First generated response.",
+            "sequence": 2,
+            "source_hash": "2" * 64,
+        },
+        "MESSAGE_AGENT_2_B": {
+            "message_id": "MESSAGE_AGENT_2_B",
+            "role": "AI",
+            "audience": "USER",
+            "content": "Conflicting generated response.",
+            "sequence": 2,
+            "source_hash": "3" * 64,
+        },
+    }
+
+    with pytest.raises(IntakeGraphContractError, match="INTAKE_MESSAGE_SEQUENCE_INVALID"):
+        validate_state(state)
+
+
 def test_snapshot_self_hash_is_mandatory(bindings, version_pins, snapshot) -> None:
     state = new_intake_graph_state(bindings=bindings, version_pins=version_pins)
     corrupted = copy.deepcopy(snapshot)

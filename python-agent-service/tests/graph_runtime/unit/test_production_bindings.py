@@ -13,6 +13,7 @@ from langchain_core.messages import AIMessageChunk
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 
+from app.agents.dispute_intake_officer.schemas import IntakeCaseDetailLlmOutput
 import app.graph_runtime.production_bindings as production_bindings
 from app.api.graph_lifecycle import GraphExecutorKernel
 from app.config import GraphShadowBindingSettings, Settings
@@ -54,6 +55,8 @@ from app.graph_runtime.intake_executor import CompiledIntakeGraphShadowExecutor
 from app.graph_runtime.persistence_models import GraphFenceContext
 from app.graph_runtime.checkpoint import FENCE_CONTEXT_KEY, bind_fence_context
 from app.graphs.intake.lcel import _SAFE_INTAKE_ROOM_UTTERANCE
+from app.graphs.intake.baseline import BASELINE_INTAKE_NODE_NAME
+from app.graphs.intake.contracts import IntakeTurnProposal
 from app.graphs.intake.runtime import IntakeRuntimeBundle
 from app.graph_runtime.production_bindings import (
     _advance_revision,
@@ -73,7 +76,12 @@ from app.security.invocation_envelope import (
     VerifiedReconciliation,
     invocation_binding_claims,
 )
-from app.model_runtime.transports import ModelTransportRequest, StructuredClientTransport
+from app.model_runtime.transports import (
+    ModelTransportCompleted,
+    ModelTransportRequest,
+    ModelTransportResult,
+    StructuredClientTransport,
+)
 
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -106,6 +114,8 @@ def _intake_command() -> tuple[RoomGraphCommand, dict[str, Any], bytes]:
             / "contracts/agent-platform/intake/v2/fixtures/valid/intake-domain-snapshot-valid.json"
         ).read_text(encoding="utf-8")
     )
+    snapshot["initial_case_facts"]["form_source"] = "EXTERNAL_IMPORT"
+    snapshot["snapshot_hash"] = canonical_sha256_omitting(snapshot, "snapshot_hash")
     payload = canonicalize(snapshot)
     registration = json.loads(
         (
@@ -126,6 +136,11 @@ def _intake_command() -> tuple[RoomGraphCommand, dict[str, Any], bytes]:
             "graph_version": registration["graph_version"],
             "checkpoint_schema_version": registration["checkpoint_schema_version"],
             "thread_id": snapshot["thread_id"],
+            # The retained command fixture is historical. Opening now reaches
+            # the governed model preflight, so this synthetic live command must
+            # carry an unexpired deadline rather than testing stale-command
+            # rejection instead of the baseline Intake binding.
+            "deadline_at": "2099-01-01T00:00:00Z",
             "actor_scope": registration["actor_scope"],
             "domain_snapshot_ref": {
                 "artifact_id": snapshot["snapshot_id"],
@@ -139,7 +154,7 @@ def _intake_command() -> tuple[RoomGraphCommand, dict[str, Any], bytes]:
     document["invocation_context"].update(
         {
             "agent_profile_id": "intake-agent.synthetic.v2",
-            "prompt_profile_id": registration["prompt_version"],
+            "prompt_profile_id": "DISPUTE_INTAKE_OFFICER:USER:v1",
             "model_profile_id": registration["model_profile_id"],
             "output_schema_version": registration["output_schema_version"],
             "policy_version": registration["policy_version"],
@@ -443,20 +458,107 @@ def _intake_version(command: RoomGraphCommand) -> VersionBinding:
     )
 
 
-class _NoCallIntakeTransport:
-    def generate(self, request: ModelTransportRequest):
-        raise AssertionError("snapshot initialization must not call the governed model")
+def _strict_baseline_opening_output() -> dict[str, Any]:
+    """A valid retained-baseline response for a snapshot-only opening turn."""
 
-    async def agenerate(self, request: ModelTransportRequest):
-        raise AssertionError("snapshot initialization must not call the governed model")
+    return IntakeCaseDetailLlmOutput.model_validate(
+        {
+            "room_utterance": "Please confirm the requested resolution.",
+            "case_detail": {
+                "case_story": {
+                    "one_sentence_summary": (
+                        "The imported case concerns the reported damaged order."
+                    )
+                }
+            },
+            "unilateral_case_matrix": {
+                "schema_version": "unilateral_case_matrix.draft.v1",
+                "fact_rows": [
+                    {
+                        "fact_key": "NEW_CASE_SUMMARY",
+                        "category": "OTHER",
+                        "fact_target": "The order was reported damaged.",
+                        "materiality": "CORE",
+                        "position_summary": "The user reports a damaged order.",
+                        "asserted_value": "The order was reported damaged.",
+                        "source_scope": "CURRENT_SOURCE",
+                    }
+                ],
+                "summary_source_fact_keys": ["NEW_CASE_SUMMARY"],
+            },
+            "admission_recommendation": "NEED_MORE_INFO",
+            "missing_fields": ["requested_resolution_detail"],
+            "knowledge_query_intent": False,
+            "knowledge_answer_mode": "NONE",
+            "confidence": 0.82,
+        }
+    ).model_dump(mode="json", exclude_none=True)
+
+
+class _StrictBaselineIntakeTransport:
+    """Capture and validate the one governed baseline call for an opening form."""
+
+    def __init__(
+        self,
+        *,
+        form_source: str,
+        form_description: str,
+        agent_session_id: str,
+    ) -> None:
+        self._form_source = form_source
+        self._form_description = form_description
+        self._agent_session_id = agent_session_id
+        self.generate_calls = 0
+        self.requests: list[ModelTransportRequest] = []
+
+    def generate(self, request: ModelTransportRequest) -> ModelTransportResult:
+        self.generate_calls += 1
+        self.requests.append(request)
+        self._assert_baseline_opening_request(request)
+        return ModelTransportResult(
+            json_document=json.dumps(
+                _strict_baseline_opening_output(),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            model="intake-model",
+            latency_ms=4,
+            token_usage={"input": 8, "output": 5, "total": 13},
+        )
+
+    async def agenerate(self, request: ModelTransportRequest) -> ModelTransportResult:
+        return self.generate(request)
 
     def stream(self, request: ModelTransportRequest):
-        raise AssertionError("snapshot initialization must not call the governed model")
-        yield
+        yield ModelTransportCompleted(result=self.generate(request))
 
     async def astream(self, request: ModelTransportRequest):
-        raise AssertionError("snapshot initialization must not call the governed model")
-        yield
+        yield ModelTransportCompleted(result=await self.agenerate(request))
+
+    def _assert_baseline_opening_request(self, request: ModelTransportRequest) -> None:
+        assert request.node_name == BASELINE_INTAKE_NODE_NAME
+        assert request.output_type is IntakeCaseDetailLlmOutput
+        assert len(request.messages) == 2
+        system_prompt = str(request.messages[0].content)
+        human_prompt = str(request.messages[1].content)
+        assert system_prompt
+        assert self._agent_session_id in system_prompt
+        assert self._agent_session_id not in human_prompt
+        assert self._form_source in human_prompt
+        assert self._form_description in human_prompt
+        assert "initial_case_facts" in human_prompt
+
+
+def _strict_baseline_opening_transport(
+    execution: GatewayExecution,
+    snapshot: dict[str, Any],
+) -> _StrictBaselineIntakeTransport:
+    facts = snapshot["initial_case_facts"]
+    return _StrictBaselineIntakeTransport(
+        form_source=facts["form_source"],
+        form_description=facts["form_description"],
+        agent_session_id=execution.thread_record.identity.agent_session_id,
+    )
 
 
 def _intake_execution(
@@ -792,6 +894,7 @@ async def test_authorized_intake_adapter_builds_the_real_governed_graph_proposal
     command, snapshot, payload = _intake_command()
     saver = InMemorySaver()
     execution = _intake_execution(command)
+    transport = _strict_baseline_opening_transport(execution, snapshot)
     context = decode_authorized_intake_ingress(
         command=command,
         loaded=LoadedIntakePayload(
@@ -806,7 +909,7 @@ async def test_authorized_intake_adapter_builds_the_real_governed_graph_proposal
     )
     bundle = build_governed_intake_runtime(
         execution=execution,
-        transport=cast(Any, _NoCallIntakeTransport()),
+        transport=cast(Any, transport),
         provider="synthetic",
         model="intake-model",
         checkpointer=saver,
@@ -823,10 +926,21 @@ async def test_authorized_intake_adapter_builds_the_real_governed_graph_proposal
     proposal = bundle.terminal_proposal(result)
     artifact = canonical_intake_proposal(proposal)
 
+    assert transport.generate_calls == 1
+    assert len(transport.requests) == 1
+    assert result["terminal_draft"] == result["result_json"]
     assert proposal.schema_version == "intake-turn-proposal.v2"
     assert proposal.command_id == command.command_id
     assert proposal.thread_id == command.thread_id
     assert proposal.actor_scope_hash == snapshot["actor_scope_hash"]
+    assert proposal.source_snapshot_hash == snapshot["snapshot_hash"]
+    assert proposal.source_event_hash is None
+    assert proposal.room_utterance == "Please confirm the requested resolution."
+    projected_dossier = proposal.dossier_patch.model_dump(mode="json", exclude_none=True)
+    assert projected_dossier["case_story"]["one_sentence_summary"] == (
+        "The imported case concerns the reported damaged order."
+    )
+    assert proposal.profile_versions.prompt_version == command.invocation_context.prompt_profile_id
     assert proposal.profile_versions.model_profile_id == "intake-model.synthetic.v1"
     assert proposal.profile_versions.tool_policy_version == "no-tools.v1"
     assert artifact.schema_version == "intake-turn-proposal.v2"
@@ -846,7 +960,7 @@ async def test_compiled_intake_executor_persists_one_pointer_without_replacing_s
     monkeypatch: pytest.MonkeyPatch,
     commit_fails: bool,
 ) -> None:
-    command, _, payload = _intake_command()
+    command, snapshot, payload = _intake_command()
     execution = _intake_execution(command)
     loaded = LoadedIntakePayload(
         artifact_id=command.domain_snapshot_ref.artifact_id,
@@ -858,9 +972,10 @@ async def test_compiled_intake_executor_persists_one_pointer_without_replacing_s
         canonical_payload=payload,
     )
     context = decode_authorized_intake_ingress(command=command, loaded=loaded)
+    source_transport = _strict_baseline_opening_transport(execution, snapshot)
     source_bundle = build_governed_intake_runtime(
         execution=execution,
-        transport=cast(Any, _NoCallIntakeTransport()),
+        transport=cast(Any, source_transport),
         provider="synthetic",
         model="intake-model",
         checkpointer=InMemorySaver(),
@@ -870,6 +985,8 @@ async def test_compiled_intake_executor_persists_one_pointer_without_replacing_s
         {"configurable": {"thread_id": command.thread_id}},
         context=context,
     )
+    assert source_transport.generate_calls == 1
+    assert len(source_transport.requests) == 1
     durable_state["usage_by_invocation"][command.attempt_id] = {
         "input_tokens": 3,
         "output_tokens": 2,
@@ -950,7 +1067,7 @@ async def test_compiled_intake_executor_persists_one_pointer_without_replacing_s
                                 {
                                     "schema_version": "governed-model-event.v1",
                                     "event_type": "visible_delta",
-                                    "node_name": "intake_lcel",
+                                    "node_name": BASELINE_INTAKE_NODE_NAME,
                                     "field": "case_detail.dispute_core_state",
                                     "delta": (
                                         '{"blocker":"missing detail","current_status":"INITIATED",'
@@ -973,8 +1090,8 @@ async def test_compiled_intake_executor_persists_one_pointer_without_replacing_s
                                 {
                                     "schema_version": "governed-model-event.v1",
                                     "event_type": "visible_delta",
-                                    "node_name": "intake_lcel",
-                                    "field": "room_utterance",
+                                    "node_name": BASELINE_INTAKE_NODE_NAME,
+                                    "field": "case_detail.case_story.title",
                                     "delta": json.dumps("请上传截图作为证据。", ensure_ascii=False),
                                 }
                             ]
@@ -993,7 +1110,7 @@ async def test_compiled_intake_executor_persists_one_pointer_without_replacing_s
                                 {
                                     "schema_version": "governed-model-event.v1",
                                     "event_type": "visible_delta",
-                                    "node_name": "intake_lcel",
+                                    "node_name": BASELINE_INTAKE_NODE_NAME,
                                     "field": "case_detail.missing_information",
                                     "delta": json.dumps(
                                         {"next_questions": ["请上传截图作为证据。"]},
@@ -1016,7 +1133,7 @@ async def test_compiled_intake_executor_persists_one_pointer_without_replacing_s
                                 {
                                     "schema_version": "governed-model-event.v1",
                                     "event_type": "visible_delta",
-                                    "node_name": "intake_lcel",
+                                    "node_name": BASELINE_INTAKE_NODE_NAME,
                                     "field": "case_detail.case_story",
                                     "delta": '{"one_sentence_summary":"Case summary."}',
                                 }
@@ -1036,7 +1153,7 @@ async def test_compiled_intake_executor_persists_one_pointer_without_replacing_s
                                 {
                                     "schema_version": "governed-model-event.v1",
                                     "event_type": "visible_delta",
-                                    "node_name": "intake_lcel",
+                                    "node_name": BASELINE_INTAKE_NODE_NAME,
                                     "field": "case_detail.references",
                                     "delta": '{"order_reference":"ORDER-1"}',
                                 }
@@ -1046,6 +1163,27 @@ async def test_compiled_intake_executor_persists_one_pointer_without_replacing_s
                     {"langgraph_node": "intake_lcel"},
                 ),
             )
+            for title_delta in ("Order ", "delivery dispute"):
+                yield (
+                    "messages",
+                    (
+                        AIMessageChunk(
+                            content="",
+                            additional_kwargs={
+                                "governed_events": [
+                                    {
+                                        "schema_version": "governed-model-event.v1",
+                                        "event_type": "visible_delta",
+                                        "node_name": BASELINE_INTAKE_NODE_NAME,
+                                        "field": "case_detail.case_story.title",
+                                        "delta": title_delta,
+                                    }
+                                ]
+                            },
+                        ),
+                        {"langgraph_node": "intake_lcel"},
+                    ),
+                )
             yield (
                 "custom",
                 GraphPublicUpdate.usage(Usage(input_tokens=3, output_tokens=2, total_tokens=5)),
@@ -1116,15 +1254,23 @@ async def test_compiled_intake_executor_persists_one_pointer_without_replacing_s
             "visible_delta",
             "visible_delta",
             "visible_delta",
+            "visible_delta",
+            "visible_delta",
         ]
-        assert events[1].payload.field == "room_utterance"
-        assert events[1].payload.delta == _SAFE_INTAKE_ROOM_UTTERANCE
-        assert events[2].payload.field == "case_detail.case_story"
-        assert events[3].payload.field == "case_detail.references"
+        assert events[1].payload.field == "case_detail.case_story"
+        assert events[2].payload.field == "case_detail.references"
+        assert [event.payload.delta for event in events[3:5]] == [
+            "Order ",
+            "delivery dispute",
+        ]
+        assert events[5].payload.field == "room_utterance"
+        assert events[5].payload.delta == _SAFE_INTAKE_ROOM_UTTERANCE
         assert visible_commit_states == [
-            ("room_utterance", False),
             ("case_detail.case_story", False),
             ("case_detail.references", False),
+            ("case_detail.case_story.title", False),
+            ("case_detail.case_story.title", False),
+            ("room_utterance", False),
         ]
         assert saver.preflights == 1
         assert store.calls == 1
@@ -1138,31 +1284,49 @@ async def test_compiled_intake_executor_persists_one_pointer_without_replacing_s
     await collect()
     assert [event.event_type for event in events] == [
         "attempt_started",
-        "visible_delta",
-        "visible_delta",
-        "visible_delta",
-        "visible_delta",
+        *["visible_delta"] * 14,
         "usage",
         "final",
     ]
-    assert events[1].payload.field == "room_utterance"
-    assert events[1].payload.delta == _SAFE_INTAKE_ROOM_UTTERANCE
-    assert events[2].payload.field == "case_detail.case_story"
-    assert events[2].payload.delta == '{"one_sentence_summary":"Case summary."}'
-    assert events[3].payload.field == "case_detail.references"
-    assert events[3].payload.delta == '{"order_reference":"ORDER-1"}'
-    assert events[4].payload.field == "case_detail.dispute_core_state"
-    assert json.loads(events[4].payload.delta) == {
-        "core_conflict": "The requested resolution remains disputed.",
-        "facts_in_dispute": ["Whether the repair resolved the recurring fault."],
-        "next_verification_focus": ["Confirm the elapsed time after repair."],
+    assert events[1].payload.field == "case_detail.case_story"
+    assert events[1].payload.delta == '{"one_sentence_summary":"Case summary."}'
+    assert events[2].payload.field == "case_detail.references"
+    assert events[2].payload.delta == '{"order_reference":"ORDER-1"}'
+    assert [event.payload.delta for event in events[3:5]] == [
+        "Order ",
+        "delivery dispute",
+    ]
+    assert events[5].payload.field == "room_utterance"
+    assert events[5].payload.delta == _SAFE_INTAKE_ROOM_UTTERANCE
+    terminal_dossier_fields = [
+        "case_story",
+        "references",
+        "party_positions",
+        "claim_resolution",
+        "dispute_core_state",
+        "dispute_focus",
+        "risk_assessment",
+        "missing_information",
+        "intake_quality",
+    ]
+    assert [event.payload.field for event in events[6:15]] == [
+        f"case_detail.{field}" for field in terminal_dossier_fields
+    ]
+    assert {
+        event.payload.field.removeprefix("case_detail."): json.loads(event.payload.delta)
+        for event in events[6:15]
+    } == {
+        field: proposal_before["dossier_patch"][field]
+        for field in terminal_dossier_fields
     }
-    assert events[5].payload.usage == Usage(input_tokens=3, output_tokens=2, total_tokens=5)
+    assert events[15].payload.usage == Usage(input_tokens=3, output_tokens=2, total_tokens=5)
     assert visible_commit_states == [
-        ("room_utterance", False),
         ("case_detail.case_story", False),
         ("case_detail.references", False),
-        ("case_detail.dispute_core_state", True),
+        ("case_detail.case_story.title", False),
+        ("case_detail.case_story.title", False),
+        ("room_utterance", False),
+        *[(f"case_detail.{field}", True) for field in terminal_dossier_fields],
     ]
     assert saver.preflights == 1
     assert store.calls == 1
@@ -1176,6 +1340,279 @@ async def test_compiled_intake_executor_persists_one_pointer_without_replacing_s
     assert result_json["artifact_operations"][0]["operation"] == "PROPOSE_PATCH"
     assert durable_state["terminal_draft"] == proposal_before
     assert durable_state["result_json"] == proposal_before
+
+
+@pytest.mark.parametrize(
+    ("length", "expected_chunk_lengths"),
+    [(4096, (4096,)), (4097, (4096, 1))],
+)
+def test_compiled_intake_executor_chunks_guarded_room_utterance_at_stream_limit(
+    length: int,
+    expected_chunk_lengths: tuple[int, ...],
+) -> None:
+    room_utterance = "\U0001F642" * length
+
+    updates = CompiledIntakeGraphShadowExecutor._room_utterance_updates(room_utterance)
+
+    assert tuple(len(update.payload.delta or "") for update in updates) == expected_chunk_lengths
+    assert "".join(update.payload.delta or "" for update in updates) == room_utterance
+    assert all((update.payload.delta or "") for update in updates)
+
+
+@pytest.mark.parametrize(
+    ("length", "expected_chunk_lengths"),
+    [(4096, (4096,)), (4097, (4096, 1))],
+)
+def test_compiled_intake_executor_chunks_unicode_string_prefix_leaf_at_stream_limit(
+    length: int,
+    expected_chunk_lengths: tuple[int, ...],
+) -> None:
+    delta = "\U0001F642" * length
+
+    updates = CompiledIntakeGraphShadowExecutor._string_prefix_dossier_updates(
+        node=BASELINE_INTAKE_NODE_NAME,
+        field="case_detail.case_story.title",
+        delta=delta,
+    )
+
+    assert tuple(len(update.payload.delta or "") for update in updates) == expected_chunk_lengths
+    assert "".join(update.payload.delta or "" for update in updates) == delta
+    assert all((update.payload.delta or "") for update in updates)
+
+
+@pytest.mark.asyncio
+async def test_compiled_intake_executor_skips_oversized_root_json_and_finalizes_after_room_chunks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command, _, _ = _intake_command()
+    execution = _intake_execution(command)
+    room_utterance = "\U0001F642" * 4097
+    oversized_leaf_delta = "\U0001F642" * 4097
+    oversized_case_story = {"one_sentence_summary": "x" * 4097}
+    oversized_delta = json.dumps(oversized_case_story, separators=(",", ":"))
+    assert len(oversized_delta) > 4096
+
+    class DossierPatch:
+        def model_dump(self, **_: Any) -> dict[str, Any]:
+            return {"case_story": oversized_case_story}
+
+    proposal = SimpleNamespace(
+        room_utterance=room_utterance,
+        dossier_patch=DossierPatch(),
+    )
+    state = {
+        "terminal_draft": {"same": True},
+        "result_json": {"same": True},
+        "cognitive_revision": 1,
+    }
+    result = SimpleNamespace(
+        result_ref="urn:intake:delta-bound:result",
+        result_hash="a" * 64,
+        proposal_hash="b" * 64,
+        result_envelope_hash="c" * 64,
+    )
+    canonical = SimpleNamespace(
+        artifact_id="intake-proposal-delta-bound",
+        schema_version="intake-turn-proposal.v2",
+        sha256="d" * 64,
+        size_bytes=1,
+    )
+    final_config = bind_fence_context(
+        {
+            "configurable": {
+                "thread_id": command.thread_id,
+                "checkpoint_ns": "",
+                "checkpoint_id": "cp-intake-terminal",
+            }
+        },
+        execution.fence,
+    )
+
+    class Saver:
+        def __init__(self) -> None:
+            self.terminal_committed = False
+
+        async def avalidate_external_terminal_checkpoint(self, config, **kwargs) -> None:
+            assert config is final_config
+            assert kwargs["cognitive_revision"] == 1
+
+        async def acommit_external_terminal(self, config, commit):
+            assert config is final_config
+            assert commit.result is result
+            self.terminal_committed = True
+            configurable = dict(config["configurable"])
+            configurable[FENCE_CONTEXT_KEY] = replace(
+                execution.fence,
+                result_ref=result.result_ref,
+                result_hash=result.result_hash,
+                proposal_hash=result.proposal_hash,
+                result_envelope_hash=result.result_envelope_hash,
+            )
+            return {"configurable": configurable}
+
+    saver = Saver()
+
+    class Graph:
+        checkpointer = saver
+
+        async def astream(self, input, config, **kwargs):
+            assert kwargs["stream_mode"] == ["messages", "custom"]
+            yield (
+                "messages",
+                (
+                    AIMessageChunk(
+                        content="",
+                        additional_kwargs={
+                            "governed_events": [
+                                {
+                                    "schema_version": "governed-model-event.v1",
+                                    "event_type": "visible_delta",
+                                    "node_name": BASELINE_INTAKE_NODE_NAME,
+                                    "field": "case_detail.case_story",
+                                    "delta": oversized_delta,
+                                }
+                            ]
+                        },
+                    ),
+                    {"langgraph_node": BASELINE_INTAKE_NODE_NAME},
+                ),
+            )
+            yield (
+                "messages",
+                (
+                    AIMessageChunk(
+                        content="",
+                        additional_kwargs={
+                            "governed_events": [
+                                {
+                                    "schema_version": "governed-model-event.v1",
+                                    "event_type": "visible_delta",
+                                    "node_name": BASELINE_INTAKE_NODE_NAME,
+                                    "field": "case_detail.case_story.title",
+                                    "delta": oversized_leaf_delta,
+                                }
+                            ]
+                        },
+                    ),
+                    {"langgraph_node": BASELINE_INTAKE_NODE_NAME},
+                ),
+            )
+
+        async def aget_state(self, config):
+            return object()
+
+    class Store:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def put(self, selected_execution, *, proposal, **kwargs):
+            assert selected_execution is execution
+            assert proposal is canonical
+            self.calls += 1
+            return StoredIntakeProposal(
+                artifact_id=canonical.artifact_id,
+                schema_version=canonical.schema_version,
+                uri="s3://intake-proposals/delta-bound.json",
+                object_version="version-1",
+                sha256=canonical.sha256,
+                size_bytes=canonical.size_bytes,
+            )
+
+    class Materializer:
+        def materialize(self, checkpoint_ns, checkpoint_id, *, fence):
+            assert checkpoint_ns == ""
+            assert checkpoint_id == "cp-intake-terminal"
+            assert fence is execution.fence
+            return result
+
+    async def load_context(*_: Any, **__: Any) -> object:
+        return object()
+
+    monkeypatch.setattr(
+        "app.graph_runtime.intake_executor.build_governed_intake_runtime",
+        lambda **kwargs: SimpleNamespace(graph=Graph()),
+    )
+    monkeypatch.setattr(CompiledIntakeGraphShadowExecutor, "_load_context", load_context)
+    monkeypatch.setattr(
+        CompiledIntakeGraphShadowExecutor,
+        "_snapshot",
+        staticmethod(lambda *_: (state, final_config)),
+    )
+    monkeypatch.setattr(
+        IntakeRuntimeBundle,
+        "terminal_proposal",
+        staticmethod(lambda _: proposal),
+    )
+    monkeypatch.setattr(
+        CompiledIntakeGraphShadowExecutor,
+        "_command_usage",
+        staticmethod(lambda *_: Usage(input_tokens=0, output_tokens=0, total_tokens=0)),
+    )
+    monkeypatch.setattr(
+        "app.graph_runtime.intake_executor.canonical_intake_proposal",
+        lambda _: canonical,
+    )
+    monkeypatch.setattr(
+        CompiledIntakeGraphShadowExecutor,
+        "_materializer",
+        staticmethod(lambda *_, **__: Materializer()),
+    )
+    monkeypatch.setattr(
+        "app.graph_runtime.intake_executor.ExternalTerminalCommit",
+        lambda **kwargs: SimpleNamespace(**kwargs),
+    )
+
+    class UnusedLoader:
+        async def load(self, *args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("patched context loader should be the only loader")
+
+    store = Store()
+    executor = CompiledIntakeGraphShadowExecutor(
+        saver=cast(Any, saver),
+        transport=cast(Any, object()),
+        provider="synthetic",
+        model="intake-model",
+        input_loader=UnusedLoader(),
+        proposal_store=store,
+    )
+
+    events = [event async for event in executor.stream(execution)]
+    room_events = [
+        event
+        for event in events
+        if event.event_type == "visible_delta" and event.payload.field == "room_utterance"
+    ]
+    leaf_events = [
+        event
+        for event in events
+        if event.event_type == "visible_delta"
+        and event.payload.field == "case_detail.case_story.title"
+    ]
+
+    assert [event.sequence_no for event in events] == list(range(len(events)))
+    assert [
+        event.payload.field for event in events if event.event_type == "visible_delta"
+    ] == [
+        "case_detail.case_story.title",
+        "case_detail.case_story.title",
+        "room_utterance",
+        "room_utterance",
+    ]
+    assert [len(event.payload.delta or "") for event in leaf_events] == [4096, 1]
+    assert "".join(event.payload.delta or "" for event in leaf_events) == oversized_leaf_delta
+    assert [len(event.payload.delta or "") for event in room_events] == [4096, 1]
+    assert "".join(event.payload.delta or "" for event in room_events) == room_utterance
+    assert all(
+        len(event.payload.delta or "") <= 4096 for event in (*leaf_events, *room_events)
+    )
+    assert not any(
+        event.event_type == "visible_delta" and event.payload.field == "case_detail.case_story"
+        for event in events
+    )
+    assert events[-1].event_type == "final"
+    assert events[-2] is room_events[-1]
+    assert saver.terminal_committed
+    assert store.calls == 1
 
 
 @pytest.mark.asyncio
@@ -1199,8 +1636,8 @@ async def test_compiled_intake_executor_streams_provisional_dossier_before_termi
                                 {
                                     "schema_version": "governed-model-event.v1",
                                     "event_type": "visible_delta",
-                                    "node_name": "intake_lcel",
-                                    "field": "room_utterance",
+                                    "node_name": BASELINE_INTAKE_NODE_NAME,
+                                    "field": "case_detail.dispute_core_state",
                                     "delta": json.dumps("Please confirm the requested resolution."),
                                 }
                             ]
@@ -1219,7 +1656,7 @@ async def test_compiled_intake_executor_streams_provisional_dossier_before_termi
                                 {
                                     "schema_version": "governed-model-event.v1",
                                     "event_type": "visible_delta",
-                                    "node_name": "intake_lcel",
+                                    "node_name": BASELINE_INTAKE_NODE_NAME,
                                     "field": "case_detail.case_story",
                                     "delta": '{"one_sentence_summary":"uncommitted"}',
                                 }
@@ -1239,7 +1676,7 @@ async def test_compiled_intake_executor_streams_provisional_dossier_before_termi
                                 {
                                     "schema_version": "governed-model-event.v1",
                                     "event_type": "visible_delta",
-                                    "node_name": "intake_lcel",
+                                    "node_name": BASELINE_INTAKE_NODE_NAME,
                                     "field": "case_detail.respondent_attitude",
                                     "delta": '{"status":"UNKNOWN","description":"待确认"}',
                                 }
@@ -1306,11 +1743,9 @@ async def test_compiled_intake_executor_streams_provisional_dossier_before_termi
     assert [event.event_type for event in events] == [
         "attempt_started",
         "visible_delta",
-        "visible_delta",
     ]
-    assert events[1].payload.field == "room_utterance"
-    assert events[2].payload.field == "case_detail.case_story"
-    assert events[2].payload.delta == '{"one_sentence_summary":"uncommitted"}'
+    assert events[1].payload.field == "case_detail.case_story"
+    assert events[1].payload.delta == '{"one_sentence_summary":"uncommitted"}'
 
 
 @pytest.mark.parametrize(
@@ -1347,6 +1782,52 @@ def test_compiled_intake_executor_defers_substantive_respondent_attitude_to_term
     assert CompiledIntakeGraphShadowExecutor._should_suppress_respondent_attitude_update(update)
 
 
+def test_compiled_intake_executor_replaces_all_streamable_dossier_sections_at_terminal() -> None:
+    document = json.loads(
+        (
+            ROOT
+            / "contracts/agent-platform/intake/v2/fixtures/valid/intake-turn-proposal-valid.json"
+        ).read_text(encoding="utf-8")
+    )
+    document["dossier_patch"].update(
+        {
+            "references": {"order_reference": "ORDER_AUTHORITATIVE"},
+            "party_positions": {"user_claim": "Authoritative claim"},
+            "dispute_core_state": {
+                "core_conflict": "Authoritative conflict",
+                "facts_in_dispute": ["Authoritative fact"],
+                "next_verification_focus": ["Authoritative focus"],
+            },
+            "missing_information": {"next_questions": ["Authoritative question?"]},
+            "intake_quality": {"score": 0.72},
+        }
+    )
+    document["proposal_hash"] = canonical_sha256_omitting(document, "proposal_hash")
+    proposal = IntakeTurnProposal.model_validate(document)
+
+    updates = CompiledIntakeGraphShadowExecutor._terminal_normalized_dossier_updates(
+        proposal
+    )
+    replacements = {
+        update.payload.field: json.loads(update.payload.delta or "") for update in updates
+    }
+
+    assert replacements["case_detail.case_story"] == document["dossier_patch"]["case_story"]
+    assert replacements["case_detail.references"] == document["dossier_patch"]["references"]
+    assert replacements["case_detail.party_positions"] == document["dossier_patch"][
+        "party_positions"
+    ]
+    assert replacements["case_detail.dispute_core_state"] == document["dossier_patch"][
+        "dispute_core_state"
+    ]
+    assert replacements["case_detail.missing_information"] == document["dossier_patch"][
+        "missing_information"
+    ]
+    assert replacements["case_detail.intake_quality"] == document["dossier_patch"][
+        "intake_quality"
+    ]
+
+
 def test_compiled_intake_executor_rejects_dual_respondent_attitude_discriminators() -> None:
     update = GraphPublicUpdate.visible_delta(
         node="intake_lcel",
@@ -1369,7 +1850,7 @@ def test_compiled_intake_executor_rejects_dual_respondent_attitude_discriminator
 
 def test_compiled_intake_executor_replaces_forbidden_room_utterance_before_publication() -> None:
     update = GraphPublicUpdate.visible_delta(
-        node="intake_lcel",
+        node=BASELINE_INTAKE_NODE_NAME,
         field="room_utterance",
         delta=json.dumps("请上传截图作为证据。", ensure_ascii=False),
     )
@@ -1776,6 +2257,9 @@ async def test_java_intake_exchange_put_returns_exact_versioned_receipt() -> Non
             "attempt_id": command.attempt_id,
             "source_snapshot_hash": command.domain_snapshot_ref.sha256,
         }
+    )
+    proposal_document["profile_versions"]["prompt_version"] = (
+        command.invocation_context.prompt_profile_id
     )
     proposal_document.pop("source_event_hash", None)
     proposal_document["proposal_hash"] = canonical_sha256_omitting(

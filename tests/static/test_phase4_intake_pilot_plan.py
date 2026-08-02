@@ -281,6 +281,46 @@ def test_phase4_schemas_validate_positive_and_reject_negative_fixtures() -> None
             assert list(validator.iter_errors(invalid)), invalid_path.name
 
 
+def test_phase4_snapshot_requires_an_explicit_known_form_source() -> None:
+    schema = json.loads(
+        (CONTRACT_ROOT / "intake-domain-snapshot.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    validator = jsonschema.Draft202012Validator(schema)
+    valid_root = CONTRACT_ROOT / "fixtures/valid"
+    invalid_root = CONTRACT_ROOT / "fixtures/invalid"
+
+    valid = json.loads(
+        (valid_root / "intake-domain-snapshot-valid.json").read_text(encoding="utf-8")
+    )
+    assert valid["initial_case_facts"]["form_source"] == "FORM_SUBMISSION"
+    assert not list(validator.iter_errors(valid))
+
+    external_import = copy.deepcopy(valid)
+    external_import["initial_case_facts"]["form_source"] = "EXTERNAL_IMPORT"
+    assert not list(validator.iter_errors(external_import))
+
+    missing = json.loads(
+        (invalid_root / "intake-domain-snapshot-missing-form-source.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert any(
+        error.validator == "required"
+        and list(error.absolute_path) == ["initial_case_facts"]
+        for error in validator.iter_errors(missing)
+    )
+
+    unsupported = copy.deepcopy(valid)
+    unsupported["initial_case_facts"]["form_source"] = "LEGACY_IMPORT"
+    assert any(
+        error.validator == "enum"
+        and list(error.absolute_path) == ["initial_case_facts", "form_source"]
+        for error in validator.iter_errors(unsupported)
+    )
+
+
 def test_phase4_snapshot_and_proposal_reject_forbidden_keys_at_any_depth() -> None:
     valid_root = CONTRACT_ROOT / "fixtures/valid"
     cases = [

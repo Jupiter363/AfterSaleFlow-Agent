@@ -65,6 +65,21 @@ function isStructuredVisibleField(fieldPath) {
   ].includes(value);
 }
 
+function isCaseDetailRootSnapshotField(fieldPath) {
+  const segments = String(fieldPath || "").split(".");
+  return segments.length === 2 && segments[0] === "case_detail" && Boolean(segments[1]);
+}
+
+function applyVisibleFieldDelta(fieldText, fieldPath, delta) {
+  // A case-detail branch is a complete JSON snapshot in one SSE event. It is
+  // deliberately not a text stream: a terminal snapshot for the same branch
+  // supersedes the model's earlier provisional snapshot. Nested case-detail
+  // leaves continue to use normal append semantics.
+  fieldText[fieldPath] = isCaseDetailRootSnapshotField(fieldPath)
+    ? delta
+    : (fieldText[fieldPath] || "") + delta;
+}
+
 function createStreamCard(presentation) {
   return reactive({
     key: presentation.key,
@@ -395,13 +410,26 @@ export async function consumeAgentRun({
 
               const isV2 = event.protocol === "agent-stream.v2";
               if (isV2 && event.event === "attempt_started") {
-                run.attempts[event.attemptId] = {
-                  status: "STREAMING",
+                run.attempts[event.attemptId] ||= {
                   startedAt: Date.now(),
+                  hasVisibleOutput: false,
                 };
+                run.attempts[event.attemptId].status = "STREAMING";
+                run.attempts[event.attemptId].hasVisibleOutput ??= false;
                 if (!run.currentAttemptId) run.currentAttemptId = event.attemptId;
                 else if (run.currentAttemptId !== event.attemptId) {
-                  run.pendingAttemptId = event.attemptId;
+                  const currentAttempt = run.attempts[run.currentAttemptId];
+                  // The ledger deliberately omits attempt_reset when a failed
+                  // attempt never emitted a visible delta. There is no user
+                  // projection to discard in that case, so atomically promote
+                  // the retry. Once any visible output exists, only an explicit
+                  // reset may replace it.
+                  if (!currentAttempt?.hasVisibleOutput) {
+                    run.currentAttemptId = event.attemptId;
+                    run.pendingAttemptId = "";
+                  } else {
+                    run.pendingAttemptId = event.attemptId;
+                  }
                 }
               }
               if (isV2 && event.event === "attempt_reset") {
@@ -440,6 +468,9 @@ export async function consumeAgentRun({
                 if (!structuredField) {
                   run.displayPacer.assertCapacity(event.delta);
                 }
+                if (isV2 && run.attempts[event.attemptId]) {
+                  run.attempts[event.attemptId].hasVisibleOutput = true;
+                }
                 run.status = "STREAMING";
                 const card = structuredField
                   ? null
@@ -448,15 +479,21 @@ export async function consumeAgentRun({
                 if (!run.receivedFieldOrder.includes(event.fieldPath)) {
                   run.receivedFieldOrder.push(event.fieldPath);
                 }
-                run.receivedFieldText[event.fieldPath] =
-                  (run.receivedFieldText[event.fieldPath] || "") + event.delta;
+                applyVisibleFieldDelta(
+                  run.receivedFieldText,
+                  event.fieldPath,
+                  event.delta,
+                );
                 rebuildReceivedContent(run);
                 if (structuredField) {
                   if (!run.fieldOrder.includes(event.fieldPath)) {
                     run.fieldOrder.push(event.fieldPath);
                   }
-                  run.fieldText[event.fieldPath] =
-                    (run.fieldText[event.fieldPath] || "") + event.delta;
+                  applyVisibleFieldDelta(
+                    run.fieldText,
+                    event.fieldPath,
+                    event.delta,
+                  );
                   rebuildVisibleContent(run);
                 } else {
                   const pacedFieldKey = `${event.nodeName || "node"}::${event.fieldPath}`;

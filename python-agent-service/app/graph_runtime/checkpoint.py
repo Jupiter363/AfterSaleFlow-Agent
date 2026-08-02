@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, replace
@@ -32,7 +34,12 @@ from app.graph_runtime.persistence_models import (
     GraphPoolConfig,
     GraphPersistenceConfigurationError,
 )
-from app.graph_runtime.ledger import PostgresCommandLedger, ResultRecord
+from app.graph_runtime.errors import GraphTerminalBindingError
+from app.graph_runtime.ledger import (
+    CompletedStartCheckpoint,
+    PostgresCommandLedger,
+    ResultRecord,
+)
 from app.graph_runtime.target_e2e import (
     TargetE2ERoomProposalSource,
     build_target_e2e_result_envelope,
@@ -48,6 +55,7 @@ from app.graph_runtime.result import (
 FENCE_CONTEXT_KEY: Final[str] = "__trusted_graph_fence_context__"
 TERMINAL_RESULT_CONTEXT_KEY: Final[str] = "__trusted_graph_terminal_result__"
 ROOM_GRAPH_RESULT_SCHEMA_VERSION: Final[str] = "room-graph-result.v1"
+PENDING_WRITE_OWNER_PREFIX: Final[str] = "grt.pending-write.v1."
 
 FENCE_LOCK_SQL: Final[str] = """
 select fencing_token
@@ -485,7 +493,7 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
         found = await self._reader.aget_tuple(config)
         if found is None:
             return None
-        self._validate_checkpoint_tuple(found, fence)
+        await self._validate_checkpoint_tuple_for_command_or_start(found, fence)
         return self._bind_tuple(found, fence)
 
     async def alist(
@@ -509,7 +517,7 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
             before=before,
             limit=limit,
         ):
-            self._validate_checkpoint_tuple(item, fence)
+            await self._validate_checkpoint_tuple_for_command_or_start(item, fence)
             yield self._bind_tuple(item, fence)
 
     async def aput(
@@ -596,7 +604,10 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
                         checkpoint_ns=checkpoint_ns,
                         checkpoint_id=checkpoint_id,
                     )
-                    if self._checkpoint_has_applied_revision(checkpoint_to_save):
+                    if (
+                        terminal_result is not None
+                        and self._checkpoint_has_applied_revision(checkpoint_to_save)
+                    ):
                         parent = config.get("configurable") or {}
                         parent_checkpoint_ns = parent.get("checkpoint_ns", "")
                         parent_checkpoint_id = parent.get("checkpoint_id")
@@ -642,13 +653,14 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
         task_path: str = "",
     ) -> None:
         fence = self._require_fence(config)
+        owned_task_id = self._encode_pending_write_task_id(task_id, fence)
         async with self._serialized_thread_write(fence.thread_id):
             prepared = (
                 await asyncio.to_thread(
                     self._prepare_pending_writes,
                     config,
                     writes,
-                    task_id,
+                    owned_task_id,
                     task_path,
                 )
                 if self._uses_native_direct_writes
@@ -660,7 +672,7 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
                     await self._validate_pending_write_target(connection, config, fence)
                     if prepared is None:
                         saver = self._direct_saver_factory(connection, self.serde)
-                        await saver.aput_writes(config, writes, task_id, task_path)
+                        await saver.aput_writes(config, writes, owned_task_id, task_path)
                     else:
                         await self._write_prepared_pending_writes(connection, prepared)
 
@@ -868,6 +880,93 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
             for index, (channel, value) in enumerate(writes)
         )
         return _PreparedPendingWrites(query=query, parameters=parameters)
+
+    @staticmethod
+    def _encode_pending_write_task_id(task_id: str, fence: GraphFenceContext) -> str:
+        """Bind a LangGraph task write to one exact command attempt.
+
+        ``checkpoint_writes`` has no command or fence columns.  Its task ID is
+        consequently the only storage field that survives the saver read API and
+        can carry an ownership discriminator without a schema migration.
+        """
+
+        if not isinstance(task_id, str):
+            raise GraphBindingError("pending write task identity must be a string")
+        payload = json.dumps(
+            [fence.command_id, fence.request_hash, fence.fencing_token, task_id],
+            ensure_ascii=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        encoded = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+        return f"{PENDING_WRITE_OWNER_PREFIX}{encoded}"
+
+    @staticmethod
+    def _restore_pending_write_task_id(
+        stored_task_id: Any,
+        fence: GraphFenceContext,
+    ) -> str | None:
+        """Return the original task ID only when its owner is the active fence.
+
+        Older unwrapped rows intentionally fail closed: a completed predecessor
+        can contain failed-command writes, and the saver API exposes no other
+        per-write ownership metadata with which to distinguish them.
+        """
+
+        if not isinstance(stored_task_id, str) or not stored_task_id.startswith(
+            PENDING_WRITE_OWNER_PREFIX
+        ):
+            return None
+        encoded = stored_task_id.removeprefix(PENDING_WRITE_OWNER_PREFIX)
+        if not encoded:
+            return None
+        try:
+            payload_bytes = base64.b64decode(
+                encoded + "=" * (-len(encoded) % 4),
+                altchars=b"-_",
+                validate=True,
+            )
+            if (
+                base64.urlsafe_b64encode(payload_bytes).decode("ascii").rstrip("=")
+                != encoded
+            ):
+                return None
+            payload = json.loads(payload_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError, TypeError):
+            return None
+        if not isinstance(payload, list) or len(payload) != 4:
+            return None
+        command_id, request_hash, fencing_token, task_id = payload
+        if (
+            not isinstance(command_id, str)
+            or not isinstance(request_hash, str)
+            or not isinstance(fencing_token, int)
+            or isinstance(fencing_token, bool)
+            or not isinstance(task_id, str)
+            or command_id != fence.command_id
+            or request_hash != fence.request_hash
+            or fencing_token != fence.fencing_token
+        ):
+            return None
+        return task_id
+
+    @classmethod
+    def _filter_pending_writes_for_fence(
+        cls,
+        pending_writes: Sequence[tuple[str, str, Any]] | None,
+        fence: GraphFenceContext,
+    ) -> list[tuple[str, str, Any]] | None:
+        if pending_writes is None:
+            return None
+        restored: list[tuple[str, str, Any]] = []
+        for pending_write in pending_writes:
+            try:
+                stored_task_id, channel, value = pending_write
+            except (TypeError, ValueError):
+                continue
+            task_id = cls._restore_pending_write_task_id(stored_task_id, fence)
+            if task_id is not None and isinstance(channel, str):
+                restored.append((task_id, channel, value))
+        return restored
 
     @staticmethod
     async def _write_prepared_pending_writes(
@@ -1178,7 +1277,13 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
             # record. The later aput is fenced and binds the checkpoint metadata
             # atomically, so an unfinished run can leave only unread orphan writes.
             return
-        self._validate_checkpoint_metadata(row["metadata"], fence)
+        await self._validate_checkpoint_metadata_for_command_or_start(
+            connection,
+            row["metadata"],
+            fence,
+            checkpoint_ns=checkpoint_ns,
+            checkpoint_id=checkpoint_id,
+        )
 
     async def _lock_external_terminal_checkpoint(
         self,
@@ -1356,30 +1461,164 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
         configurable = item.config.get("configurable") or {}
         if configurable.get("thread_id") != fence.thread_id:
             raise GraphBindingError("checkpoint tuple belongs to another Graph thread")
-        cls._validate_checkpoint_metadata(item.metadata, fence)
+        cognitive_revision = cls._metadata_cognitive_revision(item.metadata)
+        cls._validate_exact_checkpoint_metadata(
+            item.metadata,
+            fence,
+            cognitive_revision=cognitive_revision,
+        )
+        cls._require_checkpoint_tuple_identity(item)
+
+    async def _validate_checkpoint_tuple_for_command_or_start(
+        self,
+        item: CheckpointTuple,
+        fence: GraphFenceContext,
+    ) -> None:
+        configurable = item.config.get("configurable") or {}
+        if configurable.get("thread_id") != fence.thread_id:
+            raise GraphBindingError("checkpoint tuple belongs to another Graph thread")
+        try:
+            self._validate_checkpoint_tuple(item, fence)
+            return
+        except GraphBindingError:
+            self._validate_checkpoint_lineage_metadata(item.metadata, fence)
+        checkpoint_ns, checkpoint_id = self._require_checkpoint_tuple_identity(item)
+        async with self._connection() as connection:
+            await self._validate_completed_start_checkpoint(
+                connection,
+                item.metadata,
+                fence,
+                checkpoint_ns=checkpoint_ns,
+                checkpoint_id=checkpoint_id,
+            )
+
+    async def _validate_checkpoint_metadata_for_command_or_start(
+        self,
+        connection: Any,
+        metadata: Any,
+        fence: GraphFenceContext,
+        *,
+        checkpoint_ns: str,
+        checkpoint_id: str,
+    ) -> None:
+        cognitive_revision = self._metadata_cognitive_revision(metadata)
+        try:
+            self._validate_exact_checkpoint_metadata(
+                metadata,
+                fence,
+                cognitive_revision=cognitive_revision,
+            )
+            return
+        except GraphBindingError:
+            self._validate_checkpoint_lineage_metadata(metadata, fence)
+        await self._validate_completed_start_checkpoint(
+            connection,
+            metadata,
+            fence,
+            checkpoint_ns=checkpoint_ns,
+            checkpoint_id=checkpoint_id,
+        )
+
+    async def _validate_completed_start_checkpoint(
+        self,
+        connection: Any,
+        metadata: Any,
+        fence: GraphFenceContext,
+        *,
+        checkpoint_ns: str,
+        checkpoint_id: str,
+    ) -> None:
+        predecessor_command_id = metadata.get("graph_command_id")
+        if not isinstance(predecessor_command_id, str):
+            raise GraphBindingError("checkpoint metadata has an invalid command identity")
+        try:
+            proof = await self._ledger.load_completed_start_checkpoint(
+                connection,
+                fence=fence,
+                checkpoint_ns=checkpoint_ns,
+                checkpoint_id=checkpoint_id,
+                predecessor_command_id=predecessor_command_id,
+            )
+        except GraphTerminalBindingError as error:
+            raise GraphBindingError(
+                "checkpoint is not the active command's completed start predecessor"
+            ) from error
+        if (
+            type(proof) is not CompletedStartCheckpoint
+            or proof.command_id != predecessor_command_id
+            or (proof.checkpoint_ns, proof.checkpoint_id)
+            != (checkpoint_ns, checkpoint_id)
+        ):
+            raise GraphBindingError("completed start checkpoint proof has an invalid binding")
+        predecessor_fence = replace(
+            fence,
+            command_id=proof.command_id,
+            request_hash=proof.request_hash,
+            fencing_token=proof.fencing_token,
+            execution_lane=proof.execution_lane,
+            activation_id=proof.activation_id,
+            room_fencing_token=proof.room_fencing_token,
+            command_hash=proof.command_hash,
+            command_envelope_hash=proof.command_envelope_hash,
+            execution_provider=proof.execution_provider,
+            execution_model=proof.execution_model,
+            proposal_hash=proof.proposal_hash,
+            result_envelope_hash=proof.result_envelope_hash,
+            result_hash=proof.result_hash,
+            result_ref=proof.result_ref,
+        )
+        self._validate_exact_checkpoint_metadata(
+            metadata,
+            predecessor_fence,
+            cognitive_revision=proof.cognitive_revision,
+        )
 
     @staticmethod
-    def _validate_checkpoint_metadata(
+    def _require_checkpoint_tuple_identity(item: CheckpointTuple) -> tuple[str, str]:
+        configurable = item.config.get("configurable") or {}
+        checkpoint_ns = configurable.get("checkpoint_ns", "")
+        checkpoint_id = configurable.get("checkpoint_id")
+        durable_checkpoint_id = item.checkpoint.get("id")
+        if (
+            not isinstance(checkpoint_ns, str)
+            or len(checkpoint_ns) > 128
+            or not isinstance(checkpoint_id, str)
+            or not checkpoint_id
+            or len(checkpoint_id) > 128
+            or durable_checkpoint_id != checkpoint_id
+        ):
+            raise GraphBindingError("checkpoint tuple has an invalid durable identity")
+        return checkpoint_ns, checkpoint_id
+
+    @staticmethod
+    def _metadata_cognitive_revision(metadata: Any) -> int:
+        if not isinstance(metadata, dict):
+            raise GraphBindingError("checkpoint metadata is not an object")
+        cognitive_revision = metadata.get("graph_cognitive_revision")
+        if (
+            not isinstance(cognitive_revision, int)
+            or isinstance(cognitive_revision, bool)
+            or cognitive_revision < 1
+        ):
+            raise GraphBindingError("checkpoint metadata has an invalid cognitive revision")
+        return cognitive_revision
+
+    @staticmethod
+    def _validate_checkpoint_lineage_metadata(
         metadata: Any,
         fence: GraphFenceContext,
     ) -> None:
         if not isinstance(metadata, dict):
             raise GraphBindingError("checkpoint metadata is not an object")
-        base_expected = {
+        lineage_expected = {
             "graph_thread_id": fence.thread_id,
             "graph_room_epoch": fence.room_epoch,
             "graph_key": fence.graph_key,
             "graph_version": fence.graph_version,
             "graph_checkpoint_schema_version": fence.checkpoint_schema_version,
-        }
-        candidate_expected = {
             "graph_execution_lane": fence.execution_lane.value,
             "graph_activation_id": fence.activation_id,
             "graph_room_fencing_token": fence.room_fencing_token,
-            "graph_command_hash": fence.command_hash,
-            "graph_command_envelope_hash": fence.command_envelope_hash,
-            "graph_execution_provider": fence.execution_provider,
-            "graph_execution_model": fence.execution_model,
             "graph_environment_id": fence.environment_id,
             "graph_environment_generation": fence.environment_generation,
             "graph_tenant_surrogate": fence.tenant_surrogate,
@@ -1387,20 +1626,10 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
             "graph_room_type": fence.room_type,
             "graph_binding_hash": fence.binding_hash,
             "graph_code_build_id": fence.code_build_id,
-            "graph_proposal_hash": fence.proposal_hash,
-            "graph_result_envelope_hash": fence.result_envelope_hash,
         }
-        for key, value in base_expected.items():
+        for key, value in lineage_expected.items():
             if metadata.get(key) != value:
                 raise GraphBindingError(f"checkpoint metadata conflicts at {key}")
-        if fence.execution_lane is GraphGatewayMode.TARGET_E2E_CANDIDATE:
-            for key, value in candidate_expected.items():
-                if metadata.get(key) != value:
-                    raise GraphBindingError(f"checkpoint metadata conflicts at {key}")
-        else:
-            for key, value in candidate_expected.items():
-                if key in metadata and metadata[key] != value:
-                    raise GraphBindingError(f"checkpoint metadata conflicts at {key}")
         command_id = metadata.get("graph_command_id")
         request_hash = metadata.get("graph_request_hash")
         fencing_token = metadata.get("graph_fencing_token")
@@ -1412,21 +1641,41 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
             or any(character not in "0123456789abcdef" for character in request_hash)
         ):
             raise GraphBindingError("checkpoint metadata has an invalid request hash")
-        if not isinstance(fencing_token, int) or isinstance(fencing_token, bool):
-            raise GraphBindingError("checkpoint metadata has an invalid fencing token")
-        if fencing_token < 1:
-            raise GraphBindingError("checkpoint metadata has an invalid fencing token")
-        cognitive_revision = metadata.get("graph_cognitive_revision")
         if (
-            not isinstance(cognitive_revision, int)
-            or isinstance(cognitive_revision, bool)
-            or cognitive_revision < 1
+            not isinstance(fencing_token, int)
+            or isinstance(fencing_token, bool)
+            or fencing_token < 1
         ):
-            raise GraphBindingError("checkpoint metadata has an invalid cognitive revision")
+            raise GraphBindingError("checkpoint metadata has an invalid fencing token")
+        FencedPostgresSaver._metadata_cognitive_revision(metadata)
         result_hash = metadata.get("graph_result_hash")
         result_ref = metadata.get("graph_result_ref")
         if (result_hash is None) != (result_ref is None):
             raise GraphBindingError("checkpoint metadata has an incomplete result binding")
+
+    @classmethod
+    def _validate_checkpoint_metadata(
+        cls,
+        metadata: Any,
+        fence: GraphFenceContext,
+    ) -> None:
+        cls._validate_checkpoint_lineage_metadata(metadata, fence)
+        candidate_expected = {
+            "graph_command_hash": fence.command_hash,
+            "graph_command_envelope_hash": fence.command_envelope_hash,
+            "graph_execution_provider": fence.execution_provider,
+            "graph_execution_model": fence.execution_model,
+            "graph_proposal_hash": fence.proposal_hash,
+            "graph_result_envelope_hash": fence.result_envelope_hash,
+        }
+        if fence.execution_lane is GraphGatewayMode.TARGET_E2E_CANDIDATE:
+            for key, value in candidate_expected.items():
+                if metadata.get(key) != value:
+                    raise GraphBindingError(f"checkpoint metadata conflicts at {key}")
+        else:
+            for key, value in candidate_expected.items():
+                if key in metadata and metadata[key] != value:
+                    raise GraphBindingError(f"checkpoint metadata conflicts at {key}")
 
     @classmethod
     def _validate_exact_checkpoint_metadata(
@@ -1442,19 +1691,24 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
             "graph_request_hash": fence.request_hash,
             "graph_fencing_token": fence.fencing_token,
             "graph_cognitive_revision": cognitive_revision,
+            "graph_result_hash": fence.result_hash,
+            "graph_result_ref": fence.result_ref,
         }
         if any(metadata.get(key) != value for key, value in exact.items()):
             raise GraphBindingError(
                 "external terminal checkpoint differs from the active command fence"
             )
 
-    @staticmethod
-    def _bind_tuple(item: CheckpointTuple, fence: GraphFenceContext) -> CheckpointTuple:
+    def _bind_tuple(self, item: CheckpointTuple, fence: GraphFenceContext) -> CheckpointTuple:
         config = bind_fence_context(item.config, fence)
         parent = (
             None if item.parent_config is None else bind_fence_context(item.parent_config, fence)
         )
-        return item._replace(config=config, parent_config=parent)
+        return item._replace(
+            config=config,
+            parent_config=parent,
+            pending_writes=self._filter_pending_writes_for_fence(item.pending_writes, fence),
+        )
 
 
 @dataclass(slots=True)

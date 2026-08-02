@@ -73,7 +73,7 @@
     },
     "forbidden_key": {
       "enum": [
-        "memory_frame", "internal_handoff", "handoff_notes", "hidden_reasoning",
+        "memory_frame", "internal_handoff", "hidden_reasoning",
         "chain_of_thought", "tool_calls", "tool_parameters", "writer_mode",
         "credentials", "credential", "password", "api_key", "access_token",
         "refresh_token", "authorization_header", "private_key", "client_secret",
@@ -95,7 +95,9 @@
       "additionalProperties": false,
       "maxProperties": 18,
       "properties": {
-        "schema_version": {"const": "intake-dossier.v2"},
+        "schema_version": {
+          "enum": ["intake-dossier.v2", "intake_case_detail.v1"]
+        },
         "case_story": {"$ref": "#/$defs/bounded_branch"},
         "references": {"$ref": "#/$defs/bounded_branch"},
         "party_positions": {"$ref": "#/$defs/bounded_branch"},
@@ -107,7 +109,8 @@
         "risk_assessment": {"$ref": "#/$defs/bounded_branch"},
         "missing_information": {"$ref": "#/$defs/bounded_branch"},
         "intake_quality": {"$ref": "#/$defs/bounded_branch"},
-        "admission": {"$ref": "#/$defs/bounded_branch"}
+        "admission": {"$ref": "#/$defs/bounded_branch"},
+        "handoff_notes": {"$ref": "#/$defs/bounded_branch"}
       }
     },
     "unilateral_matrix_draft": {

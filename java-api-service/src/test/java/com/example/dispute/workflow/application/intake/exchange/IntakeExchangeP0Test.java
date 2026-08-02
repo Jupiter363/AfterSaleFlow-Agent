@@ -15,6 +15,7 @@ import com.example.dispute.workflow.api.SignedSyntheticIntakeIngressController;
 import com.example.dispute.workflow.api.intake.IntakeExchangeController;
 import com.example.dispute.workflow.api.intake.IntakeExchangeRequestCodec;
 import com.example.dispute.workflow.application.command.CaseCommandService;
+import com.example.dispute.workflow.application.intake.IntakeContractHashes;
 import com.example.dispute.workflow.application.intake.exchange.IntakeExchangeAuthorityValidationPort.PayloadLoadClaim;
 import com.example.dispute.workflow.application.intake.exchange.IntakeExchangeAuthorityValidationPort.PayloadLoadGrant;
 import com.example.dispute.workflow.application.intake.exchange.IntakeExchangeAuthorityValidationPort.ProposalPutClaim;
@@ -39,6 +40,7 @@ import com.example.dispute.workflow.shadow.intake.SignedSyntheticIntakeIngressSe
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.minio.GetObjectResponse;
 import io.minio.MinioClient;
 import java.io.ByteArrayInputStream;
@@ -289,6 +291,56 @@ class IntakeExchangeP0Test {
                 .isEqualTo(Base64.getEncoder().encodeToString(payload));
         assertThat(authority.payloadLoadClaims).isEqualTo(1);
         assertThat(store.loads).isEqualTo(1);
+    }
+
+    @Test
+    void canonicalSnapshotRequiresAnExplicitKnownFormSource() throws Exception {
+        ObjectNode valid = (ObjectNode) MAPPER.readTree(Path.of(
+                        "../contracts/agent-platform/intake/v2/fixtures/valid/"
+                                + "intake-domain-snapshot-valid.json")
+                .toFile());
+        var validator = new IntakeExchangeCanonicalPayloadValidator();
+        byte[] validPayload = ContractJson.canonicalize(valid);
+
+        assertThat(validator.requireValid(
+                        "intake-domain-snapshot.v2",
+                        valid.required("snapshot_hash").textValue(),
+                        validPayload.length,
+                        validPayload)
+                .at("/initial_case_facts/form_source")
+                .textValue())
+                .isEqualTo("FORM_SUBMISSION");
+
+        ObjectNode missing = valid.deepCopy();
+        ((ObjectNode) missing.required("initial_case_facts")).remove("form_source");
+        missing.put(
+                "snapshot_hash",
+                IntakeContractHashes.canonicalHashExcluding(missing, "snapshot_hash"));
+        byte[] missingPayload = ContractJson.canonicalize(missing);
+
+        assertThatThrownBy(() -> validator.requireValid(
+                        "intake-domain-snapshot.v2",
+                        missing.required("snapshot_hash").textValue(),
+                        missingPayload.length,
+                        missingPayload))
+                .isInstanceOf(IntakeExchangeAuthorityValidationPort.Rejected.class)
+                .hasMessageContaining("violates intake-domain-snapshot.v2");
+
+        ObjectNode unsupported = valid.deepCopy();
+        ((ObjectNode) unsupported.required("initial_case_facts"))
+                .put("form_source", "LEGACY_IMPORT");
+        unsupported.put(
+                "snapshot_hash",
+                IntakeContractHashes.canonicalHashExcluding(unsupported, "snapshot_hash"));
+        byte[] unsupportedPayload = ContractJson.canonicalize(unsupported);
+
+        assertThatThrownBy(() -> validator.requireValid(
+                        "intake-domain-snapshot.v2",
+                        unsupported.required("snapshot_hash").textValue(),
+                        unsupportedPayload.length,
+                        unsupportedPayload))
+                .isInstanceOf(IntakeExchangeAuthorityValidationPort.Rejected.class)
+                .hasMessageContaining("violates intake-domain-snapshot.v2");
     }
 
     @Test

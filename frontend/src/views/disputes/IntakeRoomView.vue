@@ -649,22 +649,29 @@ function isSupportedCaseDetailDossier(value) {
   const schemaVersion = value?.schema_version || value?.schemaVersion;
   return Boolean(value && supportedCaseDetailSchemas.has(schemaVersion));
 }
+
+function isCaseDetailObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function deepMergeCaseDetail(base, patch) {
+  const merged = { ...(isCaseDetailObject(base) ? base : {}) };
+  Object.entries(isCaseDetailObject(patch) ? patch : {}).forEach(([key, incoming]) => {
+    const existing = merged[key];
+    merged[key] = isCaseDetailObject(existing) && isCaseDetailObject(incoming)
+      ? deepMergeCaseDetail(existing, incoming)
+      : incoming;
+  });
+  return merged;
+}
+
 function mergeStreamedCaseDetail(base, sections) {
   const streamedEntries = Object.entries(sections || {});
   if (!streamedEntries.length) return base;
-  const merged = {
-    ...(base || {}),
+  return deepMergeCaseDetail({
+    ...(isCaseDetailObject(base) ? base : {}),
     schema_version: base?.schema_version || "intake_case_detail.v1",
-  };
-  streamedEntries.forEach(([section, value]) => {
-    const previous = merged[section];
-    merged[section] =
-      previous && value && typeof previous === "object" && typeof value === "object" &&
-      !Array.isArray(previous) && !Array.isArray(value)
-        ? { ...previous, ...value }
-        : value;
-  });
-  return merged;
+  }, sections);
 }
 const caseDetailDossier = computed(() => {
   const current = currentCaseDossier.value?.dossier;
@@ -2114,7 +2121,12 @@ function resetStreamedCaseDetail() {
 }
 
 function applyStreamedCaseDetailEvent(event, snapshot = currentWorkspaceSnapshot()) {
-  if (!isCurrentWorkspace(snapshot) || event?.event !== "visible_delta") return;
+  if (!isCurrentWorkspace(snapshot)) return;
+  if (event?.event === "attempt_reset") {
+    resetStreamedCaseDetail();
+    return;
+  }
+  if (event?.event !== "visible_delta") return;
   const prefix = "case_detail.";
   const fieldPath = String(event.fieldPath || "");
   if (!fieldPath.startsWith(prefix) || !event.delta) return;
@@ -2144,6 +2156,10 @@ function applyStreamedCaseDetailEvent(event, snapshot = currentWorkspaceSnapshot
       };
       return;
     }
+    // Root branches are atomic one-event JSON snapshots. Do not merge them
+    // into an earlier provisional branch: the terminal snapshot must replace
+    // that branch. Chunked root JSON needs a protocol extension rather than
+    // client-side reassembly.
     const value = JSON.parse(event.delta);
     streamedCaseDetailSections.value = {
       ...streamedCaseDetailSections.value,

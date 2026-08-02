@@ -23,15 +23,19 @@ from app.graph_runtime.errors import GraphContractError
 from app.graph_runtime.gateway import GatewayExecution
 from app.graph_runtime.identity import RoomType, ThreadRecord
 from app.graph_runtime.state import VersionPinsState
+from app.graphs.intake.baseline import BASELINE_INTAKE_NODE_NAME
 from app.graphs.intake.contracts import (
     IntakeDomainSnapshot,
     IntakeTurnEvent,
     IntakeTurnProposal,
 )
-from app.graphs.intake.lcel import INTAKE_SYSTEM_PROMPT
 from app.graphs.intake.runtime import IntakeRuntimeBundle, build_intake_runtime_bundle
 from app.graphs.intake.state import IntakeGraphBindings, IntakeGraphStateV2, IntakeTurnContext
 from app.graphs.intake.validators import validate_terminal_proposal
+from app.harness.invocation_context import AgentInvocationContext
+from app.harness.model_runner import prepare_baseline_prompt_authority
+from app.harness.prompt_composer import PromptRepository
+from app.llm import governed_max_output_tokens
 from app.model_runtime.profiles import (
     ModelInvocationPolicy,
     ModelProfile,
@@ -286,18 +290,25 @@ def build_governed_intake_runtime(
         raise GraphContractError(
             "Intake runtime tool policy differs from the frozen no-tools policy"
         )
+    agent_context = build_intake_baseline_agent_context(execution)
+    prompt_authority = prepare_baseline_prompt_authority(
+        prompts=PromptRepository(),
+        node_name=BASELINE_INTAKE_NODE_NAME,
+        agent_context=agent_context,
+        prompt_profile_id=agent_context.prompt_profile_id,
+    )
     profile = ModelProfile(
         profile_id=invocation.model_profile_id,
         provider=provider,
         model=model,
         temperature=0,
-        max_output_tokens=8_192,
+        max_output_tokens=governed_max_output_tokens(BASELINE_INTAKE_NODE_NAME),
         tool_allowlist=(),
         max_provider_attempts=2,
     )
     policy = ModelInvocationPolicy(
         invocation_id=command.attempt_id,
-        node_name="intake_lcel",
+        node_name=BASELINE_INTAKE_NODE_NAME,
         deadline_at=command.deadline_at,
         provider_attempts_remaining=command.retry_budget.provider_attempts_remaining,
         repairs_remaining=command.retry_budget.repairs_remaining,
@@ -305,7 +316,7 @@ def build_governed_intake_runtime(
         output_schema_version=invocation.output_schema_version,
         policy_version=invocation.policy_version,
         guardrail_version=invocation.guardrail_version,
-        trusted_system_sha256=system_prompt_sha256(INTAKE_SYSTEM_PROMPT),
+        trusted_system_sha256=system_prompt_sha256(prompt_authority.system_prompt),
         traceparent=command.traceparent,
     )
     return build_intake_runtime_bundle(
@@ -313,6 +324,64 @@ def build_governed_intake_runtime(
         profile=profile,
         policy=policy,
         checkpointer=checkpointer,
+        agent_context=agent_context,
+        trusted_system_prompt=prompt_authority.system_prompt,
+    )
+
+
+def build_intake_baseline_agent_context(
+    execution: GatewayExecution,
+) -> AgentInvocationContext:
+    """Project exact command/thread authority into the baseline Harness context."""
+
+    command, record = _execution_command_and_record(execution)
+    identity = record.identity
+    actor = identity.actor_scope
+    invocation = command.invocation_context
+    permission_level = (
+        "PARTY_USER" if actor.actor_role.value == "USER" else "PARTY_MERCHANT"
+    )
+    access_session_id = f"ACCESS_{identity.actor_scope_hash[:32]}"
+    conversation_scope = ":".join(
+        (
+            command.tenant_surrogate,
+            command.case_id,
+            "INTAKE",
+            actor.actor_id,
+            actor.actor_role.value,
+            invocation.agent_profile_id,
+            invocation.prompt_profile_id,
+            access_session_id,
+        )
+    )
+    return AgentInvocationContext.model_validate(
+        {
+            "tenant_id": command.tenant_surrogate,
+            "case_id": command.case_id,
+            "room_type": command.room_type,
+            "actor_id": actor.actor_id,
+            "actor_role": actor.actor_role.value,
+            "access_session_id": access_session_id,
+            "permission_level": permission_level,
+            "permission_scopes": sorted(actor.capabilities),
+            "agent_key": invocation.agent_profile_id,
+            "agent_invocation_id": command.attempt_id,
+            "agent_session_id": identity.agent_session_id,
+            "conversation_scope": conversation_scope,
+            "scope_type": "INTAKE_PARTY_PRIVATE",
+            "allowed_actor_ids": [actor.actor_id],
+            "allowed_actor_roles": [actor.actor_role.value],
+            "prompt_profile_id": invocation.prompt_profile_id,
+            "memory_policy_id": "MEMEO_DEFAULT",
+            "model_profile_id": invocation.model_profile_id,
+            "output_schema_version": invocation.output_schema_version,
+            "policy_version": invocation.policy_version,
+            "guardrail_version": invocation.guardrail_version,
+            "tool_capabilities": list(invocation.tool_capabilities),
+            "retry_budget": command.retry_budget.model_dump(mode="python"),
+            "deadline_at": command.deadline_at,
+            "traceparent": command.traceparent,
+        }
     )
 
 
@@ -443,6 +512,7 @@ __all__ = [
     "LoadedIntakePayload",
     "StoredIntakeProposal",
     "build_governed_intake_runtime",
+    "build_intake_baseline_agent_context",
     "build_intake_command_patch",
     "build_intake_execution_state",
     "canonical_intake_proposal",

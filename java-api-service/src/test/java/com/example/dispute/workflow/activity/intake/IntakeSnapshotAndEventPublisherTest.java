@@ -86,6 +86,35 @@ class IntakeSnapshotAndEventPublisherTest {
     }
 
     @Test
+    void carriesBaselineHandoffNotesIntoAResumedPrivateSnapshot() throws Exception {
+        SnapshotRequest valid = snapshotRequest();
+        ObjectNode dossier = (ObjectNode) valid.currentDossier();
+        dossier.putObject("handoff_notes").put("remark_status", "NOT_READY");
+        SnapshotRequest resumed = new SnapshotRequest(
+                "SNAPSHOT_P4_USER_RESUMED",
+                valid.threadBinding(),
+                valid.domainRevision(),
+                valid.roomRevision(),
+                valid.projectionRevision(),
+                valid.sourceRefs(),
+                valid.initialCaseFacts(),
+                valid.shareableProjection(),
+                valid.ownMessages(),
+                dossier,
+                valid.createdAt());
+        var objects = new CapturingPublisher();
+        var publisher = new IntakeDomainSnapshotPublisher(
+                objects, new IntakeTestFixtures.SingleBindingStore());
+
+        publisher.publish(resumed);
+
+        assertThat(MAPPER.readTree(objects.last.canonicalPayload())
+                        .at("/current_dossier/handoff_notes/remark_status")
+                        .asText())
+                .isEqualTo("NOT_READY");
+    }
+
+    @Test
     void rejectsNestedLegacyMemoryAndCrossAudienceMessagesBeforePublishing() {
         var objects = new CapturingPublisher();
         var publisher = new IntakeDomainSnapshotPublisher(
@@ -184,6 +213,7 @@ class IntakeSnapshotAndEventPublisherTest {
     private static SnapshotRequest snapshotRequest() {
         var binding = IntakeTestFixtures.binding();
         var initialFacts = MAPPER.createObjectNode();
+        initialFacts.put("form_source", "FORM_SUBMISSION");
         initialFacts.put("initiator_role", "USER");
         initialFacts.put("form_description", "Synthetic order arrived damaged.");
         var projection = MAPPER.createObjectNode().put("intake_status", "OPEN");

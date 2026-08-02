@@ -1,6 +1,6 @@
 {
   "schema_version": "intake-domain-snapshot.v2",
-  "snapshot_id": "SNAPSHOT_P4_USER_1",
+  "snapshot_id": "SNAPSHOT_P4_MISSING_FORM_SOURCE",
   "tenant_surrogate": "tenant-synthetic",
   "case_id": "CASE_P4_SYNTHETIC_1",
   "room_type": "INTAKE",
@@ -14,7 +14,6 @@
   "visibility": "PRIVATE",
   "source_refs": ["MESSAGE_P4_USER_1"],
   "initial_case_facts": {
-    "form_source": "FORM_SUBMISSION",
     "initiator_role": "USER",
     "form_description": "Synthetic order arrived damaged."
   },
@@ -31,5 +30,5 @@
   ],
   "current_dossier": {"schema_version": "intake-dossier.v2"},
   "created_at": "2026-07-20T08:01:00Z",
-  "snapshot_hash": "a576823e72e44f62b08249af84f295fe5cc3ac09f3335ab96b2846fa7e5f9743"
+  "snapshot_hash": "7deb1aa13efc125244aa0e122b6e02dc4343f97afc0423c94a00308b217fea0d"
 }

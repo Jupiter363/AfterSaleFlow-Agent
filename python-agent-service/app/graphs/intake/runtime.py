@@ -10,11 +10,7 @@ from app.graph_runtime.state import VersionPinsState
 from app.graphs.intake.contracts import IntakeTurnProposal
 from app.graphs.intake.errors import IntakeGraphContractError
 from app.graphs.intake.graph import compile_intake_v2_graph
-from app.graphs.intake.lcel import (
-    INTAKE_SYSTEM_PROMPT,
-    BuiltIntakeModelNode,
-    build_intake_model_node,
-)
+from app.graphs.intake.lcel import BuiltIntakeModelNode, build_intake_model_node
 from app.graphs.intake.state import (
     IntakeGraphBindings,
     IntakeGraphStateV2,
@@ -25,6 +21,7 @@ from app.graphs.intake.validators import (
     validate_state,
     validate_terminal_proposal,
 )
+from app.harness.invocation_context import AgentInvocationContext
 from app.model_runtime.profiles import ModelInvocationPolicy, ModelProfile
 from app.model_runtime.transports import ModelTransport
 
@@ -58,7 +55,8 @@ def build_intake_runtime_bundle(
     profile: ModelProfile,
     policy: ModelInvocationPolicy,
     checkpointer: BaseCheckpointSaver[Any],
-    trusted_system_prompt: str = INTAKE_SYSTEM_PROMPT,
+    agent_context: AgentInvocationContext,
+    trusted_system_prompt: str,
 ) -> IntakeRuntimeBundle:
     if checkpointer is None:
         raise IntakeGraphContractError("INTAKE_RUNTIME_CHECKPOINTER_REQUIRED")
@@ -68,6 +66,7 @@ def build_intake_runtime_bundle(
         transport=transport,
         profile=profile,
         policy=policy,
+        agent_context=agent_context,
         trusted_system_prompt=trusted_system_prompt,
     )
     graph = compile_intake_v2_graph(

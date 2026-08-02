@@ -6,7 +6,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.math.BigDecimal;
-import java.math.RoundingMode;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -33,12 +32,12 @@ public final class IntakeDossierProjectionMerger {
             "risk_assessment",
             "missing_information",
             "intake_quality",
-            "admission");
+            "admission",
+            "handoff_notes");
 
     private static final Set<String> FORBIDDEN_KEYS = Set.of(
             "memory_frame",
             "internal_handoff",
-            "handoff_notes",
             "hidden_reasoning",
             "chain_of_thought",
             "tool_calls",
@@ -328,7 +327,8 @@ public final class IntakeDossierProjectionMerger {
         JsonNode proposedSchema = patch.get("schema_version");
         if (proposedSchema != null
                 && (!proposedSchema.isTextual()
-                        || !DOSSIER_SCHEMA_VERSION.equals(proposedSchema.textValue()))) {
+                        || !(DOSSIER_SCHEMA_VERSION.equals(proposedSchema.textValue())
+                                || "intake_case_detail.v1".equals(proposedSchema.textValue())))) {
             throw rejected(
                     "INTAKE_DOSSIER_SCHEMA_INVALID",
                     "dossier patch schema is not the formal Intake dossier schema");
@@ -418,10 +418,7 @@ public final class IntakeDossierProjectionMerger {
         if (score.isIntegralNumber() && score.canConvertToInt()) {
             return Math.max(0, Math.min(100, score.intValue()));
         }
-        return proposal.confidence()
-                .multiply(java.math.BigDecimal.valueOf(100))
-                .setScale(0, RoundingMode.HALF_UP)
-                .intValueExact();
+        return 0;
     }
 
     private static Long matrixVersion(ObjectNode dossier) {

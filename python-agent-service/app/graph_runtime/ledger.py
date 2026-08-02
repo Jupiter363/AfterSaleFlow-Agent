@@ -311,6 +311,110 @@ class RecoveryBudget:
             raise GraphCommandBindingError("persisted recovery budget is invalid")
 
 
+@dataclass(frozen=True, slots=True)
+class CompletedStartCheckpoint:
+    """Database-proven terminal checkpoint used to start one later command."""
+
+    command_id: str
+    request_hash: str
+    fencing_token: int
+    execution_lane: GraphGatewayMode
+    activation_id: str | None
+    room_fencing_token: int | None
+    command_hash: str | None
+    command_envelope_hash: str | None
+    checkpoint_ns: str
+    checkpoint_id: str
+    cognitive_revision: int
+    execution_provider: str | None
+    execution_model: str | None
+    proposal_hash: str | None
+    result_envelope_hash: str | None
+    result_hash: str
+    result_ref: str
+
+    def __post_init__(self) -> None:
+        try:
+            _identifier(self.command_id, "command_id")
+            _sha256(self.request_hash, "request_hash")
+            _sha256(self.result_hash, "result_hash")
+        except GraphContractError as error:
+            raise GraphTerminalBindingError(
+                "completed start checkpoint identity is invalid"
+            ) from error
+        if (
+            not isinstance(self.fencing_token, int)
+            or isinstance(self.fencing_token, bool)
+            or self.fencing_token < 1
+        ):
+            raise GraphTerminalBindingError(
+                "completed start checkpoint fence is invalid"
+            )
+        if (
+            not isinstance(self.checkpoint_ns, str)
+            or len(self.checkpoint_ns) > 128
+            or not isinstance(self.checkpoint_id, str)
+            or not self.checkpoint_id
+            or len(self.checkpoint_id) > 128
+            or not isinstance(self.cognitive_revision, int)
+            or isinstance(self.cognitive_revision, bool)
+            or self.cognitive_revision < 1
+            or not isinstance(self.result_ref, str)
+            or not self.result_ref
+            or len(self.result_ref) > 512
+        ):
+            raise GraphTerminalBindingError(
+                "completed start checkpoint result binding is invalid"
+            )
+        if self.execution_lane is GraphGatewayMode.TARGET_E2E_CANDIDATE:
+            try:
+                _sha256(self.command_hash, "command_hash")
+                _sha256(self.command_envelope_hash, "command_envelope_hash")
+                _sha256(self.proposal_hash, "proposal_hash")
+                _sha256(self.result_envelope_hash, "result_envelope_hash")
+            except GraphContractError as error:
+                raise GraphTerminalBindingError(
+                    "completed candidate start checkpoint is invalid"
+                ) from error
+            if (
+                self.activation_id is None
+                or re.fullmatch(r"p9act\.v1\.[0-9a-f]{32}", self.activation_id) is None
+                or not isinstance(self.room_fencing_token, int)
+                or isinstance(self.room_fencing_token, bool)
+                or self.room_fencing_token < 1
+                or not isinstance(self.execution_provider, str)
+                or not self.execution_provider
+                or len(self.execution_provider) > 64
+                or not isinstance(self.execution_model, str)
+                or not self.execution_model
+                or len(self.execution_model) > 128
+            ):
+                raise GraphTerminalBindingError(
+                    "completed candidate start checkpoint authority is invalid"
+                )
+        elif self.execution_lane is GraphGatewayMode.SHADOW:
+            if any(
+                value is not None
+                for value in (
+                    self.activation_id,
+                    self.room_fencing_token,
+                    self.command_hash,
+                    self.command_envelope_hash,
+                    self.execution_provider,
+                    self.execution_model,
+                    self.proposal_hash,
+                    self.result_envelope_hash,
+                )
+            ):
+                raise GraphTerminalBindingError(
+                    "completed SHADOW start checkpoint carries candidate authority"
+                )
+        else:
+            raise GraphTerminalBindingError(
+                "completed start checkpoint execution lane is invalid"
+            )
+
+
 COMMAND_COLUMNS: Final[str] = """
 thread_id, command_id, request_schema_version, request_json, request_hash,
 execution_mode, activation_id, room_fencing_token, command_hash, command_envelope_hash, room_epoch,
@@ -469,23 +573,84 @@ select command.deadline_at > clock_timestamp() as deadline_open,
  group by command.deadline_at
 """
 
+QUALIFIED_COMMAND_COLUMNS: Final[str] = ", ".join(
+    f"command.{column.strip()}" for column in COMMAND_COLUMNS.split(",")
+)
+
+
 BEGIN_ATTEMPT_SQL: Final[str] = f"""
-update agent_graph_command
+update agent_graph_command command
    set status = 'EXECUTING',
        attempt_count = attempt_count + 1,
        fencing_token = %s,
+       start_checkpoint_ns = thread.last_checkpoint_ns,
+       start_checkpoint_id = thread.last_checkpoint_id,
        started_at = coalesce(started_at, clock_timestamp()),
        updated_at = clock_timestamp(),
        command_revision = command_revision + 1
- where thread_id = %s and command_id = %s and request_hash = %s
-   and room_epoch = %s and graph_key = %s and graph_version = %s
-   and checkpoint_schema_version = %s
-   and status = 'REGISTERED'
-   and deadline_at > clock_timestamp()
-   and attempt_count < (
-       request_json #>> '{{retry_budget,activity_attempts_remaining}}'
+  from graph_thread_registry thread
+ where command.thread_id = %s and command.command_id = %s and command.request_hash = %s
+   and command.room_epoch = %s and command.graph_key = %s and command.graph_version = %s
+   and command.checkpoint_schema_version = %s
+   and command.status = 'REGISTERED'
+   and command.deadline_at > clock_timestamp()
+   and command.attempt_count < (
+       command.request_json #>> '{{retry_budget,activity_attempts_remaining}}'
    )::integer
-returning {COMMAND_COLUMNS}
+   and command.start_checkpoint_ns is null
+   and command.start_checkpoint_id is null
+   and thread.thread_id = command.thread_id
+   and thread.room_epoch = command.room_epoch
+   and thread.graph_key = command.graph_key
+   and thread.graph_version = command.graph_version
+   and thread.checkpoint_schema_version = command.checkpoint_schema_version
+   and thread.lifecycle_status = 'ACTIVE'
+   and (
+       (thread.last_checkpoint_ns is null and thread.last_checkpoint_id is null)
+       or (thread.last_checkpoint_ns is not null and thread.last_checkpoint_id is not null)
+   )
+returning {QUALIFIED_COMMAND_COLUMNS}
+"""
+
+
+LOAD_COMPLETED_START_CHECKPOINT_SQL: Final[str] = f"""
+select {', '.join(f'predecessor.{column.strip()}' for column in COMMAND_COLUMNS.split(','))}
+  from agent_graph_command current_command
+  join agent_graph_command predecessor
+    on predecessor.thread_id = current_command.thread_id
+   and predecessor.command_id = %s
+ where current_command.thread_id = %s
+   and current_command.command_id = %s
+   and current_command.request_hash = %s
+   and current_command.room_epoch = %s
+   and current_command.graph_key = %s
+   and current_command.graph_version = %s
+   and current_command.checkpoint_schema_version = %s
+   and current_command.execution_mode = %s
+   and current_command.activation_id is not distinct from %s
+   and current_command.room_fencing_token is not distinct from %s
+   and current_command.command_hash is not distinct from %s
+   and current_command.command_envelope_hash is not distinct from %s
+   and current_command.fencing_token = %s
+   and current_command.status = 'EXECUTING'
+   and current_command.start_checkpoint_ns is not distinct from %s
+   and current_command.start_checkpoint_id = %s
+   and predecessor.command_id <> current_command.command_id
+   and predecessor.status = 'COMPLETED'
+   and predecessor.completed_at is not null
+   and current_command.started_at is not null
+   and predecessor.completed_at <= current_command.started_at
+   and predecessor.committed_checkpoint_ns is not distinct from %s
+   and predecessor.committed_checkpoint_id = %s
+   and predecessor.result_ref is not null
+   and predecessor.result_hash is not null
+   and predecessor.room_epoch = current_command.room_epoch
+   and predecessor.graph_key = current_command.graph_key
+   and predecessor.graph_version = current_command.graph_version
+   and predecessor.checkpoint_schema_version = current_command.checkpoint_schema_version
+   and predecessor.execution_mode = current_command.execution_mode
+   and predecessor.activation_id is not distinct from current_command.activation_id
+   and predecessor.room_fencing_token is not distinct from current_command.room_fencing_token
 """
 
 INSERT_ATTEMPT_SQL: Final[str] = """
@@ -963,6 +1128,160 @@ class PostgresCommandLedger:
         if row is None:
             raise GraphTerminalBindingError("terminal result row is missing")
         return self._result_from_row(row)
+
+    async def load_completed_start_checkpoint(
+        self,
+        connection: Any,
+        *,
+        fence: GraphFenceContext,
+        checkpoint_ns: str,
+        checkpoint_id: str,
+        predecessor_command_id: str,
+    ) -> CompletedStartCheckpoint:
+        """Prove that one checkpoint is this command's exact completed predecessor.
+
+        The current command's start pointer is captured atomically by
+        ``BEGIN_ATTEMPT_SQL``.  A checkpoint from another command is readable
+        only when that immutable pointer, the predecessor's committed pointer,
+        and its terminal result all agree.
+        """
+
+        try:
+            _identifier(predecessor_command_id, "predecessor_command_id")
+        except GraphContractError as error:
+            raise GraphTerminalBindingError(
+                "start checkpoint predecessor identity is invalid"
+            ) from error
+        if (
+            not isinstance(checkpoint_ns, str)
+            or len(checkpoint_ns) > 128
+            or not isinstance(checkpoint_id, str)
+            or not checkpoint_id
+            or len(checkpoint_id) > 128
+            or predecessor_command_id == fence.command_id
+        ):
+            raise GraphTerminalBindingError("start checkpoint identity is invalid")
+
+        row = await (
+            await connection.execute(
+                LOAD_COMPLETED_START_CHECKPOINT_SQL,
+                (
+                    predecessor_command_id,
+                    fence.thread_id,
+                    fence.command_id,
+                    fence.request_hash,
+                    fence.room_epoch,
+                    fence.graph_key,
+                    fence.graph_version,
+                    fence.checkpoint_schema_version,
+                    fence.execution_lane.value,
+                    fence.activation_id,
+                    fence.room_fencing_token,
+                    fence.command_hash,
+                    fence.command_envelope_hash,
+                    fence.fencing_token,
+                    checkpoint_ns,
+                    checkpoint_id,
+                    checkpoint_ns,
+                    checkpoint_id,
+                ),
+            )
+        ).fetchone()
+        if row is None:
+            raise GraphTerminalBindingError(
+                "checkpoint is not the current command's completed start predecessor"
+            )
+
+        predecessor = self._command_from_row(row)
+        expected_lineage = (
+            fence.thread_id,
+            fence.room_epoch,
+            fence.graph_key,
+            fence.graph_version,
+            fence.checkpoint_schema_version,
+            fence.execution_lane,
+            fence.activation_id,
+            fence.room_fencing_token,
+        )
+        actual_lineage = (
+            predecessor.binding.thread_id,
+            predecessor.binding.room_epoch,
+            predecessor.binding.graph_key,
+            predecessor.binding.graph_version,
+            predecessor.binding.checkpoint_schema_version,
+            predecessor.binding.execution_lane,
+            predecessor.binding.activation_id,
+            predecessor.binding.room_fencing_token,
+        )
+        if (
+            predecessor.binding.command_id != predecessor_command_id
+            or predecessor.status is not CommandStatus.COMPLETED
+            or predecessor.fencing_token is None
+            or isinstance(predecessor.fencing_token, bool)
+            or predecessor.fencing_token < 1
+            or actual_lineage != expected_lineage
+            or (
+                predecessor.committed_checkpoint_ns,
+                predecessor.committed_checkpoint_id,
+            )
+            != (checkpoint_ns, checkpoint_id)
+            or predecessor.result_ref is None
+            or predecessor.result_hash is None
+        ):
+            raise GraphTerminalBindingError(
+                "completed start checkpoint command binding is invalid"
+            )
+
+        result = await self.load_result(
+            connection,
+            thread_id=fence.thread_id,
+            command_id=predecessor_command_id,
+        )
+        self.require_result_matches_command(predecessor, result)
+        if (
+            result.checkpoint_ns != checkpoint_ns
+            or result.checkpoint_id != checkpoint_id
+            or result.cognitive_revision < 1
+            or result.result_ref != predecessor.result_ref
+            or result.result_hash != predecessor.result_hash
+        ):
+            raise GraphTerminalBindingError(
+                "completed start checkpoint result binding is invalid"
+            )
+
+        execution_provider: str | None = None
+        execution_model: str | None = None
+        if result.execution_lane is GraphGatewayMode.TARGET_E2E_CANDIDATE:
+            try:
+                envelope = TargetE2EGraphResultEnvelope.model_validate(
+                    result.result_envelope_json
+                )
+            except ValueError as error:
+                raise GraphTerminalBindingError(
+                    "completed candidate start checkpoint envelope is invalid"
+                ) from error
+            execution_provider = envelope.execution_provider
+            execution_model = envelope.execution_model
+
+        return CompletedStartCheckpoint(
+            command_id=predecessor.binding.command_id,
+            request_hash=predecessor.binding.request_hash,
+            fencing_token=predecessor.fencing_token,
+            execution_lane=predecessor.binding.execution_lane,
+            activation_id=predecessor.binding.activation_id,
+            room_fencing_token=predecessor.binding.room_fencing_token,
+            command_hash=predecessor.binding.command_hash,
+            command_envelope_hash=predecessor.binding.command_envelope_hash,
+            checkpoint_ns=result.checkpoint_ns,
+            checkpoint_id=result.checkpoint_id,
+            cognitive_revision=result.cognitive_revision,
+            execution_provider=execution_provider,
+            execution_model=execution_model,
+            proposal_hash=result.proposal_hash,
+            result_envelope_hash=result.result_envelope_hash,
+            result_hash=result.result_hash,
+            result_ref=result.result_ref,
+        )
 
     async def load_candidate_terminal_proof(
         self,

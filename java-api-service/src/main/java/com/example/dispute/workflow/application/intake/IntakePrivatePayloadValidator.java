@@ -9,7 +9,6 @@ final class IntakePrivatePayloadValidator {
             Set.of(
                     "memory_frame",
                     "internal_handoff",
-                    "handoff_notes",
                     "hidden_reasoning",
                     "chain_of_thought",
                     "tool_calls",

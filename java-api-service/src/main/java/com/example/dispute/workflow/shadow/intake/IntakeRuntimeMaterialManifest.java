@@ -540,7 +540,7 @@ public record IntakeRuntimeMaterialManifest(
 
     private static boolean forbiddenField(String name) {
         return Set.of(
-                        "memory_frame", "internal_handoff", "handoff_notes", "hidden_reasoning",
+                        "memory_frame", "internal_handoff", "hidden_reasoning",
                         "chain_of_thought", "tool_calls", "tool_parameters", "credential",
                         "credentials", "password", "secret", "token", "api_key", "private_key",
                         "compact_jws", "signing_key")

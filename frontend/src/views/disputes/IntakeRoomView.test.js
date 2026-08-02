@@ -260,6 +260,87 @@ function dossierStreamResponse(runId, summary) {
   });
 }
 
+function caseDetailSequenceStreamResponse(runId, deltas) {
+  const frame = (sequence, event, payload = {}) => [
+    `id: ${sequence}`,
+    `event: ${event}`,
+    `data: ${JSON.stringify({
+      schemaVersion: "agent_stream.v1",
+      runId,
+      sequence,
+      type: event,
+      ...payload,
+    })}`,
+    "",
+    "",
+  ].join("\n");
+  const frames = [
+    ...deltas.map((delta, index) => frame(index + 1, "visible_delta", delta)),
+    frame(deltas.length + 1, "final", { result: {} }),
+  ].join("");
+  return new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(frames));
+      controller.close();
+    },
+  }), {
+    status: 200,
+    headers: { "Content-Type": "text/event-stream" },
+  });
+}
+
+function v2AttemptResetDossierStreamResponse(runId, oldSummary, newSummary) {
+  const oldAttemptId = "ATTEMPT_OLD";
+  const newAttemptId = "ATTEMPT_NEW";
+  const frame = (attemptId, sequence, event, payload = {}, extra = {}) => [
+    `id: v2:${attemptId}:${sequence}`,
+    `event: ${event}`,
+    `data: ${JSON.stringify({
+      protocol: "agent-stream.v2",
+      runId,
+      attemptId,
+      sequence,
+      cursor: `v2:${attemptId}:${sequence}`,
+      audience: "USER",
+      ...extra,
+      payload,
+    })}`,
+    "",
+    "",
+  ].join("\n");
+  const frames = [
+    frame(oldAttemptId, 0, "attempt_started", { node: "turn" }),
+    frame(oldAttemptId, 1, "visible_delta", {
+      node: "turn",
+      field: "case_detail.case_story.one_sentence_summary",
+      delta: oldSummary,
+    }),
+    frame(oldAttemptId, 2, "attempt_aborted", {
+      reasonCode: "MODEL_TRANSIENT_FAILURE",
+    }),
+    frame(newAttemptId, 0, "attempt_started", { node: "turn" }),
+    frame(newAttemptId, 1, "attempt_reset", {
+      reasonCode: "RETRY",
+      resetAttemptId: oldAttemptId,
+    }, { resetAttemptId: oldAttemptId }),
+    frame(newAttemptId, 2, "visible_delta", {
+      node: "turn",
+      field: "case_detail.case_story.one_sentence_summary",
+      delta: newSummary,
+    }),
+    frame(newAttemptId, 3, "final", {}, { response: {} }),
+  ].join("");
+  return new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(frames));
+      controller.close();
+    },
+  }), {
+    status: 200,
+    headers: { "Content-Type": "text/event-stream" },
+  });
+}
+
 function failedDossierStreamResponse(runId, summary) {
   const frames = [
     "id: 1",
@@ -932,6 +1013,158 @@ describe("IntakeRoomView", () => {
     expect(messagesLoader).toHaveBeenCalledTimes(2);
     expect(wrapper.text()).toContain("正式持久卷宗已可见");
     expect(wrapper.text()).not.toContain("流式草稿卷宗");
+    wrapper.unmount();
+  });
+
+  it("replaces the streamed right-side board after a V2 attempt reset", async () => {
+    const runId = "run-v2-attempt-reset-board";
+    const streamUrl = `/api/private-agent-streams/${runId}/events`;
+    let resolveMessages;
+    let resolveTurnMemory;
+    const messagesLoader = vi.fn(() => new Promise((resolve) => {
+      resolveMessages = resolve;
+    }));
+    const turnMemoryLoader = vi.fn(() => new Promise((resolve) => {
+      resolveTurnMemory = resolve;
+    }));
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      if (String(input).startsWith(streamUrl)) {
+        return v2AttemptResetDossierStreamResponse(
+          runId,
+          "旧展板草稿",
+          "新展板草稿",
+        );
+      }
+      throw new Error(`unexpected fetch: ${String(input)}`);
+    });
+    const wrapper = await mountInteractiveView({
+      initialMessages: [],
+      initialTurnMemory: readyTurnMemory,
+      postMessageAction: vi.fn().mockResolvedValue({
+        run_id: runId,
+        stream_url: streamUrl,
+      }),
+      messagesLoader,
+      turnMemoryLoader,
+      eventStreamer: vi.fn(async () => {}),
+    });
+
+    wrapper.findComponent(ConversationStream).vm.$emit("submit", {
+      message_type: "PARTY_TEXT",
+      text: "trigger a retryable intake draft",
+      attachment_refs: [],
+    });
+
+    await vi.waitFor(() => {
+      expect(messagesLoader).toHaveBeenCalledTimes(1);
+      expect(turnMemoryLoader).toHaveBeenCalledTimes(1);
+    });
+
+    const summary = wrapper.get("[data-dispute-detail-summary]").text();
+    expect(summary).toContain("新展板草稿");
+    expect(summary).not.toContain("旧展板草稿");
+
+    resolveMessages([]);
+    resolveTurnMemory(readyTurnMemory);
+    await vi.waitFor(() => {
+      expect(agentStreamStore.runs[runId]?.status).toBe("COMPLETED");
+    });
+    wrapper.unmount();
+  });
+
+  it("deep-merges streamed sections, replaces arrays, and lets a terminal root snapshot replace provisional branch data", async () => {
+    const runId = "run-case-detail-terminal-snapshot";
+    const streamUrl = `/api/private-agent-streams/${runId}/events`;
+    const persistedTurnMemory = {
+      ...readyTurnMemory,
+      case_intake_dossier: {
+        ...readyTurnMemory.case_intake_dossier,
+        dossier: {
+          ...readyTurnMemory.case_intake_dossier.dossier,
+          missing_information: {
+            blocking_gaps: ["persisted blocker"],
+            nice_to_have_gaps: ["persisted nice detail"],
+            metadata: {
+              preserved_nested_detail: "persisted nested detail",
+              terminal_override: "persisted nested value",
+            },
+          },
+        },
+      },
+    };
+    let resolveMessages;
+    let resolveTurnMemory;
+    const messagesLoader = vi.fn(() => new Promise((resolve) => {
+      resolveMessages = resolve;
+    }));
+    const turnMemoryLoader = vi.fn(() => new Promise((resolve) => {
+      resolveTurnMemory = resolve;
+    }));
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      if (String(input).startsWith(streamUrl)) {
+        return caseDetailSequenceStreamResponse(runId, [
+          {
+            field: "case_detail.missing_information.next_questions",
+            delta: "obsolete provisional question",
+          },
+          {
+            field: "case_detail.missing_information",
+            delta: JSON.stringify({
+              blocking_gaps: ["model root blocker"],
+              metadata: { terminal_override: "model nested value" },
+            }),
+          },
+          {
+            field: "case_detail.missing_information",
+            delta: JSON.stringify({
+              blocking_gaps: ["terminal root blocker"],
+              metadata: { terminal_override: "terminal nested value" },
+            }),
+          },
+        ]);
+      }
+      throw new Error(`unexpected fetch: ${String(input)}`);
+    });
+    const wrapper = await mountInteractiveView({
+      initialMessages: [],
+      initialTurnMemory: persistedTurnMemory,
+      postMessageAction: vi.fn().mockResolvedValue({
+        run_id: runId,
+        stream_url: streamUrl,
+      }),
+      messagesLoader,
+      turnMemoryLoader,
+      eventStreamer: vi.fn(async () => {}),
+    });
+
+    wrapper.findComponent(ConversationStream).vm.$emit("submit", {
+      message_type: "PARTY_TEXT",
+      text: "stream a replacement dossier branch",
+      attachment_refs: [],
+    });
+
+    await vi.waitFor(() => {
+      expect(messagesLoader).toHaveBeenCalledTimes(1);
+      expect(turnMemoryLoader).toHaveBeenCalledTimes(1);
+    });
+
+    const dossierText = wrapper.get("[data-case-detail-dossier]").text();
+    expect(dossierText).toContain("terminal root blocker");
+    expect(dossierText).toContain("persisted nice detail");
+    expect(dossierText).not.toContain("persisted blocker");
+    expect(dossierText).not.toContain("model root blocker");
+    expect(dossierText).not.toContain("obsolete provisional question");
+    expect(wrapper.vm.$.setupState.caseDetailDossier.missing_information.metadata)
+      .toEqual({
+        preserved_nested_detail: "persisted nested detail",
+        terminal_override: "terminal nested value",
+      });
+
+    resolveMessages([]);
+    resolveTurnMemory(persistedTurnMemory);
+    await vi.waitFor(() => {
+      expect(agentStreamStore.runs[runId]?.status).toBe("COMPLETED");
+    });
     wrapper.unmount();
   });
 

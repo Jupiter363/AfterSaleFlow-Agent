@@ -109,6 +109,12 @@ def _generation_budget_for(node_name: str) -> ModelGenerationBudget:
     return _NODE_GENERATION_BUDGETS.get(node_name, _DEFAULT_GENERATION_BUDGET)
 
 
+def governed_max_output_tokens(node_name: str) -> int:
+    """Return the shared production budget for a baseline model node."""
+
+    return _generation_budget_for(node_name).max_completion_tokens
+
+
 # 所属模块：LLM 网关 > Provider 结构化输出 > Schema 名称规范化。
 # 具体功能：`_response_schema_name` 把 node_name 中供应商不接受的字符替换为下划线、去首尾下划线、为空时回退 agent_output，并限制 64 字符。
 # 上下游：上游是 `_completion_request_body` 当前业务节点名；下游是 response_format.json_schema.name，Schema 正文本身仍来自 output_type.model_json_schema()。
@@ -369,7 +375,7 @@ class LiteLlmProxyClient:
         return self._model
 
     def governed_max_output_tokens(self, node_name: str) -> int:
-        return _generation_budget_for(node_name).max_completion_tokens
+        return governed_max_output_tokens(node_name)
 
     @property
     def governed_max_provider_attempts(self) -> int:

@@ -275,6 +275,29 @@ class IntakeTurnProposalLoaderTest {
     }
 
     @Test
+    void acceptsTheBaselineDossierSchemaAndItsStructuredHandoffNotes() throws Exception {
+        ObjectNode proposal = (ObjectNode) fixture();
+        ObjectNode patch = (ObjectNode) proposal.required("dossier_patch");
+        patch.put("schema_version", "intake_case_detail.v1");
+        patch.putObject("handoff_notes").put("remark_status", "NOT_READY");
+        proposal.put(
+                "proposal_hash",
+                IntakeContractHashes.canonicalHashExcluding(proposal, "proposal_hash"));
+        byte[] payload = ContractJson.canonicalize(proposal);
+        IntakeProposalReference reference = reference(proposal, payload);
+
+        IntakeTurnProposal loaded = new IntakeTurnProposalLoader(
+                        new ExactReader(reference, payload))
+                .load(reference, authority(proposal))
+                .proposal();
+
+        assertThat(loaded.dossierPatch().path("schema_version").asText())
+                .isEqualTo("intake_case_detail.v1");
+        assertThat(loaded.dossierPatch().at("/handoff_notes/remark_status").asText())
+                .isEqualTo("NOT_READY");
+    }
+
+    @Test
     void embeddedSchemaIsCanonicallyIdenticalToTheFrozenPublicContract() throws Exception {
         Path embedded = Path.of(
                 "src",

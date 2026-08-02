@@ -74,7 +74,7 @@ final class IntakeTestFixtures {
                         "SNAPSHOT_P4_USER_1",
                         "intake-domain-snapshot.v2",
                         "urn:intake:snapshot:SNAPSHOT_P4_USER_1",
-                        "7deb1aa13efc125244aa0e122b6e02dc4343f97afc0423c94a00308b217fea0d",
+                        "a576823e72e44f62b08249af84f295fe5cc3ac09f3335ab96b2846fa7e5f9743",
                         1024),
                 "version-1",
                 4,

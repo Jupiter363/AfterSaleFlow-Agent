@@ -209,6 +209,7 @@ _COGNITION_PATCH_FIELDS = frozenset(
         "cognitive_revision",
         "terminal_draft",
         "memory_summary",
+        "messages",
         "node_results",
         "execution_receipts",
         "usage_by_invocation",
@@ -218,7 +219,6 @@ _FORBIDDEN_KEYS = frozenset(
     {
         "memory_frame",
         "internal_handoff",
-        "handoff_notes",
         "hidden_reasoning",
         "chain_of_thought",
         "tool_calls",
@@ -1245,7 +1245,7 @@ def _validate_version_pins(value: Any) -> None:
 def _validate_messages(value: Any, *, audience: str) -> None:
     if not isinstance(value, dict):
         raise IntakeGraphContractError("INTAKE_MESSAGES_INVALID")
-    sequences: set[int] = set()
+    sequence_roles: set[tuple[int, str]] = set()
     for key, message in value.items():
         _require_identifier(key, "INTAKE_MESSAGE_INVALID")
         if not isinstance(message, dict) or set(message) != {
@@ -1262,9 +1262,14 @@ def _validate_messages(value: Any, *, audience: str) -> None:
         if message.get("audience") != audience:
             raise IntakeGraphContractError("INTAKE_MESSAGE_AUDIENCE_MISMATCH")
         sequence = _strict_int(message.get("sequence"), minimum=0)
-        if sequence in sequences:
+        role = str(message["role"])
+        sequence_role = (sequence, role)
+        if sequence_role in sequence_roles:
             raise IntakeGraphContractError("INTAKE_MESSAGE_SEQUENCE_INVALID")
-        sequences.add(sequence)
+        # A generated AI response shares the immutable source-event sequence of
+        # the HUMAN message it answers.  The role disambiguates that bounded
+        # pair, while a second HUMAN or AI at the same sequence remains invalid.
+        sequence_roles.add(sequence_role)
         content = message.get("content")
         if not isinstance(content, str) or len(content.encode("utf-8")) > 8192:
             raise IntakeGraphContractError("INTAKE_MESSAGE_INVALID")

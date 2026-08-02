@@ -29,7 +29,7 @@
       "type": "array", "minItems": 1, "maxItems": 128, "uniqueItems": true,
       "items": {"$ref": "#/$defs/identifier"}
     },
-    "initial_case_facts": {"$ref": "#/$defs/bounded_object"},
+    "initial_case_facts": {"$ref": "#/$defs/initial_case_facts"},
     "shareable_projection": {"$ref": "#/$defs/bounded_object"},
     "own_messages": {
       "type": "array", "maxItems": 6,
@@ -52,6 +52,16 @@
       "propertyNames": {"not": {"$ref": "#/$defs/forbidden_key"}},
       "additionalProperties": {"$ref": "#/$defs/safe_json"}
     },
+    "initial_case_facts": {
+      "type": "object",
+      "maxProperties": 64,
+      "required": ["form_source"],
+      "properties": {
+        "form_source": {"enum": ["EXTERNAL_IMPORT", "FORM_SUBMISSION"]}
+      },
+      "propertyNames": {"not": {"$ref": "#/$defs/forbidden_key"}},
+      "additionalProperties": {"$ref": "#/$defs/safe_json"}
+    },
     "safe_json": {
       "oneOf": [
         {"type": "string", "maxLength": 20000},
@@ -68,7 +78,7 @@
     },
     "forbidden_key": {
       "enum": [
-        "memory_frame", "internal_handoff", "handoff_notes", "hidden_reasoning",
+        "memory_frame", "internal_handoff", "hidden_reasoning",
         "chain_of_thought", "tool_calls", "tool_parameters", "open_evidence",
         "complete_party", "send_summons", "execute_tool"
       ]

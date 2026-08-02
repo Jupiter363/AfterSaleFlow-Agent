@@ -66,6 +66,70 @@ describe("agentStreamStore", () => {
     expect(getAgentStreamRun("AGENT_RUN_STORE")?.status).toBe("COMPLETED");
   });
 
+  it("replaces a model root JSON snapshot with the terminal snapshot while case-detail leaves append", async () => {
+    const runId = "AGENT_RUN_CASE_DETAIL_SNAPSHOT";
+    const modelSnapshot = JSON.stringify({
+      one_sentence_summary: "model provisional summary",
+      tags: ["model"],
+    });
+    const terminalSnapshot = JSON.stringify({
+      one_sentence_summary: "terminal summary",
+      tags: ["terminal"],
+    });
+    const visibleDelta = (sequence, field, delta) => [
+      `id: ${sequence}`,
+      "event: visible_delta",
+      `data: ${JSON.stringify({
+        schemaVersion: "agent_stream.v1",
+        runId,
+        sequence,
+        type: "visible_delta",
+        field,
+        delta,
+      })}`,
+      "",
+      "",
+    ].join("\n");
+    const fetchImpl = vi.fn().mockResolvedValue(streamResponse([
+      `id: 0\nevent: start\ndata: ${JSON.stringify({
+        schemaVersion: "agent_stream.v1",
+        runId,
+        sequence: 0,
+        type: "start",
+      })}\n\n`,
+      visibleDelta(1, "case_detail.case_story", modelSnapshot),
+      visibleDelta(2, "case_detail.case_story.one_sentence_summary", "leaf "),
+      visibleDelta(3, "case_detail.case_story.one_sentence_summary", "text"),
+      visibleDelta(4, "case_detail.case_story", terminalSnapshot),
+      `id: 5\nevent: final\ndata: ${JSON.stringify({
+        schemaVersion: "agent_stream.v1",
+        runId,
+        sequence: 5,
+        type: "final",
+        response: {},
+      })}\n\n`,
+    ]));
+
+    await consumeAgentRun({
+      actor,
+      caseId: "CASE_1",
+      roomType: "INTAKE",
+      descriptor: {
+        runId,
+        streamUrl: `/api/agent-runs/${runId}/events`,
+      },
+      fetchImpl,
+    });
+
+    const run = getAgentStreamRun(runId);
+    expect(run.fieldText["case_detail.case_story"]).toBe(terminalSnapshot);
+    expect(run.receivedFieldText["case_detail.case_story"]).toBe(terminalSnapshot);
+    expect(run.fieldText["case_detail.case_story.one_sentence_summary"])
+      .toBe("leaf text");
+    expect(run.receivedFieldText["case_detail.case_story.one_sentence_summary"])
+      .toBe("leaf text");
+  });
+
   // 业务位置：【前端状态仓库】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 API 响应、SSE 增量和用户操作 正确进入 跨组件一致的案件/房间/证据状态。上游：API 响应、SSE 增量和用户操作。下游：跨组件一致的案件/房间/证据状态。边界：本地状态不能替代服务端事实。
   it("does not render internal reasoning fields even if a malformed relay emits one", async () => {
     const fetchImpl = vi.fn().mockResolvedValue(streamResponse([
@@ -256,5 +320,63 @@ describe("agentStreamStore", () => {
     );
     expect(fetchImpl.mock.calls[1][1].headers["Last-Event-ID"])
       .toBe("v2:ATTEMPT_2:1");
+  });
+
+  it("activates a retry without reset when the failed attempt emitted no visible delta", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(streamResponse([
+      'id: v2:ATTEMPT_1:0\nevent: attempt_started\ndata: {"protocol":"agent-stream.v2","runId":"AGENT_RUN_EMPTY_RETRY","attemptId":"ATTEMPT_1","sequence":0,"cursor":"v2:ATTEMPT_1:0","audience":"USER","payload":{"node":"turn"}}\n\n',
+      'id: v2:ATTEMPT_1:1\nevent: attempt_aborted\ndata: {"protocol":"agent-stream.v2","runId":"AGENT_RUN_EMPTY_RETRY","attemptId":"ATTEMPT_1","sequence":1,"cursor":"v2:ATTEMPT_1:1","audience":"USER","payload":{"reasonCode":"MODEL_TRANSIENT_FAILURE"}}\n\n',
+      'id: v2:ATTEMPT_2:0\nevent: attempt_started\ndata: {"protocol":"agent-stream.v2","runId":"AGENT_RUN_EMPTY_RETRY","attemptId":"ATTEMPT_2","sequence":0,"cursor":"v2:ATTEMPT_2:0","audience":"USER","payload":{"node":"turn"}}\n\n',
+      'id: v2:ATTEMPT_2:1\nevent: visible_delta\ndata: {"protocol":"agent-stream.v2","runId":"AGENT_RUN_EMPTY_RETRY","attemptId":"ATTEMPT_2","sequence":1,"cursor":"v2:ATTEMPT_2:1","audience":"USER","payload":{"node":"turn","field":"room_utterance","delta":"retry output"}}\n\n',
+      'id: v2:ATTEMPT_2:2\nevent: final\ndata: {"protocol":"agent-stream.v2","runId":"AGENT_RUN_EMPTY_RETRY","attemptId":"ATTEMPT_2","sequence":2,"cursor":"v2:ATTEMPT_2:2","audience":"USER","response":{"finalResultHash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},"payload":{"finalResultHash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}\n\n',
+    ]));
+
+    await consumeAgentRun({
+      actor,
+      caseId: "CASE_1",
+      roomType: "INTAKE",
+      descriptor: {
+        runId: "AGENT_RUN_EMPTY_RETRY",
+        streamUrl: "/api/agent-runs/AGENT_RUN_EMPTY_RETRY/events",
+      },
+      fetchImpl,
+    });
+
+    const run = getAgentStreamRun("AGENT_RUN_EMPTY_RETRY");
+    expect(run.currentAttemptId).toBe("ATTEMPT_2");
+    expect(run.pendingAttemptId).toBe("");
+    expect(run.resetCount).toBe(0);
+    expect(run.attempts.ATTEMPT_1.status).toBe("ABORTED");
+    expect(run.attempts.ATTEMPT_1.hasVisibleOutput).toBe(false);
+    expect(run.attempts.ATTEMPT_2.hasVisibleOutput).toBe(true);
+    expect(run.content).toBe("retry output");
+  });
+
+  it("rejects an unreset retry after the active attempt has visible output", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(streamResponse([
+      'id: v2:ATTEMPT_1:0\nevent: attempt_started\ndata: {"protocol":"agent-stream.v2","runId":"AGENT_RUN_VISIBLE_RETRY","attemptId":"ATTEMPT_1","sequence":0,"cursor":"v2:ATTEMPT_1:0","audience":"USER","payload":{"node":"turn"}}\n\n',
+      'id: v2:ATTEMPT_1:1\nevent: visible_delta\ndata: {"protocol":"agent-stream.v2","runId":"AGENT_RUN_VISIBLE_RETRY","attemptId":"ATTEMPT_1","sequence":1,"cursor":"v2:ATTEMPT_1:1","audience":"USER","payload":{"node":"turn","field":"room_utterance","delta":"original output"}}\n\n',
+      'id: v2:ATTEMPT_1:2\nevent: attempt_aborted\ndata: {"protocol":"agent-stream.v2","runId":"AGENT_RUN_VISIBLE_RETRY","attemptId":"ATTEMPT_1","sequence":2,"cursor":"v2:ATTEMPT_1:2","audience":"USER","payload":{"reasonCode":"MODEL_TRANSIENT_FAILURE"}}\n\n',
+      'id: v2:ATTEMPT_2:0\nevent: attempt_started\ndata: {"protocol":"agent-stream.v2","runId":"AGENT_RUN_VISIBLE_RETRY","attemptId":"ATTEMPT_2","sequence":0,"cursor":"v2:ATTEMPT_2:0","audience":"USER","payload":{"node":"turn"}}\n\n',
+      'id: v2:ATTEMPT_2:1\nevent: visible_delta\ndata: {"protocol":"agent-stream.v2","runId":"AGENT_RUN_VISIBLE_RETRY","attemptId":"ATTEMPT_2","sequence":1,"cursor":"v2:ATTEMPT_2:1","audience":"USER","payload":{"node":"turn","field":"room_utterance","delta":"replacement output"}}\n\n',
+    ]));
+
+    await expect(consumeAgentRun({
+      actor,
+      caseId: "CASE_1",
+      roomType: "INTAKE",
+      descriptor: {
+        runId: "AGENT_RUN_VISIBLE_RETRY",
+        streamUrl: "/api/agent-runs/AGENT_RUN_VISIBLE_RETRY/events",
+      },
+      fetchImpl,
+    })).rejects.toMatchObject({ code: "AGENT_STREAM_ATTEMPT_OUT_OF_ORDER" });
+
+    const run = getAgentStreamRun("AGENT_RUN_VISIBLE_RETRY");
+    expect(run.currentAttemptId).toBe("ATTEMPT_1");
+    expect(run.pendingAttemptId).toBe("ATTEMPT_2");
+    expect(run.attempts.ATTEMPT_1.hasVisibleOutput).toBe(true);
+    expect(run.receivedContent).toBe("original output");
+    expect(run.receivedContent).not.toContain("replacement output");
   });
 });

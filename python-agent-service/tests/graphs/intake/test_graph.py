@@ -44,7 +44,6 @@ def test_topology_is_fixed_and_exhaustive() -> None:
         "authorize_and_load",
         "import_snapshot_once_or_apply_event",
         "route_turn",
-        "deterministic_seed",
         "intake_lcel",
         "cached_terminal_projection",
         "apply_dossier_patch",
@@ -114,6 +113,7 @@ def test_snapshot_import_produces_schema_valid_proposal(
     assert initial_context["order_reference"] == "ORDER_CURRENT_CASE_1"
     assert initial_context["form_description"] == "Synthetic order arrived damaged."
     assert "private_loader_marker" not in initial_context
+    assert result["result_json"]["room_utterance"] == "已记录本轮接待信息，正在继续整理案情。"
     jsonschema.Draft202012Validator(SCHEMA).validate(result["result_json"])
 
 
@@ -160,6 +160,42 @@ def test_event_applies_once_and_uses_injected_cognition(
     assert result["readiness"]["status"] == "READY_TO_CONFIRM"
     assert result["dossier_draft"]["requested_resolution"] == {"kind": "REFUND"}
     jsonschema.Draft202012Validator(SCHEMA).validate(result["result_json"])
+
+
+def test_participant_transcript_stays_complete_after_the_dialogue_window_rolls(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+) -> None:
+    graph, state = _run_snapshot(bindings, version_pins, snapshot)
+    expected: list[tuple[str, str]] = []
+
+    for sequence in range(2, 10):
+        current = copy.deepcopy(event)
+        message_id = f"MESSAGE_P4_USER_{sequence}"
+        text = f"Participant answer {sequence}."
+        current.update(
+            event_id=f"EVENT_P4_USER_{sequence}",
+            message_id=message_id,
+            sequence_no=sequence,
+            domain_revision=sequence + 3,
+            text=text,
+            source_refs=[message_id],
+        )
+        current["event_hash"] = canonical_sha256_omitting(current, "event_hash")
+        state = graph.invoke(state, context=IntakeTurnContext("EVENT", current))
+        expected.append((f"INTAKE_TURN_{sequence}", text))
+
+    transcript = json.loads(state["memory_summary"])[
+        "initiator_statement_transcript"
+    ]
+    assert [(item["message_id"], item["text"]) for item in transcript] == expected
+    assert {item["role"] for item in transcript} == {"USER"}
+    assert snapshot["initial_case_facts"]["form_description"] not in {
+        item["text"] for item in transcript
+    }
+    assert len(state["messages"]) == 6
 
 
 def test_identical_snapshot_replay_returns_cached_terminal_without_revision_change(
@@ -299,23 +335,16 @@ def test_identical_event_replay_uses_cached_proposal(
     assert replay["result_json"] == first["result_json"]
 
 
-def test_message_route_fails_closed_until_governed_lcel_is_bound(
+def test_snapshot_initialization_fails_closed_until_governed_lcel_is_bound(
     bindings,
     version_pins,
     snapshot,
-    event,
 ) -> None:
     graph = compile_intake_v2_graph()
     state = new_intake_graph_state(bindings=bindings, version_pins=version_pins)
-    state = graph.invoke(state, context=IntakeTurnContext("SNAPSHOT", snapshot))
-    state["bindings"]["command"].update(
-        command_id="COMMAND_P4_USER_2",
-        logical_run_id="RUN_P4_USER_2",
-        attempt_id="ATTEMPT_P4_USER_2_1",
-    )
 
     with pytest.raises(IntakeGraphContractError, match="INTAKE_LCEL_NOT_CONFIGURED"):
-        graph.invoke(state, context=IntakeTurnContext("EVENT", event))
+        graph.invoke(state, context=IntakeTurnContext("SNAPSHOT", snapshot))
 
 
 def test_event_replay_requires_the_exact_cached_command_binding(
@@ -484,7 +513,6 @@ def test_cognition_cannot_overwrite_authority_state(
     bindings,
     version_pins,
     snapshot,
-    event,
 ) -> None:
     def cognition(state, runtime):
         del runtime
@@ -505,22 +533,15 @@ def test_cognition_cannot_overwrite_authority_state(
 
     graph = compile_intake_v2_graph(intake_lcel=_create_test_only_intake_cognition(cognition))
     state = new_intake_graph_state(bindings=bindings, version_pins=version_pins)
-    state = graph.invoke(state, context=IntakeTurnContext("SNAPSHOT", snapshot))
-    state["bindings"]["command"].update(
-        command_id="COMMAND_P4_USER_2",
-        logical_run_id="RUN_P4_USER_2",
-        attempt_id="ATTEMPT_P4_USER_2_1",
-    )
 
     with pytest.raises(IntakeGraphContractError, match="INTAKE_COGNITION_PATCH_FIELDS_INVALID"):
-        graph.invoke(state, context=IntakeTurnContext("EVENT", event))
+        graph.invoke(state, context=IntakeTurnContext("SNAPSHOT", snapshot))
 
 
 def test_cognition_draft_is_rejected_before_an_oversized_state_patch(
     bindings,
     version_pins,
     snapshot,
-    event,
 ) -> None:
     def cognition(state, runtime):
         del runtime
@@ -540,15 +561,9 @@ def test_cognition_draft_is_rejected_before_an_oversized_state_patch(
 
     graph = compile_intake_v2_graph(intake_lcel=_create_test_only_intake_cognition(cognition))
     state = new_intake_graph_state(bindings=bindings, version_pins=version_pins)
-    state = graph.invoke(state, context=IntakeTurnContext("SNAPSHOT", snapshot))
-    state["bindings"]["command"].update(
-        command_id="COMMAND_P4_USER_2",
-        logical_run_id="RUN_P4_USER_2",
-        attempt_id="ATTEMPT_P4_USER_2_1",
-    )
 
     with pytest.raises(IntakeGraphContractError, match="INTAKE_COGNITION_DRAFT_TOO_LARGE"):
-        graph.invoke(state, context=IntakeTurnContext("EVENT", event))
+        graph.invoke(state, context=IntakeTurnContext("SNAPSHOT", snapshot))
 
 
 @pytest.mark.parametrize(
@@ -571,7 +586,6 @@ def test_dossier_patch_cannot_bypass_the_dedicated_matrix_patch(
     bindings,
     version_pins,
     snapshot,
-    event,
     matrix_patch,
 ) -> None:
     snapshot["current_dossier"]["case_fact_matrix"] = {
@@ -604,12 +618,6 @@ def test_dossier_patch_cannot_bypass_the_dedicated_matrix_patch(
 
     graph = compile_intake_v2_graph(intake_lcel=_create_test_only_intake_cognition(cognition))
     state = new_intake_graph_state(bindings=bindings, version_pins=version_pins)
-    state = graph.invoke(state, context=IntakeTurnContext("SNAPSHOT", snapshot))
-    state["bindings"]["command"].update(
-        command_id="COMMAND_P4_USER_2",
-        logical_run_id="RUN_P4_USER_2",
-        attempt_id="ATTEMPT_P4_USER_2_1",
-    )
 
     with pytest.raises(IntakeGraphContractError, match="INTAKE_COGNITION_DRAFT_INVALID"):
-        graph.invoke(state, context=IntakeTurnContext("EVENT", event))
+        graph.invoke(state, context=IntakeTurnContext("SNAPSHOT", snapshot))

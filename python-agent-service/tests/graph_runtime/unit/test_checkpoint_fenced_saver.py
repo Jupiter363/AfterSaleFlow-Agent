@@ -18,7 +18,8 @@ from app.graph_runtime.checkpoint import (
     bind_fence_context,
     bind_terminal_result_context,
 )
-from app.graph_runtime.ledger import ResultRecord
+from app.graph_runtime.errors import GraphTerminalBindingError
+from app.graph_runtime.ledger import CompletedStartCheckpoint, ResultRecord
 from app.graph_runtime.persistence_models import (
     GraphBindingError,
     GraphFenceContext,
@@ -85,6 +86,55 @@ def _metadata(**overrides: Any) -> dict[str, Any]:
     values["graph_cognitive_revision"] = 1
     values.update(overrides)
     return values
+
+
+def _completed_start_proof(
+    fence: GraphFenceContext | None = None,
+) -> CompletedStartCheckpoint:
+    current = fence or _fence()
+    candidate = current.execution_lane is GraphGatewayMode.TARGET_E2E_CANDIDATE
+    return CompletedStartCheckpoint(
+        command_id=("command-candidate-previous" if candidate else "command-previous"),
+        request_hash="7" * 64 if candidate else SHA_B,
+        fencing_token=3 if candidate else 2,
+        execution_lane=current.execution_lane,
+        activation_id=current.activation_id,
+        room_fencing_token=current.room_fencing_token,
+        command_hash="8" * 64 if candidate else None,
+        command_envelope_hash="9" * 64 if candidate else None,
+        checkpoint_ns="intake" if candidate else "hearing",
+        checkpoint_id="cp-parent",
+        cognitive_revision=5 if candidate else 2,
+        execution_provider="openai" if candidate else None,
+        execution_model="gpt-5.6" if candidate else None,
+        proposal_hash="a" * 64 if candidate else None,
+        result_envelope_hash="b" * 64 if candidate else None,
+        result_hash="c" * 64,
+        result_ref="urn:test:graph-result:previous",
+    )
+
+
+def _completed_start_metadata(
+    fence: GraphFenceContext,
+    proof: CompletedStartCheckpoint,
+) -> dict[str, Any]:
+    predecessor_fence = replace(
+        fence,
+        command_id=proof.command_id,
+        request_hash=proof.request_hash,
+        fencing_token=proof.fencing_token,
+        command_hash=proof.command_hash,
+        command_envelope_hash=proof.command_envelope_hash,
+        execution_provider=proof.execution_provider,
+        execution_model=proof.execution_model,
+        proposal_hash=proof.proposal_hash,
+        result_envelope_hash=proof.result_envelope_hash,
+        result_hash=proof.result_hash,
+        result_ref=proof.result_ref,
+    )
+    metadata = predecessor_fence.checkpoint_metadata()
+    metadata["graph_cognitive_revision"] = proof.cognitive_revision
+    return metadata
 
 
 def _checkpoint(revision: int = 1) -> dict[str, Any]:
@@ -434,6 +484,42 @@ class _TerminalLedger:
         return result
 
 
+class _CompletedStartLedger:
+    def __init__(
+        self,
+        proof: CompletedStartCheckpoint | None = None,
+        *,
+        failure: Exception | None = None,
+    ) -> None:
+        self.proof = proof
+        self.failure = failure
+        self.calls: list[tuple[Any, ...]] = []
+
+    async def load_completed_start_checkpoint(
+        self,
+        connection: Any,
+        *,
+        fence: GraphFenceContext,
+        checkpoint_ns: str,
+        checkpoint_id: str,
+        predecessor_command_id: str,
+    ) -> CompletedStartCheckpoint:
+        self.calls.append(
+            (
+                connection,
+                fence,
+                checkpoint_ns,
+                checkpoint_id,
+                predecessor_command_id,
+            )
+        )
+        if self.failure is not None:
+            raise self.failure
+        if self.proof is None:
+            raise GraphTerminalBindingError("completed start proof is absent")
+        return self.proof
+
+
 @pytest.mark.asyncio
 async def test_checkpoint_write_locks_fence_and_uses_one_connection() -> None:
     connection = _Connection()
@@ -446,7 +532,6 @@ async def test_checkpoint_write_locks_fence_and_uses_one_connection() -> None:
         "sql:fence",
         "saver:put",
         "sql:bind-command",
-        "sql:advance-thread",
         "transaction:commit",
     ]
     assert direct_savers[0].connection is connection
@@ -484,7 +569,6 @@ async def test_native_checkpoint_serialization_finishes_before_fenced_transactio
         "sql:fence",
         "sql:checkpoint-write",
         "sql:bind-command",
-        "sql:advance-thread",
         "transaction:commit",
     ]
     assert saved["configurable"][FENCE_CONTEXT_KEY] == _fence()
@@ -682,12 +766,11 @@ async def test_langgraph_bootstrap_checkpoint_is_fenced_without_advancing_thread
 
 
 @pytest.mark.asyncio
-async def test_thread_revision_conflict_rolls_back_the_checkpoint_transaction() -> None:
+async def test_failed_command_nonterminal_checkpoint_does_not_advance_next_pointer() -> None:
     connection = _Connection(thread_current=False)
     saver, direct_savers = _saver(connection)
 
-    with pytest.raises(GraphBindingError, match="advance the durable thread revision"):
-        await saver.aput(_config(), _checkpoint(), {}, {})  # type: ignore[arg-type]
+    await saver.aput(_config(), _checkpoint(), {}, {})  # type: ignore[arg-type]
 
     assert len(direct_savers) == 1
     assert connection.events == [
@@ -695,8 +778,7 @@ async def test_thread_revision_conflict_rolls_back_the_checkpoint_transaction() 
         "sql:fence",
         "saver:put",
         "sql:bind-command",
-        "sql:advance-thread",
-        "transaction:rollback",
+        "transaction:commit",
     ]
 
 
@@ -776,6 +858,7 @@ async def test_terminal_checkpoint_result_and_command_commit_on_one_connection()
     assert ledger.calls[0][0] is connection
     assert ledger.calls[0][2] == _result()
     assert ledger.calls[0][3] == "room-graph-result.v1"
+    assert connection.events.count("sql:advance-thread") == 1
     terminal_fence = ledger.calls[0][1]
     assert terminal_fence.result_hash == _result().result_hash
     assert terminal_fence.result_ref == _result().result_ref
@@ -1273,6 +1356,159 @@ async def test_pending_writes_validate_the_parent_under_the_same_fence() -> None
 
 
 @pytest.mark.asyncio
+async def test_first_pending_writes_accept_only_the_completed_start_checkpoint() -> None:
+    fence = _fence()
+    proof = _completed_start_proof(fence)
+    connection = _Connection()
+    connection.checkpoint_metadata = _completed_start_metadata(fence, proof)
+    ledger = _CompletedStartLedger(proof)
+    saver, direct_savers = _saver(connection, ledger=ledger)
+
+    await saver.aput_writes(
+        _config(checkpoint=True),
+        [("channel", "value")],
+        "task-first",
+    )
+
+    assert connection.events == [
+        "transaction:enter",
+        "sql:fence",
+        "sql:checkpoint-metadata",
+        "saver:writes",
+        "transaction:commit",
+    ]
+    assert ledger.calls == [
+        (
+            connection,
+            fence,
+            proof.checkpoint_ns,
+            proof.checkpoint_id,
+            proof.command_id,
+        )
+    ]
+    assert direct_savers[0].connection is connection
+
+
+@pytest.mark.asyncio
+async def test_pending_writes_are_owned_by_the_exact_command_attempt() -> None:
+    connection = _Connection()
+    saver, direct_savers = _saver(connection)
+
+    await saver.aput_writes(
+        _config(checkpoint=True),
+        [("channel", "value")],
+        "task-current",
+    )
+
+    stored_task_id = direct_savers[0].write_calls[0][2]
+    assert stored_task_id != "task-current"
+    assert (
+        saver._restore_pending_write_task_id(stored_task_id, _fence())  # noqa: SLF001
+        == "task-current"
+    )
+    assert saver._restore_pending_write_task_id(  # noqa: SLF001
+        stored_task_id,
+        replace(_fence(), fencing_token=2),
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_completed_predecessor_hides_pending_writes_from_other_commands() -> None:
+    fence = _fence()
+    proof = _completed_start_proof(fence)
+    predecessor_fence = replace(
+        fence,
+        command_id=proof.command_id,
+        request_hash=proof.request_hash,
+        fencing_token=proof.fencing_token,
+    )
+    item = CheckpointTuple(
+        config={
+            "configurable": {
+                "thread_id": fence.thread_id,
+                "checkpoint_ns": proof.checkpoint_ns,
+                "checkpoint_id": proof.checkpoint_id,
+            }
+        },
+        checkpoint={"id": proof.checkpoint_id},  # type: ignore[arg-type]
+        metadata=_completed_start_metadata(fence, proof),  # type: ignore[arg-type]
+        parent_config=None,
+        pending_writes=[
+            (
+                FencedPostgresSaver._encode_pending_write_task_id(  # noqa: SLF001
+                    "task-current",
+                    fence,
+                ),
+                "current-channel",
+                {"source": "current"},
+            ),
+            (
+                FencedPostgresSaver._encode_pending_write_task_id(  # noqa: SLF001
+                    "task-predecessor",
+                    predecessor_fence,
+                ),
+                "predecessor-channel",
+                {"source": "predecessor"},
+            ),
+            (
+                FencedPostgresSaver._encode_pending_write_task_id(  # noqa: SLF001
+                    "task-stale-attempt",
+                    replace(fence, fencing_token=2),
+                ),
+                "stale-channel",
+                {"source": "stale-attempt"},
+            ),
+            ("legacy-unowned-task", "legacy-channel", {"source": "legacy"}),
+        ],
+    )
+
+    class CompletedStartReader(_Reader):
+        async def aget_tuple(self, config: dict[str, Any]) -> CheckpointTuple:
+            return item
+
+    ledger = _CompletedStartLedger(proof)
+    saver = FencedPostgresSaver(
+        _Pool(_Connection()),  # type: ignore[arg-type]
+        reader=CompletedStartReader(),  # type: ignore[arg-type]
+        ledger=ledger,  # type: ignore[arg-type]
+    )
+
+    restored = await saver.aget_tuple(_config(checkpoint=True))
+
+    assert restored is not None
+    assert restored.pending_writes == [
+        ("task-current", "current-channel", {"source": "current"})
+    ]
+
+
+@pytest.mark.asyncio
+async def test_first_pending_writes_reject_start_checkpoint_without_terminal_proof() -> None:
+    fence = _fence()
+    proof = _completed_start_proof(fence)
+    connection = _Connection()
+    connection.checkpoint_metadata = _completed_start_metadata(fence, proof)
+    ledger = _CompletedStartLedger(
+        failure=GraphTerminalBindingError("completed start proof is absent")
+    )
+    saver, direct_savers = _saver(connection, ledger=ledger)
+
+    with pytest.raises(GraphBindingError, match="completed start predecessor"):
+        await saver.aput_writes(
+            _config(checkpoint=True),
+            [("channel", "value")],
+            "task-first",
+        )
+
+    assert connection.events == [
+        "transaction:enter",
+        "sql:fence",
+        "sql:checkpoint-metadata",
+        "transaction:rollback",
+    ]
+    assert direct_savers == []
+
+
+@pytest.mark.asyncio
 async def test_pending_writes_allow_langgraph_precheckpoint_ordering() -> None:
     connection = _Connection(pending_write_checkpoint_unavailable_attempts=1)
     saver, direct_savers = _saver(connection)
@@ -1348,6 +1584,97 @@ async def test_checkpoint_read_rejects_another_graph_binding() -> None:
 
     with pytest.raises(GraphBindingError, match="graph_key"):
         await saver.aget_tuple(_config())
+
+
+@pytest.mark.asyncio
+async def test_candidate_read_accepts_exact_completed_start_checkpoint() -> None:
+    fence = _candidate_fence()
+    proof = _completed_start_proof(fence)
+    item = CheckpointTuple(
+        config={
+            "configurable": {
+                "thread_id": fence.thread_id,
+                "checkpoint_ns": proof.checkpoint_ns,
+                "checkpoint_id": proof.checkpoint_id,
+            }
+        },
+        checkpoint={"id": proof.checkpoint_id},  # type: ignore[arg-type]
+        metadata=_completed_start_metadata(fence, proof),  # type: ignore[arg-type]
+        parent_config=None,
+        pending_writes=None,
+    )
+
+    class CompletedStartReader(_Reader):
+        async def aget_tuple(self, config: dict[str, Any]) -> CheckpointTuple:
+            return item
+
+    connection = _Connection()
+    pool = _Pool(connection)
+    ledger = _CompletedStartLedger(proof)
+    saver = FencedPostgresSaver(
+        pool,  # type: ignore[arg-type]
+        reader=CompletedStartReader(),  # type: ignore[arg-type]
+        ledger=ledger,  # type: ignore[arg-type]
+    )
+    config = bind_fence_context(
+        {"configurable": {"thread_id": fence.thread_id}},
+        fence,
+    )
+
+    restored = await saver.aget_tuple(config)
+
+    assert restored is not None
+    assert restored.checkpoint == {"id": proof.checkpoint_id}
+    assert restored.config["configurable"][FENCE_CONTEXT_KEY] == fence
+    assert ledger.calls == [
+        (
+            connection,
+            fence,
+            proof.checkpoint_ns,
+            proof.checkpoint_id,
+            proof.command_id,
+        )
+    ]
+    assert pool.connection_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_candidate_read_rejects_start_checkpoint_without_terminal_proof() -> None:
+    fence = _candidate_fence()
+    proof = _completed_start_proof(fence)
+    item = CheckpointTuple(
+        config={
+            "configurable": {
+                "thread_id": fence.thread_id,
+                "checkpoint_ns": proof.checkpoint_ns,
+                "checkpoint_id": proof.checkpoint_id,
+            }
+        },
+        checkpoint={"id": proof.checkpoint_id},  # type: ignore[arg-type]
+        metadata=_completed_start_metadata(fence, proof),  # type: ignore[arg-type]
+        parent_config=None,
+        pending_writes=None,
+    )
+
+    class CompletedStartReader(_Reader):
+        async def aget_tuple(self, config: dict[str, Any]) -> CheckpointTuple:
+            return item
+
+    ledger = _CompletedStartLedger(
+        failure=GraphTerminalBindingError("completed start proof is absent")
+    )
+    saver = FencedPostgresSaver(
+        _Pool(_Connection()),  # type: ignore[arg-type]
+        reader=CompletedStartReader(),  # type: ignore[arg-type]
+        ledger=ledger,  # type: ignore[arg-type]
+    )
+    config = bind_fence_context(
+        {"configurable": {"thread_id": fence.thread_id}},
+        fence,
+    )
+
+    with pytest.raises(GraphBindingError, match="completed start predecessor"):
+        await saver.aget_tuple(config)
 
 
 @pytest.mark.asyncio

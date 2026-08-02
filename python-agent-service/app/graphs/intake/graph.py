@@ -19,7 +19,6 @@ from app.graphs.intake.nodes import (
     authorize_and_load,
     cached_terminal_projection,
     checkpoint_terminal,
-    deterministic_seed,
     guard_intake_cognition,
     import_snapshot_once_or_apply_event,
     project_intake_proposal,
@@ -118,7 +117,6 @@ def build_intake_v2_graph(
         import_snapshot_once_or_apply_event,
     )
     builder.add_node("route_turn", route_turn)
-    builder.add_node("deterministic_seed", deterministic_seed)
     builder.add_node("intake_lcel", cognition_node)
     builder.add_node("cached_terminal_projection", cached_terminal_projection)
     builder.add_node("apply_dossier_patch", apply_dossier_patch)
@@ -133,14 +131,16 @@ def build_intake_v2_graph(
         "route_turn",
         ClosedRouter(
             {
-                "initialize": "deterministic_seed",
+                # Snapshot-only opening uses the same vetted baseline model
+                # path as every participant message; no deterministic English
+                # placeholder is allowed at the model-facing boundary.
+                "initialize": "intake_lcel",
                 "message": "intake_lcel",
                 "replay": "cached_terminal_projection",
             }
         ),
     )
     for node in (
-        "deterministic_seed",
         "intake_lcel",
         "cached_terminal_projection",
     ):

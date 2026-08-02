@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Generic, Literal, TypeVar
 
-from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel
 from typing_extensions import TypedDict
 
@@ -83,10 +83,36 @@ class _HarnessPatch(TypedDict):
 
 
 @dataclass(frozen=True)
-class _PreparedHarnessInvocation:
+class PreparedHarnessInvocation:
+    """Exact provider-facing invocation prepared by the production Harness.
+
+    Target LangGraph nodes consume this same immutable value instead of rebuilding
+    prompts from Target-specific templates.  That keeps message roles, ordering,
+    ContextPack trimming, trusted-context projection and the response schema on one
+    production code path for every digital human.
+    """
+
     context: AssembledPromptContext
     system_prompt: str
     user_prompt: str
+    trusted_context: dict[str, Any]
+    raw_trusted_context: dict[str, Any]
+    resolved_prompt_profile_id: str | None
+    output_type: type[BaseModel]
+
+    @property
+    def messages(self) -> tuple[BaseMessage, BaseMessage]:
+        return (
+            SystemMessage(content=self.system_prompt),
+            HumanMessage(content=self.user_prompt),
+        )
+
+
+@dataclass(frozen=True)
+class PreparedPromptAuthority:
+    """Validated identity/profile projection shared by baseline and Target nodes."""
+
+    system_prompt: str
     trusted_context: dict[str, Any]
     raw_trusted_context: dict[str, Any]
     resolved_prompt_profile_id: str | None
@@ -268,61 +294,18 @@ class HarnessModelRunner:
         max_input_tokens: int | None,
         agent_context: AgentInvocationContext | None,
         prompt_profile_id: str | None,
-    ) -> _PreparedHarnessInvocation:
-        assembled_context = self._context_window.assemble(
-            (
-                context_pack.prompt_sections()
-                if context_pack is not None
-                else context_sections or []
-            ),
+    ) -> PreparedHarnessInvocation:
+        return prepare_baseline_invocation(
+            prompts=self._prompts,
+            context_window=self._context_window,
+            node_name=node_name,
+            case_data=case_data,
+            output_type=output_type,
+            context_sections=context_sections,
+            context_pack=context_pack,
             max_input_tokens=max_input_tokens,
-        )
-        validated_agent_context = _validated_agent_context(agent_context)
-        raw_trusted_context = _trusted_agent_context_mapping(validated_agent_context)
-        trusted_context = _trusted_agent_context_payload(validated_agent_context)
-        if validated_agent_context is None:
-            if prompt_profile_id is not None:
-                raise ValueError(
-                    "explicit prompt profile requires a validated agent context"
-                )
-            resolved_prompt_profile_id = None
-        else:
-            signed_prompt_profile_id = validated_agent_context.prompt_profile_id
-            if (
-                prompt_profile_id is not None
-                and prompt_profile_id != signed_prompt_profile_id
-            ):
-                raise ValueError(
-                    "explicit prompt profile conflicts with trusted agent context"
-                )
-            resolved_prompt_profile_id = signed_prompt_profile_id
-        enriched_case_data = {
-            **case_data,
-            "harness_context": assembled_context.as_prompt_payload(),
-        }
-        if context_pack is not None:
-            enriched_case_data["harness_context_pack"] = {
-                "node_name": context_pack.node_name,
-                "configuration_profile_key": context_pack.configuration_profile_key,
-                "configuration_source": context_pack.configuration_source,
-                "display_only_section_names": list(
-                    context_pack.display_only_section_names
-                ),
-            }
-        system_prompt, user_prompt = self._prompts.render(
-            node_name,
-            enriched_case_data,
-            output_type.model_json_schema(),
-            prompt_profile_id=resolved_prompt_profile_id,
-            trusted_agent_context=trusted_context or None,
-        )
-        return _PreparedHarnessInvocation(
-            context=assembled_context,
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            trusted_context=trusted_context,
-            raw_trusted_context=raw_trusted_context,
-            resolved_prompt_profile_id=resolved_prompt_profile_id,
+            agent_context=agent_context,
+            prompt_profile_id=prompt_profile_id,
         )
 
     def _build_node(
@@ -330,7 +313,7 @@ class HarnessModelRunner:
         *,
         node_name: str,
         output_type: type[T],
-        prepared: _PreparedHarnessInvocation,
+        prepared: PreparedHarnessInvocation,
         visible_fields: tuple[VisibleFieldSpec, ...],
         user_content_parts: tuple[dict[str, Any], ...],
     ):
@@ -366,6 +349,103 @@ class HarnessModelRunner:
             spec,
             transport=StructuredClientTransport(self._llm),
         )
+
+
+def prepare_baseline_invocation(
+    *,
+    prompts: PromptRepository,
+    context_window: ContextWindowManager,
+    node_name: str,
+    case_data: dict[str, Any],
+    output_type: type[BaseModel],
+    context_sections: list[PromptSection] | None = None,
+    context_pack: ContextPack | None = None,
+    max_input_tokens: int | None = None,
+    agent_context: AgentInvocationContext | None = None,
+    prompt_profile_id: str | None = None,
+) -> PreparedHarnessInvocation:
+    """Prepare the exact production-baseline model messages without invoking a model.
+
+    Both the established Harness workflows and durable Target graphs call this
+    function.  Callers may change how LangGraph stores state or how a validated
+    result is adapted to a transport proposal, but they cannot silently fork the
+    provider-facing prompt hierarchy or ContextPack behavior.
+    """
+
+    if not isinstance(prompts, PromptRepository):
+        raise TypeError("prompts must be the production PromptRepository")
+    if not isinstance(context_window, ContextWindowManager):
+        raise TypeError("context_window must be the production ContextWindowManager")
+    assembled_context = context_window.assemble(
+        context_pack.prompt_sections() if context_pack is not None else context_sections or [],
+        max_input_tokens=max_input_tokens,
+    )
+    authority = prepare_baseline_prompt_authority(
+        prompts=prompts,
+        node_name=node_name,
+        agent_context=agent_context,
+        prompt_profile_id=prompt_profile_id,
+    )
+    enriched_case_data = {
+        **case_data,
+        "harness_context": assembled_context.as_prompt_payload(),
+    }
+    if context_pack is not None:
+        enriched_case_data["harness_context_pack"] = {
+            "node_name": context_pack.node_name,
+            "configuration_profile_key": context_pack.configuration_profile_key,
+            "configuration_source": context_pack.configuration_source,
+            "display_only_section_names": list(context_pack.display_only_section_names),
+        }
+    user_prompt = prompts.render_user_prompt(
+        enriched_case_data,
+        output_type.model_json_schema(),
+    )
+    return PreparedHarnessInvocation(
+        context=assembled_context,
+        system_prompt=authority.system_prompt,
+        user_prompt=user_prompt,
+        trusted_context=authority.trusted_context,
+        raw_trusted_context=authority.raw_trusted_context,
+        resolved_prompt_profile_id=authority.resolved_prompt_profile_id,
+        output_type=output_type,
+    )
+
+
+def prepare_baseline_prompt_authority(
+    *,
+    prompts: PromptRepository,
+    node_name: str,
+    agent_context: AgentInvocationContext | None,
+    prompt_profile_id: str | None = None,
+) -> PreparedPromptAuthority:
+    """Render the exact baseline SystemMessage authority before graph execution."""
+
+    if not isinstance(prompts, PromptRepository):
+        raise TypeError("prompts must be the production PromptRepository")
+    validated_agent_context = _validated_agent_context(agent_context)
+    raw_trusted_context = _trusted_agent_context_mapping(validated_agent_context)
+    trusted_context = _trusted_agent_context_payload(validated_agent_context)
+    if validated_agent_context is None:
+        if prompt_profile_id is not None:
+            raise ValueError("explicit prompt profile requires a validated agent context")
+        resolved_prompt_profile_id = None
+    else:
+        signed_prompt_profile_id = validated_agent_context.prompt_profile_id
+        if prompt_profile_id is not None and prompt_profile_id != signed_prompt_profile_id:
+            raise ValueError("explicit prompt profile conflicts with trusted agent context")
+        resolved_prompt_profile_id = signed_prompt_profile_id
+    system_prompt = prompts.render_system_prompt(
+        node_name,
+        prompt_profile_id=resolved_prompt_profile_id,
+        trusted_agent_context=trusted_context or None,
+    )
+    return PreparedPromptAuthority(
+        system_prompt=system_prompt,
+        trusted_context=trusted_context,
+        raw_trusted_context=raw_trusted_context,
+        resolved_prompt_profile_id=resolved_prompt_profile_id,
+    )
 
 
 # 所属模块：Agent Harness > 模型执行中枢 > 可信调用上下文最小披露。

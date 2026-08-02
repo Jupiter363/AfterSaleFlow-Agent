@@ -7,8 +7,12 @@ from typing import Any, TypeAlias, cast
 
 from langgraph.runtime import Runtime
 
-from app.contracts.v1.codec import canonical_sha256, canonicalize
+from app.contracts.v1.codec import canonical_sha256
 from app.graph_runtime.reducers import merge_node_results
+from app.graphs.intake.baseline import (
+    append_intake_baseline_statement,
+    build_intake_baseline_memory_summary,
+)
 from app.graphs.intake.errors import IntakeGraphContractError
 from app.graphs.intake.state import (
     IntakeGraphStateV2,
@@ -31,6 +35,7 @@ from app.graphs.intake.validators import (
     validate_state,
     validate_terminal_proposal,
 )
+from app.schemas import IntakeInitialCaseFacts
 
 
 IntakeCognitionNode: TypeAlias = Callable[
@@ -52,6 +57,7 @@ _DOSSIER_BRANCHES = frozenset(
         "missing_information",
         "intake_quality",
         "admission",
+        "handoff_notes",
     }
 )
 
@@ -63,8 +69,8 @@ _AUTHORIZED_INITIAL_CONTEXT_FIELDS = (
     "logistics_reference",
     "initiator_role",
     "requested_outcome_hint",
-    "case_type",
-    "case_title",
+    "claim_resolution_seed",
+    "respondent_attitude_seed",
 )
 
 
@@ -121,29 +127,6 @@ def route_turn(state: IntakeGraphStateV2) -> dict[str, Any]:
     return {}
 
 
-def deterministic_seed(
-    state: IntakeGraphStateV2,
-    runtime: Runtime[IntakeTurnContext],
-) -> dict[str, Any]:
-    del runtime
-    return validate_cognition_patch(
-        state,
-        {
-            "cognitive_revision": state["cognitive_revision"] + 1,
-            "terminal_draft": {
-                "room_utterance": "Please provide the missing Intake details.",
-                "dossier_patch": {},
-                "matrix_patch": None,
-                "readiness": "INCOMPLETE",
-                "missing_fields": ["requested_resolution_detail"],
-                "recommendation": "NEED_MORE_INFO",
-                "knowledge_answer_mode": "NONE",
-                "confidence": 0.0,
-            },
-        },
-    )
-
-
 def unconfigured_intake_lcel(
     state: IntakeGraphStateV2,
     runtime: Runtime[IntakeTurnContext],
@@ -160,7 +143,7 @@ def deterministic_message_fallback(
     return {
         "cognitive_revision": state["cognitive_revision"] + 1,
         "terminal_draft": {
-            "room_utterance": "The Intake message was recorded for structured review.",
+            "room_utterance": "已记录本轮接待信息，正在继续整理案情。",
             "dossier_patch": {},
             "matrix_patch": None,
             "readiness": "INCOMPLETE",
@@ -346,14 +329,20 @@ def _authorized_initial_context_summary(snapshot: Mapping[str, Any]) -> str:
     initial = snapshot.get("initial_case_facts")
     if not isinstance(initial, Mapping):
         raise IntakeGraphContractError("INTAKE_SNAPSHOT_INITIAL_FACTS_INVALID")
-    projected: dict[str, str] = {}
+    projected: dict[str, Any] = {}
     for field in _AUTHORIZED_INITIAL_CONTEXT_FIELDS:
         value = initial.get(field)
-        if isinstance(value, str) and value.strip():
-            projected[field] = value
+        if value is not None and value != "":
+            projected[field] = deepcopy(value)
     if not projected:
         return ""
-    return canonicalize({"authorized_initial_case_facts": projected}).decode("utf-8")
+    try:
+        validated = IntakeInitialCaseFacts.model_validate(projected)
+    except ValueError as error:
+        raise IntakeGraphContractError("INTAKE_SNAPSHOT_INITIAL_FACTS_INVALID") from error
+    return build_intake_baseline_memory_summary(
+        validated.model_dump(mode="json", exclude_none=True),
+    )
 
 
 def _apply_event(
@@ -419,6 +408,16 @@ def _apply_event(
         # summary.  Keeping its cursor/source receipts without inserting a HUMAN message
         # preserves replay and provenance while matching the baseline first-turn contract.
         return patch
+
+    # Match the legacy RoomTurnMemory query: participant answers are retained
+    # in full and ordered by their turn cursor, independently of the bounded
+    # six-message dialogue window used by the prompt.
+    patch["memory_summary"] = append_intake_baseline_statement(
+        state["memory_summary"],
+        turn_no=sequence,
+        actor_role=cast(str, event["audience"]),
+        text=cast(str, event["text"]),
+    )
 
     message: IntakeMessageState = {
         "message_id": message_id,

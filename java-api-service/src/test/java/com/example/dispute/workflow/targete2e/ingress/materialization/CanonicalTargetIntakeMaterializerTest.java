@@ -327,9 +327,18 @@ class CanonicalTargetIntakeMaterializerTest {
         verify(accessSessions, times(2))
                 .resolve(TARGET_TENANT_SURROGATE, CASE_ID, request.actor());
         verify(participants).activateExistingParty(any(), any(), any());
-        verify(agentSessions).resolve(any(), any(), any(), any(), any());
-        verify(threadRegistrar)
-                .register(any(IntakePrivateThreadRegistrationFactory.IssueRequest.class));
+        ArgumentCaptor<String> agentPromptProfile = ArgumentCaptor.forClass(String.class);
+        verify(agentSessions).resolve(
+                any(), eq(com.example.dispute.room.domain.RoomType.INTAKE), any(),
+                agentPromptProfile.capture(), eq(pins.memoryPolicyVersion()));
+        assertThat(agentPromptProfile.getValue()).isEqualTo("DISPUTE_INTAKE_OFFICER:USER:v1");
+        ArgumentCaptor<IntakePrivateThreadRegistrationFactory.IssueRequest> registrationRequest =
+                ArgumentCaptor.forClass(IntakePrivateThreadRegistrationFactory.IssueRequest.class);
+        verify(threadRegistrar).register(registrationRequest.capture());
+        assertThat(registrationRequest.getValue().versionPins().promptVersion())
+                .isEqualTo("DISPUTE_INTAKE_OFFICER:USER:v1");
+        assertThat(registrationRequest.getValue().versionPins().modelProfileId())
+                .isEqualTo(pins.modelProfileId());
         verify(events).allocate(any(), any(), any());
         verify(materialStore, times(2)).readByRoute(any());
     }

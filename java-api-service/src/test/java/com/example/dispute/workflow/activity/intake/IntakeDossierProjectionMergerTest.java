@@ -52,8 +52,29 @@ class IntakeDossierProjectionMergerTest {
     }
 
     @Test
+    void acceptsTheExactBaselineSchemaAndNormalizesItForFormalStorage() throws Exception {
+        JsonNode patch = JSON.readTree(
+                """
+                {
+                  "schema_version":"intake_case_detail.v1",
+                  "case_story":{"summary":"baseline-bound"},
+                  "handoff_notes":{"remark_status":"NOT_READY"}
+                }
+                """);
+
+        var result = merger.merge(JSON.createObjectNode(), proposal(patch, null));
+
+        assertThat(result.dossier().path("schema_version").asText())
+                .isEqualTo("intake-dossier.v2");
+        assertThat(result.dossier().at("/case_story/summary").asText())
+                .isEqualTo("baseline-bound");
+        assertThat(result.dossier().at("/handoff_notes/remark_status").asText())
+                .isEqualTo("NOT_READY");
+    }
+
+    @Test
     void rejectsConflictingOrUnknownModelDossierSchemas() {
-        for (String schema : List.of("intake_case_detail.v1", "intake-dossier.v3")) {
+        for (String schema : List.of("intake-dossier.v3", "intake_case_detail.v2")) {
             ObjectNode patch = JSON.createObjectNode();
             patch.put("schema_version", schema);
 
@@ -118,7 +139,8 @@ class IntakeDossierProjectionMergerTest {
                         {
                           "schema_version":"intake-dossier.v2",
                           "case_story":{"summary":"updated"},
-                          "requested_resolution":{"kind":"REFUND"}
+                          "requested_resolution":{"kind":"REFUND"},
+                          "intake_quality":{"score":82}
                         }
                         """),
                 null);
@@ -136,6 +158,17 @@ class IntakeDossierProjectionMergerTest {
         assertThat(result.dossier().path("schema_version").asText())
                 .isEqualTo("intake-dossier.v2");
         assertThat(result.qualityScore()).isEqualTo(82);
+    }
+
+    @Test
+    void doesNotInventCompletenessFromModelConfidenceWhenBaselineOmitsTheScore() {
+        var result = merger.merge(
+                JSON.createObjectNode(),
+                proposal(JSON.createObjectNode(), null));
+
+        assertThat(result.qualityScore()).isZero();
+        assertThat(result.dossier().at("/intake_quality/ready_for_next_step").asBoolean())
+                .isFalse();
     }
 
     @Test

@@ -40,7 +40,6 @@ MODEL_CONTROLLED_FORBIDDEN_FIELDS = frozenset(
     {
         "memory_frame",
         "internal_handoff",
-        "handoff_notes",
         "hidden_reasoning",
         "chain_of_thought",
         "tool_calls",
@@ -191,7 +190,7 @@ class IntakeTurnEvent(StrictIntakeModel):
 
 
 class DossierPatch(StrictIntakeModel):
-    schema_version: Literal["intake-dossier.v2"] | None = None
+    schema_version: Literal["intake-dossier.v2", "intake_case_detail.v1"] | None = None
     case_story: dict[str, Any] | None = Field(default=None, max_length=64)
     references: dict[str, Any] | None = Field(default=None, max_length=64)
     party_positions: dict[str, Any] | None = Field(default=None, max_length=64)
@@ -204,6 +203,7 @@ class DossierPatch(StrictIntakeModel):
     missing_information: dict[str, Any] | None = Field(default=None, max_length=64)
     intake_quality: dict[str, Any] | None = Field(default=None, max_length=64)
     admission: dict[str, Any] | None = Field(default=None, max_length=64)
+    handoff_notes: dict[str, Any] | None = Field(default=None, max_length=64)
 
     @model_validator(mode="after")
     def reject_explicit_null_branches(self) -> DossierPatch:
@@ -419,6 +419,7 @@ class IntakeCognitionDraft(StrictIntakeModel):
             "missing_information",
             "intake_quality",
             "admission",
+            "handoff_notes",
         ):
             if field_name in canonical_dossier and canonical_dossier[field_name] is None:
                 canonical_dossier.pop(field_name)

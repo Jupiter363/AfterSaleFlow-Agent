@@ -13,7 +13,7 @@
   "projection_revision": 4,
   "visibility": "PRIVATE",
   "source_refs": ["MESSAGE_P4_USER_1"],
-  "initial_case_facts": {},
+  "initial_case_facts": {"form_source": "FORM_SUBMISSION"},
   "shareable_projection": {},
   "own_messages": [],
   "current_dossier": {},

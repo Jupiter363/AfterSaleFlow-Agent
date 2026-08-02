@@ -13,19 +13,21 @@ from langgraph.checkpoint.memory import InMemorySaver
 
 from app.contracts.v1.codec import canonical_sha256_omitting
 import app.graph_runtime.intake_executor as intake_executor
+from app.graphs.intake.baseline import BASELINE_INTAKE_NODE_NAME
 from app.graphs.intake.errors import IntakeGraphContractError
 from app.graphs.intake.graph import compile_intake_v2_graph
-from app.graphs.intake.lcel import (
-    INTAKE_SYSTEM_PROMPT,
-    build_intake_model_node,
-)
+from app.graphs.intake.lcel import build_intake_model_node as _build_intake_model_node
 from app.graphs.intake.runtime import (
-    build_intake_runtime_bundle,
+    build_intake_runtime_bundle as _build_intake_runtime_bundle,
     extract_intake_terminal_proposal,
 )
 from app.graphs.intake.state import IntakeTurnContext, new_intake_graph_state
 from app.graphs.intake.state import IntakeGraphBindings
 from app.graph_runtime.state import VersionPinsState
+from app.harness.invocation_context import AgentInvocationContext
+from app.harness.model_runner import prepare_baseline_prompt_authority
+from app.harness.prompt_composer import PromptRepository
+from app.llm import governed_max_output_tokens
 from app.model_runtime.profiles import (
     ModelInvocationPolicy,
     ModelProfile,
@@ -88,7 +90,7 @@ def version_pins() -> VersionPinsState:
         "graph_version": "2.0.0",
         "checkpoint_schema_version": "intake-checkpoint.v2",
         "state_schema_version": "intake-graph-state.v2",
-        "prompt_version": "intake-prompt.v2",
+        "prompt_version": "DISPUTE_INTAKE_OFFICER:USER:v1",
         "model_profile_id": "intake-model.synthetic.v1",
         "output_schema_version": "intake-turn-proposal.v2",
         "policy_version": "intake-policy.v2",
@@ -98,33 +100,91 @@ def version_pins() -> VersionPinsState:
 
 
 class RecoveryTransport:
-    def __init__(self) -> None:
+    def __init__(self, *, follow_up_event: dict[str, Any] | None = None) -> None:
         self.generate_calls = 0
+        self.requests: list[ModelTransportRequest] = []
+        self._follow_up_event = copy.deepcopy(follow_up_event)
 
     def generate(self, request: ModelTransportRequest) -> ModelTransportResult:
         self.generate_calls += 1
-        return ModelTransportResult(
-            json_document=json.dumps(
-                {
-                    "room_utterance": "Please confirm the requested resolution.",
-                    "dossier_patch": {
-                        "requested_resolution": {
-                            "kind": "REFUND",
-                            "source_refs": ["MESSAGE_P4_USER_2"],
-                            "source_hash": (
-                                "5da4ebd5b5ff75ea8af5c955c01f2cf18138892d07ad6ca74be7c7fb50ff5815"
-                            ),
-                        }
+        self.requests.append(request)
+        if self.generate_calls == 1:
+            document = {
+                "room_utterance": (
+                    "I have reviewed the submitted form. What resolution would you like "
+                    "to request?"
+                ),
+                "case_detail": {
+                    "case_story": {
+                        "one_sentence_summary": (
+                            "The submitted form reports that the order arrived damaged."
+                        )
                     },
-                    "matrix_patch": None,
-                    "readiness": "READY_TO_CONFIRM",
-                    "missing_fields": [],
-                    "recommendation": "ACCEPTED",
-                    "knowledge_answer_mode": "NONE",
-                    "confidence": 0.9,
+                    "requested_resolution": {"kind": "REFUND"},
+                    "intake_quality": {"score": 90},
                 },
-                separators=(",", ":"),
-            ),
+                "unilateral_case_matrix": {
+                    "schema_version": "unilateral_case_matrix.draft.v1",
+                    "fact_rows": [
+                        {
+                            "fact_key": "NEW_OPENING_FORM_SUMMARY",
+                            "category": "AFTER_SALES",
+                            "fact_target": "The submitted form reports a damaged order.",
+                            "materiality": "CORE",
+                            "position_summary": (
+                                "The current party reported that the order arrived damaged."
+                            ),
+                            "asserted_value": "DAMAGED_ORDER_REPORTED",
+                            "source_scope": "CURRENT_SOURCE",
+                        }
+                    ],
+                    "summary_source_fact_keys": ["NEW_OPENING_FORM_SUMMARY"],
+                },
+                "missing_fields": [],
+                "admission_recommendation": "ACCEPTED",
+                "knowledge_answer_mode": "NONE",
+                "confidence": 0.8,
+            }
+        else:
+            if self._follow_up_event is None:
+                raise AssertionError("follow-up baseline response was not configured")
+            document = {
+                "room_utterance": "Please confirm the requested resolution.",
+                "case_detail": {
+                    "case_story": {
+                        "one_sentence_summary": (
+                            "The imported case concerns the requested resolution."
+                        )
+                    },
+                    "requested_resolution": {
+                        "kind": "REFUND",
+                        "source_refs": [self._follow_up_event["message_id"]],
+                        "source_hash": self._follow_up_event["event_hash"],
+                    },
+                    "intake_quality": {"score": 90},
+                },
+                "unilateral_case_matrix": {
+                    "schema_version": "unilateral_case_matrix.draft.v1",
+                    "fact_rows": [
+                        {
+                            "fact_key": "NEW_REQUESTED_RESOLUTION",
+                            "category": "AFTER_SALES",
+                            "fact_target": "The requested resolution is a refund.",
+                            "materiality": "CORE",
+                            "position_summary": "The current party requests a refund.",
+                            "asserted_value": "REFUND",
+                            "source_scope": "CURRENT_SOURCE",
+                        }
+                    ],
+                    "summary_source_fact_keys": ["NEW_REQUESTED_RESOLUTION"],
+                },
+                "missing_fields": [],
+                "admission_recommendation": "ACCEPTED",
+                "knowledge_answer_mode": "NONE",
+                "confidence": 0.9,
+            }
+        return ModelTransportResult(
+            json_document=json.dumps(document, separators=(",", ":")),
             model="intake-model",
             latency_ms=3,
             token_usage={"input": 7, "output": 4, "total": 11},
@@ -157,24 +217,106 @@ def _profile() -> ModelProfile:
         provider="synthetic",
         model="intake-model",
         temperature=0,
-        max_output_tokens=2048,
+        max_output_tokens=governed_max_output_tokens(BASELINE_INTAKE_NODE_NAME),
         tool_allowlist=(),
         max_provider_attempts=1,
     )
 
 
-def _policy() -> ModelInvocationPolicy:
+def _policy(
+    *,
+    invocation_id: str = "ATTEMPT_P4_USER_2_1",
+) -> ModelInvocationPolicy:
+    trusted_system_prompt = _trusted_system_prompt(invocation_id=invocation_id)
     return ModelInvocationPolicy(
-        invocation_id="ATTEMPT_P4_USER_2_1",
-        node_name="intake_lcel",
+        invocation_id=invocation_id,
+        node_name=BASELINE_INTAKE_NODE_NAME,
         deadline_at=datetime.now(timezone.utc) + timedelta(minutes=1),
         provider_attempts_remaining=1,
         repairs_remaining=0,
-        prompt_version="intake-prompt.v2",
+        prompt_version="DISPUTE_INTAKE_OFFICER:USER:v1",
         output_schema_version="intake-turn-proposal.v2",
         policy_version="intake-policy.v2",
         guardrail_version="intake-guardrail.v2",
-        trusted_system_sha256=system_prompt_sha256(INTAKE_SYSTEM_PROMPT),
+        trusted_system_sha256=system_prompt_sha256(trusted_system_prompt),
+    )
+
+
+def _opening_policy() -> ModelInvocationPolicy:
+    return _policy(invocation_id="ATTEMPT_P4_USER_1_1")
+
+
+def _agent_context(
+    *,
+    invocation_id: str = "ATTEMPT_P4_USER_2_1",
+) -> AgentInvocationContext:
+    return AgentInvocationContext.model_validate(
+        {
+            "tenant_id": "tenant-synthetic",
+            "case_id": "CASE_P4_SYNTHETIC_1",
+            "room_type": "INTAKE",
+            "actor_id": "ACTOR_P4_USER_1",
+            "actor_role": "USER",
+            "access_session_id": "ACCESS_P4_USER_1",
+            "permission_level": "PARTY_USER",
+            "permission_scopes": [],
+            "agent_key": "DISPUTE_INTAKE_OFFICER",
+            "agent_invocation_id": invocation_id,
+            "agent_session_id": "AGENT_SESSION_P4_USER_1",
+            "conversation_scope": ":".join(
+                (
+                    "tenant-synthetic",
+                    "CASE_P4_SYNTHETIC_1",
+                    "INTAKE",
+                    "ACTOR_P4_USER_1",
+                    "USER",
+                    "DISPUTE_INTAKE_OFFICER",
+                    "DISPUTE_INTAKE_OFFICER:USER:v1",
+                    "ACCESS_P4_USER_1",
+                )
+            ),
+            "scope_type": "INTAKE_PARTY_PRIVATE",
+            "allowed_actor_ids": ["ACTOR_P4_USER_1"],
+            "allowed_actor_roles": ["USER"],
+            "prompt_profile_id": "DISPUTE_INTAKE_OFFICER:USER:v1",
+            "memory_policy_id": "INTAKE_MEMORY_SYNTHETIC_V1",
+            "model_profile_id": "intake-model.synthetic.v1",
+            "output_schema_version": "intake-turn-proposal.v2",
+            "policy_version": "intake-policy.v2",
+            "guardrail_version": "intake-guardrail.v2",
+            "tool_capabilities": [],
+        }
+    )
+
+
+def _trusted_system_prompt(
+    *,
+    invocation_id: str = "ATTEMPT_P4_USER_2_1",
+) -> str:
+    context = _agent_context(invocation_id=invocation_id)
+    return prepare_baseline_prompt_authority(
+        prompts=PromptRepository(),
+        node_name=BASELINE_INTAKE_NODE_NAME,
+        agent_context=context,
+        prompt_profile_id=context.prompt_profile_id,
+    ).system_prompt
+
+
+def build_intake_model_node(**kwargs: Any):
+    policy = kwargs["policy"]
+    return _build_intake_model_node(
+        **kwargs,
+        agent_context=_agent_context(invocation_id=policy.invocation_id),
+        trusted_system_prompt=_trusted_system_prompt(invocation_id=policy.invocation_id),
+    )
+
+
+def build_intake_runtime_bundle(**kwargs: Any):
+    policy = kwargs["policy"]
+    return _build_intake_runtime_bundle(
+        **kwargs,
+        agent_context=_agent_context(invocation_id=policy.invocation_id),
+        trusted_system_prompt=_trusted_system_prompt(invocation_id=policy.invocation_id),
     )
 
 
@@ -188,28 +330,141 @@ def _command_bindings(bindings):
     return selected
 
 
-def _initialize(graph, config, bindings, version_pins, snapshot):
+def _opening_inputs(
+    snapshot: dict[str, Any],
+    event: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Build the exact fresh-command ingress pair plus its next participant turn."""
+
+    opening_snapshot = copy.deepcopy(snapshot)
+    form_source = opening_snapshot["initial_case_facts"].get("form_source")
+    assert form_source in {"EXTERNAL_IMPORT", "FORM_SUBMISSION"}
+    opening_snapshot["initial_case_facts"].update(
+        order_reference="ORDER_P4_0001",
+        logistics_reference="LOG_P4_00001",
+        requested_outcome_hint="REFUND",
+    )
+    opening_snapshot["own_messages"] = []
+    opening_snapshot["source_refs"] = ["SNAPSHOT_SOURCE_P4"]
+    opening_snapshot["snapshot_hash"] = canonical_sha256_omitting(
+        opening_snapshot,
+        "snapshot_hash",
+    )
+
+    initial_form = copy.deepcopy(event)
+    initial_form.update(
+        event_id="EVENT_P4_USER_1",
+        message_id="MESSAGE_P4_USER_1",
+        sequence_no=1,
+        domain_revision=opening_snapshot["domain_revision"] + 1,
+        source_type="INITIAL_FORM",
+        text=opening_snapshot["initial_case_facts"]["form_description"],
+        source_refs=["MESSAGE_P4_USER_1"],
+    )
+    initial_form["event_hash"] = canonical_sha256_omitting(initial_form, "event_hash")
+
+    follow_up_event = copy.deepcopy(event)
+    follow_up_event["domain_revision"] = initial_form["domain_revision"] + 1
+    follow_up_event["event_hash"] = canonical_sha256_omitting(
+        follow_up_event,
+        "event_hash",
+    )
+    return opening_snapshot, initial_form, follow_up_event
+
+
+def _initialize(
+    graph,
+    config,
+    bindings,
+    version_pins,
+    snapshot,
+    initial_form,
+):
     return graph.invoke(
         new_intake_graph_state(bindings=bindings, version_pins=version_pins),
         config,
-        context=IntakeTurnContext("SNAPSHOT", snapshot),
+        context=IntakeTurnContext(
+            "BOOTSTRAP_EVENT",
+            {"snapshot": snapshot, "event": initial_form},
+        ),
     )
 
 
-def _baseline_hash(bindings, version_pins, snapshot, event) -> str:
-    bundle = build_intake_runtime_bundle(
-        transport=RecoveryTransport(),
+def _assert_opening_model_run(
+    result: dict[str, Any],
+    transport: RecoveryTransport,
+    snapshot: dict[str, Any],
+    initial_form: dict[str, Any],
+) -> None:
+    """Prove the first turn used the governed baseline model, not a seed node."""
+
+    assert transport.generate_calls == 1
+    assert len(transport.requests) == 1
+    request = transport.requests[0]
+    assert request.node_name == BASELINE_INTAKE_NODE_NAME
+    assert request.governed_request.max_output_tokens == governed_max_output_tokens(
+        BASELINE_INTAKE_NODE_NAME
+    )
+    assert request.governed_request.tool_allowlist == ()
+    assert len(request.messages) == 2
+    assert request.messages[0].content == _trusted_system_prompt(
+        invocation_id="ATTEMPT_P4_USER_1_1"
+    )
+    human_prompt = request.messages[1].content
+    assert isinstance(human_prompt, str)
+    assert snapshot["initial_case_facts"]["form_source"] in human_prompt
+    assert snapshot["initial_case_facts"]["form_description"] in human_prompt
+    assert initial_form["source_type"] == "INITIAL_FORM"
+    assert result["route"] == "message"
+    assert result["initial_snapshot_hash"] == snapshot["snapshot_hash"]
+    assert result["last_event_hash"] == initial_form["event_hash"]
+    assert result["last_event_sequence"] == 1
+    assert len(result["messages"]) == 1
+    assert {message["role"] for message in result["messages"].values()} == {"AI"}
+    assert result["result_json"]["room_utterance"] == (
+        "I have reviewed the submitted form. What resolution would you like to request?"
+    )
+    assert result["result_json"]["source_event_hash"] == initial_form["event_hash"]
+    assert set(result["execution_receipts"]) == {"ATTEMPT_P4_USER_1_1"}
+
+
+def _baseline_hash(
+    bindings,
+    version_pins,
+    snapshot,
+    initial_form,
+    event,
+) -> str:
+    transport = RecoveryTransport(follow_up_event=event)
+    saver = InMemorySaver()
+    opening_bundle = build_intake_runtime_bundle(
+        transport=transport,
         profile=_profile(),
-        policy=_policy(),
-        checkpointer=InMemorySaver(),
+        policy=_opening_policy(),
+        checkpointer=saver,
     )
     config = {"configurable": {"thread_id": "intake-clean-baseline"}}
-    _initialize(bundle.graph, config, bindings, version_pins, snapshot)
+    opening = _initialize(
+        opening_bundle.graph,
+        config,
+        bindings,
+        version_pins,
+        snapshot,
+        initial_form,
+    )
+    _assert_opening_model_run(opening, transport, snapshot, initial_form)
+    bundle = build_intake_runtime_bundle(
+        transport=transport,
+        profile=_profile(),
+        policy=_policy(),
+        checkpointer=saver,
+    )
     result = bundle.graph.invoke(
         {"bindings": _command_bindings(bindings)},
         config,
         context=IntakeTurnContext("EVENT", event),
     )
+    assert transport.generate_calls == 2
     return extract_intake_terminal_proposal(result).proposal_hash
 
 
@@ -238,8 +493,8 @@ def test_runtime_bundle_requires_checkpoint_saver(checkpointer) -> None:
 @pytest.mark.parametrize(
     ("boundary", "expected_model_calls"),
     [
-        ("before_model", 1),
-        ("after_model_before_checkpoint", 2),
+        ("before_model", 2),
+        ("after_model_before_checkpoint", 3),
     ],
 )
 def test_crash_before_terminal_checkpoint_resumes_to_identical_proposal_hash(
@@ -251,7 +506,28 @@ def test_crash_before_terminal_checkpoint_resumes_to_identical_proposal_hash(
     expected_model_calls,
 ) -> None:
     saver = InMemorySaver()
-    transport = RecoveryTransport()
+    opening_snapshot, initial_form, follow_up_event = _opening_inputs(snapshot, event)
+    transport = RecoveryTransport(follow_up_event=follow_up_event)
+    opening_built = build_intake_model_node(
+        transport=transport,
+        profile=_profile(),
+        policy=_opening_policy(),
+    )
+    opening_graph = compile_intake_v2_graph(
+        intake_lcel=opening_built.runnable,
+        checkpointer=saver,
+    )
+    config = {"configurable": {"thread_id": f"intake-crash-{boundary}"}}
+    opening = _initialize(
+        opening_graph,
+        config,
+        bindings,
+        version_pins,
+        opening_snapshot,
+        initial_form,
+    )
+    _assert_opening_model_run(opening, transport, opening_snapshot, initial_form)
+
     crashing_built = build_intake_model_node(
         transport=transport,
         profile=_profile(),
@@ -262,14 +538,12 @@ def test_crash_before_terminal_checkpoint_resumes_to_identical_proposal_hash(
         intake_lcel=crashing_built.runnable,
         checkpointer=saver,
     )
-    config = {"configurable": {"thread_id": f"intake-crash-{boundary}"}}
-    _initialize(crashing_graph, config, bindings, version_pins, snapshot)
 
     with pytest.raises(RuntimeError, match="synthetic crash"):
         crashing_graph.invoke(
             {"bindings": _command_bindings(bindings)},
             config,
-            context=IntakeTurnContext("EVENT", event),
+            context=IntakeTurnContext("EVENT", follow_up_event),
         )
 
     recovered_built = build_intake_model_node(
@@ -284,11 +558,15 @@ def test_crash_before_terminal_checkpoint_resumes_to_identical_proposal_hash(
     recovered = recovered_graph.invoke(
         None,
         config,
-        context=IntakeTurnContext("EVENT", event),
+        context=IntakeTurnContext("EVENT", follow_up_event),
     )
 
     assert extract_intake_terminal_proposal(recovered).proposal_hash == _baseline_hash(
-        bindings, version_pins, snapshot, event
+        bindings,
+        version_pins,
+        opening_snapshot,
+        initial_form,
+        follow_up_event,
     )
     assert transport.generate_calls == expected_model_calls
 
@@ -300,19 +578,34 @@ def test_crash_after_terminal_checkpoint_reconciles_from_cache_without_model(
     event,
 ) -> None:
     saver = InMemorySaver()
-    transport = RecoveryTransport()
+    opening_snapshot, initial_form, follow_up_event = _opening_inputs(snapshot, event)
+    transport = RecoveryTransport(follow_up_event=follow_up_event)
+    opening_bundle = build_intake_runtime_bundle(
+        transport=transport,
+        profile=_profile(),
+        policy=_opening_policy(),
+        checkpointer=saver,
+    )
+    config = {"configurable": {"thread_id": "intake-after-checkpoint"}}
+    opening = _initialize(
+        opening_bundle.graph,
+        config,
+        bindings,
+        version_pins,
+        opening_snapshot,
+        initial_form,
+    )
+    _assert_opening_model_run(opening, transport, opening_snapshot, initial_form)
     bundle = build_intake_runtime_bundle(
         transport=transport,
         profile=_profile(),
         policy=_policy(),
         checkpointer=saver,
     )
-    config = {"configurable": {"thread_id": "intake-after-checkpoint"}}
-    _initialize(bundle.graph, config, bindings, version_pins, snapshot)
     completed = bundle.graph.invoke(
         {"bindings": _command_bindings(bindings)},
         config,
-        context=IntakeTurnContext("EVENT", event),
+        context=IntakeTurnContext("EVENT", follow_up_event),
     )
     expected = extract_intake_terminal_proposal(completed).proposal_hash
 
@@ -325,11 +618,11 @@ def test_crash_after_terminal_checkpoint_reconciles_from_cache_without_model(
     reconciled = replacement.graph.invoke(
         {},
         config,
-        context=IntakeTurnContext("EVENT", copy.deepcopy(event)),
+        context=IntakeTurnContext("EVENT", copy.deepcopy(follow_up_event)),
     )
 
     assert extract_intake_terminal_proposal(reconciled).proposal_hash == expected
-    assert transport.generate_calls == 1
+    assert transport.generate_calls == 2
 
 
 def test_crash_after_completion_before_response_returns_same_cached_hash(
@@ -339,36 +632,51 @@ def test_crash_after_completion_before_response_returns_same_cached_hash(
     event,
 ) -> None:
     saver = InMemorySaver()
-    transport = RecoveryTransport()
+    opening_snapshot, initial_form, follow_up_event = _opening_inputs(snapshot, event)
+    transport = RecoveryTransport(follow_up_event=follow_up_event)
+    opening_bundle = build_intake_runtime_bundle(
+        transport=transport,
+        profile=_profile(),
+        policy=_opening_policy(),
+        checkpointer=saver,
+    )
+    config = {"configurable": {"thread_id": "intake-after-completion"}}
+    opening = _initialize(
+        opening_bundle.graph,
+        config,
+        bindings,
+        version_pins,
+        opening_snapshot,
+        initial_form,
+    )
+    _assert_opening_model_run(opening, transport, opening_snapshot, initial_form)
     bundle = build_intake_runtime_bundle(
         transport=transport,
         profile=_profile(),
         policy=_policy(),
         checkpointer=saver,
     )
-    config = {"configurable": {"thread_id": "intake-after-completion"}}
-    _initialize(bundle.graph, config, bindings, version_pins, snapshot)
     completed = bundle.graph.invoke(
         {"bindings": _command_bindings(bindings)},
         config,
-        context=IntakeTurnContext("EVENT", event),
+        context=IntakeTurnContext("EVENT", follow_up_event),
     )
     expected = extract_intake_terminal_proposal(completed).proposal_hash
 
     first_retry = bundle.graph.invoke(
         {},
         config,
-        context=IntakeTurnContext("EVENT", copy.deepcopy(event)),
+        context=IntakeTurnContext("EVENT", copy.deepcopy(follow_up_event)),
     )
     second_retry = bundle.graph.invoke(
         {},
         config,
-        context=IntakeTurnContext("EVENT", copy.deepcopy(event)),
+        context=IntakeTurnContext("EVENT", copy.deepcopy(follow_up_event)),
     )
 
     assert extract_intake_terminal_proposal(first_retry).proposal_hash == expected
     assert extract_intake_terminal_proposal(second_retry).proposal_hash == expected
-    assert transport.generate_calls == 1
+    assert transport.generate_calls == 2
 
 
 def test_cached_replay_with_different_event_hash_fails_without_model(
@@ -378,21 +686,36 @@ def test_cached_replay_with_different_event_hash_fails_without_model(
     event,
 ) -> None:
     saver = InMemorySaver()
-    transport = RecoveryTransport()
+    opening_snapshot, initial_form, follow_up_event = _opening_inputs(snapshot, event)
+    transport = RecoveryTransport(follow_up_event=follow_up_event)
+    opening_bundle = build_intake_runtime_bundle(
+        transport=transport,
+        profile=_profile(),
+        policy=_opening_policy(),
+        checkpointer=saver,
+    )
+    config = {"configurable": {"thread_id": "intake-replay-conflict"}}
+    opening = _initialize(
+        opening_bundle.graph,
+        config,
+        bindings,
+        version_pins,
+        opening_snapshot,
+        initial_form,
+    )
+    _assert_opening_model_run(opening, transport, opening_snapshot, initial_form)
     bundle = build_intake_runtime_bundle(
         transport=transport,
         profile=_profile(),
         policy=_policy(),
         checkpointer=saver,
     )
-    config = {"configurable": {"thread_id": "intake-replay-conflict"}}
-    _initialize(bundle.graph, config, bindings, version_pins, snapshot)
     bundle.graph.invoke(
         {"bindings": _command_bindings(bindings)},
         config,
-        context=IntakeTurnContext("EVENT", event),
+        context=IntakeTurnContext("EVENT", follow_up_event),
     )
-    conflicting = copy.deepcopy(event)
+    conflicting = copy.deepcopy(follow_up_event)
     conflicting["text"] = "Conflicting bytes for the same stable event."
     conflicting["event_hash"] = canonical_sha256_omitting(conflicting, "event_hash")
 
@@ -402,7 +725,7 @@ def test_cached_replay_with_different_event_hash_fails_without_model(
             config,
             context=IntakeTurnContext("EVENT", conflicting),
         )
-    assert transport.generate_calls == 1
+    assert transport.generate_calls == 2
 
 
 def _bootstrap_execution(snapshot_ref: object, event_ref: object) -> SimpleNamespace:

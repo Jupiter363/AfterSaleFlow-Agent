@@ -123,6 +123,80 @@ def _command_row(binding: CommandBinding, status: str = "REGISTERED") -> dict[st
     }
 
 
+def _terminal_result(
+    binding: CommandBinding,
+    *,
+    checkpoint_ns: str = "hearing",
+    checkpoint_id: str = "checkpoint-previous",
+    cognitive_revision: int = 2,
+) -> ResultRecord:
+    result_json: dict[str, Any] = {
+        "schema_version": "room-graph-result.v1",
+        "command_id": binding.command_id,
+        "logical_run_id": binding.request_json["logical_run_id"],
+        "attempt_id": binding.request_json["attempt_id"],
+        "graph_key": binding.graph_key,
+        "graph_version": binding.graph_version,
+        "checkpoint_id": checkpoint_id,
+        "cognitive_revision": cognitive_revision,
+        "status": "COMPLETED",
+        "public_event_proposals": [],
+        "artifact_operations": [],
+        "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+        "execution_metadata": {
+            "prompt_version": binding.profile.prompt_version,
+            "model_profile_id": binding.profile.model_profile_id,
+            "schema_version": binding.profile.output_schema_version,
+            "policy_version": binding.profile.policy_version,
+            "guardrail_version": binding.profile.guardrail_version,
+        },
+    }
+    result_hash = canonical_sha256(result_json)
+    result_json["output_hash"] = result_hash
+    return ResultRecord(
+        result_id="result-previous",
+        thread_id=binding.thread_id,
+        command_id=binding.command_id,
+        request_hash=binding.request_hash,
+        result_schema_version="room-graph-result.v1",
+        checkpoint_ns=checkpoint_ns,
+        checkpoint_id=checkpoint_id,
+        cognitive_revision=cognitive_revision,
+        terminal_status="COMPLETED",
+        result_json=result_json,
+        result_ref=f"urn:test:graph-result:{result_hash}",
+        result_hash=result_hash,
+        usage_json={"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+    )
+
+
+def _result_row(result: ResultRecord) -> dict[str, Any]:
+    return {
+        "result_id": result.result_id,
+        "thread_id": result.thread_id,
+        "command_id": result.command_id,
+        "request_hash": result.request_hash,
+        "execution_mode": result.execution_lane.value,
+        "activation_id": result.activation_id,
+        "room_fencing_token": result.room_fencing_token,
+        "command_hash": result.command_hash,
+        "command_envelope_hash": result.command_envelope_hash,
+        "proposal_hash": result.proposal_hash,
+        "result_envelope_hash": result.result_envelope_hash,
+        "proposal_source_json": result.proposal_source_json,
+        "result_envelope_json": result.result_envelope_json,
+        "result_schema_version": result.result_schema_version,
+        "checkpoint_ns": result.checkpoint_ns,
+        "checkpoint_id": result.checkpoint_id,
+        "cognitive_revision": result.cognitive_revision,
+        "terminal_status": result.terminal_status,
+        "result_json": dict(result.result_json),
+        "result_ref": result.result_ref,
+        "result_hash": result.result_hash,
+        "usage_json": dict(result.usage_json),
+    }
+
+
 class _Cursor:
     def __init__(self, value: Any) -> None:
         self.value = value
@@ -520,7 +594,14 @@ def test_command_size_uses_rfc8785_bytes_not_python_dict_rendering() -> None:
 async def test_attempt_and_provider_budgets_are_database_atomic() -> None:
     binding = _binding()
     command_row = _command_row(binding, status="EXECUTING")
-    command_row.update({"attempt_count": 1, "fencing_token": 1})
+    command_row.update(
+        {
+            "attempt_count": 1,
+            "fencing_token": 1,
+            "start_checkpoint_ns": "hearing",
+            "start_checkpoint_id": "checkpoint-previous",
+        }
+    )
     attempt_row = {
         "attempt_id": "attempt-2",
         "thread_id": binding.thread_id,
@@ -536,7 +617,7 @@ async def test_attempt_and_provider_budgets_are_database_atomic() -> None:
     connection = _Connection([command_row, attempt_row, {**attempt_row, "provider_call_count": 1}])
     ledger = PostgresCommandLedger()
 
-    _, attempt = await ledger.begin_attempt(
+    command, attempt = await ledger.begin_attempt(
         connection,
         binding=binding,
         attempt_id="attempt-2",
@@ -551,9 +632,146 @@ async def test_attempt_and_provider_budgets_are_database_atomic() -> None:
     assert "status = 'registered'" in begin_sql
     assert "status in ('registered', 'executing')" not in begin_sql
     assert "activity_attempts_remaining" in begin_sql
+    assert "from graph_thread_registry thread" in begin_sql
+    assert "start_checkpoint_ns = thread.last_checkpoint_ns" in begin_sql
+    assert "start_checkpoint_id = thread.last_checkpoint_id" in begin_sql
+    assert "thread.lifecycle_status = 'active'" in begin_sql
+    assert "command.start_checkpoint_ns is null" in begin_sql
+    assert "thread.last_checkpoint_ns is not null" in begin_sql
+    assert command.start_checkpoint_ns == "hearing"
+    assert command.start_checkpoint_id == "checkpoint-previous"
     assert "command.deadline_at > clock_timestamp()" in provider_sql
     assert "sum(budget_attempt.provider_call_count)" in provider_sql
     assert "provider_attempts_remaining" in provider_sql
+
+
+@pytest.mark.asyncio
+async def test_completed_start_checkpoint_requires_exact_current_and_terminal_lineage() -> None:
+    current = _binding("current")
+    predecessor_binding = replace(
+        _binding("previous"),
+        command_id="command-previous",
+    )
+    result = _terminal_result(predecessor_binding)
+    predecessor_row = _command_row(predecessor_binding, status="COMPLETED")
+    predecessor_row.update(
+        {
+            "fencing_token": 7,
+            "committed_checkpoint_ns": result.checkpoint_ns,
+            "committed_checkpoint_id": result.checkpoint_id,
+            "result_ref": result.result_ref,
+            "result_hash": result.result_hash,
+        }
+    )
+    connection = _Connection([predecessor_row, _result_row(result)])
+    fence = GraphFenceContext(
+        thread_id=current.thread_id,
+        command_id=current.command_id,
+        owner_id="worker-current",
+        fencing_token=9,
+        request_hash=current.request_hash,
+        room_epoch=current.room_epoch,
+        graph_key=current.graph_key,
+        graph_version=current.graph_version,
+        checkpoint_schema_version=current.checkpoint_schema_version,
+    )
+
+    proof = await PostgresCommandLedger().load_completed_start_checkpoint(
+        connection,
+        fence=fence,
+        checkpoint_ns=result.checkpoint_ns,
+        checkpoint_id=result.checkpoint_id,
+        predecessor_command_id=predecessor_binding.command_id,
+    )
+
+    assert proof.command_id == predecessor_binding.command_id
+    assert proof.request_hash == predecessor_binding.request_hash
+    assert proof.fencing_token == 7
+    assert proof.checkpoint_id == result.checkpoint_id
+    assert proof.cognitive_revision == result.cognitive_revision
+    assert proof.result_hash == result.result_hash
+    sql, params = connection.calls[0]
+    assert sql.count("%s") == len(params)
+    assert "current_command.status = 'executing'" in sql
+    assert "current_command.start_checkpoint_id = %s" in sql
+    assert "predecessor.status = 'completed'" in sql
+    assert "predecessor.completed_at <= current_command.started_at" in sql
+    assert "predecessor.committed_checkpoint_id = %s" in sql
+    assert "predecessor.execution_mode = current_command.execution_mode" in sql
+    assert "predecessor.activation_id is not distinct from current_command.activation_id" in sql
+
+
+@pytest.mark.asyncio
+async def test_completed_start_checkpoint_fails_closed_without_database_proof() -> None:
+    current = _binding("current")
+    fence = GraphFenceContext(
+        thread_id=current.thread_id,
+        command_id=current.command_id,
+        owner_id="worker-current",
+        fencing_token=9,
+        request_hash=current.request_hash,
+        room_epoch=current.room_epoch,
+        graph_key=current.graph_key,
+        graph_version=current.graph_version,
+        checkpoint_schema_version=current.checkpoint_schema_version,
+    )
+    connection = _Connection([None])
+
+    with pytest.raises(GraphTerminalBindingError, match="completed start predecessor"):
+        await PostgresCommandLedger().load_completed_start_checkpoint(
+            connection,
+            fence=fence,
+            checkpoint_ns="hearing",
+            checkpoint_id="checkpoint-previous",
+            predecessor_command_id="command-previous",
+        )
+
+    assert len(connection.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_completed_start_checkpoint_rejects_result_pointer_mismatch() -> None:
+    current = _binding("current")
+    predecessor_binding = replace(
+        _binding("previous"),
+        command_id="command-previous",
+    )
+    command_result = _terminal_result(predecessor_binding)
+    mismatched_result = _terminal_result(
+        predecessor_binding,
+        checkpoint_id="checkpoint-other",
+    )
+    predecessor_row = _command_row(predecessor_binding, status="COMPLETED")
+    predecessor_row.update(
+        {
+            "fencing_token": 7,
+            "committed_checkpoint_ns": command_result.checkpoint_ns,
+            "committed_checkpoint_id": command_result.checkpoint_id,
+            "result_ref": mismatched_result.result_ref,
+            "result_hash": mismatched_result.result_hash,
+        }
+    )
+    connection = _Connection([predecessor_row, _result_row(mismatched_result)])
+    fence = GraphFenceContext(
+        thread_id=current.thread_id,
+        command_id=current.command_id,
+        owner_id="worker-current",
+        fencing_token=9,
+        request_hash=current.request_hash,
+        room_epoch=current.room_epoch,
+        graph_key=current.graph_key,
+        graph_version=current.graph_version,
+        checkpoint_schema_version=current.checkpoint_schema_version,
+    )
+
+    with pytest.raises(GraphTerminalBindingError, match="result binding"):
+        await PostgresCommandLedger().load_completed_start_checkpoint(
+            connection,
+            fence=fence,
+            checkpoint_ns=command_result.checkpoint_ns,
+            checkpoint_id=command_result.checkpoint_id,
+            predecessor_command_id=predecessor_binding.command_id,
+        )
 
 
 @pytest.mark.asyncio

@@ -143,6 +143,7 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
             throw new IllegalStateException("target Intake activation has expired");
         }
         TargetIntakeRuntimePins activePins = activationAuthority.resolveIntakeRuntimePins(activation, pins);
+        var actorRegistrationPins = activePins.registrationPins(request.actor().role());
         CaseRoomEpochEntity epoch = epochs
                 .findByCaseIdAndRoomTypeAndRoomEpochForUpdate(
                         request.caseId(),
@@ -177,18 +178,18 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
                 request.caseId(), request.actor(), OffsetDateTime.ofInstant(now, ZoneOffset.UTC));
         AgentConversationSessionEntity session = agentSessions.resolve(
                 access, RoomType.INTAKE, IntakeAgentTurnService.AGENT_ROLE,
-                activePins.promptVersion(), activePins.memoryPolicyVersion());
+                actorRegistrationPins.promptVersion(), activePins.memoryPolicyVersion());
 
         IntakePrivateThreadRegistration.ActorScope actorScope = new IntakePrivateThreadRegistration.ActorScope(
                 request.actor().actorId(),
                 com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole.valueOf(request.actor().role().name()),
                 audience(request), List.of(caseCapability(request.caseId())));
         String registrationId = "target-intake-registration:" + token(threadIdentity(
-                activation, request, actorScope, session.getId(), activePins));
+                activation, request, actorScope, session.getId(), actorRegistrationPins));
         IntakeGraphThreadBinding thread = threadRegistrar.register(
                 new IntakePrivateThreadRegistrationFactory.IssueRequest(
                         registrationId, activation.tenantSurrogate(), request.caseId(), activation.roomEpoch(),
-                        activation.roomFencingToken(), actorScope, session.getId(), activePins.registrationPins(),
+                        activation.roomFencingToken(), actorScope, session.getId(), actorRegistrationPins,
                         WriterMode.TEMPORAL, request.createdAt())).value();
 
         IntakeSnapshotReference snapshot = snapshots.publishOrLoad(new IntakeDomainSnapshotPublisher.SnapshotRequest(
@@ -454,8 +455,7 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
             TargetIntakeMessageRequest request,
             IntakePrivateThreadRegistration.ActorScope actorScope,
             String agentSessionId,
-            TargetIntakeRuntimePins pins) {
-        var graphPins = pins.registrationPins();
+            IntakePrivateThreadRegistrationFactory.VersionPins graphPins) {
         return String.join("\n",
                 activation.tenantSurrogate(), request.caseId(),
                 Long.toString(activation.roomEpoch()), Long.toString(activation.roomFencingToken()),

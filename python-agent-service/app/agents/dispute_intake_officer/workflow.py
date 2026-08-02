@@ -188,33 +188,9 @@ def _reason_with_llm_node(model_runner: Any | None):
         if model_runner is None:
             raise AgentServiceUnavailable("intake turn model runner is not configured")
         try:
-            prompt_initial_facts = _subjective_only_initial_case_facts(
-                request.get("initial_case_facts") or {}
-            )
-            prompt_previous_detail = _subjective_only_snapshot(
-                request.get("previous_case_detail") or {},
-                actor_role=state["actor_role"],
-            )
-            # 先建立最小必需身份/最近消息；可选段只在请求确实携带时加入，避免用空对象覆盖合同语义。
-            context_sources = {
-                "case_identity": _case_identity_context(request, state),
-                "recent_dialogue_messages": _compact_dialogue_window(
-                    request.get("recent_dialogue_messages") or []
-                ),
-            }
-            # context_pack 会按 prompt_contracts 的配置筛选上下文：
-            # 哪些必填、哪些只展示不进 prompt、哪些优先级更高，都在 contract 中约束。
-            if request.get("current_user_message") is not None:
-                context_sources["current_user_message"] = request[
-                    "current_user_message"
-                ]
-            if prompt_previous_detail:
-                context_sources["previous_case_detail"] = prompt_previous_detail
-            if request.get("initial_case_facts") is not None:
-                context_sources["initial_case_facts"] = prompt_initial_facts
-            context_pack = build_context_pack(
-                "intake_turn_case_detail",
-                context_sources,
+            validated_request = IntakeTurnRequest.model_validate(request)
+            context_pack = build_intake_turn_context_pack(
+                validated_request,
                 actor_role=state["actor_role"],
             )
             generation = model_runner.invoke_structured(
@@ -248,6 +224,49 @@ def _reason_with_llm_node(model_runner: Any | None):
             raise AgentServiceUnavailable("intake turn LLM request failed") from failure
 
     return reason_with_llm
+
+
+def build_intake_turn_context_pack(
+    request: IntakeTurnRequest,
+    *,
+    actor_role: str | None = None,
+):
+    """Build the sole production ContextPack used by every Intake graph path."""
+
+    validated = IntakeTurnRequest.model_validate(request)
+    request_json = validated.model_dump(mode="json")
+    resolved_actor_role = str(actor_role or validated.agent_context.actor_role)
+    state: IntakeTurnGraphState = {
+        "request": request_json,
+        "executed_nodes": [],
+        "source_text": "",
+        "actor_role": resolved_actor_role,
+        "memory_frame": {},
+    }
+    prompt_initial_facts = _subjective_only_initial_case_facts(
+        request_json.get("initial_case_facts") or {}
+    )
+    prompt_previous_detail = _subjective_only_snapshot(
+        request_json.get("previous_case_detail") or {},
+        actor_role=resolved_actor_role,
+    )
+    context_sources = {
+        "case_identity": _case_identity_context(request_json, state),
+        "recent_dialogue_messages": _compact_dialogue_window(
+            request_json.get("recent_dialogue_messages") or []
+        ),
+    }
+    if request_json.get("current_user_message") is not None:
+        context_sources["current_user_message"] = request_json["current_user_message"]
+    if prompt_previous_detail:
+        context_sources["previous_case_detail"] = prompt_previous_detail
+    if request_json.get("initial_case_facts") is not None:
+        context_sources["initial_case_facts"] = prompt_initial_facts
+    return build_context_pack(
+        "intake_turn_case_detail",
+        context_sources,
+        actor_role=resolved_actor_role,
+    )
 
 
 # 所属模块：接待室 Agent > 单轮 LangGraph > 首轮表单态度隔离。
@@ -651,8 +670,27 @@ def _render_case_detail_dossier(state: IntakeTurnGraphState) -> dict[str, Any]:
     字段补全和安全边界，避免把模型原样输出直接写入案件卷宗。
     """
 
-    request = IntakeTurnRequest.model_validate(state["request"])
-    output = state["llm_output"]
+    projected = project_intake_case_detail_output(
+        request=IntakeTurnRequest.model_validate(state["request"]),
+        output=state["llm_output"],
+        source_text=state["source_text"],
+    )
+    return {
+        **projected,
+        "executed_nodes": ["render_case_detail_dossier"],
+    }
+
+
+def project_intake_case_detail_output(
+    *,
+    request: IntakeTurnRequest,
+    output: IntakeCaseDetailLlmOutput,
+    source_text: str,
+) -> dict[str, Any]:
+    """Apply the baseline deterministic Intake business adapter after model output."""
+
+    request = IntakeTurnRequest.model_validate(request)
+    output = IntakeCaseDetailLlmOutput.model_validate(output)
     rendered = CaseDetailDossierSkill().render(
         request=request,
         room_utterance=output.room_utterance,
@@ -681,17 +719,39 @@ def _render_case_detail_dossier(state: IntakeTurnGraphState) -> dict[str, Any]:
         "admission_recommendation": rendered.admission_recommendation,
         "missing_fields": rendered.missing_fields,
         "knowledge_query_intent": (
-            output.knowledge_query_intent or _is_knowledge_query(state["source_text"])
+            output.knowledge_query_intent or _is_knowledge_query(source_text)
         ),
         "knowledge_answer_mode": (
             "STUB"
             if output.knowledge_query_intent
-            or _is_knowledge_query(state["source_text"])
+            or _is_knowledge_query(source_text)
             else output.knowledge_answer_mode
         ),
         "confidence": rendered.confidence,
-        "executed_nodes": ["render_case_detail_dossier"],
     }
+
+
+def finalize_intake_projected_output(
+    projected: dict[str, Any],
+) -> dict[str, Any]:
+    """Apply the exact baseline readiness node to an already rendered result.
+
+    The durable Target graph calls this after the same dossier projection used by
+    the baseline graph.  Keeping the final visible utterance in this shared node
+    prevents protocol adapters from silently dropping the baseline handoff and
+    readiness wording.
+    """
+
+    finalized = copy.deepcopy(projected)
+    readiness_patch = _validate_readiness(
+        {
+            "scroll_snapshot": finalized["scroll_snapshot"],
+            "room_utterance": finalized["room_utterance"],
+        }
+    )
+    if "room_utterance" in readiness_patch:
+        finalized["room_utterance"] = readiness_patch["room_utterance"]
+    return finalized
 
 
 # 所属模块：接待室 Agent > 单轮 LangGraph > 房间职责话术护栏。

@@ -9,7 +9,7 @@
   "actor_scope_hash": "52f01901287fe5e5465ddcd7d7baf9074aa77e3d88a64da747bf1f530916a5d2",
   "agent_session_id": "AGENT_SESSION_P4_USER_1",
   "cognitive_revision": 2,
-  "source_snapshot_hash": "7deb1aa13efc125244aa0e122b6e02dc4343f97afc0423c94a00308b217fea0d",
+  "source_snapshot_hash": "a576823e72e44f62b08249af84f295fe5cc3ac09f3335ab96b2846fa7e5f9743",
   "source_event_hash": "5da4ebd5b5ff75ea8af5c955c01f2cf18138892d07ad6ca74be7c7fb50ff5815",
   "room_utterance": "Please confirm the requested resolution before submission.",
   "dossier_patch": {
@@ -33,5 +33,5 @@
     "guardrail_version": "intake-guardrail.v2",
     "tool_policy_version": "no-tools.v1"
   },
-  "proposal_hash": "ef2b73e230b41ee1efe44f05edc7e3e569d53ddbac46d887160e63e0a6921e39"
+  "proposal_hash": "c37196fce02833a2d4486831a1b8ee3a4a6c075d9041909dde99d1edece2e064"
 }

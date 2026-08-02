@@ -9,7 +9,7 @@ from inspect import getattr_static
 from typing import Any, Literal, cast
 from weakref import WeakKeyDictionary
 
-from langchain_core.messages import AIMessage, SystemMessage
+from langchain_core.messages import AIMessage
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import (
@@ -23,11 +23,17 @@ from typing_extensions import TypedDict
 
 from app.contracts.v1.codec import canonical_sha256, canonicalize
 from app.graph_runtime.state_lens import StateLens
+from app.agents.dispute_intake_officer.schemas import IntakeCaseDetailLlmOutput
 from app.agents.dispute_intake_officer.skills.dossier.dossier_skill import (
     _reported_attitude_from_text,
     _reported_attitude_position,
 )
 from app.harness.prompt_composer import PromptComposer
+from app.graphs.intake.baseline import (
+    BASELINE_INTAKE_NODE_NAME,
+    adapt_intake_baseline_output,
+    prepare_intake_baseline_invocation,
+)
 from app.graphs.intake.contracts import (
     MODEL_CONTROLLED_FORBIDDEN_FIELDS,
     IntakeCognitionDraft,
@@ -49,14 +55,16 @@ from app.model_runtime.profiles import (
     system_prompt_sha256,
 )
 from app.model_runtime.transports import ModelTransport
-from app.streaming import VisibleFieldSpec
+from app.harness.context_window import ContextWindowManager
+from app.harness.invocation_context import AgentInvocationContext
+from app.harness.prompt_composer import PromptRepository
+from app.streaming import VISIBLE_FIELD_REGISTRY
 
 
-# Reuse the same trusted PromptComposer pipeline as the production baseline while
-# selecting a Target-specific single-schema template.  The legacy baseline output
-# envelope is intentionally not concatenated here because IntakeCognitionDraft is
-# the sole governed response contract for this graph.
-INTAKE_SYSTEM_PROMPT = PromptComposer().render_system_prompt("target_intake_cognition")
+# Backward-compatible generic constant for static diagnostics only.  Production
+# runtime messages include the exact trusted Agent context and role profile and are
+# prepared by ``prepare_intake_baseline_invocation`` below.
+INTAKE_SYSTEM_PROMPT = PromptComposer().render_system_prompt(BASELINE_INTAKE_NODE_NAME)
 
 _SAFE_INTAKE_ROOM_UTTERANCE = (
     "您好，我是小衡。为了准确梳理争议，请您补充说明事件发生的时间、"
@@ -65,22 +73,11 @@ _SAFE_INTAKE_ROOM_UTTERANCE = (
 _SAFE_INTAKE_CASE_SUMMARY = "当前争议围绕已导入案件事实、处理经过及发起方诉求展开。"
 
 _TARGET_INTAKE_VISIBLE_FIELDS = (
-    # The full JSON string closes before the remaining dossier branches.  Keeping it
-    # atomic lets the executor validate the complete question before it becomes
-    # visible, without delaying the first reply until the full graph is terminal.
-    VisibleFieldSpec("room_utterance", "room_utterance", "json_value"),
-    VisibleFieldSpec("case_story", "case_detail.case_story", "json_value"),
-    VisibleFieldSpec("references", "case_detail.references", "json_value"),
-    VisibleFieldSpec("party_positions", "case_detail.party_positions", "json_value"),
-    VisibleFieldSpec("dispute_focus", "case_detail.dispute_focus", "json_value"),
-    VisibleFieldSpec("requested_resolution", "case_detail.requested_resolution", "json_value"),
-    VisibleFieldSpec("claim_resolution", "case_detail.claim_resolution", "json_value"),
-    VisibleFieldSpec("respondent_attitude", "case_detail.respondent_attitude", "json_value"),
-    VisibleFieldSpec("dispute_core_state", "case_detail.dispute_core_state", "json_value"),
-    VisibleFieldSpec("risk_assessment", "case_detail.risk_assessment", "json_value"),
-    VisibleFieldSpec("missing_information", "case_detail.missing_information", "json_value"),
-    VisibleFieldSpec("intake_quality", "case_detail.intake_quality", "json_value"),
-    VisibleFieldSpec("admission", "case_detail.admission", "json_value"),
+    # Match the baseline publication boundary: the model-facing utterance is
+    # finalized by the deterministic dossier/readiness nodes before it becomes
+    # public.  The executor publishes that finalized value while the remaining
+    # dossier fields below continue to stream directly from the governed model.
+    *VISIBLE_FIELD_REGISTRY["intake_turn"][BASELINE_INTAKE_NODE_NAME],
 )
 
 _EVIDENCE_MATERIAL_IDENTIFIER = re.compile(
@@ -139,13 +136,6 @@ _ATTITUDE_POST_NEGATION_EN = re.compile(
     re.IGNORECASE,
 )
 
-_HUMAN_PROMPT = """Authorized audience: {audience}
-<authorized_messages_json>{messages_json}</authorized_messages_json>
-<bounded_memory_summary>{memory_summary}</bounded_memory_summary>
-<authorized_dossier_json>{dossier_json}</authorized_dossier_json>
-<immutable_source_catalog_json>{source_refs_json}</immutable_source_catalog_json>
-<trusted_version_ids_json>{version_ids_json}</trusted_version_ids_json>"""
-
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _NO_TOOLS_POLICY_VERSION = "no-tools.v1"
@@ -198,12 +188,8 @@ _INTERNAL_OUTPUT_FIELDS = frozenset(
 
 
 class IntakePromptInput(TypedDict):
-    audience: str
-    messages_json: str
-    memory_summary: str
-    dossier_json: str
-    source_refs_json: str
-    version_ids_json: str
+    system_prompt: str
+    human_prompt: str
 
 
 _IntakeModelTestPhase = Literal["before_model", "after_model_before_checkpoint"]
@@ -677,7 +663,7 @@ class BuiltIntakeModelNode:
     lens: StateLens[IntakeGraphStateV2, IntakePromptInput]
     prompt: ChatPromptTemplate
     model: GovernedChatModel
-    parser: PydanticOutputParser[IntakeCognitionDraft]
+    parser: PydanticOutputParser[IntakeCaseDetailLlmOutput]
     preflight: Runnable[IntakeGraphStateV2, IntakeGraphStateV2]
     model_flow: Runnable[IntakeGraphStateV2, Mapping[str, Any]]
     guardrail: Runnable[Mapping[str, Any], Mapping[str, Any]]
@@ -734,10 +720,19 @@ class IntakeModelPreflightRunnable(Runnable[IntakeGraphStateV2, IntakeGraphState
 
     def _validate(self, state: IntakeGraphStateV2) -> IntakeGraphStateV2:
         validate_state(state)
-        if (
-            state.get("route") != "message"
-            or state.get("initial_snapshot_hash") is None
-            or state.get("last_event_hash") is None
+        route = state.get("route")
+        has_snapshot = state.get("initial_snapshot_hash") is not None
+        has_event = state.get("last_event_hash") is not None
+        # A snapshot-only opening has no participant event cursor.  Its durable
+        # source identity is the imported snapshot hash (also used by the
+        # response-message ID), while all subsequent model turns remain bound
+        # to a participant event.
+        if not (
+            has_snapshot
+            and (
+                (route == "initialize" and not has_event)
+                or (route == "message" and has_event)
+            )
         ):
             raise IntakeGraphContractError("INTAKE_LCEL_ROUTE_INVALID")
         pins = state["version_pins"]
@@ -751,6 +746,20 @@ class IntakeModelPreflightRunnable(Runnable[IntakeGraphStateV2, IntakeGraphState
         }
         if any(pins.get(key) != value for key, value in expected.items()):
             raise IntakeGraphContractError("INTAKE_LCEL_VERSION_PIN_MISMATCH")
+        if route == "initialize":
+            # StateLens deliberately scopes both event fields so a regular turn
+            # can bind its current participant message by hash.  They are
+            # optional at the durable-state boundary, however, so supply only
+            # pipeline-local nulls for the snapshot opening rather than
+            # mutating the graph state or inventing a participant message.
+            return cast(
+                IntakeGraphStateV2,
+                {
+                    **state,
+                    "last_event_ref": None,
+                    "last_event_hash": None,
+                },
+            )
         return state
 
 
@@ -760,10 +769,12 @@ class IntakeGuardrailRunnable(Runnable[Mapping[str, Any], Mapping[str, Any]]):
         *,
         profile: ModelProfile,
         policy: ModelInvocationPolicy,
+        agent_context: AgentInvocationContext,
     ) -> None:
         self.name = "intake_lcel.guardrail"
         self._profile = profile
         self._policy = policy
+        self._agent_context = agent_context
 
     def invoke(
         self,
@@ -802,7 +813,10 @@ class IntakeGuardrailRunnable(Runnable[Mapping[str, Any], Mapping[str, Any]]):
         )
 
     def _guard(self, value: Mapping[str, Any]) -> Mapping[str, Any]:
-        state, message, draft = _generation_parts(value)
+        state, message, draft = _generation_parts(
+            value,
+            agent_context=self._agent_context,
+        )
         _validated_model_metadata(message, profile=self._profile, policy=self._policy)
         _validate_business_output(state, draft)
         return value
@@ -814,10 +828,12 @@ class IntakePatchProjectorRunnable(Runnable[Mapping[str, Any], dict[str, Any]]):
         *,
         profile: ModelProfile,
         policy: ModelInvocationPolicy,
+        agent_context: AgentInvocationContext,
     ) -> None:
         self.name = "intake_lcel.patch"
         self._profile = profile
         self._policy = policy
+        self._agent_context = agent_context
 
     def invoke(
         self,
@@ -856,7 +872,10 @@ class IntakePatchProjectorRunnable(Runnable[Mapping[str, Any], dict[str, Any]]):
         )
 
     def _project(self, value: Mapping[str, Any]) -> dict[str, Any]:
-        state, message, draft = _generation_parts(value)
+        state, message, draft = _generation_parts(
+            value,
+            agent_context=self._agent_context,
+        )
         draft_json = draft.model_dump(
             mode="json",
             exclude_none=True,
@@ -868,9 +887,20 @@ class IntakePatchProjectorRunnable(Runnable[Mapping[str, Any], dict[str, Any]]):
             policy=self._policy,
         )
         output_hash = canonical_sha256(draft_json)
+        response_message_id = _intake_response_message_id(state, output_hash)
         patch = {
             "cognitive_revision": state["cognitive_revision"] + 1,
             "terminal_draft": draft_json,
+            "messages": {
+                response_message_id: {
+                    "message_id": response_message_id,
+                    "role": "AI",
+                    "audience": state["bindings"]["private"]["audience"],
+                    "content": draft.room_utterance,
+                    "sequence": state.get("last_event_sequence", 0),
+                    "source_hash": output_hash,
+                }
+            },
             "execution_receipts": {
                 self._policy.invocation_id: {
                     "invocation_id": self._policy.invocation_id,
@@ -881,6 +911,32 @@ class IntakePatchProjectorRunnable(Runnable[Mapping[str, Any], dict[str, Any]]):
             "usage_by_invocation": {self._policy.invocation_id: usage},
         }
         return validate_cognition_patch(state, patch)
+
+
+def _intake_response_message_id(
+    state: Mapping[str, Any],
+    output_hash: str,
+) -> str:
+    """Return a retry-stable ID that cannot collide across distinct turns."""
+
+    source_turn_hash = state.get("last_event_hash") or state.get(
+        "initial_snapshot_hash"
+    )
+    if (
+        not isinstance(source_turn_hash, str)
+        or not _SHA256.fullmatch(source_turn_hash)
+        or not _SHA256.fullmatch(output_hash)
+    ):
+        raise IntakeGraphContractError("INTAKE_LCEL_SOURCE_TURN_INVALID")
+    return (
+        "INTAKE_AI_"
+        + canonical_sha256(
+            {
+                "source_turn_hash": source_turn_hash,
+                "output_hash": output_hash,
+            }
+        )[:32]
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -902,9 +958,9 @@ class _IntakeComponentSeal:
     model: GovernedChatModel
     model_profile: ModelProfile
     model_policy: ModelInvocationPolicy
-    model_output_type: type[IntakeCognitionDraft]
-    parser: PydanticOutputParser[IntakeCognitionDraft]
-    parser_pydantic_object: type[IntakeCognitionDraft]
+    model_output_type: type[IntakeCaseDetailLlmOutput]
+    parser: PydanticOutputParser[IntakeCaseDetailLlmOutput]
+    parser_pydantic_object: type[IntakeCaseDetailLlmOutput]
     parser_diff: bool
     preflight: IntakeModelPreflightRunnable
     guardrail: IntakeGuardrailRunnable
@@ -913,6 +969,8 @@ class _IntakeComponentSeal:
     policy: ModelInvocationPolicy
     profile_snapshot: ModelProfile
     policy_snapshot: ModelInvocationPolicy
+    agent_context: AgentInvocationContext
+    agent_context_snapshot: AgentInvocationContext
     behavior_methods: tuple[_BehaviorMethodSeal, ...]
     behavior_attributes: tuple[_BehaviorAttributeSeal, ...]
     model_transport: ModelTransport
@@ -929,12 +987,13 @@ def _seal_intake_components(
     lens: StateLens[IntakeGraphStateV2, IntakePromptInput],
     prompt: ChatPromptTemplate,
     model: GovernedChatModel,
-    parser: PydanticOutputParser[IntakeCognitionDraft],
+    parser: PydanticOutputParser[IntakeCaseDetailLlmOutput],
     preflight: IntakeModelPreflightRunnable,
     guardrail: IntakeGuardrailRunnable,
     patch_projector: IntakePatchProjectorRunnable,
     profile: ModelProfile,
     policy: ModelInvocationPolicy,
+    agent_context: AgentInvocationContext,
     pipeline: RunnableSequence,
 ) -> _IntakeComponentSeal:
     explicit_methods = (
@@ -1037,6 +1096,8 @@ def _seal_intake_components(
         policy=policy,
         profile_snapshot=deepcopy(profile),
         policy_snapshot=deepcopy(policy),
+        agent_context=agent_context,
+        agent_context_snapshot=deepcopy(agent_context),
         behavior_methods=_seal_behavior_methods(pipeline, explicit_methods),
         behavior_attributes=_seal_behavior_attributes(pipeline),
         model_transport=model._transport,
@@ -1108,10 +1169,14 @@ def _matches_intake_component_seal(seal: _IntakeComponentSeal) -> bool:
             and seal.guardrail._policy is seal.policy
             and seal.guardrail._profile == seal.profile_snapshot
             and seal.guardrail._policy == seal.policy_snapshot
+            and seal.guardrail._agent_context is seal.agent_context
+            and seal.guardrail._agent_context == seal.agent_context_snapshot
             and seal.patch_projector._profile is seal.profile
             and seal.patch_projector._policy is seal.policy
             and seal.patch_projector._profile == seal.profile_snapshot
             and seal.patch_projector._policy == seal.policy_snapshot
+            and seal.patch_projector._agent_context is seal.agent_context
+            and seal.patch_projector._agent_context == seal.agent_context_snapshot
         )
     )
 
@@ -1121,17 +1186,32 @@ def build_intake_model_node(
     transport: ModelTransport,
     profile: ModelProfile,
     policy: ModelInvocationPolicy,
-    trusted_system_prompt: str = INTAKE_SYSTEM_PROMPT,
+    agent_context: AgentInvocationContext,
+    trusted_system_prompt: str,
     _test_hook: _IntakeModelTestHook | None = None,
 ) -> BuiltIntakeModelNode:
-    if policy.node_name != "intake_lcel":
+    if policy.node_name != BASELINE_INTAKE_NODE_NAME:
         raise IntakeGraphContractError("INTAKE_LCEL_NODE_BINDING_INVALID")
+    if type(agent_context) is not AgentInvocationContext:
+        raise IntakeGraphContractError("INTAKE_LCEL_AGENT_CONTEXT_INVALID")
     if system_prompt_sha256(trusted_system_prompt) != policy.trusted_system_sha256:
         raise IntakeGraphContractError("INTAKE_LCEL_SYSTEM_PROMPT_MISMATCH")
     if profile.tool_allowlist:
         raise IntakeGraphContractError("INTAKE_LCEL_TOOLS_FORBIDDEN")
     if not _IDENTIFIER.fullmatch(policy.invocation_id):
         raise IntakeGraphContractError("INTAKE_LCEL_INVOCATION_ID_INVALID")
+
+    prompts = PromptRepository()
+    context_window = ContextWindowManager()
+
+    def select_baseline_prompt(state: Mapping[str, Any]) -> Mapping[str, Any]:
+        return _select_intake_prompt(
+            state,
+            agent_context=agent_context,
+            prompts=prompts,
+            context_window=context_window,
+            trusted_system_prompt=trusted_system_prompt,
+        )
 
     lens: StateLens[IntakeGraphStateV2, IntakePromptInput] = StateLens(
         name="intake_lcel.state_lens",
@@ -1146,23 +1226,23 @@ def build_intake_model_node(
             "last_event_ref",
             "last_event_hash",
         ),
-        selector=_select_intake_prompt,
+        selector=select_baseline_prompt,
         output_type=IntakePromptInput,
     )
     prompt = ChatPromptTemplate.from_messages(
         [
-            SystemMessage(content=trusted_system_prompt),
-            ("human", _HUMAN_PROMPT),
+            ("system", "{system_prompt}"),
+            ("human", "{human_prompt}"),
         ]
     )
     model = GovernedChatModel(
         transport=transport,
-        output_type=IntakeCognitionDraft,
+        output_type=IntakeCaseDetailLlmOutput,
         profile=profile,
         policy=policy,
         visible_fields=_TARGET_INTAKE_VISIBLE_FIELDS,
     )
-    parser = PydanticOutputParser(pydantic_object=IntakeCognitionDraft)
+    parser = PydanticOutputParser(pydantic_object=IntakeCaseDetailLlmOutput)
     preflight = IntakeModelPreflightRunnable(profile=profile, policy=policy)
     parsed_generation = RunnableParallel(
         message=RunnablePassthrough(),
@@ -1173,8 +1253,16 @@ def build_intake_model_node(
         state=RunnablePassthrough(),
         generation=model_flow,
     )
-    guardrail = IntakeGuardrailRunnable(profile=profile, policy=policy)
-    patch_projector = IntakePatchProjectorRunnable(profile=profile, policy=policy)
+    guardrail = IntakeGuardrailRunnable(
+        profile=profile,
+        policy=policy,
+        agent_context=agent_context,
+    )
+    patch_projector = IntakePatchProjectorRunnable(
+        profile=profile,
+        policy=policy,
+        agent_context=agent_context,
+    )
     pipeline = cast(
         RunnableSequence,
         preflight | state_and_generation | guardrail | patch_projector,
@@ -1189,6 +1277,7 @@ def build_intake_model_node(
         patch_projector=patch_projector,
         profile=profile,
         policy=policy,
+        agent_context=agent_context,
         pipeline=pipeline,
     )
     runnable = _create_vetted_intake_model_runnable(
@@ -1210,60 +1299,32 @@ def build_intake_model_node(
     )
 
 
-def _select_intake_prompt(state: Mapping[str, Any]) -> Mapping[str, Any]:
-    bindings = cast(Mapping[str, Any], state["bindings"])
-    private = cast(Mapping[str, Any], bindings["private"])
-    messages = cast(Mapping[str, Mapping[str, Any]], state["messages"])
-    ordered_messages = sorted(
-        messages.values(),
-        key=lambda item: (cast(int, item["sequence"]), cast(str, item["message_id"])),
+def _select_intake_prompt(
+    state: Mapping[str, Any],
+    *,
+    agent_context: AgentInvocationContext,
+    prompts: PromptRepository,
+    context_window: ContextWindowManager,
+    trusted_system_prompt: str,
+) -> Mapping[str, Any]:
+    prepared = prepare_intake_baseline_invocation(
+        state,
+        agent_context=agent_context,
+        prompts=prompts,
+        context_window=context_window,
     )
-    if len(ordered_messages) > 6:
-        raise IntakeGraphContractError("INTAKE_LCEL_MESSAGE_WINDOW_TOO_LARGE")
-    projected_messages = [
-        {
-            "message_id": message["message_id"],
-            "role": message["role"],
-            "audience": message["audience"],
-            "sequence": message["sequence"],
-            "content": message["content"],
-        }
-        for message in ordered_messages
-    ]
-    source_catalog = [
-        {
-            "source_ref": source_ref,
-            **({"source_hash": source_hash} if source_hash is not None else {}),
-        }
-        for source_ref, source_hash in sorted(_source_catalog(state).items())
-    ]
-    pins = cast(Mapping[str, Any], state["version_pins"])
-    version_ids = {
-        key: pins[key]
-        for key in (
-            "graph_version",
-            "checkpoint_schema_version",
-            "state_schema_version",
-            "prompt_version",
-            "model_profile_id",
-            "output_schema_version",
-            "policy_version",
-            "guardrail_version",
-            "tool_policy_version",
-        )
-    }
+    if prepared.system_prompt != trusted_system_prompt:
+        raise IntakeGraphContractError("INTAKE_LCEL_SYSTEM_PROMPT_MISMATCH")
     return {
-        "audience": private["audience"],
-        "messages_json": _canonical_text(projected_messages),
-        "memory_summary": state["memory_summary"],
-        "dossier_json": _canonical_text(state["dossier_draft"]),
-        "source_refs_json": _canonical_text(source_catalog),
-        "version_ids_json": _canonical_text(version_ids),
+        "system_prompt": prepared.system_prompt,
+        "human_prompt": prepared.user_prompt,
     }
 
 
 def _generation_parts(
     value: Mapping[str, Any],
+    *,
+    agent_context: AgentInvocationContext,
 ) -> tuple[IntakeGraphStateV2, AIMessage, IntakeCognitionDraft]:
     state = value.get("state")
     generation = value.get("generation")
@@ -1271,13 +1332,24 @@ def _generation_parts(
         raise IntakeGraphContractError("INTAKE_LCEL_GENERATION_INVALID")
     message = generation.get("message")
     draft = generation.get("draft")
-    if not isinstance(message, AIMessage) or not isinstance(draft, IntakeCognitionDraft):
+    if not isinstance(message, AIMessage) or not isinstance(
+        draft,
+        IntakeCaseDetailLlmOutput,
+    ):
         raise IntakeGraphContractError("INTAKE_LCEL_GENERATION_INVALID")
     typed_state = cast(IntakeGraphStateV2, state)
-    normalized = _normalize_model_matrix_fact_keys(typed_state, draft)
+    adapted = adapt_intake_baseline_output(
+        typed_state,
+        agent_context=agent_context,
+        output=draft,
+    )
+    normalized = _normalize_model_matrix_fact_keys(typed_state, adapted)
     normalized = _normalize_model_respondent_attitude(typed_state, normalized)
     normalized = _normalize_model_evidence_boundaries(normalized)
-    return typed_state, message, _normalize_model_dispute_core_state(typed_state, normalized)
+    return typed_state, message, _normalize_model_dispute_core_state(
+        typed_state,
+        normalized,
+    )
 
 
 def _normalize_model_respondent_attitude(

@@ -56,6 +56,7 @@ from app.graphs.intake.lcel import (
     _normalized_intake_room_utterance,
     _respondent_attitude_discriminator,
 )
+from app.graphs.intake.baseline import BASELINE_INTAKE_NODE_NAME
 from app.graphs.intake.contracts import IntakeTurnProposal
 from app.graphs.intake.runtime import IntakeRuntimeBundle
 from app.graphs.intake.state import IntakeGraphStateV2, IntakeTurnContext
@@ -64,7 +65,19 @@ from app.model_runtime.callbacks import governed_events_from_chunk
 from app.model_runtime.transports import ModelTransport
 
 
-_INTAKE_VISIBLE_FIELDS = frozenset(spec.field for spec in _TARGET_INTAKE_VISIBLE_FIELDS)
+_INTAKE_MODEL_VISIBLE_FIELD_MODES = {
+    spec.field: spec.value_mode for spec in _TARGET_INTAKE_VISIBLE_FIELDS
+}
+_INTAKE_MODEL_VISIBLE_FIELDS = frozenset(_INTAKE_MODEL_VISIBLE_FIELD_MODES)
+_INTAKE_VISIBLE_FIELDS = _INTAKE_MODEL_VISIBLE_FIELDS | frozenset({"room_utterance"})
+_INTAKE_TERMINAL_DOSSIER_FIELDS = tuple(
+    dict.fromkeys(
+        spec.field
+        for spec in _TARGET_INTAKE_VISIBLE_FIELDS
+        if spec.value_mode == "json_value" and spec.field.count(".") == 1
+    )
+)
+_AGENT_STREAM_DELTA_MAX_LENGTH = 4096
 
 
 class CompiledIntakeStateGraphPort(Protocol):
@@ -147,7 +160,6 @@ class CompiledIntakeGraphShadowExecutor:
         config = self._graph_config(runtime_execution)
         emitted_usage: list[Usage] = []
         pending_usage_update: GraphPublicUpdate | None = None
-        room_utterance_emitted = False
         source = graph.astream(
             graph_input,
             config,
@@ -169,27 +181,13 @@ class CompiledIntakeGraphShadowExecutor:
                         emitted_usage.append(usage_update)
                         pending_usage_update = update
                         continue
-                    if update.payload.field == "room_utterance":
-                        if room_utterance_emitted:
-                            raise GraphContractError("INTAKE_ROOM_UTTERANCE_STREAM_DUPLICATE")
-                        safe_update = self._validated_room_utterance_update(update)
-                        self._validate_public_update(safe_update)
-                        yield self._event(
-                            execution,
-                            sequence,
-                            safe_update.event_type,
-                            safe_update.payload,
-                        )
-                        room_utterance_emitted = True
-                        sequence += 1
-                        continue
                     if not update.payload.field.startswith("case_detail."):
                         raise GraphContractError(
                             "compiled Intake Graph emitted an unsupported visible field"
                         )
                     if self._should_suppress_respondent_attitude_update(update):
                         continue
-                    if update.payload.field == "case_detail.dispute_core_state":
+                    if update.payload.field.startswith("case_detail.dispute_core_state"):
                         # The provider-facing branch is intentionally open for
                         # incremental generation and may contain legacy aliases.
                         # Publish it only from the normalized terminal proposal.
@@ -203,7 +201,8 @@ class CompiledIntakeGraphShadowExecutor:
                     # governed JSON section as soon as it is available so the board can
                     # evolve alongside the utterance; the durable proposal and formal
                     # dossier remain authoritative only after the fenced terminal commit
-                    # below succeeds.
+                    # below succeeds. String leaves arrive as real prefixes;
+                    # structured sections arrive once their JSON value closes.
                     yield self._event(
                         execution,
                         sequence,
@@ -227,6 +226,20 @@ class CompiledIntakeGraphShadowExecutor:
         checkpoint_ns = str(configurable.get("checkpoint_ns") or "")
         checkpoint_id = str(configurable.get("checkpoint_id") or "")
         revision = state["cognitive_revision"]
+
+        # Baseline Intake publishes the room utterance only after its dossier and
+        # readiness guards have produced the final text.  It is still provisional
+        # until the fenced commit below (like the streamed board sections), but it
+        # is byte-for-byte the value that will be persisted on success.
+        for room_update in self._room_utterance_updates(proposal.room_utterance):
+            self._validate_public_update(room_update)
+            yield self._event(
+                execution,
+                sequence,
+                room_update.event_type,
+                room_update.payload,
+            )
+            sequence += 1
 
         await self._saver.avalidate_external_terminal_checkpoint(
             final_config,
@@ -349,15 +362,40 @@ class CompiledIntakeGraphShadowExecutor:
         for event in events:
             if (
                 event.get("schema_version") != "governed-model-event.v1"
-                or event.get("node_name") != "intake_lcel"
-                or event.get("field") not in _INTAKE_VISIBLE_FIELDS
+                or event.get("node_name") != BASELINE_INTAKE_NODE_NAME
+                or event.get("field") not in _INTAKE_MODEL_VISIBLE_FIELDS
             ):
                 raise GraphContractError("compiled Intake Graph governed event is invalid")
+            field = event["field"]
+            delta = event["delta"]
+            # A structured root snapshot must be a complete JSON document for the
+            # frontend to parse it.  Splitting it would publish invalid fragments,
+            # while allowing it through would violate AgentStreamV2's 4096-char
+            # bound and abort an otherwise durable execution.  The terminal
+            # projection remains authoritative and the room refreshes from it.
+            if CompiledIntakeGraphShadowExecutor._is_oversized_root_dossier_snapshot(
+                field,
+                delta,
+            ):
+                continue
+            if (
+                _INTAKE_MODEL_VISIBLE_FIELD_MODES[field] == "string_prefix"
+                and isinstance(delta, str)
+                and delta
+            ):
+                updates.extend(
+                    CompiledIntakeGraphShadowExecutor._string_prefix_dossier_updates(
+                        node=event["node_name"],
+                        field=field,
+                        delta=delta,
+                    )
+                )
+                continue
             updates.append(
                 GraphPublicUpdate.visible_delta(
                     node=event["node_name"],
-                    field=event["field"],
-                    delta=event["delta"],
+                    field=field,
+                    delta=delta,
                 )
             )
         return tuple(updates)
@@ -376,9 +414,9 @@ class CompiledIntakeGraphShadowExecutor:
         delta = update.payload.delta
         if field not in _INTAKE_VISIBLE_FIELDS or not isinstance(delta, str) or not delta:
             raise GraphContractError("compiled Intake Graph visible update is invalid")
-        # room_utterance is intentionally a complete JSON string.  Its decoded
-        # text is validated by _validated_room_utterance_update immediately before
-        # publication; do not inspect the quoted transport representation here.
+        # room_utterance is the finalized baseline text, not provider JSON.  It is
+        # normalized by _validated_room_utterance_update immediately before
+        # publication.
         if field == "room_utterance":
             return
         if (
@@ -395,15 +433,12 @@ class CompiledIntakeGraphShadowExecutor:
         payload = update.payload
         if (
             update.event_type != "visible_delta"
-            or payload.node != "intake_lcel"
+            or payload.node != BASELINE_INTAKE_NODE_NAME
             or payload.field != "room_utterance"
             or not isinstance(payload.delta, str)
         ):
             raise GraphContractError("compiled Intake Graph room utterance is invalid")
-        try:
-            room_utterance = json.loads(payload.delta)
-        except (TypeError, json.JSONDecodeError) as error:
-            raise GraphContractError("INTAKE_ROOM_UTTERANCE_STREAM_INVALID") from error
+        room_utterance = payload.delta
         if not isinstance(room_utterance, str) or not room_utterance.strip():
             raise GraphContractError("INTAKE_ROOM_UTTERANCE_STREAM_INVALID")
         room_utterance = _normalized_intake_room_utterance(room_utterance)
@@ -414,16 +449,72 @@ class CompiledIntakeGraphShadowExecutor:
         )
 
     @staticmethod
+    def _room_utterance_updates(room_utterance: str) -> tuple[GraphPublicUpdate, ...]:
+        """Publish the already-guarded baseline reply in bounded Unicode chunks."""
+
+        if not isinstance(room_utterance, str) or not room_utterance.strip():
+            raise GraphContractError("INTAKE_ROOM_UTTERANCE_STREAM_INVALID")
+        normalized = _normalized_intake_room_utterance(room_utterance)
+        return tuple(
+            GraphPublicUpdate.visible_delta(
+                node=BASELINE_INTAKE_NODE_NAME,
+                field="room_utterance",
+                # Python slices operate on Unicode code points, so no UTF-8 byte
+                # sequence can be cut in half.  The frontend reassembles these
+                # ordered deltas before applying its baseline typewriter pacing.
+                delta=normalized[offset : offset + _AGENT_STREAM_DELTA_MAX_LENGTH],
+            )
+            for offset in range(0, len(normalized), _AGENT_STREAM_DELTA_MAX_LENGTH)
+        )
+
+    @staticmethod
+    def _string_prefix_dossier_updates(
+        *,
+        node: str,
+        field: str,
+        delta: str,
+    ) -> tuple[GraphPublicUpdate, ...]:
+        """Keep a streamable dossier leaf within AgentStreamV2's text bound."""
+
+        return tuple(
+            GraphPublicUpdate.visible_delta(
+                node=node,
+                field=field,
+                # This is a textual prefix, unlike a root JSON snapshot, so the
+                # client can safely append each Unicode-code-point chunk.
+                delta=delta[offset : offset + _AGENT_STREAM_DELTA_MAX_LENGTH],
+            )
+            for offset in range(0, len(delta), _AGENT_STREAM_DELTA_MAX_LENGTH)
+        )
+
+    @staticmethod
+    def _is_oversized_root_dossier_snapshot(field: object, delta: object) -> bool:
+        return (
+            isinstance(field, str)
+            and isinstance(delta, str)
+            and field.startswith("case_detail.")
+            and field.count(".") == 1
+            and _INTAKE_MODEL_VISIBLE_FIELD_MODES.get(field) == "json_value"
+            and len(delta) > _AGENT_STREAM_DELTA_MAX_LENGTH
+        )
+
+    @staticmethod
     def _should_suppress_evidence_dossier_update(update: GraphPublicUpdate) -> bool:
         payload = update.payload
         field = payload.field
         if not field.startswith("case_detail."):
             return False
-        try:
-            document = json.loads(payload.delta or "")
-        except (TypeError, json.JSONDecodeError) as error:
-            raise GraphContractError("INTAKE_DOSSIER_STREAM_INVALID") from error
-        texts = tuple(_nested_strings(document))
+        value_mode = _INTAKE_MODEL_VISIBLE_FIELD_MODES.get(field)
+        if value_mode == "string_prefix":
+            texts = (payload.delta or "",)
+        elif value_mode == "json_value":
+            try:
+                document = json.loads(payload.delta or "")
+            except (TypeError, json.JSONDecodeError) as error:
+                raise GraphContractError("INTAKE_DOSSIER_STREAM_INVALID") from error
+            texts = tuple(_nested_strings(document))
+        else:
+            raise GraphContractError("INTAKE_DOSSIER_STREAM_INVALID")
         return any(
             _contains_forbidden_evidence_request(text)
             or (field == "case_detail.missing_information" and _is_evidence_material_gap(text))
@@ -433,6 +524,8 @@ class CompiledIntakeGraphShadowExecutor:
     @staticmethod
     def _should_suppress_respondent_attitude_update(update: GraphPublicUpdate) -> bool:
         payload = update.payload
+        if payload.field.startswith("case_detail.respondent_attitude."):
+            return True
         if payload.field != "case_detail.respondent_attitude":
             return False
         try:
@@ -456,43 +549,37 @@ class CompiledIntakeGraphShadowExecutor:
     def _terminal_normalized_dossier_updates(
         proposal: IntakeTurnProposal,
     ) -> tuple[GraphPublicUpdate, ...]:
-        core = proposal.dossier_patch.dispute_core_state
-        if not isinstance(core, Mapping):
-            return ()
-        core_conflict = core.get("core_conflict")
-        facts_in_dispute = core.get("facts_in_dispute")
-        next_verification_focus = core.get("next_verification_focus")
-        if (
-            not isinstance(core_conflict, str)
-            or not core_conflict.strip()
-            or not isinstance(facts_in_dispute, list)
-            or not all(isinstance(item, str) and item.strip() for item in facts_in_dispute)
-            or not isinstance(next_verification_focus, list)
-            or not all(isinstance(item, str) and item.strip() for item in next_verification_focus)
-        ):
-            # Older durable proposals may predate the normalizer.  Never replay
-            # their raw provider shape; Java's formal compatibility boundary can
-            # still canonicalize them before the authoritative dossier is read.
-            return ()
-        canonical_core: dict[str, Any] = {
-            "core_conflict": core_conflict.strip(),
-            "facts_in_dispute": [item.strip() for item in facts_in_dispute],
-            "next_verification_focus": [item.strip() for item in next_verification_focus],
-        }
-        conflict_type = core.get("conflict_type")
-        if isinstance(conflict_type, str) and conflict_type.strip():
-            canonical_core["conflict_type"] = conflict_type.strip()
-        return (
-            GraphPublicUpdate.visible_delta(
-                node="intake_lcel",
-                field="case_detail.dispute_core_state",
-                delta=json.dumps(
-                    canonical_core,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ),
-            ),
+        dossier = proposal.dossier_patch.model_dump(
+            mode="json",
+            exclude_none=True,
+            exclude_unset=True,
         )
+        updates: list[GraphPublicUpdate] = []
+        for field in _INTAKE_TERMINAL_DOSSIER_FIELDS:
+            branch_name = field.removeprefix("case_detail.")
+            branch = dossier.get(branch_name)
+            if not isinstance(branch, Mapping):
+                continue
+            delta = json.dumps(
+                branch,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            if len(delta) > _AGENT_STREAM_DELTA_MAX_LENGTH:
+                # Root JSON cannot be emitted piecemeal because the client parses
+                # every visible delta independently.  Do not let an oversized
+                # optional live snapshot turn a successful terminal commit into a
+                # failed stream; the authoritative terminal dossier is reloaded by
+                # the normal final-result refresh instead.
+                continue
+            updates.append(
+                GraphPublicUpdate.visible_delta(
+                    node=BASELINE_INTAKE_NODE_NAME,
+                    field=field,
+                    delta=delta,
+                )
+            )
+        return tuple(updates)
 
     @staticmethod
     def _graph_input(execution: GatewayExecution) -> Mapping[str, Any]:

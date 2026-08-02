@@ -9,7 +9,7 @@
   "actor_scope_hash": "52f01901287fe5e5465ddcd7d7baf9074aa77e3d88a64da747bf1f530916a5d2",
   "agent_session_id": "AGENT_SESSION_P4_MERCHANT_1",
   "cognitive_revision": 2,
-  "source_snapshot_hash": "7deb1aa13efc125244aa0e122b6e02dc4343f97afc0423c94a00308b217fea0d",
+  "source_snapshot_hash": "a576823e72e44f62b08249af84f295fe5cc3ac09f3335ab96b2846fa7e5f9743",
   "source_event_hash": "5da4ebd5b5ff75ea8af5c955c01f2cf18138892d07ad6ca74be7c7fb50ff5815",
   "room_utterance": "The response to the submitted facts was recorded.",
   "dossier_patch": {
@@ -52,5 +52,5 @@
     "guardrail_version": "intake-guardrail.v2",
     "tool_policy_version": "no-tools.v1"
   },
-  "proposal_hash": "d046d464ddc52bbc08363a06e6ec23e01a7a2bdaff5c2d491316393b7caf9cbc"
+  "proposal_hash": "c7a6ce362e32c073c07da3b35a1bc91b1b7c031e950d704098c3b20d07829782"
 }
