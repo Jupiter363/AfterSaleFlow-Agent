@@ -21,6 +21,7 @@ from app.graph_runtime.errors import (
     GraphRuntimeError,
     GraphTerminalBindingError,
     GraphThreadBindingError,
+    GraphVersionBindingError,
     normalize_transient_persistence_error,
 )
 from app.graph_runtime.identity import (
@@ -49,6 +50,7 @@ from app.graph_runtime.ledger import (
 from app.graph_runtime.persistence_models import GraphFenceContext, GraphGatewayMode
 from app.graph_runtime.recovery import PostgresRecoveryCoordinator, RecoveryDecision
 from app.graph_runtime.registry import (
+    CommandProfileBinding,
     PostgresGraphVersionRegistry,
     RegistryRecord,
 )
@@ -95,6 +97,9 @@ _CONTROL_PLANE_RETRY_LIMIT: Final[int] = 2
 _CONTROL_PLANE_RETRY_INITIAL_SECONDS: Final[float] = 0.05
 _CONTROL_PLANE_RETRY_MAX_SECONDS: Final[float] = 0.2
 _CONTROL_PLANE_LEASE_SAFETY_MARGIN: Final[timedelta] = timedelta(seconds=2)
+_TARGET_E2E_GRAPH_KEY: Final[str] = "all-rooms.target-e2e.v1"
+_TARGET_E2E_LEGACY_PROMPT_VERSION: Final[str] = "all-rooms-prompt.target-e2e.v1"
+_TARGET_E2E_INTAKE_ROLES: Final[frozenset[str]] = frozenset({"USER", "MERCHANT"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -294,7 +299,12 @@ class GraphCommandGateway:
                             else None
                         ),
                     )
-                    version.require_profile(binding.profile)
+                    self._require_registry_command_profile(
+                        command=command,
+                        registry=registry,
+                        actual_profile=binding.profile,
+                        execution_lane=execution_lane,
+                    )
                     if candidate_authority is not None:
                         if not isinstance(
                             verified_invocation,
@@ -594,7 +604,12 @@ class GraphCommandGateway:
                         command,
                         tool_policy_version=registry.binding.tool_policy_version,
                     )
-                    registry.binding.require_profile(binding.profile)
+                    self._require_registry_command_profile(
+                        command=command,
+                        registry=registry,
+                        actual_profile=binding.profile,
+                        execution_lane=binding.execution_lane,
+                    )
                     existing = await self._ledger.consume_nonce_for_existing(
                         connection,
                         binding=binding,
@@ -681,7 +696,12 @@ class GraphCommandGateway:
                     command_hash=verified_invocation.command_hash,
                     command_envelope_hash=verified_invocation.command_envelope_hash,
                 )
-                registry.binding.require_profile(binding.profile)
+                self._require_registry_command_profile(
+                    command=command,
+                    registry=registry,
+                    actual_profile=binding.profile,
+                    execution_lane=lane,
+                )
                 _, result = await self._ledger.load_candidate_reconciliation_proof(
                     connection,
                     binding=binding,
@@ -1066,6 +1086,45 @@ class GraphCommandGateway:
             raise GraphThreadBindingError(
                 "verified invocation differs from the exact Graph registry profile"
             )
+
+    @staticmethod
+    def _require_registry_command_profile(
+        *,
+        command: RoomGraphCommand,
+        registry: RegistryRecord,
+        actual_profile: CommandProfileBinding,
+        execution_lane: GraphGatewayMode,
+    ) -> None:
+        """Allow only the frozen candidate Intake prompt alias.
+
+        The durable command and its signed profile continue to carry the actual
+        role-specific PromptComposer ID.  The exception exists solely because the
+        candidate all-room registry row is pinned to the older room-level prompt.
+        """
+
+        binding = registry.binding
+        role = command.actor_scope.actor_role
+        audience = command.actor_scope.audience
+        is_target_intake_candidate = (
+            execution_lane is GraphGatewayMode.TARGET_E2E_CANDIDATE
+            and command.graph_key == _TARGET_E2E_GRAPH_KEY
+            and binding.graph_key == _TARGET_E2E_GRAPH_KEY
+            and command.room_type == "INTAKE"
+        )
+        if is_target_intake_candidate:
+            if (
+                binding.prompt_version == _TARGET_E2E_LEGACY_PROMPT_VERSION
+                and role in _TARGET_E2E_INTAKE_ROLES
+                and audience == role
+                and actual_profile
+                == replace(
+                    binding.command_profile,
+                    prompt_version=f"DISPUTE_INTAKE_OFFICER:{role}:v1",
+                )
+            ):
+                return
+            raise GraphVersionBindingError()
+        binding.require_profile(actual_profile)
 
     @staticmethod
     def _require_command_thread(

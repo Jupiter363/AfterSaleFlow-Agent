@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from app.contracts.v1.codec import canonical_sha256
+from app.contracts.v1.codec import canonical_sha256, canonical_sha256_omitting
 from app.contracts.v1.models import AgentStreamEvent, RoomGraphCommand
 from app.graph_runtime.errors import (
     GraphCommandAbortedError,
@@ -18,6 +18,7 @@ from app.graph_runtime.errors import (
     GraphNonceReplayError,
     GraphResultNotCommittedError,
     GraphThreadBindingError,
+    GraphVersionBindingError,
     GraphVersionUnavailableError,
 )
 from app.graph_runtime.gateway import (
@@ -53,7 +54,12 @@ from app.graph_runtime.lease import (
     LeaseRecord,
 )
 from app.graph_runtime.persistence_models import GraphFenceContext, GraphGatewayMode
-from app.graph_runtime.registry import RegistryRecord, RegistryState, VersionBinding
+from app.graph_runtime.registry import (
+    CommandProfileBinding,
+    RegistryRecord,
+    RegistryState,
+    VersionBinding,
+)
 from app.security.invocation_envelope import (
     InvocationClaims,
     ReconciliationClaims,
@@ -214,6 +220,211 @@ def _registry() -> RegistryRecord:
     )
 
 
+def _target_e2e_command(
+    *,
+    actor_role: str = "USER",
+    audience: str | None = None,
+    room_type: str = "INTAKE",
+    graph_key: str = "all-rooms.target-e2e.v1",
+    prompt_profile_id: str | None = None,
+) -> RoomGraphCommand:
+    payload = _command().model_dump(
+        mode="json",
+        exclude={"request_hash"},
+        exclude_none=True,
+    )
+    selected_audience = audience or actor_role
+    payload.update(
+        {
+            "room_type": room_type,
+            "graph_key": graph_key,
+            "graph_version": "target-e2e-graph.2026-07-27.1",
+            "checkpoint_schema_version": "target-e2e-checkpoint.v1",
+            "actor_scope": {
+                **payload["actor_scope"],
+                "actor_role": actor_role,
+                "audience": selected_audience,
+            },
+            "invocation_context": {
+                **payload["invocation_context"],
+                "prompt_profile_id": (
+                    prompt_profile_id
+                    or f"DISPUTE_INTAKE_OFFICER:{actor_role}:v1"
+                ),
+                "output_schema_version": "target-e2e-room-proposal-source.v1",
+            },
+        }
+    )
+    payload["request_hash"] = "0" * 64
+    payload["request_hash"] = canonical_sha256_omitting(payload, "request_hash")
+    return RoomGraphCommand.model_validate(payload)
+
+
+def _target_e2e_registry(*, prompt_version: str = "all-rooms-prompt.target-e2e.v1") -> RegistryRecord:
+    record = _registry()
+    return replace(
+        record,
+        binding=replace(
+            record.binding,
+            graph_key="all-rooms.target-e2e.v1",
+            graph_version="target-e2e-graph.2026-07-27.1",
+            checkpoint_schema_version="target-e2e-checkpoint.v1",
+            prompt_version=prompt_version,
+            output_schema_version="target-e2e-room-proposal-source.v1",
+        ),
+        state=RegistryState.ACTIVE_CANDIDATE,
+    )
+
+
+def _target_e2e_thread(command: RoomGraphCommand) -> ThreadIdentity:
+    scope = command.actor_scope
+    return ThreadIdentity(
+        thread_id=command.thread_id,
+        tenant_surrogate=command.tenant_surrogate,
+        case_id=command.case_id,
+        room_type=RoomType(command.room_type),
+        room_epoch=command.room_epoch,
+        actor_scope=ActorScopeBinding(
+            actor_id=scope.actor_id,
+            actor_role=ActorRole(scope.actor_role),
+            audience=Audience(scope.audience),
+            capabilities=tuple(scope.capabilities),
+        ),
+        agent_session_id="agent-session-1",
+        shared_session=False,
+        graph_key=command.graph_key,
+        graph_version=command.graph_version,
+        checkpoint_schema_version=command.checkpoint_schema_version,
+    )
+
+
+def _command_profile(command: RoomGraphCommand) -> CommandProfileBinding:
+    invocation = command.invocation_context
+    return CommandProfileBinding(
+        command_schema_version=command.schema_version,
+        prompt_version=invocation.prompt_profile_id,
+        model_profile_id=invocation.model_profile_id,
+        output_schema_version=invocation.output_schema_version,
+        policy_version=invocation.policy_version,
+        guardrail_version=invocation.guardrail_version,
+        tool_policy_version="tools.none.v1",
+    )
+
+
+@pytest.mark.parametrize("actor_role", ("USER", "MERCHANT"))
+def test_target_e2e_intake_accepts_only_the_matching_baseline_prompt_alias(
+    actor_role: str,
+) -> None:
+    command = _target_e2e_command(actor_role=actor_role)
+    actual_profile = _command_profile(command)
+
+    GraphCommandGateway._require_registry_command_profile(
+        command=command,
+        registry=_target_e2e_registry(),
+        actual_profile=actual_profile,
+        execution_lane=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+    )
+
+    assert actual_profile.prompt_version == f"DISPUTE_INTAKE_OFFICER:{actor_role}:v1"
+
+
+@pytest.mark.parametrize(
+    ("command", "registry", "actual_profile", "execution_lane"),
+    [
+        (
+            _target_e2e_command(prompt_profile_id="all-rooms-prompt.target-e2e.v1"),
+            _target_e2e_registry(),
+            None,
+            GraphGatewayMode.TARGET_E2E_CANDIDATE,
+        ),
+        (
+            _target_e2e_command(prompt_profile_id="DISPUTE_INTAKE_OFFICER:ADMIN:v1"),
+            _target_e2e_registry(),
+            None,
+            GraphGatewayMode.TARGET_E2E_CANDIDATE,
+        ),
+        (
+            _target_e2e_command(actor_role="USER", prompt_profile_id="DISPUTE_INTAKE_OFFICER:MERCHANT:v1"),
+            _target_e2e_registry(),
+            None,
+            GraphGatewayMode.TARGET_E2E_CANDIDATE,
+        ),
+        (
+            _target_e2e_command(actor_role="USER", audience="MERCHANT"),
+            _target_e2e_registry(),
+            None,
+            GraphGatewayMode.TARGET_E2E_CANDIDATE,
+        ),
+        (
+            _target_e2e_command(),
+            _target_e2e_registry(),
+            None,
+            GraphGatewayMode.SHADOW,
+        ),
+        (
+            _target_e2e_command(room_type="EVIDENCE"),
+            _target_e2e_registry(),
+            None,
+            GraphGatewayMode.TARGET_E2E_CANDIDATE,
+        ),
+        (
+            _target_e2e_command(graph_key="other.target-e2e.v1"),
+            _target_e2e_registry(),
+            None,
+            GraphGatewayMode.TARGET_E2E_CANDIDATE,
+        ),
+        (
+            _target_e2e_command(),
+            _target_e2e_registry(prompt_version="other-prompt.v1"),
+            None,
+            GraphGatewayMode.TARGET_E2E_CANDIDATE,
+        ),
+    ],
+)
+def test_target_e2e_intake_prompt_alias_rejects_wrong_scope_and_legacy_pin(
+    command: RoomGraphCommand,
+    registry: RegistryRecord,
+    actual_profile: CommandProfileBinding | None,
+    execution_lane: GraphGatewayMode,
+) -> None:
+    with pytest.raises(GraphVersionBindingError):
+        GraphCommandGateway._require_registry_command_profile(
+            command=command,
+            registry=registry,
+            actual_profile=actual_profile or _command_profile(command),
+            execution_lane=execution_lane,
+        )
+
+
+@pytest.mark.parametrize(
+    "profile_field",
+    (
+        "command_schema_version",
+        "model_profile_id",
+        "output_schema_version",
+        "policy_version",
+        "guardrail_version",
+        "tool_policy_version",
+    ),
+)
+def test_target_e2e_intake_prompt_alias_rejects_every_non_prompt_profile_drift(
+    profile_field: str,
+) -> None:
+    command = _target_e2e_command()
+    actual_profile = replace(
+        _command_profile(command),
+        **{profile_field: f"drifted-{profile_field}.v1"},
+    )
+
+    with pytest.raises(GraphVersionBindingError):
+        GraphCommandGateway._require_registry_command_profile(
+            command=command,
+            registry=_target_e2e_registry(),
+            actual_profile=actual_profile,
+            execution_lane=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+        )
+
+
 class _Cursor:
     async def fetchone(self) -> None:
         return None
@@ -306,13 +517,15 @@ class _Registry:
         self,
         events: list[str],
         state: RegistryState = RegistryState.SHADOW,
+        record: RegistryRecord | None = None,
     ) -> None:
         self.events = events
         self.state = state
+        self.record = record
 
     async def load(self, connection: Any, **kwargs: Any) -> RegistryRecord:
         self.events.append("repo:registry")
-        return replace(_registry(), state=self.state)
+        return replace(self.record or _registry(), state=self.state)
 
     async def require_thread_restore(
         self,
@@ -320,7 +533,7 @@ class _Registry:
         **kwargs: Any,
     ) -> RegistryRecord:
         self.events.append("repo:registry-restore")
-        record = replace(_registry(), state=self.state)
+        record = replace(self.record or _registry(), state=self.state)
         record.require_thread_restore()
         return record
 
@@ -716,15 +929,17 @@ def _reconciliation_gateway(
     status: CommandStatus,
     registry_state: RegistryState = RegistryState.SHADOW,
     ledger: _Ledger | None = None,
+    mode: GraphGatewayMode = GraphGatewayMode.SHADOW,
+    registry_record: RegistryRecord | None = None,
 ) -> tuple[GraphCommandGateway, _Pool, _Audit, _ReconcileRecovery]:
     pool = _Pool()
     audit = _Audit()
     selected_ledger = ledger or _Ledger(pool.events, status=status, created=False)
     gateway = GraphCommandGateway(
-        mode=GraphGatewayMode.SHADOW,
+        mode=mode,
         pool=pool,
         threads=_Threads(pool.events, ThreadLifecycle.RETIRED),  # type: ignore[arg-type]
-        registry=_Registry(pool.events, registry_state),  # type: ignore[arg-type]
+        registry=_Registry(pool.events, registry_state, registry_record),  # type: ignore[arg-type]
         ledger=selected_ledger,  # type: ignore[arg-type]
         input_authorizer=_InputAuthorizer(pool.events),
         audit_sink=audit,
@@ -809,6 +1024,29 @@ async def test_reconcile_only_rejects_registry_profile_drift_before_nonce_consum
     assert "repo:registry-restore" in pool.events
     assert "repo:existing-command+nonce" not in pool.events
     assert "transaction:rollback" in pool.events
+    assert recovery.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_reconcile_only_uses_the_durable_shadow_binding_lane_not_gateway_mode() -> None:
+    command = _target_e2e_command()
+    gateway, pool, _, recovery = _reconciliation_gateway(
+        status=CommandStatus.COMPLETED,
+        registry_state=RegistryState.ACTIVE_CANDIDATE,
+        mode=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+        registry_record=_target_e2e_registry(),
+    )
+
+    with pytest.raises(GraphVersionBindingError):
+        await gateway.reconcile_only(
+            command=command,
+            verified_reconciliation=_verified_reconciliation(command),
+            expected_thread=_target_e2e_thread(command),
+            owner_id="worker-reconcile-1",
+        )
+
+    assert "repo:registry-restore" in pool.events
+    assert "repo:existing-command+nonce" not in pool.events
     assert recovery.calls == 0
 
 

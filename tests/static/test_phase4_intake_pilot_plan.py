@@ -560,6 +560,39 @@ def test_phase4_compose_keeps_intake_runtime_fail_closed_for_java_services() -> 
     assert "APP_AGENT_RUN_V2_GRAPH_TLS_TRUST_STORE_PATH: /run/secrets/graph-mtls/trust.p12" in agent_worker
 
 
+def test_target_e2e_registry_keeps_exact_intake_prompt_profiles_fail_closed() -> None:
+    source = (
+        ROOT
+        / "java-api-service/src/target-e2e/java/com/example/dispute/workflow/"
+        "targete2e/artifact/TargetE2eGraphRegistryConfiguration.java"
+    ).read_text(encoding="utf-8")
+
+    exact_profiles = {
+        "Audience.USER": "DISPUTE_INTAKE_OFFICER:USER:v1",
+        "Audience.MERCHANT": "DISPUTE_INTAKE_OFFICER:MERCHANT:v1",
+    }
+    for audience, prompt_profile in exact_profiles.items():
+        assert f'{audience}, "{prompt_profile}"' in source
+
+    # All ordinary target rooms retain the activation-owned template. The two Intake profiles are
+    # an explicit, audience-bound supplement rather than a prompt wildcard or fallback.
+    assert "EnumSet.allOf(Audience.class)" in source
+    assert "template.promptProfileId(), audience" in source
+    assert "INTAKE_BASELINE_PROMPT_PROFILES.entrySet()" in source
+    assert "intakeProfile.getValue(), intakeProfile.getKey()" in source
+    assert "DISPUTE_INTAKE_OFFICER:*" not in source
+    assert "DISPUTE_INTAKE_OFFICER:" not in source.replace(
+        "DISPUTE_INTAKE_OFFICER:USER:v1", ""
+    ).replace("DISPUTE_INTAKE_OFFICER:MERCHANT:v1", "")
+
+    # The same exact catalog supplies visibility and expected registry pins. A profile outside
+    # that catalog therefore resolves to null and GraphRegistryBindingPolicy rejects it before
+    # the model call.
+    assert source.count("var bindings = bindings(template(properties));") == 2
+    assert "return binding -> snapshot.get(binding);" in source
+    assert "return GraphRegistryBindingPolicy.immutable(catalog);" in source
+
+
 def test_phase4_plan_is_linked_and_forbids_implicit_respondent_timeout() -> None:
     plan_text = PLAN.read_text(encoding="utf-8")
     matrix_text = MATRIX.read_text(encoding="utf-8")
