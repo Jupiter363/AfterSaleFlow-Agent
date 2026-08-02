@@ -319,10 +319,16 @@ class _Connection:
 
 
 class _StatefulThreadPointerConnection:
-    def __init__(self) -> None:
-        self.revision = 0
-        self.checkpoint_ns: str | None = None
-        self.checkpoint_id: str | None = None
+    def __init__(
+        self,
+        *,
+        revision: int = 0,
+        checkpoint_ns: str | None = None,
+        checkpoint_id: str | None = None,
+    ) -> None:
+        self.revision = revision
+        self.checkpoint_ns = checkpoint_ns
+        self.checkpoint_id = checkpoint_id
 
     async def execute(self, query: str, params: Any = None) -> _Cursor:
         normalized = " ".join(query.split()).lower()
@@ -336,6 +342,13 @@ class _StatefulThreadPointerConnection:
                 (params[10], params[11]),
                 (params[12], params[13]),
             }
+        if (
+            self.revision == 0
+            and self.checkpoint_ns is None
+            and self.checkpoint_id is None
+            and params[14] == 2
+        ):
+            allowed = True
         if not allowed:
             return _Cursor(None)
         self.revision = params[0]
@@ -830,6 +843,115 @@ async def test_active_fence_can_repoint_multiple_checkpoints_at_one_cognitive_re
             parent_checkpoint_ns="intake",
             parent_checkpoint_id="cp-intake-route",
         )
+
+
+@pytest.mark.asyncio
+async def test_fresh_thread_can_bootstrap_terminal_checkpoint_at_revision_two() -> None:
+    saver, _ = _saver(_Connection())
+    connection = _StatefulThreadPointerConnection()
+
+    await saver._advance_thread_checkpoint(
+        connection,
+        _fence(),
+        cognitive_revision=2,
+        checkpoint_ns="intake",
+        checkpoint_id="cp-intake-terminal",
+        parent_checkpoint_ns="",
+        parent_checkpoint_id=None,
+    )
+
+    assert connection.revision == 2
+    assert connection.checkpoint_ns == "intake"
+    assert connection.checkpoint_id == "cp-intake-terminal"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    (
+        "revision",
+        "checkpoint_ns",
+        "checkpoint_id",
+        "target_revision",
+        "target_checkpoint_id",
+        "parent_checkpoint_id",
+    ),
+    (
+        (0, None, None, 3, "cp-intake-jump", None),
+        (0, "intake", "cp-existing", 2, "cp-intake-terminal", "cp-existing"),
+        (0, "intake", None, 2, "cp-intake-terminal", None),
+        (1, "intake", "cp-intake-one", 3, "cp-intake-jump", "cp-intake-one"),
+    ),
+    ids=(
+        "fresh-thread-cannot-jump-to-three",
+        "pointer-at-zero-is-not-fresh",
+        "partial-pointer-at-zero-is-not-fresh",
+        "one-cannot-jump-to-three",
+    ),
+)
+async def test_thread_checkpoint_bootstrap_exception_rejects_non_fresh_jumps(
+    revision: int,
+    checkpoint_ns: str | None,
+    checkpoint_id: str | None,
+    target_revision: int,
+    target_checkpoint_id: str,
+    parent_checkpoint_id: str | None,
+) -> None:
+    saver, _ = _saver(_Connection())
+    connection = _StatefulThreadPointerConnection(
+        revision=revision,
+        checkpoint_ns=checkpoint_ns,
+        checkpoint_id=checkpoint_id,
+    )
+
+    with pytest.raises(GraphBindingError, match="advance the durable thread revision"):
+        await saver._advance_thread_checkpoint(
+            connection,
+            _fence(),
+            cognitive_revision=target_revision,
+            checkpoint_ns="intake",
+            checkpoint_id=target_checkpoint_id,
+            parent_checkpoint_ns="intake",
+            parent_checkpoint_id=parent_checkpoint_id,
+        )
+
+    assert (connection.revision, connection.checkpoint_ns, connection.checkpoint_id) == (
+        revision,
+        checkpoint_ns,
+        checkpoint_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_fresh_bootstrap_rejects_stale_same_revision_pointer_rollback() -> None:
+    saver, _ = _saver(_Connection())
+    connection = _StatefulThreadPointerConnection()
+
+    await saver._advance_thread_checkpoint(
+        connection,
+        _fence(),
+        cognitive_revision=2,
+        checkpoint_ns="intake",
+        checkpoint_id="cp-intake-terminal",
+        parent_checkpoint_ns="",
+        parent_checkpoint_id=None,
+    )
+
+    with pytest.raises(GraphBindingError, match="advance the durable thread revision"):
+        await saver._advance_thread_checkpoint(
+            connection,
+            _fence(),
+            cognitive_revision=2,
+            checkpoint_ns="intake",
+            checkpoint_id="cp-intake-bootstrap",
+            parent_checkpoint_ns="",
+            parent_checkpoint_id=None,
+        )
+
+    assert (connection.revision, connection.checkpoint_ns, connection.checkpoint_id) == (
+        2,
+        "intake",
+        "cp-intake-terminal",
+    )
 
 
 @pytest.mark.asyncio

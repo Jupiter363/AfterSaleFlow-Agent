@@ -206,6 +206,12 @@ update graph_thread_registry
                )
            )
        )
+       or (
+           cognitive_revision = 0
+           and last_checkpoint_ns is null
+           and last_checkpoint_id is null
+           and %s = 2
+       )
    )
 returning cognitive_revision, last_checkpoint_ns, last_checkpoint_id
 """
@@ -1244,6 +1250,7 @@ class FencedPostgresSaver(BaseCheckpointSaver[Any]):
                 checkpoint_id,
                 parent_checkpoint_ns,
                 parent_checkpoint_id,
+                cognitive_revision,
             ),
         )
         row = await cursor.fetchone()

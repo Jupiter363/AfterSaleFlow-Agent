@@ -1,7 +1,7 @@
 """Controlled Graph PostgreSQL migration job.
 
 Application replicas call readiness only. This module is the sole owner of checkpointer setup and
-G001-G007 DDL under a session advisory lock.
+G001-G008 DDL under a session advisory lock.
 """
 
 from __future__ import annotations
@@ -36,6 +36,7 @@ MIGRATION_FILENAMES: Final[tuple[str, ...]] = (
     "G005_graph_fanout_fairness_and_cancellation.sql",
     "G006_target_e2e_candidate.sql",
     "G007_graph_thread_checkpoint_parent_chain.sql",
+    "G008_graph_thread_fresh_bootstrap.sql",
 )
 MIGRATIONS_DIRECTORY: Final[Path] = Path(__file__).resolve().parents[2] / "migrations" / "graph"
 CONTROL_KEY: Final[str] = "primary"

@@ -121,11 +121,21 @@ async def test_real_migrations_restore_readiness_and_runtime_acl(
         "G005",
         "G006",
         "G007",
+        "G008",
     }
 
     second = await _migration_runner(graph_database).run()
     assert second.applied == ()
-    assert second.already_current == ("G001", "G002", "G003", "G004", "G005", "G006", "G007")
+    assert second.already_current == (
+        "G001",
+        "G002",
+        "G003",
+        "G004",
+        "G005",
+        "G006",
+        "G007",
+        "G008",
+    )
 
     restore = await GraphRestoreValidationRunner(
         graph_database.migration_dsn,
@@ -332,6 +342,402 @@ async def test_real_g007_allows_only_bound_same_revision_checkpoint_children(
                  where thread_id = %s
                 """,
                 (thread_id,),
+            )
+
+
+@pytest.mark.asyncio
+async def test_real_g008_allows_only_the_fresh_zero_to_two_bootstrap_transition(
+    graph_database: _Database,
+) -> None:
+    await _migration_runner(graph_database).run()
+    graph_key = f"fresh_bootstrap_{uuid4().hex[:12]}"
+    graph_version = "fresh_bootstrap.v1"
+    checkpoint_schema_version = "fresh_bootstrap.v1"
+    execution_lane = "TARGET_E2E_CANDIDATE"
+    activation_id = "p9act.v1." + "a" * 32
+    room_fencing_token = 31
+    command_fencing_token = 37
+    request_hash = "a" * 64
+    result_hash = "b" * 64
+    command_hash = "c" * 64
+    command_envelope_hash = "d" * 64
+    accepted_thread_id = f"grt.v1.{uuid4().hex}"
+    empty_pointer_thread_id = f"grt.v1.{uuid4().hex}"
+    empty_checkpoint_id_thread_id = f"grt.v1.{uuid4().hex}"
+    missing_checkpoint_thread_id = f"grt.v1.{uuid4().hex}"
+    metadata_mismatch_thread_id = f"grt.v1.{uuid4().hex}"
+    command_id_mismatch_thread_id = f"grt.v1.{uuid4().hex}"
+    request_hash_mismatch_thread_id = f"grt.v1.{uuid4().hex}"
+    result_mismatch_thread_id = f"grt.v1.{uuid4().hex}"
+    missing_command_thread_id = f"grt.v1.{uuid4().hex}"
+    non_active_thread_id = f"grt.v1.{uuid4().hex}"
+    too_far_thread_id = f"grt.v1.{uuid4().hex}"
+    old_pointer_thread_id = f"grt.v1.{uuid4().hex}"
+    accepted_checkpoint_id = "fresh-bootstrap-accepted"
+    missing_checkpoint_id = "fresh-bootstrap-missing"
+    metadata_mismatch_checkpoint_id = "fresh-bootstrap-mismatch"
+    command_id_mismatch_checkpoint_id = "fresh-bootstrap-command-id-mismatch"
+    request_hash_mismatch_checkpoint_id = "fresh-bootstrap-request-hash-mismatch"
+    result_mismatch_checkpoint_id = "fresh-bootstrap-result-mismatch"
+    missing_command_checkpoint_id = "fresh-bootstrap-missing-command"
+    non_active_checkpoint_id = "fresh-bootstrap-non-active"
+
+    async with await AsyncConnection.connect(
+        graph_database.migration_dsn,
+        autocommit=True,
+        prepare_threshold=0,
+        row_factory=dict_row,
+    ) as connection:
+        await connection.execute(sql.SQL("set role {}").format(sql.Identifier(OWNER)))
+        await connection.execute(
+            sql.SQL("set search_path to {}, pg_catalog, pg_temp").format(sql.Identifier(SCHEMA))
+        )
+        await connection.execute(
+            """
+            insert into agent_graph_version_registry (
+                graph_key, graph_version, checkpoint_schema_version,
+                registry_state, state_schema_version, state_schema_hash,
+                command_schema_version, result_schema_version,
+                prompt_version, model_profile_id, output_schema_version,
+                policy_version, guardrail_version, tool_policy_version,
+                binding_hash, code_build_id, loadable, activated_at
+            ) values (
+                %s, %s, %s,
+                'ACTIVE_CANDIDATE', 'fresh_bootstrap.state.v1', %s,
+                'room-graph-command.v1', 'room-graph-result.v1',
+                'prompt.v1', 'model.v1', 'output.v1',
+                'policy.v1', 'guardrail.v1', 'tools.v1',
+                %s, 'integration-build', true, clock_timestamp()
+            )
+            """,
+            (graph_key, graph_version, checkpoint_schema_version, STATE_SCHEMA_HASH, BINDING_HASH),
+        )
+        for ordinal, thread_id, lifecycle_status, checkpoint_ns, checkpoint_id in (
+            (1, accepted_thread_id, "ACTIVE", None, None),
+            (2, empty_pointer_thread_id, "ACTIVE", None, None),
+            (3, empty_checkpoint_id_thread_id, "ACTIVE", None, None),
+            (4, missing_checkpoint_thread_id, "ACTIVE", None, None),
+            (5, metadata_mismatch_thread_id, "ACTIVE", None, None),
+            (6, command_id_mismatch_thread_id, "ACTIVE", None, None),
+            (7, request_hash_mismatch_thread_id, "ACTIVE", None, None),
+            (8, result_mismatch_thread_id, "ACTIVE", None, None),
+            (9, missing_command_thread_id, "ACTIVE", None, None),
+            (10, non_active_thread_id, "CANCELLED", None, None),
+            (11, too_far_thread_id, "ACTIVE", None, None),
+            (12, old_pointer_thread_id, "ACTIVE", "intake", "already-durable"),
+        ):
+            await connection.execute(
+                """
+                insert into graph_thread_registry (
+                    thread_id, tenant_surrogate, case_id, room_type, room_epoch,
+                    actor_scope_json, actor_scope_hash, agent_session_id,
+                    lifecycle_status, graph_key, graph_version, checkpoint_schema_version,
+                    last_checkpoint_ns, last_checkpoint_id
+                ) values (
+                    %s, %s, %s, 'INTAKE', 3,
+                    '{"audience":"PUBLIC"}'::jsonb, %s, %s,
+                    %s, %s, %s, %s, %s, %s
+                )
+                """,
+                (
+                    thread_id,
+                    f"tenant-fresh-bootstrap-{ordinal}",
+                    f"case-fresh-bootstrap-{ordinal}",
+                    "f" * 64,
+                    f"session-fresh-bootstrap-{ordinal}",
+                    lifecycle_status,
+                    graph_key,
+                    graph_version,
+                    checkpoint_schema_version,
+                    checkpoint_ns,
+                    checkpoint_id,
+                ),
+            )
+
+        def checkpoint_metadata(
+            thread_id: str,
+            command_id: str,
+            *,
+            revision: int = 2,
+            overrides: dict[str, object] | None = None,
+        ) -> dict[str, object]:
+            metadata = {
+                "graph_thread_id": thread_id,
+                "graph_room_epoch": 3,
+                "graph_key": graph_key,
+                "graph_version": graph_version,
+                "graph_checkpoint_schema_version": checkpoint_schema_version,
+                "graph_cognitive_revision": revision,
+                "graph_command_id": command_id,
+                "graph_request_hash": request_hash,
+                "graph_fencing_token": str(command_fencing_token),
+                "graph_result_hash": result_hash,
+                "graph_result_ref": f"result/{command_id}",
+                "graph_execution_lane": execution_lane,
+                "graph_activation_id": activation_id,
+                "graph_room_fencing_token": str(room_fencing_token),
+                "graph_command_hash": command_hash,
+                "graph_command_envelope_hash": command_envelope_hash,
+            }
+            if overrides is not None:
+                metadata.update(overrides)
+            return metadata
+
+        async def insert_checkpoint(
+            thread_id: str,
+            checkpoint_id: str,
+            metadata: dict[str, object],
+        ) -> None:
+            await connection.execute(
+                """
+                insert into checkpoints (
+                    thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id,
+                    checkpoint, metadata
+                ) values (%s, 'intake', %s, null, '{}'::jsonb, %s::jsonb)
+                """,
+                (thread_id, checkpoint_id, json.dumps(metadata)),
+            )
+
+        async def insert_result_checkpointed_command(
+            thread_id: str,
+            command_id: str,
+            checkpoint_id: str,
+        ) -> None:
+            await connection.execute(
+                """
+                insert into agent_graph_command (
+                    thread_id, command_id, request_schema_version, request_json, request_hash,
+                    execution_mode, activation_id, room_fencing_token,
+                    command_hash, command_envelope_hash,
+                    room_epoch, graph_key, graph_version, checkpoint_schema_version,
+                    prompt_version, model_profile_id, output_schema_version,
+                    policy_version, guardrail_version, tool_policy_version,
+                    deadline_at, status, fencing_token,
+                    committed_checkpoint_ns, committed_checkpoint_id,
+                    result_ref, result_hash, result_checkpointed_at
+                ) values (
+                    %s, %s, 'room-graph-command.v1', '{}'::jsonb, %s,
+                    %s, %s, %s, %s, %s,
+                    3, %s, %s, %s,
+                    'prompt.v1', 'model.v1', 'output.v1',
+                    'policy.v1', 'guardrail.v1', 'tools.v1',
+                    clock_timestamp() + interval '5 minutes', 'RESULT_CHECKPOINTED', %s,
+                    'intake', %s, %s, %s, clock_timestamp()
+                )
+                """,
+                (
+                    thread_id,
+                    command_id,
+                    request_hash,
+                    execution_lane,
+                    activation_id,
+                    room_fencing_token,
+                    command_hash,
+                    command_envelope_hash,
+                    graph_key,
+                    graph_version,
+                    checkpoint_schema_version,
+                    command_fencing_token,
+                    checkpoint_id,
+                    f"result/{command_id}",
+                    result_hash,
+                ),
+            )
+
+        await insert_checkpoint(
+            accepted_thread_id,
+            accepted_checkpoint_id,
+            checkpoint_metadata(accepted_thread_id, "fresh-bootstrap-accepted"),
+        )
+        await insert_result_checkpointed_command(
+            accepted_thread_id,
+            "fresh-bootstrap-accepted",
+            accepted_checkpoint_id,
+        )
+        await insert_result_checkpointed_command(
+            missing_checkpoint_thread_id,
+            "fresh-bootstrap-missing-checkpoint",
+            missing_checkpoint_id,
+        )
+        await insert_checkpoint(
+            metadata_mismatch_thread_id,
+            metadata_mismatch_checkpoint_id,
+            checkpoint_metadata(
+                metadata_mismatch_thread_id,
+                "fresh-bootstrap-metadata-mismatch",
+                revision=1,
+            ),
+        )
+        await insert_result_checkpointed_command(
+            metadata_mismatch_thread_id,
+            "fresh-bootstrap-metadata-mismatch",
+            metadata_mismatch_checkpoint_id,
+        )
+        for thread_id, checkpoint_id, command_id, overrides in (
+            (
+                command_id_mismatch_thread_id,
+                command_id_mismatch_checkpoint_id,
+                "fresh-bootstrap-command-id-mismatch",
+                {"graph_command_id": "a-different-command"},
+            ),
+            (
+                request_hash_mismatch_thread_id,
+                request_hash_mismatch_checkpoint_id,
+                "fresh-bootstrap-request-hash-mismatch",
+                {"graph_request_hash": "e" * 64},
+            ),
+            (
+                result_mismatch_thread_id,
+                result_mismatch_checkpoint_id,
+                "fresh-bootstrap-result-mismatch",
+                {"graph_result_hash": "f" * 64},
+            ),
+        ):
+            await insert_checkpoint(
+                thread_id,
+                checkpoint_id,
+                checkpoint_metadata(thread_id, command_id, overrides=overrides),
+            )
+            await insert_result_checkpointed_command(thread_id, command_id, checkpoint_id)
+        await insert_checkpoint(
+            missing_command_thread_id,
+            missing_command_checkpoint_id,
+            checkpoint_metadata(missing_command_thread_id, "fresh-bootstrap-missing-command"),
+        )
+        await insert_checkpoint(
+            non_active_thread_id,
+            non_active_checkpoint_id,
+            checkpoint_metadata(non_active_thread_id, "fresh-bootstrap-non-active"),
+        )
+        await insert_result_checkpointed_command(
+            non_active_thread_id,
+            "fresh-bootstrap-non-active",
+            non_active_checkpoint_id,
+        )
+
+        await connection.execute(
+            """
+            update graph_thread_registry
+               set cognitive_revision = 2,
+                   last_checkpoint_ns = 'intake',
+                   last_checkpoint_id = %s
+             where thread_id = %s
+            """,
+            (accepted_checkpoint_id, accepted_thread_id),
+        )
+        accepted = await (
+            await connection.execute(
+                """
+                select cognitive_revision, last_checkpoint_ns, last_checkpoint_id
+                  from graph_thread_registry
+                 where thread_id = %s
+                """,
+                (accepted_thread_id,),
+            )
+        ).fetchone()
+        assert accepted == {
+            "cognitive_revision": 2,
+            "last_checkpoint_ns": "intake",
+            "last_checkpoint_id": accepted_checkpoint_id,
+        }
+
+        with pytest.raises(CheckViolation, match="cognitive revision cannot jump"):
+            await connection.execute(
+                """
+                update graph_thread_registry
+                   set cognitive_revision = 2
+                 where thread_id = %s
+                """,
+                (empty_pointer_thread_id,),
+            )
+        with pytest.raises(CheckViolation, match="cognitive revision cannot jump"):
+            await connection.execute(
+                """
+                update graph_thread_registry
+                   set cognitive_revision = 2,
+                       last_checkpoint_ns = 'intake',
+                       last_checkpoint_id = ''
+                 where thread_id = %s
+                """,
+                (empty_checkpoint_id_thread_id,),
+            )
+        with pytest.raises(CheckViolation, match="cognitive revision cannot jump"):
+            await connection.execute(
+                """
+                update graph_thread_registry
+                   set cognitive_revision = 2,
+                       last_checkpoint_ns = 'intake',
+                       last_checkpoint_id = %s
+                 where thread_id = %s
+                """,
+                (missing_checkpoint_id, missing_checkpoint_thread_id),
+            )
+        with pytest.raises(CheckViolation, match="cognitive revision cannot jump"):
+            await connection.execute(
+                """
+                update graph_thread_registry
+                   set cognitive_revision = 2,
+                       last_checkpoint_ns = 'intake',
+                       last_checkpoint_id = %s
+                 where thread_id = %s
+                """,
+                (metadata_mismatch_checkpoint_id, metadata_mismatch_thread_id),
+            )
+        for thread_id, checkpoint_id in (
+            (command_id_mismatch_thread_id, command_id_mismatch_checkpoint_id),
+            (request_hash_mismatch_thread_id, request_hash_mismatch_checkpoint_id),
+            (result_mismatch_thread_id, result_mismatch_checkpoint_id),
+        ):
+            with pytest.raises(CheckViolation, match="cognitive revision cannot jump"):
+                await connection.execute(
+                    """
+                    update graph_thread_registry
+                       set cognitive_revision = 2,
+                           last_checkpoint_ns = 'intake',
+                           last_checkpoint_id = %s
+                     where thread_id = %s
+                    """,
+                    (checkpoint_id, thread_id),
+                )
+        with pytest.raises(CheckViolation, match="cognitive revision cannot jump"):
+            await connection.execute(
+                """
+                update graph_thread_registry
+                   set cognitive_revision = 2,
+                       last_checkpoint_ns = 'intake',
+                       last_checkpoint_id = %s
+                 where thread_id = %s
+                """,
+                (missing_command_checkpoint_id, missing_command_thread_id),
+            )
+        with pytest.raises(CheckViolation, match="cognitive revision cannot jump"):
+            await connection.execute(
+                """
+                update graph_thread_registry
+                   set cognitive_revision = 2,
+                       last_checkpoint_ns = 'intake',
+                       last_checkpoint_id = %s
+                 where thread_id = %s
+                """,
+                (non_active_checkpoint_id, non_active_thread_id),
+            )
+        with pytest.raises(CheckViolation, match="cognitive revision cannot jump"):
+            await connection.execute(
+                """
+                update graph_thread_registry
+                   set cognitive_revision = 3
+                 where thread_id = %s
+                """,
+                (too_far_thread_id,),
+            )
+        with pytest.raises(CheckViolation, match="cognitive revision cannot jump"):
+            await connection.execute(
+                """
+                update graph_thread_registry
+                   set cognitive_revision = 2
+                 where thread_id = %s
+                """,
+                (old_pointer_thread_id,),
             )
 
 
@@ -977,7 +1383,16 @@ async def test_real_schema_advisory_lock_rejects_a_competing_migrator(
 
     recovered = await _migration_runner(graph_database).run()
     assert recovered.applied == ()
-    assert recovered.already_current == ("G001", "G002", "G003", "G004", "G005", "G006", "G007")
+    assert recovered.already_current == (
+        "G001",
+        "G002",
+        "G003",
+        "G004",
+        "G005",
+        "G006",
+        "G007",
+        "G008",
+    )
 
 
 @pytest.mark.asyncio
