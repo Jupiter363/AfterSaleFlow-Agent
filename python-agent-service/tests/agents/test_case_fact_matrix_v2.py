@@ -8,9 +8,11 @@ import pytest
 
 from app.agents.dispute_intake_officer.case_fact_matrix import (
     finalize_case_fact_matrix,
+    validate_case_fact_matrix_content_hash,
 )
+from app.contracts.v1.codec import canonical_sha256_omitting
 from app.llm import AgentOutputSchemaError
-from app.schemas import CaseFactMatrixDeltaV2, IntakeTurnRequest
+from app.schemas import CaseFactMatrixDeltaV2, CaseFactMatrixV2, IntakeTurnRequest
 from app.harness.evidence_context_assembler import (
     _allowed_fact_targets,
     _claim_and_response_state,
@@ -257,6 +259,68 @@ def _existing_fact_delta(
             "summary_source_fact_keys": [fact_key],
         }
     )
+
+
+def _java_jcs_previous_matrix(case_id: str, *, requested_amount: int | None):
+    previous = _single_fact_initiator_matrix(case_id).model_dump(mode="json")
+    initiator_claim = previous["claims"]["initiator_claim"]
+    initiator_claim.pop("requested_items")
+    if requested_amount is None:
+        initiator_claim.pop("requested_amount")
+    else:
+        initiator_claim["requested_amount"] = requested_amount
+    previous["content_hash"] = canonical_sha256_omitting(previous, "content_hash")
+    return previous
+
+
+@pytest.mark.parametrize(
+    ("case_id", "requested_amount"),
+    [
+        ("CASE_java_jcs_integer_amount", 2399),
+        ("CASE_java_jcs_omitted_amount", None),
+    ],
+)
+def test_previous_java_jcs_matrix_with_omitted_claim_optionals_generates_successor(
+    case_id: str,
+    requested_amount: int | None,
+) -> None:
+    previous = _java_jcs_previous_matrix(
+        case_id,
+        requested_amount=requested_amount,
+    )
+    parsed = CaseFactMatrixV2.model_validate(previous)
+    assert validate_case_fact_matrix_content_hash(previous)
+    assert not validate_case_fact_matrix_content_hash(parsed.model_dump(mode="json"))
+    initiator_claim = previous["claims"]["initiator_claim"]
+    assert "requested_items" not in initiator_claim
+    if requested_amount is None:
+        assert "requested_amount" not in initiator_claim
+    else:
+        assert initiator_claim["requested_amount"] == 2399
+        assert type(initiator_claim["requested_amount"]) is int
+
+    successor = finalize_case_fact_matrix(
+        request=_respondent_request(case_id, previous),
+        case_detail=_detail("The respondent confirms the prior fact."),
+        delta=_existing_fact_delta(previous["fact_rows"][0]["fact_id"]),
+    )
+
+    assert successor.matrix_version == 2
+    assert successor.parent_ref is not None
+    assert successor.parent_ref.content_hash == previous["content_hash"]
+
+
+def test_previous_java_jcs_matrix_rejects_raw_content_tampering() -> None:
+    case_id = "CASE_java_jcs_tampered"
+    previous = _java_jcs_previous_matrix(case_id, requested_amount=2399)
+    previous["claims"]["initiator_claim"]["requested_resolution"] = "EXCHANGE"
+
+    with pytest.raises(AgentOutputSchemaError, match="content hash is invalid"):
+        finalize_case_fact_matrix(
+            request=_respondent_request(case_id, previous),
+            case_detail=_detail("The respondent confirms the prior fact."),
+            delta=_existing_fact_delta(previous["fact_rows"][0]["fact_id"]),
+        )
 
 
 def test_reducer_allows_new_fact_with_mixed_scope_using_only_current_source() -> None:

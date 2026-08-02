@@ -585,7 +585,7 @@ def _previous_matrix(request: IntakeTurnRequest) -> CaseFactMatrixV2 | None:
             matrix = CaseFactMatrixV2.model_validate(candidate)
         except ValueError as failure:
             _schema_error(f"previous case_fact_matrix.v2 is invalid: {failure}")
-        if not validate_case_fact_matrix_content_hash(matrix.model_dump(mode="json")):
+        if not validate_case_fact_matrix_content_hash(candidate):
             _schema_error("previous case_fact_matrix.v2 content hash is invalid")
         return matrix
     legacy = detail.get("unilateral_case_matrix")
