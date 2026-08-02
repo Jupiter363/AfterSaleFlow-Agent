@@ -251,6 +251,7 @@ def adapt_intake_baseline_output(
 ) -> IntakeCognitionDraft:
     """Map a validated baseline response to the durable Target proposal contract."""
 
+    output = _normalize_intake_baseline_matrix_fact_keys(state, output)
     request = build_intake_baseline_request(state, agent_context=agent_context)
     source_text = (
         request.current_user_message.text
@@ -294,6 +295,115 @@ def adapt_intake_baseline_output(
             "confidence": projected["confidence"],
         }
     )
+
+
+def normalize_model_matrix_fact_key_payload(
+    matrix_patch: Mapping[str, Any],
+    *,
+    authorized_fact_ids: frozenset[str],
+) -> dict[str, Any]:
+    """Demote unknown model-authored ``FACT_*`` keys before matrix reduction.
+
+    Stable ``FACT_*`` identifiers belong to the authorized dossier.  A model may
+    only propose a new fact under ``NEW_*``.  The payload boundary is shared by
+    the baseline adapter, which must normalize before its formal reducer, and
+    the Target proposal adapter, which rechecks its typed matrix draft.
+    """
+
+    normalized = deepcopy(dict(matrix_patch))
+    if normalized.get("schema_version") not in {
+        "unilateral_case_matrix.draft.v1",
+        "case_fact_matrix.delta.v2",
+    }:
+        raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_INVALID")
+    rows = normalized.get("fact_rows")
+    summary_keys = normalized.get("summary_source_fact_keys")
+    if not isinstance(rows, list) or not isinstance(summary_keys, list):
+        raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_INVALID")
+
+    proposed_keys: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_INVALID")
+        fact_key = row.get("fact_key")
+        if not isinstance(fact_key, str):
+            raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_INVALID")
+        if fact_key in proposed_keys:
+            raise IntakeGraphContractError("INTAKE_MATRIX_FACT_ID_CONFLICT")
+        proposed_keys.add(fact_key)
+    if any(not isinstance(fact_key, str) for fact_key in summary_keys):
+        raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_INVALID")
+
+    replacements: dict[str, str] = {}
+    for row in rows:
+        fact_key = row["fact_key"]
+        if not fact_key.startswith("FACT_") or fact_key in authorized_fact_ids:
+            continue
+        replacement = f"NEW_{fact_key.removeprefix('FACT_')}"
+        if replacement in proposed_keys or replacement in replacements.values():
+            raise IntakeGraphContractError("INTAKE_MATRIX_FACT_ID_CONFLICT")
+        replacements[fact_key] = replacement
+
+    if not replacements:
+        return normalized
+
+    for row in rows:
+        fact_key = row["fact_key"]
+        if fact_key in replacements:
+            row["fact_key"] = replacements[fact_key]
+    normalized["summary_source_fact_keys"] = [
+        replacements.get(fact_key, fact_key) for fact_key in summary_keys
+    ]
+    return normalized
+
+
+def _normalize_intake_baseline_matrix_fact_keys(
+    state: Mapping[str, Any],
+    output: IntakeCaseDetailLlmOutput,
+) -> IntakeCaseDetailLlmOutput:
+    """Normalize the parsed model matrix before the baseline reducer consumes it."""
+
+    if output.case_matrix_delta is not None:
+        matrix_field = "case_matrix_delta"
+        matrix = output.case_matrix_delta
+    elif output.unilateral_case_matrix is not None:
+        matrix_field = "unilateral_case_matrix"
+        matrix = output.unilateral_case_matrix
+    else:
+        raise IntakeGraphContractError("INTAKE_BASELINE_MATRIX_PATCH_INVALID")
+
+    matrix_payload = matrix.model_dump(mode="json", exclude_none=True)
+    normalized_matrix = normalize_model_matrix_fact_key_payload(
+        matrix_payload,
+        authorized_fact_ids=_fact_ids(state.get("dossier_draft", {})),
+    )
+    if normalized_matrix == matrix_payload:
+        return output
+
+    normalized_output = output.model_dump(mode="json", exclude_none=True)
+    normalized_output[matrix_field] = normalized_matrix
+    try:
+        return IntakeCaseDetailLlmOutput.model_validate(normalized_output)
+    except ValueError as error:
+        raise IntakeGraphContractError("INTAKE_BASELINE_MATRIX_PATCH_INVALID") from error
+
+
+def _fact_ids(value: Any) -> frozenset[str]:
+    ids: set[str] = set()
+
+    def visit(candidate: Any) -> None:
+        if isinstance(candidate, Mapping):
+            fact_id = candidate.get("fact_id")
+            if isinstance(fact_id, str):
+                ids.add(fact_id)
+            for child in candidate.values():
+                visit(child)
+        elif isinstance(candidate, list | tuple):
+            for child in candidate:
+                visit(child)
+
+    visit(value)
+    return frozenset(ids)
 
 
 def _target_missing_field_identifiers(missing_fields: Any) -> list[str]:
@@ -456,6 +566,7 @@ __all__ = [
     "append_intake_baseline_statement",
     "build_intake_baseline_memory_summary",
     "build_intake_baseline_request",
+    "normalize_model_matrix_fact_key_payload",
     "prepare_intake_baseline_invocation",
     "read_intake_baseline_memory_summary",
 ]

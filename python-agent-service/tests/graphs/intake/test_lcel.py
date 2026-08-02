@@ -21,6 +21,9 @@ from langchain_core.runnables import (
 )
 
 from app.contracts.v1.codec import canonical_sha256_omitting
+from app.agents.dispute_intake_officer.case_fact_matrix import (
+    finalize_case_fact_matrix,
+)
 from app.agents.dispute_intake_officer.schemas import IntakeCaseDetailLlmOutput
 from app.graph_runtime.state_lens import StateLens
 from app.graph_runtime.state import VersionPinsState
@@ -51,6 +54,8 @@ from app.harness.invocation_context import AgentInvocationContext
 from app.harness.model_runner import prepare_baseline_prompt_authority
 from app.harness.prompt_composer import PromptRepository
 from app.llm import LiteLlmProxyClient, governed_max_output_tokens
+from app.schemas.case_fact_matrix import CaseFactMatrixDeltaV2
+from app.schemas.final_agents import IntakeTurnRequest
 from app.model_runtime.governed_chat_model import GovernedChatModel
 from app.model_runtime.profiles import (
     ModelInvocationPolicy,
@@ -503,6 +508,56 @@ def _state_with_matrix_roles(bindings, version_pins, *, actor: str, initiator: s
     return state
 
 
+def _prior_formal_matrix(
+    *,
+    case_id: str,
+    agent_context: AgentInvocationContext,
+) -> dict[str, Any]:
+    request = IntakeTurnRequest.model_validate(
+        {
+            "case_id": case_id,
+            "room_type": "INTAKE",
+            "turn_source": "EXTERNAL_IMPORT",
+            "initial_case_facts": {
+                "form_source": "EXTERNAL_IMPORT",
+                "form_description": "The order allegedly arrived damaged.",
+                "initiator_role": "USER",
+            },
+            "agent_context": agent_context,
+        }
+    )
+    return finalize_case_fact_matrix(
+        request=request,
+        case_detail={
+            "case_story": {
+                "one_sentence_summary": "The order allegedly arrived damaged."
+            },
+            "claim_resolution": {
+                "requested_resolution": "REFUND",
+                "request_reason": "The order allegedly arrived damaged.",
+            },
+        },
+        delta=CaseFactMatrixDeltaV2.model_validate(
+            {
+                "schema_version": "case_fact_matrix.delta.v2",
+                "fact_rows": [
+                    {
+                        "fact_key": "NEW_DAMAGE",
+                        "category": "PRODUCT_STATE",
+                        "fact_target": "Whether the order arrived damaged.",
+                        "materiality": "CORE",
+                        "stance": "CONFIRM",
+                        "position_summary": "The initiator reports visible damage.",
+                        "asserted_value": "damaged",
+                        "source_scope": "CURRENT_SOURCE",
+                    }
+                ],
+                "summary_source_fact_keys": ["NEW_DAMAGE"],
+            }
+        ),
+    ).model_dump(mode="json")
+
+
 def test_real_intake_lcel_is_governed_object_flow_with_human_text_isolation(
     bindings,
     version_pins,
@@ -840,6 +895,190 @@ def test_model_fact_key_normalization_preserves_authorized_stable_keys(
     assert normalized.matrix_patch.summary_source_fact_keys == (
         "FACT_DAMAGE",
         "NEW_COLOR",
+    )
+
+
+def test_model_delta_fact_key_normalization_rewrites_unknown_key_and_syncs_summary(
+    bindings,
+    version_pins,
+) -> None:
+    state = _state_with_matrix_roles(bindings, version_pins, actor="USER", initiator="USER")
+    state["dossier_draft"] = {
+        "case_fact_matrix": {
+            "fact_rows": [{"fact_id": "FACT_DAMAGE"}],
+        }
+    }
+    draft = IntakeCognitionDraft.model_validate(
+        _draft(
+            matrix_patch={
+                "schema_version": "case_fact_matrix.delta.v2",
+                "fact_rows": [
+                    {
+                        "fact_key": "FACT_DAMAGE",
+                        "category": "PRODUCT_STATE",
+                        "fact_target": "Whether the order arrived damaged.",
+                        "materiality": "CORE",
+                        "stance": "CONFIRM",
+                        "position_summary": "The damage remains asserted.",
+                        "asserted_value": "damaged",
+                        "source_scope": "PREVIOUS_MATRIX",
+                    },
+                    {
+                        "fact_key": "FACT_INSTALL_FEE_CLAIM",
+                        "category": "PAYMENT",
+                        "fact_target": "Whether an installation fee was charged.",
+                        "materiality": "SUPPORTING",
+                        "stance": "CONFIRM",
+                        "position_summary": "The current actor says an installation fee was charged.",
+                        "asserted_value": "charged",
+                        "source_scope": "CURRENT_SOURCE",
+                    },
+                ],
+                "summary_source_fact_keys": [
+                    "FACT_DAMAGE",
+                    "FACT_INSTALL_FEE_CLAIM",
+                ],
+            },
+            readiness="INCOMPLETE",
+            missing_fields=["delivery_time"],
+            recommendation="NEED_MORE_INFO",
+        )
+    )
+
+    normalized = _normalize_model_matrix_fact_keys(state, draft)
+
+    assert normalized.matrix_patch is not None
+    assert normalized.matrix_patch.schema_version == "case_fact_matrix.delta.v2"
+    assert [row.fact_key for row in normalized.matrix_patch.fact_rows] == [
+        "FACT_DAMAGE",
+        "NEW_INSTALL_FEE_CLAIM",
+    ]
+    assert normalized.matrix_patch.summary_source_fact_keys == (
+        "FACT_DAMAGE",
+        "NEW_INSTALL_FEE_CLAIM",
+    )
+
+
+def test_model_delta_fact_key_normalization_rejects_new_key_collision(
+    bindings,
+    version_pins,
+) -> None:
+    state = _state_with_matrix_roles(bindings, version_pins, actor="USER", initiator="USER")
+    draft = IntakeCognitionDraft.model_validate(
+        _draft(
+            matrix_patch={
+                "schema_version": "case_fact_matrix.delta.v2",
+                "fact_rows": [
+                    {
+                        "fact_key": "FACT_INSTALL_FEE_CLAIM",
+                        "category": "PAYMENT",
+                        "fact_target": "Whether an installation fee was charged.",
+                        "materiality": "SUPPORTING",
+                        "stance": "CONFIRM",
+                        "position_summary": "The current actor says an installation fee was charged.",
+                        "asserted_value": "charged",
+                        "source_scope": "CURRENT_SOURCE",
+                    },
+                    {
+                        "fact_key": "NEW_INSTALL_FEE_CLAIM",
+                        "category": "PAYMENT",
+                        "fact_target": "Whether a separate service fee was charged.",
+                        "materiality": "SUPPORTING",
+                        "stance": "CONFIRM",
+                        "position_summary": "The current actor separately reports a service fee.",
+                        "asserted_value": "charged",
+                        "source_scope": "CURRENT_SOURCE",
+                    },
+                ],
+                "summary_source_fact_keys": [
+                    "FACT_INSTALL_FEE_CLAIM",
+                    "NEW_INSTALL_FEE_CLAIM",
+                ],
+            },
+            readiness="INCOMPLETE",
+            missing_fields=["delivery_time"],
+            recommendation="NEED_MORE_INFO",
+        )
+    )
+
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_MATRIX_FACT_ID_CONFLICT",
+    ):
+        _normalize_model_matrix_fact_keys(state, draft)
+
+
+def test_production_generation_normalizes_unknown_delta_fact_before_baseline_reducer(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+) -> None:
+    state = _event_state(bindings, version_pins, snapshot, event)
+    agent_context = _agent_context_for_state(state)
+    prior_matrix = _prior_formal_matrix(
+        case_id=agent_context.case_id,
+        agent_context=agent_context,
+    )
+    prior_fact_id = prior_matrix["fact_rows"][0]["fact_id"]
+    state["dossier_draft"] = {
+        "case_fact_matrix": prior_matrix,
+    }
+    output = IntakeCaseDetailLlmOutput.model_validate(
+        _baseline_document(
+            _draft(
+                matrix_patch={
+                    "schema_version": "case_fact_matrix.delta.v2",
+                    "fact_rows": [
+                        {
+                            "fact_key": prior_fact_id,
+                            "category": "PRODUCT_STATE",
+                            "fact_target": "Whether the order arrived damaged.",
+                            "materiality": "CORE",
+                            "stance": "CONFIRM",
+                            "position_summary": "The damage remains asserted.",
+                            "asserted_value": "damaged",
+                            "source_scope": "PREVIOUS_MATRIX",
+                        },
+                        {
+                            "fact_key": "FACT_INSTALL_FEE_CLAIM",
+                            "category": "PAYMENT",
+                            "fact_target": "Whether an installation fee was charged.",
+                            "materiality": "SUPPORTING",
+                            "stance": "CONFIRM",
+                            "position_summary": "The current actor says an installation fee was charged.",
+                            "asserted_value": "charged",
+                            "source_scope": "CURRENT_SOURCE",
+                        },
+                    ],
+                    "summary_source_fact_keys": [
+                        prior_fact_id,
+                        "FACT_INSTALL_FEE_CLAIM",
+                    ],
+                },
+                readiness="INCOMPLETE",
+                missing_fields=["delivery_time"],
+                recommendation="NEED_MORE_INFO",
+            )
+        )
+    )
+
+    _, _, normalized = _production_generation_parts(
+        {
+            "state": state,
+            "generation": {"message": AIMessage(content="{}"), "draft": output},
+        },
+        agent_context=agent_context,
+    )
+
+    assert normalized.matrix_patch is not None
+    assert [row.fact_key for row in normalized.matrix_patch.fact_rows] == [
+        prior_fact_id,
+        "NEW_INSTALL_FEE_CLAIM",
+    ]
+    assert normalized.matrix_patch.summary_source_fact_keys == (
+        prior_fact_id,
+        "NEW_INSTALL_FEE_CLAIM",
     )
 
 

@@ -32,9 +32,11 @@ from app.harness.prompt_composer import PromptComposer
 from app.graphs.intake.baseline import (
     BASELINE_INTAKE_NODE_NAME,
     adapt_intake_baseline_output,
+    normalize_model_matrix_fact_key_payload,
     prepare_intake_baseline_invocation,
 )
 from app.graphs.intake.contracts import (
+    CaseFactMatrixDeltaV2,
     MODEL_CONTROLLED_FORBIDDEN_FIELDS,
     IntakeCognitionDraft,
     UnilateralCaseMatrixDraftV1,
@@ -1917,41 +1919,22 @@ def _normalize_model_matrix_fact_keys(
     """
 
     matrix_patch = draft.matrix_patch
-    if not isinstance(matrix_patch, UnilateralCaseMatrixDraftV1):
+    if not isinstance(
+        matrix_patch,
+        (UnilateralCaseMatrixDraftV1, CaseFactMatrixDeltaV2),
+    ):
         return draft
 
-    existing_fact_ids = _fact_ids(state.get("dossier_draft", {}))
-    proposed_keys = {row.fact_key for row in matrix_patch.fact_rows}
-    replacements: dict[str, str] = {}
-    for row in matrix_patch.fact_rows:
-        fact_key = row.fact_key
-        if not fact_key.startswith("FACT_") or fact_key in existing_fact_ids:
-            continue
-        replacement = f"NEW_{fact_key.removeprefix('FACT_')}"
-        if replacement in proposed_keys or replacement in replacements.values():
-            raise IntakeGraphContractError("INTAKE_MATRIX_FACT_ID_CONFLICT")
-        replacements[fact_key] = replacement
-
-    if not replacements:
+    matrix_payload = matrix_patch.model_dump(mode="json", exclude_none=True)
+    normalized_patch = normalize_model_matrix_fact_key_payload(
+        matrix_payload,
+        authorized_fact_ids=_fact_ids(state.get("dossier_draft", {})),
+    )
+    if normalized_patch == matrix_payload:
         return draft
 
     normalized = draft.model_dump(mode="json", exclude_none=True, exclude_unset=True)
-    normalized_patch = normalized["matrix_patch"]
-    if not isinstance(normalized_patch, dict):
-        raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_INVALID")
-    rows = normalized_patch.get("fact_rows")
-    summary_keys = normalized_patch.get("summary_source_fact_keys")
-    if not isinstance(rows, list) or not isinstance(summary_keys, list):
-        raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_INVALID")
-    for row in rows:
-        if not isinstance(row, dict):
-            raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_INVALID")
-        fact_key = row.get("fact_key")
-        if isinstance(fact_key, str) and fact_key in replacements:
-            row["fact_key"] = replacements[fact_key]
-    normalized_patch["summary_source_fact_keys"] = [
-        replacements.get(fact_key, fact_key) for fact_key in summary_keys
-    ]
+    normalized["matrix_patch"] = normalized_patch
     return IntakeCognitionDraft.model_validate(normalized)
 
 
