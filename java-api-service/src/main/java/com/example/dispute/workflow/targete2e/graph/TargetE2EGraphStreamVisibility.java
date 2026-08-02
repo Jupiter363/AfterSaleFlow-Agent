@@ -13,9 +13,12 @@ import java.util.Set;
  */
 public final class TargetE2EGraphStreamVisibility {
 
-  private static final Map<String, Set<String>> INTAKE_LCEL_VISIBLE_FIELDS =
+  // Python graph constants are not shared with this Java reader; this locks the wire contract.
+  private static final String INTAKE_BASELINE_WIRE_NODE = "intake_turn_case_detail";
+
+  private static final Map<String, Set<String>> INTAKE_VISIBLE_FIELDS =
       Map.of(
-          "intake_lcel",
+          INTAKE_BASELINE_WIRE_NODE,
           Set.of(
               "room_utterance",
               "case_detail.case_story",
@@ -39,17 +42,17 @@ public final class TargetE2EGraphStreamVisibility {
    */
   public static Map<String, Set<String>> requireExactPolicy(Map<String, Set<String>> configured) {
     if (configured == null || configured.isEmpty()) {
-      return INTAKE_LCEL_VISIBLE_FIELDS;
+      return INTAKE_VISIBLE_FIELDS;
     }
     Map<String, Set<String>> validated = GraphStreamVisibilityPolicy.immutablePolicy(configured);
-    if (!INTAKE_LCEL_VISIBLE_FIELDS.equals(validated)) {
+    if (!INTAKE_VISIBLE_FIELDS.equals(validated)) {
       throw new IllegalStateException(
           "target E2E Graph stream visibility differs from the frozen Intake contract");
     }
-    return INTAKE_LCEL_VISIBLE_FIELDS;
+    return INTAKE_VISIBLE_FIELDS;
   }
 
   public static Map<String, Set<String>> frozenPolicy() {
-    return INTAKE_LCEL_VISIBLE_FIELDS;
+    return INTAKE_VISIBLE_FIELDS;
   }
 }

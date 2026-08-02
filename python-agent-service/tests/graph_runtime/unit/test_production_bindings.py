@@ -2,20 +2,27 @@ from __future__ import annotations
 
 import base64
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, TypedDict, cast
 
-import pytest
 import httpx
+import pytest
 from langchain_core.messages import AIMessageChunk
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
+from pydantic import BaseModel
 
 from app.agents.dispute_intake_officer.schemas import IntakeCaseDetailLlmOutput
 import app.graph_runtime.production_bindings as production_bindings
 from app.api.graph_lifecycle import GraphExecutorKernel
+from app.api.graph_stream_service import (
+    ExactShadowExecutorRegistry,
+    GatewayBackedGraphCommandStreamService,
+    GraphStreamAdmissionGate,
+)
 from app.config import GraphShadowBindingSettings, Settings
 from app.contracts.v1.codec import canonical_sha256_omitting, canonicalize
 from app.contracts.v1.models import RoomGraphCommand, SnapshotRef, Usage
@@ -29,7 +36,7 @@ from app.graph_runtime.errors import (
     GraphThreadBindingError,
     GraphVersionUnavailableError,
 )
-from app.graph_runtime.gateway import GatewayExecution
+from app.graph_runtime.gateway import AdmissionAction, GatewayExecution
 from app.graph_runtime.identity import (
     ActorScopeBinding,
     RoomType,
@@ -50,9 +57,10 @@ from app.graph_runtime.intake_exchange import (
     INTAKE_PROPOSAL_PUT_PATH,
     JavaIntakeExchangeClient,
 )
-from app.graph_runtime.postgres_bulkhead import PostgresGraphFanoutBulkhead
 from app.graph_runtime.intake_executor import CompiledIntakeGraphShadowExecutor
-from app.graph_runtime.persistence_models import GraphFenceContext
+from app.graph_runtime.postgres_bulkhead import PostgresGraphFanoutBulkhead
+from app.graph_runtime.persistence_models import GraphFenceContext, GraphGatewayMode
+from app.graph_runtime.recovery import RecoveryAction, RecoveryDecision
 from app.graph_runtime.checkpoint import FENCE_CONTEXT_KEY, bind_fence_context
 from app.graphs.intake.lcel import _SAFE_INTAKE_ROOM_UTTERANCE
 from app.graphs.intake.baseline import BASELINE_INTAKE_NODE_NAME
@@ -76,6 +84,7 @@ from app.security.invocation_envelope import (
     VerifiedReconciliation,
     invocation_binding_claims,
 )
+from app.llm import GovernedProviderRequest, LiteLlmProxyClient
 from app.model_runtime.transports import (
     ModelTransportCompleted,
     ModelTransportRequest,
@@ -809,7 +818,7 @@ def test_target_e2e_composite_registers_the_exact_intake_provider_binding() -> N
     intake_binding = registration.provider_binding_for("INTAKE")
     assert intake_binding.provider == "litellm"
     assert intake_binding.model == "qwen3.7-plus-target"
-    assert intake_binding.allowed_nodes == frozenset({"intake_lcel"})
+    assert intake_binding.allowed_nodes == frozenset({BASELINE_INTAKE_NODE_NAME})
     assert registration.provider_binding_for("HEARING") is registration.provider_binding
 
 
@@ -886,7 +895,226 @@ def test_exact_intake_graph_key_registers_only_the_dedicated_executor() -> None:
     assert isinstance(registration.executor, CompiledIntakeGraphShadowExecutor)
     assert registration.provider_binding.provider == "litellm"
     assert registration.provider_binding.model == "intake-model"
-    assert registration.provider_binding.allowed_nodes == frozenset({"intake_lcel"})
+    assert registration.provider_binding.allowed_nodes == frozenset({BASELINE_INTAKE_NODE_NAME})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("node_name", "expects_provider_record"),
+    [
+        (BASELINE_INTAKE_NODE_NAME, True),
+        ("intake_lcel", False),
+        ("unknown_node", False),
+    ],
+)
+async def test_target_e2e_intake_registration_installs_provider_binding_in_stream_lifecycle(
+    node_name: str,
+    expects_provider_record: bool,
+) -> None:
+    provider_name = "litellm"
+    model_name = "intake-model"
+
+    class ProviderResponse(BaseModel):
+        answer: str
+
+    class Provider:
+        def __init__(self, room_type: RoomType) -> None:
+            self.room_type = room_type
+            self.http_calls = 0
+            self.invocations = 0
+
+        async def stream(self, execution: GatewayExecution):
+            if self.room_type is not RoomType.INTAKE:
+                return
+            self.invocations += 1
+            yield cast(Any, SimpleNamespace(event_type="attempt_started"))
+
+            async def handler(_request: httpx.Request) -> httpx.Response:
+                self.http_calls += 1
+                return httpx.Response(
+                    200,
+                    json={
+                        "model": model_name,
+                        "choices": [{"message": {"content": '{"answer":"ok"}'}}],
+                        "usage": {
+                            "prompt_tokens": 1,
+                            "completion_tokens": 1,
+                            "total_tokens": 2,
+                        },
+                    },
+                )
+
+            transport = httpx.MockTransport(handler)
+            client = LiteLlmProxyClient(
+                "http://litellm:4000",
+                model_name,
+                "test-key",
+                transport=transport,
+                async_transport=transport,
+            )
+            result = await client.agenerate(
+                node_name=node_name,
+                system_prompt="system",
+                user_prompt="human",
+                output_type=ProviderResponse,
+                governed_request=GovernedProviderRequest(
+                    provider=provider_name,
+                    model=model_name,
+                    temperature=0,
+                    max_output_tokens=32,
+                    response_format="STRICT_JSON_SCHEMA",
+                    tool_allowlist=(),
+                    deadline_at=datetime.now(timezone.utc) + timedelta(minutes=1),
+                    provider_attempts_remaining=1,
+                    repairs_remaining=0,
+                    traceparent=execution.admission.command.traceparent,
+                ),
+            )
+            assert result.value.answer == "ok"
+            yield cast(Any, SimpleNamespace(event_type="final"))
+
+    settings = _target_settings()
+    providers = tuple(Provider(room_type) for room_type in RoomType)
+    intake_provider = next(
+        provider for provider in providers if provider.room_type is RoomType.INTAKE
+    )
+    registration = _target_e2e_executor_registration(
+        settings.graph_target_e2e_bindings[0],
+        GraphExecutorKernel(
+            saver=cast(Any, InMemorySaver()),
+            gateway=cast(Any, object()),
+            durable_bulkhead=cast(Any, object()),
+        ),
+        providers=providers,
+        intake_provider=provider_name,
+        intake_model=model_name,
+    )
+    intake_binding = registration.provider_binding_for("INTAKE")
+    assert intake_binding.allowed_nodes == frozenset({BASELINE_INTAKE_NODE_NAME})
+
+    source_command, _, _ = _intake_command()
+    command = source_command.model_copy(
+        update={
+            "graph_key": registration.binding.graph_key,
+            "graph_version": registration.binding.graph_version,
+            "checkpoint_schema_version": registration.binding.checkpoint_schema_version,
+        }
+    )
+    registry = RegistryRecord(
+        binding=registration.binding,
+        state=RegistryState.ACTIVE_CANDIDATE,
+        loadable=True,
+        revision=1,
+    )
+    admission = SimpleNamespace(
+        action=AdmissionAction.ACQUIRE,
+        command=command,
+        registry=registry,
+        binding=SimpleNamespace(execution_lane=GraphGatewayMode.TARGET_E2E_CANDIDATE),
+        candidate_authority=object(),
+    )
+    seeded_execution = _intake_execution(command)
+    execution = replace(
+        seeded_execution,
+        admission=cast(Any, admission),
+        attempt=cast(Any, SimpleNamespace(provider_call_count=0)),
+        fence=replace(
+            seeded_execution.fence,
+            execution_lane=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+            activation_id=f"p9act.v1.{'a' * 32}",
+            room_fencing_token=1,
+            command_hash="c" * 64,
+            command_envelope_hash="d" * 64,
+            environment_id="target-e2e-local",
+            environment_generation=1,
+            tenant_surrogate=command.tenant_surrogate,
+            case_id=command.case_id,
+            room_type=command.room_type,
+            binding_hash=registration.binding.binding_hash,
+            code_build_id=registration.binding.code_build_id,
+        ),
+    )
+
+    class Gateway:
+        def __init__(self) -> None:
+            self.executed: GatewayExecution | None = None
+            self.finished = 0
+            self.provider_call_counts: list[int] = []
+            self.recorded: GatewayExecution | None = None
+
+        async def admit(self, **_kwargs: Any):
+            return admission
+
+        async def inspect_recovery(self, _admission: Any) -> RecoveryDecision:
+            return RecoveryDecision(
+                action=RecoveryAction.RESUME_BEFORE_MODEL,
+                invoke_model=True,
+                emit_attempt_reset=False,
+                reason_code="NO_MODEL_CALL_DURABLY_STARTED",
+            )
+
+        async def acquire_execution(self, _admission: Any, **_kwargs: Any) -> GatewayExecution:
+            return execution
+
+        async def execute_stream(self, *, execution: GatewayExecution, executor: Any):
+            self.executed = execution
+            async for event in executor.stream(execution):
+                yield event
+
+        async def renew_execution(self, execution: GatewayExecution) -> Any:
+            return execution.lease
+
+        def cleanup_execution_lease(self, _execution: GatewayExecution) -> None:
+            return None
+
+        async def record_provider_call(self, current: GatewayExecution) -> GatewayExecution:
+            self.provider_call_counts.append(current.attempt.provider_call_count)
+            self.recorded = replace(
+                current,
+                attempt=SimpleNamespace(
+                    provider_call_count=current.attempt.provider_call_count + 1
+                ),
+            )
+            return self.recorded
+
+        async def finish_execution_attempt(self, _execution: GatewayExecution, **_kwargs: Any):
+            self.finished += 1
+            return execution
+
+    gateway = Gateway()
+    gate = GraphStreamAdmissionGate()
+    await gate.start()
+    service = GatewayBackedGraphCommandStreamService(
+        gateway=cast(Any, gateway),
+        executors=ExactShadowExecutorRegistry((registration,)),
+        owner_id="target-binding-test",
+        admission_gate=gate,
+    )
+    assert execution.thread_record is not None
+    stream = await service.open_stream(
+        command=command,
+        verified_invocation=cast(VerifiedInvocation, object()),
+        expected_thread=execution.thread_record.identity,
+    )
+
+    if expects_provider_record:
+        events = [event async for event in stream]
+        assert [event.event_type for event in events] == ["attempt_started", "final"]
+        assert gateway.provider_call_counts == [0]
+        assert gateway.recorded is not None
+        assert gateway.recorded.attempt.provider_call_count == 1
+        assert gateway.executed is not None
+        assert gateway.executed.fence.execution_provider == provider_name
+        assert gateway.executed.fence.execution_model == model_name
+        assert intake_provider.http_calls == 1
+    else:
+        with pytest.raises(GraphContractError, match="provider call intent conflicts"):
+            _ = [event async for event in stream]
+        assert gateway.provider_call_counts == []
+        assert gateway.finished == 1
+        assert intake_provider.http_calls == 0
+    assert intake_provider.invocations == 1
+    assert await gate.drain(0.01) is True
 
 
 @pytest.mark.asyncio

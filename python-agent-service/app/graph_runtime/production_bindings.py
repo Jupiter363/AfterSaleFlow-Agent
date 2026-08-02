@@ -50,6 +50,7 @@ from app.graph_runtime.identity import (
 from app.graph_runtime.intake_binding import require_exact_intake_binding
 from app.graph_runtime.intake_exchange import JavaIntakeExchangeClient
 from app.graph_runtime.intake_executor import CompiledIntakeGraphShadowExecutor
+from app.graphs.intake.baseline import BASELINE_INTAKE_NODE_NAME
 from app.graph_runtime.postgres_bulkhead import PostgresGraphFanoutBulkhead
 from app.graph_runtime.registry import VersionBinding
 from app.graph_runtime.result import ResultBindings, TERMINAL_DRAFT_ADAPTER
@@ -367,7 +368,7 @@ def _target_e2e_executor_registration(
                     model_profile_id=binding.model_profile_id,
                     provider=intake_provider,
                     model=intake_model,
-                    allowed_nodes=frozenset({"intake_lcel"}),
+                    allowed_nodes=frozenset({BASELINE_INTAKE_NODE_NAME}),
                 ),
             ),
         )
@@ -510,7 +511,7 @@ def _intake_executor_registration(
             model_profile_id=binding.model_profile_id,
             provider=provider,
             model=model,
-            allowed_nodes=frozenset({"intake_lcel"}),
+            allowed_nodes=frozenset({BASELINE_INTAKE_NODE_NAME}),
         ),
     )
 

@@ -23,7 +23,7 @@ class TargetE2EGraphStreamVisibilityTest {
         .isSameAs(TargetE2EGraphStreamVisibility.frozenPolicy())
         .containsExactly(
             Map.entry(
-                "intake_lcel",
+                "intake_turn_case_detail",
                 Set.of(
                     "room_utterance",
                     "case_detail.case_story",
@@ -49,13 +49,13 @@ class TargetE2EGraphStreamVisibilityTest {
     assertThatThrownBy(
             () ->
                 TargetE2EGraphStreamVisibility.requireExactPolicy(
-                    Map.of("intake_lcel", Set.of("room_utterance"))))
+                    Map.of("intake_turn_case_detail", Set.of("room_utterance"))))
         .isInstanceOf(IllegalStateException.class)
         .hasMessageContaining("frozen Intake contract");
   }
 
   @Test
-  void permitsOnlyTheTargetIntakeNodeAndFieldsInTheV2Stream() {
+  void permitsTheBaselineIntakeNodeAndRejectsOldOrNonPublicV2StreamValues() {
     var allowed = state();
     parse(allowed, event(0, "attempt_started", "{\"node\":\"authorize_and_load\"}"));
 
@@ -65,7 +65,7 @@ class TargetE2EGraphStreamVisibilityTest {
                     event(
                         1,
                         "visible_delta",
-                        "{\"node\":\"intake_lcel\",\"field\":\"room_utterance\","
+                        "{\"node\":\"intake_turn_case_detail\",\"field\":\"room_utterance\","
                             + "\"delta\":\"\\\"hello\\\"\"}"))
                 .eventType())
         .isEqualTo(StreamEventType.VISIBLE_DELTA);
@@ -79,8 +79,22 @@ class TargetE2EGraphStreamVisibilityTest {
                     event(
                         1,
                         "visible_delta",
-                        "{\"node\":\"other_lcel\",\"field\":\"room_utterance\","
+                        "{\"node\":\"intake_lcel\",\"field\":\"room_utterance\","
                             + "\"delta\":\"\\\"not-public\\\"\"}")))
+        .isInstanceOf(AgentStreamProtocolException.class)
+        .hasMessageContaining("non-public field");
+
+    var unknownNode = state();
+    parse(unknownNode, event(0, "attempt_started", "{\"node\":\"authorize_and_load\"}"));
+    assertThatThrownBy(
+            () ->
+                parse(
+                    unknownNode,
+                    event(
+                        1,
+                        "visible_delta",
+                        "{\"node\":\"other_lcel\",\"field\":\"room_utterance\","
+                            + "\"delta\":\"not-public\"}")))
         .isInstanceOf(AgentStreamProtocolException.class)
         .hasMessageContaining("non-public field");
 
@@ -93,7 +107,7 @@ class TargetE2EGraphStreamVisibilityTest {
                     event(
                         1,
                         "visible_delta",
-                        "{\"node\":\"intake_lcel\",\"field\":\"reasoning_content\","
+                        "{\"node\":\"intake_turn_case_detail\",\"field\":\"reasoning_content\","
                             + "\"delta\":\"not-public\"}")))
         .isInstanceOf(AgentStreamProtocolException.class)
         .hasMessageContaining("non-public field");
