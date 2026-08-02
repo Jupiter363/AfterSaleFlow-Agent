@@ -811,12 +811,25 @@ def _enforce_intake_question_boundary(
     ]
     if safe_questions:
         return "我已记录本轮补充。为了继续梳理案情，请补充：" + " ".join(
-            safe_questions[:2]
+            _normalize_safe_intake_follow_up_question(question)
+            for question in safe_questions[:2]
         )
     return (
         "我已记录本轮补充。为了继续梳理案情，请说明事情发生的时间、经过、"
-        "当前处理状态、你的诉求以及你所了解的对方态度。"
+        "当前处理状态、你的诉求以及你所了解的对方态度？"
     )
+
+
+def _normalize_safe_intake_follow_up_question(question: str) -> str:
+    """End a governed follow-up as a question without changing its wording."""
+
+    stripped = question.rstrip()
+    suffix = question[len(stripped) :]
+    if stripped.endswith(("？", "?")):
+        return question
+    if stripped.endswith(("。", "！", "!")):
+        stripped = stripped[:-1].rstrip()
+    return f"{stripped}？{suffix}"
 
 
 def _limit_follow_up_questions(utterance: str, *, limit: int) -> str:

@@ -213,7 +213,7 @@ class CompiledIntakeGraphShadowExecutor:
         finally:
             await cast(Callable[[], Awaitable[None]], close)()
 
-        snapshot = await graph.aget_state(config)
+        snapshot = await graph.aget_state(self._latest_checkpoint_config(config))
         state, final_config = self._snapshot(snapshot, runtime_execution)
         proposal = IntakeRuntimeBundle.terminal_proposal(state)
         if state.get("terminal_draft") != state.get("result_json"):
@@ -667,6 +667,14 @@ class CompiledIntakeGraphShadowExecutor:
         if checkpoint_id is not None:
             configurable["checkpoint_id"] = checkpoint_id
         return bind_fence_context({"configurable": configurable}, execution.fence)
+
+    @staticmethod
+    def _latest_checkpoint_config(config: RunnableConfig) -> RunnableConfig:
+        """Query the post-stream checkpoint head without changing the stream pointer."""
+
+        configurable = dict(config["configurable"])
+        configurable.pop("checkpoint_id", None)
+        return cast(RunnableConfig, {**config, "configurable": configurable})
 
     @staticmethod
     def _snapshot(

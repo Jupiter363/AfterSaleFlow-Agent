@@ -578,6 +578,82 @@ def test_intake_question_boundary_replaces_evidence_requests_with_case_questions
     assert "什么时间联系了商家" not in result
 
 
+def test_intake_question_boundary_normalizes_unpunctuated_uat_safe_questions() -> None:
+    utterance = "请上传客服聊天记录截图和充值凭证。"
+    case_detail = {
+        "intake_quality": {"score": 72, "ready_for_next_step": False},
+        "missing_information": {
+            "next_questions": [
+                "用户是否已联系商家客服及商家回复内容",
+                "用户期望的具体补发形式（新兑换码或直接充值）",
+            ]
+        },
+    }
+
+    result = _enforce_intake_question_boundary(utterance, case_detail)
+
+    assert result == (
+        "我已记录本轮补充。为了继续梳理案情，请补充："
+        "用户是否已联系商家客服及商家回复内容？ "
+        "用户期望的具体补发形式（新兑换码或直接充值）？"
+    )
+    assert "上传" not in result
+    assert "截图" not in result
+    assert "凭证" not in result
+
+
+def test_intake_question_boundary_does_not_double_punctuate_safe_questions() -> None:
+    utterance = "请上传客服聊天记录截图和充值凭证。"
+    case_detail = {
+        "intake_quality": {"score": 72, "ready_for_next_step": False},
+        "missing_information": {
+            "next_questions": [
+                "用户是否已联系商家客服及商家回复内容？",
+                "用户期望的具体补发形式（新兑换码或直接充值）？",
+            ]
+        },
+    }
+
+    result = _enforce_intake_question_boundary(utterance, case_detail)
+
+    assert result == (
+        "我已记录本轮补充。为了继续梳理案情，请补充："
+        "用户是否已联系商家客服及商家回复内容？ "
+        "用户期望的具体补发形式（新兑换码或直接充值）？"
+    )
+    assert "？？" not in result
+
+
+def test_intake_question_boundary_keeps_the_safe_fallback_interrogative() -> None:
+    utterance = "请上传客服聊天记录截图和充值凭证。"
+    case_detail = {
+        "intake_quality": {"score": 72, "ready_for_next_step": False},
+        "missing_information": {"next_questions": []},
+    }
+
+    result = _enforce_intake_question_boundary(utterance, case_detail)
+
+    assert result.endswith("你的诉求以及你所了解的对方态度？")
+    assert "上传" not in result
+    assert "截图" not in result
+    assert "凭证" not in result
+
+
+def test_intake_question_boundary_turns_statement_punctuation_into_a_question() -> None:
+    utterance = "请上传客服聊天记录截图和充值凭证。"
+    case_detail = {
+        "intake_quality": {"score": 72, "ready_for_next_step": False},
+        "missing_information": {
+            "next_questions": ["用户是否已联系商家客服及商家回复内容。"]
+        },
+    }
+
+    result = _enforce_intake_question_boundary(utterance, case_detail)
+
+    assert result.endswith("用户是否已联系商家客服及商家回复内容？")
+    assert "。？" not in result
+
+
 def test_respondent_message_keeps_initiator_claim_but_isolates_original_statement() -> None:
     case_id = "CASE_respondent_claim_guard"
     context = _agent_context(case_id)

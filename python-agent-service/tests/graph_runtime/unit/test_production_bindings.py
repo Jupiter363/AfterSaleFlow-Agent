@@ -1570,6 +1570,217 @@ async def test_compiled_intake_executor_persists_one_pointer_without_replacing_s
     assert durable_state["result_json"] == proposal_before
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "resume_checkpoint_id",
+    [None, "cp-intake-previous"],
+    ids=("fresh", "continuation"),
+)
+async def test_compiled_intake_executor_reads_latest_terminal_checkpoint_without_mutating_stream_config(
+    monkeypatch: pytest.MonkeyPatch,
+    resume_checkpoint_id: str | None,
+) -> None:
+    command, _, _ = _intake_command()
+    execution = _intake_execution(command)
+    if resume_checkpoint_id is not None:
+        execution = replace(
+            execution,
+            thread_record=replace(
+                execution.thread_record,
+                last_checkpoint_ns="",
+                last_checkpoint_id=resume_checkpoint_id,
+            ),
+        )
+
+    current_terminal_config = bind_fence_context(
+        {
+            "configurable": {
+                "thread_id": command.thread_id,
+                "checkpoint_ns": "",
+                "checkpoint_id": "cp-intake-current-terminal",
+            }
+        },
+        execution.fence,
+    )
+    current_terminal_snapshot = object()
+    stale_snapshot = object()
+    terminal_state = {
+        "terminal_draft": {"checkpoint": "current"},
+        "result_json": {"checkpoint": "current"},
+        "cognitive_revision": 3,
+    }
+    proposal = SimpleNamespace(room_utterance="unused")
+    canonical = SimpleNamespace(
+        artifact_id="intake-proposal-current-terminal",
+        schema_version="intake-turn-proposal.v2",
+        sha256="a" * 64,
+        size_bytes=1,
+    )
+    result = SimpleNamespace(
+        result_ref="urn:intake:latest-terminal:result",
+        result_hash="b" * 64,
+        proposal_hash="c" * 64,
+        result_envelope_hash="d" * 64,
+    )
+
+    class Saver:
+        async def avalidate_external_terminal_checkpoint(self, config, **kwargs) -> None:
+            assert config is current_terminal_config
+            assert kwargs == {"cognitive_revision": 3}
+
+        async def acommit_external_terminal(self, config, commit):
+            assert config is current_terminal_config
+            assert commit.result is result
+            configurable = dict(config["configurable"])
+            configurable[FENCE_CONTEXT_KEY] = replace(
+                execution.fence,
+                result_ref=result.result_ref,
+                result_hash=result.result_hash,
+                proposal_hash=result.proposal_hash,
+                result_envelope_hash=result.result_envelope_hash,
+            )
+            return {"configurable": configurable}
+
+    saver = Saver()
+
+    class Graph:
+        checkpointer = saver
+
+        def __init__(self) -> None:
+            self.stream_config: dict[str, Any] | None = None
+            self.state_configs: list[dict[str, Any]] = []
+
+        async def astream(self, input, config, **kwargs):
+            assert kwargs["stream_mode"] == ["messages", "custom"]
+            self.stream_config = config
+            configurable = config["configurable"]
+            assert configurable["thread_id"] == execution.fence.thread_id
+            assert configurable["checkpoint_ns"] == ""
+            assert configurable[FENCE_CONTEXT_KEY] is execution.fence
+            if resume_checkpoint_id is None:
+                assert "checkpoint_id" not in configurable
+            else:
+                assert configurable["checkpoint_id"] == resume_checkpoint_id
+            if False:
+                yield None
+
+        async def aget_state(self, config):
+            self.state_configs.append(config)
+            if "checkpoint_id" in config["configurable"]:
+                return stale_snapshot
+            return current_terminal_snapshot
+
+    graph = Graph()
+
+    class Store:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        async def put(self, selected_execution, *, proposal, **kwargs):
+            assert selected_execution is execution
+            assert proposal is canonical
+            self.calls.append(kwargs)
+            return StoredIntakeProposal(
+                artifact_id=canonical.artifact_id,
+                schema_version=canonical.schema_version,
+                uri="s3://intake-proposals/current-terminal.json",
+                object_version="version-current",
+                sha256=canonical.sha256,
+                size_bytes=canonical.size_bytes,
+            )
+
+    class Materializer:
+        def materialize(self, checkpoint_ns, checkpoint_id, *, fence):
+            assert checkpoint_ns == ""
+            assert checkpoint_id == "cp-intake-current-terminal"
+            assert fence is execution.fence
+            return result
+
+    async def load_context(*_: Any, **__: Any) -> object:
+        return object()
+
+    def snapshot(snapshot: object, selected_execution: GatewayExecution):
+        assert selected_execution is execution
+        assert snapshot is current_terminal_snapshot
+        return terminal_state, current_terminal_config
+
+    monkeypatch.setattr(
+        "app.graph_runtime.intake_executor.build_governed_intake_runtime",
+        lambda **kwargs: SimpleNamespace(graph=graph),
+    )
+    monkeypatch.setattr(CompiledIntakeGraphShadowExecutor, "_load_context", load_context)
+    monkeypatch.setattr(CompiledIntakeGraphShadowExecutor, "_snapshot", staticmethod(snapshot))
+    monkeypatch.setattr(
+        IntakeRuntimeBundle,
+        "terminal_proposal",
+        staticmethod(lambda _: proposal),
+    )
+    monkeypatch.setattr(
+        CompiledIntakeGraphShadowExecutor,
+        "_room_utterance_updates",
+        staticmethod(lambda _: ()),
+    )
+    monkeypatch.setattr(
+        CompiledIntakeGraphShadowExecutor,
+        "_terminal_normalized_dossier_updates",
+        staticmethod(lambda _: ()),
+    )
+    monkeypatch.setattr(
+        CompiledIntakeGraphShadowExecutor,
+        "_command_usage",
+        staticmethod(lambda *_: Usage(input_tokens=0, output_tokens=0, total_tokens=0)),
+    )
+    monkeypatch.setattr(
+        "app.graph_runtime.intake_executor.canonical_intake_proposal",
+        lambda _: canonical,
+    )
+    monkeypatch.setattr(
+        CompiledIntakeGraphShadowExecutor,
+        "_materializer",
+        staticmethod(lambda *_, **__: Materializer()),
+    )
+    monkeypatch.setattr(
+        "app.graph_runtime.intake_executor.ExternalTerminalCommit",
+        lambda **kwargs: SimpleNamespace(**kwargs),
+    )
+
+    class UnusedLoader:
+        async def load(self, *args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("patched context loader should be the only loader")
+
+    store = Store()
+    executor = CompiledIntakeGraphShadowExecutor(
+        saver=cast(Any, saver),
+        transport=cast(Any, object()),
+        provider="synthetic",
+        model="intake-model",
+        input_loader=UnusedLoader(),
+        proposal_store=store,
+    )
+
+    events = [event async for event in executor.stream(execution)]
+
+    assert [event.event_type for event in events] == ["attempt_started", "final"]
+    assert graph.stream_config is not None
+    assert len(graph.state_configs) == 1
+    latest_config = graph.state_configs[0]
+    assert latest_config is not graph.stream_config
+    assert latest_config["configurable"] is not graph.stream_config["configurable"]
+    assert latest_config["configurable"]["thread_id"] == execution.fence.thread_id
+    assert latest_config["configurable"]["checkpoint_ns"] == ""
+    assert latest_config["configurable"][FENCE_CONTEXT_KEY] is execution.fence
+    assert "checkpoint_id" not in latest_config["configurable"]
+    if resume_checkpoint_id is not None:
+        assert graph.stream_config["configurable"]["checkpoint_id"] == resume_checkpoint_id
+    assert store.calls == [
+        {
+            "checkpoint_ns": "",
+            "checkpoint_id": "cp-intake-current-terminal",
+            "cognitive_revision": 3,
+        }
+    ]
+
+
 @pytest.mark.parametrize(
     ("length", "expected_chunk_lengths"),
     [(4096, (4096,)), (4097, (4096, 1))],
