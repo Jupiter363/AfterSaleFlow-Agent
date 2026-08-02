@@ -11,6 +11,7 @@ import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPe
 import com.example.dispute.workflow.infrastructure.persistence.repository.CaseRoomEpochRepository;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import org.springframework.stereotype.Service;
 
 @Service
@@ -24,16 +25,20 @@ public class EpochAwareIntakeMessageIngressRouter implements IntakeMessageIngres
     private final LegacyIntakeWriterGuard legacyWriterGuard;
     private final List<TargetIntakeActivationAuthority> activationAuthorities;
     private final List<TargetTemporalIntakeIngress> targetIngresses;
+    private final TargetIntakeCommandAdmissionReadiness commandAdmissionReadiness;
 
     public EpochAwareIntakeMessageIngressRouter(
             CaseRoomEpochRepository epochRepository,
             LegacyIntakeWriterGuard legacyWriterGuard,
             List<TargetIntakeActivationAuthority> activationAuthorities,
-            List<TargetTemporalIntakeIngress> targetIngresses) {
+            List<TargetTemporalIntakeIngress> targetIngresses,
+            TargetIntakeCommandAdmissionReadiness commandAdmissionReadiness) {
         this.epochRepository = epochRepository;
         this.legacyWriterGuard = legacyWriterGuard;
         this.activationAuthorities = List.copyOf(activationAuthorities);
         this.targetIngresses = List.copyOf(targetIngresses);
+        this.commandAdmissionReadiness =
+                Objects.requireNonNull(commandAdmissionReadiness, "commandAdmissionReadiness");
     }
 
     @Override
@@ -92,6 +97,9 @@ public class EpochAwareIntakeMessageIngressRouter implements IntakeMessageIngres
         if (targetIngresses.size() != 1) {
             throw new IllegalStateException("target Intake command adapter is unavailable");
         }
+        commandAdmissionReadiness.assertDispatchAllowed(
+                selection.targetGrant(),
+                TargetIntakeCommandIdentity.messageCommandId(selection.targetGrant(), request));
         return targetIngresses.getFirst().accept(request);
     }
 

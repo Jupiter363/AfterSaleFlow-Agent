@@ -43,6 +43,7 @@ import com.example.dispute.workflow.infrastructure.persistence.repository.CasePr
 import com.example.dispute.workflow.targete2e.graph.TargetE2EGraphCommandEnvelope;
 import com.example.dispute.workflow.targete2e.graph.TargetE2EGraphEnvelopeCodec;
 import com.example.dispute.workflow.targete2e.ingress.TargetIntakeActivationGrant;
+import com.example.dispute.workflow.targete2e.ingress.TargetIntakeCommandIdentity;
 import com.example.dispute.workflow.targete2e.ingress.TargetIntakeMessageRequest;
 import com.example.dispute.workflow.targete2e.persistence.TargetE2EActivationLedger.CommandAdmission;
 import com.example.dispute.workflow.targete2e.persistence.JdbcTargetE2eApiAuthority;
@@ -56,14 +57,14 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
-import java.nio.charset.StandardCharsets;
-import java.util.UUID;
 import java.util.List;
 import java.util.Objects;
+import java.util.UUID;
 
 /**
  * Caller-transaction target Intake materialization. No workflow is launched here: the persisted
@@ -166,8 +167,8 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
                 request.caseId(),
                 request.actor().actorId(),
                 request.actor().role());
-        String messageIdentity = durableMessageIdentity(activation, request);
-        String commandId = "intake-message:" + messageIdentity;
+        String messageIdentity = TargetIntakeCommandIdentity.messageIdentity(activation, request);
+        String commandId = TargetIntakeCommandIdentity.messageCommandId(activation, request);
         String logicalRunId = "target-intake-run:" + messageIdentity;
         MaterializedIntake replay =
                 replayInitialForm(request, activation, commandId, logicalRunId);
@@ -468,18 +469,7 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
 
     static String durableMessageIdentity(
             TargetIntakeActivationGrant activation, TargetIntakeMessageRequest request) {
-        return token(
-                String.join(
-                        "\n",
-                        activation.tenantSurrogate(),
-                        request.caseId(),
-                        request.roomId(),
-                        Long.toString(activation.roomEpoch()),
-                        Long.toString(activation.roomFencingToken()),
-                        request.actor().actorId(),
-                        request.actor().role().name(),
-                        request.sourceType().name(),
-                        request.messageId()));
+        return TargetIntakeCommandIdentity.messageIdentity(activation, request);
     }
 
     private static String caseCapability(String caseId) {
@@ -487,7 +477,9 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
     }
 
     private static String token(String value) {
-        return UUID.nameUUIDFromBytes(value.getBytes(StandardCharsets.UTF_8)).toString().replace("-", "");
+        return UUID.nameUUIDFromBytes(value.getBytes(StandardCharsets.UTF_8))
+                .toString()
+                .replace("-", "");
     }
 
     static String traceparent(String traceId) {

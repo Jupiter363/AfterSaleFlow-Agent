@@ -55,7 +55,10 @@ class IntakeProcessProjectionAdapterTest {
                         "run.room_epoch = epoch.room_epoch",
                         "run.fencing_token = epoch.fencing_token",
                         "run.stream_audience_json",
-                        "run.stream_audience_actor_ids_json");
+                        "run.stream_audience_actor_ids_json",
+                        "command.expected_process_revision = projection.process_revision",
+                        "'PENDING_ORCHESTRATION', 'ORCHESTRATION_ACCEPTED'",
+                        "command_admission_pending");
         assertThat(parameters.getValue().getValue("actorId")).isEqualTo("user-safe");
         assertThat(parameters.getValue().getValue("actorRole")).isEqualTo("USER");
     }
@@ -73,6 +76,7 @@ class IntakeProcessProjectionAdapterTest {
         assertThat(view.fencingToken()).isEqualTo(9);
         assertThat(view.roomPhase()).isEqualTo("WAITING_PARTY");
         assertThat(view.pendingState()).isEqualTo("WAITING_PARTY");
+        assertThat(view.commandAdmissionState()).isEqualTo("READY");
         assertThat(view.versionPins().processContractVersion())
                 .isEqualTo("case-process.v2");
         assertThat(view.versionPins().graphVersion()).isEqualTo("2.0.0");
@@ -152,6 +156,21 @@ class IntakeProcessProjectionAdapterTest {
                 current.lastSequenceNo());
 
         assertThat(adapter.adapt(preparing).projectionState()).isEqualTo("PROCESSING");
+    }
+
+    @Test
+    void reportsPendingDuringTheFormalVisibleGapAndReadyAfterApplied() {
+        ProjectionRow current = currentShadowRow();
+
+        IntakeProcessProjectionView pending =
+                adapter.adapt(withCommandAdmissionPending(current, true));
+        IntakeProcessProjectionView applied =
+                adapter.adapt(withCommandAdmissionPending(current, false));
+
+        assertThat(pending.projectionState()).isEqualTo("CURRENT");
+        assertThat(pending.commandAdmissionState()).isEqualTo("PENDING");
+        assertThat(applied.projectionState()).isEqualTo("CURRENT");
+        assertThat(applied.commandAdmissionState()).isEqualTo("READY");
     }
 
     @Test
@@ -319,5 +338,36 @@ class IntakeProcessProjectionAdapterTest {
                 activeAttemptId,
                 activeRunStatus,
                 lastSequenceNo);
+    }
+
+    private static ProjectionRow withCommandAdmissionPending(
+            ProjectionRow source, boolean commandAdmissionPending) {
+        return new ProjectionRow(
+                source.writerMode(),
+                source.writerActivationStatus(),
+                source.projectionRoomEpoch(),
+                source.projectionProcessRevision(),
+                source.projectionFencingToken(),
+                source.roomPhase(),
+                source.projectedAt(),
+                source.epochWriterMode(),
+                source.epochLifecycleStatus(),
+                source.epochProvisioningStatus(),
+                source.epochRoomEpochValue(),
+                source.epochProcessRevisionValue(),
+                source.roomRevisionValue(),
+                source.epochFencingTokenValue(),
+                source.processContractVersion(),
+                source.selectionSchemaVersion(),
+                source.streamProtocol(),
+                source.temporalBuildId(),
+                source.roomWorkflowBuildId(),
+                source.graphVersion(),
+                source.checkpointSchemaVersion(),
+                commandAdmissionPending,
+                source.activeLogicalRunId(),
+                source.activeAttemptId(),
+                source.activeRunStatus(),
+                source.lastSequenceNo());
     }
 }

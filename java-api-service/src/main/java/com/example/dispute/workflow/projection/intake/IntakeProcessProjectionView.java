@@ -16,6 +16,7 @@ public record IntakeProcessProjectionView(
         long fencingToken,
         String roomPhase,
         String pendingState,
+        String commandAdmissionState,
         String activeLogicalRunId,
         String activeAttemptId,
         String activeRunStatus,
@@ -27,6 +28,44 @@ public record IntakeProcessProjectionView(
     public static final String CURRENT = "CURRENT";
     public static final String PROCESSING = "PROCESSING";
     public static final String UNAVAILABLE = "UNAVAILABLE";
+    public static final String COMMAND_ADMISSION_READY = "READY";
+    public static final String COMMAND_ADMISSION_PENDING = "PENDING";
+
+    /** Source-compatible constructor before command admission state became visible. */
+    public IntakeProcessProjectionView(
+            String schemaVersion,
+            String projectionState,
+            String writerMode,
+            long roomEpoch,
+            long processRevision,
+            long roomRevision,
+            long fencingToken,
+            String roomPhase,
+            String pendingState,
+            String activeLogicalRunId,
+            String activeAttemptId,
+            String activeRunStatus,
+            String streamCursor,
+            VersionPins versionPins,
+            OffsetDateTime projectedAt) {
+        this(
+                schemaVersion,
+                projectionState,
+                writerMode,
+                roomEpoch,
+                processRevision,
+                roomRevision,
+                fencingToken,
+                roomPhase,
+                pendingState,
+                COMMAND_ADMISSION_READY,
+                activeLogicalRunId,
+                activeAttemptId,
+                activeRunStatus,
+                streamCursor,
+                versionPins,
+                projectedAt);
+    }
 
     public static IntakeProcessProjectionView legacyUnavailable(OffsetDateTime projectedAt) {
         return new IntakeProcessProjectionView(
@@ -39,6 +78,7 @@ public record IntakeProcessProjectionView(
                 0,
                 "LEGACY",
                 "NONE",
+                COMMAND_ADMISSION_READY,
                 null,
                 null,
                 null,
@@ -58,6 +98,7 @@ public record IntakeProcessProjectionView(
                 0,
                 PROCESSING,
                 PROCESSING,
+                COMMAND_ADMISSION_PENDING,
                 null,
                 null,
                 null,

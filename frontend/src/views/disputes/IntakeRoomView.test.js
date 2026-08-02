@@ -115,6 +115,7 @@ function currentProcessProjection(overrides = {}) {
     schema_version: "intake-process-projection.v1",
     projection_state: "CURRENT",
     writer_mode: "SHADOW",
+    command_admission_state: "READY",
     room_epoch: 4,
     process_revision: 12,
     room_revision: 7,
@@ -147,6 +148,7 @@ function currentCamelProcessProjection(overrides = {}) {
     schemaVersion: "intake-process-projection.v1",
     projectionState: "CURRENT",
     writerMode: "SHADOW",
+    commandAdmissionState: "READY",
     roomEpoch: 4,
     processRevision: 12,
     roomRevision: 7,
@@ -889,6 +891,11 @@ describe("IntakeRoomView", () => {
       initialIntakeStatus: intakeStatusWithProjection(
         currentProcessProjection({ writer_mode: "TEMPORAL" }),
       ),
+      intakeStatusLoader: vi.fn().mockResolvedValue(
+        intakeStatusWithProjection(
+          currentProcessProjection({ writer_mode: "TEMPORAL" }),
+        ),
+      ),
       messagesLoader,
       turnMemoryLoader: vi.fn().mockResolvedValue(formalMemory),
       openingAction,
@@ -936,6 +943,11 @@ describe("IntakeRoomView", () => {
       initialTurnMemory: null,
       initialIntakeStatus: intakeStatusWithProjection(
         currentProcessProjection({ writer_mode: "TEMPORAL" }),
+      ),
+      intakeStatusLoader: vi.fn().mockResolvedValue(
+        intakeStatusWithProjection(
+          currentProcessProjection({ writer_mode: "TEMPORAL" }),
+        ),
       ),
       messagesLoader,
       turnMemoryLoader: vi.fn().mockResolvedValue(formalMemory),
@@ -987,6 +999,11 @@ describe("IntakeRoomView", () => {
       initialIntakeStatus: intakeStatusWithProjection(
         currentProcessProjection({ writer_mode: "TEMPORAL" }),
       ),
+      intakeStatusLoader: vi.fn().mockResolvedValue(
+        intakeStatusWithProjection(
+          currentProcessProjection({ writer_mode: "TEMPORAL" }),
+        ),
+      ),
       postMessageAction: vi.fn().mockResolvedValue({
         agent_run: { run_id: runId, stream_url: streamUrl },
       }),
@@ -1013,6 +1030,98 @@ describe("IntakeRoomView", () => {
     expect(messagesLoader).toHaveBeenCalledTimes(2);
     expect(wrapper.text()).toContain("正式持久卷宗已可见");
     expect(wrapper.text()).not.toContain("流式草稿卷宗");
+    wrapper.unmount();
+  });
+
+  it("keeps a TEMPORAL final locked until formal command admission becomes READY", async () => {
+    vi.useFakeTimers();
+    const runId = "run-temporal-command-admission";
+    const streamUrl = `/api/private-agent-streams/${runId}/events`;
+    const pendingStatus = intakeStatusWithProjection(
+      currentProcessProjection({
+        writer_mode: "TEMPORAL",
+        command_admission_state: "PENDING",
+      }),
+    );
+    const initialReadyStatus = intakeStatusWithProjection(
+      currentProcessProjection({ writer_mode: "TEMPORAL" }),
+    );
+    const readyStatus = intakeStatusWithProjection(
+      currentCamelProcessProjection({
+        writerMode: "TEMPORAL",
+        commandAdmissionState: "READY",
+      }),
+    );
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      if (String(input).startsWith(streamUrl)) {
+        return dossierStreamResponse(runId, "等待正式准入的流式草稿");
+      }
+      throw new Error(`unexpected fetch: ${String(input)}`);
+    });
+    const messagesLoader = vi.fn().mockResolvedValue([{
+      id: "MESSAGE_FORMAL_COMMAND_ADMISSION",
+      sequence_no: 4,
+      sender_type: "AGENT",
+      sender_role: "CUSTOMER_SERVICE",
+      agent_run_id: runId,
+      message_text: "正式回复已可见，但命令准入仍在确认。",
+    }]);
+    const turnMemoryLoader = vi.fn().mockResolvedValue(
+      formalTurnMemory("正式卷宗已可见，等待命令准入", 1, 1),
+    );
+    const intakeStatusLoader = vi.fn()
+      .mockResolvedValueOnce(pendingStatus)
+      .mockResolvedValueOnce(readyStatus);
+    const postMessageAction = vi.fn().mockResolvedValue({
+      run_id: runId,
+      stream_url: streamUrl,
+    });
+    const wrapper = await mountInteractiveView({
+      initialMessages: [],
+      initialTurnMemory: null,
+      initialIntakeStatus: initialReadyStatus,
+      postMessageAction,
+      messagesLoader,
+      turnMemoryLoader,
+      intakeStatusLoader,
+      eventStreamer: vi.fn(async () => {}),
+      formalReadinessPollAttempts: 3,
+      formalReadinessPollDelayMs: 1_000,
+    });
+
+    wrapper.findComponent(ConversationStream).vm.$emit("submit", {
+      message_type: "PARTY_TEXT",
+      text: "wait for formal command admission",
+      attachment_refs: [],
+    });
+    await flushPromises();
+    await vi.waitFor(() => {
+      expect(intakeStatusLoader).toHaveBeenCalledTimes(1);
+      expect(agentStreamStore.runs[runId]?.status).toBe("FINALIZING");
+    });
+
+    expect(messagesLoader).toHaveBeenCalledTimes(1);
+    expect(turnMemoryLoader).toHaveBeenCalledTimes(1);
+    expect(wrapper.vm.$.setupState.messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({ agent_run_id: runId }),
+    ]));
+    expect(wrapper.vm.$.setupState.turnMemory.case_intake_dossier.dossier.case_story)
+      .toEqual({ one_sentence_summary: "正式卷宗已可见，等待命令准入" });
+    expect(wrapper.find(".conversation-stream__composer").exists()).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await flushPromises();
+    await vi.waitFor(() => {
+      expect(agentStreamStore.runs[runId]?.status).toBe("COMPLETED");
+    });
+
+    expect(postMessageAction).toHaveBeenCalledTimes(1);
+    expect(intakeStatusLoader).toHaveBeenCalledTimes(2);
+    expect(messagesLoader).toHaveBeenCalledTimes(2);
+    expect(turnMemoryLoader).toHaveBeenCalledTimes(2);
+    expect(wrapper.get("textarea").attributes("disabled")).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(intakeStatusLoader).toHaveBeenCalledTimes(2);
     wrapper.unmount();
   });
 
@@ -1178,20 +1287,44 @@ describe("IntakeRoomView", () => {
       }
       throw new Error(`unexpected fetch: ${String(input)}`);
     });
-    const messagesLoader = vi.fn().mockResolvedValue([]);
-    const turnMemoryLoader = vi.fn().mockResolvedValue(null);
+    const pendingStatus = intakeStatusWithProjection(
+      currentProcessProjection({
+        writer_mode: "TEMPORAL",
+        command_admission_state: "PENDING",
+      }),
+    );
+    const initialReadyStatus = intakeStatusWithProjection(
+      currentProcessProjection({ writer_mode: "TEMPORAL" }),
+    );
+    const nextWorkspaceStatus = intakeStatusWithProjection(
+      currentProcessProjection({ writer_mode: "TEMPORAL" }),
+      { can_use_intake: false },
+    );
+    const intakeStatusLoader = vi.fn()
+      .mockResolvedValueOnce(pendingStatus)
+      .mockResolvedValueOnce(nextWorkspaceStatus);
+    const messagesLoader = vi.fn().mockResolvedValue([{
+      id: "MESSAGE_FORMAL_WORKSPACE_CANCEL",
+      sequence_no: 5,
+      sender_type: "AGENT",
+      sender_role: "CUSTOMER_SERVICE",
+      agent_run_id: runId,
+      message_text: "旧工作区正式回复",
+    }]);
+    const turnMemoryLoader = vi.fn().mockResolvedValue(
+      formalTurnMemory("旧工作区正式卷宗", 1, 1),
+    );
     const wrapper = await mountInteractiveView({
       initialMessages: [],
       initialTurnMemory: null,
-      initialIntakeStatus: intakeStatusWithProjection(
-        currentProcessProjection({ writer_mode: "TEMPORAL" }),
-      ),
+      initialIntakeStatus: initialReadyStatus,
       postMessageAction: vi.fn().mockResolvedValue({
         run_id: runId,
         stream_url: streamUrl,
       }),
       messagesLoader,
       turnMemoryLoader,
+      intakeStatusLoader,
       eventStreamer: vi.fn(async () => {}),
       formalReadinessPollAttempts: 5,
       formalReadinessPollDelayMs: 1_000,
@@ -1205,7 +1338,10 @@ describe("IntakeRoomView", () => {
     await flushPromises();
     await vi.waitFor(() => {
       expect(turnMemoryLoader).toHaveBeenCalledTimes(1);
+      expect(intakeStatusLoader).toHaveBeenCalledTimes(1);
+      expect(agentStreamStore.runs[runId]?.status).toBe("FINALIZING");
     });
+    expect(wrapper.find(".conversation-stream__composer").exists()).toBe(false);
 
     actor.id = "user-other";
     await wrapper.vm.$nextTick();
@@ -1215,6 +1351,11 @@ describe("IntakeRoomView", () => {
 
     expect(turnMemoryLoader).toHaveBeenCalledTimes(1);
     expect(messagesLoader).toHaveBeenCalledTimes(1);
+    expect(intakeStatusLoader).toHaveBeenCalledTimes(2);
+    expect(agentStreamStore.runs[runId]).toBeUndefined();
+    expect(wrapper.find(".conversation-stream__composer").exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("旧工作区正式回复");
+    expect(wrapper.text()).not.toContain("旧工作区正式卷宗");
     wrapper.unmount();
   });
 
@@ -1235,6 +1376,11 @@ describe("IntakeRoomView", () => {
       initialTurnMemory: null,
       initialIntakeStatus: intakeStatusWithProjection(
         currentProcessProjection({ writer_mode: "TEMPORAL" }),
+      ),
+      intakeStatusLoader: vi.fn().mockResolvedValue(
+        intakeStatusWithProjection(
+          currentProcessProjection({ writer_mode: "TEMPORAL" }),
+        ),
       ),
       postMessageAction: vi.fn().mockResolvedValue({
         run_id: runId,
@@ -1353,6 +1499,11 @@ describe("IntakeRoomView", () => {
       initialIntakeStatus: intakeStatusWithProjection(
         currentProcessProjection({ writer_mode: "TEMPORAL" }),
       ),
+      intakeStatusLoader: vi.fn().mockResolvedValue(
+        intakeStatusWithProjection(
+          currentProcessProjection({ writer_mode: "TEMPORAL" }),
+        ),
+      ),
       postMessageAction,
       messagesLoader,
       turnMemoryLoader,
@@ -1447,6 +1598,11 @@ describe("IntakeRoomView", () => {
       initialTurnMemory: null,
       initialIntakeStatus: intakeStatusWithProjection(
         currentProcessProjection({ writer_mode: "TEMPORAL" }),
+      ),
+      intakeStatusLoader: vi.fn().mockResolvedValue(
+        intakeStatusWithProjection(
+          currentProcessProjection({ writer_mode: "TEMPORAL" }),
+        ),
       ),
       postMessageAction: vi.fn().mockResolvedValue({
         run_id: runId,
@@ -1633,6 +1789,164 @@ describe("IntakeRoomView", () => {
       expect(confirmAction).toHaveBeenCalledTimes(1);
       wrapper.unmount();
     }
+  });
+
+  it("fails closed for reloaded TEMPORAL command admission until READY", async () => {
+    actor.id = "merchant-local";
+    actor.role = "MERCHANT";
+    const reloadedMessages = [{
+      id: "MESSAGE_RELOADED_INTAKE",
+      sequence_no: 6,
+      sender_role: "CUSTOMER_SERVICE",
+      message_text: "已恢复接待记录。",
+    }];
+    const reloadedStatus = (processProjection) => intakeStatusWithProjection(
+      processProjection,
+      {
+        initiator_status: "COMPLETED",
+        respondent_status: "OPEN",
+        can_use_intake: true,
+        can_enter_evidence: false,
+      },
+    );
+    const mountReloadedRoom = (processProjection, postMessageAction = vi.fn()) =>
+      mountInteractiveView({
+        initialMessages: null,
+        initialTurnMemory: readyTurnMemory,
+        initialIntakeStatus: reloadedStatus(processProjection),
+        messagesLoader: vi.fn().mockResolvedValue(reloadedMessages),
+        turnMemoryLoader: vi.fn().mockResolvedValue(readyTurnMemory),
+        postMessageAction,
+        eventStreamer: vi.fn(async () => {}),
+      });
+    const pendingProjection = currentProcessProjection({
+      writer_mode: "TEMPORAL",
+      command_admission_state: "PENDING",
+    });
+    const missingAdmissionProjection = currentProcessProjection({
+      writer_mode: "TEMPORAL",
+    });
+    delete missingAdmissionProjection.command_admission_state;
+
+    for (const processProjection of [pendingProjection, missingAdmissionProjection]) {
+      const postMessageAction = vi.fn();
+      const wrapper = await mountReloadedRoom(processProjection, postMessageAction);
+
+      expect(Object.values(agentStreamStore.runs)).toHaveLength(0);
+      expect(wrapper.find(".conversation-stream__composer").exists()).toBe(false);
+      wrapper.findComponent(ConversationStream).vm.$emit("submit", {
+        message_type: "PARTY_TEXT",
+        text: "must remain blocked after reload",
+        attachment_refs: [],
+      });
+      await flushPromises();
+      expect(postMessageAction).not.toHaveBeenCalled();
+      wrapper.unmount();
+    }
+
+    const readyPostMessageAction = vi.fn().mockResolvedValue(null);
+    const readyWrapper = await mountReloadedRoom(
+      currentProcessProjection({ writer_mode: "TEMPORAL" }),
+      readyPostMessageAction,
+    );
+    expect(readyWrapper.find(".conversation-stream__composer").exists()).toBe(true);
+    expect(readyWrapper.get("textarea").attributes("disabled")).toBeUndefined();
+    readyWrapper.findComponent(ConversationStream).vm.$emit("submit", {
+      message_type: "PARTY_TEXT",
+      text: "READY permits a reloaded response",
+      attachment_refs: [],
+    });
+    await vi.waitFor(() => {
+      expect(readyPostMessageAction).toHaveBeenCalledTimes(1);
+    });
+    readyWrapper.unmount();
+
+    const shadowWithoutAdmission = currentProcessProjection();
+    delete shadowWithoutAdmission.command_admission_state;
+    const shadowWrapper = await mountReloadedRoom(shadowWithoutAdmission);
+    expect(shadowWrapper.find(".conversation-stream__composer").exists()).toBe(true);
+    shadowWrapper.unmount();
+  });
+
+  it("fails closed for reloaded TEMPORAL confirmation and cancellation until READY", async () => {
+    const reloadedMessages = [{
+      id: "MESSAGE_RELOADED_READY_TO_CONFIRM",
+      sequence_no: 7,
+      sender_role: "CUSTOMER_SERVICE",
+      message_text: "Formal intake record restored.",
+    }];
+    const reloadedStatus = (processProjection) => intakeStatusWithProjection(
+      processProjection,
+      {
+        initiator_status: "OPEN",
+        respondent_status: "LOCKED",
+        can_use_intake: true,
+        can_enter_evidence: false,
+      },
+    );
+    const mountReloadedRoom = (processProjection, actions = {}) =>
+      mountInteractiveView({
+        initialMessages: null,
+        initialTurnMemory: readyTurnMemory,
+        initialIntakeStatus: reloadedStatus(processProjection),
+        messagesLoader: vi.fn().mockResolvedValue(reloadedMessages),
+        turnMemoryLoader: vi.fn().mockResolvedValue(readyTurnMemory),
+        confirmAction: actions.confirmAction,
+        cancelAction: actions.cancelAction,
+        eventStreamer: vi.fn(async () => {}),
+      });
+    const pendingProjection = currentProcessProjection({
+      writer_mode: "TEMPORAL",
+      room_phase: "READY_TO_CONFIRM",
+      command_admission_state: "PENDING",
+    });
+    const missingAdmissionProjection = currentProcessProjection({
+      writer_mode: "TEMPORAL",
+      room_phase: "READY_TO_CONFIRM",
+    });
+    delete missingAdmissionProjection.command_admission_state;
+
+    for (const processProjection of [pendingProjection, missingAdmissionProjection]) {
+      const confirmAction = vi.fn();
+      const cancelAction = vi.fn();
+      const wrapper = await mountReloadedRoom(processProjection, {
+        confirmAction,
+        cancelAction,
+      });
+
+      expect(wrapper.find("[data-confirm-admission]").exists()).toBe(false);
+      expect(wrapper.find("[data-resolve-without-dispute]").exists()).toBe(false);
+      expect(wrapper.vm.$.setupState.intakeDossierSubmissionDisabled).toBe(true);
+      expect(wrapper.vm.$.setupState.intakeCancellationDisabled).toBe(true);
+      await wrapper.vm.$.setupState.confirmAdmission();
+      await wrapper.vm.$.setupState.resolveWithoutDispute();
+      await flushPromises();
+      expect(confirmAction).not.toHaveBeenCalled();
+      expect(cancelAction).not.toHaveBeenCalled();
+      wrapper.unmount();
+    }
+
+    const confirmAction = vi.fn().mockResolvedValue(null);
+    const cancelAction = vi.fn().mockResolvedValue(null);
+    const readyWrapper = await mountReloadedRoom(
+      currentProcessProjection({
+        writer_mode: "TEMPORAL",
+        room_phase: "READY_TO_CONFIRM",
+      }),
+      { confirmAction, cancelAction },
+    );
+
+    expect(readyWrapper.get("[data-confirm-admission]").attributes("disabled"))
+      .toBeUndefined();
+    expect(readyWrapper.get("[data-resolve-without-dispute]").attributes("disabled"))
+      .toBeUndefined();
+    await readyWrapper.get("[data-confirm-admission]").trigger("click");
+    await flushPromises();
+    expect(confirmAction).toHaveBeenCalledTimes(1);
+    await readyWrapper.get("[data-resolve-without-dispute]").trigger("click");
+    await flushPromises();
+    expect(cancelAction).toHaveBeenCalledTimes(1);
+    readyWrapper.unmount();
   });
 
   it("fails closed while a projection is processing and blocks opening, writes, navigation, and run discovery", async () => {

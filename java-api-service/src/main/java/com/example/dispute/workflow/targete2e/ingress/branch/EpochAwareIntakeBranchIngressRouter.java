@@ -11,6 +11,7 @@ import com.example.dispute.workflow.infrastructure.persistence.repository.CaseRo
 import com.example.dispute.workflow.targete2e.ingress.IntakeIngressSelection;
 import com.example.dispute.workflow.targete2e.ingress.TargetIntakeActivationAuthority;
 import com.example.dispute.workflow.targete2e.ingress.TargetIntakeActivationGrant;
+import com.example.dispute.workflow.targete2e.ingress.TargetIntakeCommandAdmissionReadiness;
 import com.example.dispute.workflow.targete2e.ingress.TargetIntakeEpochBinding;
 import java.util.List;
 import java.util.Map;
@@ -24,14 +25,18 @@ public final class EpochAwareIntakeBranchIngressRouter {
     private final CaseRoomEpochRepository epochs;
     private final List<TargetIntakeActivationAuthority> authorities;
     private final List<TargetIntakeBranchIngress> delegates;
+    private final TargetIntakeCommandAdmissionReadiness commandAdmissionReadiness;
 
     public EpochAwareIntakeBranchIngressRouter(
             CaseRoomEpochRepository epochs,
             List<TargetIntakeActivationAuthority> authorities,
-            List<TargetIntakeBranchIngress> delegates) {
+            List<TargetIntakeBranchIngress> delegates,
+            TargetIntakeCommandAdmissionReadiness commandAdmissionReadiness) {
         this.epochs = Objects.requireNonNull(epochs, "epochs");
         this.authorities = List.copyOf(authorities);
         this.delegates = List.copyOf(delegates);
+        this.commandAdmissionReadiness =
+                Objects.requireNonNull(commandAdmissionReadiness, "commandAdmissionReadiness");
     }
 
     public IntakeIngressSelection select(String caseId) {
@@ -83,6 +88,8 @@ public final class EpochAwareIntakeBranchIngressRouter {
         if (delegates.size() != 1) {
             throw new IllegalStateException("target Intake branch command adapter is unavailable");
         }
+        commandAdmissionReadiness.assertDispatchAllowed(
+                selection.targetGrant(), request.command().commandId());
         return delegates.getFirst().accept(request);
     }
 

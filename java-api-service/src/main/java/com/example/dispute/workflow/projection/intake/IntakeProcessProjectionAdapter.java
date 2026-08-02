@@ -40,6 +40,15 @@ public class IntakeProcessProjectionAdapter {
                    epoch.room_workflow_build_id,
                    epoch.graph_version,
                    epoch.checkpoint_schema_version,
+                   exists (
+                       select 1
+                         from case_command command
+                        where command.case_id = projection.case_id
+                          and command.expected_process_revision = projection.process_revision
+                          and command.command_status in (
+                              'PENDING_ORCHESTRATION', 'ORCHESTRATION_ACCEPTED'
+                          )
+                   ) as command_admission_pending,
                    active_run.logical_run_id,
                    active_run.attempt_id,
                    active_run.run_status,
@@ -140,6 +149,7 @@ public class IntakeProcessProjectionAdapter {
                 row.projectionFencingToken(),
                 normalized(row.roomPhase()),
                 pendingState(row.roomPhase()),
+                commandAdmissionState(row),
                 row.activeLogicalRunId(),
                 row.activeAttemptId(),
                 row.activeRunStatus(),
@@ -159,6 +169,7 @@ public class IntakeProcessProjectionAdapter {
                 row.projectionFencingToken(),
                 normalized(row.roomPhase()),
                 pendingState(row.roomPhase()),
+                commandAdmissionState(row),
                 null,
                 null,
                 null,
@@ -178,6 +189,7 @@ public class IntakeProcessProjectionAdapter {
                 row.projectionFencingToken(),
                 IntakeProcessProjectionView.PROCESSING,
                 IntakeProcessProjectionView.PROCESSING,
+                commandAdmissionState(row),
                 null,
                 null,
                 null,
@@ -267,6 +279,12 @@ public class IntakeProcessProjectionAdapter {
         };
     }
 
+    private static String commandAdmissionState(ProjectionRow row) {
+        return row.commandAdmissionPending()
+                ? IntakeProcessProjectionView.COMMAND_ADMISSION_PENDING
+                : IntakeProcessProjectionView.COMMAND_ADMISSION_READY;
+    }
+
     private static VersionPins versionPins(ProjectionRow row) {
         return new VersionPins(
                 row.processContractVersion(),
@@ -312,6 +330,7 @@ public class IntakeProcessProjectionAdapter {
                 resultSet.getString("room_workflow_build_id"),
                 resultSet.getString("graph_version"),
                 resultSet.getString("checkpoint_schema_version"),
+                resultSet.getBoolean("command_admission_pending"),
                 resultSet.getString("logical_run_id"),
                 resultSet.getString("attempt_id"),
                 resultSet.getString("run_status"),
@@ -362,10 +381,66 @@ public class IntakeProcessProjectionAdapter {
             String roomWorkflowBuildId,
             String graphVersion,
             String checkpointSchemaVersion,
+            boolean commandAdmissionPending,
             String activeLogicalRunId,
             String activeAttemptId,
             String activeRunStatus,
             Long lastSequenceNo) {
+
+        public ProjectionRow(
+                String writerMode,
+                String writerActivationStatus,
+                long projectionRoomEpoch,
+                long projectionProcessRevision,
+                long projectionFencingToken,
+                String roomPhase,
+                OffsetDateTime projectedAt,
+                String epochWriterMode,
+                String epochLifecycleStatus,
+                String epochProvisioningStatus,
+                Long epochRoomEpochValue,
+                Long epochProcessRevisionValue,
+                Long roomRevisionValue,
+                Long epochFencingTokenValue,
+                String processContractVersion,
+                String selectionSchemaVersion,
+                String streamProtocol,
+                String temporalBuildId,
+                String roomWorkflowBuildId,
+                String graphVersion,
+                String checkpointSchemaVersion,
+                String activeLogicalRunId,
+                String activeAttemptId,
+                String activeRunStatus,
+                Long lastSequenceNo) {
+            this(
+                    writerMode,
+                    writerActivationStatus,
+                    projectionRoomEpoch,
+                    projectionProcessRevision,
+                    projectionFencingToken,
+                    roomPhase,
+                    projectedAt,
+                    epochWriterMode,
+                    epochLifecycleStatus,
+                    epochProvisioningStatus,
+                    epochRoomEpochValue,
+                    epochProcessRevisionValue,
+                    roomRevisionValue,
+                    epochFencingTokenValue,
+                    processContractVersion,
+                    selectionSchemaVersion,
+                    streamProtocol,
+                    temporalBuildId,
+                    roomWorkflowBuildId,
+                    graphVersion,
+                    checkpointSchemaVersion,
+                    false,
+                    activeLogicalRunId,
+                    activeAttemptId,
+                    activeRunStatus,
+                    lastSequenceNo);
+        }
 
         boolean epochPresent() {
             return epochRoomEpochValue != null;

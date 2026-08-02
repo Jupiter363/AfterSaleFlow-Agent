@@ -49,6 +49,7 @@ import com.example.dispute.workflow.infrastructure.persistence.repository.CasePr
 import com.example.dispute.workflow.targete2e.graph.TargetE2EGraphCommandEnvelope;
 import com.example.dispute.workflow.targete2e.graph.TargetE2EGraphEnvelopeCodec;
 import com.example.dispute.workflow.targete2e.ingress.TargetIntakeActivationGrant;
+import com.example.dispute.workflow.targete2e.ingress.TargetIntakeCommandIdentity;
 import com.example.dispute.workflow.targete2e.ingress.TargetIntakeMessageRequest;
 import com.example.dispute.workflow.targete2e.persistence.TargetE2EActivationLedger.CommandAdmission;
 import com.example.dispute.workflow.targete2e.persistence.JdbcTargetE2eApiAuthority;
@@ -278,6 +279,8 @@ class CanonicalTargetIntakeMaterializerTest {
         assertThat(CanonicalTargetIntakeMaterializer.durableMessageIdentity(
                         rotatedActivation, rotatedRequest))
                 .isEqualTo(messageIdentity);
+        assertThat(TargetIntakeCommandIdentity.messageCommandId(activation, request))
+                .isEqualTo("intake-message:" + messageIdentity);
 
         ArgumentCaptor<CreateLogicalRun> logicalRun = ArgumentCaptor.forClass(CreateLogicalRun.class);
         verify(ledger).createOrLoad(logicalRun.capture());

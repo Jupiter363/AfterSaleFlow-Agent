@@ -58,6 +58,7 @@ const INTAKE_PROCESS_PHASES = new Set([
   "CLOSED",
   "COMPLETED",
 ]);
+const INTAKE_COMMAND_ADMISSION_STATES = new Set(["PENDING", "READY"]);
 const INTAKE_PENDING_STATE_BY_PHASE = {
   OPEN: "NONE",
   WAITING_PARTY: "WAITING_PARTY",
@@ -143,6 +144,7 @@ function processingProjection() {
   return {
     mode: "PROCESSING",
     writerMode: "",
+    commandAdmissionState: "",
     roomPhase: "",
     pendingState: "",
     activeLogicalRunId: "",
@@ -153,6 +155,7 @@ function legacyProjection() {
   return {
     mode: "LEGACY",
     writerMode: "LEGACY",
+    commandAdmissionState: "",
     roomPhase: "",
     pendingState: "",
     activeLogicalRunId: "",
@@ -179,6 +182,11 @@ function normalizeIntakeProcessProjection(status) {
       "projectionState",
     ),
     writerMode: projectionField(projection, "writer_mode", "writerMode"),
+    commandAdmissionState: projectionField(
+      projection,
+      "command_admission_state",
+      "commandAdmissionState",
+    ),
     roomEpoch: projectionField(projection, "room_epoch", "roomEpoch"),
     processRevision: projectionField(
       projection,
@@ -227,6 +235,14 @@ function normalizeIntakeProcessProjection(status) {
   if (projectionState === "PROCESSING") return processingProjection();
   if (writerMode === "LEGACY") return legacyProjection();
 
+  const commandAdmissionState = projectionEnum(fields.commandAdmissionState);
+  if (
+    fields.commandAdmissionState !== undefined &&
+    !INTAKE_COMMAND_ADMISSION_STATES.has(commandAdmissionState)
+  ) {
+    return processingProjection();
+  }
+
   const roomPhase = projectionEnum(fields.roomPhase);
   const pendingState = projectionEnum(fields.pendingState);
   if (
@@ -266,6 +282,7 @@ function normalizeIntakeProcessProjection(status) {
     return {
       mode: "CURRENT",
       writerMode,
+      commandAdmissionState,
       roomPhase,
       pendingState,
       activeLogicalRunId: "",
@@ -293,6 +310,7 @@ function normalizeIntakeProcessProjection(status) {
     return {
       mode: "CURRENT",
       writerMode,
+      commandAdmissionState,
       roomPhase,
       pendingState,
       activeLogicalRunId: normalizedRunId,
@@ -309,6 +327,7 @@ function normalizeIntakeProcessProjection(status) {
   return {
     mode: "CURRENT",
     writerMode,
+    commandAdmissionState,
     roomPhase,
     pendingState,
     activeLogicalRunId: normalizedRunId,
@@ -371,6 +390,7 @@ let formalReadinessRetryToken = 0;
 let formalReadinessActiveRunId = "";
 let roomMessagesRefreshToken = 0;
 let roomTurnMemoryRefreshToken = 0;
+let roomIntakeStatusRefreshToken = 0;
 let roomSnapshotWriteBarrier = 0;
 let awaitingTemporalInitiatorRun = false;
 let componentUnmounted = false;
@@ -380,31 +400,40 @@ const historyMode = computed(() => route.query.view === "history");
 const intakeProcessProjection = computed(() =>
   normalizeIntakeProcessProjection(intakeStatus.value),
 );
-const projectionAllowsMessages = computed(() =>
-  intakeProcessProjection.value.mode === "LEGACY" ||
+const projectionAllowsMessages = computed(() => {
+  const projection = intakeProcessProjection.value;
+  return projection.mode === "LEGACY" ||
   (
-    intakeProcessProjection.value.mode === "CURRENT" &&
+    projection.mode === "CURRENT" &&
     ["OPEN", "WAITING_PARTY", "READY_TO_CONFIRM"].includes(
-      intakeProcessProjection.value.roomPhase,
+      projection.roomPhase,
+    ) &&
+    (
+      projection.writerMode !== "TEMPORAL" ||
+      targetTemporalCommandAdmissionReady(projection)
     )
-  ),
-);
-const projectionAllowsConfirmation = computed(() =>
-  intakeProcessProjection.value.mode === "LEGACY" ||
+  );
+});
+const projectionAllowsConfirmation = computed(() => {
+  const projection = intakeProcessProjection.value;
+  return projection.mode === "LEGACY" ||
   (
-    intakeProcessProjection.value.mode === "CURRENT" &&
-    intakeProcessProjection.value.roomPhase === "READY_TO_CONFIRM"
-  ),
-);
-const projectionAllowsCancellation = computed(() =>
-  intakeProcessProjection.value.mode === "LEGACY" ||
+    projection.mode === "CURRENT" &&
+    projection.roomPhase === "READY_TO_CONFIRM" &&
+    targetTemporalCommandAdmissionAllowed(projection)
+  );
+});
+const projectionAllowsCancellation = computed(() => {
+  const projection = intakeProcessProjection.value;
+  return projection.mode === "LEGACY" ||
   (
-    intakeProcessProjection.value.mode === "CURRENT" &&
+    projection.mode === "CURRENT" &&
     ["OPEN", "WAITING_PARTY", "READY_TO_CONFIRM"].includes(
-      intakeProcessProjection.value.roomPhase,
-    )
-  ),
-);
+      projection.roomPhase,
+    ) &&
+    targetTemporalCommandAdmissionAllowed(projection)
+  );
+});
 const projectionAllowsEvidence = computed(() =>
   intakeProcessProjection.value.mode === "LEGACY" ||
   (
@@ -1233,12 +1262,16 @@ const intakeRecipientView = computed(
     !serverPartyCanChat.value &&
     !currentActorIntakeCompleted.value,
 );
-const canManageIntake = computed(() =>
-  ["INITIATOR", "RESPONDENT"].includes(actorPartyPosition.value) &&
-  !intakeRecipientView.value &&
-  serverPartyCanChat.value &&
-  (projectionAllowsMessages.value || projectionAllowsConfirmation.value),
-);
+const canManageIntake = computed(() => {
+  const projection = intakeProcessProjection.value;
+  return (
+    ["INITIATOR", "RESPONDENT"].includes(actorPartyPosition.value) &&
+    !intakeRecipientView.value &&
+    serverPartyCanChat.value &&
+    targetTemporalCommandAdmissionAllowed(projection) &&
+    (projectionAllowsMessages.value || projectionAllowsConfirmation.value)
+  );
+});
 const currentActorIsInitiator = computed(
   () => actorPartyPosition.value === "INITIATOR",
 );
@@ -1574,6 +1607,13 @@ async function loadTurnMemory(snapshot = currentWorkspaceSnapshot()) {
   return loader(snapshot);
 }
 
+async function loadIntakeStatus(snapshot = currentWorkspaceSnapshot()) {
+  const loader =
+    props.intakeStatusLoader ||
+    (() => disputeApi.intakeStatus(snapshot.actor, snapshot.caseId));
+  return loader(snapshot);
+}
+
 // 业务位置：【前端接待室】refreshTurnMemory：重新加载 案件会话和上下文快照，确保页面和下一次 Agent 调用基于最新案件版本。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 async function refreshTurnMemory(snapshot = currentWorkspaceSnapshot()) {
   if (formalReadinessActiveRunId) return turnMemory.value;
@@ -1614,22 +1654,29 @@ async function refreshRoomSnapshot(snapshot = currentWorkspaceSnapshot()) {
 }
 
 async function refreshFormalRoomSnapshot(snapshot, context) {
+  const writeBarrier = roomSnapshotWriteBarrier;
   const messagesToken = ++roomMessagesRefreshToken;
   const turnMemoryToken = ++roomTurnMemoryRefreshToken;
-  const [loadedMessages, loadedMemory] = await Promise.all([
+  const intakeStatusToken = ++roomIntakeStatusRefreshToken;
+  const [loadedMessages, loadedMemory, loadedStatus] = await Promise.all([
     loadMessages(snapshot),
     loadTurnMemory(snapshot),
+    loadIntakeStatus(snapshot),
   ]);
   if (
     messagesToken !== roomMessagesRefreshToken ||
     turnMemoryToken !== roomTurnMemoryRefreshToken ||
+    intakeStatusToken !== roomIntakeStatusRefreshToken ||
+    writeBarrier !== roomSnapshotWriteBarrier ||
     !isCurrentFormalReadinessContext(context, snapshot)
   ) return false;
-  // Commit both halves together only while this exact run/token still owns the
-  // formal-readiness gate. A superseded run must never overwrite the latest
-  // run's persisted message or dossier with a late HTTP response.
+  // Commit the formal result and its command-admission projection together only
+  // while this exact run/token still owns the gate. A superseded run must never
+  // overwrite the latest run's persisted message, dossier, or status with a
+  // late HTTP response.
   messages.value = loadedMessages;
   turnMemory.value = loadedMemory;
+  intakeStatus.value = loadedStatus;
   return true;
 }
 
@@ -1711,7 +1758,7 @@ function formalReadinessVisible(context) {
     return identity && !baseline.agentMessages.has(identity);
   });
   const current = persistedDossierMarker();
-  if (!hasNewAgentMessage || !current) return false;
+  if (!hasNewAgentMessage || !current || !targetTemporalCommandAdmissionReady()) return false;
   const hasNewDossier = !baseline.dossier || (
     (
       current.version !== null &&
@@ -1726,6 +1773,25 @@ function formalReadinessVisible(context) {
     )
   );
   return hasNewDossier;
+}
+
+function targetTemporalCommandAdmissionReady(
+  projection = intakeProcessProjection.value,
+) {
+  return (
+    projection.mode === "CURRENT" &&
+    projection.writerMode === "TEMPORAL" &&
+    projection.commandAdmissionState === "READY"
+  );
+}
+
+function targetTemporalCommandAdmissionAllowed(
+  projection = intakeProcessProjection.value,
+) {
+  return (
+    projection.writerMode !== "TEMPORAL" ||
+    targetTemporalCommandAdmissionReady(projection)
+  );
 }
 
 function isCurrentFormalReadinessContext(context, snapshot = currentWorkspaceSnapshot()) {
@@ -1746,6 +1812,7 @@ function isCurrentIntakeRunContext(context, snapshot = currentWorkspaceSnapshot(
 
 function clearFormalReadinessRetry() {
   roomSnapshotWriteBarrier += 1;
+  roomIntakeStatusRefreshToken += 1;
   formalReadinessRetryToken += 1;
   formalReadinessActiveRunId = "";
   if (formalReadinessRetryTimer !== null) {
@@ -1934,11 +2001,12 @@ async function consumeIntakeAgentRun(descriptor, snapshot = currentWorkspaceSnap
 }
 
 async function refreshIntakeStatus(snapshot = currentWorkspaceSnapshot()) {
-  const loader =
-    props.intakeStatusLoader ||
-    (() => disputeApi.intakeStatus(snapshot.actor, snapshot.caseId));
-  const loaded = await loader(snapshot);
-  if (isCurrentWorkspace(snapshot)) {
+  const refreshToken = ++roomIntakeStatusRefreshToken;
+  const loaded = await loadIntakeStatus(snapshot);
+  if (
+    refreshToken === roomIntakeStatusRefreshToken &&
+    isCurrentWorkspace(snapshot)
+  ) {
     intakeStatus.value = loaded;
   }
   return loaded;
@@ -2521,7 +2589,11 @@ async function postMessage(command) {
 
 // 业务位置：【前端接待室】resolveWithoutDispute：读取 当前阶段业务数据，并依据当前案件、角色和会话权限裁剪成可用输入。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 async function resolveWithoutDispute() {
-  if (historyMode.value || intakeCancellationDisabled.value) return;
+  if (
+    historyMode.value ||
+    !targetTemporalCommandAdmissionAllowed() ||
+    intakeCancellationDisabled.value
+  ) return;
   const snapshot = currentWorkspaceSnapshot();
   submitting.value = true;
   error.value = "";
@@ -2566,7 +2638,11 @@ async function resolveWithoutDispute() {
 
 // 业务位置：【前端接待室】confirmAdmission：执行 案件受理信息和接待结论 对应的业务动作，并将结果交给 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 async function confirmAdmission() {
-  if (historyMode.value || intakeDossierSubmissionDisabled.value) return;
+  if (
+    historyMode.value ||
+    !targetTemporalCommandAdmissionAllowed() ||
+    intakeDossierSubmissionDisabled.value
+  ) return;
   const snapshot = currentWorkspaceSnapshot();
   submitting.value = true;
   error.value = "";

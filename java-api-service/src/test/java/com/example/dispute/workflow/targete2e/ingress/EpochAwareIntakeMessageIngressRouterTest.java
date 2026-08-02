@@ -2,12 +2,16 @@ package com.example.dispute.workflow.targete2e.ingress;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anySet;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import com.example.dispute.common.api.ErrorCode;
 import com.example.dispute.common.exception.BusinessException;
 import com.example.dispute.workflow.application.intake.LegacyIntakeWriterGuard;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
@@ -15,6 +19,8 @@ import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
 import com.example.dispute.workflow.infrastructure.persistence.entity.CaseRoomEpochEntity;
 import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.EpochLifecycleStatus;
 import com.example.dispute.workflow.infrastructure.persistence.entity.WorkflowPersistenceTypes.EpochProvisioningStatus;
+import com.example.dispute.workflow.infrastructure.persistence.entity.CaseCommandEntity;
+import com.example.dispute.workflow.infrastructure.persistence.repository.CaseCommandRepository;
 import com.example.dispute.workflow.infrastructure.persistence.repository.CaseRoomEpochRepository;
 import java.util.List;
 import java.util.Optional;
@@ -32,6 +38,7 @@ class EpochAwareIntakeMessageIngressRouterTest {
 
     @Mock private CaseRoomEpochRepository epochRepository;
     @Mock private LegacyIntakeWriterGuard legacyWriterGuard;
+    @Mock private CaseCommandRepository commandRepository;
     @Mock private TargetIntakeActivationAuthority activationAuthority;
     @Mock private TargetTemporalIntakeIngress targetIngress;
     @Mock private CaseRoomEpochEntity epoch;
@@ -45,7 +52,8 @@ class EpochAwareIntakeMessageIngressRouterTest {
                         epochRepository,
                         legacyWriterGuard,
                         List.of(activationAuthority),
-                        List.of(targetIngress));
+                        List.of(targetIngress),
+                        new TargetIntakeCommandAdmissionReadiness(commandRepository));
     }
 
     @Test
@@ -68,7 +76,8 @@ class EpochAwareIntakeMessageIngressRouterTest {
                         epochRepository,
                         legacyWriterGuard,
                         List.of(),
-                        List.of(targetIngress));
+                        List.of(targetIngress),
+                        new TargetIntakeCommandAdmissionReadiness(commandRepository));
 
         assertThatThrownBy(() -> router.select(CASE_ID))
                 .isInstanceOf(BusinessException.class)
@@ -123,6 +132,64 @@ class EpochAwareIntakeMessageIngressRouterTest {
         assertThat(actual).isEqualTo(expected);
         assertThat(selection.targetGrant()).isSameAs(grant);
         verify(legacyWriterGuard, never()).assertLegacyWriteAllowed(CASE_ID);
+        verify(targetIngress).accept(request);
+    }
+
+    @Test
+    void pendingProjectionRejectsADifferentFreshMessageBeforeTheDelegate() {
+        TargetIntakeActivationGrant grant = grant();
+        TargetIntakeMessageRequest request = TestRequests.message(grant);
+        when(commandRepository.existsByCaseIdAndExpectedProcessRevisionAndCommandStatusIn(
+                        anyString(), anyLong(), anySet()))
+                .thenReturn(true);
+        when(commandRepository.findByTenantSurrogateAndCommandId(
+                        grant.tenantSurrogate(),
+                        TargetIntakeCommandIdentity.messageCommandId(grant, request)))
+                .thenReturn(Optional.empty());
+
+        assertThatThrownBy(
+                        () ->
+                                router.dispatchTarget(
+                                        IntakeIngressSelection.target(grant), request))
+                .isInstanceOf(BusinessException.class)
+                .satisfies(
+                        failure -> {
+                            BusinessException rejection = (BusinessException) failure;
+                            assertThat(rejection.errorCode()).isEqualTo(ErrorCode.CASE_STATUS_INVALID);
+                            assertThat(rejection.details())
+                                    .containsEntry(
+                                            "reason_code",
+                                            TargetIntakeCommandAdmissionReadiness
+                                                    .REASON_TARGET_E2E_INTAKE_PROJECTION_PENDING);
+                        });
+
+        verifyNoInteractions(targetIngress);
+    }
+
+    @Test
+    void pendingProjectionAllowsTheExactExistingMessageCommandToReachTheDelegate() {
+        TargetIntakeActivationGrant grant = grant();
+        TargetIntakeMessageRequest request = TestRequests.message(grant);
+        String commandId = TargetIntakeCommandIdentity.messageCommandId(grant, request);
+        TargetIntakeIngressReceipt expected =
+                new TargetIntakeIngressReceipt(
+                        commandId,
+                        "target-intake-run:" + commandId.substring("intake-message:".length()),
+                        HASH,
+                        "PENDING_ORCHESTRATION",
+                        true,
+                        java.time.Instant.parse("2026-07-27T01:01:00Z"));
+        when(commandRepository.existsByCaseIdAndExpectedProcessRevisionAndCommandStatusIn(
+                        anyString(), anyLong(), anySet()))
+                .thenReturn(true);
+        when(commandRepository.findByTenantSurrogateAndCommandId(grant.tenantSurrogate(), commandId))
+                .thenReturn(Optional.of(org.mockito.Mockito.mock(CaseCommandEntity.class)));
+        when(targetIngress.accept(request)).thenReturn(expected);
+
+        TargetIntakeIngressReceipt actual =
+                router.dispatchTarget(IntakeIngressSelection.target(grant), request);
+
+        assertThat(actual).isEqualTo(expected);
         verify(targetIngress).accept(request);
     }
 
