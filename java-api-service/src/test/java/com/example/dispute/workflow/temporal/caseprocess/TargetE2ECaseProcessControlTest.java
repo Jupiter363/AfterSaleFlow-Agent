@@ -5,7 +5,11 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
+import com.example.dispute.workflow.contract.v1.ContractTypes.PayloadRef;
 import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
+import com.example.dispute.workflow.contract.v1.ProcessProjectionContract.CompleteConsumedIntakeProjectionCommand;
+import com.example.dispute.workflow.contract.v1.ProcessProjectionContract.CompleteConsumedIntakeProjectionOutcome;
+import com.example.dispute.workflow.contract.v1.ProcessProjectionContract.CompleteConsumedIntakeProjectionResult;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.ActiveChildDescriptor;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.ActiveChildKind;
 import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceParticipantBindingActivities;
@@ -19,6 +23,44 @@ import java.time.Instant;
 import org.junit.jupiter.api.Test;
 
 class TargetE2ECaseProcessControlTest {
+
+  @Test
+  void targetIntakeFormalEventsRequirePrimaryProjectionCompletionOnlyOnV1() {
+    ActiveChildDescriptor descriptor = intakeCompletionDescriptor();
+    CaseDomainEventRef formal = intakeEvent("INTAKE_TURN_NEEDS_INPUT", 3);
+    CaseDomainEventRef sourceOnly = intakeEvent("ROOM_MESSAGE_CREATED", 3);
+
+    assertThat(
+            CaseProcessWorkflowImpl.requiresTargetIntakeProjectionCompletion(
+                1, descriptor, RoomType.INTAKE, 3, formal))
+        .isTrue();
+    assertThat(
+            CaseProcessWorkflowImpl.requiresTargetIntakeProjectionCompletion(
+                io.temporal.workflow.Workflow.DEFAULT_VERSION,
+                descriptor,
+                RoomType.INTAKE,
+                3,
+                formal))
+        .isFalse();
+    assertThat(
+            CaseProcessWorkflowImpl.requiresTargetIntakeProjectionCompletion(
+                1, descriptor, RoomType.INTAKE, 3, sourceOnly))
+        .isFalse();
+  }
+
+  @Test
+  void consumedIntakeProjectionReceiptMustEchoEveryAuthorityPin() {
+    CompleteConsumedIntakeProjectionCommand command = completionCommand();
+    CompleteConsumedIntakeProjectionResult matching = completionResult(command, command.eventId());
+    CompleteConsumedIntakeProjectionResult wrongEvent = completionResult(command, "event.other");
+
+    assertThat(
+            CaseProcessWorkflowImpl.consumedIntakeProjectionResultMatches(command, matching))
+        .isTrue();
+    assertThat(
+            CaseProcessWorkflowImpl.consumedIntakeProjectionResultMatches(command, wrongEvent))
+        .isFalse();
+  }
 
   @Test
   void targetMarkerSelectsOneFencedTypedChildKindForEveryRoomType() {
@@ -227,6 +269,83 @@ class TargetE2ECaseProcessControlTest {
             "prompt-3",
             "model-3",
             false));
+  }
+
+  private static ActiveChildDescriptor intakeCompletionDescriptor() {
+    return new ActiveChildDescriptor(
+        ActiveChildKind.TARGET_TYPED_ROOM,
+        "room-epoch-selection.v2",
+        WriterMode.TEMPORAL,
+        "CaseProcessWorkflow",
+        "p9-case-build",
+        TargetTypedRoomProtocol.workflowType(RoomType.INTAKE),
+        "p9-control-build",
+        RoomType.INTAKE,
+        3,
+        17,
+        "room-child-3",
+        "room-run-3",
+        TargetIntakeActorScopes.hash("case-3", "user-3", ActorRole.USER),
+        TargetIntakeActorScopes.hash("case-3", "merchant-3", ActorRole.MERCHANT),
+        0L,
+        0L,
+        1L,
+        1L,
+        null,
+        null);
+  }
+
+  private static CaseDomainEventRef intakeEvent(String eventType, long roomEpoch) {
+    return new CaseDomainEventRef(
+        "case-domain-event-ref.v1",
+        "event.primary",
+        "tenant-primary",
+        "CASE_Primary",
+        1,
+        eventType,
+        RoomType.INTAKE,
+        roomEpoch,
+        new PayloadRef("intake-event.v1", "urn:test:event:primary", "a".repeat(64), 16),
+        Instant.parse("2026-08-02T12:00:00Z"),
+        "00-11111111111111111111111111111111-2222222222222222-01");
+  }
+
+  private static CompleteConsumedIntakeProjectionCommand completionCommand() {
+    return new CompleteConsumedIntakeProjectionCommand(
+        "complete-consumed-intake-projection.v1",
+        "tenant-primary",
+        "CASE_Primary",
+        "event.primary",
+        1,
+        "INTAKE_TURN_NEEDS_INPUT",
+        1,
+        3,
+        17,
+        1,
+        1,
+        "case-process:tenant-primary:CASE_Primary",
+        "case-run-primary",
+        "room-run-primary");
+  }
+
+  private static CompleteConsumedIntakeProjectionResult completionResult(
+      CompleteConsumedIntakeProjectionCommand command, String eventId) {
+    return new CompleteConsumedIntakeProjectionResult(
+        "complete-consumed-intake-projection-result.v1",
+        eventId,
+        command.caseEventSequence(),
+        CompleteConsumedIntakeProjectionOutcome.APPLIED,
+        command.lastCommandSequence(),
+        command.processRevision(),
+        command.roomRevision(),
+        command.roomEpoch(),
+        command.fencingToken(),
+        command.temporalWorkflowId(),
+        command.firstExecutionRunId(),
+        command.activeChildRunId(),
+        "urn:test:intake:completion",
+        "b".repeat(64),
+        Instant.parse("2026-08-02T12:00:00Z"));
   }
 
   @Test

@@ -10,8 +10,11 @@ import com.example.dispute.workflow.contract.v1.CaseProcessWorkflowProtocol;
 import com.example.dispute.workflow.contract.v1.ContractTypes.CommandType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
+import com.example.dispute.workflow.contract.v1.ProcessProjectionContract.CompleteConsumedIntakeProjectionCommand;
+import com.example.dispute.workflow.contract.v1.ProcessProjectionContract.CompleteConsumedIntakeProjectionResult;
 import com.example.dispute.workflow.contract.v1.ProvisionRoomEpoch;
 import com.example.dispute.workflow.contract.v1.ProvisionRoomEpochReceipt;
+import com.example.dispute.workflow.activity.domain.ProcessProjectionActivities;
 import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.CommandLifecycleOutcome;
 import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.ExpireCaseCommand;
 import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.RecordCaseCommandRouted;
@@ -98,6 +101,8 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
       "target-e2e-typed-room-child-v1";
   private static final String CHILD_COMPENSATION_INVARIANT_CHANGE_ID =
       "case-process-child-compensation-invariant-v1";
+  private static final String TARGET_INTAKE_PROJECTION_COMPLETION_CHANGE_ID =
+      "case-process-target-intake-projection-completion-v1";
   private static final String AUTHORITY_CHECKPOINT_MEMO_KEY =
       "case_process_authority_checkpoint_v1";
   private static final String SELECTION_V1 = "room-epoch-selection.v1";
@@ -150,6 +155,10 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
       Workflow.newActivityStub(
           IntakeChildBridgeActivitiesV2.class,
           intakeChildBridgeActivityOptions());
+  private final ProcessProjectionActivities processProjectionActivities =
+      Workflow.newActivityStub(
+          ProcessProjectionActivities.class,
+          targetIntakeProjectionCompletionActivityOptions());
   private final WorkflowQueue<PendingCommand> commandInbox = Workflow.newQueue(INBOX_CAPACITY);
   private final WorkflowQueue<CaseDomainEventRef> eventInbox = Workflow.newQueue(INBOX_CAPACITY);
   private final WorkflowQueue<PendingProvisioning> provisioningInbox =
@@ -210,6 +219,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
   private int authorityBridgeVersion;
   private int targetTypedRoomVersion;
   private int childCompensationInvariantVersion;
+  private int targetIntakeProjectionCompletionVersion;
   private boolean provisioningSwitchInProgress;
   private StartedChild uncommittedChild;
   private String protocolErrorCode;
@@ -231,6 +241,20 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
                 .setDoNotRetry(
                     "INTAKE_CHILD_BRIDGE_INVARIANT",
                     "INTAKE_CHILD_BRIDGE_READ_UNCLASSIFIED")
+                .build())
+        .build();
+  }
+
+  private static ActivityOptions targetIntakeProjectionCompletionActivityOptions() {
+    return ActivityOptions.newBuilder()
+        .setTaskQueue(CASE_CONTROL_TASK_QUEUE)
+        .setStartToCloseTimeout(Duration.ofSeconds(30))
+        .setScheduleToCloseTimeout(Duration.ofMinutes(2))
+        .setRetryOptions(
+            RetryOptions.newBuilder()
+                .setInitialInterval(Duration.ofSeconds(1))
+                .setMaximumInterval(Duration.ofSeconds(5))
+                .setMaximumAttempts(0)
                 .build())
         .build();
   }
@@ -262,6 +286,9 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
     childCompensationInvariantVersion =
         Workflow.getVersion(
             CHILD_COMPENSATION_INVARIANT_CHANGE_ID, Workflow.DEFAULT_VERSION, 1);
+    targetIntakeProjectionCompletionVersion =
+        Workflow.getVersion(
+            TARGET_INTAKE_PROJECTION_COMPLETION_CHANGE_ID, Workflow.DEFAULT_VERSION, 1);
     validateCarriedTargetHistory();
     restoreActiveChildStub();
     restoreAuthorityCheckpoint();
@@ -2262,6 +2289,7 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
         && activeRoomEpoch == event.roomEpoch()) {
       try {
         routeEventToActiveChild(event);
+        completeTargetIntakeProjection(event);
       } catch (TypedChildOperationFailure failure) {
         recordProtocolError(
             failure.errorCode(), typedFailureOrigin(failure.errorCode(), SequenceStream.DOMAIN_EVENT));
@@ -2269,6 +2297,13 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
         return true;
       } catch (CanceledFailure failure) {
         throw failure;
+      } catch (ActivityFailure failure) {
+        rethrowIfCanceled(failure);
+        recordProtocolError(
+            "INTAKE_PROCESS_PROJECTION_COMPLETION_FAILED",
+            RecoveryErrorOrigin.DOMAIN_EVENT);
+        eventManualRecoveryRequired = true;
+        return true;
       } catch (SignalExternalWorkflowException | TemporalFailure failure) {
         recordProtocolError(
             "CASE_PROCESS_ROOM_EVENT_ROUTING_FAILED", RecoveryErrorOrigin.DOMAIN_EVENT);
@@ -2286,6 +2321,81 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
     }
     clearRecoveryError(SequenceStream.DOMAIN_EVENT);
     return true;
+  }
+
+  private void completeTargetIntakeProjection(CaseDomainEventRef event) {
+    if (!requiresTargetIntakeProjectionCompletion(
+        targetIntakeProjectionCompletionVersion,
+        activeChildDescriptor,
+        activeRoomType,
+        activeRoomEpoch,
+        event)) {
+      return;
+    }
+    CompleteConsumedIntakeProjectionCommand command =
+        new CompleteConsumedIntakeProjectionCommand(
+            "complete-consumed-intake-projection.v1",
+            tenantSurrogate,
+            caseId,
+            event.eventId(),
+            event.caseEventSequence(),
+            event.eventType(),
+            Math.max(0, nextCommandSequence - 1),
+            activeRoomEpoch,
+            activeFencingToken,
+            observedProcessRevision,
+            activeRoomRevision,
+            Workflow.getInfo().getWorkflowId(),
+            Workflow.getInfo().getFirstExecutionRunId(),
+            activeChildWorkflowRunId);
+    CompleteConsumedIntakeProjectionResult completed =
+        processProjectionActivities.completeConsumedIntakeProjection(command);
+    if (!consumedIntakeProjectionResultMatches(command, completed)) {
+      throw new TypedChildOperationFailure(
+          "INTAKE_PROCESS_PROJECTION_COMPLETION_INVALID",
+          "projection completion receipt does not match the consumed Intake event",
+          null);
+    }
+  }
+
+  static boolean requiresTargetIntakeProjectionCompletion(
+      int version,
+      ActiveChildDescriptor descriptor,
+      RoomType roomType,
+      long roomEpoch,
+      CaseDomainEventRef event) {
+    return version == 1
+        && descriptor != null
+        && descriptor.kind() == ActiveChildKind.TARGET_TYPED_ROOM
+        && roomType == RoomType.INTAKE
+        && descriptor.roomType() == RoomType.INTAKE
+        && event != null
+        && event.roomType() == RoomType.INTAKE
+        && event.roomEpoch() == roomEpoch
+        && isFormalIntakeProjectionEvent(event.eventType());
+  }
+
+  static boolean consumedIntakeProjectionResultMatches(
+      CompleteConsumedIntakeProjectionCommand command,
+      CompleteConsumedIntakeProjectionResult result) {
+    return result != null
+        && command.eventId().equals(result.eventId())
+        && command.caseEventSequence() == result.caseEventSequence()
+        && command.lastCommandSequence() == result.lastCommandSequence()
+        && command.processRevision() == result.processRevision()
+        && command.roomRevision() == result.roomRevision()
+        && command.roomEpoch() == result.roomEpoch()
+        && command.fencingToken() == result.fencingToken()
+        && command.temporalWorkflowId().equals(result.temporalWorkflowId())
+        && command.firstExecutionRunId().equals(result.firstExecutionRunId())
+        && command.activeChildRunId().equals(result.activeChildRunId());
+  }
+
+  private static boolean isFormalIntakeProjectionEvent(String eventType) {
+    return "TURN_NEEDS_INPUT".equals(eventType)
+        || "INTAKE_TURN_NEEDS_INPUT".equals(eventType)
+        || "TURN_READY_TO_CONFIRM".equals(eventType)
+        || "INTAKE_TURN_READY_TO_CONFIRM".equals(eventType);
   }
 
   private void routeEventToActiveChild(CaseDomainEventRef event) {

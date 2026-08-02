@@ -20,6 +20,98 @@ public final class ProcessProjectionContract {
         IDEMPOTENT_REPLAY
     }
 
+    public enum CompleteConsumedIntakeProjectionOutcome {
+        APPLIED,
+        IDEMPOTENT_REPLAY
+    }
+
+    public record CompleteConsumedIntakeProjectionCommand(
+            String schemaVersion,
+            String tenantSurrogate,
+            String caseId,
+            String eventId,
+            long caseEventSequence,
+            String eventType,
+            long lastCommandSequence,
+            long roomEpoch,
+            long fencingToken,
+            long processRevision,
+            long roomRevision,
+            String temporalWorkflowId,
+            String firstExecutionRunId,
+            String activeChildRunId) {
+
+        public CompleteConsumedIntakeProjectionCommand {
+            if (!"complete-consumed-intake-projection.v1".equals(schemaVersion)) {
+                throw new IllegalArgumentException(
+                        "schemaVersion must be complete-consumed-intake-projection.v1");
+            }
+            requireText(tenantSurrogate, 128, "tenantSurrogate");
+            requireText(caseId, 64, "caseId");
+            requireKey(eventId, "eventId");
+            if (caseEventSequence < 1 || lastCommandSequence < 1) {
+                throw new IllegalArgumentException("consumed Intake sequence is invalid");
+            }
+            if (!isIntakeFormalEventType(eventType)) {
+                throw new IllegalArgumentException("eventType is not a formal Intake turn event");
+            }
+            if (roomEpoch < 0 || fencingToken < 1) {
+                throw new IllegalArgumentException("room epoch or fencing token is invalid");
+            }
+            if (processRevision < 1 || roomRevision < 1) {
+                throw new IllegalArgumentException("consumed Intake revision is invalid");
+            }
+            requireText(temporalWorkflowId, 128, "temporalWorkflowId");
+            requireText(firstExecutionRunId, 128, "firstExecutionRunId");
+            requireText(activeChildRunId, 128, "activeChildRunId");
+        }
+    }
+
+    public record CompleteConsumedIntakeProjectionResult(
+            String schemaVersion,
+            String eventId,
+            long caseEventSequence,
+            CompleteConsumedIntakeProjectionOutcome outcome,
+            long lastCommandSequence,
+            long processRevision,
+            long roomRevision,
+            long roomEpoch,
+            long fencingToken,
+            String temporalWorkflowId,
+            String firstExecutionRunId,
+            String activeChildRunId,
+            String resultRef,
+            String resultSha256,
+            Instant completedAt) {
+
+        public CompleteConsumedIntakeProjectionResult {
+            if (!"complete-consumed-intake-projection-result.v1".equals(schemaVersion)) {
+                throw new IllegalArgumentException(
+                        "schemaVersion must be complete-consumed-intake-projection-result.v1");
+            }
+            requireKey(eventId, "eventId");
+            Objects.requireNonNull(outcome, "outcome must not be null");
+            if (caseEventSequence < 1 || lastCommandSequence < 1) {
+                throw new IllegalArgumentException("completed Intake sequence is invalid");
+            }
+            if (processRevision < 1 || roomRevision < 1) {
+                throw new IllegalArgumentException("completed Intake revision is invalid");
+            }
+            if (roomEpoch < 0 || fencingToken < 1) {
+                throw new IllegalArgumentException("room epoch or fencing token is invalid");
+            }
+            requireText(temporalWorkflowId, 128, "temporalWorkflowId");
+            requireText(firstExecutionRunId, 128, "firstExecutionRunId");
+            requireText(activeChildRunId, 128, "activeChildRunId");
+            if (resultRef == null || resultSha256 == null) {
+                throw new IllegalArgumentException("completion result reference is required");
+            }
+            requireReference(resultRef, resultSha256);
+            Objects.requireNonNull(completedAt, "completedAt must not be null");
+            completedAt = completedAt.truncatedTo(ChronoUnit.MICROS);
+        }
+    }
+
     public record ApplyProjectionCommand(
             String schemaVersion,
             String operationKey,
@@ -131,6 +223,13 @@ public final class ProcessProjectionContract {
             throw new IllegalArgumentException("projection reference uri is invalid");
         }
         requireHash(hash, "projectionSha256");
+    }
+
+    private static boolean isIntakeFormalEventType(String eventType) {
+        return "TURN_NEEDS_INPUT".equals(eventType)
+                || "INTAKE_TURN_NEEDS_INPUT".equals(eventType)
+                || "TURN_READY_TO_CONFIRM".equals(eventType)
+                || "INTAKE_TURN_READY_TO_CONFIRM".equals(eventType);
     }
 
     private static void requireKey(String value, String field) {

@@ -7,6 +7,7 @@ import com.example.dispute.workflow.application.projection.AuthoritativeProcessS
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ProcessProjectionContract.ApplyProjectionCommand;
 import com.example.dispute.workflow.contract.v1.ProcessProjectionContract.ApplyProjectionResult;
+import com.example.dispute.workflow.contract.v1.ProcessProjectionContract.CompleteConsumedIntakeProjectionCommand;
 import com.example.dispute.workflow.infrastructure.persistence.repository.DomainOperationRepository;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -84,6 +85,62 @@ public class IntakeProcessProjectionCompletionService {
                     "committed Intake evidence cannot form a projection request",
                     failure);
         }
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public CompletionResult completeConsumedEvent(
+            CompleteConsumedIntakeProjectionCommand command) {
+        Objects.requireNonNull(command, "command");
+        try {
+            return completeConsumedEventInternal(command);
+        } catch (ProjectionWriteRejectedException failure) {
+            throw failure;
+        } catch (IntakeFinalizationRejectedException failure) {
+            throw rejected(
+                    "INTAKE_PROJECTION_RECEIPT_REJECTED",
+                    "committed Intake receipt failed canonical validation",
+                    failure);
+        } catch (DomainOperationConflictException failure) {
+            throw rejected(
+                    failure.reasonCode(),
+                    "projection operation conflicts with committed Intake evidence",
+                    failure);
+        } catch (DomainOperationInProgressException failure) {
+            throw failure;
+        } catch (IllegalArgumentException failure) {
+            throw rejected(
+                    "INTAKE_PROJECTION_REQUEST_INVALID",
+                    "consumed Intake event cannot form a projection request",
+                    failure);
+        }
+    }
+
+    private CompletionResult completeConsumedEventInternal(
+            CompleteConsumedIntakeProjectionCommand command) {
+        CompletionEvidence evidence =
+                loadByEventId(command.tenantSurrogate(), command.caseId(), command.eventId())
+                        .orElseThrow(
+                                () ->
+                                        rejected(
+                                                "INTAKE_PROJECTION_EVIDENCE_MISSING",
+                                                "consumed Intake event has no committed finalization evidence"));
+        String operationKey = projectionOperationKey(evidence);
+        operationRepository.lockTenantOperationKey(command.tenantSurrogate(), operationKey);
+
+        CompletionEvidence current =
+                loadByEventId(command.tenantSurrogate(), command.caseId(), command.eventId())
+                        .orElseThrow(
+                                () ->
+                                        rejected(
+                                                "INTAKE_PROJECTION_EVIDENCE_CHANGED",
+                                                "committed Intake evidence changed while acquiring the projection lock"));
+        if (!operationKey.equals(projectionOperationKey(current))) {
+            throw rejected(
+                    "INTAKE_PROJECTION_EVIDENCE_CHANGED",
+                    "committed Intake evidence changed while acquiring the projection lock");
+        }
+        validateConsumedEventAuthority(current, command);
+        return complete(current, operationKey);
     }
 
     private Optional<CompletionResult> recoverInternal(
@@ -165,6 +222,15 @@ public class IntakeProcessProjectionCompletionService {
                 caseId,
                 "command_row.case_command_sequence = :selector",
                 commandSequence);
+    }
+
+    private Optional<CompletionEvidence> loadByEventId(
+            String tenantSurrogate, String caseId, String eventId) {
+        return load(
+                tenantSurrogate,
+                caseId,
+                "formal_event.id = :selector",
+                eventId);
     }
 
     private Optional<CompletionEvidence> load(
@@ -378,6 +444,39 @@ public class IntakeProcessProjectionCompletionService {
                     "INTAKE_PROJECTION_TEMPORAL_AUTHORITY_MISMATCH",
                     "Temporal observation does not match the committed Intake completion");
         }
+    }
+
+    private void validateConsumedEventAuthority(
+            CompletionEvidence evidence,
+            CompleteConsumedIntakeProjectionCommand command) {
+        long newProcessRevision = increment(evidence.receipt().processRevision(), "process revision");
+        long newRoomRevision = increment(evidence.receipt().roomRevision(), "room revision");
+        if (!command.tenantSurrogate().equals(evidence.tenantSurrogate())
+                || !command.caseId().equals(evidence.caseId())
+                || !command.eventId().equals(evidence.eventId())
+                || command.caseEventSequence() != evidence.eventSequence()
+                || !canonicalEventType(command.eventType()).equals(evidence.eventType())
+                || command.lastCommandSequence() != evidence.commandSequence()
+                || command.roomEpoch() != evidence.roomEpoch()
+                || command.fencingToken() != evidence.fencingToken()
+                || command.processRevision() != newProcessRevision
+                || command.roomRevision() != newRoomRevision
+                || !command.temporalWorkflowId().equals(evidence.temporalWorkflowId())
+                || !command.firstExecutionRunId().equals(evidence.temporalRunId())
+                || !command.activeChildRunId().equals(evidence.roomTemporalRunId())) {
+            throw rejected(
+                    "INTAKE_PROJECTION_TEMPORAL_AUTHORITY_MISMATCH",
+                    "consumed Intake event does not match committed completion authority");
+        }
+    }
+
+    private static String canonicalEventType(String eventType) {
+        return switch (eventType) {
+            case "TURN_NEEDS_INPUT", "INTAKE_TURN_NEEDS_INPUT" -> "TURN_NEEDS_INPUT";
+            case "TURN_READY_TO_CONFIRM", "INTAKE_TURN_READY_TO_CONFIRM" ->
+                    "TURN_READY_TO_CONFIRM";
+            default -> eventType;
+        };
     }
 
     private void validateFormalEvidence(CompletionEvidence evidence) {

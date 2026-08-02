@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.example.dispute.workflow.application.projection.AuthoritativeProcessStateReader.AuthoritativeProcessObservation;
 import com.example.dispute.workflow.application.projection.AuthoritativeProcessStateReader.ReconciliationTarget;
 import com.example.dispute.workflow.application.projection.IntakeProcessProjectionCompletionService;
+import com.example.dispute.workflow.contract.v1.ProcessProjectionContract.CompleteConsumedIntakeProjectionCommand;
 import java.lang.reflect.Method;
 import org.junit.jupiter.api.Test;
 import org.springframework.transaction.annotation.Propagation;
@@ -21,6 +22,19 @@ class IntakeProcessProjectionCompletionServiceTransactionTest {
                         AuthoritativeProcessObservation.class);
 
         Transactional transaction = recover.getAnnotation(Transactional.class);
+
+        assertThat(transaction).isNotNull();
+        assertThat(transaction.propagation()).isEqualTo(Propagation.REQUIRES_NEW);
+    }
+
+    @Test
+    void primaryCompletionUsesAnIndependentTransaction() throws NoSuchMethodException {
+        Method complete =
+                IntakeProcessProjectionCompletionService.class.getMethod(
+                        "completeConsumedEvent",
+                        CompleteConsumedIntakeProjectionCommand.class);
+
+        Transactional transaction = complete.getAnnotation(Transactional.class);
 
         assertThat(transaction).isNotNull();
         assertThat(transaction.propagation()).isEqualTo(Propagation.REQUIRES_NEW);
