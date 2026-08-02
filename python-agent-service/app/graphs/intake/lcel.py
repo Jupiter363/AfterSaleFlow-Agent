@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping
@@ -2315,6 +2316,17 @@ def _output_source_refs(value: Mapping[str, Any]) -> set[str]:
     for key in ("source_id", "source_ref", "message_id"):
         candidate = value.get(key)
         if isinstance(candidate, str):
+            # The deterministic baseline represents form-only respondent
+            # grounding with this exact two-field sentinel.  It is provenance
+            # metadata, not a reference to a participant message.  Do not
+            # generalize this exemption to empty IDs in other envelopes.
+            if (
+                key == "message_id"
+                and candidate == ""
+                and set(value) == {"source", "message_id"}
+                and value.get("source") == "INITIAL_FORM"
+            ):
+                continue
             refs.add(candidate)
     for key in ("source_refs", "source_ids"):
         candidates = value.get(key)
@@ -2352,6 +2364,12 @@ def _source_catalog(state: Mapping[str, Any]) -> dict[str, str | None]:
             raise IntakeGraphContractError("INTAKE_LCEL_SOURCE_CATALOG_INVALID")
         register(message.get("message_id"), message.get("source_hash"))
 
+    node_results = state.get("node_results")
+    if isinstance(node_results, Mapping):
+        for record_key, record in node_results.items():
+            if _is_trusted_initial_form_source_record(record_key, record, node_results, state):
+                register(record["stable_id"], record["content_hash"])
+
     def visit(candidate: Any) -> None:
         if isinstance(candidate, Mapping):
             refs = _output_source_refs(candidate)
@@ -2373,6 +2391,76 @@ def _source_catalog(state: Mapping[str, Any]) -> dict[str, str | None]:
 
     visit(state.get("dossier_draft", {}))
     return catalog
+
+
+def _is_trusted_initial_form_source_record(
+    record_key: Any,
+    record: Any,
+    node_results: Mapping[Any, Any],
+    state: Mapping[str, Any],
+) -> bool:
+    """Accept only the initial-form source receipt paired with its event receipt."""
+
+    last_event_sequence = state.get("last_event_sequence")
+    last_event_ref = state.get("last_event_ref")
+    last_event_hash = state.get("last_event_hash")
+    if (
+        not isinstance(last_event_sequence, int)
+        or isinstance(last_event_sequence, bool)
+        or last_event_sequence != 1
+        or not isinstance(last_event_ref, str)
+        or _IDENTIFIER.fullmatch(last_event_ref) is None
+        or not isinstance(last_event_hash, str)
+        or _SHA256.fullmatch(last_event_hash) is None
+    ):
+        return False
+
+    bindings = state.get("bindings")
+    private = bindings.get("private") if isinstance(bindings, Mapping) else None
+    case_id = private.get("case_id") if isinstance(private, Mapping) else None
+    if not isinstance(case_id, str):
+        return False
+
+    if (
+        not isinstance(record, Mapping)
+        or record.get("kind") != "INITIAL_FORM_SOURCE"
+        or record.get("source_type") != "INITIAL_FORM"
+        or not isinstance(record.get("sequence"), int)
+        or isinstance(record.get("sequence"), bool)
+        or record.get("sequence") != 1
+        or not isinstance(record.get("stable_id"), str)
+        or _IDENTIFIER.fullmatch(record["stable_id"]) is None
+        or not isinstance(record.get("content_hash"), str)
+        or _SHA256.fullmatch(record["content_hash"]) is None
+    ):
+        return False
+
+    stable_id = record["stable_id"]
+    content_hash = record["content_hash"]
+    if (
+        stable_id != f"INTAKE_FORM_{case_id}"
+        or record_key != _stable_node_result_key("message", stable_id)
+        or content_hash != last_event_hash
+    ):
+        return False
+    event = node_results.get(_stable_node_result_key("event", last_event_ref))
+    return (
+        isinstance(event, Mapping)
+        and event.get("kind") == "EVENT"
+        and event.get("stable_id") == last_event_ref
+        and event.get("message_id") == stable_id
+        and event.get("content_hash") == content_hash
+        and event.get("source_type") == record["source_type"]
+        and isinstance(event.get("sequence"), int)
+        and not isinstance(event.get("sequence"), bool)
+        and event.get("sequence") == record["sequence"]
+        and event.get("source_refs") == [stable_id]
+    )
+
+
+def _stable_node_result_key(kind: str, stable_id: str) -> str:
+    digest = hashlib.sha256(stable_id.encode("utf-8")).hexdigest()
+    return f"{kind}:{digest}"
 
 
 def _fact_ids(value: Any) -> frozenset[str]:

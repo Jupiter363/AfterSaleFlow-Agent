@@ -453,6 +453,33 @@ def _bootstrap_event_context(
     )
 
 
+def _initial_form_ingress(
+    snapshot: dict[str, Any],
+    event: dict[str, Any],
+    *,
+    form_description: str | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    imported = copy.deepcopy(snapshot)
+    imported["own_messages"] = []
+    imported["source_refs"] = ["FORM_P4_USER_1"]
+    if form_description is not None:
+        imported["initial_case_facts"]["form_description"] = form_description
+    imported["snapshot_hash"] = canonical_sha256_omitting(imported, "snapshot_hash")
+
+    initial_form = copy.deepcopy(event)
+    initial_form.update(
+        event_id="EVENT_P4_USER_FORM_1",
+        message_id=f"INTAKE_FORM_{imported['case_id']}",
+        sequence_no=1,
+        domain_revision=imported["domain_revision"] + 1,
+        source_type="INITIAL_FORM",
+        text="The submitted form describes an after-sales dispute.",
+        source_refs=[f"INTAKE_FORM_{imported['case_id']}"],
+    )
+    initial_form["event_hash"] = canonical_sha256_omitting(initial_form, "event_hash")
+    return imported, initial_form
+
+
 def _event_state(bindings, version_pins, snapshot, event):
     # Event-focused runnable tests apply the canonical bootstrap ingress only.
     # The test's subject under test then makes its one real model call; a separate
@@ -469,6 +496,315 @@ def _event_state(bindings, version_pins, snapshot, event):
     )
     state.update(patch)
     return state
+
+
+def test_initial_form_grounding_empty_message_id_sentinel_passes_full_graph_path(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+) -> None:
+    imported, initial_form = _initial_form_ingress(
+        snapshot,
+        event,
+        form_description="商家明确拒绝退款。",
+    )
+    transport = IntakeTransport(_opening_document())
+    built = build_intake_model_node(
+        transport=transport,
+        profile=_profile(),
+        policy=_policy(),
+    )
+    graph = compile_intake_v2_graph(intake_lcel=built.runnable)
+    state = new_intake_graph_state(bindings=bindings, version_pins=version_pins)
+    state["bindings"]["command"].update(
+        command_id="COMMAND_P4_USER_2",
+        logical_run_id="RUN_P4_USER_2",
+        attempt_id="ATTEMPT_P4_USER_2_1",
+    )
+
+    result = graph.invoke(state, context=_bootstrap_event_context(imported, initial_form))
+
+    assert transport.generate_calls == 1
+    assert result["dossier_draft"]["respondent_attitude"]["grounding"] == {
+        "source": "INITIAL_FORM",
+        "message_id": "",
+    }
+
+
+@pytest.mark.parametrize(
+    "grounding",
+    [
+        {"source": "PARTICIPANT_MESSAGE", "message_id": ""},
+        {
+            "source": "INITIAL_FORM",
+            "message_id": "",
+            "source_ref": "MESSAGE_P4_USER_2",
+        },
+        {
+            "source": "INITIAL_FORM",
+            "message_id": "",
+            "source_hash": "5da4ebd5b5ff75ea8af5c955c01f2cf18138892d07ad6ca74be7c7fb50ff5815",
+        },
+    ],
+)
+def test_empty_message_id_remains_unauthorized_outside_exact_initial_form_sentinel(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+    grounding: dict[str, str],
+) -> None:
+    state = _event_state(bindings, version_pins, snapshot, event)
+    draft = IntakeCognitionDraft.model_validate(
+        _draft(dossier_patch={"respondent_attitude": {"grounding": grounding}})
+    )
+
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_LCEL_SOURCE_REF_UNAUTHORIZED",
+    ):
+        _validate_business_output(state, draft)
+
+
+def test_verified_initial_form_source_record_authorizes_matching_hash(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+) -> None:
+    imported, initial_form = _initial_form_ingress(snapshot, event)
+    state = _event_state(bindings, version_pins, imported, initial_form)
+    source_ref = initial_form["message_id"]
+    draft = IntakeCognitionDraft.model_validate(
+        _draft(
+            dossier_patch={
+                "requested_resolution": {
+                    "kind": "REFUND",
+                    "source_refs": [source_ref],
+                    "source_hash": initial_form["event_hash"],
+                }
+            }
+        )
+    )
+
+    _validate_business_output(state, draft)
+
+
+@pytest.mark.parametrize(
+    ("anchor_field", "anchor_value"),
+    [
+        ("last_event_ref", "EVENT_P4_USER_FORM_OTHER"),
+        ("last_event_hash", "f" * 64),
+    ],
+)
+def test_initial_form_source_record_requires_current_event_ref_and_hash(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+    anchor_field: str,
+    anchor_value: str,
+) -> None:
+    imported, initial_form = _initial_form_ingress(snapshot, event)
+    state = _event_state(bindings, version_pins, imported, initial_form)
+    state[anchor_field] = anchor_value
+    source_ref = initial_form["message_id"]
+    draft = IntakeCognitionDraft.model_validate(
+        _draft(
+            dossier_patch={
+                "requested_resolution": {
+                    "kind": "REFUND",
+                    "source_refs": [source_ref],
+                    "source_hash": initial_form["event_hash"],
+                }
+            }
+        )
+    )
+
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_LCEL_SOURCE_REF_UNAUTHORIZED",
+    ):
+        _validate_business_output(state, draft)
+
+
+def test_snapshot_only_rogue_initial_form_receipts_cannot_authorize_source_reference(
+    bindings,
+    version_pins,
+    snapshot,
+) -> None:
+    state = new_intake_graph_state(bindings=bindings, version_pins=version_pins)
+    state.update(
+        import_snapshot_once_or_apply_event(
+            state,
+            SimpleNamespace(context=IntakeTurnContext("SNAPSHOT", snapshot)),
+        )
+    )
+    source_ref = "MESSAGE_ROGUE_INITIAL_FORM"
+    content_hash = "e" * 64
+    state["node_results"].update(
+        {
+            "EVENT_ROGUE_INITIAL_FORM": {
+                "kind": "EVENT",
+                "stable_id": "EVENT_ROGUE_INITIAL_FORM",
+                "content_hash": content_hash,
+                "sequence": 1,
+                "message_id": source_ref,
+                "source_type": "INITIAL_FORM",
+                "source_refs": [source_ref],
+            },
+            "SOURCE_ROGUE_INITIAL_FORM": {
+                "kind": "INITIAL_FORM_SOURCE",
+                "stable_id": source_ref,
+                "content_hash": content_hash,
+                "sequence": 1,
+                "source_type": "INITIAL_FORM",
+            },
+        }
+    )
+    draft = IntakeCognitionDraft.model_validate(
+        _draft(
+            dossier_patch={
+                "requested_resolution": {
+                    "kind": "REFUND",
+                    "source_refs": [source_ref],
+                    "source_hash": content_hash,
+                }
+            }
+        )
+    )
+
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_LCEL_SOURCE_REF_UNAUTHORIZED",
+    ):
+        _validate_business_output(state, draft)
+
+
+def test_canonical_initial_form_state_ignores_duplicate_rogue_receipt_pair(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+) -> None:
+    imported, initial_form = _initial_form_ingress(snapshot, event)
+    state = _event_state(bindings, version_pins, imported, initial_form)
+    rogue_source_ref = "MESSAGE_ROGUE_INITIAL_FORM"
+    state["node_results"].update(
+        {
+            "ROGUE_INITIAL_FORM_EVENT": {
+                "kind": "EVENT",
+                "stable_id": state["last_event_ref"],
+                "content_hash": state["last_event_hash"],
+                "sequence": 1,
+                "message_id": rogue_source_ref,
+                "source_type": "INITIAL_FORM",
+                "source_refs": [rogue_source_ref],
+            },
+            "ROGUE_INITIAL_FORM_SOURCE": {
+                "kind": "INITIAL_FORM_SOURCE",
+                "stable_id": rogue_source_ref,
+                "content_hash": state["last_event_hash"],
+                "sequence": 1,
+                "source_type": "INITIAL_FORM",
+            },
+        }
+    )
+    draft = IntakeCognitionDraft.model_validate(
+        _draft(
+            dossier_patch={
+                "requested_resolution": {
+                    "kind": "REFUND",
+                    "source_refs": [rogue_source_ref],
+                    "source_hash": state["last_event_hash"],
+                }
+            }
+        )
+    )
+
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_LCEL_SOURCE_REF_UNAUTHORIZED",
+    ):
+        _validate_business_output(state, draft)
+
+
+@pytest.mark.parametrize("tamper", ["source_type", "event_source_refs"])
+def test_untrusted_or_malformed_initial_form_source_records_fail_closed(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+    tamper: str,
+) -> None:
+    imported, initial_form = _initial_form_ingress(snapshot, event)
+    state = _event_state(bindings, version_pins, imported, initial_form)
+    source_ref = initial_form["message_id"]
+    source_record = next(
+        record
+        for record in state["node_results"].values()
+        if record.get("kind") == "INITIAL_FORM_SOURCE"
+    )
+    if tamper == "source_type":
+        source_record["source_type"] = "ROOM_MESSAGE"
+    else:
+        event_record = next(
+            record
+            for record in state["node_results"].values()
+            if record.get("kind") == "EVENT"
+        )
+        event_record["source_refs"] = [source_ref, "MESSAGE_OTHER_PARTY"]
+    draft = IntakeCognitionDraft.model_validate(
+        _draft(
+            dossier_patch={
+                "requested_resolution": {
+                    "kind": "REFUND",
+                    "source_refs": [source_ref],
+                    "source_hash": initial_form["event_hash"],
+                }
+            }
+        )
+    )
+
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_LCEL_SOURCE_REF_UNAUTHORIZED",
+    ):
+        _validate_business_output(state, draft)
+
+
+def test_untrusted_node_result_cannot_authorize_unknown_source_reference(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+) -> None:
+    state = _event_state(bindings, version_pins, snapshot, event)
+    state["node_results"]["UNTRUSTED_SOURCE"] = {
+        "kind": "MESSAGE",
+        "stable_id": "MESSAGE_OTHER_PARTY",
+        "content_hash": event["event_hash"],
+        "source_type": "INITIAL_FORM",
+        "sequence": 1,
+    }
+    draft = IntakeCognitionDraft.model_validate(
+        _draft(
+            dossier_patch={
+                "requested_resolution": {
+                    "kind": "REFUND",
+                    "source_refs": ["MESSAGE_OTHER_PARTY"],
+                    "source_hash": event["event_hash"],
+                }
+            }
+        )
+    )
+
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_LCEL_SOURCE_REF_UNAUTHORIZED",
+    ):
+        _validate_business_output(state, draft)
 
 
 def test_snapshot_opening_invokes_the_real_model_without_a_participant_message(
