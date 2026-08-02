@@ -21,18 +21,32 @@ public final class TargetE2EGraphStreamVisibility {
           INTAKE_BASELINE_WIRE_NODE,
           Set.of(
               "room_utterance",
+              "case_detail.case_story.title",
+              "case_detail.case_story.one_sentence_summary",
+              "case_detail.references.order_reference",
+              "case_detail.references.after_sales_reference",
+              "case_detail.references.logistics_reference",
+              "case_detail.party_positions.user_claim",
+              "case_detail.party_positions.merchant_claim",
+              "case_detail.party_positions.initiator_position",
+              "case_detail.party_positions.platform_observation",
+              "case_detail.claim_resolution.normalized_statement",
+              "case_detail.claim_resolution.request_reason",
+              "case_detail.claim_resolution.requested_items",
+              "case_detail.respondent_attitude.position",
+              "case_detail.dispute_core_state.core_conflict",
+              "case_detail.dispute_focus.core_issue",
+              "case_detail.intake_quality.improvement_reason",
               "case_detail.case_story",
               "case_detail.references",
               "case_detail.party_positions",
-              "case_detail.dispute_focus",
-              "case_detail.requested_resolution",
               "case_detail.claim_resolution",
               "case_detail.respondent_attitude",
               "case_detail.dispute_core_state",
+              "case_detail.dispute_focus",
               "case_detail.risk_assessment",
               "case_detail.missing_information",
-              "case_detail.intake_quality",
-              "case_detail.admission"));
+              "case_detail.intake_quality"));
 
   private TargetE2EGraphStreamVisibility() {}
 

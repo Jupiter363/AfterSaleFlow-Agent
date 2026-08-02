@@ -26,18 +26,32 @@ class TargetE2EGraphStreamVisibilityTest {
                 "intake_turn_case_detail",
                 Set.of(
                     "room_utterance",
+                    "case_detail.case_story.title",
+                    "case_detail.case_story.one_sentence_summary",
+                    "case_detail.references.order_reference",
+                    "case_detail.references.after_sales_reference",
+                    "case_detail.references.logistics_reference",
+                    "case_detail.party_positions.user_claim",
+                    "case_detail.party_positions.merchant_claim",
+                    "case_detail.party_positions.initiator_position",
+                    "case_detail.party_positions.platform_observation",
+                    "case_detail.claim_resolution.normalized_statement",
+                    "case_detail.claim_resolution.request_reason",
+                    "case_detail.claim_resolution.requested_items",
+                    "case_detail.respondent_attitude.position",
+                    "case_detail.dispute_core_state.core_conflict",
+                    "case_detail.dispute_focus.core_issue",
+                    "case_detail.intake_quality.improvement_reason",
                     "case_detail.case_story",
                     "case_detail.references",
                     "case_detail.party_positions",
-                    "case_detail.dispute_focus",
-                    "case_detail.requested_resolution",
                     "case_detail.claim_resolution",
                     "case_detail.respondent_attitude",
                     "case_detail.dispute_core_state",
+                    "case_detail.dispute_focus",
                     "case_detail.risk_assessment",
                     "case_detail.missing_information",
-                    "case_detail.intake_quality",
-                    "case_detail.admission")));
+                    "case_detail.intake_quality")));
   }
 
   @Test
@@ -55,7 +69,7 @@ class TargetE2EGraphStreamVisibilityTest {
   }
 
   @Test
-  void permitsTheBaselineIntakeNodeAndRejectsOldOrNonPublicV2StreamValues() {
+  void permitsOnlyTheFrozenIntakeV2VisibleFields() {
     var allowed = state();
     parse(allowed, event(0, "attempt_started", "{\"node\":\"authorize_and_load\"}"));
 
@@ -65,8 +79,29 @@ class TargetE2EGraphStreamVisibilityTest {
                     event(
                         1,
                         "visible_delta",
+                        "{\"node\":\"intake_turn_case_detail\","
+                            + "\"field\":\"case_detail.case_story.title\","
+                            + "\"delta\":\"title\"}"))
+                .eventType())
+        .isEqualTo(StreamEventType.VISIBLE_DELTA);
+    assertThat(
+            parse(
+                    allowed,
+                    event(
+                        2,
+                        "visible_delta",
+                        "{\"node\":\"intake_turn_case_detail\","
+                            + "\"field\":\"case_detail.case_story\",\"delta\":\"{}\"}"))
+                .eventType())
+        .isEqualTo(StreamEventType.VISIBLE_DELTA);
+    assertThat(
+            parse(
+                    allowed,
+                    event(
+                        3,
+                        "visible_delta",
                         "{\"node\":\"intake_turn_case_detail\",\"field\":\"room_utterance\","
-                            + "\"delta\":\"\\\"hello\\\"\"}"))
+                            + "\"delta\":\"hello\"}"))
                 .eventType())
         .isEqualTo(StreamEventType.VISIBLE_DELTA);
 
@@ -98,12 +133,40 @@ class TargetE2EGraphStreamVisibilityTest {
         .isInstanceOf(AgentStreamProtocolException.class)
         .hasMessageContaining("non-public field");
 
-    var wrongField = state();
-    parse(wrongField, event(0, "attempt_started", "{\"node\":\"authorize_and_load\"}"));
+    var unknownField = state();
+    parse(unknownField, event(0, "attempt_started", "{\"node\":\"authorize_and_load\"}"));
     assertThatThrownBy(
             () ->
                 parse(
-                    wrongField,
+                    unknownField,
+                    event(
+                        1,
+                        "visible_delta",
+                        "{\"node\":\"intake_turn_case_detail\",\"field\":\"case_detail.unknown_field\","
+                            + "\"delta\":\"not-public\"}")))
+        .isInstanceOf(AgentStreamProtocolException.class)
+        .hasMessageContaining("non-public field");
+
+    var legacyAdmission = state();
+    parse(legacyAdmission, event(0, "attempt_started", "{\"node\":\"authorize_and_load\"}"));
+    assertThatThrownBy(
+            () ->
+                parse(
+                    legacyAdmission,
+                    event(
+                        1,
+                        "visible_delta",
+                        "{\"node\":\"intake_turn_case_detail\",\"field\":\"case_detail.admission\","
+                            + "\"delta\":\"not-public\"}")))
+        .isInstanceOf(AgentStreamProtocolException.class)
+        .hasMessageContaining("non-public field");
+
+    var reasoningContent = state();
+    parse(reasoningContent, event(0, "attempt_started", "{\"node\":\"authorize_and_load\"}"));
+    assertThatThrownBy(
+            () ->
+                parse(
+                    reasoningContent,
                     event(
                         1,
                         "visible_delta",
