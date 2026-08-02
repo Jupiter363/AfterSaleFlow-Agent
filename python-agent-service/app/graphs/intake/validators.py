@@ -7,7 +7,10 @@ from dataclasses import dataclass
 from typing import Any, NoReturn, cast
 
 from app.contracts.v1.codec import canonical_sha256, canonical_sha256_omitting, canonicalize
-from app.agents.dispute_intake_officer.case_fact_matrix import finalize_case_fact_matrix
+from app.agents.dispute_intake_officer.case_fact_matrix import (
+    finalize_case_fact_matrix,
+    validate_case_fact_matrix_content_hash,
+)
 from app.graph_runtime.reducers import (
     merge_execution_receipts,
     merge_node_results,
@@ -1180,6 +1183,7 @@ def _require_matrix_authority(
             respondent_role=respondent_role,
             allow_unassessed_evidence_coverage=uses_baseline_context,
             allow_bilateral_successor=uses_baseline_context,
+            allow_legacy_content_hash=uses_baseline_context,
         )
         if frozen_authority is not None:
             raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_UNAUTHORIZED")
@@ -1198,6 +1202,7 @@ def _require_matrix_authority(
             respondent_role=respondent_role,
             allow_unassessed_evidence_coverage=uses_baseline_context,
             allow_bilateral_successor=uses_baseline_context,
+            allow_legacy_content_hash=uses_baseline_context,
         )
         expected_formal_hash = (
             frozen_authority.content_hash if frozen_authority is not None else None
@@ -1222,6 +1227,7 @@ def _require_matrix_authority(
             respondent_role=actor_role,
             allow_unassessed_evidence_coverage=uses_baseline_context,
             allow_bilateral_successor=uses_baseline_context,
+            allow_legacy_content_hash=uses_baseline_context,
         )
         if (
             record.get("proposal_mode") != _MATRIX_PROPOSAL_RESPONDENT_DELTA
@@ -1257,6 +1263,7 @@ def _locked_initiator_matrix_authority(
     respondent_role: str,
     allow_unassessed_evidence_coverage: bool = False,
     allow_bilateral_successor: bool = False,
+    allow_legacy_content_hash: bool = False,
 ) -> _FrozenInitiatorMatrixAuthority | None:
     if not isinstance(dossier, Mapping):
         return None
@@ -1267,6 +1274,10 @@ def _locked_initiator_matrix_authority(
     content_hash = _formal_hash(matrix, "content_hash")
     try:
         expected_hash = canonical_sha256_omitting(matrix, "content_hash")
+        content_hash_is_valid = content_hash == expected_hash or (
+            allow_legacy_content_hash
+            and validate_case_fact_matrix_content_hash(matrix)
+        )
     except (TypeError, ValueError) as error:
         raise IntakeGraphContractError("INTAKE_MATRIX_CURRENT_INVALID") from error
     matrix_version = matrix.get("matrix_version")
@@ -1283,7 +1294,7 @@ def _locked_initiator_matrix_authority(
         or matrix_version < 1
         or (is_bilateral_successor and matrix_version < 2)
         or not _FROZEN_MATRIX_ID.fullmatch(matrix_id)
-        or content_hash != expected_hash
+        or not content_hash_is_valid
     ):
         _reject_frozen_matrix()
     _validate_frozen_parent_ref(matrix.get("parent_ref"), matrix_version=matrix_version)
@@ -2730,7 +2741,12 @@ def _validate_baseline_scroll_snapshot(
     if not isinstance(matrix, Mapping):
         raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_SNAPSHOT_INVALID")
     _validate_model(CaseFactMatrixV2, matrix, "INTAKE_BASELINE_CONTEXT_SNAPSHOT_INVALID")
-    _verify_self_hash(matrix, "content_hash", "INTAKE_BASELINE_CONTEXT_SNAPSHOT_INVALID")
+    try:
+        content_hash_is_valid = validate_case_fact_matrix_content_hash(matrix)
+    except (TypeError, ValueError) as error:
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_SNAPSHOT_INVALID") from error
+    if not content_hash_is_valid:
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_SNAPSHOT_INVALID")
     if expected_case_id is not None and matrix.get("case_id") != expected_case_id:
         raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_BINDING_INVALID")
 
@@ -2749,11 +2765,12 @@ def _validate_baseline_formal_matrix(
         matrix,
         "INTAKE_BASELINE_CONTEXT_FORMAL_MATRIX_INVALID",
     )
-    _verify_self_hash(
-        matrix,
-        "content_hash",
-        "INTAKE_BASELINE_CONTEXT_FORMAL_MATRIX_INVALID",
-    )
+    try:
+        content_hash_is_valid = validate_case_fact_matrix_content_hash(matrix)
+    except (TypeError, ValueError) as error:
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_FORMAL_MATRIX_INVALID") from error
+    if not content_hash_is_valid:
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_FORMAL_MATRIX_INVALID")
     _validate_safe_json(matrix, max_array_length=256)
     if (
         _canonical_size(matrix, "INTAKE_BASELINE_CONTEXT_FORMAL_MATRIX_INVALID")

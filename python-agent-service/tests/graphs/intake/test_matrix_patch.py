@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 
 import pytest
 from pydantic import ValidationError
 
+from app.agents.dispute_intake_officer.case_fact_matrix import (
+    case_fact_matrix_content_hash,
+    validate_case_fact_matrix_content_hash,
+)
 from app.contracts.v1.codec import canonical_sha256_omitting
 from app.graphs.intake.contracts import IntakeCognitionDraft
 from app.graphs.intake.errors import IntakeGraphContractError
@@ -17,6 +23,8 @@ from app.graphs.intake.nodes import deterministic_message_fallback
 from app.graphs.intake.state import IntakeTurnContext, new_intake_graph_state
 from app.graphs.intake.validators import (
     MATRIX_AUTHORITY_RECORD_KEY,
+    _validate_baseline_formal_matrix,
+    _validate_baseline_scroll_snapshot,
     validate_matrix_patch,
 )
 
@@ -83,6 +91,7 @@ def _formal_initiator_matrix(
     matrix_version: int = 1,
     initiator_stance: str = "CONFIRM",
     initiator_asserted_value: str | None = "damaged",
+    requested_amount: float | None = None,
 ) -> dict:
     respondent_role = "MERCHANT" if initiator_role == "USER" else "USER"
     source_ref = f"MESSAGE_P4_{initiator_role}_1"
@@ -183,8 +192,23 @@ def _formal_initiator_matrix(
             "requires_resolution_fact_ids": [],
         },
     }
+    if requested_amount is not None:
+        matrix["claims"]["initiator_claim"]["requested_amount"] = requested_amount
     matrix["content_hash"] = canonical_sha256_omitting(matrix, "content_hash")
     return matrix
+
+
+def _historic_matrix_content_hash(matrix: dict) -> str:
+    material = copy.deepcopy(matrix)
+    material.pop("content_hash", None)
+    return hashlib.sha256(
+        json.dumps(
+            material,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def _import_state(bindings, version_pins, snapshot):
@@ -262,6 +286,7 @@ def _initiator_followup_state(
     matrix_version: int = 1,
     initiator_stance: str = "CONFIRM",
     initiator_asserted_value: str | None = "damaged",
+    requested_amount: float | None = None,
 ):
     selected_bindings = copy.deepcopy(bindings)
     selected_bindings["private"]["audience"] = initiator_role
@@ -272,6 +297,7 @@ def _initiator_followup_state(
         matrix_version=matrix_version,
         initiator_stance=initiator_stance,
         initiator_asserted_value=initiator_asserted_value,
+        requested_amount=requested_amount,
     )
     selected_snapshot["snapshot_hash"] = canonical_sha256_omitting(
         selected_snapshot,
@@ -613,6 +639,116 @@ def test_initiator_followup_reuses_trusted_formal_matrix_and_allows_new_fact(
     assert authority["proposal_mode"] == "INITIATOR_DELTA"
     assert authority["formal_matrix_hash"]
     validate_matrix_patch(state, _initiator_followup_delta())
+
+
+def test_baseline_matrix_hash_compat_accepts_exact_float_amount_at_boundaries(
+    bindings,
+    version_pins,
+    snapshot,
+) -> None:
+    selected_bindings = copy.deepcopy(bindings)
+    selected_bindings["private"]["audience"] = "USER"
+    selected_snapshot = _initiator_snapshot(snapshot, initiator_role="USER")
+    matrix = _formal_initiator_matrix(
+        selected_snapshot["case_id"],
+        requested_amount=2399.0,
+    )
+    canonical_hash = matrix["content_hash"]
+    matrix["content_hash"] = case_fact_matrix_content_hash(matrix)
+
+    assert matrix["content_hash"] == _historic_matrix_content_hash(matrix)
+    assert validate_case_fact_matrix_content_hash(matrix)
+    assert matrix["content_hash"] != canonical_hash
+
+    _validate_baseline_formal_matrix(
+        matrix,
+        expected_case_id=selected_snapshot["case_id"],
+    )
+    _validate_baseline_scroll_snapshot(
+        {
+            "schema_version": "intake_case_detail.v1",
+            "case_story": {"one_sentence_summary": "A damage dispute."},
+            "case_fact_matrix": matrix,
+        },
+        expected_case_id=selected_snapshot["case_id"],
+    )
+
+    legacy_ingress = copy.deepcopy(selected_snapshot)
+    legacy_ingress["current_dossier"]["case_fact_matrix"] = matrix
+    legacy_ingress["snapshot_hash"] = canonical_sha256_omitting(
+        legacy_ingress,
+        "snapshot_hash",
+    )
+    with pytest.raises(IntakeGraphContractError, match="INTAKE_MATRIX_CURRENT_INVALID"):
+        _import_state(selected_bindings, version_pins, legacy_ingress)
+
+    canonical_matrix = copy.deepcopy(matrix)
+    canonical_matrix["content_hash"] = canonical_hash
+    assert validate_case_fact_matrix_content_hash(canonical_matrix)
+    selected_snapshot["current_dossier"]["case_fact_matrix"] = canonical_matrix
+    selected_snapshot["snapshot_hash"] = canonical_sha256_omitting(
+        selected_snapshot,
+        "snapshot_hash",
+    )
+    state = _import_state(selected_bindings, version_pins, selected_snapshot)
+
+    assert (
+        state["node_results"][MATRIX_AUTHORITY_RECORD_KEY]["formal_matrix_hash"]
+        == canonical_hash
+    )
+    _validate_baseline_formal_matrix(
+        canonical_matrix,
+        expected_case_id=selected_snapshot["case_id"],
+    )
+    _validate_baseline_scroll_snapshot(
+        {
+            "schema_version": "intake_case_detail.v1",
+            "case_story": {"one_sentence_summary": "A damage dispute."},
+            "case_fact_matrix": canonical_matrix,
+        },
+        expected_case_id=selected_snapshot["case_id"],
+    )
+
+
+def test_baseline_matrix_json_hash_rejects_tampered_float_amount_at_all_self_hash_boundaries(
+    bindings,
+    version_pins,
+    snapshot,
+) -> None:
+    tampered = _formal_initiator_matrix(snapshot["case_id"], requested_amount=2399.0)
+    tampered["content_hash"] = case_fact_matrix_content_hash(tampered)
+    tampered["claims"]["initiator_claim"]["requested_amount"] = 2400.0
+
+    assert not validate_case_fact_matrix_content_hash(tampered)
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_BASELINE_CONTEXT_FORMAL_MATRIX_INVALID",
+    ):
+        _validate_baseline_formal_matrix(tampered, expected_case_id=snapshot["case_id"])
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_BASELINE_CONTEXT_SNAPSHOT_INVALID",
+    ):
+        _validate_baseline_scroll_snapshot(
+            {
+                "schema_version": "intake_case_detail.v1",
+                "case_story": {"one_sentence_summary": "A damage dispute."},
+                "case_fact_matrix": tampered,
+            },
+            expected_case_id=snapshot["case_id"],
+        )
+
+    selected_bindings = copy.deepcopy(bindings)
+    selected_bindings["private"]["audience"] = "USER"
+    selected_snapshot = _initiator_snapshot(snapshot, initiator_role="USER")
+    selected_snapshot["current_dossier"]["case_fact_matrix"] = tampered
+    selected_snapshot["snapshot_hash"] = canonical_sha256_omitting(
+        selected_snapshot,
+        "snapshot_hash",
+    )
+
+    with pytest.raises(IntakeGraphContractError, match="INTAKE_MATRIX_CURRENT_INVALID"):
+        _import_state(selected_bindings, version_pins, selected_snapshot)
 
 
 def test_initiator_followup_allows_not_addressed_previous_only_carrier(

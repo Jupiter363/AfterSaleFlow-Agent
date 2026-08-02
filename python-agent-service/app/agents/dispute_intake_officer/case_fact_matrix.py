@@ -5,8 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Mapping
 from typing import Any, NoReturn
 
+from app.contracts.v1.codec import canonical_sha256_omitting
 from app.llm import AgentOutputSchemaError
 from app.schemas.intake_case_matrix import (
     FactStance,
@@ -26,6 +28,7 @@ from app.schemas.final_agents import IntakeTurnRequest
 
 SUBJECTIVE_RESPONDENT_SOURCE = "发起方单方陈述（主观）"
 _SUBSTANTIVE = {FactStance.CONFIRM, FactStance.DENY, FactStance.PARTIAL}
+_CONTENT_HASH = re.compile(r"^[0-9a-f]{64}$")
 
 
 def finalize_case_fact_matrix(
@@ -582,7 +585,7 @@ def _previous_matrix(request: IntakeTurnRequest) -> CaseFactMatrixV2 | None:
             matrix = CaseFactMatrixV2.model_validate(candidate)
         except ValueError as failure:
             _schema_error(f"previous case_fact_matrix.v2 is invalid: {failure}")
-        if matrix.content_hash != _hash_without_content_hash(matrix.model_dump(mode="json")):
+        if not validate_case_fact_matrix_content_hash(matrix.model_dump(mode="json")):
             _schema_error("previous case_fact_matrix.v2 content hash is invalid")
         return matrix
     legacy = detail.get("unilateral_case_matrix")
@@ -776,14 +779,42 @@ def _with_hash(value: dict[str, Any]) -> CaseFactMatrixV2:
     material = provisional.model_dump(mode="json")
     material.pop("content_hash")
     return CaseFactMatrixV2.model_validate(
-        {**material, "content_hash": _hash_json(material)}
+        {**material, "content_hash": case_fact_matrix_content_hash(material)}
     )
 
 
-def _hash_without_content_hash(value: dict[str, Any]) -> str:
+def case_fact_matrix_content_hash(value: Mapping[str, Any]) -> str:
+    """Return the historic CaseFactMatrixV2 content hash.
+
+    Baseline formal-matrix self-hashes deliberately use sorted compact
+    ``json.dumps`` bytes rather than the RFC8785 envelope protocol, so this
+    helper must not be replaced with the generic contract hash.
+    """
+
     material = dict(value)
     material.pop("content_hash", None)
     return _hash_json(material)
+
+
+def validate_case_fact_matrix_content_hash(value: Mapping[str, Any]) -> bool:
+    """Validate baseline and Java-authoritative CaseFactMatrixV2 hashes.
+
+    Baseline Python matrices retain their historic sorted-JSON hash, while
+    Java-owned formal matrices use the cross-language RFC8785 contract hash.
+    The stored value remains authoritative; this compatibility check never
+    rewrites it or weakens parent/hash binding.
+    """
+
+    content_hash = value.get("content_hash")
+    return (
+        isinstance(content_hash, str)
+        and _CONTENT_HASH.fullmatch(content_hash) is not None
+        and content_hash
+        in {
+            case_fact_matrix_content_hash(value),
+            canonical_sha256_omitting(value, "content_hash"),
+        }
+    )
 
 
 def _current_source(request: IntakeTurnRequest) -> tuple[str, str]:

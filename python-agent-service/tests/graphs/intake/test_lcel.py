@@ -22,6 +22,7 @@ from langchain_core.runnables import (
 
 from app.contracts.v1.codec import canonical_sha256, canonical_sha256_omitting
 from app.agents.dispute_intake_officer.case_fact_matrix import (
+    case_fact_matrix_content_hash,
     finalize_case_fact_matrix,
 )
 from app.agents.dispute_intake_officer.schemas import IntakeCaseDetailLlmOutput
@@ -1204,7 +1205,7 @@ def test_pending_project_and_checkpoint_replay_the_capsule_request_base(
     formal_envelope = formal_tampered["baseline_pending_case_detail"]
     formal = formal_envelope["formal_matrix"]
     formal["case_overview"]["neutral_summary"] = "Tampered formal matrix summary."
-    formal["content_hash"] = canonical_sha256_omitting(formal, "content_hash")
+    formal["content_hash"] = case_fact_matrix_content_hash(formal)
     formal_envelope["formal_matrix_hash"] = canonical_sha256(formal)
     formal_envelope["snapshot"]["case_fact_matrix"] = copy.deepcopy(formal)
     formal_envelope["snapshot_hash"] = canonical_sha256(formal_envelope["snapshot"])
@@ -1562,10 +1563,16 @@ def test_imported_m0_allows_verified_respondent_successor_capsule_without_public
     # accepted as a reducer anchor.
     for row in imported_m0["fact_rows"]:
         row["evidence_coverage_status"] = "PENDING_EVIDENCE_REVIEW"
+    imported_m0["claims"]["initiator_claim"]["requested_amount"] = 2399.0
     imported_m0["content_hash"] = canonical_sha256_omitting(imported_m0, "content_hash")
     imported_snapshot["current_dossier"] = {
         "schema_version": "intake_case_detail.v1",
         "case_story": {"one_sentence_summary": "The order allegedly arrived damaged."},
+        "claim_resolution": {
+            "requested_resolution": "REFUND",
+            "requested_amount": 2399.0,
+            "request_reason": "The order allegedly arrived damaged.",
+        },
         "case_fact_matrix": imported_m0,
     }
     imported_snapshot["snapshot_hash"] = canonical_sha256_omitting(
@@ -1657,6 +1664,12 @@ def test_imported_m0_allows_verified_respondent_successor_capsule_without_public
     )
     assert first_context["authority_anchor_hash"] == imported_m0["content_hash"]
     assert first_context["formal_matrix_hash"] != active_m1["content_hash"]
+    assert first_context["formal_matrix_hash"] == canonical_sha256(active_m1)
+    assert active_m1["content_hash"] == case_fact_matrix_content_hash(active_m1)
+    assert active_m1["content_hash"] != canonical_sha256_omitting(
+        active_m1,
+        "content_hash",
+    )
     assert active_m1["content_hash"] != imported_m0["content_hash"]
     assert active_m1["parent_ref"]["content_hash"] == imported_m0["content_hash"]
     assert "case_fact_matrix" not in first_result["dossier_draft"]
