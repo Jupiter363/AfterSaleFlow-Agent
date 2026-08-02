@@ -4,9 +4,10 @@ import re
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, NoReturn
+from typing import Any, NoReturn, cast
 
-from app.contracts.v1.codec import canonical_sha256_omitting, canonicalize
+from app.contracts.v1.codec import canonical_sha256, canonical_sha256_omitting, canonicalize
+from app.agents.dispute_intake_officer.case_fact_matrix import finalize_case_fact_matrix
 from app.graph_runtime.reducers import (
     merge_execution_receipts,
     merge_node_results,
@@ -17,9 +18,17 @@ from app.graph_runtime.state import (
     validate_graph_patch,
     validate_graph_state,
 )
-from app.graphs.intake.baseline import read_intake_baseline_memory_summary
+from app.agents.dispute_intake_officer.skills.dossier.dossier_skill import (
+    CASE_DETAIL_TOP_LEVEL_FIELDS,
+)
+from app.graphs.intake.baseline import (
+    BASELINE_INTAKE_NODE_NAME,
+    build_intake_baseline_request,
+    read_intake_baseline_memory_summary,
+)
 from app.graphs.intake.contracts import (
     CaseFactMatrixDeltaV2,
+    DossierPatch,
     IntakeCognitionDraft,
     IntakeDomainSnapshot,
     IntakeTurnEvent,
@@ -30,9 +39,17 @@ from app.graphs.intake.errors import IntakeGraphContractError
 from app.graphs.intake.state import (
     IntakeGraphStateV2,
     IntakeTurnContext,
+    merge_intake_dossier,
     merge_intake_bindings,
     merge_intake_messages,
     merge_intake_version_pins,
+)
+from app.llm import AgentOutputSchemaError
+from app.schemas.case_fact_matrix import CaseFactMatrixDeltaV2 as FormalCaseFactMatrixDeltaV2
+from app.schemas.case_fact_matrix import CaseFactMatrixV2
+from app.schemas.final_agents import IntakeTurnRequest
+from app.schemas.intake_case_matrix import (
+    UnilateralCaseMatrixDraftV1 as FormalUnilateralCaseMatrixDraftV1,
 )
 
 
@@ -41,6 +58,24 @@ _THREAD_ID = re.compile(r"^grt\.v1\.[0-9a-f]{32}$")
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _MATRIX_FACT_ID = re.compile(r"^FACT_[A-Za-z0-9_:-]{1,123}$")
 _FROZEN_MATRIX_ID = re.compile(r"^CASE_MATRIX_[A-F0-9]{20}$")
+_MATRIX_EVIDENCE_REQUEST_EN = re.compile(
+    r"(?:please|kindly|must|can you|could you|need (?:you|the party)?\s*to|required to|"
+    r"upload|provide|submit|attach|send)"
+    r"[^.!?]{0,64}(?:evidence|proof|screenshot|photo|picture|video|chat (?:record|log)|"
+    r"logistics (?:voucher|receipt)|tracking (?:receipt|proof)|document|attachment)"
+    r"|(?:evidence|proof|screenshot|photo|picture|video|chat (?:record|log)|document|attachment)"
+    r"[^.!?]{0,32}(?:please provide|please upload|must submit|need to send|required to attach)",
+    re.IGNORECASE,
+)
+_MATRIX_EVIDENCE_REQUEST_ZH = re.compile(
+    "(?:\\u8bf7|\\u70e6\\u8bf7|\\u9700\\u8981|\\u5fc5\\u987b|\\u80fd\\u5426|"
+    "\\u4e0a\\u4f20|\\u63d0\\u4f9b|\\u63d0\\u4ea4|\\u9644\\u4e0a|\\u53d1\\u9001)"
+    ".{0,32}(?:\\u8bc1\\u636e|\\u51ed\\u8bc1|\\u622a\\u56fe|\\u7167\\u7247|\\u56fe\\u7247|"
+    "\\u89c6\\u9891|\\u804a\\u5929\\u8bb0\\u5f55|\\u8fd0\\u5355|\\u9644\\u4ef6|\\u6750\\u6599)"
+    "|(?:\\u8bc1\\u636e|\\u51ed\\u8bc1|\\u622a\\u56fe|\\u7167\\u7247|\\u56fe\\u7247|"
+    "\\u89c6\\u9891|\\u804a\\u5929\\u8bb0\\u5f55|\\u8fd0\\u5355|\\u9644\\u4ef6|\\u6750\\u6599)"
+    ".{0,24}(?:\\u8bf7\\u63d0\\u4f9b|\\u8bf7\\u4e0a\\u4f20|\\u8bf7\\u8865\\u5145|\\u9700\\u8981\\u63d0\\u4ea4)",
+)
 MATRIX_AUTHORITY_RECORD_KEY = "matrix-authority:v1"
 _MATRIX_PROPOSAL_UNILATERAL = "UNILATERAL"
 _MATRIX_PROPOSAL_INITIATOR_DELTA = "INITIATOR_DELTA"
@@ -188,6 +223,8 @@ _STATE_FIELDS = frozenset(
         "execution_receipts",
         "usage_by_invocation",
         "route",
+        "baseline_previous_case_detail",
+        "baseline_pending_case_detail",
         "terminal_draft",
         "result_json",
     }
@@ -213,6 +250,7 @@ _COGNITION_PATCH_FIELDS = frozenset(
     {
         "cognitive_revision",
         "terminal_draft",
+        "baseline_pending_case_detail",
         "memory_summary",
         "messages",
         "node_results",
@@ -273,6 +311,91 @@ _PROPOSAL_FORBIDDEN_KEYS = _FORBIDDEN_KEYS | frozenset(
     }
 )
 _INTAKE_LIMITS = GraphStateLimits(message_count=6)
+_BASELINE_CONTEXT_ENVELOPE_SCHEMA = "intake-baseline-context.v1"
+_BASELINE_CONTEXT_ENVELOPE_KIND = "BASELINE_SCROLL_SNAPSHOT"
+_BASELINE_CONTEXT_UNASSESSED_MATRIX_MODE = "BASELINE_FINALIZER_UNASSESSED_V1"
+_BASELINE_CONTEXT_ENVELOPE_FIELDS = frozenset(
+    {
+        "schema_version",
+        "kind",
+        "command_id",
+        "logical_run_id",
+        "attempt_id",
+        "source_turn_hash",
+        "target_cognitive_revision",
+        "terminal_draft_hash",
+        "execution_receipt_invocation_id",
+        "execution_receipt_node_name",
+        "normalized_matrix_patch",
+        "matrix_patch_hash",
+        "proposal_hash",
+        "matrix_authority_mode",
+        "authority_input_matrix",
+        "authority_input_content_hash",
+        "authority_input_matrix_hash",
+        "matrix_derivation_request_base",
+        "matrix_derivation_request_base_hash",
+        "formal_matrix",
+        "formal_matrix_hash",
+        "authority_anchor_hash",
+        "public_dossier_hash",
+        "private_binding",
+        "initial_snapshot_lineage",
+        "source_lineage",
+        "committed_proposal_identity",
+        "snapshot",
+        "snapshot_hash",
+        "envelope_hash",
+    }
+)
+_BASELINE_CONTEXT_PRIVATE_BINDING_FIELDS = frozenset(
+    {
+        "tenant_surrogate",
+        "case_id",
+        "room_type",
+        "thread_id",
+        "room_epoch",
+        "actor_scope_hash",
+        "agent_session_id",
+        "audience",
+    }
+)
+_BASELINE_CONTEXT_INITIAL_LINEAGE_FIELDS = frozenset(
+    {
+        "snapshot_ref",
+        "snapshot_hash",
+        "domain_revision",
+    }
+)
+_BASELINE_CONTEXT_SOURCE_LINEAGE_FIELDS = frozenset(
+    {
+        "kind",
+        "source_ref",
+        "source_turn_hash",
+        "sequence",
+    }
+)
+_BASELINE_CONTEXT_PROPOSAL_IDENTITY_FIELDS = frozenset(
+    {
+        "command_id",
+        "logical_run_id",
+        "attempt_id",
+        "case_id",
+        "room_epoch",
+        "thread_id",
+        "actor_scope_hash",
+        "agent_session_id",
+        "cognitive_revision",
+        "source_snapshot_hash",
+        "source_event_hash",
+    }
+)
+_BASELINE_SCROLL_SNAPSHOT_FIELDS = CASE_DETAIL_TOP_LEVEL_FIELDS - frozenset(
+    {"unilateral_case_matrix"}
+)
+_BASELINE_SCROLL_SNAPSHOT_MAX_BYTES = 524_288
+_MATRIX_DERIVATION_REQUEST_BASE_MAX_BYTES = 65_536
+_NORMALIZED_MATRIX_PATCH_MAX_BYTES = 65_536
 
 
 def validate_state(state: IntakeGraphStateV2) -> None:
@@ -393,10 +516,14 @@ def validate_terminal_proposal(proposal: Mapping[str, Any]) -> None:
 def validate_cognition_patch(
     state: IntakeGraphStateV2,
     patch: Mapping[str, Any],
+    *,
+    require_baseline_pending_context: bool = False,
 ) -> dict[str, Any]:
-    if isinstance(patch, Mapping) and "memory_summary" in patch and patch.get(
-        "memory_summary"
-    ) != state.get("memory_summary"):
+    if (
+        isinstance(patch, Mapping)
+        and "memory_summary" in patch
+        and patch.get("memory_summary") != state.get("memory_summary")
+    ):
         raise IntakeGraphContractError("INTAKE_MEMORY_SUMMARY_IMMUTABLE")
     fields = set(patch) if isinstance(patch, Mapping) else set()
     if not {"cognitive_revision", "terminal_draft"} <= fields or not fields <= (
@@ -415,7 +542,39 @@ def validate_cognition_patch(
     if _canonical_size(draft, "INTAKE_COGNITION_DRAFT_INVALID") > 65_536:
         raise IntakeGraphContractError("INTAKE_COGNITION_DRAFT_TOO_LARGE")
     validate_matrix_patch(state, draft.get("matrix_patch"))
-    return validate_node_patch(state, patch)
+    validated = validate_node_patch(state, patch)
+    if not require_baseline_pending_context:
+        return validated
+    pending = validated.get("baseline_pending_case_detail")
+    if not isinstance(pending, Mapping):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_PENDING_REQUIRED")
+    candidate = deepcopy(dict(state))
+    candidate.update(
+        {
+            "cognitive_revision": validated["cognitive_revision"],
+            "terminal_draft": deepcopy(validated["terminal_draft"]),
+            "baseline_pending_case_detail": deepcopy(dict(pending)),
+        }
+    )
+    if "execution_receipts" in validated:
+        candidate["execution_receipts"] = merge_execution_receipts(
+            state.get("execution_receipts"),
+            validated["execution_receipts"],
+        )
+    _validate_baseline_context_envelope(
+        pending,
+        require_bound=False,
+        state=candidate,
+    )
+    _require_pending_envelope_matches_cognitive_draft(candidate, pending)
+    _require_pending_authority_input_matches_current_context(state, pending)
+    _require_pending_derivation_request_matches_pre_model_state(
+        state,
+        pending,
+        response_content=draft.get("room_utterance"),
+        allow_response_absent=True,
+    )
+    return validated
 
 
 def validate_node_patch(
@@ -483,7 +642,72 @@ def validate_proposal_binding(
     }
     if proposal.get("profile_versions") != expected_profiles:
         raise IntakeGraphContractError("INTAKE_PROPOSAL_PROFILE_MISMATCH")
-    validate_matrix_patch(state, proposal.get("matrix_patch"))
+    if not _proposal_matrix_is_attested_by_current_pending_context(state, proposal):
+        validate_matrix_patch(state, proposal.get("matrix_patch"))
+    pending = state.get("baseline_pending_case_detail")
+    if _is_baseline_context_envelope(pending):
+        _require_pending_formal_matrix_derivation(
+            state,
+            pending,
+            matrix_patch=proposal.get("matrix_patch"),
+            response_content=proposal.get("room_utterance"),
+        )
+
+
+def _proposal_matrix_is_attested_by_current_pending_context(
+    state: IntakeGraphStateV2,
+    proposal: Mapping[str, Any],
+) -> bool:
+    """Replay the original validator against the capsule's exact M0/Mn input."""
+
+    pending = state.get("baseline_pending_case_detail")
+    if not _is_baseline_context_envelope(pending):
+        return False
+    terminal_draft = state.get("terminal_draft")
+    if not isinstance(terminal_draft, Mapping):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_PENDING_PROPOSAL_MISSING")
+    if pending.get("proposal_hash") is None:
+        _validate_baseline_context_envelope(
+            pending,
+            require_bound=False,
+            state=state,
+        )
+        _require_pending_envelope_matches_cognitive_draft(state, pending)
+    else:
+        _validate_baseline_context_envelope(
+            pending,
+            require_bound=True,
+            state=state,
+        )
+        _require_pending_envelope_matches_proposal(state, pending, proposal)
+        _require_pending_public_dossier_matches_state(state, pending)
+    if proposal.get("matrix_patch") != terminal_draft.get("matrix_patch"):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_PENDING_MATRIX_MISMATCH")
+    _require_pending_normalized_matrix_patch(
+        pending,
+        proposal.get("matrix_patch"),
+    )
+    authority_input = pending.get("authority_input_matrix")
+    if authority_input is None:
+        return False
+    if not isinstance(authority_input, Mapping):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_AUTHORITY_INPUT_INVALID")
+    current_authority = _authority_input_matrix_from_current_context(state)
+    if current_authority is not None and current_authority != authority_input:
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_AUTHORITY_INPUT_MISMATCH")
+    replay_state = deepcopy(dict(state))
+    if current_authority is None:
+        dossier = replay_state.get("dossier_draft")
+        if not isinstance(dossier, Mapping) or "case_fact_matrix" in dossier:
+            raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_PUBLIC_DOSSIER_INVALID")
+        replay_state["dossier_draft"] = {
+            **deepcopy(dict(dossier)),
+            "case_fact_matrix": deepcopy(dict(authority_input)),
+        }
+    # This is deliberately the original full contract validator, not a hash
+    # shortcut.  It cannot recurse into this proposal attestation path.
+    validate_matrix_patch(cast(IntakeGraphStateV2, replay_state), proposal.get("matrix_patch"))
+    return True
 
 
 def validate_matrix_patch(
@@ -494,6 +718,8 @@ def validate_matrix_patch(
         return
     if not isinstance(matrix_patch, Mapping):
         raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_INVALID")
+    if _matrix_patch_contains_evidence_request(matrix_patch):
+        raise IntakeGraphContractError("INTAKE_MATRIX_EVIDENCE_REQUEST_FORBIDDEN")
     schema_version = matrix_patch.get("schema_version")
     if schema_version == "unilateral_case_matrix.draft.v1":
         model_type = UnilateralCaseMatrixDraftV1
@@ -527,7 +753,7 @@ def validate_matrix_patch(
             previous_by_fingerprint = dict(frozen_authority.facts_by_fingerprint)
     else:
         previous_by_id, previous_by_fingerprint = _visible_unilateral_fact_index(
-            state.get("dossier_draft")
+            _matrix_proposal_context(state)
         )
     resolved_by_key: dict[str, tuple[str, bytes | str]] = {}
     resolved: set[tuple[str, bytes | str]] = set()
@@ -609,6 +835,25 @@ def validate_matrix_patch(
         summary_resolutions.add(resolution)
 
 
+def _matrix_patch_contains_evidence_request(value: Any) -> bool:
+    """Fail closed on evidence-collection instructions in formal matrix text."""
+
+    stack = [value]
+    while stack:
+        candidate = stack.pop()
+        if isinstance(candidate, str):
+            if _MATRIX_EVIDENCE_REQUEST_EN.search(candidate) or _MATRIX_EVIDENCE_REQUEST_ZH.search(
+                candidate
+            ):
+                return True
+        elif isinstance(candidate, Mapping):
+            stack.extend(candidate.keys())
+            stack.extend(candidate.values())
+        elif isinstance(candidate, list | tuple):
+            stack.extend(candidate)
+    return False
+
+
 def _trusted_initiator_role(state: IntakeGraphStateV2) -> str:
     """Re-derive the role from imported, baseline-validated initial facts.
 
@@ -617,9 +862,7 @@ def _trusted_initiator_role(state: IntakeGraphStateV2) -> str:
     """
 
     try:
-        initial_facts, _ = read_intake_baseline_memory_summary(
-            state.get("memory_summary", "")
-        )
+        initial_facts, _ = read_intake_baseline_memory_summary(state.get("memory_summary", ""))
     except IntakeGraphContractError as error:
         raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_UNAUTHORIZED") from error
     initiator_role = initial_facts.get("initiator_role")
@@ -717,27 +960,192 @@ def _respondent_role(initiator_role: str) -> str:
     raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_UNAUTHORIZED")
 
 
-def _require_matrix_authority(
-    state: IntakeGraphStateV2,
-    *,
-    required_mode: str,
-) -> tuple[str, _FrozenInitiatorMatrixAuthority | None]:
-    record = state.get("node_results", {}).get(MATRIX_AUTHORITY_RECORD_KEY)
-    private = state["bindings"]["private"]
-    if not isinstance(record, Mapping) or set(record) != _MATRIX_AUTHORITY_FIELDS:
+def _matrix_proposal_context(state: IntakeGraphStateV2) -> Any:
+    """Return the latest semantic detail available to matrix authorization.
+
+    Formal matrix material is intentionally absent from the public
+    ``dossier_draft`` after a model turn.  New checkpoints instead keep the
+    deterministic baseline finalizer's full scroll snapshot in a private state
+    field; old checkpoints deterministically fall back to their dossier.
+    """
+
+    if "baseline_previous_case_detail" in state:
+        context = state["baseline_previous_case_detail"]
+        if context is None:
+            return state.get("dossier_draft")
+        if _is_baseline_context_envelope(context):
+            _validate_baseline_context_envelope(
+                context,
+                require_bound=True,
+                state=state,
+            )
+            _require_baseline_previous_result_lineage(state, context)
+            return context["snapshot"]
+        if not isinstance(context, Mapping):
+            raise IntakeGraphContractError("INTAKE_BASELINE_PREVIOUS_DETAIL_INVALID")
+        return context
+    return state.get("dossier_draft")
+
+
+def _has_verified_baseline_context(state: IntakeGraphStateV2) -> bool:
+    context = state.get("baseline_previous_case_detail")
+    if not _is_baseline_context_envelope(context):
+        return False
+    _validate_baseline_context_envelope(
+        context,
+        require_bound=True,
+        state=state,
+    )
+    _require_baseline_previous_result_lineage(state, context)
+    return True
+
+
+def _authority_input_matrix_from_current_context(
+    state: IntakeGraphStateV2 | Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Return the exact formal matrix used by the current matrix validator.
+
+    This helper intentionally follows ``_matrix_proposal_context`` instead of
+    reading the public dossier directly.  A verified prior capsule is the
+    authority for M1/Mn, while an imported M0 exists only in the pre-apply
+    public dossier on its first turn.
+    """
+
+    typed_state = cast(IntakeGraphStateV2, state)
+    context = _matrix_proposal_context(typed_state)
+    if not isinstance(context, Mapping):
+        return None
+    matrix = context.get("case_fact_matrix")
+    if matrix is None:
+        return None
+    bindings = typed_state.get("bindings")
+    private = bindings.get("private") if isinstance(bindings, Mapping) else None
+    if not isinstance(private, Mapping) or not isinstance(matrix, Mapping):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_AUTHORITY_INPUT_INVALID")
+    try:
+        _validate_baseline_formal_matrix(matrix, expected_case_id=private["case_id"])
+    except IntakeGraphContractError as error:
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_AUTHORITY_INPUT_INVALID") from error
+    return deepcopy(dict(matrix))
+
+
+def _require_pending_authority_input_matches_current_context(
+    state: IntakeGraphStateV2 | Mapping[str, Any],
+    envelope: Mapping[str, Any],
+) -> None:
+    """Bind an unbound capsule input to the authority visible before apply."""
+
+    current = _authority_input_matrix_from_current_context(state)
+    pending = envelope.get("authority_input_matrix")
+    if pending is None:
+        if current is not None:
+            raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_AUTHORITY_INPUT_MISMATCH")
+        return
+    if current is None or pending != current:
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_AUTHORITY_INPUT_MISMATCH")
+
+
+def _validated_ingress_matrix_authority_record(
+    state: IntakeGraphStateV2 | Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Return only the immutable, snapshot-bound authority record.
+
+    The record is intentionally not advanced by later Target reductions.  Its
+    formal hash is the anchor for every private capsule descended from the
+    imported matrix, rather than an active-matrix hash that would become stale
+    on the next turn.
+    """
+
+    records = state.get("node_results")
+    record = records.get(MATRIX_AUTHORITY_RECORD_KEY) if isinstance(records, Mapping) else None
+    bindings = state.get("bindings")
+    private = bindings.get("private") if isinstance(bindings, Mapping) else None
+    if (
+        not isinstance(record, Mapping)
+        or set(record) != _MATRIX_AUTHORITY_FIELDS
+        or not isinstance(private, Mapping)
+    ):
         raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_UNAUTHORIZED")
     expected = {
         "schema_version": "intake-matrix-authority.v1",
         "kind": "MATRIX_AUTHORITY",
         "source_snapshot_hash": state.get("initial_snapshot_hash"),
-        "case_id": private["case_id"],
-        "room_epoch": private["room_epoch"],
-        "thread_id": private["thread_id"],
-        "actor_scope_hash": private["actor_scope_hash"],
-        "actor_role": private["audience"],
+        "case_id": private.get("case_id"),
+        "room_epoch": private.get("room_epoch"),
+        "thread_id": private.get("thread_id"),
+        "actor_scope_hash": private.get("actor_scope_hash"),
+        "actor_role": private.get("audience"),
     }
     if any(record.get(field) != value for field, value in expected.items()):
         raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_UNAUTHORIZED")
+    record_formal_hash = record.get("formal_matrix_hash")
+    if record_formal_hash is not None and (
+        not isinstance(record_formal_hash, str) or not _SHA256.fullmatch(record_formal_hash)
+    ):
+        raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_UNAUTHORIZED")
+    return record
+
+
+def _ingress_matrix_authority_anchor_hash(
+    state: IntakeGraphStateV2 | Mapping[str, Any],
+) -> str | None:
+    return cast(
+        str | None,
+        _validated_ingress_matrix_authority_record(state).get("formal_matrix_hash"),
+    )
+
+
+def _baseline_authority_anchor_hash(state: IntakeGraphStateV2) -> str | None:
+    """Inherit the verified immutable anchor or start at the ingress record."""
+
+    ingress_anchor = _ingress_matrix_authority_anchor_hash(state)
+    previous = state.get("baseline_previous_case_detail")
+    if not _is_baseline_context_envelope(previous):
+        return ingress_anchor
+    _validate_baseline_context_envelope(
+        previous,
+        require_bound=True,
+        state=state,
+    )
+    _require_baseline_previous_result_lineage(state, previous)
+    inherited_anchor = previous.get("authority_anchor_hash")
+    if inherited_anchor != ingress_anchor:
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_AUTHORITY_ANCHOR_INVALID")
+    return cast(str | None, inherited_anchor)
+
+
+def _verified_capsule_authority_succeeds_ingress(
+    state: IntakeGraphStateV2,
+    *,
+    active_formal_hash: str | None,
+    ingress_formal_hash: str | None,
+) -> bool:
+    """Allow a newer active matrix only through a fully bound private capsule."""
+
+    previous = state.get("baseline_previous_case_detail")
+    if not _is_baseline_context_envelope(previous):
+        return False
+    _validate_baseline_context_envelope(
+        previous,
+        require_bound=True,
+        state=state,
+    )
+    _require_baseline_previous_result_lineage(state, previous)
+    formal_matrix = previous.get("formal_matrix")
+    return (
+        isinstance(formal_matrix, Mapping)
+        and formal_matrix.get("content_hash") == active_formal_hash
+        and previous.get("authority_anchor_hash") == ingress_formal_hash
+    )
+
+
+def _require_matrix_authority(
+    state: IntakeGraphStateV2,
+    *,
+    required_mode: str,
+) -> tuple[str, _FrozenInitiatorMatrixAuthority | None]:
+    record = _validated_ingress_matrix_authority_record(state)
+    private = state["bindings"]["private"]
     actor_role = record.get("actor_role")
     initiator_role = record.get("initiator_role")
     if (
@@ -746,7 +1154,14 @@ def _require_matrix_authority(
         or initiator_role != _trusted_initiator_role(state)
     ):
         raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_UNAUTHORIZED")
+    record_formal_hash = record.get("formal_matrix_hash")
+    if record_formal_hash is not None and (
+        not isinstance(record_formal_hash, str) or not _SHA256.fullmatch(record_formal_hash)
+    ):
+        raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_UNAUTHORIZED")
     respondent_role = _respondent_role(initiator_role)
+    proposal_context = _matrix_proposal_context(state)
+    uses_baseline_context = _has_verified_baseline_context(state)
     if required_mode == _MATRIX_PROPOSAL_UNILATERAL:
         if (
             record.get("proposal_mode")
@@ -756,13 +1171,15 @@ def _require_matrix_authority(
         ):
             raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_UNAUTHORIZED")
         # Compatibility for historical unilateral output exists only before a
-        # formal matrix.  Still inspect the dossier, so a forged formal matrix
-        # cannot be ignored by this legacy branch.
+        # formal matrix.  Still inspect the semantic proposal context, so a
+        # forged formal matrix cannot be ignored by this legacy branch.
         frozen_authority = _locked_initiator_matrix_authority(
-            state.get("dossier_draft"),
+            proposal_context,
             case_id=private["case_id"],
             initiator_role=initiator_role,
             respondent_role=respondent_role,
+            allow_unassessed_evidence_coverage=uses_baseline_context,
+            allow_bilateral_successor=uses_baseline_context,
         )
         if frozen_authority is not None:
             raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_UNAUTHORIZED")
@@ -775,28 +1192,49 @@ def _require_matrix_authority(
         ):
             raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_UNAUTHORIZED")
         frozen_authority = _locked_initiator_matrix_authority(
-            state.get("dossier_draft"),
+            proposal_context,
             case_id=private["case_id"],
             initiator_role=initiator_role,
             respondent_role=respondent_role,
+            allow_unassessed_evidence_coverage=uses_baseline_context,
+            allow_bilateral_successor=uses_baseline_context,
         )
         expected_formal_hash = (
             frozen_authority.content_hash if frozen_authority is not None else None
         )
-        if record.get("formal_matrix_hash") != expected_formal_hash:
+        # The ingress record is immutable M0 provenance.  A later active
+        # authority M1/Mn is accepted only when the verified private capsule
+        # binds that active matrix to the same immutable ingress anchor.
+        if (
+            record_formal_hash != expected_formal_hash
+            and not _verified_capsule_authority_succeeds_ingress(
+                state,
+                active_formal_hash=expected_formal_hash,
+                ingress_formal_hash=record_formal_hash,
+            )
+        ):
             raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_UNAUTHORIZED")
     elif required_mode == _MATRIX_PROPOSAL_RESPONDENT_DELTA:
         frozen_authority = _locked_initiator_matrix_authority(
-            state.get("dossier_draft"),
+            proposal_context,
             case_id=private["case_id"],
             initiator_role=initiator_role,
             respondent_role=actor_role,
+            allow_unassessed_evidence_coverage=uses_baseline_context,
+            allow_bilateral_successor=uses_baseline_context,
         )
         if (
             record.get("proposal_mode") != _MATRIX_PROPOSAL_RESPONDENT_DELTA
             or actor_role != respondent_role
             or frozen_authority is None
-            or frozen_authority.content_hash != record.get("formal_matrix_hash")
+            or (
+                frozen_authority.content_hash != record_formal_hash
+                and not _verified_capsule_authority_succeeds_ingress(
+                    state,
+                    active_formal_hash=frozen_authority.content_hash,
+                    ingress_formal_hash=record_formal_hash,
+                )
+            )
         ):
             raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_UNAUTHORIZED")
     else:
@@ -817,6 +1255,8 @@ def _locked_initiator_matrix_authority(
     case_id: str,
     initiator_role: str,
     respondent_role: str,
+    allow_unassessed_evidence_coverage: bool = False,
+    allow_bilateral_successor: bool = False,
 ) -> _FrozenInitiatorMatrixAuthority | None:
     if not isinstance(dossier, Mapping):
         return None
@@ -831,13 +1271,17 @@ def _locked_initiator_matrix_authority(
         raise IntakeGraphContractError("INTAKE_MATRIX_CURRENT_INVALID") from error
     matrix_version = matrix.get("matrix_version")
     matrix_id = _formal_text(matrix, "matrix_id", 128)
+    matrix_kind = _formal_text(matrix, "matrix_kind", 64)
+    is_bilateral_successor = matrix_kind == "BILATERAL_FROZEN"
     if (
         _formal_text(matrix, "schema_version", 64) != "case_fact_matrix.v2"
         or _formal_identifier(matrix, "case_id") != case_id
-        or _formal_text(matrix, "matrix_kind", 64) != "INITIATOR_FROZEN"
+        or matrix_kind not in {"INITIATOR_FROZEN", "BILATERAL_FROZEN"}
+        or (is_bilateral_successor and not allow_bilateral_successor)
         or isinstance(matrix_version, bool)
         or not isinstance(matrix_version, int)
         or matrix_version < 1
+        or (is_bilateral_successor and matrix_version < 2)
         or not _FROZEN_MATRIX_ID.fullmatch(matrix_id)
         or content_hash != expected_hash
     ):
@@ -860,9 +1304,14 @@ def _locked_initiator_matrix_authority(
         _FROZEN_GENERATION_FIELDS,
     )
     latest_source_ref = _formal_identifier(generation, "latest_source_ref")
+    expected_generation = (
+        (respondent_role, "RESPONDENT_INTAKE")
+        if is_bilateral_successor
+        else (initiator_role, "INITIATOR_INTAKE")
+    )
     if (
-        generation.get("actor_role") != initiator_role
-        or generation.get("source_stage") != "INITIATOR_INTAKE"
+        generation.get("actor_role") != expected_generation[0]
+        or generation.get("source_stage") != expected_generation[1]
         or latest_source_ref not in declared_sources
     ):
         _reject_frozen_matrix()
@@ -883,6 +1332,7 @@ def _locked_initiator_matrix_authority(
         initiator_role=initiator_role,
         respondent_role=respondent_role,
         declared_sources=declared_sources,
+        allow_bilateral_successor=is_bilateral_successor,
     )
     relationships = matrix.get("fact_relationships")
     if not isinstance(relationships, list) or relationships:
@@ -900,6 +1350,8 @@ def _locked_initiator_matrix_authority(
             initiator_role=initiator_role,
             respondent_role=respondent_role,
             declared_sources=declared_sources,
+            allow_unassessed_evidence_coverage=allow_unassessed_evidence_coverage,
+            allow_bilateral_successor=is_bilateral_successor,
         )
         if fact_id in facts_by_id:
             _reject_frozen_matrix()
@@ -918,6 +1370,7 @@ def _locked_initiator_matrix_authority(
         matrix,
         fact_ids=list(facts_by_id),
         core_fact_ids=core_fact_ids,
+        allow_bilateral_successor=is_bilateral_successor,
     )
     return _FrozenInitiatorMatrixAuthority(
         content_hash=content_hash,
@@ -949,6 +1402,7 @@ def _validate_frozen_claims(
     initiator_role: str,
     respondent_role: str,
     declared_sources: set[str],
+    allow_bilateral_successor: bool = False,
 ) -> None:
     claims = _formal_child_object(matrix, "claims", _FROZEN_CLAIM_FIELDS)
     initiator_claim = claims.get("initiator_claim")
@@ -982,8 +1436,21 @@ def _validate_frozen_claims(
     )
     if not set(initiator_sources) <= declared_sources:
         _reject_frozen_matrix()
-    if claims.get("respondent_direct") is not None or claims.get("claim_conflict") is not None:
-        _reject_frozen_matrix()
+    direct = claims.get("respondent_direct")
+    conflict = claims.get("claim_conflict")
+    if not allow_bilateral_successor:
+        if direct is not None or conflict is not None:
+            _reject_frozen_matrix()
+    elif direct is None:
+        if conflict is not None:
+            _reject_frozen_matrix()
+    else:
+        _validate_bilateral_direct_respondent_claim(
+            direct,
+            respondent_role=respondent_role,
+            declared_sources=declared_sources,
+        )
+        _formal_text(claims, "claim_conflict", 20_000)
 
     reported = claims.get("respondent_reported_by_initiator")
     if reported is None:
@@ -1007,12 +1474,48 @@ def _validate_frozen_claims(
         _reject_frozen_matrix()
 
 
+def _validate_bilateral_direct_respondent_claim(
+    candidate: Any,
+    *,
+    respondent_role: str,
+    declared_sources: set[str],
+) -> None:
+    direct = _formal_object(
+        candidate,
+        frozenset(
+            {
+                "respondent_role",
+                "attitude",
+                "position_summary",
+                "alternative_proposal",
+                "source_type",
+                "source_refs",
+            }
+        ),
+    )
+    attitude = _formal_identifier(direct, "attitude")
+    if (
+        direct.get("respondent_role") != respondent_role
+        or attitude not in _FROZEN_CLAIM_ATTITUDES - {"NOT_ADDRESSED"}
+        or direct.get("source_type") != "RESPONDENT_DIRECT_INTAKE"
+    ):
+        _reject_frozen_matrix()
+    _formal_text(direct, "position_summary", 20_000)
+    if direct.get("alternative_proposal") is not None:
+        _formal_text(direct, "alternative_proposal", 20_000)
+    sources = _formal_identifier_list(direct, "source_refs", minimum=1, maximum=50)
+    if not set(sources) <= declared_sources:
+        _reject_frozen_matrix()
+
+
 def _validate_frozen_fact_row(
     candidate: Any,
     *,
     initiator_role: str,
     respondent_role: str,
     declared_sources: set[str],
+    allow_unassessed_evidence_coverage: bool,
+    allow_bilateral_successor: bool = False,
 ) -> tuple[Mapping[str, Any], str, bool]:
     row = _formal_object(candidate, _FROZEN_ROW_FIELDS)
     fact_id = _formal_text(row, "fact_id", 128)
@@ -1027,8 +1530,13 @@ def _validate_frozen_fact_row(
     _formal_text(row, "fact_target", 20_000)
     if (
         row.get("truth_status") != "NOT_EVALUATED"
-        or row.get("evidence_coverage_status") != "PENDING_EVIDENCE_REVIEW"
-        or row.get("requires_resolution") is not None
+        or row.get("evidence_coverage_status")
+        not in (
+            {"PENDING_EVIDENCE_REVIEW", None}
+            if allow_unassessed_evidence_coverage
+            else {"PENDING_EVIDENCE_REVIEW"}
+        )
+        or (not allow_bilateral_successor and row.get("requires_resolution") is not None)
     ):
         _reject_frozen_matrix()
 
@@ -1039,8 +1547,13 @@ def _validate_frozen_fact_row(
         minimum=1,
         maximum=50,
     )
+    allowed_origin_stages = (
+        {"INITIATOR_INTAKE", "RESPONDENT_INTAKE"}
+        if allow_bilateral_successor
+        else {"INITIATOR_INTAKE"}
+    )
     if (
-        origin.get("introduced_stage") != "INITIATOR_INTAKE"
+        origin.get("introduced_stage") not in allowed_origin_stages
         or not set(origin_sources) <= declared_sources
     ):
         _reject_frozen_matrix()
@@ -1076,6 +1589,15 @@ def _validate_frozen_fact_row(
         respondent_role,
         _FROZEN_POSITION_FIELDS,
     )
+    if allow_bilateral_successor:
+        _validate_bilateral_position(respondent, declared_sources=declared_sources)
+        alignment = _formal_child_object(
+            row,
+            "party_alignment",
+            _FROZEN_ALIGNMENT_FIELDS,
+        )
+        _validate_bilateral_alignment(row, alignment)
+        return row, fact_id, materiality == "CORE"
     if (
         respondent.get("stance") != "NOT_ADDRESSED"
         or respondent.get("position_summary") != "该方尚未直接陈述。"
@@ -1099,15 +1621,80 @@ def _validate_frozen_fact_row(
     return row, fact_id, materiality == "CORE"
 
 
+def _validate_bilateral_position(
+    position: Mapping[str, Any],
+    *,
+    declared_sources: set[str],
+) -> None:
+    stance = position.get("stance")
+    if stance == "NOT_ADDRESSED":
+        if (
+            position.get("asserted_value") is not None
+            or position.get("source_type") != "NO_DIRECT_POSITION"
+            or position.get("source_refs") != []
+            or not isinstance(position.get("position_summary"), str)
+        ):
+            _reject_frozen_matrix()
+        return
+    sources = _formal_identifier_list(position, "source_refs", minimum=1, maximum=50)
+    if (
+        stance not in _FROZEN_INITIATOR_STANCES
+        or position.get("source_type") != "DIRECT_PARTY_STATEMENT"
+        or not set(sources) <= declared_sources
+    ):
+        _reject_frozen_matrix()
+    _formal_text(position, "position_summary", 20_000)
+    if position.get("asserted_value") is not None:
+        _formal_text(position, "asserted_value", 2_000)
+
+
+def _validate_bilateral_alignment(
+    row: Mapping[str, Any],
+    alignment: Mapping[str, Any],
+) -> None:
+    status = alignment.get("status")
+    if status not in {
+        "NOT_COMPUTED",
+        "AGREED",
+        "PARTIALLY_AGREED",
+        "CONTESTED",
+        "ONE_SIDED",
+        "UNRESOLVED",
+    }:
+        _reject_frozen_matrix()
+    agreed = alignment.get("agreed_statement")
+    conflict = alignment.get("conflict_summary")
+    requires_resolution = row.get("requires_resolution")
+    if status == "NOT_COMPUTED":
+        if agreed is not None or conflict is not None or requires_resolution is not None:
+            _reject_frozen_matrix()
+        return
+    if requires_resolution != (status != "AGREED"):
+        _reject_frozen_matrix()
+    if status == "AGREED":
+        if conflict is not None:
+            _reject_frozen_matrix()
+        _formal_text(alignment, "agreed_statement", 20_000)
+        return
+    if status == "PARTIALLY_AGREED":
+        _formal_text(alignment, "agreed_statement", 20_000)
+        _formal_text(alignment, "conflict_summary", 20_000)
+        return
+    if agreed is not None:
+        _reject_frozen_matrix()
+    _formal_text(alignment, "conflict_summary", 20_000)
+
+
 def _validate_frozen_indexes(
     matrix: Mapping[str, Any],
     *,
     fact_ids: list[str],
     core_fact_ids: list[str],
+    allow_bilateral_successor: bool = False,
 ) -> None:
     indexes = _formal_child_object(matrix, "fact_indexes", _FROZEN_INDEX_FIELDS)
     expected = {
-        "not_computed_fact_ids": fact_ids,
+        "not_computed_fact_ids": [],
         "agreed_fact_ids": [],
         "partially_agreed_fact_ids": [],
         "contested_fact_ids": [],
@@ -1116,6 +1703,33 @@ def _validate_frozen_indexes(
         "core_fact_ids": core_fact_ids,
         "requires_resolution_fact_ids": [],
     }
+    if allow_bilateral_successor:
+        status_index = {
+            "NOT_COMPUTED": "not_computed_fact_ids",
+            "AGREED": "agreed_fact_ids",
+            "PARTIALLY_AGREED": "partially_agreed_fact_ids",
+            "CONTESTED": "contested_fact_ids",
+            "ONE_SIDED": "one_sided_fact_ids",
+            "UNRESOLVED": "unresolved_fact_ids",
+        }
+        rows = matrix.get("fact_rows")
+        if not isinstance(rows, list):
+            _reject_frozen_matrix()
+        for row in rows:
+            if not isinstance(row, Mapping):
+                _reject_frozen_matrix()
+            alignment = row.get("party_alignment")
+            fact_id = row.get("fact_id")
+            if not isinstance(alignment, Mapping) or not isinstance(fact_id, str):
+                _reject_frozen_matrix()
+            index_name = status_index.get(alignment.get("status"))
+            if index_name is None:
+                _reject_frozen_matrix()
+            expected[index_name].append(fact_id)
+            if row.get("requires_resolution") is True:
+                expected["requires_resolution_fact_ids"].append(fact_id)
+    else:
+        expected["not_computed_fact_ids"] = fact_ids
     for field, expected_ids in expected.items():
         actual = indexes.get(field)
         if (
@@ -1249,10 +1863,9 @@ def _matches_matrix_binding(
     or fact wording stored in the formal matrix.
     """
 
-    return (
-        draft.get("category") == previous.get("category")
-        and draft.get("fact_target") == previous.get("fact_target")
-    )
+    return draft.get("category") == previous.get("category") and draft.get(
+        "fact_target"
+    ) == previous.get("fact_target")
 
 
 def _matches_previous_matrix_semantics(
@@ -1264,10 +1877,14 @@ def _matches_previous_matrix_semantics(
 ) -> bool:
     if draft.get("materiality") != previous.get("materiality"):
         return False
-    if patch_kind in {
-        _MATRIX_PROPOSAL_INITIATOR_DELTA,
-        _MATRIX_PROPOSAL_RESPONDENT_DELTA,
-    } and draft.get("stance") == "NOT_ADDRESSED":
+    if (
+        patch_kind
+        in {
+            _MATRIX_PROPOSAL_INITIATOR_DELTA,
+            _MATRIX_PROPOSAL_RESPONDENT_DELTA,
+        }
+        and draft.get("stance") == "NOT_ADDRESSED"
+    ):
         return True
     positions = previous.get("positions")
     position = positions.get(actor_role) if isinstance(positions, Mapping) else None
@@ -1484,6 +2101,8 @@ def _validate_state_payloads(state: IntakeGraphStateV2) -> None:
     if not isinstance(dossier, dict):
         raise IntakeGraphContractError("INTAKE_DOSSIER_INVALID")
     _validate_safe_json(dossier)
+    _validate_optional_state_refs(state)
+    _validate_baseline_case_detail_contexts(state)
     readiness = state.get("readiness")
     if not isinstance(readiness, dict) or set(readiness) != {"status", "evaluated_revision"}:
         raise IntakeGraphContractError("INTAKE_READINESS_INVALID")
@@ -1499,7 +2118,6 @@ def _validate_state_payloads(state: IntakeGraphStateV2) -> None:
         _require_identifier(field, "INTAKE_MISSING_FIELDS_INVALID")
     if state.get("recommendation") not in {"ACCEPTED", "NEED_MORE_INFO", "NOT_ADMISSIBLE"}:
         raise IntakeGraphContractError("INTAKE_RECOMMENDATION_INVALID")
-    _validate_optional_state_refs(state)
     route = state.get("route")
     if route is not None and route not in {"initialize", "message", "replay"}:
         raise IntakeGraphContractError("INTAKE_ROUTE_INVALID")
@@ -1519,6 +2137,1074 @@ def _validate_state_payloads(state: IntakeGraphStateV2) -> None:
     result = state.get("result_json")
     if isinstance(result, dict):
         validate_terminal_proposal(result)
+
+
+def build_baseline_pending_case_detail(
+    state: IntakeGraphStateV2,
+    *,
+    terminal_draft: Mapping[str, Any],
+    formal_matrix: Mapping[str, Any],
+    public_dossier: Mapping[str, Any],
+    matrix_derivation_request_base: Mapping[str, Any],
+    execution_receipt_invocation_id: str,
+    execution_receipt_node_name: str,
+    execution_receipt_output_hash: str,
+) -> dict[str, Any]:
+    """Create an unbound, formal-matrix-only private context envelope.
+
+    The model-facing public dossier is still mutable until ``apply_dossier_patch``
+    has merged the normalized draft.  Persisting a whole scroll snapshot here
+    would therefore retain the pre-normalizer dossier.  Keep only the already
+    finalized formal matrix plus the normalized cognitive-draft identity; the
+    complete snapshot is materialized and bound after that public merge.
+    """
+
+    command = state["bindings"]["command"]
+    matrix_patch = terminal_draft.get("matrix_patch")
+    terminal_draft_hash = canonical_sha256(terminal_draft)
+    if execution_receipt_output_hash != terminal_draft_hash:
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_RECEIPT_OUTPUT_MISMATCH")
+    authority_input_matrix = _authority_input_matrix_from_current_context(state)
+    authority_input_content_hash = (
+        authority_input_matrix.get("content_hash") if authority_input_matrix is not None else None
+    )
+    envelope: dict[str, Any] = {
+        "schema_version": _BASELINE_CONTEXT_ENVELOPE_SCHEMA,
+        "kind": _BASELINE_CONTEXT_ENVELOPE_KIND,
+        "command_id": command["command_id"],
+        "logical_run_id": command["logical_run_id"],
+        "attempt_id": command["attempt_id"],
+        "source_turn_hash": _current_source_turn_hash(state),
+        "target_cognitive_revision": _next_revision(state),
+        "terminal_draft_hash": terminal_draft_hash,
+        "execution_receipt_invocation_id": execution_receipt_invocation_id,
+        "execution_receipt_node_name": execution_receipt_node_name,
+        "normalized_matrix_patch": deepcopy(matrix_patch),
+        "matrix_patch_hash": canonical_sha256(matrix_patch),
+        "proposal_hash": None,
+        "matrix_authority_mode": _BASELINE_CONTEXT_UNASSESSED_MATRIX_MODE,
+        # The public dossier intentionally strips formal authority during apply.
+        # Retain the exact M0/Mn input that just passed full matrix validation so
+        # project/checkpoint can replay that same validation without trusting a
+        # mutable public copy or a self-hash-only attestation.
+        "authority_input_matrix": authority_input_matrix,
+        "authority_input_content_hash": authority_input_content_hash,
+        "authority_input_matrix_hash": (
+            canonical_sha256(authority_input_matrix) if authority_input_matrix is not None else None
+        ),
+        "matrix_derivation_request_base": deepcopy(dict(matrix_derivation_request_base)),
+        "matrix_derivation_request_base_hash": canonical_sha256(matrix_derivation_request_base),
+        "formal_matrix": deepcopy(dict(formal_matrix)),
+        "formal_matrix_hash": canonical_sha256(formal_matrix),
+        # Preserve the immutable ingress authority anchor across all later
+        # finalized matrices.  The active formal matrix may advance each turn,
+        # but it is accepted only when its fully verified capsule still names
+        # the same imported authority (or the explicit no-import null anchor).
+        "authority_anchor_hash": _baseline_authority_anchor_hash(state),
+        "public_dossier_hash": canonical_sha256(public_dossier),
+        "private_binding": _baseline_private_binding(state),
+        "initial_snapshot_lineage": _baseline_initial_snapshot_lineage(state),
+        "source_lineage": _baseline_source_lineage(state),
+        "committed_proposal_identity": None,
+        "snapshot": None,
+        "snapshot_hash": None,
+        # The canonical helper requires the omitted self-hash member to exist.
+        "envelope_hash": "0" * 64,
+    }
+    envelope["envelope_hash"] = canonical_sha256_omitting(envelope, "envelope_hash")
+    _validate_baseline_context_envelope(
+        envelope,
+        require_bound=False,
+        state=state,
+        require_execution_receipt=False,
+    )
+    _require_pending_authority_input_matches_current_context(state, envelope)
+    return envelope
+
+
+def bind_baseline_pending_case_detail(
+    state: IntakeGraphStateV2,
+    *,
+    proposal: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Materialize and bind a pending capsule to its terminal proposal."""
+
+    pending = state.get("baseline_pending_case_detail")
+    if not isinstance(pending, Mapping):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_PENDING_MISSING")
+    _validate_baseline_context_envelope(
+        pending,
+        require_bound=False,
+        state=state,
+    )
+    _require_pending_envelope_matches_cognitive_draft(state, pending)
+    _require_pending_public_dossier_matches_state(state, pending)
+    validate_terminal_proposal(proposal)
+    _require_pending_derivation_request_matches_pre_model_state(
+        state,
+        pending,
+        response_content=proposal.get("room_utterance"),
+    )
+    validate_proposal_binding(state, proposal)
+    bound = deepcopy(dict(pending))
+    snapshot = _materialize_baseline_scroll_snapshot(state, bound)
+    bound["snapshot"] = snapshot
+    bound["snapshot_hash"] = canonical_sha256(snapshot)
+    bound["proposal_hash"] = proposal["proposal_hash"]
+    bound["committed_proposal_identity"] = _baseline_proposal_identity(proposal)
+    bound["envelope_hash"] = canonical_sha256_omitting(bound, "envelope_hash")
+    _validate_baseline_context_envelope(
+        bound,
+        require_bound=True,
+        state=state,
+    )
+    _require_pending_envelope_matches_proposal(state, bound, proposal)
+    return bound
+
+
+def validate_baseline_pending_promotion(
+    state: IntakeGraphStateV2,
+    *,
+    proposal: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return only a fully bound envelope eligible for terminal promotion."""
+
+    pending = state.get("baseline_pending_case_detail")
+    if not isinstance(pending, Mapping):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_PENDING_MISSING")
+    _validate_baseline_context_envelope(
+        pending,
+        require_bound=True,
+        state=state,
+    )
+    _require_pending_envelope_matches_proposal(state, pending, proposal)
+    _require_pending_public_dossier_matches_state(state, pending)
+    _require_pending_formal_matrix_derivation(
+        state,
+        pending,
+        matrix_patch=proposal.get("matrix_patch"),
+        response_content=proposal.get("room_utterance"),
+    )
+    return deepcopy(dict(pending))
+
+
+def _validate_baseline_case_detail_contexts(state: IntakeGraphStateV2) -> None:
+    """Validate private baseline context envelopes and legacy snapshot fallback."""
+
+    if "baseline_previous_case_detail" in state:
+        previous = state["baseline_previous_case_detail"]
+        if previous is None:
+            pass
+        elif _is_baseline_context_envelope(previous):
+            _validate_baseline_context_envelope(
+                previous,
+                require_bound=True,
+                state=state,
+            )
+            _require_baseline_previous_result_lineage(state, previous)
+        else:
+            # Pre-envelope checkpoints remain readable, but cannot unlock the
+            # envelope-only evidence-coverage compatibility path.
+            _validate_baseline_scroll_snapshot(previous)
+    if "baseline_pending_case_detail" in state:
+        pending = state["baseline_pending_case_detail"]
+        if pending is None:
+            return
+        if not _is_baseline_context_envelope(pending):
+            raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_INVALID")
+        _validate_baseline_context_envelope(
+            pending,
+            require_bound=None,
+            state=state,
+        )
+        if pending.get("proposal_hash") is None:
+            _require_pending_envelope_matches_cognitive_draft(state, pending)
+        else:
+            proposal = state.get("terminal_draft")
+            if not isinstance(proposal, Mapping):
+                raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_PENDING_PROPOSAL_MISSING")
+            _require_pending_envelope_matches_proposal(state, pending, proposal)
+            _require_pending_public_dossier_matches_state(state, pending)
+
+
+def _is_baseline_context_envelope(value: Any) -> bool:
+    return (
+        isinstance(value, Mapping)
+        and value.get("schema_version") == _BASELINE_CONTEXT_ENVELOPE_SCHEMA
+    )
+
+
+def _validate_baseline_context_envelope(
+    envelope: Mapping[str, Any],
+    *,
+    require_bound: bool | None,
+    state: Mapping[str, Any],
+    require_execution_receipt: bool = True,
+) -> None:
+    if not isinstance(envelope, Mapping) or set(envelope) != _BASELINE_CONTEXT_ENVELOPE_FIELDS:
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_INVALID")
+    if (
+        envelope.get("schema_version") != _BASELINE_CONTEXT_ENVELOPE_SCHEMA
+        or envelope.get("kind") != _BASELINE_CONTEXT_ENVELOPE_KIND
+        or envelope.get("matrix_authority_mode") != _BASELINE_CONTEXT_UNASSESSED_MATRIX_MODE
+    ):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_INVALID")
+    for field in ("command_id", "logical_run_id", "attempt_id"):
+        _require_identifier(envelope.get(field), "INTAKE_BASELINE_CONTEXT_INVALID")
+    for field in (
+        "source_turn_hash",
+        "terminal_draft_hash",
+        "matrix_patch_hash",
+        "matrix_derivation_request_base_hash",
+        "formal_matrix_hash",
+        "public_dossier_hash",
+        "envelope_hash",
+    ):
+        value = envelope.get(field)
+        if not isinstance(value, str) or not _SHA256.fullmatch(value):
+            raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_INVALID")
+    for field in (
+        "execution_receipt_invocation_id",
+        "execution_receipt_node_name",
+    ):
+        _require_identifier(envelope.get(field), "INTAKE_BASELINE_CONTEXT_RECEIPT_INVALID")
+    normalized_matrix_patch = envelope.get("normalized_matrix_patch")
+    if _canonical_size(
+        normalized_matrix_patch,
+        "INTAKE_BASELINE_CONTEXT_PENDING_MATRIX_MISMATCH",
+    ) > _NORMALIZED_MATRIX_PATCH_MAX_BYTES or canonical_sha256(
+        normalized_matrix_patch
+    ) != envelope.get("matrix_patch_hash"):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_PENDING_MATRIX_MISMATCH")
+    if normalized_matrix_patch is not None:
+        _formal_delta_from_matrix_patch(normalized_matrix_patch)
+    proposal_hash = envelope.get("proposal_hash")
+    if proposal_hash is not None and (
+        not isinstance(proposal_hash, str) or not _SHA256.fullmatch(proposal_hash)
+    ):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_INVALID")
+    target_revision = envelope.get("target_cognitive_revision")
+    if (
+        isinstance(target_revision, bool)
+        or not isinstance(target_revision, int)
+        or target_revision < 1
+    ):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_INVALID")
+    _validate_baseline_private_binding(envelope.get("private_binding"))
+    _validate_baseline_initial_snapshot_lineage(envelope.get("initial_snapshot_lineage"))
+    _validate_baseline_source_lineage(envelope.get("source_lineage"))
+    private_binding = envelope["private_binding"]
+    formal_matrix = envelope.get("formal_matrix")
+    _validate_baseline_formal_matrix(
+        formal_matrix,
+        expected_case_id=private_binding["case_id"],
+    )
+    if envelope["formal_matrix_hash"] != canonical_sha256(formal_matrix):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_FORMAL_MATRIX_HASH_INVALID")
+    _validate_baseline_authority_input(
+        envelope,
+        expected_case_id=private_binding["case_id"],
+    )
+    derivation_request = _matrix_derivation_request_base(
+        envelope,
+        expected_private_binding=private_binding,
+    )
+    _validate_baseline_execution_receipt_binding(
+        envelope,
+        state=state,
+        require_present=require_execution_receipt,
+        expected_invocation_id=derivation_request.agent_context.agent_invocation_id,
+    )
+    authority_anchor_hash = envelope.get("authority_anchor_hash")
+    if authority_anchor_hash is not None and (
+        not isinstance(authority_anchor_hash, str) or not _SHA256.fullmatch(authority_anchor_hash)
+    ):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_AUTHORITY_ANCHOR_INVALID")
+    if authority_anchor_hash != _ingress_matrix_authority_anchor_hash(state):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_AUTHORITY_ANCHOR_INVALID")
+    proposal_identity = envelope.get("committed_proposal_identity")
+    is_bound = proposal_hash is not None
+    if require_bound is True and not is_bound:
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_UNBOUND")
+    if require_bound is False and is_bound:
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_ALREADY_BOUND")
+    if is_bound:
+        _validate_baseline_proposal_identity(proposal_identity)
+        if proposal_identity is None:
+            raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_UNBOUND")
+    else:
+        if proposal_identity is not None:
+            raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_INVALID")
+    snapshot = envelope.get("snapshot")
+    snapshot_hash = envelope.get("snapshot_hash")
+    if not is_bound:
+        if snapshot is not None or snapshot_hash is not None:
+            raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_UNBOUND_SNAPSHOT")
+    else:
+        if not isinstance(snapshot_hash, str) or not _SHA256.fullmatch(snapshot_hash):
+            raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_INVALID")
+        _validate_baseline_scroll_snapshot(
+            snapshot,
+            expected_case_id=private_binding["case_id"],
+        )
+        if snapshot_hash != canonical_sha256(snapshot):
+            raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_SNAPSHOT_HASH_INVALID")
+        if canonical_sha256(snapshot["case_fact_matrix"]) != envelope["formal_matrix_hash"]:
+            raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_FORMAL_MATRIX_MISMATCH")
+        if (
+            canonical_sha256(_baseline_snapshot_public_dossier(snapshot))
+            != envelope["public_dossier_hash"]
+        ):
+            raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_PUBLIC_DOSSIER_MISMATCH")
+    _verify_self_hash(envelope, "envelope_hash", "INTAKE_BASELINE_CONTEXT_HASH_INVALID")
+    _require_baseline_envelope_state_lineage(state, envelope)
+
+
+def unwrap_verified_baseline_previous_case_detail(
+    state: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return an envelope snapshot only after current state bindings match it.
+
+    This is deliberately separate from the generic state validator because the
+    baseline prompt adapter is another trust boundary: a persisted envelope
+    must not be unwrapped merely because its internal self-hash is valid.
+    """
+
+    previous = state.get("baseline_previous_case_detail")
+    if not _is_baseline_context_envelope(previous):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_INVALID")
+    _validate_baseline_context_envelope(
+        previous,
+        require_bound=True,
+        state=state,
+    )
+    _require_baseline_previous_result_lineage(state, previous)
+    return deepcopy(dict(previous["snapshot"]))
+
+
+def _baseline_private_binding(state: Mapping[str, Any]) -> dict[str, Any]:
+    bindings = state.get("bindings")
+    private = bindings.get("private") if isinstance(bindings, Mapping) else None
+    if not isinstance(private, Mapping):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_BINDING_INVALID")
+    value = {
+        field: deepcopy(private.get(field)) for field in _BASELINE_CONTEXT_PRIVATE_BINDING_FIELDS
+    }
+    _validate_baseline_private_binding(value)
+    return value
+
+
+def _validate_baseline_private_binding(value: Any) -> None:
+    if not isinstance(value, Mapping) or set(value) != _BASELINE_CONTEXT_PRIVATE_BINDING_FIELDS:
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_BINDING_INVALID")
+    for field in ("tenant_surrogate", "case_id", "agent_session_id"):
+        _require_identifier(value.get(field), "INTAKE_BASELINE_CONTEXT_BINDING_INVALID")
+    if value.get("room_type") != "INTAKE":
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_BINDING_INVALID")
+    if not _THREAD_ID.fullmatch(str(value.get("thread_id", ""))):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_BINDING_INVALID")
+    _strict_int(value.get("room_epoch"), minimum=0)
+    if not _SHA256.fullmatch(str(value.get("actor_scope_hash", ""))):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_BINDING_INVALID")
+    if value.get("audience") not in {"USER", "MERCHANT"}:
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_BINDING_INVALID")
+
+
+def _baseline_initial_snapshot_lineage(state: Mapping[str, Any]) -> dict[str, Any]:
+    value = {
+        "snapshot_ref": state.get("initial_snapshot_ref"),
+        "snapshot_hash": state.get("initial_snapshot_hash"),
+        "domain_revision": state.get("initial_domain_revision"),
+    }
+    _validate_baseline_initial_snapshot_lineage(value)
+    return value
+
+
+def _validate_baseline_initial_snapshot_lineage(value: Any) -> None:
+    if not isinstance(value, Mapping) or set(value) != _BASELINE_CONTEXT_INITIAL_LINEAGE_FIELDS:
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_BINDING_INVALID")
+    _require_identifier(value.get("snapshot_ref"), "INTAKE_BASELINE_CONTEXT_BINDING_INVALID")
+    if not _SHA256.fullmatch(str(value.get("snapshot_hash", ""))):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_BINDING_INVALID")
+    _strict_int(value.get("domain_revision"), minimum=0)
+
+
+def _baseline_source_lineage(state: Mapping[str, Any]) -> dict[str, Any]:
+    event_ref = state.get("last_event_ref")
+    event_hash = state.get("last_event_hash")
+    sequence = state.get("last_event_sequence")
+    if event_ref is None:
+        if event_hash is not None:
+            raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_SOURCE_INVALID")
+        initial = _baseline_initial_snapshot_lineage(state)
+        return {
+            "kind": "INITIAL_SNAPSHOT",
+            "source_ref": initial["snapshot_ref"],
+            "source_turn_hash": initial["snapshot_hash"],
+            "sequence": 0,
+        }
+    value = {
+        "kind": "EVENT",
+        "source_ref": event_ref,
+        "source_turn_hash": event_hash,
+        "sequence": sequence,
+    }
+    _validate_baseline_source_lineage(value)
+    return value
+
+
+def _validate_baseline_source_lineage(value: Any) -> None:
+    if not isinstance(value, Mapping) or set(value) != _BASELINE_CONTEXT_SOURCE_LINEAGE_FIELDS:
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_SOURCE_INVALID")
+    kind = value.get("kind")
+    if kind not in {"INITIAL_SNAPSHOT", "EVENT"}:
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_SOURCE_INVALID")
+    _require_identifier(value.get("source_ref"), "INTAKE_BASELINE_CONTEXT_SOURCE_INVALID")
+    if not _SHA256.fullmatch(str(value.get("source_turn_hash", ""))):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_SOURCE_INVALID")
+    sequence = _strict_int(value.get("sequence"), minimum=0)
+    if kind == "INITIAL_SNAPSHOT" and sequence != 0:
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_SOURCE_INVALID")
+    if kind == "EVENT" and sequence < 1:
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_SOURCE_INVALID")
+
+
+def _baseline_proposal_identity(proposal: Mapping[str, Any]) -> dict[str, Any]:
+    value = {
+        field: deepcopy(proposal.get(field)) for field in _BASELINE_CONTEXT_PROPOSAL_IDENTITY_FIELDS
+    }
+    _validate_baseline_proposal_identity(value)
+    return value
+
+
+def _validate_baseline_proposal_identity(value: Any) -> None:
+    if not isinstance(value, Mapping) or set(value) != _BASELINE_CONTEXT_PROPOSAL_IDENTITY_FIELDS:
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_BINDING_INVALID")
+    for field in ("command_id", "logical_run_id", "attempt_id", "case_id", "agent_session_id"):
+        _require_identifier(value.get(field), "INTAKE_BASELINE_CONTEXT_BINDING_INVALID")
+    if not _THREAD_ID.fullmatch(str(value.get("thread_id", ""))):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_BINDING_INVALID")
+    _strict_int(value.get("room_epoch"), minimum=0)
+    _strict_int(value.get("cognitive_revision"), minimum=1)
+    if not _SHA256.fullmatch(str(value.get("actor_scope_hash", ""))):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_BINDING_INVALID")
+    if not _SHA256.fullmatch(str(value.get("source_snapshot_hash", ""))):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_BINDING_INVALID")
+    source_event_hash = value.get("source_event_hash")
+    if source_event_hash is not None and (
+        not isinstance(source_event_hash, str) or not _SHA256.fullmatch(source_event_hash)
+    ):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_BINDING_INVALID")
+
+
+def _require_baseline_envelope_state_lineage(
+    state: Mapping[str, Any],
+    envelope: Mapping[str, Any],
+) -> None:
+    if envelope.get("private_binding") != _baseline_private_binding(state):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_BINDING_INVALID")
+    if envelope.get("initial_snapshot_lineage") != _baseline_initial_snapshot_lineage(state):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_BINDING_INVALID")
+    source_lineage = envelope.get("source_lineage")
+    _validate_baseline_source_lineage(source_lineage)
+    if envelope.get("source_turn_hash") != source_lineage["source_turn_hash"]:
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_SOURCE_INVALID")
+    if source_lineage["kind"] == "INITIAL_SNAPSHOT":
+        initial = _baseline_initial_snapshot_lineage(state)
+        if (
+            source_lineage["source_ref"] != initial["snapshot_ref"]
+            or source_lineage["source_turn_hash"] != initial["snapshot_hash"]
+        ):
+            raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_BINDING_INVALID")
+        # A later event does not invalidate an initial-snapshot provenance
+        # record.  It only means that the current generation has a newer input.
+    elif not _state_has_baseline_source_event(state, source_lineage):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_BINDING_INVALID")
+    _require_baseline_proposal_identity_matches_envelope(envelope)
+
+
+def _require_baseline_previous_result_lineage(
+    state: Mapping[str, Any],
+    envelope: Mapping[str, Any],
+) -> None:
+    """Require the persisted snapshot to name the actually committed result.
+
+    The current command may later change, so this deliberately compares the
+    envelope against the retained committed result rather than asking that old
+    command identifiers equal the next command's binding.
+    """
+
+    result = state.get("result_json")
+    if not isinstance(result, Mapping):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_COMMITTED_RESULT_MISSING")
+    try:
+        validate_terminal_proposal(result)
+    except IntakeGraphContractError as error:
+        raise IntakeGraphContractError(
+            "INTAKE_BASELINE_CONTEXT_COMMITTED_RESULT_INVALID"
+        ) from error
+    if result.get("proposal_hash") != envelope.get("proposal_hash"):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_COMMITTED_RESULT_MISMATCH")
+    if _baseline_proposal_identity(result) != envelope.get("committed_proposal_identity"):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_COMMITTED_RESULT_MISMATCH")
+
+
+def _state_has_baseline_source_event(
+    state: Mapping[str, Any],
+    source_lineage: Mapping[str, Any],
+) -> bool:
+    records = state.get("node_results")
+    if not isinstance(records, Mapping):
+        return False
+    return any(
+        isinstance(record, Mapping)
+        and record.get("kind") == "EVENT"
+        and record.get("stable_id") == source_lineage["source_ref"]
+        and record.get("content_hash") == source_lineage["source_turn_hash"]
+        and record.get("sequence") == source_lineage["sequence"]
+        for record in records.values()
+    )
+
+
+def _require_baseline_proposal_identity_matches_envelope(envelope: Mapping[str, Any]) -> None:
+    proposal_hash = envelope.get("proposal_hash")
+    identity = envelope.get("committed_proposal_identity")
+    if proposal_hash is None:
+        if identity is not None:
+            raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_BINDING_INVALID")
+        return
+    _validate_baseline_proposal_identity(identity)
+    private_binding = envelope["private_binding"]
+    initial = envelope["initial_snapshot_lineage"]
+    source = envelope["source_lineage"]
+    expected = {
+        "command_id": envelope["command_id"],
+        "logical_run_id": envelope["logical_run_id"],
+        "attempt_id": envelope["attempt_id"],
+        "case_id": private_binding["case_id"],
+        "room_epoch": private_binding["room_epoch"],
+        "thread_id": private_binding["thread_id"],
+        "actor_scope_hash": private_binding["actor_scope_hash"],
+        "agent_session_id": private_binding["agent_session_id"],
+        "cognitive_revision": envelope["target_cognitive_revision"],
+        "source_snapshot_hash": initial["snapshot_hash"],
+        "source_event_hash": (source["source_turn_hash"] if source["kind"] == "EVENT" else None),
+    }
+    if any(identity.get(field) != value for field, value in expected.items()):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_BINDING_INVALID")
+
+
+def _validate_baseline_scroll_snapshot(
+    snapshot: Any,
+    *,
+    expected_case_id: str | None = None,
+) -> None:
+    if (
+        not isinstance(snapshot, Mapping)
+        or not {
+            "schema_version",
+            "case_story",
+            "case_fact_matrix",
+        }
+        <= set(snapshot)
+        <= _BASELINE_SCROLL_SNAPSHOT_FIELDS
+    ):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_SNAPSHOT_INVALID")
+    if snapshot.get("schema_version") != "intake_case_detail.v1":
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_SNAPSHOT_INVALID")
+    case_story = snapshot.get("case_story")
+    if not isinstance(case_story, Mapping) or not case_story:
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_SNAPSHOT_INVALID")
+    _reject_forbidden_keys(snapshot)
+    _validate_safe_json(snapshot, max_array_length=256)
+    if (
+        _canonical_size(snapshot, "INTAKE_BASELINE_CONTEXT_SNAPSHOT_INVALID")
+        > _BASELINE_SCROLL_SNAPSHOT_MAX_BYTES
+    ):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_SNAPSHOT_TOO_LARGE")
+    public_detail = {
+        key: deepcopy(value) for key, value in snapshot.items() if key != "case_fact_matrix"
+    }
+    _validate_model(DossierPatch, public_detail, "INTAKE_BASELINE_CONTEXT_SNAPSHOT_INVALID")
+    matrix = snapshot.get("case_fact_matrix")
+    if not isinstance(matrix, Mapping):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_SNAPSHOT_INVALID")
+    _validate_model(CaseFactMatrixV2, matrix, "INTAKE_BASELINE_CONTEXT_SNAPSHOT_INVALID")
+    _verify_self_hash(matrix, "content_hash", "INTAKE_BASELINE_CONTEXT_SNAPSHOT_INVALID")
+    if expected_case_id is not None and matrix.get("case_id") != expected_case_id:
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_BINDING_INVALID")
+
+
+def _validate_baseline_formal_matrix(
+    matrix: Any,
+    *,
+    expected_case_id: str,
+) -> None:
+    """Validate the finalizer-owned formal matrix retained before snapshot bind."""
+
+    if not isinstance(matrix, Mapping):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_FORMAL_MATRIX_INVALID")
+    _validate_model(
+        CaseFactMatrixV2,
+        matrix,
+        "INTAKE_BASELINE_CONTEXT_FORMAL_MATRIX_INVALID",
+    )
+    _verify_self_hash(
+        matrix,
+        "content_hash",
+        "INTAKE_BASELINE_CONTEXT_FORMAL_MATRIX_INVALID",
+    )
+    _validate_safe_json(matrix, max_array_length=256)
+    if (
+        _canonical_size(matrix, "INTAKE_BASELINE_CONTEXT_FORMAL_MATRIX_INVALID")
+        > _BASELINE_SCROLL_SNAPSHOT_MAX_BYTES
+    ):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_FORMAL_MATRIX_TOO_LARGE")
+    if matrix.get("case_id") != expected_case_id:
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_BINDING_INVALID")
+
+
+def _validate_baseline_authority_input(
+    envelope: Mapping[str, Any],
+    *,
+    expected_case_id: str,
+) -> None:
+    """Validate the private M0/Mn replay material independently of self-hashes."""
+
+    matrix = envelope.get("authority_input_matrix")
+    content_hash = envelope.get("authority_input_content_hash")
+    matrix_hash = envelope.get("authority_input_matrix_hash")
+    if matrix is None:
+        if content_hash is not None or matrix_hash is not None:
+            raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_AUTHORITY_INPUT_INVALID")
+        return
+    if (
+        not isinstance(matrix, Mapping)
+        or not isinstance(content_hash, str)
+        or not _SHA256.fullmatch(content_hash)
+        or not isinstance(matrix_hash, str)
+        or not _SHA256.fullmatch(matrix_hash)
+    ):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_AUTHORITY_INPUT_INVALID")
+    try:
+        _validate_baseline_formal_matrix(matrix, expected_case_id=expected_case_id)
+        actual_matrix_hash = canonical_sha256(matrix)
+    except (IntakeGraphContractError, TypeError, ValueError) as error:
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_AUTHORITY_INPUT_INVALID") from error
+    if content_hash != matrix.get("content_hash") or matrix_hash != actual_matrix_hash:
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_AUTHORITY_INPUT_HASH_INVALID")
+
+
+def _validate_baseline_execution_receipt_binding(
+    envelope: Mapping[str, Any],
+    *,
+    state: Mapping[str, Any],
+    require_present: bool,
+    expected_invocation_id: str,
+) -> None:
+    """Bind the retained cognitive hash to the governed intake policy receipt."""
+
+    invocation_id = envelope.get("execution_receipt_invocation_id")
+    node_name = envelope.get("execution_receipt_node_name")
+    terminal_draft_hash = envelope.get("terminal_draft_hash")
+    if (
+        not isinstance(invocation_id, str)
+        or not _IDENTIFIER.fullmatch(invocation_id)
+        or not isinstance(node_name, str)
+        or not _IDENTIFIER.fullmatch(node_name)
+        or not isinstance(terminal_draft_hash, str)
+        or not _SHA256.fullmatch(terminal_draft_hash)
+    ):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_RECEIPT_INVALID")
+    # The production intake binding derives all three values from one governed
+    # execution: command.attempt_id, agent_context.agent_invocation_id, and the
+    # fixed baseline intake node.  A self-consistent receipt from a different
+    # invocation or node is not authority for this capsule.
+    if (
+        invocation_id != envelope.get("attempt_id")
+        or invocation_id != expected_invocation_id
+        or node_name != BASELINE_INTAKE_NODE_NAME
+    ):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_RECEIPT_BINDING_INVALID")
+    receipts = state.get("execution_receipts")
+    if not isinstance(receipts, Mapping):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_RECEIPT_INVALID")
+    receipt = receipts.get(invocation_id)
+    if receipt is None:
+        if require_present:
+            raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_RECEIPT_MISSING")
+        return
+    expected = {
+        "invocation_id": invocation_id,
+        "node_name": node_name,
+        "output_hash": terminal_draft_hash,
+    }
+    if not isinstance(receipt, Mapping) or dict(receipt) != expected:
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_RECEIPT_OUTPUT_MISMATCH")
+
+
+def _matrix_derivation_request_base(
+    envelope: Mapping[str, Any],
+    *,
+    expected_private_binding: Mapping[str, Any],
+) -> IntakeTurnRequest:
+    """Parse the compact, previous-detail-free finalizer request base."""
+
+    base = envelope.get("matrix_derivation_request_base")
+    expected_hash = envelope.get("matrix_derivation_request_base_hash")
+    if (
+        not isinstance(base, Mapping)
+        or not isinstance(expected_hash, str)
+        or not _SHA256.fullmatch(expected_hash)
+        or base.get("previous_case_detail") is not None
+    ):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_DERIVATION_REQUEST_INVALID")
+    if (
+        _canonical_size(base, "INTAKE_BASELINE_CONTEXT_DERIVATION_REQUEST_INVALID")
+        > _MATRIX_DERIVATION_REQUEST_BASE_MAX_BYTES
+        or canonical_sha256(base) != expected_hash
+    ):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_DERIVATION_REQUEST_HASH_INVALID")
+    try:
+        request = IntakeTurnRequest.model_validate(deepcopy(dict(base)))
+    except (TypeError, ValueError) as error:
+        raise IntakeGraphContractError(
+            "INTAKE_BASELINE_CONTEXT_DERIVATION_REQUEST_INVALID"
+        ) from error
+    if request.model_dump(mode="json") != dict(base):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_DERIVATION_REQUEST_INVALID")
+    context = request.agent_context
+    if (
+        request.case_id != expected_private_binding.get("case_id")
+        or request.room_type != expected_private_binding.get("room_type")
+        or context.case_id != expected_private_binding.get("case_id")
+        or context.room_type != expected_private_binding.get("room_type")
+        or context.agent_session_id != expected_private_binding.get("agent_session_id")
+        or context.actor_role != expected_private_binding.get("audience")
+    ):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_DERIVATION_REQUEST_BINDING_INVALID")
+    return request
+
+
+def _pre_model_state_for_pending_derivation(
+    state: Mapping[str, Any],
+    *,
+    envelope: Mapping[str, Any],
+    response_content: Any,
+    allow_response_absent: bool,
+) -> dict[str, Any]:
+    """Remove only the capsule-bound current-turn AI response.
+
+    The response is identified from the immutable cognitive draft hash retained
+    by the pending envelope, never from the later terminal proposal hash.  Its
+    content is still checked against the caller's proposal/cognitive utterance,
+    so a proposal substitution cannot make the request-base replay skip the
+    response binding.
+    """
+
+    source_turn_hash = envelope.get("source_turn_hash")
+    output_hash = envelope.get("terminal_draft_hash")
+    if (
+        not isinstance(source_turn_hash, str)
+        or not _SHA256.fullmatch(source_turn_hash)
+        or not isinstance(output_hash, str)
+        or not _SHA256.fullmatch(output_hash)
+        or not isinstance(response_content, str)
+    ):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_DERIVATION_REQUEST_BINDING_INVALID")
+    response_message_id = (
+        "INTAKE_AI_"
+        + canonical_sha256({"source_turn_hash": source_turn_hash, "output_hash": output_hash})[:32]
+    )
+    messages = state.get("messages")
+    if not isinstance(messages, Mapping):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_DERIVATION_REQUEST_BINDING_INVALID")
+    candidate = deepcopy(dict(state))
+    candidate_messages = deepcopy(dict(messages))
+    response = candidate_messages.get(response_message_id)
+    if response is None:
+        if not allow_response_absent:
+            raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_DERIVATION_RESPONSE_MISSING")
+        candidate["messages"] = candidate_messages
+        return candidate
+    private = (
+        state.get("bindings", {}).get("private")
+        if isinstance(state.get("bindings"), Mapping)
+        else None
+    )
+    expected = {
+        "message_id": response_message_id,
+        "role": "AI",
+        "audience": private.get("audience") if isinstance(private, Mapping) else None,
+        "content": response_content,
+        "sequence": state.get("last_event_sequence", 0),
+        "source_hash": output_hash,
+    }
+    if not isinstance(response, Mapping) or dict(response) != expected:
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_DERIVATION_RESPONSE_INVALID")
+    candidate_messages.pop(response_message_id)
+    candidate["messages"] = candidate_messages
+    return candidate
+
+
+def _require_pending_derivation_request_matches_pre_model_state(
+    state: IntakeGraphStateV2,
+    envelope: Mapping[str, Any],
+    *,
+    response_content: Any,
+    allow_response_absent: bool = False,
+) -> None:
+    """Tie the compact request base to the exact pre-model state projection."""
+
+    private_binding = envelope.get("private_binding")
+    if not isinstance(private_binding, Mapping):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_DERIVATION_REQUEST_BINDING_INVALID")
+    request = _matrix_derivation_request_base(
+        envelope,
+        expected_private_binding=private_binding,
+    )
+    pre_model_state = _pre_model_state_for_pending_derivation(
+        state,
+        envelope=envelope,
+        response_content=response_content,
+        allow_response_absent=allow_response_absent,
+    )
+    try:
+        expected = build_intake_baseline_request(
+            pre_model_state,
+            agent_context=request.agent_context,
+        ).model_dump(mode="json")
+    except (IntakeGraphContractError, TypeError, ValueError) as error:
+        raise IntakeGraphContractError(
+            "INTAKE_BASELINE_CONTEXT_DERIVATION_REQUEST_BINDING_INVALID"
+        ) from error
+    # The complete prior detail is deliberately not retained.  Its only formal
+    # authority is checked separately through ``authority_input_matrix``.
+    expected["previous_case_detail"] = None
+    if expected != envelope.get("matrix_derivation_request_base"):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_DERIVATION_REQUEST_BINDING_INVALID")
+
+
+def _derivation_request_with_authority_input(
+    envelope: Mapping[str, Any],
+) -> IntakeTurnRequest:
+    private_binding = envelope.get("private_binding")
+    if not isinstance(private_binding, Mapping):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_DERIVATION_REQUEST_BINDING_INVALID")
+    base = _matrix_derivation_request_base(
+        envelope,
+        expected_private_binding=private_binding,
+    ).model_dump(mode="json")
+    authority_input = envelope.get("authority_input_matrix")
+    base["previous_case_detail"] = (
+        {"case_fact_matrix": deepcopy(dict(authority_input))}
+        if isinstance(authority_input, Mapping)
+        else None
+    )
+    try:
+        return IntakeTurnRequest.model_validate(base)
+    except (TypeError, ValueError) as error:
+        raise IntakeGraphContractError(
+            "INTAKE_BASELINE_CONTEXT_DERIVATION_REQUEST_INVALID"
+        ) from error
+
+
+def _require_pending_normalized_matrix_patch(
+    envelope: Mapping[str, Any],
+    matrix_patch: Any,
+) -> None:
+    """Require the exact normalized patch retained before proposal projection."""
+
+    if matrix_patch != envelope.get("normalized_matrix_patch") or envelope.get(
+        "matrix_patch_hash"
+    ) != canonical_sha256(matrix_patch):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_PENDING_MATRIX_MISMATCH")
+
+
+def _formal_delta_from_matrix_patch(matrix_patch: Any) -> Any:
+    if matrix_patch is None:
+        return None
+    if not isinstance(matrix_patch, Mapping):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_PENDING_MATRIX_MISMATCH")
+    try:
+        if matrix_patch.get("schema_version") == "case_fact_matrix.delta.v2":
+            return FormalCaseFactMatrixDeltaV2.model_validate(matrix_patch)
+        if matrix_patch.get("schema_version") == "unilateral_case_matrix.draft.v1":
+            return FormalUnilateralCaseMatrixDraftV1.model_validate(matrix_patch)
+    except ValueError as error:
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_PENDING_MATRIX_MISMATCH") from error
+    raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_PENDING_MATRIX_MISMATCH")
+
+
+def _require_pending_formal_matrix_derivation(
+    state: IntakeGraphStateV2,
+    envelope: Mapping[str, Any],
+    *,
+    matrix_patch: Any,
+    response_content: Any,
+) -> None:
+    """Re-run the canonical finalizer from the retained input, patch and public dossier."""
+
+    _require_pending_normalized_matrix_patch(envelope, matrix_patch)
+    _require_pending_derivation_request_matches_pre_model_state(
+        state,
+        envelope,
+        response_content=response_content,
+    )
+    _require_pending_public_dossier_matches_state(state, envelope)
+    dossier = state.get("dossier_draft")
+    if not isinstance(dossier, Mapping) or "case_fact_matrix" in dossier:
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_PUBLIC_DOSSIER_INVALID")
+    try:
+        expected = finalize_case_fact_matrix(
+            request=_derivation_request_with_authority_input(envelope),
+            case_detail=deepcopy(dict(dossier)),
+            delta=_formal_delta_from_matrix_patch(matrix_patch),
+        ).model_dump(mode="json")
+    except (AgentOutputSchemaError, IntakeGraphContractError, TypeError, ValueError) as error:
+        raise IntakeGraphContractError(
+            "INTAKE_BASELINE_CONTEXT_FORMAL_DERIVATION_INVALID"
+        ) from error
+    formal_matrix = envelope.get("formal_matrix")
+    if (
+        not isinstance(formal_matrix, Mapping)
+        or canonical_sha256(expected) != canonical_sha256(formal_matrix)
+        or canonical_sha256(expected) != envelope.get("formal_matrix_hash")
+    ):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_FORMAL_DERIVATION_MISMATCH")
+
+
+def _baseline_snapshot_public_dossier(snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the public half of a complete baseline scroll snapshot."""
+
+    public = deepcopy(dict(snapshot))
+    public.pop("case_fact_matrix", None)
+    public.pop("unilateral_case_matrix", None)
+    return public
+
+
+def _materialize_baseline_scroll_snapshot(
+    state: IntakeGraphStateV2,
+    envelope: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Attach a trusted formal matrix to the exact post-apply public dossier."""
+
+    _require_pending_public_dossier_matches_state(state, envelope)
+    dossier = state.get("dossier_draft")
+    if not isinstance(dossier, Mapping):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_PUBLIC_DOSSIER_INVALID")
+    if "case_fact_matrix" in dossier or "unilateral_case_matrix" in dossier:
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_PUBLIC_DOSSIER_INVALID")
+    formal_matrix = envelope.get("formal_matrix")
+    private_binding = envelope.get("private_binding")
+    if not isinstance(private_binding, Mapping):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_BINDING_INVALID")
+    _validate_baseline_formal_matrix(
+        formal_matrix,
+        expected_case_id=private_binding["case_id"],
+    )
+    snapshot = deepcopy(dict(dossier))
+    snapshot["case_fact_matrix"] = deepcopy(dict(formal_matrix))
+    _validate_baseline_scroll_snapshot(
+        snapshot,
+        expected_case_id=private_binding["case_id"],
+    )
+    if canonical_sha256(_baseline_snapshot_public_dossier(snapshot)) != envelope.get(
+        "public_dossier_hash"
+    ):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_PUBLIC_DOSSIER_MISMATCH")
+    return snapshot
+
+
+def _require_pending_public_dossier_consistency(
+    state: Mapping[str, Any],
+    envelope: Mapping[str, Any],
+) -> None:
+    """Accept only the pre-apply or post-apply public state for an unbound turn."""
+
+    dossier = state.get("dossier_draft")
+    terminal_draft = state.get("terminal_draft")
+    if not isinstance(dossier, Mapping) or not isinstance(terminal_draft, Mapping):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_PUBLIC_DOSSIER_INVALID")
+    patch = terminal_draft.get("dossier_patch")
+    if not isinstance(patch, Mapping):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_PUBLIC_DOSSIER_INVALID")
+    expected_hash = envelope.get("public_dossier_hash")
+    if canonical_sha256(dossier) == expected_hash:
+        return
+    projected = merge_intake_dossier(dossier, patch)
+    if canonical_sha256(projected) != expected_hash:
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_PUBLIC_DOSSIER_MISMATCH")
+
+
+def _require_pending_public_dossier_matches_state(
+    state: Mapping[str, Any],
+    envelope: Mapping[str, Any],
+) -> None:
+    dossier = state.get("dossier_draft")
+    if not isinstance(dossier, Mapping) or canonical_sha256(dossier) != envelope.get(
+        "public_dossier_hash"
+    ):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_PUBLIC_DOSSIER_MISMATCH")
+
+
+def _current_source_turn_hash(state: IntakeGraphStateV2) -> str:
+    source_turn_hash = state.get("last_event_hash") or state.get("initial_snapshot_hash")
+    if not isinstance(source_turn_hash, str) or not _SHA256.fullmatch(source_turn_hash):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_SOURCE_INVALID")
+    return source_turn_hash
+
+
+def _require_pending_envelope_matches_cognitive_draft(
+    state: IntakeGraphStateV2,
+    envelope: Mapping[str, Any],
+) -> None:
+    command = state["bindings"]["command"]
+    expected = {
+        "command_id": command["command_id"],
+        "logical_run_id": command["logical_run_id"],
+        "attempt_id": command["attempt_id"],
+        "source_turn_hash": _current_source_turn_hash(state),
+        "target_cognitive_revision": state["cognitive_revision"],
+    }
+    if any(envelope.get(field) != value for field, value in expected.items()):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_BINDING_INVALID")
+    if envelope.get("proposal_hash") is not None:
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_BINDING_INVALID")
+    terminal_draft = state.get("terminal_draft")
+    if (
+        not isinstance(terminal_draft, Mapping)
+        or terminal_draft.get("schema_version") == "intake-turn-proposal.v2"
+    ):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_BINDING_INVALID")
+    if envelope.get("terminal_draft_hash") != canonical_sha256(terminal_draft):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_BINDING_INVALID")
+    _require_pending_normalized_matrix_patch(
+        envelope,
+        terminal_draft.get("matrix_patch"),
+    )
+    _require_pending_public_dossier_consistency(state, envelope)
+
+
+def _require_pending_envelope_matches_proposal(
+    state: IntakeGraphStateV2,
+    envelope: Mapping[str, Any],
+    proposal: Mapping[str, Any],
+) -> None:
+    command = state["bindings"]["command"]
+    expected = {
+        "command_id": command["command_id"],
+        "logical_run_id": command["logical_run_id"],
+        "attempt_id": command["attempt_id"],
+        "source_turn_hash": _current_source_turn_hash(state),
+        "target_cognitive_revision": state["cognitive_revision"],
+        "proposal_hash": proposal.get("proposal_hash"),
+    }
+    if any(envelope.get(field) != value for field, value in expected.items()):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_BINDING_INVALID")
+    if proposal.get("proposal_hash") != canonical_sha256_omitting(proposal, "proposal_hash"):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_BINDING_INVALID")
+    _require_pending_normalized_matrix_patch(envelope, proposal.get("matrix_patch"))
 
 
 def _validate_optional_state_refs(state: IntakeGraphStateV2) -> None:
@@ -1613,17 +3299,17 @@ def _validate_model(model_type: Any, value: Mapping[str, Any], code: str) -> Non
         raise IntakeGraphContractError(code) from error
 
 
-def _validate_safe_json(value: Any) -> None:
+def _validate_safe_json(value: Any, *, max_array_length: int = 128) -> None:
     if isinstance(value, Mapping):
         if len(value) > 64:
             raise IntakeGraphContractError("INTAKE_OBJECT_TOO_WIDE")
         for child in value.values():
-            _validate_safe_json(child)
+            _validate_safe_json(child, max_array_length=max_array_length)
     elif isinstance(value, list | tuple):
-        if len(value) > 128:
+        if len(value) > max_array_length:
             raise IntakeGraphContractError("INTAKE_ARRAY_TOO_LONG")
         for child in value:
-            _validate_safe_json(child)
+            _validate_safe_json(child, max_array_length=max_array_length)
     elif isinstance(value, str) and len(value) > 20_000:
         raise IntakeGraphContractError("INTAKE_STRING_TOO_LONG")
     elif value is not None and not isinstance(value, str | int | float | bool):

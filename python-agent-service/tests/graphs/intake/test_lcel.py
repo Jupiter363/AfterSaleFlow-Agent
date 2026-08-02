@@ -20,20 +20,27 @@ from langchain_core.runnables import (
     RunnableSequence,
 )
 
-from app.contracts.v1.codec import canonical_sha256_omitting
+from app.contracts.v1.codec import canonical_sha256, canonical_sha256_omitting
 from app.agents.dispute_intake_officer.case_fact_matrix import (
     finalize_case_fact_matrix,
 )
 from app.agents.dispute_intake_officer.schemas import IntakeCaseDetailLlmOutput
 from app.graph_runtime.state_lens import StateLens
 from app.graph_runtime.state import VersionPinsState
-from app.graphs.intake.baseline import BASELINE_INTAKE_NODE_NAME
+from app.graphs.intake.baseline import (
+    BASELINE_INTAKE_NODE_NAME,
+    normalize_model_matrix_fact_key_payload,
+)
 from app.graphs.intake.errors import IntakeGraphContractError
 from app.graphs.intake.graph import (
     build_intake_v2_graph,
     compile_intake_v2_graph,
 )
-from app.graphs.intake.nodes import import_snapshot_once_or_apply_event
+from app.graphs.intake.nodes import (
+    checkpoint_terminal,
+    import_snapshot_once_or_apply_event,
+    project_intake_proposal,
+)
 from app.graphs.intake.lcel import (
     _SAFE_INTAKE_CASE_SUMMARY,
     _SAFE_INTAKE_ROOM_UTTERANCE,
@@ -48,8 +55,14 @@ from app.graphs.intake.lcel import (
     build_intake_model_node as _production_build_intake_model_node,
 )
 from app.graphs.intake.contracts import IntakeCognitionDraft
-from app.graphs.intake.state import IntakeTurnContext, new_intake_graph_state
-from app.graphs.intake.validators import MATRIX_AUTHORITY_RECORD_KEY
+from app.graphs.intake.state import (
+    IntakeTurnContext,
+    new_intake_graph_state,
+)
+from app.graphs.intake.validators import (
+    MATRIX_AUTHORITY_RECORD_KEY,
+    validate_matrix_patch,
+)
 from app.harness.invocation_context import AgentInvocationContext
 from app.harness.model_runner import prepare_baseline_prompt_authority
 from app.harness.prompt_composer import PromptRepository
@@ -149,6 +162,7 @@ def _agent_context(
     role: str = "USER",
     case_id: str = "CASE_P4_SYNTHETIC_1",
     agent_session_id: str = "AGENT_SESSION_P4_USER_1",
+    invocation_id: str = "ATTEMPT_P4_USER_2_1",
 ) -> AgentInvocationContext:
     actor_id = f"ACTOR_P4_{role}_1"
     access_session_id = f"ACCESS_P4_{role}_1"
@@ -164,7 +178,7 @@ def _agent_context(
             "permission_level": "PARTY_USER" if role == "USER" else "PARTY_MERCHANT",
             "permission_scopes": [],
             "agent_key": "DISPUTE_INTAKE_OFFICER",
-            "agent_invocation_id": "ATTEMPT_P4_USER_2_1",
+            "agent_invocation_id": invocation_id,
             "agent_session_id": agent_session_id,
             "conversation_scope": ":".join(
                 (
@@ -194,10 +208,12 @@ def _agent_context(
 
 def _agent_context_for_state(state: dict[str, Any]) -> AgentInvocationContext:
     private = state["bindings"]["private"]
+    command = state["bindings"]["command"]
     return _agent_context(
         role=str(private["audience"]),
         case_id=str(private["case_id"]),
         agent_session_id=str(private["agent_session_id"]),
+        invocation_id=str(command["attempt_id"]),
     )
 
 
@@ -411,9 +427,7 @@ def _opening_document() -> dict[str, Any]:
     return _draft(
         dossier_patch={
             "case_story": {
-                "one_sentence_summary": (
-                    "The submitted form describes an after-sales dispute."
-                )
+                "one_sentence_summary": ("The submitted form describes an after-sales dispute.")
             }
         },
         readiness="INCOMPLETE",
@@ -424,9 +438,7 @@ def _opening_document() -> dict[str, Any]:
 
 def _event_document(event: dict[str, Any]) -> dict[str, Any]:
     document = _draft()
-    document["dossier_patch"]["requested_resolution"]["source_hash"] = event[
-        "event_hash"
-    ]
+    document["dossier_patch"]["requested_resolution"]["source_hash"] = event["event_hash"]
     return document
 
 
@@ -467,10 +479,19 @@ def test_snapshot_opening_invokes_the_real_model_without_a_participant_message(
     snapshot["own_messages"][0]["text"] = prior_message
     snapshot["snapshot_hash"] = canonical_sha256_omitting(snapshot, "snapshot_hash")
     transport = IntakeTransport(_opening_document())
+    opening_context = _agent_context(invocation_id="ATTEMPT_P4_USER_1_1")
     built = build_intake_model_node(
         transport=transport,
         profile=_profile(),
-        policy=_policy(),
+        policy=_policy().model_copy(
+            update={
+                "invocation_id": "ATTEMPT_P4_USER_1_1",
+                "trusted_system_sha256": system_prompt_sha256(
+                    _trusted_system_prompt(opening_context)
+                ),
+            }
+        ),
+        agent_context=opening_context,
     )
     graph = compile_intake_v2_graph(intake_lcel=built.runnable)
 
@@ -529,9 +550,7 @@ def _prior_formal_matrix(
     return finalize_case_fact_matrix(
         request=request,
         case_detail={
-            "case_story": {
-                "one_sentence_summary": "The order allegedly arrived damaged."
-            },
+            "case_story": {"one_sentence_summary": "The order allegedly arrived damaged."},
             "claim_resolution": {
                 "requested_resolution": "REFUND",
                 "request_reason": "The order allegedly arrived damaged.",
@@ -556,6 +575,77 @@ def _prior_formal_matrix(
             }
         ),
     ).model_dump(mode="json")
+
+
+def _snapshot_with_imported_formal_m0(snapshot: dict[str, Any]) -> dict[str, Any]:
+    imported = copy.deepcopy(snapshot)
+    matrix = _prior_formal_matrix(
+        case_id=imported["case_id"],
+        agent_context=_agent_context(
+            case_id=imported["case_id"],
+            agent_session_id=imported["agent_session_id"],
+        ),
+    )
+    for row in matrix["fact_rows"]:
+        row["evidence_coverage_status"] = "PENDING_EVIDENCE_REVIEW"
+    matrix["content_hash"] = canonical_sha256_omitting(matrix, "content_hash")
+    imported["current_dossier"] = {
+        "schema_version": "intake_case_detail.v1",
+        "case_story": {"one_sentence_summary": "The order allegedly arrived damaged."},
+        "case_fact_matrix": matrix,
+    }
+    imported["snapshot_hash"] = canonical_sha256_omitting(imported, "snapshot_hash")
+    return imported
+
+
+@pytest.mark.parametrize("ingress_kind", ["SNAPSHOT", "BOOTSTRAP_INITIAL_FORM"])
+def test_imported_formal_m0_form_only_opening_fails_before_model(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+    ingress_kind: str,
+) -> None:
+    imported = _snapshot_with_imported_formal_m0(snapshot)
+    transport = IntakeTransport(_opening_document())
+    graph = compile_intake_v2_graph(
+        intake_lcel=build_intake_model_node(
+            transport=transport,
+            profile=_profile(),
+            policy=_policy(),
+        ).runnable
+    )
+    if ingress_kind == "SNAPSHOT":
+        context = IntakeTurnContext("SNAPSHOT", imported)
+    else:
+        # BOOTSTRAP INITIAL_FORM deliberately stores the event cursor but no
+        # current HUMAN message, exactly like the legacy first-form path.
+        imported["own_messages"] = []
+        imported["source_refs"] = ["FORM_P4_USER_1"]
+        imported["snapshot_hash"] = canonical_sha256_omitting(imported, "snapshot_hash")
+        initial_form = copy.deepcopy(event)
+        initial_form.update(
+            event_id="EVENT_P4_USER_FORM_1",
+            message_id="MESSAGE_P4_USER_FORM_1",
+            sequence_no=1,
+            domain_revision=imported["domain_revision"] + 1,
+            source_type="INITIAL_FORM",
+            text="The submitted form describes an after-sales dispute.",
+            source_refs=["MESSAGE_P4_USER_FORM_1"],
+        )
+        initial_form["event_hash"] = canonical_sha256_omitting(initial_form, "event_hash")
+        context = _bootstrap_event_context(imported, initial_form)
+
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_BASELINE_OPENING_FORMAL_MATRIX_UNSUPPORTED",
+    ):
+        graph.invoke(
+            new_intake_graph_state(bindings=bindings, version_pins=version_pins),
+            context=context,
+        )
+
+    assert transport.generate_calls == 0
 
 
 def test_real_intake_lcel_is_governed_object_flow_with_human_text_isolation(
@@ -776,12 +866,8 @@ async def test_async_graph_emits_only_governed_model_deltas_before_terminal_patc
     for _, field, delta in governed:
         streamed[field] = streamed.get(field, "") + delta
     assert streamed == {
-        "case_detail.case_story.one_sentence_summary": (
-            "用户就订单商品问题提出售后诉求。"
-        ),
-        "case_detail.case_story": (
-            '{"one_sentence_summary":"用户就订单商品问题提出售后诉求。"}'
-        ),
+        "case_detail.case_story.one_sentence_summary": ("用户就订单商品问题提出售后诉求。"),
+        "case_detail.case_story": ('{"one_sentence_summary":"用户就订单商品问题提出售后诉求。"}'),
     }
     assert "room_utterance" not in streamed
     assert terminal_positions
@@ -836,6 +922,948 @@ def test_baseline_new_fact_key_is_preserved_before_target_projection(
     projected = result["result_json"]["matrix_patch"]
     assert projected["fact_rows"][0]["fact_key"] == "NEW_DAMAGE"
     assert projected["summary_source_fact_keys"] == ["NEW_DAMAGE"]
+
+
+def test_two_turn_baseline_context_preserves_formal_fact_authority_privately(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+) -> None:
+    first_document = _draft(
+        dossier_patch={
+            "case_story": {"one_sentence_summary": "The user reports a damaged delivered order."}
+        },
+        matrix_patch={
+            "schema_version": "unilateral_case_matrix.draft.v1",
+            "fact_rows": [
+                {
+                    "fact_key": "NEW_DAMAGE",
+                    "category": "PRODUCT_STATE",
+                    "fact_target": "Whether the order arrived damaged.",
+                    "materiality": "CORE",
+                    "position_summary": "The user reports visible damage.",
+                    "asserted_value": "damaged",
+                    "source_scope": "CURRENT_SOURCE",
+                }
+            ],
+            "summary_source_fact_keys": ["NEW_DAMAGE"],
+        },
+        readiness="INCOMPLETE",
+        missing_fields=["delivery_time"],
+        recommendation="NEED_MORE_INFO",
+    )
+    first_transport = IntakeTransport(first_document)
+    first_built = build_intake_model_node(
+        transport=first_transport,
+        profile=_profile(),
+        policy=_policy(),
+    )
+    first_graph = compile_intake_v2_graph(intake_lcel=first_built.runnable)
+    state = new_intake_graph_state(bindings=bindings, version_pins=version_pins)
+    state["bindings"]["command"].update(
+        command_id="COMMAND_P4_USER_2",
+        logical_run_id="RUN_P4_USER_2",
+        attempt_id="ATTEMPT_P4_USER_2_1",
+    )
+
+    first_result = first_graph.invoke(
+        state,
+        context=_bootstrap_event_context(snapshot, event),
+    )
+
+    assert "case_fact_matrix" not in first_result["dossier_draft"]
+    assert "baseline_previous_case_detail" not in first_result["result_json"]
+    baseline_context = first_result["baseline_previous_case_detail"]
+    assert baseline_context["proposal_hash"] == first_result["result_json"]["proposal_hash"]
+    assert (
+        baseline_context["committed_proposal_identity"]["command_id"]
+        == first_result["result_json"]["command_id"]
+    )
+    assert first_result["baseline_pending_case_detail"] is None
+    snapshot_context = baseline_context["snapshot"]
+    snapshot_public = copy.deepcopy(snapshot_context)
+    snapshot_public.pop("case_fact_matrix")
+    assert snapshot_public == first_result["dossier_draft"]
+    assert baseline_context["public_dossier_hash"] == canonical_sha256(
+        first_result["dossier_draft"]
+    )
+    assert baseline_context["formal_matrix"] == snapshot_context["case_fact_matrix"]
+    prior_matrix = snapshot_context["case_fact_matrix"]
+    prior_row = prior_matrix["fact_rows"][0]
+    prior_fact_id = prior_row["fact_id"]
+
+    def prior_delta_row() -> dict[str, Any]:
+        prior_position = prior_row["positions"]["USER"]
+        return {
+            "fact_key": prior_fact_id,
+            "category": prior_row["category"],
+            "fact_target": prior_row["fact_target"],
+            "materiality": prior_row["materiality"],
+            "stance": prior_position["stance"],
+            "position_summary": prior_position["position_summary"],
+            "asserted_value": prior_position["asserted_value"],
+            "source_scope": "PREVIOUS_MATRIX",
+        }
+
+    unknown_previous = IntakeCognitionDraft.model_validate(
+        _draft(
+            dossier_patch={
+                "case_story": {"one_sentence_summary": "The damage report remains open."}
+            },
+            matrix_patch={
+                "schema_version": "case_fact_matrix.delta.v2",
+                "fact_rows": [
+                    prior_delta_row(),
+                    {
+                        "fact_key": "FACT_MODEL_INVENTED",
+                        "category": "PAYMENT",
+                        "fact_target": "Whether an installation fee was charged.",
+                        "materiality": "SUPPORTING",
+                        "stance": "CONFIRM",
+                        "position_summary": "The user reports an installation fee.",
+                        "asserted_value": "charged",
+                        "source_scope": "PREVIOUS_MATRIX",
+                    },
+                ],
+                "summary_source_fact_keys": [prior_fact_id, "FACT_MODEL_INVENTED"],
+            },
+            readiness="INCOMPLETE",
+            missing_fields=["delivery_time"],
+            recommendation="NEED_MORE_INFO",
+        )
+    )
+    normalized_unknown_payload = normalize_model_matrix_fact_key_payload(
+        unknown_previous.matrix_patch.model_dump(mode="json"),
+        authorized_fact_ids=frozenset({prior_fact_id}),
+    )
+    assert normalized_unknown_payload["fact_rows"][1]["fact_key"] == "NEW_MODEL_INVENTED"
+    assert normalized_unknown_payload["fact_rows"][1]["source_scope"] == "PREVIOUS_MATRIX"
+    with pytest.raises(ValueError, match="new matrix fact cannot come from PREVIOUS_MATRIX"):
+        _normalize_model_matrix_fact_keys(first_result, unknown_previous)
+
+    next_event = copy.deepcopy(event)
+    next_event.update(
+        event_id="EVENT_P4_USER_3",
+        message_id="MESSAGE_P4_USER_3",
+        sequence_no=first_result["last_event_sequence"] + 1,
+        domain_revision=event["domain_revision"] + 1,
+        text="The installation fee was charged in addition to the damaged order.",
+        source_refs=["MESSAGE_P4_USER_3"],
+        occurred_at="2026-07-20T08:03:00Z",
+    )
+    next_event["event_hash"] = canonical_sha256_omitting(next_event, "event_hash")
+    second_document = _draft(
+        dossier_patch={
+            "case_story": {"one_sentence_summary": "The user adds an installation-fee claim."}
+        },
+        matrix_patch={
+            "schema_version": "case_fact_matrix.delta.v2",
+            "fact_rows": [
+                prior_delta_row(),
+                {
+                    "fact_key": "NEW_INSTALL_FEE",
+                    "category": "PAYMENT",
+                    "fact_target": "Whether an installation fee was charged.",
+                    "materiality": "SUPPORTING",
+                    "stance": "CONFIRM",
+                    "position_summary": "The user reports an installation fee.",
+                    "asserted_value": "charged",
+                    "source_scope": "CURRENT_SOURCE",
+                },
+            ],
+            "summary_source_fact_keys": [prior_fact_id, "NEW_INSTALL_FEE"],
+        },
+        readiness="INCOMPLETE",
+        missing_fields=["delivery_time"],
+        recommendation="NEED_MORE_INFO",
+    )
+    second_transport = IntakeTransport(second_document)
+    first_result["bindings"]["command"].update(
+        command_id="COMMAND_P4_USER_3",
+        logical_run_id="RUN_P4_USER_3",
+        attempt_id="ATTEMPT_P4_USER_3_1",
+    )
+    second_context = _agent_context(invocation_id="ATTEMPT_P4_USER_3_1")
+    second_built = build_intake_model_node(
+        transport=second_transport,
+        profile=_profile(),
+        policy=_policy().model_copy(
+            update={
+                "invocation_id": "ATTEMPT_P4_USER_3_1",
+                "trusted_system_sha256": system_prompt_sha256(
+                    _trusted_system_prompt(second_context)
+                ),
+            }
+        ),
+        agent_context=second_context,
+    )
+    second_graph = compile_intake_v2_graph(intake_lcel=second_built.runnable)
+
+    second_result = second_graph.invoke(
+        first_result,
+        context=IntakeTurnContext("EVENT", next_event),
+    )
+
+    assert second_transport.generate_calls == 1
+    assert prior_fact_id in str(second_transport.requests[0].messages[1].content)
+    assert "case_fact_matrix" not in second_result["dossier_draft"]
+    projected_rows = second_result["result_json"]["matrix_patch"]["fact_rows"]
+    assert [row["fact_key"] for row in projected_rows] == [
+        prior_fact_id,
+        "NEW_INSTALL_FEE",
+    ]
+    assert prior_fact_id in {
+        row["fact_id"]
+        for row in second_result["baseline_previous_case_detail"]["snapshot"]["case_fact_matrix"][
+            "fact_rows"
+        ]
+    }
+    second_context = second_result["baseline_previous_case_detail"]
+    second_snapshot_public = copy.deepcopy(second_context["snapshot"])
+    second_snapshot_public.pop("case_fact_matrix")
+    assert second_context["proposal_hash"] == second_result["result_json"]["proposal_hash"]
+    assert second_context["committed_proposal_identity"] == {
+        field: second_result["result_json"][field]
+        for field in (
+            "command_id",
+            "logical_run_id",
+            "attempt_id",
+            "case_id",
+            "room_epoch",
+            "thread_id",
+            "actor_scope_hash",
+            "agent_session_id",
+            "cognitive_revision",
+            "source_snapshot_hash",
+            "source_event_hash",
+        )
+    }
+    assert second_snapshot_public == second_result["dossier_draft"]
+    assert second_context["public_dossier_hash"] == canonical_sha256(second_result["dossier_draft"])
+
+
+def test_pending_project_and_checkpoint_replay_the_capsule_request_base(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+) -> None:
+    transport = IntakeTransport(_event_document(event))
+    graph = compile_intake_v2_graph(
+        intake_lcel=build_intake_model_node(
+            transport=transport,
+            profile=_profile(),
+            policy=_policy(),
+        ).runnable
+    )
+    state = new_intake_graph_state(bindings=bindings, version_pins=version_pins)
+    state["bindings"]["command"].update(
+        command_id="COMMAND_P4_USER_2",
+        logical_run_id="RUN_P4_USER_2",
+        attempt_id="ATTEMPT_P4_USER_2_1",
+    )
+
+    projected = graph.invoke(
+        state,
+        context=_bootstrap_event_context(snapshot, event),
+        interrupt_before=["checkpoint_terminal"],
+    )
+
+    pending = projected["baseline_pending_case_detail"]
+    assert pending["proposal_hash"] == projected["terminal_draft"]["proposal_hash"]
+    assert pending["matrix_derivation_request_base"]["previous_case_detail"] is None
+    assert checkpoint_terminal(projected)["baseline_previous_case_detail"] == pending
+
+    def rehash_envelope(envelope: dict[str, Any]) -> None:
+        envelope["envelope_hash"] = canonical_sha256_omitting(envelope, "envelope_hash")
+
+    request_tampered = copy.deepcopy(projected)
+    request_envelope = request_tampered["baseline_pending_case_detail"]
+    request_base = request_envelope["matrix_derivation_request_base"]
+    request_base["current_user_message"]["text"] = "Tampered replay request text."
+    request_envelope["matrix_derivation_request_base_hash"] = canonical_sha256(request_base)
+    rehash_envelope(request_envelope)
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_BASELINE_CONTEXT_DERIVATION_REQUEST_BINDING_INVALID",
+    ):
+        checkpoint_terminal(request_tampered)
+
+    patch_tampered = copy.deepcopy(projected)
+    patch_envelope = patch_tampered["baseline_pending_case_detail"]
+    patch_envelope["matrix_patch_hash"] = "a" * 64
+    rehash_envelope(patch_envelope)
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_BASELINE_CONTEXT_PENDING_MATRIX_MISMATCH",
+    ):
+        checkpoint_terminal(patch_tampered)
+
+    formal_tampered = copy.deepcopy(projected)
+    formal_envelope = formal_tampered["baseline_pending_case_detail"]
+    formal = formal_envelope["formal_matrix"]
+    formal["case_overview"]["neutral_summary"] = "Tampered formal matrix summary."
+    formal["content_hash"] = canonical_sha256_omitting(formal, "content_hash")
+    formal_envelope["formal_matrix_hash"] = canonical_sha256(formal)
+    formal_envelope["snapshot"]["case_fact_matrix"] = copy.deepcopy(formal)
+    formal_envelope["snapshot_hash"] = canonical_sha256(formal_envelope["snapshot"])
+    rehash_envelope(formal_envelope)
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_BASELINE_CONTEXT_FORMAL_DERIVATION_MISMATCH",
+    ):
+        checkpoint_terminal(formal_tampered)
+
+    snapshot_tampered = copy.deepcopy(projected)
+    snapshot_envelope = snapshot_tampered["baseline_pending_case_detail"]
+    snapshot_envelope["snapshot"]["case_story"]["one_sentence_summary"] = (
+        "Tampered public snapshot summary."
+    )
+    snapshot_envelope["snapshot_hash"] = canonical_sha256(snapshot_envelope["snapshot"])
+    rehash_envelope(snapshot_envelope)
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_BASELINE_CONTEXT_PUBLIC_DOSSIER_MISMATCH",
+    ):
+        checkpoint_terminal(snapshot_tampered)
+
+
+def test_receipt_seal_rejects_coherent_preproject_matrix_patch_rehash(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+) -> None:
+    document = _event_document(event)
+    document["matrix_patch"] = {
+        "schema_version": "unilateral_case_matrix.draft.v1",
+        "fact_rows": [
+            {
+                "fact_key": "NEW_DAMAGE",
+                "category": "PRODUCT_STATE",
+                "fact_target": "Whether the order arrived damaged.",
+                "materiality": "CORE",
+                "position_summary": "The user reports visible damage.",
+                "asserted_value": "damaged",
+                "source_scope": "CURRENT_SOURCE",
+            }
+        ],
+        "summary_source_fact_keys": ["NEW_DAMAGE"],
+    }
+    graph = compile_intake_v2_graph(
+        intake_lcel=build_intake_model_node(
+            transport=IntakeTransport(document),
+            profile=_profile(),
+            policy=_policy(),
+        ).runnable
+    )
+    state = new_intake_graph_state(bindings=bindings, version_pins=version_pins)
+    state["bindings"]["command"].update(
+        command_id="COMMAND_P4_USER_2",
+        logical_run_id="RUN_P4_USER_2",
+        attempt_id="ATTEMPT_P4_USER_2_1",
+    )
+    preproject = graph.invoke(
+        state,
+        context=_bootstrap_event_context(snapshot, event),
+        interrupt_before=["project_intake_proposal"],
+    )
+
+    envelope = preproject["baseline_pending_case_detail"]
+    receipt = preproject["execution_receipts"][envelope["execution_receipt_invocation_id"]]
+    assert receipt["node_name"] == envelope["execution_receipt_node_name"]
+    assert receipt["output_hash"] == envelope["terminal_draft_hash"]
+    assert envelope["normalized_matrix_patch"] == preproject["terminal_draft"]["matrix_patch"]
+
+    def rehash_pending(candidate: dict[str, Any]) -> None:
+        pending = candidate["baseline_pending_case_detail"]
+        pending["envelope_hash"] = canonical_sha256_omitting(pending, "envelope_hash")
+
+    # A self-consistent receipt for another invocation must not be accepted just
+    # because it appears in the receipt map.
+    wrong_receipt_id = copy.deepcopy(preproject)
+    wrong_receipt_id["execution_receipts"]["ATTEMPT_P4_USER_99_1"] = {
+        "invocation_id": "ATTEMPT_P4_USER_99_1",
+        "node_name": BASELINE_INTAKE_NODE_NAME,
+        "output_hash": envelope["terminal_draft_hash"],
+    }
+    wrong_receipt_id["baseline_pending_case_detail"]["execution_receipt_invocation_id"] = (
+        "ATTEMPT_P4_USER_99_1"
+    )
+    rehash_pending(wrong_receipt_id)
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_BASELINE_CONTEXT_RECEIPT_BINDING_INVALID",
+    ):
+        project_intake_proposal(wrong_receipt_id)
+
+    # Likewise, an otherwise matching receipt must name the governed baseline
+    # node rather than an arbitrary node supplied by persisted state.
+    wrong_receipt_node = copy.deepcopy(preproject)
+    wrong_node = "other_intake_node"
+    wrong_receipt_node["baseline_pending_case_detail"]["execution_receipt_node_name"] = wrong_node
+    wrong_receipt_node["execution_receipts"][envelope["execution_receipt_invocation_id"]][
+        "node_name"
+    ] = wrong_node
+    rehash_pending(wrong_receipt_node)
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_BASELINE_CONTEXT_RECEIPT_BINDING_INVALID",
+    ):
+        project_intake_proposal(wrong_receipt_node)
+
+    # The receipt is still an exact seal over the cognitive terminal hash; a
+    # substituted output hash is rejected even when the capsule self-hash has
+    # been refreshed.
+    wrong_receipt_output = copy.deepcopy(preproject)
+    wrong_receipt_output["execution_receipts"][envelope["execution_receipt_invocation_id"]][
+        "output_hash"
+    ] = "f" * 64
+    rehash_pending(wrong_receipt_output)
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_BASELINE_CONTEXT_RECEIPT_OUTPUT_MISMATCH",
+    ):
+        project_intake_proposal(wrong_receipt_output)
+
+    bound = copy.deepcopy(preproject)
+    bound.update(project_intake_proposal(preproject))
+    assert (
+        bound["baseline_pending_case_detail"]["proposal_hash"]
+        == bound["terminal_draft"]["proposal_hash"]
+    )
+    proposal_tampered = copy.deepcopy(bound)
+    proposal = proposal_tampered["terminal_draft"]
+    proposal["matrix_patch"]["fact_rows"][0]["asserted_value"] = "undamaged"
+    proposal["proposal_hash"] = canonical_sha256_omitting(proposal, "proposal_hash")
+    proposal_envelope = proposal_tampered["baseline_pending_case_detail"]
+    proposal_envelope["proposal_hash"] = proposal["proposal_hash"]
+    proposal_envelope["envelope_hash"] = canonical_sha256_omitting(
+        proposal_envelope,
+        "envelope_hash",
+    )
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_BASELINE_CONTEXT_PENDING_MATRIX_MISMATCH",
+    ):
+        checkpoint_terminal(proposal_tampered)
+
+    tampered = copy.deepcopy(preproject)
+    tampered_patch = tampered["terminal_draft"]["matrix_patch"]
+    tampered_patch["fact_rows"][0]["asserted_value"] = "undamaged"
+    tampered_envelope = tampered["baseline_pending_case_detail"]
+    tampered_envelope["normalized_matrix_patch"] = copy.deepcopy(tampered_patch)
+    tampered_envelope["matrix_patch_hash"] = canonical_sha256(tampered_patch)
+    tampered_envelope["terminal_draft_hash"] = canonical_sha256(tampered["terminal_draft"])
+    tampered_envelope["envelope_hash"] = canonical_sha256_omitting(
+        tampered_envelope,
+        "envelope_hash",
+    )
+
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_BASELINE_CONTEXT_RECEIPT_OUTPUT_MISMATCH",
+    ):
+        project_intake_proposal(tampered)
+
+
+@pytest.mark.parametrize(
+    "unsafe_text",
+    [
+        "Upload a screenshot of the chat.",
+        "上传聊天截图。",
+    ],
+)
+def test_matrix_patch_rejects_nested_evidence_collection_instruction_at_contract_boundary(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+    unsafe_text: str,
+) -> None:
+    state = _event_state(bindings, version_pins, snapshot, event)
+    matrix_patch = {
+        "schema_version": "unilateral_case_matrix.draft.v1",
+        "fact_rows": [
+            {
+                "fact_key": "NEW_DAMAGE",
+                "category": "PRODUCT_STATE",
+                "fact_target": "Whether the order arrived damaged.",
+                "materiality": "CORE",
+                # This is an exact negative: a factual reference to a screenshot
+                # is allowed; an instruction to collect one is not.
+                "position_summary": "The user says a chat screenshot exists.",
+                "asserted_value": "damaged",
+                "source_scope": "CURRENT_SOURCE",
+            }
+        ],
+        "summary_source_fact_keys": ["NEW_DAMAGE"],
+    }
+    validate_matrix_patch(state, matrix_patch)
+
+    unsafe_patch = copy.deepcopy(matrix_patch)
+    unsafe_patch["fact_rows"][0]["position_summary"] = unsafe_text
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_MATRIX_EVIDENCE_REQUEST_FORBIDDEN",
+    ):
+        validate_matrix_patch(state, unsafe_patch)
+
+
+def test_post_normalizer_capsule_and_next_prompt_exclude_unsafe_first_summary(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+) -> None:
+    unsafe_summary = "Please upload a photo as evidence."
+    first_document = _draft(
+        dossier_patch={"case_story": {"one_sentence_summary": unsafe_summary}},
+        matrix_patch={
+            "schema_version": "unilateral_case_matrix.draft.v1",
+            "fact_rows": [
+                {
+                    "fact_key": "NEW_DAMAGE",
+                    "category": "PRODUCT_STATE",
+                    "fact_target": "Whether the order arrived damaged.",
+                    "materiality": "CORE",
+                    "position_summary": "The user reports visible damage.",
+                    "asserted_value": "damaged",
+                    "source_scope": "CURRENT_SOURCE",
+                }
+            ],
+            "summary_source_fact_keys": ["NEW_DAMAGE"],
+        },
+        readiness="INCOMPLETE",
+        missing_fields=["delivery_time"],
+        recommendation="NEED_MORE_INFO",
+    )
+    first_transport = IntakeTransport(first_document)
+    first_graph = compile_intake_v2_graph(
+        intake_lcel=build_intake_model_node(
+            transport=first_transport,
+            profile=_profile(),
+            policy=_policy(),
+        ).runnable
+    )
+    state = new_intake_graph_state(bindings=bindings, version_pins=version_pins)
+    state["bindings"]["command"].update(
+        command_id="COMMAND_P4_USER_2",
+        logical_run_id="RUN_P4_USER_2",
+        attempt_id="ATTEMPT_P4_USER_2_1",
+    )
+    first_result = first_graph.invoke(state, context=_bootstrap_event_context(snapshot, event))
+
+    first_context = first_result["baseline_previous_case_detail"]
+    assert first_result["dossier_draft"]["case_story"]["one_sentence_summary"] == (
+        _SAFE_INTAKE_CASE_SUMMARY
+    )
+    assert unsafe_summary not in json.dumps(first_context, ensure_ascii=False)
+    assert unsafe_summary not in json.dumps(first_context["formal_matrix"], ensure_ascii=False)
+
+    prior_row = first_context["formal_matrix"]["fact_rows"][0]
+    prior_position = prior_row["positions"]["USER"]
+    prior_delta = {
+        "fact_key": prior_row["fact_id"],
+        "category": prior_row["category"],
+        "fact_target": prior_row["fact_target"],
+        "materiality": prior_row["materiality"],
+        "stance": prior_position["stance"],
+        "position_summary": prior_position["position_summary"],
+        "asserted_value": prior_position["asserted_value"],
+        "source_scope": "PREVIOUS_MATRIX",
+    }
+    next_event = copy.deepcopy(event)
+    next_event.update(
+        event_id="EVENT_P4_USER_3",
+        message_id="MESSAGE_P4_USER_3",
+        sequence_no=first_result["last_event_sequence"] + 1,
+        domain_revision=event["domain_revision"] + 1,
+        text="The user confirms the delivery date.",
+        source_refs=["MESSAGE_P4_USER_3"],
+        occurred_at="2026-07-20T08:03:00Z",
+    )
+    next_event["event_hash"] = canonical_sha256_omitting(next_event, "event_hash")
+    second_document = _draft(
+        dossier_patch={"case_story": {"one_sentence_summary": "The damage report remains open."}},
+        matrix_patch={
+            "schema_version": "case_fact_matrix.delta.v2",
+            "fact_rows": [
+                prior_delta,
+                {
+                    "fact_key": "NEW_DELIVERY_DATE",
+                    "category": "TIME",
+                    "fact_target": "The reported delivery date.",
+                    "materiality": "SUPPORTING",
+                    "stance": "CONFIRM",
+                    "position_summary": "The user confirms the delivery date.",
+                    "asserted_value": "confirmed",
+                    "source_scope": "CURRENT_SOURCE",
+                },
+            ],
+            "summary_source_fact_keys": [prior_row["fact_id"], "NEW_DELIVERY_DATE"],
+        },
+        readiness="INCOMPLETE",
+        missing_fields=["delivery_time"],
+        recommendation="NEED_MORE_INFO",
+    )
+    second_transport = IntakeTransport(second_document)
+    first_result["bindings"]["command"].update(
+        command_id="COMMAND_P4_USER_3",
+        logical_run_id="RUN_P4_USER_3",
+        attempt_id="ATTEMPT_P4_USER_3_1",
+    )
+    second_context = _agent_context(invocation_id="ATTEMPT_P4_USER_3_1")
+    second_graph = compile_intake_v2_graph(
+        intake_lcel=build_intake_model_node(
+            transport=second_transport,
+            profile=_profile(),
+            policy=_policy().model_copy(
+                update={
+                    "invocation_id": "ATTEMPT_P4_USER_3_1",
+                    "trusted_system_sha256": system_prompt_sha256(
+                        _trusted_system_prompt(second_context)
+                    ),
+                }
+            ),
+            agent_context=second_context,
+        ).runnable
+    )
+    second_result = second_graph.invoke(
+        first_result, context=IntakeTurnContext("EVENT", next_event)
+    )
+
+    assert unsafe_summary not in str(second_transport.requests[0].messages[1].content)
+    second_context = second_result["baseline_previous_case_detail"]
+    assert unsafe_summary not in json.dumps(second_context, ensure_ascii=False)
+    assert unsafe_summary not in json.dumps(second_context["formal_matrix"], ensure_ascii=False)
+
+
+def test_imported_m0_allows_verified_respondent_successor_capsule_without_public_matrix(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+) -> None:
+    respondent_bindings = copy.deepcopy(bindings)
+    respondent_bindings["private"]["audience"] = "MERCHANT"
+    imported_snapshot = copy.deepcopy(snapshot)
+    imported_snapshot["own_messages"][0]["audience"] = "MERCHANT"
+    imported_m0 = _prior_formal_matrix(
+        case_id=imported_snapshot["case_id"],
+        agent_context=_agent_context(
+            case_id=imported_snapshot["case_id"],
+            agent_session_id=imported_snapshot["agent_session_id"],
+        ),
+    )
+    # Imported M0 is an ingress authority, not a legacy bare checkpoint: it
+    # must carry the current evidence-coverage contract before its self-hash is
+    # accepted as a reducer anchor.
+    for row in imported_m0["fact_rows"]:
+        row["evidence_coverage_status"] = "PENDING_EVIDENCE_REVIEW"
+    imported_m0["content_hash"] = canonical_sha256_omitting(imported_m0, "content_hash")
+    imported_snapshot["current_dossier"] = {
+        "schema_version": "intake_case_detail.v1",
+        "case_story": {"one_sentence_summary": "The order allegedly arrived damaged."},
+        "case_fact_matrix": imported_m0,
+    }
+    imported_snapshot["snapshot_hash"] = canonical_sha256_omitting(
+        imported_snapshot,
+        "snapshot_hash",
+    )
+    respondent_event = copy.deepcopy(event)
+    respondent_event.update(
+        audience="MERCHANT",
+        text="We reject the requested refund because the item was undamaged at dispatch.",
+    )
+    respondent_event["event_hash"] = canonical_sha256_omitting(
+        respondent_event,
+        "event_hash",
+    )
+    merchant_context = _agent_context(
+        role="MERCHANT",
+        case_id=imported_snapshot["case_id"],
+        agent_session_id=imported_snapshot["agent_session_id"],
+        invocation_id="ATTEMPT_P4_MERCHANT_2_1",
+    )
+    merchant_policy = _policy().model_copy(
+        update={
+            "invocation_id": "ATTEMPT_P4_MERCHANT_2_1",
+            "trusted_system_sha256": system_prompt_sha256(_trusted_system_prompt(merchant_context)),
+        }
+    )
+    imported_row = imported_m0["fact_rows"][0]
+    respondent_delta = {
+        "schema_version": "case_fact_matrix.delta.v2",
+        "fact_rows": [
+            {
+                "fact_key": imported_row["fact_id"],
+                "category": imported_row["category"],
+                "fact_target": imported_row["fact_target"],
+                "materiality": imported_row["materiality"],
+                "stance": "DENY",
+                "position_summary": "The merchant denies the reported damage.",
+                "asserted_value": "undamaged at dispatch",
+                "source_scope": "CURRENT_SOURCE",
+                "conflict_summary": "The parties disagree about the item condition.",
+            }
+        ],
+        "summary_source_fact_keys": [imported_row["fact_id"]],
+        "respondent_claim": {
+            "attitude": "DISAGREE",
+            "position_summary": "The merchant disputes the refund request.",
+        },
+    }
+    first_document = _draft(
+        dossier_patch={
+            "case_story": {"one_sentence_summary": "The merchant disputes the reported damage."},
+            "respondent_attitude": {
+                "attitude": "DISAGREE",
+                "position": "We reject the requested refund because the item was undamaged at dispatch.",
+            },
+        },
+        matrix_patch=respondent_delta,
+        readiness="INCOMPLETE",
+        missing_fields=["delivery_time"],
+        recommendation="NEED_MORE_INFO",
+    )
+    first_transport = IntakeTransport(first_document)
+    first_graph = compile_intake_v2_graph(
+        intake_lcel=build_intake_model_node(
+            transport=first_transport,
+            profile=_profile(),
+            policy=merchant_policy,
+            agent_context=merchant_context,
+        ).runnable
+    )
+    state = new_intake_graph_state(bindings=respondent_bindings, version_pins=version_pins)
+    state["bindings"]["command"].update(
+        command_id="COMMAND_P4_MERCHANT_2",
+        logical_run_id="RUN_P4_MERCHANT_2",
+        attempt_id="ATTEMPT_P4_MERCHANT_2_1",
+    )
+    first_result = first_graph.invoke(
+        state,
+        context=_bootstrap_event_context(imported_snapshot, respondent_event),
+    )
+
+    first_context = first_result["baseline_previous_case_detail"]
+    active_m1 = first_context["formal_matrix"]
+    assert imported_row["fact_id"] in str(first_transport.requests[0].messages[1].content)
+    assert (
+        first_result["node_results"][MATRIX_AUTHORITY_RECORD_KEY]["formal_matrix_hash"]
+        == (imported_m0["content_hash"])
+    )
+    assert first_context["authority_anchor_hash"] == imported_m0["content_hash"]
+    assert first_context["formal_matrix_hash"] != active_m1["content_hash"]
+    assert active_m1["content_hash"] != imported_m0["content_hash"]
+    assert active_m1["parent_ref"]["content_hash"] == imported_m0["content_hash"]
+    assert "case_fact_matrix" not in first_result["dossier_draft"]
+    assert first_context["snapshot"]["case_fact_matrix"] == active_m1
+
+    # The active M1 is not equal to the immutable M0 ingress record, so this
+    # next respondent turn exercises the narrowly verified successor path.
+    next_event = copy.deepcopy(respondent_event)
+    next_event.update(
+        event_id="EVENT_P4_MERCHANT_3",
+        message_id="MESSAGE_P4_MERCHANT_3",
+        sequence_no=first_result["last_event_sequence"] + 1,
+        domain_revision=respondent_event["domain_revision"] + 1,
+        text="We reject the requested refund and maintain the dispatch condition position.",
+        source_refs=["MESSAGE_P4_MERCHANT_3"],
+        occurred_at="2026-07-20T08:03:00Z",
+    )
+    next_event["event_hash"] = canonical_sha256_omitting(next_event, "event_hash")
+    m1_row = active_m1["fact_rows"][0]
+    m1_position = m1_row["positions"]["MERCHANT"]
+    second_delta = copy.deepcopy(respondent_delta)
+    second_delta["fact_rows"] = [
+        {
+            "fact_key": m1_row["fact_id"],
+            "category": m1_row["category"],
+            "fact_target": m1_row["fact_target"],
+            "materiality": m1_row["materiality"],
+            "stance": m1_position["stance"],
+            "position_summary": m1_position["position_summary"],
+            "asserted_value": m1_position["asserted_value"],
+            "source_scope": "PREVIOUS_MATRIX",
+            "conflict_summary": m1_row["party_alignment"]["conflict_summary"],
+        }
+    ]
+    second_delta["summary_source_fact_keys"] = [m1_row["fact_id"]]
+    second_document = _draft(
+        dossier_patch={
+            "case_story": {"one_sentence_summary": "The merchant maintains its position."},
+            "respondent_attitude": {
+                "attitude": "DISAGREE",
+                "position": "We reject the requested refund and maintain the dispatch condition position.",
+            },
+        },
+        matrix_patch=second_delta,
+        readiness="INCOMPLETE",
+        missing_fields=["delivery_time"],
+        recommendation="NEED_MORE_INFO",
+    )
+    second_transport = IntakeTransport(second_document)
+    first_result["bindings"]["command"].update(
+        command_id="COMMAND_P4_MERCHANT_3",
+        logical_run_id="RUN_P4_MERCHANT_3",
+        attempt_id="ATTEMPT_P4_MERCHANT_3_1",
+    )
+    merchant_second_context = _agent_context(
+        role="MERCHANT",
+        case_id=imported_snapshot["case_id"],
+        agent_session_id=imported_snapshot["agent_session_id"],
+        invocation_id="ATTEMPT_P4_MERCHANT_3_1",
+    )
+    second_graph = compile_intake_v2_graph(
+        intake_lcel=build_intake_model_node(
+            transport=second_transport,
+            profile=_profile(),
+            policy=merchant_policy.model_copy(
+                update={
+                    "invocation_id": "ATTEMPT_P4_MERCHANT_3_1",
+                    "trusted_system_sha256": system_prompt_sha256(
+                        _trusted_system_prompt(merchant_second_context)
+                    ),
+                }
+            ),
+            agent_context=merchant_second_context,
+        ).runnable
+    )
+    second_result = second_graph.invoke(
+        first_result,
+        context=IntakeTurnContext("EVENT", next_event),
+    )
+
+    second_context = second_result["baseline_previous_case_detail"]
+    assert second_transport.generate_calls == 1
+    assert second_context["authority_anchor_hash"] == imported_m0["content_hash"]
+    assert second_context["formal_matrix"]["content_hash"] != imported_m0["content_hash"]
+    assert "case_fact_matrix" not in second_result["dossier_draft"]
+
+    for field, value, error_code in (
+        ("authority_anchor_hash", "f" * 64, "INTAKE_BASELINE_CONTEXT_AUTHORITY_ANCHOR_INVALID"),
+        ("formal_matrix_hash", "e" * 64, "INTAKE_BASELINE_CONTEXT_FORMAL_MATRIX_HASH_INVALID"),
+    ):
+        tampered = copy.deepcopy(first_result)
+        tampered["baseline_previous_case_detail"][field] = value
+        tampered["baseline_previous_case_detail"]["envelope_hash"] = canonical_sha256_omitting(
+            tampered["baseline_previous_case_detail"],
+            "envelope_hash",
+        )
+        with pytest.raises(IntakeGraphContractError, match=error_code):
+            validate_matrix_patch(tampered, second_delta)
+
+
+def test_imported_m0_authority_input_coherent_rehash_tamper_fails_checkpoint(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+) -> None:
+    respondent_bindings = copy.deepcopy(bindings)
+    respondent_bindings["private"]["audience"] = "MERCHANT"
+    imported = _snapshot_with_imported_formal_m0(snapshot)
+    imported["own_messages"][0]["audience"] = "MERCHANT"
+    imported["snapshot_hash"] = canonical_sha256_omitting(imported, "snapshot_hash")
+    imported_m0 = imported["current_dossier"]["case_fact_matrix"]
+    respondent_event = copy.deepcopy(event)
+    respondent_event.update(
+        audience="MERCHANT",
+        text="We reject the requested refund because the item was undamaged at dispatch.",
+    )
+    respondent_event["event_hash"] = canonical_sha256_omitting(
+        respondent_event,
+        "event_hash",
+    )
+    merchant_context = _agent_context(
+        role="MERCHANT",
+        case_id=imported["case_id"],
+        agent_session_id=imported["agent_session_id"],
+        invocation_id="ATTEMPT_P4_MERCHANT_2_1",
+    )
+    merchant_policy = _policy().model_copy(
+        update={
+            "invocation_id": "ATTEMPT_P4_MERCHANT_2_1",
+            "trusted_system_sha256": system_prompt_sha256(_trusted_system_prompt(merchant_context)),
+        }
+    )
+    imported_row = imported_m0["fact_rows"][0]
+    respondent_delta = {
+        "schema_version": "case_fact_matrix.delta.v2",
+        "fact_rows": [
+            {
+                "fact_key": imported_row["fact_id"],
+                "category": imported_row["category"],
+                "fact_target": imported_row["fact_target"],
+                "materiality": imported_row["materiality"],
+                "stance": "DENY",
+                "position_summary": "The merchant denies the reported damage.",
+                "asserted_value": "undamaged at dispatch",
+                "source_scope": "CURRENT_SOURCE",
+                "conflict_summary": "The parties disagree about the item condition.",
+            }
+        ],
+        "summary_source_fact_keys": [imported_row["fact_id"]],
+        "respondent_claim": {
+            "attitude": "DISAGREE",
+            "position_summary": "The merchant disputes the refund request.",
+        },
+    }
+    document = _draft(
+        dossier_patch={
+            "case_story": {"one_sentence_summary": "The merchant disputes the reported damage."},
+            "respondent_attitude": {
+                "attitude": "DISAGREE",
+                "position": respondent_event["text"],
+            },
+        },
+        matrix_patch=respondent_delta,
+        readiness="INCOMPLETE",
+        missing_fields=["delivery_time"],
+        recommendation="NEED_MORE_INFO",
+    )
+    graph = compile_intake_v2_graph(
+        intake_lcel=build_intake_model_node(
+            transport=IntakeTransport(document),
+            profile=_profile(),
+            policy=merchant_policy,
+            agent_context=merchant_context,
+        ).runnable
+    )
+    state = new_intake_graph_state(bindings=respondent_bindings, version_pins=version_pins)
+    state["bindings"]["command"].update(
+        command_id="COMMAND_P4_MERCHANT_2",
+        logical_run_id="RUN_P4_MERCHANT_2",
+        attempt_id="ATTEMPT_P4_MERCHANT_2_1",
+    )
+    projected = graph.invoke(
+        state,
+        context=_bootstrap_event_context(imported, respondent_event),
+        interrupt_before=["checkpoint_terminal"],
+    )
+
+    envelope = projected["baseline_pending_case_detail"]
+    assert envelope["authority_input_matrix"] == imported_m0
+    tampered = copy.deepcopy(projected)
+    tampered_envelope = tampered["baseline_pending_case_detail"]
+    authority_input = tampered_envelope["authority_input_matrix"]
+    authority_input["case_overview"]["neutral_summary"] = "Tampered imported M0 authority."
+    authority_input["content_hash"] = canonical_sha256_omitting(
+        authority_input,
+        "content_hash",
+    )
+    tampered_envelope["authority_input_content_hash"] = authority_input["content_hash"]
+    tampered_envelope["authority_input_matrix_hash"] = canonical_sha256(authority_input)
+    tampered_envelope["envelope_hash"] = canonical_sha256_omitting(
+        tampered_envelope,
+        "envelope_hash",
+    )
+
+    with pytest.raises(IntakeGraphContractError, match="INTAKE_MATRIX_PATCH_UNAUTHORIZED"):
+        checkpoint_terminal(tampered)
 
 
 def test_model_fact_key_normalization_preserves_authorized_stable_keys(
@@ -2458,8 +3486,7 @@ def _assert_accounting(patch: dict[str, Any]) -> None:
         "total_tokens": 13,
     }
     assert (
-        patch["execution_receipts"]["ATTEMPT_P4_USER_2_1"]["node_name"]
-        == BASELINE_INTAKE_NODE_NAME
+        patch["execution_receipts"]["ATTEMPT_P4_USER_2_1"]["node_name"] == BASELINE_INTAKE_NODE_NAME
     )
 
 
@@ -2874,9 +3901,7 @@ def test_baseline_parser_preserves_established_confidence_coercion(
         policy=_policy(),
     )
 
-    parsed = built.parser.invoke(
-        json.dumps(_baseline_document(_draft(confidence=confidence)))
-    )
+    parsed = built.parser.invoke(json.dumps(_baseline_document(_draft(confidence=confidence))))
 
     assert parsed.confidence == expected
     assert (

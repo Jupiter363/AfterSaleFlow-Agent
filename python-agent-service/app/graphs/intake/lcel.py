@@ -22,6 +22,7 @@ from langchain_core.runnables import (
 from typing_extensions import TypedDict
 
 from app.contracts.v1.codec import canonical_sha256, canonicalize
+from app.agents.dispute_intake_officer.case_fact_matrix import finalize_case_fact_matrix
 from app.graph_runtime.state_lens import StateLens
 from app.agents.dispute_intake_officer.schemas import IntakeCaseDetailLlmOutput
 from app.agents.dispute_intake_officer.skills.dossier.dossier_skill import (
@@ -32,6 +33,8 @@ from app.harness.prompt_composer import PromptComposer
 from app.graphs.intake.baseline import (
     BASELINE_INTAKE_NODE_NAME,
     adapt_intake_baseline_output,
+    build_intake_baseline_request,
+    intake_baseline_authorized_fact_ids,
     normalize_model_matrix_fact_key_payload,
     prepare_intake_baseline_invocation,
 )
@@ -42,9 +45,10 @@ from app.graphs.intake.contracts import (
     UnilateralCaseMatrixDraftV1,
 )
 from app.graphs.intake.errors import IntakeGraphContractError
-from app.graphs.intake.state import IntakeGraphStateV2
+from app.graphs.intake.state import IntakeGraphStateV2, merge_intake_dossier
 from app.graphs.intake.validators import (
     MATRIX_AUTHORITY_RECORD_KEY,
+    build_baseline_pending_case_detail,
     validate_cognition_patch,
     validate_dossier_transition,
     validate_matrix_patch,
@@ -57,9 +61,14 @@ from app.model_runtime.profiles import (
     system_prompt_sha256,
 )
 from app.model_runtime.transports import ModelTransport
+from app.schemas.case_fact_matrix import CaseFactMatrixDeltaV2 as FormalCaseFactMatrixDeltaV2
+from app.schemas.intake_case_matrix import (
+    UnilateralCaseMatrixDraftV1 as FormalUnilateralCaseMatrixDraftV1,
+)
 from app.harness.context_window import ContextWindowManager
 from app.harness.invocation_context import AgentInvocationContext
 from app.harness.prompt_composer import PromptRepository
+from app.llm import AgentOutputSchemaError
 from app.streaming import VISIBLE_FIELD_REGISTRY
 
 
@@ -192,6 +201,26 @@ _INTERNAL_OUTPUT_FIELDS = frozenset(
 class IntakePromptInput(TypedDict):
     system_prompt: str
     human_prompt: str
+
+
+class _OptionalBaselineContextStateLens(StateLens[IntakeGraphStateV2, IntakePromptInput]):
+    """Expose the private baseline context without breaking older checkpoints."""
+
+    def _select(self, state: IntakeGraphStateV2) -> IntakePromptInput:
+        if "baseline_previous_case_detail" in state and "result_json" in state:
+            return super()._select(state)
+        # StateLens deliberately fails closed for undeclared missing fields.  The
+        # context field is NotRequired for historical checkpoints, however, so
+        # provide a non-durable null sentinel only to this prompt projection.
+        # ``_previous_case_detail`` falls back to the legacy public dossier for
+        # that sentinel; it is never persisted or exposed in the prompt output.
+        scoped_state = dict(state)
+        scoped_state.setdefault("baseline_previous_case_detail", None)
+        # Historical/opening states legitimately predate a terminal proposal.
+        # Keep this prompt-only sentinel outside durable graph state; an actual
+        # envelope still requires a real, matching committed result on unwrap.
+        scoped_state.setdefault("result_json", None)
+        return super()._select(cast(IntakeGraphStateV2, scoped_state))
 
 
 _IntakeModelTestPhase = Literal["before_model", "after_model_before_checkpoint"]
@@ -731,12 +760,15 @@ class IntakeModelPreflightRunnable(Runnable[IntakeGraphStateV2, IntakeGraphState
         # to a participant event.
         if not (
             has_snapshot
-            and (
-                (route == "initialize" and not has_event)
-                or (route == "message" and has_event)
-            )
+            and ((route == "initialize" and not has_event) or (route == "message" and has_event))
         ):
             raise IntakeGraphContractError("INTAKE_LCEL_ROUTE_INVALID")
+        # An imported formal M0 can authorize only an actual participant room
+        # statement.  The SNAPSHOT and BOOTSTRAP INITIAL_FORM openings have no
+        # current HUMAN message, so fail before the lens/prompt/model boundary
+        # rather than silently deriving a successor from form-only context.
+        if _opening_imported_formal_matrix_without_current_party_message(state):
+            raise IntakeGraphContractError("INTAKE_BASELINE_OPENING_FORMAL_MATRIX_UNSUPPORTED")
         pins = state["version_pins"]
         expected = {
             "model_profile_id": self._profile.profile_id,
@@ -763,6 +795,26 @@ class IntakeModelPreflightRunnable(Runnable[IntakeGraphStateV2, IntakeGraphState
                 },
             )
         return state
+
+
+def _opening_imported_formal_matrix_without_current_party_message(
+    state: Mapping[str, Any],
+) -> bool:
+    """Whether this form-only opening carries an imported formal M0 authority."""
+
+    dossier = state.get("dossier_draft")
+    if not isinstance(dossier, Mapping) or not isinstance(dossier.get("case_fact_matrix"), Mapping):
+        return False
+    messages = state.get("messages")
+    if not isinstance(messages, Mapping):
+        return False
+    event_hash = state.get("last_event_hash")
+    return not any(
+        isinstance(message, Mapping)
+        and message.get("role") == "HUMAN"
+        and message.get("source_hash") == event_hash
+        for message in messages.values()
+    )
 
 
 class IntakeGuardrailRunnable(Runnable[Mapping[str, Any], Mapping[str, Any]]):
@@ -874,7 +926,14 @@ class IntakePatchProjectorRunnable(Runnable[Mapping[str, Any], dict[str, Any]]):
         )
 
     def _project(self, value: Mapping[str, Any]) -> dict[str, Any]:
-        state, message, draft = _generation_parts(
+        (
+            state,
+            message,
+            draft,
+            baseline_formal_matrix,
+            materialized_public_dossier,
+            matrix_derivation_request_base,
+        ) = _generation_parts_with_baseline_context(
             value,
             agent_context=self._agent_context,
         )
@@ -883,16 +942,27 @@ class IntakePatchProjectorRunnable(Runnable[Mapping[str, Any], dict[str, Any]]):
             exclude_none=True,
             exclude_unset=True,
         )
+        output_hash = canonical_sha256(draft_json)
+        baseline_pending_case_detail = build_baseline_pending_case_detail(
+            state,
+            terminal_draft=draft_json,
+            formal_matrix=baseline_formal_matrix,
+            public_dossier=materialized_public_dossier,
+            matrix_derivation_request_base=matrix_derivation_request_base,
+            execution_receipt_invocation_id=self._policy.invocation_id,
+            execution_receipt_node_name=self._policy.node_name,
+            execution_receipt_output_hash=output_hash,
+        )
         usage = _validated_model_metadata(
             message,
             profile=self._profile,
             policy=self._policy,
         )
-        output_hash = canonical_sha256(draft_json)
         response_message_id = _intake_response_message_id(state, output_hash)
         patch = {
             "cognitive_revision": state["cognitive_revision"] + 1,
             "terminal_draft": draft_json,
+            "baseline_pending_case_detail": baseline_pending_case_detail,
             "messages": {
                 response_message_id: {
                     "message_id": response_message_id,
@@ -912,7 +982,11 @@ class IntakePatchProjectorRunnable(Runnable[Mapping[str, Any], dict[str, Any]]):
             },
             "usage_by_invocation": {self._policy.invocation_id: usage},
         }
-        return validate_cognition_patch(state, patch)
+        return validate_cognition_patch(
+            state,
+            patch,
+            require_baseline_pending_context=True,
+        )
 
 
 def _intake_response_message_id(
@@ -921,9 +995,7 @@ def _intake_response_message_id(
 ) -> str:
     """Return a retry-stable ID that cannot collide across distinct turns."""
 
-    source_turn_hash = state.get("last_event_hash") or state.get(
-        "initial_snapshot_hash"
-    )
+    source_turn_hash = state.get("last_event_hash") or state.get("initial_snapshot_hash")
     if (
         not isinstance(source_turn_hash, str)
         or not _SHA256.fullmatch(source_turn_hash)
@@ -1215,7 +1287,7 @@ def build_intake_model_node(
             trusted_system_prompt=trusted_system_prompt,
         )
 
-    lens: StateLens[IntakeGraphStateV2, IntakePromptInput] = StateLens(
+    lens: StateLens[IntakeGraphStateV2, IntakePromptInput] = _OptionalBaselineContextStateLens(
         name="intake_lcel.state_lens",
         source_fields=(
             "bindings",
@@ -1223,10 +1295,16 @@ def build_intake_model_node(
             "messages",
             "memory_summary",
             "dossier_draft",
+            "baseline_previous_case_detail",
             "initial_snapshot_ref",
             "initial_snapshot_hash",
+            "initial_domain_revision",
             "last_event_ref",
             "last_event_hash",
+            "last_event_sequence",
+            "node_results",
+            "execution_receipts",
+            "result_json",
         ),
         selector=select_baseline_prompt,
         output_type=IntakePromptInput,
@@ -1328,6 +1406,77 @@ def _generation_parts(
     *,
     agent_context: AgentInvocationContext,
 ) -> tuple[IntakeGraphStateV2, AIMessage, IntakeCognitionDraft]:
+    state, message, _, draft = _adapt_and_normalize_generation_parts(
+        value,
+        agent_context=agent_context,
+    )
+    return state, message, draft
+
+
+def _generation_parts_with_baseline_context(
+    value: Mapping[str, Any],
+    *,
+    agent_context: AgentInvocationContext,
+) -> tuple[
+    IntakeGraphStateV2,
+    AIMessage,
+    IntakeCognitionDraft,
+    dict[str, Any],
+    dict[str, Any],
+    dict[str, Any],
+]:
+    """Produce the normalized draft, its public materialization, and formal matrix."""
+
+    typed_state, message, adapted, normalized = _adapt_and_normalize_generation_parts(
+        value,
+        agent_context=agent_context,
+    )
+    if normalized.matrix_patch != adapted.matrix_patch:
+        # The baseline adapter has already normalized model fact keys before
+        # finalizing the retained formal matrix.  A second, divergent Target
+        # rewrite would sever the terminal draft from that matrix provenance.
+        raise IntakeGraphContractError("INTAKE_BASELINE_MATRIX_NORMALIZATION_DIVERGENCE")
+    # Formal matrix finalization accepts only the same already-governed Target
+    # patch that the cognition/proposal contract will later persist.
+    validate_matrix_patch(
+        typed_state,
+        (
+            normalized.matrix_patch.model_dump(mode="json", exclude_none=True)
+            if normalized.matrix_patch is not None
+            else None
+        ),
+    )
+    (
+        baseline_formal_matrix,
+        materialized_public_dossier,
+        matrix_derivation_request_base,
+    ) = _post_normalizer_formal_matrix(
+        typed_state,
+        agent_context=agent_context,
+        draft=normalized,
+    )
+    return (
+        typed_state,
+        message,
+        normalized,
+        baseline_formal_matrix,
+        materialized_public_dossier,
+        matrix_derivation_request_base,
+    )
+
+
+def _adapt_and_normalize_generation_parts(
+    value: Mapping[str, Any],
+    *,
+    agent_context: AgentInvocationContext,
+) -> tuple[
+    IntakeGraphStateV2,
+    AIMessage,
+    IntakeCognitionDraft,
+    IntakeCognitionDraft,
+]:
+    """Adapt a governed model result and apply Target-only normalizers."""
+
     state = value.get("state")
     generation = value.get("generation")
     if not isinstance(state, dict) or not isinstance(generation, Mapping):
@@ -1348,10 +1497,60 @@ def _generation_parts(
     normalized = _normalize_model_matrix_fact_keys(typed_state, adapted)
     normalized = _normalize_model_respondent_attitude(typed_state, normalized)
     normalized = _normalize_model_evidence_boundaries(normalized)
-    return typed_state, message, _normalize_model_dispute_core_state(
+    return (
         typed_state,
-        normalized,
+        message,
+        adapted,
+        _normalize_model_dispute_core_state(typed_state, normalized),
     )
+
+
+def _post_normalizer_formal_matrix(
+    state: IntakeGraphStateV2,
+    *,
+    agent_context: AgentInvocationContext,
+    draft: IntakeCognitionDraft,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Finalize formal authority from the same post-normalizer public dossier.
+
+    The initial baseline projection is needed to construct the Target draft, but
+    its full scroll snapshot can contain model text later removed by Target
+    boundary normalizers.  Recompute only the established case-fact matrix from
+    the normalized public dossier and normalized delta.  Do not re-run the
+    DossierSkill: that would reintroduce its earlier evidence follow-ups.
+    """
+
+    patch = draft.dossier_patch.model_dump(mode="json", exclude_none=True, exclude_unset=True)
+    materialized = merge_intake_dossier(state["dossier_draft"], patch)
+    matrix_patch = draft.matrix_patch
+    if matrix_patch is None:
+        delta = None
+    else:
+        matrix_payload = matrix_patch.model_dump(mode="json", exclude_none=True)
+        try:
+            if matrix_payload.get("schema_version") == "case_fact_matrix.delta.v2":
+                delta = FormalCaseFactMatrixDeltaV2.model_validate(matrix_payload)
+            elif matrix_payload.get("schema_version") == "unilateral_case_matrix.draft.v1":
+                delta = FormalUnilateralCaseMatrixDraftV1.model_validate(matrix_payload)
+            else:
+                raise IntakeGraphContractError("INTAKE_BASELINE_FORMAL_MATRIX_INVALID")
+        except ValueError as error:
+            raise IntakeGraphContractError("INTAKE_BASELINE_FORMAL_MATRIX_INVALID") from error
+    try:
+        request = build_intake_baseline_request(state, agent_context=agent_context)
+        matrix = finalize_case_fact_matrix(
+            request=request,
+            case_detail=deepcopy(materialized),
+            delta=delta,
+        )
+    except (AgentOutputSchemaError, ValueError) as error:
+        raise IntakeGraphContractError("INTAKE_BASELINE_FORMAL_MATRIX_INVALID") from error
+    request_base = request.model_dump(mode="json")
+    # The only retained previous authority is the separate, hash-bound M0/Mn
+    # input in the pending capsule.  Do not duplicate a full prior dossier in
+    # the derivation request base.
+    request_base["previous_case_detail"] = None
+    return matrix.model_dump(mode="json"), materialized, request_base
 
 
 def _normalize_model_respondent_attitude(
@@ -1912,10 +2111,11 @@ def _normalize_model_matrix_fact_keys(
     A model has no authority to mint a stable ``FACT_*`` identifier.  Providers
     nevertheless sometimes use that prefix for a genuinely new unilateral fact,
     even when the prompt requires ``NEW_*``.  Preserve every FACT key that is
-    already visible in the authorized dossier, but deterministically rewrite an
-    unknown one to the proposal-local namespace before the normal matrix policy
-    validates fingerprints, sources, membership, and summary references.  Any
-    ambiguous collision remains a hard contract failure.
+    already visible in the authorized semantic baseline context, but
+    deterministically rewrite an unknown one to the proposal-local namespace
+    before the normal matrix policy validates fingerprints, sources, membership,
+    and summary references.  Any ambiguous collision remains a hard contract
+    failure.
     """
 
     matrix_patch = draft.matrix_patch
@@ -1928,7 +2128,7 @@ def _normalize_model_matrix_fact_keys(
     matrix_payload = matrix_patch.model_dump(mode="json", exclude_none=True)
     normalized_patch = normalize_model_matrix_fact_key_payload(
         matrix_payload,
-        authorized_fact_ids=_fact_ids(state.get("dossier_draft", {})),
+        authorized_fact_ids=intake_baseline_authorized_fact_ids(state),
     )
     if normalized_patch == matrix_payload:
         return draft
@@ -1981,7 +2181,7 @@ def _validate_business_output(
     output = draft.model_dump(mode="json", exclude_none=True, exclude_unset=True)
     _validate_no_evidence_collection(draft, output)
     catalog = _source_catalog(state)
-    existing_fact_ids = _fact_ids(state["dossier_draft"])
+    existing_fact_ids = intake_baseline_authorized_fact_ids(state)
     _validate_output_tree(
         output,
         audience=state["bindings"]["private"]["audience"],
@@ -1993,8 +2193,9 @@ def _validate_business_output(
     patch = output.get("dossier_patch", {})
     if not isinstance(patch, dict):
         raise IntakeGraphContractError("INTAKE_LCEL_DOSSIER_PATCH_INVALID")
-    merged = _merge_object(state["dossier_draft"], patch)
-    validate_dossier_transition(state["dossier_draft"], merged)
+    merged = merge_intake_dossier(state["dossier_draft"], patch)
+    previous_public = merge_intake_dossier(state["dossier_draft"], {})
+    validate_dossier_transition(previous_public, merged)
     validate_dossier_transition({}, patch)
 
     readiness = draft.readiness
@@ -2190,18 +2391,6 @@ def _fact_ids(value: Any) -> frozenset[str]:
 
     visit(value)
     return frozenset(ids)
-
-
-def _merge_object(left: Mapping[str, Any], right: Mapping[str, Any]) -> dict[str, Any]:
-    merged = deepcopy(dict(left))
-    for key in sorted(right):
-        incoming = right[key]
-        existing = merged.get(key)
-        if isinstance(existing, dict) and isinstance(incoming, Mapping):
-            merged[key] = _merge_object(existing, incoming)
-        else:
-            merged[key] = deepcopy(incoming)
-    return merged
 
 
 def _canonical_text(value: Any) -> str:

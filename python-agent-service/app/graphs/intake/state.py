@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Annotated, Literal, TypeAlias
+from typing import Annotated, Any, Literal, TypeAlias, cast
 
 from typing_extensions import NotRequired, TypedDict
 
@@ -22,6 +23,55 @@ from app.graphs.intake.errors import IntakeGraphContractError
 
 
 JsonObject: TypeAlias = dict[str, JsonValue]
+_PUBLIC_DOSSIER_FORMAL_MATRIX_FIELDS = frozenset({"case_fact_matrix", "unilateral_case_matrix"})
+
+
+def merge_intake_dossier(
+    left: Mapping[str, Any],
+    right: Mapping[str, Any],
+) -> JsonObject:
+    """Apply the durable Intake dossier merge semantics.
+
+    Object branches merge recursively while every non-object value (including
+    lists) replaces its predecessor.  A legacy/imported formal matrix remains
+    readable before the merge, but is always stripped from the resulting public
+    dossier; formal authority is retained only in the private capsule.  Both
+    the Target normalizer's formal projection and ``apply_dossier_patch`` use
+    this one implementation so a capsule can bind the exact public dossier
+    that will be committed.
+    """
+
+    return _merge_intake_dossier_objects(left, right, top_level=True)
+
+
+def _merge_intake_dossier_objects(
+    left: Mapping[str, Any],
+    right: Mapping[str, Any],
+    *,
+    top_level: bool,
+) -> JsonObject:
+    """Recursively merge a dossier branch without reapplying top-level policy."""
+
+    if not isinstance(left, Mapping) or not isinstance(right, Mapping):
+        raise IntakeGraphContractError("INTAKE_DOSSIER_PATCH_INVALID")
+    merged: dict[str, Any] = deepcopy(dict(left))
+    if top_level:
+        for field in _PUBLIC_DOSSIER_FORMAL_MATRIX_FIELDS:
+            merged.pop(field, None)
+    for key in sorted(right):
+        if top_level and key in _PUBLIC_DOSSIER_FORMAL_MATRIX_FIELDS:
+            raise IntakeGraphContractError("INTAKE_DOSSIER_PATCH_INVALID")
+        incoming = right[key]
+        existing = merged.get(key)
+        if isinstance(existing, Mapping) and isinstance(incoming, Mapping):
+            merged[key] = _merge_intake_dossier_objects(
+                existing,
+                incoming,
+                top_level=False,
+            )
+        else:
+            merged[key] = deepcopy(incoming)
+    return cast(JsonObject, merged)
 
 
 class IntakePrivateBindings(TypedDict):
@@ -129,6 +179,11 @@ class IntakeGraphStateV2(TypedDict):
     last_event_hash: NotRequired[str]
     last_event_sequence: NotRequired[int]
     route: NotRequired[Literal["initialize", "message", "replay"]]
+    # Private deterministic baseline context.  It intentionally remains outside
+    # the public dossier and terminal proposal, which do not carry formal matrix
+    # authority between turns.
+    baseline_previous_case_detail: NotRequired[JsonObject | None]
+    baseline_pending_case_detail: NotRequired[JsonObject | None]
     terminal_draft: NotRequired[JsonObject]
     result_json: NotRequired[JsonObject]
 

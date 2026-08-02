@@ -187,9 +187,7 @@ def test_participant_transcript_stays_complete_after_the_dialogue_window_rolls(
         state = graph.invoke(state, context=IntakeTurnContext("EVENT", current))
         expected.append((f"INTAKE_TURN_{sequence}", text))
 
-    transcript = json.loads(state["memory_summary"])[
-        "initiator_statement_transcript"
-    ]
+    transcript = json.loads(state["memory_summary"])["initiator_statement_transcript"]
     assert [(item["message_id"], item["text"]) for item in transcript] == expected
     assert {item["role"] for item in transcript} == {"USER"}
     assert snapshot["initial_case_facts"]["form_description"] not in {
@@ -588,18 +586,6 @@ def test_dossier_patch_cannot_bypass_the_dedicated_matrix_patch(
     snapshot,
     matrix_patch,
 ) -> None:
-    snapshot["current_dossier"]["case_fact_matrix"] = {
-        "fact_rows": [
-            {
-                "fact_id": "FACT_DAMAGE",
-                "category": "PRODUCT",
-                "fact_target": "The product arrived damaged.",
-            }
-        ],
-        "source_refs": ["MESSAGE_P4_USER_1"],
-    }
-    snapshot["snapshot_hash"] = canonical_sha256_omitting(snapshot, "snapshot_hash")
-
     def cognition(state, runtime):
         del runtime
         return {

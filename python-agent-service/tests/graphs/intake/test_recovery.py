@@ -62,6 +62,7 @@ def test_resume_from_pre_model_checkpoint_invokes_cognition_once(
     config = _config("intake-recovery-before-model")
     graph = _compiled_graph(saver, cognition)
     _initialize_thread(graph, config, bindings, version_pins, snapshot)
+    assert calls == 1
     context = IntakeTurnContext("EVENT", event)
 
     interrupted = graph.invoke(
@@ -71,14 +72,14 @@ def test_resume_from_pre_model_checkpoint_invokes_cognition_once(
         interrupt_before=["intake_lcel"],
     )
 
-    assert calls == 0
+    assert calls == 1
     assert interrupted["route"] == "message"
     assert graph.get_state(config).next == ("intake_lcel",)
 
     replacement = _compiled_graph(saver, cognition)
     recovered = replacement.invoke(None, config, context=context)
 
-    assert calls == 1
+    assert calls == 2
     assert replacement.get_state(config).next == ()
     assert recovered["result_json"]["cognitive_revision"] == 2
 
@@ -100,6 +101,7 @@ def test_replacement_graph_resumes_after_model_without_a_second_invocation(
     config = _config("intake-recovery-after-model")
     graph = _compiled_graph(saver, cognition)
     _initialize_thread(graph, config, bindings, version_pins, snapshot)
+    assert calls == 1
     context = IntakeTurnContext("EVENT", event)
     interrupted = graph.invoke(
         _next_command(bindings),
@@ -108,7 +110,7 @@ def test_replacement_graph_resumes_after_model_without_a_second_invocation(
         interrupt_after=["intake_lcel"],
     )
 
-    assert calls == 1
+    assert calls == 2
     assert interrupted["cognitive_revision"] == 2
     assert graph.get_state(config).next == ("apply_dossier_patch",)
 
@@ -119,7 +121,7 @@ def test_replacement_graph_resumes_after_model_without_a_second_invocation(
     replacement = _compiled_graph(saver, repeated_model_call_is_a_failure)
     recovered = replacement.invoke(None, config, context=context)
 
-    assert calls == 1
+    assert calls == 2
     assert replacement.get_state(config).next == ()
     assert recovered["result_json"]["proposal_hash"]
 
@@ -171,6 +173,7 @@ def test_terminal_checkpoint_is_reused_after_response_loss(
     config = _config("intake-recovery-after-terminal-checkpoint")
     graph = _compiled_graph(saver, cognition)
     _initialize_thread(graph, config, bindings, version_pins, snapshot)
+    assert calls == 1
     context = IntakeTurnContext("EVENT", event)
     committed = graph.invoke(
         _next_command(bindings),
@@ -179,7 +182,7 @@ def test_terminal_checkpoint_is_reused_after_response_loss(
         interrupt_after=["checkpoint_terminal"],
     )
 
-    assert calls == 1
+    assert calls == 2
     assert committed["result_json"] == committed["terminal_draft"]
 
     def repeated_model_call_is_a_failure(state, runtime):
@@ -189,6 +192,6 @@ def test_terminal_checkpoint_is_reused_after_response_loss(
     replacement = _compiled_graph(saver, repeated_model_call_is_a_failure)
     recovered = replacement.invoke(None, config, context=context)
 
-    assert calls == 1
+    assert calls == 2
     assert recovered["result_json"] == committed["result_json"]
     assert replacement.get_state(config).next == ()

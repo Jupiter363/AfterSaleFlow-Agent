@@ -34,6 +34,7 @@ from app.schemas.final_agents import IntakeTurnMessage
 
 
 BASELINE_INTAKE_NODE_NAME = "intake_turn_case_detail"
+_BASELINE_CONTEXT_ENVELOPE_SCHEMA = "intake-baseline-context.v1"
 
 _MEMORY_INITIAL_FACTS_KEY = "authorized_initial_case_facts"
 _MEMORY_TRANSCRIPT_KEY = "initiator_statement_transcript"
@@ -72,9 +73,7 @@ def build_intake_baseline_memory_summary(
 
     payload: dict[str, Any] = {
         _MEMORY_INITIAL_FACTS_KEY: facts.model_dump(mode="json", exclude_none=True),
-        _MEMORY_TRANSCRIPT_KEY: [
-            message.model_dump(mode="json") for message in transcript
-        ],
+        _MEMORY_TRANSCRIPT_KEY: [message.model_dump(mode="json") for message in transcript],
     }
     return canonicalize(payload).decode("utf-8")
 
@@ -143,9 +142,7 @@ def read_intake_baseline_memory_summary(
         ]
     except (TypeError, ValueError) as error:
         raise IntakeGraphContractError("INTAKE_BASELINE_TRANSCRIPT_INVALID") from error
-    if len({message.message_id for message in validated_transcript}) != len(
-        validated_transcript
-    ):
+    if len({message.message_id for message in validated_transcript}) != len(validated_transcript):
         raise IntakeGraphContractError("INTAKE_BASELINE_TRANSCRIPT_INVALID")
     return (
         validated_facts.model_dump(mode="json", exclude_none=True),
@@ -172,9 +169,7 @@ def build_intake_baseline_request(
     ):
         raise IntakeGraphContractError("INTAKE_BASELINE_AGENT_CONTEXT_MISMATCH")
 
-    initial_facts, transcript = read_intake_baseline_memory_summary(
-        state.get("memory_summary", "")
-    )
+    initial_facts, transcript = read_intake_baseline_memory_summary(state.get("memory_summary", ""))
     messages = _ordered_messages(state)
     current = _current_party_message(state, messages)
     if current is None:
@@ -251,15 +246,31 @@ def adapt_intake_baseline_output(
 ) -> IntakeCognitionDraft:
     """Map a validated baseline response to the durable Target proposal contract."""
 
+    draft, _ = adapt_intake_baseline_output_with_scroll_snapshot(
+        state,
+        agent_context=agent_context,
+        output=output,
+    )
+    return draft
+
+
+def adapt_intake_baseline_output_with_scroll_snapshot(
+    state: Mapping[str, Any],
+    *,
+    agent_context: AgentInvocationContext,
+    output: IntakeCaseDetailLlmOutput,
+) -> tuple[IntakeCognitionDraft, dict[str, Any]]:
+    """Adapt one response and retain its finalized semantic scroll snapshot.
+
+    The public Target proposal deliberately excludes the formal case matrix.
+    The returned snapshot is therefore for the graph's private baseline context
+    only; it is the exact post-reducer/finalizer ``scroll_snapshot``, never the
+    raw model matrix payload.
+    """
+
     output = _normalize_intake_baseline_matrix_fact_keys(state, output)
     request = build_intake_baseline_request(state, agent_context=agent_context)
-    source_text = (
-        request.current_user_message.text
-        if request.current_user_message is not None
-        else str(request.initial_case_facts.form_description or "")
-        if request.initial_case_facts is not None
-        else ""
-    )
+    source_text = _baseline_source_text(request)
     projected = finalize_intake_projected_output(
         project_intake_case_detail_output(
             request=request,
@@ -267,7 +278,18 @@ def adapt_intake_baseline_output(
             source_text=source_text,
         )
     )
-    detail = deepcopy(cast(dict[str, Any], projected["scroll_snapshot"]))
+    return _target_draft_and_scroll_snapshot(projected, output)
+
+
+def _target_draft_and_scroll_snapshot(
+    projected: Mapping[str, Any],
+    output: IntakeCaseDetailLlmOutput,
+) -> tuple[IntakeCognitionDraft, dict[str, Any]]:
+    raw_scroll_snapshot = projected.get("scroll_snapshot")
+    if not isinstance(raw_scroll_snapshot, Mapping):
+        raise IntakeGraphContractError("INTAKE_BASELINE_SCROLL_SNAPSHOT_INVALID")
+    scroll_snapshot = deepcopy(dict(raw_scroll_snapshot))
+    detail = deepcopy(scroll_snapshot)
     detail.pop("case_fact_matrix", None)
     detail.pop("unilateral_case_matrix", None)
     matrix = output.case_matrix_delta or output.unilateral_case_matrix
@@ -281,20 +303,29 @@ def adapt_intake_baseline_output(
         if recommendation == "NOT_ADMISSIBLE"
         else "INCOMPLETE"
     )
-    return IntakeCognitionDraft.model_validate(
-        {
-            "room_utterance": projected["room_utterance"],
-            "dossier_patch": detail,
-            "matrix_patch": matrix.model_dump(mode="json") if matrix is not None else None,
-            "readiness": readiness,
-            "missing_fields": _target_missing_field_identifiers(
-                projected["missing_fields"]
-            ),
-            "recommendation": recommendation,
-            "knowledge_answer_mode": projected["knowledge_answer_mode"],
-            "confidence": projected["confidence"],
-        }
+    return (
+        IntakeCognitionDraft.model_validate(
+            {
+                "room_utterance": projected["room_utterance"],
+                "dossier_patch": detail,
+                "matrix_patch": (matrix.model_dump(mode="json") if matrix is not None else None),
+                "readiness": readiness,
+                "missing_fields": _target_missing_field_identifiers(projected["missing_fields"]),
+                "recommendation": recommendation,
+                "knowledge_answer_mode": projected["knowledge_answer_mode"],
+                "confidence": projected["confidence"],
+            }
+        ),
+        scroll_snapshot,
     )
+
+
+def _baseline_source_text(request: IntakeTurnRequest) -> str:
+    if request.current_user_message is not None:
+        return request.current_user_message.text
+    if request.initial_case_facts is not None:
+        return str(request.initial_case_facts.form_description or "")
+    return ""
 
 
 def normalize_model_matrix_fact_key_payload(
@@ -375,7 +406,7 @@ def _normalize_intake_baseline_matrix_fact_keys(
     matrix_payload = matrix.model_dump(mode="json", exclude_none=True)
     normalized_matrix = normalize_model_matrix_fact_key_payload(
         matrix_payload,
-        authorized_fact_ids=_fact_ids(state.get("dossier_draft", {})),
+        authorized_fact_ids=intake_baseline_authorized_fact_ids(state),
     )
     if normalized_matrix == matrix_payload:
         return output
@@ -406,6 +437,12 @@ def _fact_ids(value: Any) -> frozenset[str]:
     return frozenset(ids)
 
 
+def intake_baseline_authorized_fact_ids(state: Mapping[str, Any]) -> frozenset[str]:
+    """Return stable fact IDs from the semantic previous-detail context."""
+
+    return _fact_ids(_previous_case_detail(state))
+
+
 def _target_missing_field_identifiers(missing_fields: Any) -> list[str]:
     """Project baseline display gaps onto unique Target identifiers.
 
@@ -423,9 +460,7 @@ def _target_missing_field_identifiers(missing_fields: Any) -> list[str]:
     # Reserve every source identifier before deriving display-label identifiers.
     # This also prevents a (rare, but valid) source identifier such as a hash
     # output from collapsing a distinct display label.
-    reserved = {
-        field for field in missing_fields if _TARGET_IDENTIFIER.fullmatch(field)
-    }
+    reserved = {field for field in missing_fields if _TARGET_IDENTIFIER.fullmatch(field)}
     used: set[str] = set()
     display_identifiers: dict[str, str] = {}
     adapted: list[str] = []
@@ -498,7 +533,21 @@ def _current_party_message(
 
 
 def _previous_case_detail(state: Mapping[str, Any]) -> dict[str, Any] | None:
-    raw = state.get("dossier_draft")
+    # New checkpoints retain the full deterministic scroll snapshot separately
+    # from the public dossier projection.  Older checkpoints have no such field,
+    # so preserve their deterministic dossier fallback for replay compatibility.
+    baseline_previous = state.get("baseline_previous_case_detail")
+    raw = baseline_previous if baseline_previous is not None else state.get("dossier_draft")
+    if isinstance(raw, Mapping) and raw.get("schema_version") == _BASELINE_CONTEXT_ENVELOPE_SCHEMA:
+        # Import lazily to avoid the validators module's baseline-memory import
+        # cycle.  Prompt construction is a trust boundary too: an internally
+        # self-consistent envelope may not be unwrapped for another private
+        # case/thread/audience or snapshot lineage.
+        from app.graphs.intake.validators import (
+            unwrap_verified_baseline_previous_case_detail,
+        )
+
+        raw = unwrap_verified_baseline_previous_case_detail(state)
     if raw is None:
         detail: dict[str, Any] = {}
     elif isinstance(raw, Mapping):
@@ -563,9 +612,11 @@ def _mapping(value: Any, code: str) -> Mapping[str, Any]:
 __all__ = [
     "BASELINE_INTAKE_NODE_NAME",
     "adapt_intake_baseline_output",
+    "adapt_intake_baseline_output_with_scroll_snapshot",
     "append_intake_baseline_statement",
     "build_intake_baseline_memory_summary",
     "build_intake_baseline_request",
+    "intake_baseline_authorized_fact_ids",
     "normalize_model_matrix_fact_key_payload",
     "prepare_intake_baseline_invocation",
     "read_intake_baseline_memory_summary",

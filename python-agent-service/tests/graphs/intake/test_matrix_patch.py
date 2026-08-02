@@ -10,6 +10,7 @@ from app.graphs.intake.contracts import IntakeCognitionDraft
 from app.graphs.intake.errors import IntakeGraphContractError
 from app.graphs.intake.graph import (
     _create_test_only_intake_cognition,
+    build_intake_v2_graph,
     compile_intake_v2_graph,
 )
 from app.graphs.intake.nodes import deterministic_message_fallback
@@ -187,9 +188,9 @@ def _formal_initiator_matrix(
 
 
 def _import_state(bindings, version_pins, snapshot):
-    graph = compile_intake_v2_graph(
+    graph = build_intake_v2_graph(
         intake_lcel=_create_test_only_intake_cognition(deterministic_message_fallback)
-    )
+    ).compile(interrupt_after=["import_snapshot_once_or_apply_event"])
     return graph.invoke(
         new_intake_graph_state(bindings=bindings, version_pins=version_pins),
         context=IntakeTurnContext("SNAPSHOT", snapshot),
@@ -241,10 +242,14 @@ def _initiator_opening_state(bindings, version_pins, snapshot, *, initiator_role
     selected_bindings = copy.deepcopy(bindings)
     selected_bindings["private"]["audience"] = initiator_role
     selected_snapshot = _initiator_snapshot(snapshot, initiator_role=initiator_role)
-    return selected_bindings, selected_snapshot, _import_state(
+    return (
         selected_bindings,
-        version_pins,
         selected_snapshot,
+        _import_state(
+            selected_bindings,
+            version_pins,
+            selected_snapshot,
+        ),
     )
 
 
@@ -272,10 +277,14 @@ def _initiator_followup_state(
         selected_snapshot,
         "snapshot_hash",
     )
-    return selected_bindings, selected_snapshot, _import_state(
+    return (
         selected_bindings,
-        version_pins,
         selected_snapshot,
+        _import_state(
+            selected_bindings,
+            version_pins,
+            selected_snapshot,
+        ),
     )
 
 
@@ -406,7 +415,13 @@ def test_incomplete_provider_acceptance_is_normalized_conservatively() -> None:
 
 
 @pytest.mark.parametrize(
-    ("readiness", "missing_fields", "recommendation", "expected_readiness", "expected_recommendation"),
+    (
+        "readiness",
+        "missing_fields",
+        "recommendation",
+        "expected_readiness",
+        "expected_recommendation",
+    ),
     [
         ("INCOMPLETE", [], "ACCEPTED", "INCOMPLETE", "NEED_MORE_INFO"),
         (
@@ -554,9 +569,7 @@ def test_initiator_opening_keeps_legacy_unilateral_compatibility(
             "INTAKE_MATRIX_PATCH_INVALID",
         ),
         (
-            lambda patch: patch["fact_rows"][0].update(
-                source_scope="PREVIOUS_AND_CURRENT_SOURCE"
-            ),
+            lambda patch: patch["fact_rows"][0].update(source_scope="PREVIOUS_AND_CURRENT_SOURCE"),
             "INTAKE_MATRIX_INITIATOR_OPENING_INVALID",
         ),
     ],
@@ -750,9 +763,7 @@ def test_initiator_followup_rejects_incomplete_or_rebound_prior_matrix_rows(
     _, _, state = _initiator_followup_state(bindings, version_pins, snapshot)
     patch = _initiator_followup_delta()
     mutation(patch)
-    patch["summary_source_fact_keys"] = [
-        row["fact_key"] for row in patch["fact_rows"]
-    ]
+    patch["summary_source_fact_keys"] = [row["fact_key"] for row in patch["fact_rows"]]
 
     with pytest.raises(IntakeGraphContractError, match=error_code):
         validate_matrix_patch(state, patch)
@@ -768,9 +779,9 @@ def test_initiator_followup_rejects_tampered_formal_matrix(
     selected_snapshot["current_dossier"]["case_fact_matrix"] = _formal_initiator_matrix(
         selected_snapshot["case_id"]
     )
-    selected_snapshot["current_dossier"]["case_fact_matrix"]["fact_rows"][0][
-        "fact_target"
-    ] = "A tampered fact target."
+    selected_snapshot["current_dossier"]["case_fact_matrix"]["fact_rows"][0]["fact_target"] = (
+        "A tampered fact target."
+    )
     selected_snapshot["snapshot_hash"] = canonical_sha256_omitting(
         selected_snapshot,
         "snapshot_hash",
@@ -790,7 +801,7 @@ def test_respondent_cannot_flip_authority_record_to_initiator(
     snapshot,
     initiator_role: str,
     respondent_role: str,
-    ) -> None:
+) -> None:
     selected_bindings = copy.deepcopy(bindings)
     selected_bindings["private"]["audience"] = respondent_role
     selected_snapshot = _initiator_snapshot(
@@ -1114,13 +1125,13 @@ def test_tampered_checkpoint_authority_fails_closed(
         validate_matrix_patch(state, _unilateral_patch())
 
 
-def test_respondent_delta_projects_and_replays_deterministically(
+def test_bare_respondent_m0_test_cognition_fails_closed_without_signed_capsule(
     bindings,
     version_pins,
     snapshot,
     event,
 ) -> None:
-    respondent_bindings, respondent_snapshot, _ = _respondent_state(
+    respondent_bindings, respondent_snapshot, initialized = _respondent_state(
         bindings,
         version_pins,
         snapshot,
@@ -1135,10 +1146,6 @@ def test_respondent_delta_projects_and_replays_deterministically(
         }
 
     graph = compile_intake_v2_graph(intake_lcel=_create_test_only_intake_cognition(cognition))
-    initialized = graph.invoke(
-        new_intake_graph_state(bindings=respondent_bindings, version_pins=version_pins),
-        context=IntakeTurnContext("SNAPSHOT", respondent_snapshot),
-    )
     initialized["bindings"]["command"].update(
         command_id="COMMAND_P4_MERCHANT_2",
         logical_run_id="RUN_P4_MERCHANT_2",
@@ -1150,15 +1157,12 @@ def test_respondent_delta_projects_and_replays_deterministically(
         respondent_event,
         "event_hash",
     )
-    first = graph.invoke(
-        initialized,
-        context=IntakeTurnContext("EVENT", respondent_event),
-    )
-    replay = graph.invoke(
-        first,
-        context=IntakeTurnContext("EVENT", copy.deepcopy(respondent_event)),
-    )
-
-    assert first["result_json"]["matrix_patch"] == patch
-    assert replay["result_json"] == first["result_json"]
-    assert replay["cognitive_revision"] == first["cognitive_revision"]
+    # The imported M0 is available to the event-level test cognition only at
+    # ingress.  Applying its public dossier strips formal authority, and a
+    # test-only cognition node cannot mint the signed baseline capsule needed
+    # to carry that authority through projection.
+    with pytest.raises(IntakeGraphContractError, match="INTAKE_MATRIX_PATCH_UNAUTHORIZED"):
+        graph.invoke(
+            initialized,
+            context=IntakeTurnContext("EVENT", respondent_event),
+        )
