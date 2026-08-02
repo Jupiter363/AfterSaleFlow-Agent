@@ -81,6 +81,17 @@ class IntakeInitiatorMatrixFreezerTest {
     }
 
     @Test
+    void acceptsBaselineUnknownInitiatorStanceWithANullAssertedValue() {
+        ObjectNode matrix = freezer.freeze(CASE_ID, ActorRole.USER, ActorRole.MERCHANT, unilateral());
+        ObjectNode position = (ObjectNode) matrix.at("/fact_rows/0/positions/USER");
+        position.put("stance", "UNKNOWN");
+        position.putNull("asserted_value");
+        rehash(matrix);
+
+        freezer.validateFrozen(matrix, CASE_ID, ActorRole.USER, ActorRole.MERCHANT);
+    }
+
+    @Test
     void advancesASecondInitiatorTurnWithStableFactsSourcesAndParentAuthority() {
         ObjectNode first = freezer.freeze(
                 CASE_ID, ActorRole.USER, ActorRole.MERCHANT, unilateral());

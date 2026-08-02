@@ -123,6 +123,8 @@ public final class IntakeDossierProjectionMerger {
     private final IntakeUnilateralMatrixPolicy matrixPolicy = new IntakeUnilateralMatrixPolicy();
     private final IntakeInitiatorMatrixFreezer initiatorMatrixFreezer =
             new IntakeInitiatorMatrixFreezer();
+    private final IntakeInitiatorMatrixDeltaFreezer initiatorMatrixDeltaFreezer =
+            new IntakeInitiatorMatrixDeltaFreezer();
     private final IntakeRespondentMatrixFreezer respondentMatrixFreezer =
             new IntakeRespondentMatrixFreezer();
 
@@ -207,26 +209,33 @@ public final class IntakeDossierProjectionMerger {
                 matrixChanged = true;
                 formalAuthorityValidated = true;
             } else if ("case_fact_matrix.delta.v2".equals(matrixSchema)) {
-                if (matrixAuthority.actorRole() != matrixAuthority.respondentRole()) {
-                    throw rejected(
-                            "INTAKE_RESPONDENT_MATRIX_AUTHORITY_INVALID",
-                            "matrix delta requires the Java-authorized respondent actor");
-                }
-                JsonNode currentFormalMatrix = merged.path("case_fact_matrix");
-                if (!currentFormalMatrix.isObject()) {
-                    throw rejected(
-                            "INTAKE_RESPONDENT_MATRIX_PARENT_REQUIRED",
-                            "respondent delta requires the Java-owned initiator matrix");
-                }
-                ObjectNode bilateralCandidate = respondentMatrixFreezer.deriveCandidate(
-                        (ObjectNode) currentFormalMatrix, matrixPatch, matrixAuthority);
-                formalAuthorityValidated = true;
-                if (proposal.readiness() == IntakeTurnProposal.Readiness.READY_TO_CONFIRM
-                        && proposal.missingFields().isEmpty()) {
-                    respondentMatrixFreezer.requireCompleteForFreeze(
-                            bilateralCandidate, matrixAuthority);
-                    merged.set("case_fact_matrix", bilateralCandidate);
+                if (matrixAuthority.actorRole() == matrixAuthority.initiatorRole()) {
+                    ObjectNode initiatorFrozen = initiatorMatrixDeltaFreezer.freeze(
+                            merged, matrixPatch, matrixAuthority);
+                    merged.set("case_fact_matrix", initiatorFrozen);
                     matrixChanged = true;
+                    formalAuthorityValidated = true;
+                } else if (matrixAuthority.actorRole() == matrixAuthority.respondentRole()) {
+                    JsonNode currentFormalMatrix = merged.path("case_fact_matrix");
+                    if (!currentFormalMatrix.isObject()) {
+                        throw rejected(
+                                "INTAKE_RESPONDENT_MATRIX_PARENT_REQUIRED",
+                                "respondent delta requires the Java-owned initiator matrix");
+                    }
+                    ObjectNode bilateralCandidate = respondentMatrixFreezer.deriveCandidate(
+                            (ObjectNode) currentFormalMatrix, matrixPatch, matrixAuthority);
+                    formalAuthorityValidated = true;
+                    if (proposal.readiness() == IntakeTurnProposal.Readiness.READY_TO_CONFIRM
+                            && proposal.missingFields().isEmpty()) {
+                        respondentMatrixFreezer.requireCompleteForFreeze(
+                                bilateralCandidate, matrixAuthority);
+                        merged.set("case_fact_matrix", bilateralCandidate);
+                        matrixChanged = true;
+                    }
+                } else {
+                    throw rejected(
+                            "INTAKE_MATRIX_ACTOR_AUTHORITY_INVALID",
+                            "matrix delta actor is not a Java-authorized case party");
                 }
             } else {
                 if ("case_fact_matrix.v2".equals(matrixSchema)

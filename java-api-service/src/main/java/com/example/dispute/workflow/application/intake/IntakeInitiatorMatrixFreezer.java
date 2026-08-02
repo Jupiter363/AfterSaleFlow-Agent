@@ -97,7 +97,7 @@ public final class IntakeInitiatorMatrixFreezer {
             "TIME",
             "OTHER");
     private static final Set<String> MATERIALITIES = Set.of("CORE", "SUPPORTING", "CONTEXT");
-    private static final Set<String> STANCES = Set.of("CONFIRM", "DENY", "PARTIAL");
+    private static final Set<String> STANCES = Set.of("CONFIRM", "DENY", "PARTIAL", "UNKNOWN");
     private static final Set<String> CLAIM_ATTITUDES = Set.of(
             "AGREE",
             "PARTIALLY_AGREE",
@@ -788,7 +788,10 @@ public final class IntakeInitiatorMatrixFreezer {
                     "initiator direct party position is invalid");
         }
         requiredText(initiator, "position_summary", 20_000);
-        requiredText(initiator, "asserted_value", 2_000);
+        JsonNode assertedValue = initiator.required("asserted_value");
+        if (!assertedValue.isNull()) {
+            requiredText(initiator, "asserted_value", 2_000);
+        }
         List<String> initiatorSources = requiredTextArray(
                 initiator, "source_refs", 1, 50, 128, "initiator fact source refs");
         requireDeclaredSources(

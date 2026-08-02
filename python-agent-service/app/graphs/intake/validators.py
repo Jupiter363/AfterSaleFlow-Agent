@@ -17,7 +17,7 @@ from app.graph_runtime.state import (
     validate_graph_patch,
     validate_graph_state,
 )
-from app.graphs.intake.errors import IntakeGraphContractError
+from app.graphs.intake.baseline import read_intake_baseline_memory_summary
 from app.graphs.intake.contracts import (
     CaseFactMatrixDeltaV2,
     IntakeCognitionDraft,
@@ -26,6 +26,7 @@ from app.graphs.intake.contracts import (
     IntakeTurnProposal,
     UnilateralCaseMatrixDraftV1,
 )
+from app.graphs.intake.errors import IntakeGraphContractError
 from app.graphs.intake.state import (
     IntakeGraphStateV2,
     IntakeTurnContext,
@@ -41,6 +42,9 @@ _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _MATRIX_FACT_ID = re.compile(r"^FACT_[A-Za-z0-9_:-]{1,123}$")
 _FROZEN_MATRIX_ID = re.compile(r"^CASE_MATRIX_[A-F0-9]{20}$")
 MATRIX_AUTHORITY_RECORD_KEY = "matrix-authority:v1"
+_MATRIX_PROPOSAL_UNILATERAL = "UNILATERAL"
+_MATRIX_PROPOSAL_INITIATOR_DELTA = "INITIATOR_DELTA"
+_MATRIX_PROPOSAL_RESPONDENT_DELTA = "RESPONDENT_DELTA"
 _MATRIX_AUTHORITY_FIELDS = frozenset(
     {
         "schema_version",
@@ -75,6 +79,7 @@ _FROZEN_MATRIX_FIELDS = frozenset(
         "fact_indexes",
     }
 )
+_FROZEN_PARENT_REF_FIELDS = frozenset({"matrix_id", "matrix_version", "content_hash"})
 _FROZEN_PARTY_MAP_FIELDS = frozenset({"initiator_role", "respondent_role"})
 _FROZEN_OVERVIEW_FIELDS = frozenset({"neutral_summary", "core_conflict", "summary_source_fact_ids"})
 _FROZEN_CLAIM_FIELDS = frozenset(
@@ -149,7 +154,7 @@ _FROZEN_CATEGORIES = frozenset(
     }
 )
 _FROZEN_MATERIALITIES = frozenset({"CORE", "SUPPORTING", "CONTEXT"})
-_FROZEN_INITIATOR_STANCES = frozenset({"CONFIRM", "DENY", "PARTIAL"})
+_FROZEN_INITIATOR_STANCES = frozenset({"CONFIRM", "DENY", "PARTIAL", "UNKNOWN"})
 _FROZEN_CLAIM_ATTITUDES = frozenset(
     {
         "AGREE",
@@ -389,6 +394,10 @@ def validate_cognition_patch(
     state: IntakeGraphStateV2,
     patch: Mapping[str, Any],
 ) -> dict[str, Any]:
+    if isinstance(patch, Mapping) and "memory_summary" in patch and patch.get(
+        "memory_summary"
+    ) != state.get("memory_summary"):
+        raise IntakeGraphContractError("INTAKE_MEMORY_SUMMARY_IMMUTABLE")
     fields = set(patch) if isinstance(patch, Mapping) else set()
     if not {"cognitive_revision", "terminal_draft"} <= fields or not fields <= (
         _COGNITION_PATCH_FIELDS
@@ -488,10 +497,10 @@ def validate_matrix_patch(
     schema_version = matrix_patch.get("schema_version")
     if schema_version == "unilateral_case_matrix.draft.v1":
         model_type = UnilateralCaseMatrixDraftV1
-        required_mode = "UNILATERAL"
+        required_mode = _MATRIX_PROPOSAL_UNILATERAL
     elif schema_version == "case_fact_matrix.delta.v2":
         model_type = CaseFactMatrixDeltaV2
-        required_mode = "RESPONDENT_DELTA"
+        required_mode = _delta_proposal_mode(state)
     else:
         raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_INVALID")
     _validate_model(model_type, matrix_patch, "INTAKE_MATRIX_PATCH_INVALID")
@@ -503,11 +512,19 @@ def validate_matrix_patch(
     if not isinstance(current_source, str) or not _IDENTIFIER.fullmatch(current_source):
         raise IntakeGraphContractError("INTAKE_MATRIX_CURRENT_SOURCE_MISSING")
 
-    if required_mode == "RESPONDENT_DELTA":
+    if required_mode == _MATRIX_PROPOSAL_INITIATOR_DELTA:
+        _validate_initiator_delta_patch(matrix_patch, frozen_authority=frozen_authority)
+
+    if required_mode in {
+        _MATRIX_PROPOSAL_INITIATOR_DELTA,
+        _MATRIX_PROPOSAL_RESPONDENT_DELTA,
+    }:
         if frozen_authority is None:
-            raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_UNAUTHORIZED")
-        previous_by_id = dict(frozen_authority.facts_by_id)
-        previous_by_fingerprint = dict(frozen_authority.facts_by_fingerprint)
+            previous_by_id = {}
+            previous_by_fingerprint = {}
+        else:
+            previous_by_id = dict(frozen_authority.facts_by_id)
+            previous_by_fingerprint = dict(frozen_authority.facts_by_fingerprint)
     else:
         previous_by_id, previous_by_fingerprint = _visible_unilateral_fact_index(
             state.get("dossier_draft")
@@ -517,30 +534,42 @@ def validate_matrix_patch(
     rows = matrix_patch["fact_rows"]
     for row in rows:
         fact_key = row["fact_key"]
-        fingerprint = canonicalize(
-            {
-                "category": row["category"],
-                "fact_target": row["fact_target"],
-            }
-        )
+        fingerprint = _matrix_row_fingerprint(row)
         prior: Mapping[str, Any] | None
         if fact_key.startswith("FACT_"):
             prior = previous_by_id.get(fact_key)
             if prior is None:
-                raise IntakeGraphContractError("INTAKE_MATRIX_FACT_UNKNOWN")
-            if fingerprint != _matrix_row_fingerprint(prior):
+                corrected_fact_id = _unique_fact_id_for_fingerprint(
+                    previous_by_fingerprint,
+                    fingerprint,
+                )
+                if corrected_fact_id is None:
+                    raise IntakeGraphContractError("INTAKE_MATRIX_FACT_UNKNOWN")
+                prior = previous_by_id[corrected_fact_id]
+            else:
+                corrected_fact_id = fact_key
+            if not _matches_matrix_binding(row, prior):
                 raise IntakeGraphContractError("INTAKE_MATRIX_FACT_REBOUND")
             if row["materiality"] != prior.get("materiality"):
                 raise IntakeGraphContractError("INTAKE_MATRIX_FACT_REBOUND")
-            resolution: tuple[str, bytes | str] = ("FACT", fact_key)
+            resolution: tuple[str, bytes | str] = ("FACT", corrected_fact_id)
         else:
             if row["source_scope"] == "PREVIOUS_MATRIX":
                 raise IntakeGraphContractError("INTAKE_MATRIX_SOURCE_SCOPE_INVALID")
-            prior_id = previous_by_fingerprint.get(fingerprint)
+            prior_id = _unique_fact_id_for_fingerprint(
+                previous_by_fingerprint,
+                fingerprint,
+            )
             if prior_id is not None:
-                raise IntakeGraphContractError("INTAKE_MATRIX_FACT_REBOUND")
-            prior = None
-            resolution = ("NEW", fingerprint)
+                prior = previous_by_id[prior_id]
+                if not _matches_matrix_binding(row, prior):
+                    raise IntakeGraphContractError("INTAKE_MATRIX_FACT_REBOUND")
+                if row["materiality"] != prior.get("materiality"):
+                    raise IntakeGraphContractError("INTAKE_MATRIX_FACT_REBOUND")
+                resolution = ("FACT", prior_id)
+            else:
+                prior = None
+                resolution = ("NEW", fingerprint)
 
         if resolution in resolved:
             raise IntakeGraphContractError("INTAKE_MATRIX_FACT_ID_CONFLICT")
@@ -556,8 +585,19 @@ def validate_matrix_patch(
             ):
                 raise IntakeGraphContractError("INTAKE_MATRIX_PREVIOUS_FACT_MUTATED")
 
-    if required_mode == "RESPONDENT_DELTA":
-        carried_fact_ids = {row["fact_key"] for row in rows if row["fact_key"].startswith("FACT_")}
+    if (
+        required_mode
+        in {
+            _MATRIX_PROPOSAL_INITIATOR_DELTA,
+            _MATRIX_PROPOSAL_RESPONDENT_DELTA,
+        }
+        and frozen_authority is not None
+    ):
+        carried_fact_ids = {
+            fact_id
+            for resolution_kind, fact_id in resolved
+            if resolution_kind == "FACT" and isinstance(fact_id, str)
+        }
         if carried_fact_ids != set(previous_by_id):
             raise IntakeGraphContractError("INTAKE_MATRIX_FACT_MEMBERSHIP_INVALID")
 
@@ -567,6 +607,64 @@ def validate_matrix_patch(
         if resolution is None or resolution in summary_resolutions:
             raise IntakeGraphContractError("INTAKE_MATRIX_SUMMARY_SOURCE_INVALID")
         summary_resolutions.add(resolution)
+
+
+def _trusted_initiator_role(state: IntakeGraphStateV2) -> str:
+    """Re-derive the role from imported, baseline-validated initial facts.
+
+    The matrix authority record is immutable in normal graph reductions, but it
+    must never be its own source of truth when selecting a party branch.
+    """
+
+    try:
+        initial_facts, _ = read_intake_baseline_memory_summary(
+            state.get("memory_summary", "")
+        )
+    except IntakeGraphContractError as error:
+        raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_UNAUTHORIZED") from error
+    initiator_role = initial_facts.get("initiator_role")
+    if initiator_role not in {"USER", "MERCHANT"}:
+        raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_UNAUTHORIZED")
+    return initiator_role
+
+
+def _delta_proposal_mode(state: IntakeGraphStateV2) -> str:
+    """Choose the unified-delta branch before validating its full authority.
+
+    ``_require_matrix_authority`` verifies the record below; this dispatch only
+    keeps the baseline's single ``case_fact_matrix.delta.v2`` envelope intact.
+    """
+
+    initiator_role = _trusted_initiator_role(state)
+    record = state.get("node_results", {}).get(MATRIX_AUTHORITY_RECORD_KEY)
+    actor_role = state["bindings"]["private"]["audience"]
+    if (
+        actor_role == initiator_role
+        and isinstance(record, Mapping)
+        and record.get("initiator_role") == initiator_role
+    ):
+        return _MATRIX_PROPOSAL_INITIATOR_DELTA
+    return _MATRIX_PROPOSAL_RESPONDENT_DELTA
+
+
+def _validate_initiator_delta_patch(
+    matrix_patch: Mapping[str, Any],
+    *,
+    frozen_authority: _FrozenInitiatorMatrixAuthority | None,
+) -> None:
+    """Enforce initiator authority without rewriting the baseline delta shape."""
+
+    if matrix_patch.get("respondent_claim") is not None:
+        raise IntakeGraphContractError("INTAKE_MATRIX_INITIATOR_CLAIM_UNAUTHORIZED")
+    for row in matrix_patch["fact_rows"]:
+        fact_key = row["fact_key"]
+        if frozen_authority is None:
+            if (
+                not fact_key.startswith("NEW_")
+                or row["stance"] == "NOT_ADDRESSED"
+                or row["source_scope"] != "CURRENT_SOURCE"
+            ):
+                raise IntakeGraphContractError("INTAKE_MATRIX_INITIATOR_OPENING_INVALID")
 
 
 def matrix_authority_record(
@@ -582,18 +680,20 @@ def matrix_authority_record(
     proposal_mode = "NONE"
     formal_matrix_hash: str | None = None
     if initiator_role in {"USER", "MERCHANT"}:
+        respondent_role = _respondent_role(initiator_role)
+        frozen_authority = _locked_initiator_matrix_authority(
+            snapshot.get("current_dossier"),
+            case_id=private["case_id"],
+            initiator_role=initiator_role,
+            respondent_role=respondent_role,
+        )
         if actor_role == initiator_role:
-            proposal_mode = "UNILATERAL"
-        else:
-            frozen_authority = _locked_initiator_matrix_authority(
-                snapshot.get("current_dossier"),
-                case_id=private["case_id"],
-                initiator_role=initiator_role,
-                respondent_role=actor_role,
-            )
+            proposal_mode = _MATRIX_PROPOSAL_INITIATOR_DELTA
             if frozen_authority is not None:
                 formal_matrix_hash = frozen_authority.content_hash
-                proposal_mode = "RESPONDENT_DELTA"
+        elif actor_role == respondent_role and frozen_authority is not None:
+            formal_matrix_hash = frozen_authority.content_hash
+            proposal_mode = _MATRIX_PROPOSAL_RESPONDENT_DELTA
     return {
         "schema_version": "intake-matrix-authority.v1",
         "kind": "MATRIX_AUTHORITY",
@@ -607,6 +707,14 @@ def matrix_authority_record(
         "proposal_mode": proposal_mode,
         "formal_matrix_hash": formal_matrix_hash,
     }
+
+
+def _respondent_role(initiator_role: str) -> str:
+    if initiator_role == "USER":
+        return "MERCHANT"
+    if initiator_role == "MERCHANT":
+        return "USER"
+    raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_UNAUTHORIZED")
 
 
 def _require_matrix_authority(
@@ -635,14 +743,49 @@ def _require_matrix_authority(
     if (
         actor_role not in {"USER", "MERCHANT"}
         or initiator_role not in {"USER", "MERCHANT"}
-        or record.get("proposal_mode") != required_mode
+        or initiator_role != _trusted_initiator_role(state)
     ):
         raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_UNAUTHORIZED")
-    if required_mode == "UNILATERAL":
-        if actor_role != initiator_role or record.get("formal_matrix_hash") is not None:
+    respondent_role = _respondent_role(initiator_role)
+    if required_mode == _MATRIX_PROPOSAL_UNILATERAL:
+        if (
+            record.get("proposal_mode")
+            not in {_MATRIX_PROPOSAL_UNILATERAL, _MATRIX_PROPOSAL_INITIATOR_DELTA}
+            or actor_role != initiator_role
+            or record.get("formal_matrix_hash") is not None
+        ):
+            raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_UNAUTHORIZED")
+        # Compatibility for historical unilateral output exists only before a
+        # formal matrix.  Still inspect the dossier, so a forged formal matrix
+        # cannot be ignored by this legacy branch.
+        frozen_authority = _locked_initiator_matrix_authority(
+            state.get("dossier_draft"),
+            case_id=private["case_id"],
+            initiator_role=initiator_role,
+            respondent_role=respondent_role,
+        )
+        if frozen_authority is not None:
             raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_UNAUTHORIZED")
         frozen_authority = None
-    elif required_mode == "RESPONDENT_DELTA":
+    elif required_mode == _MATRIX_PROPOSAL_INITIATOR_DELTA:
+        if (
+            record.get("proposal_mode")
+            not in {_MATRIX_PROPOSAL_INITIATOR_DELTA, _MATRIX_PROPOSAL_UNILATERAL}
+            or actor_role != initiator_role
+        ):
+            raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_UNAUTHORIZED")
+        frozen_authority = _locked_initiator_matrix_authority(
+            state.get("dossier_draft"),
+            case_id=private["case_id"],
+            initiator_role=initiator_role,
+            respondent_role=respondent_role,
+        )
+        expected_formal_hash = (
+            frozen_authority.content_hash if frozen_authority is not None else None
+        )
+        if record.get("formal_matrix_hash") != expected_formal_hash:
+            raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_UNAUTHORIZED")
+    elif required_mode == _MATRIX_PROPOSAL_RESPONDENT_DELTA:
         frozen_authority = _locked_initiator_matrix_authority(
             state.get("dossier_draft"),
             case_id=private["case_id"],
@@ -650,7 +793,8 @@ def _require_matrix_authority(
             respondent_role=actor_role,
         )
         if (
-            actor_role == initiator_role
+            record.get("proposal_mode") != _MATRIX_PROPOSAL_RESPONDENT_DELTA
+            or actor_role != respondent_role
             or frozen_authority is None
             or frozen_authority.content_hash != record.get("formal_matrix_hash")
         ):
@@ -664,7 +808,7 @@ def _require_matrix_authority(
 class _FrozenInitiatorMatrixAuthority:
     content_hash: str
     facts_by_id: Mapping[str, Mapping[str, Any]]
-    facts_by_fingerprint: Mapping[bytes, str]
+    facts_by_fingerprint: Mapping[str, tuple[str, ...]]
 
 
 def _locked_initiator_matrix_authority(
@@ -691,14 +835,14 @@ def _locked_initiator_matrix_authority(
         _formal_text(matrix, "schema_version", 64) != "case_fact_matrix.v2"
         or _formal_identifier(matrix, "case_id") != case_id
         or _formal_text(matrix, "matrix_kind", 64) != "INITIATOR_FROZEN"
-        or matrix.get("parent_ref") is not None
         or isinstance(matrix_version, bool)
         or not isinstance(matrix_version, int)
-        or matrix_version != 1
+        or matrix_version < 1
         or not _FROZEN_MATRIX_ID.fullmatch(matrix_id)
         or content_hash != expected_hash
     ):
         _reject_frozen_matrix()
+    _validate_frozen_parent_ref(matrix.get("parent_ref"), matrix_version=matrix_version)
 
     party_map = _formal_child_object(matrix, "party_map", _FROZEN_PARTY_MAP_FIELDS)
     if (
@@ -748,7 +892,7 @@ def _locked_initiator_matrix_authority(
     if not isinstance(fact_rows, list) or not 1 <= len(fact_rows) <= 200:
         _reject_frozen_matrix()
     facts_by_id: dict[str, Mapping[str, Any]] = {}
-    facts_by_fingerprint: dict[bytes, str] = {}
+    facts_by_fingerprint: dict[str, tuple[str, ...]] = {}
     core_fact_ids: list[str] = []
     for candidate in fact_rows:
         row, fact_id, is_core = _validate_frozen_fact_row(
@@ -760,7 +904,11 @@ def _locked_initiator_matrix_authority(
         if fact_id in facts_by_id:
             _reject_frozen_matrix()
         facts_by_id[fact_id] = row
-        facts_by_fingerprint.setdefault(_matrix_row_fingerprint(row), fact_id)
+        fingerprint = _matrix_row_fingerprint(row)
+        facts_by_fingerprint[fingerprint] = (
+            *facts_by_fingerprint.get(fingerprint, ()),
+            fact_id,
+        )
         if is_core:
             core_fact_ids.append(fact_id)
 
@@ -776,6 +924,23 @@ def _locked_initiator_matrix_authority(
         facts_by_id=facts_by_id,
         facts_by_fingerprint=facts_by_fingerprint,
     )
+
+
+def _validate_frozen_parent_ref(value: Any, *, matrix_version: int) -> None:
+    if matrix_version == 1:
+        if value is not None:
+            _reject_frozen_matrix()
+        return
+    parent = _formal_object(value, _FROZEN_PARENT_REF_FIELDS)
+    parent_version = parent.get("matrix_version")
+    if (
+        not _FROZEN_MATRIX_ID.fullmatch(_formal_text(parent, "matrix_id", 128))
+        or isinstance(parent_version, bool)
+        or not isinstance(parent_version, int)
+        or parent_version != matrix_version - 1
+    ):
+        _reject_frozen_matrix()
+    _formal_hash(parent, "content_hash")
 
 
 def _validate_frozen_claims(
@@ -903,7 +1068,8 @@ def _validate_frozen_fact_row(
     ):
         _reject_frozen_matrix()
     _formal_text(initiator, "position_summary", 20_000)
-    _formal_text(initiator, "asserted_value", 2_000)
+    if initiator.get("asserted_value") is not None:
+        _formal_text(initiator, "asserted_value", 2_000)
 
     respondent = _formal_child_object(
         positions,
@@ -912,7 +1078,7 @@ def _validate_frozen_fact_row(
     )
     if (
         respondent.get("stance") != "NOT_ADDRESSED"
-        or respondent.get("position_summary") != "No direct respondent position is recorded."
+        or respondent.get("position_summary") != "该方尚未直接陈述。"
         or respondent.get("asserted_value") is not None
         or respondent.get("source_type") != "NO_DIRECT_POSITION"
         or respondent.get("source_refs") != []
@@ -1027,11 +1193,11 @@ def _reject_frozen_matrix() -> NoReturn:
 
 def _visible_unilateral_fact_index(
     dossier: Any,
-) -> tuple[dict[str, Mapping[str, Any]], dict[bytes, str]]:
+) -> tuple[dict[str, Mapping[str, Any]], dict[str, tuple[str, ...]]]:
     if not isinstance(dossier, Mapping):
         raise IntakeGraphContractError("INTAKE_DOSSIER_INVALID")
     by_id: dict[str, Mapping[str, Any]] = {}
-    by_fingerprint: dict[bytes, str] = {}
+    by_fingerprint: dict[str, tuple[str, ...]] = {}
     matrix = dossier.get("unilateral_case_matrix")
     if matrix is None:
         return by_id, by_fingerprint
@@ -1050,16 +1216,43 @@ def _visible_unilateral_fact_index(
             raise IntakeGraphContractError("INTAKE_DOSSIER_STABLE_ID_CONFLICT")
         fingerprint = _matrix_row_fingerprint(row)
         by_id[fact_id] = row
-        by_fingerprint.setdefault(fingerprint, fact_id)
+        by_fingerprint[fingerprint] = (*by_fingerprint.get(fingerprint, ()), fact_id)
     return by_id, by_fingerprint
 
 
-def _matrix_row_fingerprint(row: Mapping[str, Any]) -> bytes:
+def _matrix_row_fingerprint(row: Mapping[str, Any]) -> str:
     category = row.get("category")
     fact_target = row.get("fact_target")
     if not isinstance(category, str) or not isinstance(fact_target, str) or not fact_target.strip():
         raise IntakeGraphContractError("INTAKE_MATRIX_CURRENT_INVALID")
-    return canonicalize({"category": category, "fact_target": fact_target})
+    return category + ":" + re.sub(r"\s+", "", fact_target).casefold()
+
+
+def _unique_fact_id_for_fingerprint(
+    index: Mapping[str, tuple[str, ...]],
+    fingerprint: str,
+) -> str | None:
+    matches = index.get(fingerprint, ())
+    if len(matches) > 1:
+        raise IntakeGraphContractError("INTAKE_MATRIX_FACT_ID_CONFLICT")
+    return matches[0] if matches else None
+
+
+def _matches_matrix_binding(
+    draft: Mapping[str, Any],
+    previous: Mapping[str, Any],
+) -> bool:
+    """Require exact persisted text after normalized-key correction.
+
+    The baseline fingerprint is deliberately normalized to repair a model's
+    unique local key.  It is not authorization to overwrite the durable category
+    or fact wording stored in the formal matrix.
+    """
+
+    return (
+        draft.get("category") == previous.get("category")
+        and draft.get("fact_target") == previous.get("fact_target")
+    )
 
 
 def _matches_previous_matrix_semantics(
@@ -1071,7 +1264,10 @@ def _matches_previous_matrix_semantics(
 ) -> bool:
     if draft.get("materiality") != previous.get("materiality"):
         return False
-    if patch_kind == "RESPONDENT_DELTA" and draft.get("stance") == "NOT_ADDRESSED":
+    if patch_kind in {
+        _MATRIX_PROPOSAL_INITIATOR_DELTA,
+        _MATRIX_PROPOSAL_RESPONDENT_DELTA,
+    } and draft.get("stance") == "NOT_ADDRESSED":
         return True
     positions = previous.get("positions")
     position = positions.get(actor_role) if isinstance(positions, Mapping) else None
@@ -1083,7 +1279,10 @@ def _matches_previous_matrix_semantics(
         "position_summary": position.get("position_summary"),
         "asserted_value": position.get("asserted_value"),
     }
-    if patch_kind == "RESPONDENT_DELTA":
+    if patch_kind in {
+        _MATRIX_PROPOSAL_INITIATOR_DELTA,
+        _MATRIX_PROPOSAL_RESPONDENT_DELTA,
+    }:
         expected["stance"] = position.get("stance")
     return all(draft.get(field) == value for field, value in expected.items())
 

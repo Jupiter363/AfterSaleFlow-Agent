@@ -75,17 +75,42 @@ def _cognition(matrix_patch: dict) -> dict:
     }
 
 
-def _formal_initiator_matrix(case_id: str) -> dict:
+def _formal_initiator_matrix(
+    case_id: str,
+    *,
+    initiator_role: str = "USER",
+    matrix_version: int = 1,
+    initiator_stance: str = "CONFIRM",
+    initiator_asserted_value: str | None = "damaged",
+) -> dict:
+    respondent_role = "MERCHANT" if initiator_role == "USER" else "USER"
+    source_ref = f"MESSAGE_P4_{initiator_role}_1"
+    parent_ref = (
+        None
+        if matrix_version == 1
+        else {
+            "matrix_id": "CASE_MATRIX_0123456789ABCDEF0123",
+            "matrix_version": matrix_version - 1,
+            "content_hash": "d" * 64,
+        }
+    )
     matrix = {
         "schema_version": "case_fact_matrix.v2",
         "case_id": case_id,
-        "matrix_id": "CASE_MATRIX_0123456789ABCDEF0123",
-        "matrix_version": 1,
+        "matrix_id": (
+            "CASE_MATRIX_0123456789ABCDEF0123"
+            if matrix_version == 1
+            else "CASE_MATRIX_1234567890ABCDEF0123"
+        ),
+        "matrix_version": matrix_version,
         "matrix_kind": "INITIATOR_FROZEN",
-        "parent_ref": None,
+        "parent_ref": parent_ref,
         "content_hash": "0" * 64,
-        "party_map": {"initiator_role": "USER", "respondent_role": "MERCHANT"},
-        "source_refs": ["MESSAGE_P4_USER_1"],
+        "party_map": {
+            "initiator_role": initiator_role,
+            "respondent_role": respondent_role,
+        },
+        "source_refs": [source_ref],
         "case_overview": {
             "neutral_summary": "A damage dispute.",
             "core_conflict": "Whether damage existed at delivery.",
@@ -93,11 +118,11 @@ def _formal_initiator_matrix(case_id: str) -> dict:
         },
         "claims": {
             "initiator_claim": {
-                "initiator_role": "USER",
+                "initiator_role": initiator_role,
                 "requested_resolution": "REFUND",
                 "reason_summary": "The order allegedly arrived damaged.",
                 "position_summary": "The initiator requests a refund.",
-                "source_refs": ["MESSAGE_P4_USER_1"],
+                "source_refs": [source_ref],
             },
             "respondent_reported_by_initiator": None,
             "respondent_direct": None,
@@ -111,19 +136,19 @@ def _formal_initiator_matrix(case_id: str) -> dict:
                 "materiality": "CORE",
                 "origin": {
                     "introduced_stage": "INITIATOR_INTAKE",
-                    "source_refs": ["MESSAGE_P4_USER_1"],
+                    "source_refs": [source_ref],
                 },
                 "positions": {
-                    "USER": {
-                        "stance": "CONFIRM",
+                    initiator_role: {
+                        "stance": initiator_stance,
                         "position_summary": "The order arrived damaged.",
-                        "asserted_value": "damaged",
+                        "asserted_value": initiator_asserted_value,
                         "source_type": "DIRECT_PARTY_STATEMENT",
-                        "source_refs": ["MESSAGE_P4_USER_1"],
+                        "source_refs": [source_ref],
                     },
-                    "MERCHANT": {
+                    respondent_role: {
                         "stance": "NOT_ADDRESSED",
-                        "position_summary": "No direct respondent position is recorded.",
+                        "position_summary": "该方尚未直接陈述。",
                         "asserted_value": None,
                         "source_type": "NO_DIRECT_POSITION",
                         "source_refs": [],
@@ -141,9 +166,9 @@ def _formal_initiator_matrix(case_id: str) -> dict:
         ],
         "fact_relationships": [],
         "generation_ref": {
-            "actor_role": "USER",
+            "actor_role": initiator_role,
             "source_stage": "INITIATOR_INTAKE",
-            "latest_source_ref": "MESSAGE_P4_USER_1",
+            "latest_source_ref": source_ref,
             "source_context_hash": "b" * 64,
         },
         "fact_indexes": {
@@ -197,6 +222,110 @@ def _respondent_state(bindings, version_pins, snapshot):
             respondent_snapshot,
         ),
     )
+
+
+def _initiator_snapshot(
+    snapshot: dict,
+    *,
+    initiator_role: str,
+    audience: str | None = None,
+) -> dict:
+    selected = copy.deepcopy(snapshot)
+    selected["initial_case_facts"]["initiator_role"] = initiator_role
+    selected["own_messages"][0]["audience"] = audience or initiator_role
+    selected["snapshot_hash"] = canonical_sha256_omitting(selected, "snapshot_hash")
+    return selected
+
+
+def _initiator_opening_state(bindings, version_pins, snapshot, *, initiator_role: str):
+    selected_bindings = copy.deepcopy(bindings)
+    selected_bindings["private"]["audience"] = initiator_role
+    selected_snapshot = _initiator_snapshot(snapshot, initiator_role=initiator_role)
+    return selected_bindings, selected_snapshot, _import_state(
+        selected_bindings,
+        version_pins,
+        selected_snapshot,
+    )
+
+
+def _initiator_followup_state(
+    bindings,
+    version_pins,
+    snapshot,
+    *,
+    initiator_role: str = "USER",
+    matrix_version: int = 1,
+    initiator_stance: str = "CONFIRM",
+    initiator_asserted_value: str | None = "damaged",
+):
+    selected_bindings = copy.deepcopy(bindings)
+    selected_bindings["private"]["audience"] = initiator_role
+    selected_snapshot = _initiator_snapshot(snapshot, initiator_role=initiator_role)
+    selected_snapshot["current_dossier"]["case_fact_matrix"] = _formal_initiator_matrix(
+        selected_snapshot["case_id"],
+        initiator_role=initiator_role,
+        matrix_version=matrix_version,
+        initiator_stance=initiator_stance,
+        initiator_asserted_value=initiator_asserted_value,
+    )
+    selected_snapshot["snapshot_hash"] = canonical_sha256_omitting(
+        selected_snapshot,
+        "snapshot_hash",
+    )
+    return selected_bindings, selected_snapshot, _import_state(
+        selected_bindings,
+        version_pins,
+        selected_snapshot,
+    )
+
+
+def _initiator_opening_delta() -> dict:
+    return {
+        "schema_version": "case_fact_matrix.delta.v2",
+        "fact_rows": [
+            {
+                "fact_key": "NEW_DAMAGE",
+                "category": "PRODUCT_STATE",
+                "fact_target": "Whether the order arrived damaged.",
+                "materiality": "CORE",
+                "stance": "CONFIRM",
+                "position_summary": "The current actor reports visible damage.",
+                "asserted_value": "damaged",
+                "source_scope": "CURRENT_SOURCE",
+            }
+        ],
+        "summary_source_fact_keys": ["NEW_DAMAGE"],
+    }
+
+
+def _initiator_followup_delta(*, source_scope: str = "PREVIOUS_MATRIX") -> dict:
+    patch = {
+        "schema_version": "case_fact_matrix.delta.v2",
+        "fact_rows": [
+            {
+                "fact_key": "FACT_DAMAGE",
+                "category": "PRODUCT_STATE",
+                "fact_target": "Whether the order arrived damaged.",
+                "materiality": "CORE",
+                "stance": "CONFIRM",
+                "position_summary": "The order arrived damaged.",
+                "asserted_value": "damaged",
+                "source_scope": source_scope,
+            },
+            {
+                "fact_key": "NEW_DELIVERY_DELAY",
+                "category": "LOGISTICS",
+                "fact_target": "Whether delivery was delayed beyond the promised date.",
+                "materiality": "SUPPORTING",
+                "stance": "CONFIRM",
+                "position_summary": "The current actor reports a delayed delivery.",
+                "asserted_value": "delayed",
+                "source_scope": "CURRENT_SOURCE",
+            },
+        ],
+        "summary_source_fact_keys": ["FACT_DAMAGE", "NEW_DELIVERY_DELAY"],
+    }
+    return patch
 
 
 def test_contract_union_requires_explicit_delta_stance() -> None:
@@ -360,7 +489,25 @@ def test_dossier_patch_keeps_general_fact_and_source_references() -> None:
     assert parsed.dossier_patch.case_story == cognition["dossier_patch"]["case_story"]
 
 
-def test_initiator_can_only_propose_unilateral_matrix(
+@pytest.mark.parametrize("initiator_role", ["USER", "MERCHANT"])
+def test_initiator_opening_accepts_baseline_unified_delta(
+    bindings,
+    version_pins,
+    snapshot,
+    initiator_role: str,
+) -> None:
+    _, _, state = _initiator_opening_state(
+        bindings,
+        version_pins,
+        snapshot,
+        initiator_role=initiator_role,
+    )
+
+    assert state["node_results"][MATRIX_AUTHORITY_RECORD_KEY]["proposal_mode"] == "INITIATOR_DELTA"
+    validate_matrix_patch(state, _initiator_opening_delta())
+
+
+def test_initiator_opening_keeps_legacy_unilateral_compatibility(
     bindings,
     version_pins,
     snapshot,
@@ -368,8 +515,299 @@ def test_initiator_can_only_propose_unilateral_matrix(
     state = _import_state(bindings, version_pins, snapshot)
 
     validate_matrix_patch(state, _unilateral_patch())
+
+
+@pytest.mark.parametrize("initiator_role", ["USER", "MERCHANT"])
+@pytest.mark.parametrize(
+    ("mutation", "error_code"),
+    [
+        (
+            lambda patch: (
+                patch["fact_rows"][0].update(fact_key="FACT_DAMAGE"),
+                patch.update(summary_source_fact_keys=["FACT_DAMAGE"]),
+            ),
+            "INTAKE_MATRIX_INITIATOR_OPENING_INVALID",
+        ),
+        (
+            lambda patch: patch.update(
+                respondent_claim={
+                    "attitude": "DISAGREE",
+                    "position_summary": "A counterparty claim cannot be authored here.",
+                }
+            ),
+            "INTAKE_MATRIX_INITIATOR_CLAIM_UNAUTHORIZED",
+        ),
+        (
+            lambda patch: (
+                patch["fact_rows"][0].update(
+                    fact_key="FACT_DAMAGE",
+                    stance="NOT_ADDRESSED",
+                    asserted_value=None,
+                    source_scope="PREVIOUS_MATRIX",
+                ),
+                patch.update(summary_source_fact_keys=["FACT_DAMAGE"]),
+            ),
+            "INTAKE_MATRIX_INITIATOR_OPENING_INVALID",
+        ),
+        (
+            lambda patch: patch["fact_rows"][0].update(source_scope="PREVIOUS_MATRIX"),
+            "INTAKE_MATRIX_PATCH_INVALID",
+        ),
+        (
+            lambda patch: patch["fact_rows"][0].update(
+                source_scope="PREVIOUS_AND_CURRENT_SOURCE"
+            ),
+            "INTAKE_MATRIX_INITIATOR_OPENING_INVALID",
+        ),
+    ],
+)
+def test_initiator_opening_rejects_counterparty_or_prior_matrix_semantics(
+    bindings,
+    version_pins,
+    snapshot,
+    initiator_role: str,
+    mutation,
+    error_code: str,
+) -> None:
+    _, _, state = _initiator_opening_state(
+        bindings,
+        version_pins,
+        snapshot,
+        initiator_role=initiator_role,
+    )
+    patch = _initiator_opening_delta()
+    mutation(patch)
+
+    with pytest.raises(IntakeGraphContractError, match=error_code):
+        validate_matrix_patch(state, patch)
+
+
+@pytest.mark.parametrize("matrix_version", [1, 2])
+def test_initiator_followup_reuses_trusted_formal_matrix_and_allows_new_fact(
+    bindings,
+    version_pins,
+    snapshot,
+    matrix_version: int,
+) -> None:
+    _, _, state = _initiator_followup_state(
+        bindings,
+        version_pins,
+        snapshot,
+        matrix_version=matrix_version,
+    )
+
+    authority = state["node_results"][MATRIX_AUTHORITY_RECORD_KEY]
+    assert authority["proposal_mode"] == "INITIATOR_DELTA"
+    assert authority["formal_matrix_hash"]
+    validate_matrix_patch(state, _initiator_followup_delta())
+
+
+def test_initiator_followup_allows_not_addressed_previous_only_carrier(
+    bindings,
+    version_pins,
+    snapshot,
+) -> None:
+    _, _, state = _initiator_followup_state(bindings, version_pins, snapshot)
+    patch = _initiator_followup_delta()
+    patch["fact_rows"][0].update(
+        stance="NOT_ADDRESSED",
+        position_summary="The initiator carries the prior position without a new statement.",
+        asserted_value=None,
+        source_scope="PREVIOUS_MATRIX",
+    )
+
+    validate_matrix_patch(state, patch)
+
+
+def test_initiator_followup_accepts_unknown_stance_and_null_asserted_value(
+    bindings,
+    version_pins,
+    snapshot,
+) -> None:
+    _, _, state = _initiator_followup_state(
+        bindings,
+        version_pins,
+        snapshot,
+        initiator_stance="UNKNOWN",
+        initiator_asserted_value=None,
+    )
+    patch = _initiator_followup_delta()
+    patch["fact_rows"][0].update(stance="UNKNOWN", asserted_value=None)
+
+    validate_matrix_patch(state, patch)
+
+
+@pytest.mark.parametrize(
+    ("corrected_key", "source_scope"),
+    [
+        ("FACT_MODEL_KEY_CORRECTION", "PREVIOUS_MATRIX"),
+        ("NEW_MODEL_KEY_CORRECTION", "CURRENT_SOURCE"),
+    ],
+)
+def test_initiator_followup_accepts_unique_normalized_key_correction(
+    bindings,
+    version_pins,
+    snapshot,
+    corrected_key: str,
+    source_scope: str,
+) -> None:
+    _, _, state = _initiator_followup_state(bindings, version_pins, snapshot)
+    patch = _initiator_followup_delta()
+    patch["fact_rows"][0].update(
+        fact_key=corrected_key,
+        source_scope=source_scope,
+    )
+    patch["summary_source_fact_keys"][0] = corrected_key
+
+    validate_matrix_patch(state, patch)
+
+
+def test_initiator_followup_rejects_normalized_match_that_rebinds_persisted_text(
+    bindings,
+    version_pins,
+    snapshot,
+) -> None:
+    _, _, state = _initiator_followup_state(bindings, version_pins, snapshot)
+    patch = _initiator_followup_delta()
+    patch["fact_rows"][0].update(
+        fact_key="FACT_MODEL_KEY_CORRECTION",
+        fact_target=" WHETHER THE ORDER ARRIVED DAMAGED. ",
+    )
+    patch["summary_source_fact_keys"][0] = "FACT_MODEL_KEY_CORRECTION"
+
+    with pytest.raises(IntakeGraphContractError, match="INTAKE_MATRIX_FACT_REBOUND"):
+        validate_matrix_patch(state, patch)
+
+
+def test_initiator_followup_rejects_ambiguous_normalized_key_correction(
+    bindings,
+    version_pins,
+    snapshot,
+) -> None:
+    selected_bindings = copy.deepcopy(bindings)
+    selected_snapshot = _initiator_snapshot(snapshot, initiator_role="USER")
+    matrix = _formal_initiator_matrix(selected_snapshot["case_id"])
+    duplicate = copy.deepcopy(matrix["fact_rows"][0])
+    duplicate.update(
+        fact_id="FACT_DAMAGE_DUPLICATE",
+        fact_target="WHETHER THE ORDER ARRIVED DAMAGED.",
+    )
+    matrix["fact_rows"].append(duplicate)
+    matrix["fact_indexes"]["not_computed_fact_ids"].append("FACT_DAMAGE_DUPLICATE")
+    matrix["fact_indexes"]["core_fact_ids"].append("FACT_DAMAGE_DUPLICATE")
+    matrix["content_hash"] = canonical_sha256_omitting(matrix, "content_hash")
+    selected_snapshot["current_dossier"]["case_fact_matrix"] = matrix
+    selected_snapshot["snapshot_hash"] = canonical_sha256_omitting(
+        selected_snapshot,
+        "snapshot_hash",
+    )
+    state = _import_state(selected_bindings, version_pins, selected_snapshot)
+    patch = _initiator_followup_delta()
+    patch["fact_rows"][0]["fact_key"] = "FACT_MODEL_KEY_CORRECTION"
+    patch["summary_source_fact_keys"][0] = "FACT_MODEL_KEY_CORRECTION"
+
+    with pytest.raises(IntakeGraphContractError, match="INTAKE_MATRIX_FACT_ID_CONFLICT"):
+        validate_matrix_patch(state, patch)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "error_code"),
+    [
+        (
+            lambda patch: patch["fact_rows"].pop(0),
+            "INTAKE_MATRIX_FACT_MEMBERSHIP_INVALID",
+        ),
+        (
+            lambda patch: patch["fact_rows"][0].update(
+                fact_key="FACT_UNKNOWN",
+                fact_target="Whether the item was damaged during delivery.",
+            ),
+            "INTAKE_MATRIX_FACT_UNKNOWN",
+        ),
+        (
+            lambda patch: patch["fact_rows"][0].update(materiality="SUPPORTING"),
+            "INTAKE_MATRIX_FACT_REBOUND",
+        ),
+        (
+            lambda patch: patch["fact_rows"][0].update(
+                position_summary="A changed statement with previous-only provenance."
+            ),
+            "INTAKE_MATRIX_PREVIOUS_FACT_MUTATED",
+        ),
+        (
+            lambda patch: patch["fact_rows"][0].update(stance="DENY"),
+            "INTAKE_MATRIX_PREVIOUS_FACT_MUTATED",
+        ),
+    ],
+)
+def test_initiator_followup_rejects_incomplete_or_rebound_prior_matrix_rows(
+    bindings,
+    version_pins,
+    snapshot,
+    mutation,
+    error_code: str,
+) -> None:
+    _, _, state = _initiator_followup_state(bindings, version_pins, snapshot)
+    patch = _initiator_followup_delta()
+    mutation(patch)
+    patch["summary_source_fact_keys"] = [
+        row["fact_key"] for row in patch["fact_rows"]
+    ]
+
+    with pytest.raises(IntakeGraphContractError, match=error_code):
+        validate_matrix_patch(state, patch)
+
+
+def test_initiator_followup_rejects_tampered_formal_matrix(
+    bindings,
+    version_pins,
+    snapshot,
+) -> None:
+    selected_bindings = copy.deepcopy(bindings)
+    selected_snapshot = _initiator_snapshot(snapshot, initiator_role="USER")
+    selected_snapshot["current_dossier"]["case_fact_matrix"] = _formal_initiator_matrix(
+        selected_snapshot["case_id"]
+    )
+    selected_snapshot["current_dossier"]["case_fact_matrix"]["fact_rows"][0][
+        "fact_target"
+    ] = "A tampered fact target."
+    selected_snapshot["snapshot_hash"] = canonical_sha256_omitting(
+        selected_snapshot,
+        "snapshot_hash",
+    )
+
+    with pytest.raises(IntakeGraphContractError, match="INTAKE_MATRIX_CURRENT_INVALID"):
+        _import_state(selected_bindings, version_pins, selected_snapshot)
+
+
+@pytest.mark.parametrize(
+    ("initiator_role", "respondent_role"),
+    [("USER", "MERCHANT"), ("MERCHANT", "USER")],
+)
+def test_respondent_cannot_flip_authority_record_to_initiator(
+    bindings,
+    version_pins,
+    snapshot,
+    initiator_role: str,
+    respondent_role: str,
+    ) -> None:
+    selected_bindings = copy.deepcopy(bindings)
+    selected_bindings["private"]["audience"] = respondent_role
+    selected_snapshot = _initiator_snapshot(
+        snapshot,
+        initiator_role=initiator_role,
+        audience=respondent_role,
+    )
+    state = _import_state(selected_bindings, version_pins, selected_snapshot)
+    authority = state["node_results"][MATRIX_AUTHORITY_RECORD_KEY]
+    authority.update(
+        initiator_role=respondent_role,
+        proposal_mode="INITIATOR_DELTA",
+        formal_matrix_hash=None,
+    )
+
     with pytest.raises(IntakeGraphContractError, match="INTAKE_MATRIX_PATCH_UNAUTHORIZED"):
-        validate_matrix_patch(state, _delta_patch())
+        validate_matrix_patch(state, _initiator_opening_delta())
 
 
 def test_unlocked_respondent_can_only_propose_delta(
@@ -548,7 +986,10 @@ def test_delta_shape_and_formal_authority_fields_fail_closed(
     [
         (
             lambda patch: (
-                patch["fact_rows"][0].update(fact_key="FACT_UNKNOWN"),
+                patch["fact_rows"][0].update(
+                    fact_key="FACT_UNKNOWN",
+                    fact_target="Whether the item was damaged during delivery.",
+                ),
                 patch.update(summary_source_fact_keys=["FACT_UNKNOWN"]),
             ),
             "INTAKE_MATRIX_FACT_UNKNOWN",
@@ -559,7 +1000,10 @@ def test_delta_shape_and_formal_authority_fields_fail_closed(
         ),
         (
             lambda patch: (
-                patch["fact_rows"][0].update(fact_key="NEW_DAMAGE"),
+                patch["fact_rows"][0].update(
+                    fact_key="NEW_DAMAGE",
+                    fact_target=" WHETHER THE ORDER ARRIVED DAMAGED. ",
+                ),
                 patch.update(summary_source_fact_keys=["NEW_DAMAGE"]),
             ),
             "INTAKE_MATRIX_FACT_REBOUND",

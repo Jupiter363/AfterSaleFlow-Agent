@@ -280,6 +280,38 @@ class IntakeDossierProjectionMergerTest {
     }
 
     @Test
+    void immediatelyFreezesAnInitiatorDeltaAndAllowsTheMerchantToFreezeItBilaterally()
+            throws Exception {
+        var opening = merger.merge(
+                JSON.createObjectNode(),
+                proposal(completeDossierPatch(), initiatorUnknownDelta()),
+                matrixAuthority(ActorRole.USER));
+
+        ObjectNode initiator = (ObjectNode) opening.dossier().path("case_fact_matrix");
+        String factId = initiator.at("/fact_rows/0/fact_id").asText();
+        assertThat(opening.matrixVersion()).isEqualTo(1);
+        assertThat(initiator.path("matrix_kind").asText()).isEqualTo("INITIATOR_FROZEN");
+        assertThat(initiator.at("/fact_rows/0/positions/USER/stance").asText())
+                .isEqualTo("UNKNOWN");
+        assertThat(initiator.at("/fact_rows/0/positions/USER/asserted_value").isNull()).isTrue();
+
+        var bilateral = merger.merge(
+                opening.dossier(),
+                proposal(
+                        JSON.createObjectNode(),
+                        respondentDelta(factId),
+                        IntakeTurnProposal.Readiness.READY_TO_CONFIRM,
+                        List.of()),
+                matrixAuthority(ActorRole.MERCHANT));
+
+        assertThat(bilateral.matrixVersion()).isEqualTo(2);
+        assertThat(bilateral.dossier().at("/case_fact_matrix/matrix_kind").asText())
+                .isEqualTo("BILATERAL_FROZEN");
+        assertThat(bilateral.dossier().at("/case_fact_matrix/parent_ref/content_hash"))
+                .isEqualTo(initiator.path("content_hash"));
+    }
+
+    @Test
     void derivesTheBaselineCoreStateWhenTheModelProvidesMatrixSemanticsWithoutTheBranch()
             throws Exception {
         JsonNode modelPatch = JSON.readTree(
@@ -692,7 +724,7 @@ class IntakeDossierProjectionMergerTest {
                         matrixAuthority(ActorRole.MERCHANT)));
 
         assertRejected(
-                "INTAKE_RESPONDENT_MATRIX_AUTHORITY_INVALID",
+                "INTAKE_INITIATOR_MATRIX_RESPONDENT_CLAIM_FORBIDDEN",
                 () -> merger.merge(
                         JSON.createObjectNode(),
                         proposal(
@@ -1017,6 +1049,24 @@ class IntakeDossierProjectionMergerTest {
         delta.putObject("respondent_claim")
                 .put("attitude", "DISAGREE")
                 .put("position_summary", "The merchant disputes the requested refund.");
+        return delta;
+    }
+
+    private static JsonNode initiatorUnknownDelta() {
+        ObjectNode delta = JSON.createObjectNode();
+        delta.put("schema_version", "case_fact_matrix.delta.v2");
+        ObjectNode row = delta.putArray("fact_rows").addObject();
+        row.put("fact_key", "NEW_INSTALL_SCOPE");
+        row.put("category", "PRODUCT_PAGE");
+        row.put("fact_target", "The listing included basic installation.");
+        row.put("materiality", "CORE");
+        row.put("stance", "UNKNOWN");
+        row.put("position_summary", "The buyer cannot confirm whether installation was included.");
+        row.putNull("asserted_value");
+        row.put("source_scope", "CURRENT_SOURCE");
+        row.put("agreed_statement", "The optional draft alignment must not be persisted.");
+        row.put("conflict_summary", "The optional draft alignment must not be persisted.");
+        delta.putArray("summary_source_fact_keys").add("NEW_INSTALL_SCOPE");
         return delta;
     }
 

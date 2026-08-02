@@ -435,11 +435,18 @@ class GraphCommandGateway:
                     owner_id=owner_id,
                     fencing_token=acquisition.lease.fencing_token,
                 )
+                lease = await self._leases.renew(
+                    connection,
+                    thread_id=admission.binding.thread_id,
+                    command_id=admission.binding.command_id,
+                    owner_id=owner_id,
+                    fencing_token=acquisition.lease.fencing_token,
+                )
         fence = GraphFenceContext(
             thread_id=admission.binding.thread_id,
             command_id=admission.binding.command_id,
             owner_id=owner_id,
-            fencing_token=acquisition.lease.fencing_token,
+            fencing_token=lease.fencing_token,
             request_hash=admission.binding.request_hash,
             room_epoch=admission.binding.room_epoch,
             graph_key=admission.binding.graph_key,
@@ -497,11 +504,11 @@ class GraphCommandGateway:
         execution = GatewayExecution(
             updated_admission,
             attempt,
-            acquisition.lease,
+            lease,
             fence,
             thread_record,
         )
-        self._remember_lease(execution, acquisition.lease)
+        self._remember_lease(execution, lease)
         await self._emit(
             updated_admission,
             event_type="graph.command.execution_acquired",

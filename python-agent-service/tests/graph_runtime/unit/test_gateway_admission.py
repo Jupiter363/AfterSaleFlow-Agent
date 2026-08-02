@@ -14,6 +14,7 @@ from app.graph_runtime.errors import (
     GraphCommandNotFoundError,
     GraphContractError,
     GraphGatewayDisabledError,
+    GraphLeaseLostError,
     GraphNewAgentAttemptRequiredError,
     GraphNonceReplayError,
     GraphResultNotCommittedError,
@@ -1509,6 +1510,23 @@ class _DisplacingLeases:
             ),
         )
 
+    async def renew(self, connection: Any, **kwargs: Any) -> LeaseRecord:
+        assert kwargs == {
+            "thread_id": self.admission.binding.thread_id,
+            "command_id": self.admission.binding.command_id,
+            "owner_id": "worker-new",
+            "fencing_token": 2,
+        }
+        return replace(
+            _execution().lease,
+            command_id=self.admission.binding.command_id,
+            owner_id="worker-new",
+            fencing_token=2,
+            lease_expires_at=NOW + timedelta(seconds=31),
+            renewed_at=NOW + timedelta(seconds=1),
+            revision=2,
+        )
+
 
 def _registered_admission() -> GatewayAdmission:
     execution = _execution()
@@ -1523,6 +1541,179 @@ def _registered_admission() -> GatewayAdmission:
         action=AdmissionAction.ACQUIRE,
         created=True,
     )
+
+
+class _BeginningAttemptLedger:
+    def __init__(self, admission: GatewayAdmission, ordering: list[str]) -> None:
+        self.admission = admission
+        self.ordering = ordering
+
+    async def load(self, connection: Any, **kwargs: Any) -> CommandRecord:
+        assert kwargs == {
+            "thread_id": self.admission.binding.thread_id,
+            "command_id": self.admission.binding.command_id,
+        }
+        return self.admission.record
+
+    @staticmethod
+    def require_same_binding(actual: CommandBinding, expected: CommandBinding) -> None:
+        assert actual == expected
+
+    async def latest_attempt(self, connection: Any, **kwargs: Any) -> None:
+        assert kwargs == {
+            "thread_id": self.admission.binding.thread_id,
+            "command_id": self.admission.binding.command_id,
+        }
+        return None
+
+    async def begin_attempt(
+        self,
+        connection: Any,
+        *,
+        binding: CommandBinding,
+        attempt_id: str,
+        owner_id: str,
+        fencing_token: int,
+    ) -> tuple[CommandRecord, AttemptRecord]:
+        self.ordering.append("begin_attempt")
+        assert binding == self.admission.binding
+        assert attempt_id == self.admission.command.attempt_id
+        assert owner_id == "worker-1"
+        assert fencing_token == 1
+        command = replace(
+            self.admission.record,
+            status=CommandStatus.EXECUTING,
+            attempt_count=1,
+            fencing_token=fencing_token,
+        )
+        return command, AttemptRecord(
+            attempt_id=attempt_id,
+            thread_id=binding.thread_id,
+            command_id=binding.command_id,
+            attempt_no=1,
+            owner_id=owner_id,
+            fencing_token=fencing_token,
+            status=AttemptStatus.EXECUTING,
+            provider_call_count=0,
+            error_code=None,
+            error_classification=None,
+        )
+
+
+class _FresheningLeases:
+    def __init__(
+        self,
+        admission: GatewayAdmission,
+        ordering: list[str],
+        *,
+        lose_on_renew: bool = False,
+    ) -> None:
+        self.admission = admission
+        self.ordering = ordering
+        self.lose_on_renew = lose_on_renew
+        self.acquired_lease = LeaseRecord(
+            thread_id=admission.binding.thread_id,
+            command_id=admission.binding.command_id,
+            owner_id="worker-1",
+            fencing_token=1,
+            lease_expires_at=NOW + timedelta(seconds=30),
+            acquired_at=NOW,
+            renewed_at=NOW,
+            released_at=None,
+            cancelled_at=None,
+            cancelled_by_command_id=None,
+            revision=0,
+        )
+        self.fresh_lease = replace(
+            self.acquired_lease,
+            lease_expires_at=NOW + timedelta(seconds=50),
+            renewed_at=NOW + timedelta(seconds=20),
+            revision=1,
+        )
+
+    async def acquire(self, connection: Any, **kwargs: Any) -> LeaseAcquisition:
+        self.ordering.append("acquire")
+        assert kwargs == {
+            "thread_id": self.admission.binding.thread_id,
+            "command_id": self.admission.binding.command_id,
+            "owner_id": "worker-1",
+        }
+        return LeaseAcquisition(LeaseAcquisitionKind.FIRST, self.acquired_lease)
+
+    async def renew(self, connection: Any, **kwargs: Any) -> LeaseRecord:
+        self.ordering.append("renew")
+        assert kwargs == {
+            "thread_id": self.admission.binding.thread_id,
+            "command_id": self.admission.binding.command_id,
+            "owner_id": "worker-1",
+            "fencing_token": self.acquired_lease.fencing_token,
+        }
+        if self.lose_on_renew:
+            raise GraphLeaseLostError()
+        return self.fresh_lease
+
+
+@pytest.mark.asyncio
+async def test_acquire_execution_renews_after_begin_attempt_and_keeps_fresh_lease() -> None:
+    admission = _registered_admission()
+    pool = _Pool()
+    ordering: list[str] = []
+    leases = _FresheningLeases(admission, ordering)
+    gateway = GraphCommandGateway(
+        mode=GraphGatewayMode.SHADOW,
+        pool=pool,
+        threads=_Threads(pool.events),  # type: ignore[arg-type]
+        ledger=_BeginningAttemptLedger(admission, ordering),  # type: ignore[arg-type]
+        leases=leases,  # type: ignore[arg-type]
+        input_authorizer=_InputAuthorizer([]),
+    )
+
+    execution = await gateway.acquire_execution(
+        admission,
+        owner_id="worker-1",
+        attempt_id=admission.command.attempt_id,
+    )
+
+    assert ordering == ["acquire", "begin_attempt", "renew"]
+    assert execution.lease is leases.fresh_lease
+    assert execution.fence.fencing_token == leases.fresh_lease.fencing_token
+    assert gateway._latest_leases == {
+        (
+            admission.binding.thread_id,
+            admission.binding.command_id,
+            "worker-1",
+            leases.fresh_lease.fencing_token,
+        ): leases.fresh_lease
+    }
+    assert "transaction:commit" in pool.events
+
+
+@pytest.mark.asyncio
+async def test_acquire_execution_rolls_back_when_post_begin_renew_loses_lease() -> None:
+    admission = _registered_admission()
+    pool = _Pool()
+    ordering: list[str] = []
+    leases = _FresheningLeases(admission, ordering, lose_on_renew=True)
+    gateway = GraphCommandGateway(
+        mode=GraphGatewayMode.SHADOW,
+        pool=pool,
+        threads=_Threads(pool.events),  # type: ignore[arg-type]
+        ledger=_BeginningAttemptLedger(admission, ordering),  # type: ignore[arg-type]
+        leases=leases,  # type: ignore[arg-type]
+        input_authorizer=_InputAuthorizer([]),
+    )
+
+    with pytest.raises(GraphLeaseLostError):
+        await gateway.acquire_execution(
+            admission,
+            owner_id="worker-1",
+            attempt_id=admission.command.attempt_id,
+        )
+
+    assert ordering == ["acquire", "begin_attempt", "renew"]
+    assert gateway._latest_leases == {}
+    assert "transaction:rollback" in pool.events
+    assert "transaction:commit" not in pool.events
 
 
 @pytest.mark.asyncio
