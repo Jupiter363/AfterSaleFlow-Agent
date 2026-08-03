@@ -148,6 +148,8 @@ class GraphRuntimeBindings:
     thread_identity_resolver: TrustedThreadIdentityResolver
     input_authorizer: ImmutableInputAuthorizer
     executor_registry_factory: ExecutorRegistryFactory
+    resource_opener: Callable[[], Awaitable[None]] | None = None
+    resource_closer: Callable[[], Awaitable[None]] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -263,6 +265,7 @@ class GraphApplicationRuntime:
         reconciliation_verifier: ReconciliationEnvelopeVerifier,
         target_e2e_verifier: TargetE2EInvocationVerifier | None = None,
         mode: GraphGatewayMode = GraphGatewayMode.SHADOW,
+        resource_closer: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._checkpoint_runtime = checkpoint_runtime
         self._persistence_probe = persistence_probe
@@ -276,6 +279,7 @@ class GraphApplicationRuntime:
         self.reconciliation_verifier = reconciliation_verifier
         self.target_e2e_verifier = target_e2e_verifier
         self._mode = mode
+        self._resource_closer = resource_closer
         self._persistence_ready = True
         self._bulkhead_ready = True
         self._closed = False
@@ -463,6 +467,8 @@ class GraphApplicationRuntime:
                 )
             if bindings is None:
                 raise RuntimeError("active Graph runtime bindings were not assembled")
+            if bindings.resource_opener is not None:
+                await bindings.resource_opener()
             executors = bindings.executor_registry_factory(
                 GraphExecutorKernel(
                     saver=checkpoint_runtime.saver,
@@ -506,19 +512,24 @@ class GraphApplicationRuntime:
                 ),
                 target_e2e_verifier=target_e2e_verifier,
                 mode=mode,
+                resource_closer=bindings.resource_closer,
             )
             await gate.start()
             return runtime
         except BaseException:
             try:
-                if durable_bulkhead is not None:
-                    await durable_bulkhead.close()
+                if bindings is not None and bindings.resource_closer is not None:
+                    await bindings.resource_closer()
             finally:
                 try:
-                    if security_runtime is not None:
-                        await security_runtime.close()
+                    if durable_bulkhead is not None:
+                        await durable_bulkhead.close()
                 finally:
-                    await checkpoint_runtime.close()
+                    try:
+                        if security_runtime is not None:
+                            await security_runtime.close()
+                    finally:
+                        await checkpoint_runtime.close()
             raise
 
     @property
@@ -630,9 +641,13 @@ class GraphApplicationRuntime:
                             await self._durable_bulkhead.close()
                         finally:
                             try:
-                                await self._security_runtime.close()
+                                if self._resource_closer is not None:
+                                    await self._resource_closer()
                             finally:
-                                await self._checkpoint_runtime.close()
+                                try:
+                                    await self._security_runtime.close()
+                                finally:
+                                    await self._checkpoint_runtime.close()
             finally:
                 self._drained = drained and bulkhead_drained
                 self._close_complete = True

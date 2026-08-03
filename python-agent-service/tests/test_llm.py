@@ -1,5 +1,6 @@
 # 文件作用：自动化测试文件，验证 test_llm 相关模块的行为、契约或页面布局。
 
+import asyncio
 import json
 
 import httpx
@@ -900,3 +901,182 @@ def test_litellm_proxy_rejects_an_oversized_single_stream_delta(
                 output_type=SimpleStructuredOutput,
             )
         )
+
+
+def test_async_stream_reuses_one_client_for_consecutive_provider_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    valid_content = json.dumps({"requires_supplemental_evidence": False, "gaps": []})
+    provider_calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        provider_calls.append(request)
+        return httpx.Response(
+            200,
+            content=_structured_stream_body(valid_content, finish_reason="stop"),
+        )
+
+    transport = httpx.MockTransport(handler)
+    real_async_client = httpx.AsyncClient
+    client_constructions: list[dict[str, object]] = []
+
+    def build_async_client(**kwargs: object) -> httpx.AsyncClient:
+        client_constructions.append(dict(kwargs))
+        return real_async_client(**kwargs)
+
+    monkeypatch.setattr(llm_module.httpx, "AsyncClient", build_async_client)
+    client = LiteLlmProxyClient(
+        "http://litellm:4000",
+        "qwen3.7-plus",
+        "test-master-key",
+        async_transport=transport,
+    )
+
+    async def scenario() -> None:
+        await asyncio.gather(client.aopen(), client.aopen(), client.aopen())
+        assert len(client_constructions) == 1
+        for _ in range(2):
+            updates = [
+                update
+                async for update in client.agenerate_stream(
+                    node_name="intake_turn_case_detail",
+                    system_prompt="system",
+                    user_prompt="user",
+                    output_type=SimpleStructuredOutput,
+                )
+            ]
+            assert updates[-1].kind == "completed"
+        await client.aclose()
+
+    asyncio.run(scenario())
+
+    assert len(provider_calls) == 2
+    assert len(client_constructions) == 1
+    assert client_constructions[0]["transport"] is transport
+    assert "trust_env" not in client_constructions[0]
+    assert "verify" not in client_constructions[0]
+
+
+def test_async_client_close_is_concurrent_idempotent_and_rejects_reuse() -> None:
+    class CountingAsyncTransport(httpx.AsyncBaseTransport):
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, request=request, content=b"")
+
+        async def aclose(self) -> None:
+            self.close_calls += 1
+
+    transport = CountingAsyncTransport()
+    client = LiteLlmProxyClient(
+        "http://litellm:4000",
+        "qwen3.7-plus",
+        "test-master-key",
+        async_transport=transport,
+    )
+
+    async def scenario() -> None:
+        async with client._lease_async_client() as leased:
+            assert leased is not None
+        await asyncio.gather(client.aclose(), client.aclose(), client.aclose())
+        await client.aclose()
+        with pytest.raises(AgentServiceUnavailable, match="has been closed"):
+            async with client._lease_async_client():
+                pass
+        with pytest.raises(AgentServiceUnavailable, match="has been closed"):
+            await client.aopen()
+
+    asyncio.run(scenario())
+
+    assert transport.close_calls == 1
+
+
+def test_async_client_preserves_environment_and_secure_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    constructions: list[dict[str, object]] = []
+
+    class StubAsyncClient:
+        async def aclose(self) -> None:
+            return None
+
+    def build_async_client(**kwargs: object) -> StubAsyncClient:
+        constructions.append(dict(kwargs))
+        return StubAsyncClient()
+
+    monkeypatch.setattr(llm_module.httpx, "AsyncClient", build_async_client)
+
+    async def scenario() -> None:
+        for base_url in ("http://litellm:4000", "https://litellm.example"):
+            client = LiteLlmProxyClient(
+                base_url,
+                "qwen3.7-plus",
+                "test-master-key",
+            )
+            async with client._lease_async_client():
+                pass
+            await client.aclose()
+
+    asyncio.run(scenario())
+
+    assert len(constructions) == 2
+    assert all("trust_env" not in item for item in constructions)
+    assert all("verify" not in item for item in constructions)
+
+
+def test_cancelled_active_stream_cannot_strand_concurrent_close() -> None:
+    class BlockingAsyncTransport(httpx.AsyncBaseTransport):
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.never_respond = asyncio.Event()
+            self.close_calls = 0
+
+        async def handle_async_request(
+            self, request: httpx.Request
+        ) -> httpx.Response:
+            self.started.set()
+            await self.never_respond.wait()
+            raise AssertionError("the cancelled request unexpectedly resumed")
+
+        async def aclose(self) -> None:
+            self.close_calls += 1
+
+    transport = BlockingAsyncTransport()
+    client = LiteLlmProxyClient(
+        "http://litellm:4000",
+        "qwen3.7-plus",
+        "test-master-key",
+        async_transport=transport,
+    )
+
+    async def consume_stream() -> None:
+        async for _ in client.agenerate_stream(
+            node_name="intake_turn_case_detail",
+            system_prompt="system",
+            user_prompt="user",
+            output_type=SimpleStructuredOutput,
+        ):
+            pass
+
+    async def scenario() -> None:
+        stream_task = asyncio.create_task(consume_stream())
+        await asyncio.wait_for(transport.started.wait(), timeout=1.0)
+
+        # Hold the lifecycle lock while cancellation unwinds. The former lease
+        # cleanup awaited this lock, so a second cancellation could skip its
+        # decrement and strand every concurrent aclose waiter.
+        await client._async_client_lock.acquire()
+        close_tasks = [asyncio.create_task(client.aclose()) for _ in range(3)]
+        stream_task.cancel()
+        await asyncio.sleep(0)
+        stream_task.cancel()
+        client._async_client_lock.release()
+
+        with pytest.raises(asyncio.CancelledError):
+            await stream_task
+        await asyncio.wait_for(asyncio.gather(*close_tasks), timeout=1.0)
+
+    asyncio.run(scenario())
+
+    assert transport.close_calls == 1

@@ -756,7 +756,8 @@ def test_executor_factory_registers_a_real_exact_compiled_executor() -> None:
         registry.resolve_registration(drifted)
 
 
-def test_target_e2e_default_intake_uses_configured_structured_client(
+@pytest.mark.asyncio
+async def test_target_e2e_default_intake_uses_configured_structured_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, Any] = {}
@@ -773,6 +774,30 @@ def test_target_e2e_default_intake_uses_configured_structured_client(
             self.governed_provider = "litellm"
             self.governed_model = model
 
+        async def aopen(self) -> None:
+            captured["client_opened"] = True
+
+        async def aclose(self) -> None:
+            captured["client_closed"] = True
+
+    class FakeJavaIntakeExchangeClient:
+        def __init__(
+            self,
+            *,
+            java_api_service_url: str,
+            java_service_secret: str,
+        ) -> None:
+            captured["exchange_args"] = (
+                java_api_service_url,
+                java_service_secret,
+            )
+
+        async def aopen(self) -> None:
+            captured["exchange_opened"] = True
+
+        async def aclose(self) -> None:
+            captured["exchange_closed"] = True
+
     class DefaultProvidersCaptured(Exception):
         pass
 
@@ -788,6 +813,11 @@ def test_target_e2e_default_intake_uses_configured_structured_client(
         production_bindings,
         "LiteLlmProxyClient",
         FakeLiteLlmProxyClient,
+    )
+    monkeypatch.setattr(
+        production_bindings,
+        "JavaIntakeExchangeClient",
+        FakeJavaIntakeExchangeClient,
     )
     monkeypatch.setattr(
         production_bindings,
@@ -809,16 +839,30 @@ def test_target_e2e_default_intake_uses_configured_structured_client(
     with pytest.raises(DefaultProvidersCaptured):
         runtime.executor_registry_factory(kernel)
 
+    assert runtime.resource_opener is not None
+    await runtime.resource_opener()
+
     assert captured["client_args"] == (
         settings.resolved_llm_base_url,
         settings.resolved_llm_model,
         settings.resolved_llm_api_key,
         settings.llm_timeout_seconds,
     )
+    assert captured["exchange_args"] == (
+        settings.java_api_service_url,
+        settings.java_service_secret,
+    )
     assert captured["kernel"] is kernel
     assert isinstance(captured["intake_transport"], StructuredClientTransport)
     assert captured["intake_provider"] == "litellm"
     assert captured["intake_model"] == "qwen3.7-plus-target"
+    assert captured["client_opened"] is True
+    assert captured["exchange_opened"] is True
+
+    assert runtime.resource_closer is not None
+    await runtime.resource_closer()
+    assert captured["client_closed"] is True
+    assert captured["exchange_closed"] is True
 
 
 def test_target_e2e_composite_registers_the_exact_intake_provider_binding() -> None:
@@ -3777,11 +3821,210 @@ async def test_java_intake_exchange_loads_only_exact_canonical_receipt_bytes() -
         transport=httpx.MockTransport(handler),
     )
 
-    loaded = await client.load(execution)
+    try:
+        loaded = await client.load(execution)
+    finally:
+        await client.aclose()
 
     assert loaded.object_version == "version-1"
     assert loaded.canonical_payload == payload
     assert loaded.sha256 == command.domain_snapshot_ref.sha256
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "origin",
+    ["http://java-api-service:8080", "https://java-api-service:8443"],
+)
+async def test_java_intake_exchange_builds_one_lazy_baseline_environment_client(
+    monkeypatch: pytest.MonkeyPatch,
+    origin: str,
+) -> None:
+    real_client = httpx.AsyncClient
+    constructor_options: list[dict[str, Any]] = []
+
+    def build_client(**options: Any) -> httpx.AsyncClient:
+        constructor_options.append(options)
+        return real_client(**options)
+
+    monkeypatch.setattr(httpx, "AsyncClient", build_client)
+    client = JavaIntakeExchangeClient(
+        java_api_service_url=origin,
+        java_service_secret="test-java-service-secret",
+        transport=httpx.MockTransport(lambda _: httpx.Response(200)),
+    )
+    try:
+        assert constructor_options == []
+        await asyncio.gather(client.aopen(), client.aopen())
+        assert len(constructor_options) == 1
+        assert constructor_options[0]["base_url"] == origin
+        assert constructor_options[0]["follow_redirects"] is False
+        # Preserve baseline proxy, SSL_CERT_*, and trusted-CA behavior.
+        assert "trust_env" not in constructor_options[0]
+        assert "verify" not in constructor_options[0]
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_java_intake_exchange_close_before_open_never_builds_or_reopens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_client = httpx.AsyncClient
+    constructor_count = 0
+
+    def build_client(**options: Any) -> httpx.AsyncClient:
+        nonlocal constructor_count
+        constructor_count += 1
+        return real_client(**options)
+
+    monkeypatch.setattr(httpx, "AsyncClient", build_client)
+    client = JavaIntakeExchangeClient(
+        java_api_service_url="http://java-api-service:8080",
+        java_service_secret="test-java-service-secret",
+        transport=httpx.MockTransport(lambda _: httpx.Response(200)),
+    )
+
+    assert client._client is None
+    await asyncio.gather(client.aclose(), client.aclose())
+    await client.aclose()
+    assert constructor_count == 0
+    assert client._client is None
+    with pytest.raises(GraphContractError, match="client is closed"):
+        await client.aopen()
+    with pytest.raises(GraphContractError, match="client is closed"):
+        await client._post("/after-close", {}, maximum_bytes=64)
+    assert constructor_count == 0
+
+
+@pytest.mark.asyncio
+async def test_java_intake_exchange_reuses_one_client_and_drains_concurrent_requests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class TrackingTransport(httpx.AsyncBaseTransport):
+        def __init__(self) -> None:
+            self.request_count = 0
+            self.active = 0
+            self.peak_active = 0
+            self.close_count = 0
+            self.closed = False
+            self.two_started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            assert not self.closed
+            self.request_count += 1
+            self.active += 1
+            self.peak_active = max(self.peak_active, self.active)
+            if self.active == 2:
+                self.two_started.set()
+            try:
+                await asyncio.wait_for(self.release.wait(), timeout=1)
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "application/json"},
+                    content=b"{}",
+                )
+            finally:
+                self.active -= 1
+
+        async def aclose(self) -> None:
+            self.close_count += 1
+            self.closed = True
+
+    real_client = httpx.AsyncClient
+    constructor_count = 0
+
+    def build_client(**options: Any) -> httpx.AsyncClient:
+        nonlocal constructor_count
+        constructor_count += 1
+        return real_client(**options)
+
+    monkeypatch.setattr(httpx, "AsyncClient", build_client)
+    transport = TrackingTransport()
+    client = JavaIntakeExchangeClient(
+        java_api_service_url="http://java-api-service:8080",
+        java_service_secret="test-java-service-secret",
+        transport=transport,
+    )
+    assert constructor_count == 0
+    await asyncio.gather(client.aopen(), client.aopen())
+    assert constructor_count == 1
+    http_client = client._client
+    assert http_client is not None
+    requests = [
+        asyncio.create_task(client._post("/first", {}, maximum_bytes=64)),
+        asyncio.create_task(client._post("/second", {}, maximum_bytes=64)),
+    ]
+    await asyncio.wait_for(transport.two_started.wait(), timeout=1)
+    closers = [asyncio.create_task(client.aclose()), asyncio.create_task(client.aclose())]
+    while not client._closing:
+        await asyncio.sleep(0)
+
+    with pytest.raises(GraphContractError, match="client is closed"):
+        await client._post("/after-close", {}, maximum_bytes=64)
+    assert all(not closer.done() for closer in closers)
+
+    transport.release.set()
+    assert await asyncio.gather(*requests) == [{}, {}]
+    await asyncio.gather(*closers)
+    await client.aclose()
+
+    assert constructor_count == 1
+    assert client._client is http_client
+    assert transport.request_count == 2
+    assert transport.peak_active == 2
+    assert transport.close_count == 1
+    assert http_client.is_closed
+
+
+@pytest.mark.asyncio
+async def test_java_intake_exchange_cancelled_request_cannot_strand_close() -> None:
+    class CancellationTrackingTransport(httpx.AsyncBaseTransport):
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.never_complete = asyncio.Event()
+            self.close_count = 0
+
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            self.started.set()
+            await self.never_complete.wait()
+            raise AssertionError("cancelled exchange must not produce a response")
+
+        async def aclose(self) -> None:
+            self.close_count += 1
+
+    transport = CancellationTrackingTransport()
+    client = JavaIntakeExchangeClient(
+        java_api_service_url="http://java-api-service:8080",
+        java_service_secret="test-java-service-secret",
+        transport=transport,
+    )
+    await client.aopen()
+    request = asyncio.create_task(client._post("/cancel", {}, maximum_bytes=64))
+    await asyncio.wait_for(transport.started.wait(), timeout=1)
+    closers = [asyncio.create_task(client.aclose()), asyncio.create_task(client.aclose())]
+    while not client._closing:
+        await asyncio.sleep(0)
+
+    # Hold the lifecycle lock so the former await-based lease return would be
+    # interrupted and lost by the second cancellation.
+    await client._lifecycle.acquire()
+    try:
+        assert request.cancel()
+        await asyncio.sleep(0)
+        request.cancel()
+    finally:
+        client._lifecycle.release()
+
+    with pytest.raises(asyncio.CancelledError):
+        await request
+    await asyncio.wait_for(asyncio.gather(*closers), timeout=1)
+    await client.aclose()
+
+    assert client._active_requests == 0
+    assert client._idle.is_set()
+    assert transport.close_count == 1
 
 
 @pytest.mark.asyncio
@@ -3901,8 +4144,11 @@ async def test_java_intake_exchange_rejects_payload_hash_mismatch() -> None:
         transport=httpx.MockTransport(handler),
     )
 
-    with pytest.raises(GraphContractError, match="receipt|hash"):
-        await client.load(execution)
+    try:
+        with pytest.raises(GraphContractError, match="receipt|hash"):
+            await client.load(execution)
+    finally:
+        await client.aclose()
 
 
 @pytest.mark.asyncio
@@ -3965,13 +4211,16 @@ async def test_java_intake_exchange_put_returns_exact_versioned_receipt() -> Non
         transport=httpx.MockTransport(handler),
     )
 
-    stored = await client.put(
-        execution,
-        proposal=proposal,
-        checkpoint_ns="",
-        checkpoint_id="cp-terminal",
-        cognitive_revision=2,
-    )
+    try:
+        stored = await client.put(
+            execution,
+            proposal=proposal,
+            checkpoint_ns="",
+            checkpoint_id="cp-terminal",
+            cognitive_revision=2,
+        )
+    finally:
+        await client.aclose()
 
     assert stored.object_version == "version-1"
     assert stored.sha256 == proposal.sha256

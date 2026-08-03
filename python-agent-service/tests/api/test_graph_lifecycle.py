@@ -115,11 +115,15 @@ def _empty_executor_registry_factory(
 def _bindings(
     *,
     executor_registry_factory: Any = _empty_executor_registry_factory,
+    resource_opener: Any = None,
+    resource_closer: Any = None,
 ) -> GraphRuntimeBindings:
     return GraphRuntimeBindings(
         thread_identity_resolver=cast(Any, _ThreadResolver()),
         input_authorizer=cast(Any, _InputAuthorizer()),
         executor_registry_factory=executor_registry_factory,
+        resource_opener=resource_opener,
+        resource_closer=resource_closer,
     )
 
 
@@ -706,9 +710,19 @@ async def test_shadow_services_share_the_runtime_kernel_owner_and_shutdown_gate(
         assert kernel.durable_bulkhead is durable_bulkheads[0]
         return _registered_executors()
 
+    async def open_http_resources() -> None:
+        events.append("http_resources_open")
+
+    async def close_http_resources() -> None:
+        events.append("http_resources_close")
+
     runtime = await GraphApplicationRuntime.open(
         _shadow_settings(),
-        _bindings(executor_registry_factory=executor_factory),
+        _bindings(
+            executor_registry_factory=executor_factory,
+            resource_opener=open_http_resources,
+            resource_closer=close_http_resources,
+        ),
     )
     assert len(gateways) == 1
     assert len(durable_bulkheads) == 1
@@ -724,11 +738,13 @@ async def test_shadow_services_share_the_runtime_kernel_owner_and_shutdown_gate(
         "bulkhead_open",
         "bulkhead_readiness",
         "security_open",
+        "http_resources_open",
         "executor_factory",
         "gate_start",
         "drain",
         "bulkhead_drain",
         "bulkhead_close",
+        "http_resources_close",
         "security_close",
         "checkpoint_close",
     ]
@@ -1008,6 +1024,7 @@ def _application_runtime(
     security: _SecurityRuntime | None = None,
     bulkhead: _DurableBulkhead | None = None,
     gate: _AdmissionGate | None = None,
+    resource_closer: Any = None,
 ) -> GraphApplicationRuntime:
     return GraphApplicationRuntime(
         checkpoint_runtime=cast(Any, _CheckpointRuntime(events)),
@@ -1020,6 +1037,7 @@ def _application_runtime(
         admission_gate=cast(Any, gate or _AdmissionGate(events)),
         execution_verifier=cast(Any, object()),
         reconciliation_verifier=cast(Any, object()),
+        resource_closer=resource_closer,
     )
 
 
@@ -1046,6 +1064,32 @@ async def test_application_close_waits_for_both_shared_admission_tokens() -> Non
     await gate.leave(reconciliation_token)
     assert await close_task is True
     assert events == ["bulkhead_drain", "bulkhead_close", "security_close", "checkpoint_close"]
+
+
+@pytest.mark.asyncio
+async def test_application_close_releases_process_http_resources_after_drain() -> None:
+    events: list[str] = []
+
+    async def close_http_resources() -> None:
+        events.append("http_resources_close")
+
+    runtime = _application_runtime(
+        events=events,
+        resource_closer=close_http_resources,
+    )
+
+    assert await runtime.close() is True
+    assert events == [
+        "drain",
+        "bulkhead_drain",
+        "bulkhead_close",
+        "http_resources_close",
+        "security_close",
+        "checkpoint_close",
+    ]
+
+    assert await runtime.close() is True
+    assert events.count("http_resources_close") == 1
 
 
 @pytest.mark.asyncio

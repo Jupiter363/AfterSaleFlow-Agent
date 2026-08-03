@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import json
@@ -10,7 +11,7 @@ import re
 import threading
 import time
 from collections.abc import AsyncIterator, Iterator
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -361,10 +362,89 @@ class LiteLlmProxyClient:
         self._async_transport = async_transport or (
             transport if isinstance(transport, httpx.AsyncBaseTransport) else None
         )
+        self._async_client: httpx.AsyncClient | None = None
+        self._async_client_lock = asyncio.Lock()
+        self._async_client_idle = asyncio.Event()
+        self._async_client_idle.set()
+        self._async_client_active_leases = 0
+        self._async_client_closing = False
+        self._async_client_closed = False
+        self._async_client_close_task: asyncio.Task[None] | None = None
         self._health_lock = threading.Lock()
         self._health_cached_at = 0.0
         self._health_cached_result: dict[str, Any] | None = None
         self._health_failed_at = 0.0
+
+    def _build_async_client(self) -> httpx.AsyncClient:
+        """Build the process-lifetime async transport on its first real use."""
+
+        # Construct this once during lifecycle warm-up instead of once per model
+        # call. Keep httpx environment handling intact so deployment proxy and
+        # SSL_CERT_* settings retain their baseline meaning.
+        return httpx.AsyncClient(
+            timeout=self._timeout,
+            transport=self._async_transport,
+        )
+
+    async def aopen(self) -> None:
+        """Idempotently prepare the shared async transport without network I/O."""
+
+        async with self._async_client_lock:
+            if self._async_client_closing or self._async_client_closed:
+                raise AgentServiceUnavailable("LLM async client has been closed")
+            if self._async_client is None:
+                self._async_client = self._build_async_client()
+
+    @asynccontextmanager
+    async def _lease_async_client(self) -> AsyncIterator[httpx.AsyncClient]:
+        """Lease the shared async client without racing process shutdown."""
+
+        async with self._async_client_lock:
+            if self._async_client_closing or self._async_client_closed:
+                raise AgentServiceUnavailable("LLM async client has been closed")
+            if self._async_client is None:
+                self._async_client = self._build_async_client()
+            client = self._async_client
+            self._async_client_active_leases += 1
+            self._async_client_idle.clear()
+        try:
+            yield client
+        finally:
+            # Async leases run on one event loop. Returning the lease must not
+            # contain a cancellation point: otherwise a second cancellation can
+            # interrupt lock acquisition, lose this decrement, and leave aclose
+            # waiting on ``_async_client_idle`` forever.
+            self._async_client_active_leases -= 1
+            if self._async_client_active_leases == 0:
+                self._async_client_idle.set()
+
+    async def _finish_async_close(self) -> None:
+        """Wait for in-flight leases and close the shared transport exactly once."""
+
+        try:
+            await self._async_client_idle.wait()
+            async with self._async_client_lock:
+                client = self._async_client
+                self._async_client = None
+            if client is not None:
+                await client.aclose()
+        finally:
+            async with self._async_client_lock:
+                self._async_client_closed = True
+                self._async_client_closing = False
+
+    async def aclose(self) -> None:
+        """Idempotently close the reused async transport after active calls finish."""
+
+        async with self._async_client_lock:
+            close_task = self._async_client_close_task
+            if close_task is None:
+                self._async_client_closing = True
+                close_task = asyncio.create_task(self._finish_async_close())
+                self._async_client_close_task = close_task
+        # Shield the shared close task so cancellation of one shutdown waiter
+        # cannot strand the connection pool or other concurrent waiters.
+        await asyncio.shield(close_task)
 
     @property
     def governed_provider(self) -> str:
@@ -657,10 +737,7 @@ class LiteLlmProxyClient:
         provider_attempts_used = 0
         repairs_used = 0
         try:
-            async with httpx.AsyncClient(
-                timeout=self._timeout,
-                transport=self._async_transport,
-            ) as client:
+            async with self._lease_async_client() as client:
                 allow_json_extraction = False
                 try:
                     provider_attempts_used += 1
@@ -784,10 +861,7 @@ class LiteLlmProxyClient:
         )
         request_timeout = self._request_timeout_seconds(governed_request)
         try:
-            async with httpx.AsyncClient(
-                timeout=self._timeout,
-                transport=self._async_transport,
-            ) as client:
+            async with self._lease_async_client() as client:
                 request_body = self._completion_request_body(
                     node_name=node_name,
                     output_type=output_type,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 from collections.abc import Mapping
@@ -194,6 +195,79 @@ class JavaIntakeExchangeClient:
         self._secret = java_service_secret
         self._timeout = timeout_seconds
         self._transport = transport
+        self._client: httpx.AsyncClient | None = None
+        self._lifecycle = asyncio.Condition()
+        self._active_requests = 0
+        self._idle = asyncio.Event()
+        self._idle.set()
+        self._closing = False
+        self._closed = False
+        self._close_task: asyncio.Task[None] | None = None
+
+    async def aopen(self) -> None:
+        """Build this runtime's reusable transport without opening a connection."""
+
+        async with self._lifecycle:
+            if self._closing or self._closed:
+                raise GraphContractError("Intake exchange client is closed")
+            if self._client is None:
+                self._client = self._build_client()
+
+    async def aclose(self) -> None:
+        """Stop accepting requests, drain in-flight exchanges, and close once."""
+
+        async with self._lifecycle:
+            if self._close_task is None:
+                self._closing = True
+                self._close_task = asyncio.create_task(self._close_when_idle())
+            close_task = self._close_task
+        assert close_task is not None
+        await asyncio.shield(close_task)
+
+    async def _close_when_idle(self) -> None:
+        try:
+            await self._idle.wait()
+            client = self._client
+            if client is not None:
+                await client.aclose()
+        finally:
+            async with self._lifecycle:
+                self._closed = True
+                self._closing = False
+                self._lifecycle.notify_all()
+
+    async def _borrow_client(self) -> httpx.AsyncClient:
+        async with self._lifecycle:
+            if self._closing or self._closed:
+                raise GraphContractError("Intake exchange client is closed")
+            client = self._client
+            if client is None:
+                # Direct users remain compatible even when no application
+                # lifecycle has explicitly opened this runtime resource.
+                client = self._build_client()
+                self._client = client
+            if self._active_requests == 0:
+                self._idle.clear()
+            self._active_requests += 1
+            return client
+
+    def _build_client(self) -> httpx.AsyncClient:
+        # Construction loads transport resources synchronously, so application
+        # lifecycles call aopen before serving commands. One client is retained for
+        # all snapshot/event loads and proposal writes, enabling connection reuse.
+        return httpx.AsyncClient(
+            base_url=self._origin,
+            timeout=self._timeout,
+            transport=self._transport,
+            follow_redirects=False,
+        )
+
+    def _return_client(self) -> None:
+        self._active_requests -= 1
+        if self._active_requests == 0:
+            # This release path deliberately contains no await: repeated task
+            # cancellation cannot strand the close task behind a leaked lease.
+            self._idle.set()
 
     async def load(
         self,
@@ -349,40 +423,37 @@ class JavaIntakeExchangeClient:
             "Content-Type": "application/json",
             "X-Service-Secret": self._secret,
         }
+        client = await self._borrow_client()
         try:
-            async with httpx.AsyncClient(
-                base_url=self._origin,
-                timeout=self._timeout,
-                transport=self._transport,
-                follow_redirects=False,
-            ) as client:
-                async with client.stream(
-                    "POST",
-                    path,
-                    headers=headers,
-                    content=canonicalize(dict(payload)),
-                ) as response:
-                    if response.status_code != 200:
-                        raise GraphContractError("Intake exchange rejected the bound request")
-                    media_type = response.headers.get("content-type", "").split(";", 1)[0]
-                    if media_type.strip().lower() != "application/json":
-                        raise GraphContractError("Intake exchange returned another media type")
-                    declared = response.headers.get("content-length")
-                    if declared is not None and (
-                        not declared.isdigit() or int(declared) > maximum_bytes
-                    ):
+            async with client.stream(
+                "POST",
+                path,
+                headers=headers,
+                content=canonicalize(dict(payload)),
+            ) as response:
+                if response.status_code != 200:
+                    raise GraphContractError("Intake exchange rejected the bound request")
+                media_type = response.headers.get("content-type", "").split(";", 1)[0]
+                if media_type.strip().lower() != "application/json":
+                    raise GraphContractError("Intake exchange returned another media type")
+                declared = response.headers.get("content-length")
+                if declared is not None and (
+                    not declared.isdigit() or int(declared) > maximum_bytes
+                ):
+                    raise GraphContractError("Intake exchange response exceeds its limit")
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in response.aiter_bytes():
+                    total += len(chunk)
+                    if total > maximum_bytes:
                         raise GraphContractError("Intake exchange response exceeds its limit")
-                    chunks: list[bytes] = []
-                    total = 0
-                    async for chunk in response.aiter_bytes():
-                        total += len(chunk)
-                        if total > maximum_bytes:
-                            raise GraphContractError("Intake exchange response exceeds its limit")
-                        chunks.append(chunk)
+                    chunks.append(chunk)
         except GraphContractError:
             raise
         except httpx.HTTPError as error:
             raise GraphContractError("Intake exchange transport failed") from error
+        finally:
+            self._return_client()
         try:
             value = json.loads(b"".join(chunks), object_pairs_hook=_unique_object)
         except (UnicodeDecodeError, ValueError) as error:

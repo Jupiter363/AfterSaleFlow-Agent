@@ -272,6 +272,20 @@ def build_graph_runtime_bindings(
             java_service_secret=settings.java_service_secret,
         )
 
+    async def open_http_resources() -> None:
+        if intake_exchange is not None:
+            await intake_exchange.aopen()
+        if structured_client is not None:
+            await structured_client.aopen()
+
+    async def close_http_resources() -> None:
+        try:
+            if intake_exchange is not None:
+                await intake_exchange.aclose()
+        finally:
+            if structured_client is not None:
+                await structured_client.aclose()
+
     def executor_registry_factory(
         kernel: GraphExecutorKernel,
     ) -> ExactShadowExecutorRegistry:
@@ -336,6 +350,16 @@ def build_graph_runtime_bindings(
         thread_identity_resolver=resolver,
         input_authorizer=authorizer,
         executor_registry_factory=executor_registry_factory,
+        resource_opener=(
+            open_http_resources
+            if structured_client is not None or intake_exchange is not None
+            else None
+        ),
+        resource_closer=(
+            close_http_resources
+            if structured_client is not None or intake_exchange is not None
+            else None
+        ),
     )
 
 
