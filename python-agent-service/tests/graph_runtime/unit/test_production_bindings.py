@@ -18,7 +18,6 @@ from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel
 
 from app.agents.dispute_intake_officer.schemas import IntakeCaseDetailLlmOutput
-from app.agents.dispute_intake_officer.workflow import _limit_follow_up_questions
 import app.graph_runtime.intake_executor as intake_executor
 import app.graph_runtime.production_bindings as production_bindings
 from app.api.graph_lifecycle import GraphExecutorKernel
@@ -2273,9 +2272,6 @@ async def test_target_intake_executor_streams_room_equal_to_terminal_before_term
     streamed_room_utterance = terminal_room_utterance
     assert streamed_room_utterance == terminal_room_utterance
     assert streamed_room_utterance.count("？") == 2
-    assert _limit_follow_up_questions(streamed_room_utterance, limit=2) == (
-        terminal_room_utterance
-    )
     preview_split_at = len(streamed_room_utterance) // 2
     preview_room_deltas = (
         streamed_room_utterance[:preview_split_at],
@@ -3203,77 +3199,26 @@ async def test_target_intake_executor_streams_governed_ready_handoff_equal_to_te
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    (
-        "raw_room_deltas",
-        "expected_live_room_after_each_delta",
-        "terminal_room_utterance",
-        "withheld_marker",
-        "marker_is_retained",
-    ),
-    (
-        (
-            (
-                "为了更准确地梳理案情，请问：1. 您是否曾就此事与商家沟通过",
-                "？如有，商家是如何回复的",
-                "？",
-                "2",
-                ". 您收到的主商品包裹外包装或内部清单上，"
-                "是否有提及【RAW_THIRD_QUESTION】赠品的信息",
-                "？",
-            ),
-            (
-                "为了更准确地梳理案情，请问：1. 您是否曾就此事与商家沟通过",
-                "为了更准确地梳理案情，请问：1. 您是否曾就此事与商家沟通过"
-                "？如有，商家是如何回复的",
-                "为了更准确地梳理案情，请问：1. 您是否曾就此事与商家沟通过"
-                "？如有，商家是如何回复的？",
-                "为了更准确地梳理案情，请问：1. 您是否曾就此事与商家沟通过"
-                "？如有，商家是如何回复的？",
-                "为了更准确地梳理案情，请问：1. 您是否曾就此事与商家沟通过"
-                "？如有，商家是如何回复的？",
-                "为了更准确地梳理案情，请问：1. 您是否曾就此事与商家沟通过"
-                "？如有，商家是如何回复的？",
-            ),
-            "为了更准确地梳理案情，请问：1. 您是否曾就此事与商家沟通过"
-            "？如有，商家是如何回复的？",
-            "RAW_THIRD_QUESTION",
-            False,
-        ),
-        (
-            (
-                "Please confirm the order number?",
-                " How did the fault affect use?【TERMINAL_STATEMENT_TAIL】",
-            ),
-            (
-                "Please confirm the order number?",
-                "Please confirm the order number? How did the fault affect use?",
-            ),
-            (
-                "Please confirm the order number? How did the fault affect use?"
-                "【TERMINAL_STATEMENT_TAIL】"
-            ),
-            "TERMINAL_STATEMENT_TAIL",
-            True,
-        ),
-    ),
-    ids=("two_numbered_items_three_questions", "two_questions_statement_tail"),
-)
-async def test_target_intake_executor_projects_question_limited_room_before_releasing_board(
+async def test_target_intake_executor_streams_three_full_width_questions_before_releasing_board(
     monkeypatch: pytest.MonkeyPatch,
-    raw_room_deltas: tuple[str, ...],
-    expected_live_room_after_each_delta: tuple[str, ...],
-    terminal_room_utterance: str,
-    withheld_marker: str,
-    marker_is_retained: bool,
 ) -> None:
     command, _, _ = _intake_command()
     execution = _target_candidate_intake_execution(command)
+    raw_room_deltas = (
+        "为了更准确地梳理案情，请问：1. 您是否曾就此事与商家沟通过",
+        "？如有，商家是如何回复的",
+        "？2. 商品故障对您使用造成了什么影响【RAW_THIRD_QUESTION】",
+        "？",
+    )
     raw_room_utterance = "".join(raw_room_deltas)
-    assert _limit_follow_up_questions(raw_room_utterance, limit=2) == terminal_room_utterance
-    if withheld_marker == "RAW_THIRD_QUESTION":
-        assert raw_room_utterance.count("?") + raw_room_utterance.count("？") == 3
-        assert "1." in raw_room_utterance and "2." in raw_room_utterance
+    expected_live_room_after_each_delta = tuple(
+        "".join(raw_room_deltas[: index + 1])
+        for index in range(len(raw_room_deltas))
+    )
+    terminal_room_utterance = raw_room_utterance
+    assert raw_room_utterance.count("？") == 3
+    assert "?" not in raw_room_utterance
+    assert "1." in raw_room_utterance and "2." in raw_room_utterance
 
     state = {
         "terminal_draft": {"same": True},
@@ -3521,11 +3466,13 @@ async def test_target_intake_executor_projects_question_limited_room_before_rele
 
     assert graph.room_after_each_delta == list(expected_live_room_after_each_delta)
     assert graph.room_before_board == expected_live_room_after_each_delta[-1]
-    assert withheld_marker not in graph.room_before_board
     assert events[1].payload.field == "room_utterance"
     assert events[1].payload.delta == raw_room_deltas[0]
-    assert "".join(event.payload.delta or "" for event in room_events) == terminal_room_utterance
-    assert (withheld_marker in visible_text) is marker_is_retained
+    assert [event.payload.delta for event in room_events] == list(raw_room_deltas)
+    streamed_room_utterance = "".join(event.payload.delta or "" for event in room_events)
+    assert streamed_room_utterance == terminal_room_utterance == raw_room_utterance
+    assert "【RAW_THIRD_QUESTION】" in graph.room_before_board
+    assert "【RAW_THIRD_QUESTION】" in visible_text
     assert max(event.sequence_no for event in room_events) < min(
         event.sequence_no for event in board_events
     )
@@ -4007,19 +3954,16 @@ def test_compiled_intake_executor_rejects_dual_respondent_attitude_discriminator
         CompiledIntakeGraphShadowExecutor._should_suppress_respondent_attitude_update(update)
 
 
-def test_compiled_intake_executor_replaces_forbidden_room_utterance_before_publication() -> None:
+def test_compiled_intake_executor_preserves_prompt_owned_room_utterance() -> None:
     update = GraphPublicUpdate.visible_delta(
         node=BASELINE_INTAKE_NODE_NAME,
         field="room_utterance",
         delta=json.dumps("请上传截图作为证据。", ensure_ascii=False),
     )
 
-    safe = CompiledIntakeGraphShadowExecutor._validated_room_utterance_update(update)
+    preserved = CompiledIntakeGraphShadowExecutor._validated_room_utterance_update(update)
 
-    assert safe.payload.delta == (
-        "您好，我是小衡。为了准确梳理争议，请您补充说明事件发生的时间、"
-        "当前处理进展，以及您希望平台解决的核心问题？"
-    )
+    assert preserved.payload.delta == update.payload.delta
 
 
 def test_compiled_intake_executor_suppresses_provisional_evidence_dossier_update() -> None:

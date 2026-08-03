@@ -17,10 +17,7 @@ from app.agents.dispute_intake_officer.skills.dossier.dossier_skill import (
 )
 from app.intake_turn import IntakeTurnWorkflow
 from app.harness.invocation_context import AgentInvocationContext
-from app.agents.dispute_intake_officer.workflow import (
-    _limit_follow_up_questions,
-    _subjective_only_snapshot,
-)
+from app.agents.dispute_intake_officer.workflow import _subjective_only_snapshot
 from app.main import create_app
 from app.schemas import IntakeTurnRequest
 
@@ -358,20 +355,6 @@ def test_intake_request_rejects_cross_party_messages_and_non_private_scope() -> 
     wrong_scope["agent_context"]["scope_type"] = "ROOM_SHARED"
     with pytest.raises(ValueError, match="scope_type"):
         IntakeTurnRequest.model_validate(wrong_scope)
-
-
-def test_intake_reply_is_limited_to_two_question_sentences() -> None:
-    reply = "已记录。第一个问题？第二个问题？第三个问题？后续会继续整理。"
-
-    limited = _limit_follow_up_questions(reply, limit=2)
-
-    assert limited.count("？") == 2
-    assert "第三个问题" not in limited
-    assert "后续会继续整理" in limited
-    assert _limit_follow_up_questions(
-        "请说明：1. 履约时间；2. 当前处理状态；3. 其他情况。",
-        limit=2,
-    ) == "请说明：1. 履约时间；2. 当前处理状态；"
 
 
 class FakeCaseDetailRunner:

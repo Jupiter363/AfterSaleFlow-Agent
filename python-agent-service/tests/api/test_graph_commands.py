@@ -21,6 +21,7 @@ from app.api.graph_commands import (
     AgentStreamProtocolValidator,
     GraphCommandEndpointDependencies,
     _encode_event,
+    _log_safe_failure,
     _stream_ndjson,
     create_graph_commands_router,
 )
@@ -40,6 +41,7 @@ from app.graph_runtime.errors import (
     GraphLeaseLostError,
     GraphNewAgentAttemptRequiredError,
 )
+from app.graphs.intake.errors import IntakeGraphContractError
 from app.graph_runtime.identity import ActorScopeBinding, RoomType, ThreadIdentity
 from app.graph_runtime.target_e2e import (
     TargetE2EGraphCommandEnvelope,
@@ -150,6 +152,41 @@ class TargetVerifier:
     def verify_envelope(self, **kwargs: Any) -> VerifiedTargetE2EInvocation:
         assert kwargs["envelope"] == self.envelope
         return self.verified
+
+
+def test_log_safe_failure_records_stable_intake_error_code(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    error_code = "INTAKE_CONTRACT_REJECTED"
+
+    _log_safe_failure("intake contract validation", IntakeGraphContractError(error_code))
+
+    assert caplog.messages == [
+        "intake contract validation failed: "
+        "error_type=IntakeGraphContractError "
+        f"error_code={error_code}"
+    ]
+
+
+@pytest.mark.parametrize(
+    "message",
+    (
+        "model output with spaces",
+        "https://example.test/failure?token=secret",
+        "api_token=super-secret",
+        "first line\nsecond line",
+        "API_TOKEN_SECRET",
+        "INTAKE_API_TOKEN_SECRET",
+    ),
+)
+def test_log_safe_failure_omits_unstable_error_messages(
+    caplog: pytest.LogCaptureFixture,
+    message: str,
+) -> None:
+    _log_safe_failure("intake contract validation", ValueError(message))
+
+    assert caplog.messages == ["intake contract validation failed: error_type=ValueError"]
+    assert message not in caplog.text
 
 
 def _command() -> tuple[RoomGraphCommand, dict[str, Any]]:

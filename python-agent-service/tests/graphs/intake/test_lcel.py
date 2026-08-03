@@ -44,7 +44,6 @@ from app.graphs.intake.nodes import (
 )
 from app.graphs.intake.lcel import (
     _SAFE_INTAKE_CASE_SUMMARY,
-    _SAFE_INTAKE_ROOM_UTTERANCE,
     _contains_forbidden_evidence_request,
     _generation_parts as _production_generation_parts,
     _intake_response_message_id,
@@ -1536,13 +1535,13 @@ def test_two_turn_baseline_context_preserves_formal_fact_authority_privately(
     assert second_context["public_dossier_hash"] == canonical_sha256(second_result["dossier_draft"])
 
 
-def test_baseline_finalized_ready_handoff_owns_target_terminal_room_utterance(
+def test_prompt_owned_ready_handoff_preserves_target_terminal_room_utterance(
     bindings,
     version_pins,
     snapshot,
     event,
 ) -> None:
-    """Target keeps the baseline finalizer as terminal room-copy authority."""
+    """Target keeps the model reply unchanged while finalizing structured state."""
 
     event["text"] = (
         "Order ORDER_1001 arrived damaged; logistics reference SF1001001001 confirms delivery. "
@@ -1639,16 +1638,11 @@ def test_baseline_finalized_ready_handoff_owns_target_terminal_room_utterance(
         interrupt_before=["checkpoint_terminal"],
     )
 
-    baseline_finalized_room_utterance = (
-        "已记录本轮补充，当前信息已经可以提交。"
-        "请问还有没有需要备注给证据书记官或后续审理环节的案情内容？"
-    )
-    assert projected["terminal_draft"]["room_utterance"] == baseline_finalized_room_utterance
-    assert projected["terminal_draft"]["room_utterance"] != raw_provider_room_utterance
+    assert projected["terminal_draft"]["room_utterance"] == raw_provider_room_utterance
     assert projected["readiness"]["status"] == "READY_TO_CONFIRM"
     assert projected["dossier_draft"]["intake_quality"]["ready_for_next_step"] is True
     assert any(
-        message["role"] == "AI" and message["content"] == baseline_finalized_room_utterance
+        message["role"] == "AI" and message["content"] == raw_provider_room_utterance
         for message in projected["messages"].values()
     )
 
@@ -2747,7 +2741,7 @@ def test_model_ungrounded_optional_core_branch_is_discarded_for_java_baseline_fa
     assert projected.dossier_patch.dispute_core_state is None
 
 
-def test_model_evidence_request_is_replaced_by_safe_fact_question_and_removed_from_dossier(
+def test_model_evidence_request_is_preserved_while_structured_evidence_gaps_are_removed(
     bindings,
     version_pins,
 ) -> None:
@@ -2777,7 +2771,7 @@ def test_model_evidence_request_is_replaced_by_safe_fact_question_and_removed_fr
         }
     )
 
-    assert projected.room_utterance == _SAFE_INTAKE_ROOM_UTTERANCE
+    assert projected.room_utterance == "请上传活动页面截图作为证据？"
     assert projected.missing_fields == ("promotion_window",)
     assert projected.dossier_patch.missing_information == {
         "missing_facts": ["下单时活动是否仍在进行"],
@@ -2785,13 +2779,13 @@ def test_model_evidence_request_is_replaced_by_safe_fact_question_and_removed_fr
     }
 
 
-def test_production_generation_replaces_raw_model_evidence_room_request(
+def test_production_generation_preserves_raw_model_room_request(
     bindings,
     version_pins,
     snapshot,
     event,
 ) -> None:
-    """A raw provider request is still governed before baseline finalization."""
+    """The visible provider reply remains prompt-owned through finalization."""
 
     state = _event_state(bindings, version_pins, snapshot, event)
     raw_document = _event_document(event)
@@ -2806,7 +2800,7 @@ def test_production_generation_replaces_raw_model_evidence_room_request(
         agent_context=_agent_context_for_state(state),
     )
 
-    assert projected.room_utterance == _SAFE_INTAKE_ROOM_UTTERANCE
+    assert projected.room_utterance == "Upload a screenshot as evidence."
 
 
 def test_target_evidence_boundary_keeps_factual_record_clarification() -> None:

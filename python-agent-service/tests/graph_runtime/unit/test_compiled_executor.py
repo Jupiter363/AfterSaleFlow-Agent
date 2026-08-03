@@ -945,10 +945,6 @@ async def test_intake_executor_fails_closed_before_commit_when_terminal_reply_di
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     unsafe_terminal_reply = "Please upload a screenshot as evidence."
-    assert (
-        intake_executor._normalized_intake_room_utterance(unsafe_terminal_reply)
-        != unsafe_terminal_reply
-    )
     executor, execution, graph, saver, store = _intake_stream_executor(
         monkeypatch,
         [_intake_governed_delta("room_utterance", "streamed reply")],

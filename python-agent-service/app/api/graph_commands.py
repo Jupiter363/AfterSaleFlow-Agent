@@ -39,6 +39,7 @@ from app.graph_runtime.errors import (
     normalize_transient_persistence_error,
 )
 from app.graph_runtime.identity import ThreadIdentity
+from app.graphs.intake.errors import IntakeGraphContractError
 from app.graph_runtime.target_e2e import (
     TARGET_E2E_COMMAND_PATH,
     TargetE2EGraphCommandEnvelope,
@@ -64,6 +65,7 @@ GRAPH_RECONCILE_PATH = "/internal/graphs/commands/reconcile"
 TARGET_E2E_RECONCILE_PATH = "/internal/graphs/target-e2e/commands/reconcile"
 TARGET_E2E_PROPOSAL_SOURCE_PATH = "/internal/graphs/target-e2e/commands/proposal-source"
 _TERMINAL_EVENTS = frozenset({"attempt_aborted", "final", "error"})
+_STABLE_INTAKE_ERROR_CODE_PATTERN = re.compile(r"^INTAKE_[A-Z0-9_]{1,120}$")
 _NO_STORE_HEADERS: Mapping[str, str] = {
     "Cache-Control": "no-store, no-transform",
     "Pragma": "no-cache",
@@ -1119,6 +1121,16 @@ def _reconciliation_error_response(
 
 
 def _log_safe_failure(stage: str, error: Exception) -> None:
+    if isinstance(error, IntakeGraphContractError) and _STABLE_INTAKE_ERROR_CODE_PATTERN.fullmatch(
+        error.code
+    ):
+        LOGGER.error(
+            "%s failed: error_type=%s error_code=%s",
+            stage,
+            type(error).__name__,
+            error.code,
+        )
+        return
     LOGGER.error("%s failed: error_type=%s", stage, type(error).__name__)
 
 

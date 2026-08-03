@@ -14,12 +14,8 @@ from app.agents.dispute_intake_officer.skills.dossier.dossier_skill import (
     _canonical_verification_focus,
     _enforce_case_story_summary,
     _enforce_claim_resolution,
-    _is_evidence_material_request,
     _question_targets_resolved_intake_field,
     _reported_attitude_position,
-)
-from app.agents.dispute_intake_officer.workflow import (
-    _enforce_intake_question_boundary,
 )
 from app.schemas import IntakeTurnRequest
 from app.streaming import (
@@ -552,223 +548,38 @@ def test_intake_case_detail_patch_stays_a_dict_and_keeps_dynamic_branches() -> N
     assert "references" not in parsed.case_detail
 
 
-# 所属模块：Agent 角色能力 > test_intake_case_detail_dossier；函数角色：回归测试用例。
-# 具体功能：`test_intake_question_boundary_replaces_evidence_requests_with_case_questions` 验证当前可见证据在固定案例中的输出、边界和失败行为；关键协作调用：`_enforce_intake_question_boundary`。
-# 上下游：上游为 受治理的案件上下文和角色提示词；下游为 协作调用 `_enforce_intake_question_boundary`。
-# 系统意义：固定“Agent 角色能力 > test_intake_case_detail_dossier”的可观察契约，防止后续重构改变业务结果。
-def test_intake_question_boundary_replaces_evidence_requests_with_case_questions() -> None:
-    utterance = "请上传开箱视频、聊天记录截图和物流签收凭证。"
-    case_detail = {
-        "intake_quality": {"score": 72, "ready_for_next_step": False},
-        "missing_information": {
-            "next_questions": [
-                "包裹实际到达时间是什么时候？",
-                "包裹由谁签收？",
-                "您在什么时间联系了商家？",
-                "能否提供物流签收截图？",
-            ]
-        },
-    }
-
-    result = _enforce_intake_question_boundary(utterance, case_detail)
-
-    assert "包裹实际到达时间是什么时候" in result
-    assert "上传" not in result
-    assert "截图" not in result
-    assert "凭证" not in result
-    assert result.count("？") == 2
-    assert "什么时间联系了商家" not in result
-
-
-def test_intake_question_boundary_keeps_factual_material_clarification_byte_identical() -> None:
-    utterance = "您提到的“订单确认稿”具体是指哪一版本的沟通记录或文件？"
-    case_detail = {
-        "intake_quality": {"score": 72, "ready_for_next_step": False},
-        "missing_information": {
-            "next_questions": ["商品目前是否已被用户签收或使用？"]
-        },
-    }
-
-    result = _enforce_intake_question_boundary(utterance, case_detail)
-
-    assert _is_evidence_material_request(utterance) is False
-    assert result.encode("utf-8") == utterance.encode("utf-8")
-
-
-def test_intake_question_boundary_keeps_explanation_of_named_material_byte_identical() -> None:
-    utterance = "请您补充说明“订单确认稿”具体是指哪一版本的沟通记录或文件？"
-    case_detail = {
-        "intake_quality": {"score": 72, "ready_for_next_step": False},
-        "missing_information": {
-            "next_questions": ["商品目前是否已被用户签收或使用？"]
-        },
-    }
-
-    result = _enforce_intake_question_boundary(utterance, case_detail)
-
-    assert _is_evidence_material_request(utterance) is False
-    assert result.encode("utf-8") == utterance.encode("utf-8")
-
-
 @pytest.mark.parametrize(
-    "utterance",
+    ("score", "model_utterance"),
     [
-        "请确认商家是否已经提供物流凭证？",
-        "请说明提供的订单确认稿中写明了什么？",
-        "请问您此前提供的物流凭证显示的签收时间是？",
-        "商家称还需要物流凭证才能核验延误。",
-        "已记录本轮补充，请问还有没有需要备注给证据书记官或后续审理环节的案情内容？",
-        "请问物流凭证由谁提供？",
-        "请确认订单确认稿的提供方是谁？",
-        "请问用户是否上传过聊天记录？",
-        "请问商家需要提供物流凭证吗？",
-        "请补充说明“订单确认稿”具体是指哪一版本的沟通记录或文件？",
-        "请补充说明事件经过。",
+        (72, "请上传开箱视频、聊天记录截图和物流签收凭证。"),
+        (
+            72,
+            "请补充：1. 订单号是多少？2. 物流单号是多少？3. 商家如何回应您的诉求？",
+        ),
+        (
+            88,
+            "已记录本轮补充，当前信息已经可以提交。如有交接备注请继续说明。",
+        ),
     ],
 )
-def test_intake_question_boundary_keeps_factual_material_references_byte_identical(
-    utterance: str,
+def test_intake_turn_preserves_model_room_utterance_verbatim(
+    score: int,
+    model_utterance: str,
 ) -> None:
-    case_detail = {
-        "intake_quality": {"score": 72, "ready_for_next_step": False},
-        "missing_information": {
-            "next_questions": ["商品目前是否已被用户签收或使用？"]
-        },
-    }
+    from app.agents.dispute_intake_officer.workflow import IntakeTurnWorkflow
 
-    result = _enforce_intake_question_boundary(utterance, case_detail)
+    result = IntakeTurnWorkflow(
+        model_runner=CaseDetailRunner(score=score, room_utterance=model_utterance)
+    ).run(_request())
 
-    assert _is_evidence_material_request(utterance) is False
-    assert result.encode("utf-8") == utterance.encode("utf-8")
-
-
-@pytest.mark.parametrize(
-    "utterance",
-    [
-        "请上传开箱视频、聊天记录截图和物流签收凭证。",
-        "请补充物流凭证。",
-        "请补充证据。",
-        "请上传图片。",
-        "请上传物流单。",
-        "请上传运单。",
-        "请提供订单确认稿。",
-        "请提供订单确认稿文件，并附上相关沟通记录。",
-        "请提交物流记录。",
-        "请将照片和视频发送过来，并提交物流凭证。",
-        "Please upload the screenshots and attach the order-confirmation document.",
-        "Please upload an image.",
-        "Please provide evidence.",
-        "Please submit proof.",
-        "Could you provide the chat records and show the shipping voucher?",
-        "需要出示检测报告。",
-        "还需提交凭证。",
-        "必须提供发票。",
-        "务必上传截图。",
-        "You must submit the document.",
-        "You need to send the screenshots.",
-        "You are required to attach the file.",
-        "还需要物流凭证。",
-        "需要证据。",
-        "需要证据材料。",
-        "请把截图发给我。",
-        "请确认您是否可以提供物流凭证？",
-        "请上传截图，商家称收到后处理。",
-        "用户称未提供凭证，请现在提供凭证。",
-        "请上传商家称需要的物流凭证。",
-        "Please email the screenshot to me.",
-        "Please share the document with me.",
-    ],
-)
-def test_intake_question_boundary_replaces_explicit_evidence_transfer_requests(
-    utterance: str,
-) -> None:
-    case_detail = {
-        "intake_quality": {"score": 72, "ready_for_next_step": False},
-        "missing_information": {
-            "next_questions": ["商品目前是否已被用户签收或使用？"]
-        },
-    }
-
-    result = _enforce_intake_question_boundary(utterance, case_detail)
-
-    assert _is_evidence_material_request(utterance) is True
-    assert result == "我已记录本轮补充。为了继续梳理案情，请补充：商品目前是否已被用户签收或使用？"
-
-
-def test_intake_question_boundary_normalizes_unpunctuated_uat_safe_questions() -> None:
-    utterance = "请上传客服聊天记录截图和充值凭证。"
-    case_detail = {
-        "intake_quality": {"score": 72, "ready_for_next_step": False},
-        "missing_information": {
-            "next_questions": [
-                "用户是否已联系商家客服及商家回复内容",
-                "用户期望的具体补发形式（新兑换码或直接充值）",
-            ]
-        },
-    }
-
-    result = _enforce_intake_question_boundary(utterance, case_detail)
-
-    assert result == (
-        "我已记录本轮补充。为了继续梳理案情，请补充："
-        "用户是否已联系商家客服及商家回复内容？ "
-        "用户期望的具体补发形式（新兑换码或直接充值）？"
+    assert result.room_utterance == model_utterance
+    assert result.scroll_snapshot["schema_version"] == "intake_case_detail.v1"
+    assert result.dossier_patch["case_detail"]["case_story"]["title"] == (
+        "物流显示签收但用户称未收到商品"
     )
-    assert "上传" not in result
-    assert "截图" not in result
-    assert "凭证" not in result
-
-
-def test_intake_question_boundary_does_not_double_punctuate_safe_questions() -> None:
-    utterance = "请上传客服聊天记录截图和充值凭证。"
-    case_detail = {
-        "intake_quality": {"score": 72, "ready_for_next_step": False},
-        "missing_information": {
-            "next_questions": [
-                "用户是否已联系商家客服及商家回复内容？",
-                "用户期望的具体补发形式（新兑换码或直接充值）？",
-            ]
-        },
-    }
-
-    result = _enforce_intake_question_boundary(utterance, case_detail)
-
-    assert result == (
-        "我已记录本轮补充。为了继续梳理案情，请补充："
-        "用户是否已联系商家客服及商家回复内容？ "
-        "用户期望的具体补发形式（新兑换码或直接充值）？"
+    assert result.scroll_snapshot["intake_quality"]["ready_for_next_step"] is (
+        score >= 80
     )
-    assert "？？" not in result
-
-
-def test_intake_question_boundary_keeps_the_safe_fallback_interrogative() -> None:
-    utterance = "请上传客服聊天记录截图和充值凭证。"
-    case_detail = {
-        "intake_quality": {"score": 72, "ready_for_next_step": False},
-        "missing_information": {"next_questions": []},
-    }
-
-    result = _enforce_intake_question_boundary(utterance, case_detail)
-
-    assert result.endswith("你的诉求以及你所了解的对方态度？")
-    assert "上传" not in result
-    assert "截图" not in result
-    assert "凭证" not in result
-
-
-def test_intake_question_boundary_turns_statement_punctuation_into_a_question() -> None:
-    utterance = "请上传客服聊天记录截图和充值凭证。"
-    case_detail = {
-        "intake_quality": {"score": 72, "ready_for_next_step": False},
-        "missing_information": {
-            "next_questions": ["用户是否已联系商家客服及商家回复内容。"]
-        },
-    }
-
-    result = _enforce_intake_question_boundary(utterance, case_detail)
-
-    assert result.endswith("用户是否已联系商家客服及商家回复内容？")
-    assert "。？" not in result
 
 
 def test_respondent_message_keeps_initiator_claim_but_isolates_original_statement() -> None:
@@ -910,25 +721,6 @@ def test_attitude_position_skips_counterparty_used_as_contact_object() -> None:
     )
 
 
-def test_intake_question_boundary_removes_question_answered_by_claim_seed() -> None:
-    utterance = (
-        "为了继续梳理案情，请补充：您目前的具体诉求是换货、退货退款，"
-        "还是其他处理方式？ 您是否已在平台发起售后单，目前进度如何？"
-    )
-    case_detail = {
-        "intake_quality": {"score": 70, "ready_for_next_step": False},
-        "claim_resolution": {"requested_resolution": "REPLACE_OR_REPAIR"},
-        "missing_information": {
-            "next_questions": ["您是否已在平台发起售后单，目前进度如何？"]
-        },
-    }
-
-    result = _enforce_intake_question_boundary(utterance, case_detail)
-
-    assert "具体诉求" not in result
-    assert "售后单" in result
-
-
 def test_resolved_claim_guard_keeps_counterparty_response_question() -> None:
     case_detail = {
         "claim_resolution": {
@@ -957,61 +749,6 @@ def test_resolved_claim_guard_keeps_counterparty_response_question() -> None:
         case_detail,
         actor_role="USER",
     )
-
-
-def test_intake_question_boundary_keeps_known_claim_response_follow_up() -> None:
-    utterance = (
-        "您好，我是小衡。已收到您关于电视安装服务额外收费的反馈。"
-        "为了更准确地梳理案情，请问上门人员收取的150元是否有提供收据或具体的收费名目说明？"
-        "另外，商家目前对这笔费用的退还诉求是否有过回应？"
-    )
-    case_detail = {
-        "intake_quality": {"score": 72, "ready_for_next_step": False},
-        "claim_resolution": {
-            "initiator_role": "USER",
-            "requested_resolution": "REFUND",
-        },
-        "respondent_attitude": {"attitude": "NOT_RESPONDED"},
-        "missing_information": {
-            "next_questions": [
-                "上门人员收取的150元是否有提供收据或具体的收费名目说明？",
-                "商家目前对这笔费用的退还诉求是否有过回应？",
-            ]
-        },
-    }
-
-    assert _enforce_intake_question_boundary(
-        utterance,
-        case_detail,
-        actor_role="USER",
-    ) == utterance
-
-
-def test_respondent_resolution_question_is_not_replaced_by_initiator_claim() -> None:
-    utterance = (
-        "已记录您关于商品未拆封、未激活的说明。为了明确争议焦点，请补充："
-        "1. 您提到的“白色大容量型号”具体是指哪一款配置（例如内存大小）？"
-        "2. 针对商家提出的换货方案，您目前的最终诉求是什么？"
-    )
-    case_detail = {
-        "intake_quality": {"score": 75, "ready_for_next_step": False},
-        "claim_resolution": {
-            "initiator_role": "MERCHANT",
-            "requested_resolution": "REPLACE_OR_REPAIR",
-        },
-        "missing_information": {
-            "next_questions": ["用户是否已拆封或激活手机"]
-        },
-    }
-
-    result = _enforce_intake_question_boundary(
-        utterance,
-        case_detail,
-        actor_role="USER",
-    )
-
-    assert result == utterance
-    assert "用户是否已拆封或激活手机" not in result
 
 
 def test_visible_follow_up_questions_replace_stale_structured_questions() -> None:
@@ -1351,14 +1088,14 @@ def test_handoff_remark_is_persisted_when_officer_is_waiting_for_remark() -> Non
     assert notes["remarks"][-1]["role"] == "USER"
     assert notes["remarks"][-1]["text"] == remark
     assert notes["remarks"][-1]["source_message_id"] == "MESSAGE_REMARK_1"
-    assert "已收到备注" in result.room_utterance
+    assert result.room_utterance == runner.room_utterance
 
 
 # 所属模块：Agent 角色能力 > test_intake_case_detail_dossier；函数角色：回归测试用例。
 # 具体功能：`test_ready_board_does_not_treat_regular_followup_as_remark_before_officer_asks` 读取并按案件、角色或会话范围筛选本阶段状态；关键协作调用：`CaseDetailRunner`、`run`、`IntakeTurnWorkflow`。
 # 上下游：上游为 受治理的案件上下文和角色提示词；下游为 本文件的 `_request`。
 # 系统意义：固定“Agent 角色能力 > test_intake_case_detail_dossier”的可观察契约，防止后续重构改变业务结果。
-def test_pending_ready_board_records_final_answer_then_invites_remark() -> None:
+def test_pending_ready_board_preserves_model_reply() -> None:
     from app.agents.dispute_intake_officer.workflow import IntakeTurnWorkflow
 
     runner = CaseDetailRunner(score=88)
@@ -1394,11 +1131,10 @@ def test_pending_ready_board_records_final_answer_then_invites_remark() -> None:
     assert notes["remark_status"] == "WAITING_FOR_REMARK"
     assert notes["latest_remark"] == ""
     assert notes["remarks"] == []
-    assert "已记录本轮补充" in result.room_utterance
-    assert "还有没有需要备注" in result.room_utterance
+    assert result.room_utterance == runner.room_utterance
 
 
-def test_pending_ready_stream_matches_normalized_final_utterance() -> None:
+def test_pending_ready_stream_matches_model_final_utterance() -> None:
     from app.agents.dispute_intake_officer.workflow import IntakeTurnWorkflow
 
     raw_question = (
@@ -1469,6 +1205,5 @@ def test_pending_ready_stream_matches_normalized_final_utterance() -> None:
     assert result.scroll_snapshot["handoff_notes"]["remark_status"] == (
         "WAITING_FOR_REMARK"
     )
-    assert raw_question not in streamed_utterance
+    assert streamed_utterance == raw_question
     assert streamed_utterance == result.room_utterance
-    assert "还有没有需要备注" in streamed_utterance

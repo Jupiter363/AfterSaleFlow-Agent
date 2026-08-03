@@ -5,7 +5,6 @@ from __future__ import annotations
 import copy
 import logging
 import operator
-import re
 from typing import Annotated, Any
 
 from langgraph.graph import END, START, StateGraph
@@ -15,8 +14,6 @@ from app.agents.dispute_intake_officer.schemas import IntakeCaseDetailLlmOutput
 from app.agents.dispute_intake_officer.skills.dossier.dossier_skill import (
     CaseDetailDossierSkill,
     SUBJECTIVE_RESPONDENT_SOURCE,
-    _is_evidence_material_request,
-    _question_targets_resolved_intake_field,
 )
 from app.harness.context_pack import build_context_pack
 from app.harness.invocation_context import AgentInvocationContext
@@ -705,14 +702,8 @@ def project_intake_case_detail_output(
             output.case_matrix_delta or output.unilateral_case_matrix
         ),
     )
-    room_utterance = _enforce_intake_question_boundary(
-        output.room_utterance,
-        rendered.scroll_snapshot,
-        actor_role=request.agent_context.actor_role,
-    )
-    room_utterance = _limit_follow_up_questions(room_utterance, limit=2)
     return {
-        "room_utterance": room_utterance,
+        "room_utterance": output.room_utterance,
         "dossier_patch": rendered.dossier_patch,
         "scroll_snapshot": rendered.scroll_snapshot,
         "canvas_operations": rendered.canvas_operations,
@@ -737,140 +728,28 @@ def finalize_intake_projected_output(
     """Apply the exact baseline readiness node to an already rendered result.
 
     The durable Target graph calls this after the same dossier projection used by
-    the baseline graph.  Keeping the final visible utterance in this shared node
-    prevents protocol adapters from silently dropping the baseline handoff and
-    readiness wording.
+    the baseline graph.  Readiness remains observable through its graph
+    trajectory, while the prompt-owned visible utterance is preserved verbatim.
     """
 
     finalized = copy.deepcopy(projected)
-    readiness_patch = _validate_readiness(
+    _validate_readiness(
         {
             "scroll_snapshot": finalized["scroll_snapshot"],
             "room_utterance": finalized["room_utterance"],
         }
     )
-    if "room_utterance" in readiness_patch:
-        finalized["room_utterance"] = readiness_patch["room_utterance"]
     return finalized
 
 
-# 所属模块：接待室 Agent > 单轮 LangGraph > 房间职责话术护栏。
-# 具体功能：`_enforce_intake_question_boundary` 在卷宗首次就绪时保留当前问题，下一轮才询问交接备注；未就绪时检测并移除“上传截图/视频/凭证”等证据室问题，优先改用 Skill 生成的安全案情问题。
-# 上下游：上游是模型 room_utterance 与确定性 scroll_snapshot；下游是用户在接待室实际看到的回复。
-# 系统意义：材料必须在证据室按可见性和附件协议提交；接待 Agent 不能诱导用户在私聊文本中绕开正式证据链路，也不能继续阻塞已可提交案件。
-def _enforce_intake_question_boundary(
-    utterance: str,
-    case_detail: dict[str, Any],
-    *,
-    actor_role: str | None = None,
-) -> str:
-    """限制接待室话术只收集案情，不抢占证据室职责。
-
-    卷宗本轮首次满足提交条件时保留已流式输出的问题；用户回答后，下一轮才询问
-    是否还有交接备注。未满足时也不会把“上传证据”作为接待室追问，避免用户在
-    错误房间提交材料而绕过证据可见性流程。
-    """
-
-    quality = case_detail.get("intake_quality")
-    ready = isinstance(quality, dict) and quality.get("ready_for_next_step") is True
-    if ready:
-        handoff_notes = case_detail.get("handoff_notes")
-        remark_status = (
-            str(handoff_notes.get("remark_status") or "")
-            if isinstance(handoff_notes, dict)
-            else ""
-        )
-        if remark_status == "READY_PENDING_REMARK_INVITE":
-            return utterance
-        if remark_status in {"HAS_REMARKS", "NO_EXTRA_REMARKS"}:
-            return "已收到备注，当前案情信息已经可以提交。"
-        return (
-            "已记录本轮补充，当前信息已经可以提交。"
-            "请问还有没有需要备注给证据书记官或后续审理环节的案情内容？"
-        )
-
-    repeats_resolved_field = _question_targets_resolved_intake_field(
-        utterance,
-        case_detail,
-        actor_role=actor_role,
-    )
-    if not repeats_resolved_field and not _is_evidence_material_request(utterance):
-        return utterance
-
-    missing = case_detail.get("missing_information")
-    questions = missing.get("next_questions") if isinstance(missing, dict) else []
-    safe_questions = [
-        str(question)
-        for question in questions or []
-        if question and not _is_evidence_material_request(question)
-        and not _question_targets_resolved_intake_field(
-            question,
-            case_detail,
-            actor_role=actor_role,
-        )
-    ]
-    if safe_questions:
-        return "我已记录本轮补充。为了继续梳理案情，请补充：" + " ".join(
-            _normalize_safe_intake_follow_up_question(question)
-            for question in safe_questions[:2]
-        )
-    return (
-        "我已记录本轮补充。为了继续梳理案情，请说明事情发生的时间、经过、"
-        "当前处理状态、你的诉求以及你所了解的对方态度？"
-    )
-
-
-def _normalize_safe_intake_follow_up_question(question: str) -> str:
-    """End a governed follow-up as a question without changing its wording."""
-
-    stripped = question.rstrip()
-    suffix = question[len(stripped) :]
-    if stripped.endswith(("？", "?")):
-        return question
-    if stripped.endswith(("。", "！", "!")):
-        stripped = stripped[:-1].rstrip()
-    return f"{stripped}？{suffix}"
-
-
-def _limit_follow_up_questions(utterance: str, *, limit: int) -> str:
-    """Keep at most ``limit`` question sentences in a user-visible reply."""
-
-    if limit < 1:
-        return ""
-    text = str(utterance or "")
-    numbered = list(re.finditer(r"(?<!\d)([1-9]\d*)[.、．)]", text))
-    if len(numbered) > limit and [
-        int(match.group(1)) for match in numbered[: limit + 1]
-    ] == list(range(1, limit + 2)):
-        text = text[: numbered[limit].start()].rstrip()
-    question_count = 0
-    kept: list[str] = []
-    for segment in re.split(r"(?<=[？?])", text):
-        if not segment:
-            continue
-        segment_questions = segment.count("？") + segment.count("?")
-        if segment_questions:
-            if question_count >= limit:
-                continue
-            if question_count + segment_questions > limit:
-                allowed = limit - question_count
-                boundary_matches = list(re.finditer(r"[？?]", segment))
-                segment = segment[: boundary_matches[allowed - 1].end()]
-                segment_questions = allowed
-            question_count += segment_questions
-        kept.append(segment)
-    return "".join(kept).strip()
-
-
 # 所属模块：接待室 Agent > 单轮 LangGraph > 最终就绪一致性节点。
-# 具体功能：`_validate_readiness` 仅信任当前 CaseDetailDossierSkill.schema_version 的 intake_quality；首次 ready 时保留流式话术，下一轮再补齐“已记录/可以提交/可补交接备注”等必要话术，旧版快照走兼容轨迹不改文案。
+# 具体功能：`_validate_readiness` 仅信任当前 CaseDetailDossierSkill.schema_version 的 intake_quality，并记录卷宗就绪状态对应的执行轨迹，不改写模型话术。
 # 上下游：上游是卷宗渲染后的 scroll_snapshot 与 room_utterance；下游是 END 前最后一次局部更新和最终 IntakeTurnResult。
-# 系统意义：结构化 ready 标志与用户可见提示必须一致，避免后台允许提交但 Agent 仍无限追问，或话术声称可提交而权威评分未达阈值。
+# 系统意义：结构化 ready 标志与校验轨迹保持可观察，且不以确定性代码覆盖用户可见的模型话术。
 def _validate_readiness(state: IntakeTurnGraphState) -> dict[str, Any]:
     """最后一道可流转性校验。
 
-    如果卷宗质量已经达到 ready_for_next_step，就确保对话话术明确告知可提交；
-    否则保持上游问题继续收集信息。
+    根据卷宗质量保留就绪校验轨迹，但不修改上游模型生成的话术。
     """
 
     snapshot = state["scroll_snapshot"]
@@ -879,8 +758,6 @@ def _validate_readiness(state: IntakeTurnGraphState) -> dict[str, Any]:
     quality = snapshot.get("intake_quality")
     ready = isinstance(quality, dict) and quality.get("ready_for_next_step") is True
     if ready:
-        additions: list[str] = []
-        utterance = state["room_utterance"]
         handoff_notes = snapshot.get("handoff_notes")
         remark_status = (
             str(handoff_notes.get("remark_status") or "")
@@ -889,30 +766,6 @@ def _validate_readiness(state: IntakeTurnGraphState) -> dict[str, Any]:
         )
         if remark_status == "READY_PENDING_REMARK_INVITE":
             return {"executed_nodes": ["validate_readiness_pending_remark_invite"]}
-        if remark_status in {"HAS_REMARKS", "NO_EXTRA_REMARKS"}:
-            if "收到备注" not in utterance and "已收到" not in utterance:
-                additions.append("已收到备注，我会把这部分一起交接给证据书记官。")
-            if not additions:
-                return {"executed_nodes": ["validate_readiness"]}
-            return {
-                "room_utterance": utterance + " " + " ".join(additions),
-                "executed_nodes": ["validate_readiness"],
-            }
-        if "已记录" not in utterance:
-            additions.append("已记录本轮补充。")
-        if "可以提交" not in utterance and "可提交" not in utterance:
-            additions.append("当前信息已经可以提交。")
-        if "备注" not in utterance:
-            additions.append(
-                "请问还有没有需要备注给证据书记官或后续审理环节的内容？"
-                "如果没有，可以直接回复“没有补充”。"
-            )
-        if not additions:
-            return {"executed_nodes": ["validate_readiness"]}
-        return {
-            "room_utterance": utterance + " " + " ".join(additions),
-            "executed_nodes": ["validate_readiness"],
-        }
     return {"executed_nodes": ["validate_readiness"]}
 
 

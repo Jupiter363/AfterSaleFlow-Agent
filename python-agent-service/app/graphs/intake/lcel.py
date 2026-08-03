@@ -80,10 +80,6 @@ from app.streaming import TARGET_INTAKE_REPLY_FIRST_VISIBLE_FIELDS
 # prepared by ``prepare_intake_baseline_invocation`` below.
 INTAKE_SYSTEM_PROMPT = PromptComposer().render_system_prompt(BASELINE_INTAKE_NODE_NAME)
 
-_SAFE_INTAKE_ROOM_UTTERANCE = (
-    "您好，我是小衡。为了准确梳理争议，请您补充说明事件发生的时间、"
-    "当前处理进展，以及您希望平台解决的核心问题？"
-)
 _SAFE_INTAKE_CASE_SUMMARY = "当前争议围绕已导入案件事实、处理经过及发起方诉求展开。"
 
 _TARGET_INTAKE_VISIBLE_FIELDS = TARGET_INTAKE_REPLY_FIRST_VISIBLE_FIELDS
@@ -1476,18 +1472,14 @@ def _adapt_and_normalize_generation_parts(
     ):
         raise IntakeGraphContractError("INTAKE_LCEL_GENERATION_INVALID")
     typed_state = cast(IntakeGraphStateV2, state)
-    raw_model_draft = _normalize_raw_model_room_utterance(draft)
     adapted = adapt_intake_baseline_output(
         typed_state,
         agent_context=agent_context,
-        output=raw_model_draft,
+        output=draft,
     )
     normalized = _normalize_model_matrix_fact_keys(typed_state, adapted)
     normalized = _normalize_model_respondent_attitude(typed_state, normalized)
-    normalized = _normalize_model_evidence_boundaries(
-        normalized,
-        normalize_room_utterance=False,
-    )
+    normalized = _normalize_model_evidence_boundaries(normalized)
     return (
         typed_state,
         message,
@@ -1599,50 +1591,24 @@ _ATOMIC_EVIDENCE_SANITIZE_BRANCHES = frozenset(
 
 
 def _normalized_intake_room_utterance(value: str) -> str:
-    """Keep the Intake reply proactive without publishing an evidence request."""
+    """Preserve the prompt-owned Intake reply without semantic rewriting."""
 
-    if _contains_forbidden_evidence_request(value):
-        return _SAFE_INTAKE_ROOM_UTTERANCE
     return value
-
-
-def _normalize_raw_model_room_utterance(
-    draft: IntakeCaseDetailLlmOutput,
-) -> IntakeCaseDetailLlmOutput:
-    """Apply the room evidence boundary before the shared baseline finalizer.
-
-    ``adapt_intake_baseline_output`` delegates the visible reply to the established
-    baseline workflow.  Its ready/handoff wording deliberately mentions the
-    evidence clerk, which is a routing label rather than a request to submit
-    evidence.  Therefore only the raw provider reply is eligible for this
-    replacement; the finalized reply must remain byte-for-byte authoritative.
-    """
-
-    room_utterance = _normalized_intake_room_utterance(draft.room_utterance)
-    if room_utterance == draft.room_utterance:
-        return draft
-    return draft.model_copy(update={"room_utterance": room_utterance})
 
 
 def _normalize_model_evidence_boundaries(
     draft: IntakeCognitionDraft,
-    *,
-    normalize_room_utterance: bool = True,
 ) -> IntakeCognitionDraft:
-    """Discard untrusted evidence-collection suggestions before formal validation.
+    """Discard untrusted evidence suggestions from structured dossier fields.
 
     Intake may ask for facts, but evidence collection belongs to the later Evidence
-    room.  A provider violation must therefore never become public or durable, and
-    must not abort an otherwise usable first turn.  The replacement question is
-    deterministic so the early stream and terminal proposal remain identical.
+    room. The visible ``room_utterance`` remains prompt-owned and byte-preserving;
+    this normalizer only governs structured fields.
     """
 
     normalized = draft.model_dump(mode="json", exclude_none=True, exclude_unset=True)
-    room_utterance = normalized.get("room_utterance")
-    if not isinstance(room_utterance, str):
+    if not isinstance(normalized.get("room_utterance"), str):
         raise IntakeGraphContractError("INTAKE_ROOM_UTTERANCE_STREAM_INVALID")
-    if normalize_room_utterance:
-        normalized["room_utterance"] = _normalized_intake_room_utterance(room_utterance)
 
     missing_fields = normalized.get("missing_fields")
     if isinstance(missing_fields, list):
