@@ -867,7 +867,11 @@ class IntakeGuardrailRunnable(Runnable[Mapping[str, Any], Mapping[str, Any]]):
             agent_context=self._agent_context,
         )
         _validated_model_metadata(message, profile=self._profile, policy=self._policy)
-        _validate_business_output(state, draft)
+        _validate_business_output(
+            state,
+            draft,
+            room_utterance_is_baseline_finalized=True,
+        )
         return value
 
 
@@ -1484,14 +1488,18 @@ def _adapt_and_normalize_generation_parts(
     ):
         raise IntakeGraphContractError("INTAKE_LCEL_GENERATION_INVALID")
     typed_state = cast(IntakeGraphStateV2, state)
+    raw_model_draft = _normalize_raw_model_room_utterance(draft)
     adapted = adapt_intake_baseline_output(
         typed_state,
         agent_context=agent_context,
-        output=draft,
+        output=raw_model_draft,
     )
     normalized = _normalize_model_matrix_fact_keys(typed_state, adapted)
     normalized = _normalize_model_respondent_attitude(typed_state, normalized)
-    normalized = _normalize_model_evidence_boundaries(normalized)
+    normalized = _normalize_model_evidence_boundaries(
+        normalized,
+        normalize_room_utterance=False,
+    )
     return (
         typed_state,
         message,
@@ -1610,8 +1618,28 @@ def _normalized_intake_room_utterance(value: str) -> str:
     return value
 
 
+def _normalize_raw_model_room_utterance(
+    draft: IntakeCaseDetailLlmOutput,
+) -> IntakeCaseDetailLlmOutput:
+    """Apply the room evidence boundary before the shared baseline finalizer.
+
+    ``adapt_intake_baseline_output`` delegates the visible reply to the established
+    baseline workflow.  Its ready/handoff wording deliberately mentions the
+    evidence clerk, which is a routing label rather than a request to submit
+    evidence.  Therefore only the raw provider reply is eligible for this
+    replacement; the finalized reply must remain byte-for-byte authoritative.
+    """
+
+    room_utterance = _normalized_intake_room_utterance(draft.room_utterance)
+    if room_utterance == draft.room_utterance:
+        return draft
+    return draft.model_copy(update={"room_utterance": room_utterance})
+
+
 def _normalize_model_evidence_boundaries(
     draft: IntakeCognitionDraft,
+    *,
+    normalize_room_utterance: bool = True,
 ) -> IntakeCognitionDraft:
     """Discard untrusted evidence-collection suggestions before formal validation.
 
@@ -1625,7 +1653,8 @@ def _normalize_model_evidence_boundaries(
     room_utterance = normalized.get("room_utterance")
     if not isinstance(room_utterance, str):
         raise IntakeGraphContractError("INTAKE_ROOM_UTTERANCE_STREAM_INVALID")
-    normalized["room_utterance"] = _normalized_intake_room_utterance(room_utterance)
+    if normalize_room_utterance:
+        normalized["room_utterance"] = _normalized_intake_room_utterance(room_utterance)
 
     missing_fields = normalized.get("missing_fields")
     if isinstance(missing_fields, list):
@@ -2172,9 +2201,15 @@ def _validated_model_metadata(
 def _validate_business_output(
     state: IntakeGraphStateV2,
     draft: IntakeCognitionDraft,
+    *,
+    room_utterance_is_baseline_finalized: bool = False,
 ) -> None:
     output = draft.model_dump(mode="json", exclude_none=True, exclude_unset=True)
-    _validate_no_evidence_collection(draft, output)
+    _validate_no_evidence_collection(
+        draft,
+        output,
+        room_utterance_is_baseline_finalized=room_utterance_is_baseline_finalized,
+    )
     catalog = _source_catalog(state)
     existing_fact_ids = intake_baseline_authorized_fact_ids(state)
     _validate_output_tree(
@@ -2204,8 +2239,13 @@ def _validate_business_output(
 def _validate_no_evidence_collection(
     draft: IntakeCognitionDraft,
     output: Mapping[str, Any],
+    *,
+    room_utterance_is_baseline_finalized: bool = False,
 ) -> None:
-    if _contains_forbidden_evidence_request(draft.room_utterance):
+    if (
+        not room_utterance_is_baseline_finalized
+        and _contains_forbidden_evidence_request(draft.room_utterance)
+    ):
         raise IntakeGraphContractError("INTAKE_EVIDENCE_REQUEST_FORBIDDEN")
     if any(_is_evidence_material_gap(field) for field in draft.missing_fields):
         raise IntakeGraphContractError("INTAKE_EVIDENCE_MISSING_FIELD_FORBIDDEN")

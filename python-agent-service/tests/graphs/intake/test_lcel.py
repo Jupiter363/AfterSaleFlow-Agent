@@ -443,6 +443,36 @@ def _event_document(event: dict[str, Any]) -> dict[str, Any]:
     return document
 
 
+def _ready_handoff_document(event: dict[str, Any]) -> dict[str, Any]:
+    """Return a baseline-schema fixture that deterministically reaches handoff."""
+
+    document = _event_document(event)
+    document.update(
+        room_utterance="The case details have been recorded.",
+        dossier_patch={
+            "case_story": {
+                "one_sentence_summary": (
+                    "The user reports a damaged delivered order and requests a refund."
+                )
+            },
+            "requested_resolution": {
+                "requested_outcome": "REFUND",
+                "expected_resolution_text": "The user requests a refund.",
+            },
+            "missing_information": {
+                "blocking_gaps": [],
+                "nice_to_have_gaps": [],
+                "next_questions": [],
+            },
+            "intake_quality": {"score": 90, "improvement_reason": ""},
+        },
+        readiness="READY_TO_CONFIRM",
+        missing_fields=[],
+        recommendation="ACCEPTED",
+    )
+    return document
+
+
 def _bootstrap_event_context(
     snapshot: dict[str, Any],
     event: dict[str, Any],
@@ -1486,6 +1516,113 @@ def test_two_turn_baseline_context_preserves_formal_fact_authority_privately(
     }
     assert second_snapshot_public == second_result["dossier_draft"]
     assert second_context["public_dossier_hash"] == canonical_sha256(second_result["dossier_draft"])
+
+
+def test_baseline_finalized_ready_handoff_survives_real_lcel_terminal_draft(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+) -> None:
+    """The shared baseline finalizer owns the ready/handoff room utterance."""
+
+    event["text"] = (
+        "Order ORDER_1001 arrived damaged; logistics reference SF1001001001 confirms delivery. "
+        "I request a refund."
+    )
+    event["event_hash"] = canonical_sha256_omitting(event, "event_hash")
+    first_transport = IntakeTransport(_ready_handoff_document(event))
+    first_graph = compile_intake_v2_graph(
+        intake_lcel=build_intake_model_node(
+            transport=first_transport,
+            profile=_profile(),
+            policy=_policy(),
+        ).runnable
+    )
+    state = new_intake_graph_state(bindings=bindings, version_pins=version_pins)
+    state["bindings"]["command"].update(
+        command_id="COMMAND_P4_USER_2",
+        logical_run_id="RUN_P4_USER_2",
+        attempt_id="ATTEMPT_P4_USER_2_1",
+    )
+    first_result = first_graph.invoke(
+        state,
+        context=_bootstrap_event_context(snapshot, event),
+    )
+    assert (
+        first_result["baseline_previous_case_detail"]["snapshot"]["handoff_notes"][
+            "remark_status"
+        ]
+        == "READY_PENDING_REMARK_INVITE"
+    )
+
+    next_event = copy.deepcopy(event)
+    next_event.update(
+        event_id="EVENT_P4_USER_3",
+        message_id="MESSAGE_P4_USER_3",
+        sequence_no=first_result["last_event_sequence"] + 1,
+        domain_revision=event["domain_revision"] + 1,
+        text=(
+            "The order remains damaged; order ORDER_1001 and logistics reference "
+            "SF1001001001 are unchanged."
+        ),
+        source_refs=["MESSAGE_P4_USER_3"],
+        occurred_at="2026-07-20T08:03:00Z",
+    )
+    next_event["event_hash"] = canonical_sha256_omitting(next_event, "event_hash")
+    prior_row = first_result["baseline_previous_case_detail"]["snapshot"]["case_fact_matrix"][
+        "fact_rows"
+    ][0]
+    prior_position = prior_row["positions"]["USER"]
+    second_document = _ready_handoff_document(next_event)
+    second_document["matrix_patch"] = {
+        "schema_version": "case_fact_matrix.delta.v2",
+        "fact_rows": [
+            {
+                "fact_key": prior_row["fact_id"],
+                "category": prior_row["category"],
+                "fact_target": prior_row["fact_target"],
+                "materiality": prior_row["materiality"],
+                "stance": prior_position["stance"],
+                "position_summary": prior_position["position_summary"],
+                "asserted_value": prior_position["asserted_value"],
+                "source_scope": "PREVIOUS_MATRIX",
+            }
+        ],
+        "summary_source_fact_keys": [prior_row["fact_id"]],
+    }
+    second_context = _agent_context(invocation_id="ATTEMPT_P4_USER_3_1")
+    first_result["bindings"]["command"].update(
+        command_id="COMMAND_P4_USER_3",
+        logical_run_id="RUN_P4_USER_3",
+        attempt_id="ATTEMPT_P4_USER_3_1",
+    )
+    second_graph = compile_intake_v2_graph(
+        intake_lcel=build_intake_model_node(
+            transport=IntakeTransport(second_document),
+            profile=_profile(),
+            policy=_policy().model_copy(
+                update={
+                    "invocation_id": "ATTEMPT_P4_USER_3_1",
+                    "trusted_system_sha256": system_prompt_sha256(
+                        _trusted_system_prompt(second_context)
+                    ),
+                }
+            ),
+            agent_context=second_context,
+        ).runnable
+    )
+
+    projected = second_graph.invoke(
+        first_result,
+        context=IntakeTurnContext("EVENT", next_event),
+        interrupt_before=["checkpoint_terminal"],
+    )
+
+    assert projected["terminal_draft"]["room_utterance"] == (
+        "已记录本轮补充，当前信息已经可以提交。"
+        "请问还有没有需要备注给证据书记官或后续审理环节的案情内容？"
+    )
 
 
 def test_pending_project_and_checkpoint_replay_the_capsule_request_base(
@@ -2621,6 +2758,30 @@ def test_model_evidence_request_is_replaced_by_safe_fact_question_and_removed_fr
         "missing_facts": ["下单时活动是否仍在进行"],
         "next_questions": ["请说明下单时活动是否仍在进行？"],
     }
+
+
+def test_production_generation_replaces_raw_model_evidence_room_request(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+) -> None:
+    """A raw provider request is still governed before baseline finalization."""
+
+    state = _event_state(bindings, version_pins, snapshot, event)
+    raw_document = _event_document(event)
+    raw_document["room_utterance"] = "Please upload a screenshot as evidence."
+    raw_output = IntakeCaseDetailLlmOutput.model_validate(_baseline_document(raw_document))
+
+    _, _, projected = _production_generation_parts(
+        {
+            "state": state,
+            "generation": {"message": AIMessage(content="{}"), "draft": raw_output},
+        },
+        agent_context=_agent_context_for_state(state),
+    )
+
+    assert projected.room_utterance == _SAFE_INTAKE_ROOM_UTTERANCE
 
 
 def test_model_evidence_requests_are_removed_from_non_question_dossier_branches(

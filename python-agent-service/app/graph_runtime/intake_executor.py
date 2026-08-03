@@ -62,7 +62,10 @@ from app.graphs.intake.state import IntakeGraphStateV2, IntakeTurnContext
 from app.graphs.intake.validators import validate_state
 from app.model_runtime.callbacks import governed_events_from_chunk
 from app.model_runtime.transports import ModelTransport
-from app.streaming import TARGET_INTAKE_REPLY_FIRST_VISIBLE_FIELDS
+from app.streaming import (
+    IncrementalVisibleJsonProjector,
+    TARGET_INTAKE_REPLY_FIRST_VISIBLE_FIELDS,
+)
 
 
 _INTAKE_REPLY_FIRST_VISIBLE_FIELD_MODES = {
@@ -84,6 +87,11 @@ _INTAKE_TERMINAL_DOSSIER_FIELDS = tuple(
     )
 )
 _AGENT_STREAM_DELTA_MAX_LENGTH = 4096
+# Replaying a terminal, baseline-finalized Intake proposal is deliberately much
+# smaller than the protocol maximum.  Python slices are code-point safe and the
+# projector retains incomplete JSON escape sequences between slices, so a
+# multi-byte UTF-8 character can never be split for a downstream consumer.
+_TARGET_INTAKE_CANONICAL_REPLAY_SOURCE_CHUNK_LENGTH = 64
 
 
 class CompiledIntakeStateGraphPort(Protocol):
@@ -170,6 +178,7 @@ class CompiledIntakeGraphShadowExecutor:
         room_utterance_streamed = False
         room_utterance_completed = False
         case_detail_seen_before_room_utterance = False
+        target_reply_then_board = self._uses_target_reply_then_board_boundary(execution)
         source = graph.astream(
             graph_input,
             config,
@@ -190,6 +199,12 @@ class CompiledIntakeGraphShadowExecutor:
                         assert usage_update is not None
                         emitted_usage.append(usage_update)
                         pending_usage_update = update
+                        continue
+                    if target_reply_then_board:
+                        # A target candidate may not expose model-provisional room
+                        # text or dossier sections.  The terminal proposal is the
+                        # first user-visible source of truth, after its immutable
+                        # storage and fenced external commit both succeed.
                         continue
                     field = update.payload.field
                     if field == _INTAKE_ROOM_UTTERANCE_FIELD:
@@ -289,15 +304,23 @@ class CompiledIntakeGraphShadowExecutor:
         checkpoint_id = str(configurable.get("checkpoint_id") or "")
         revision = state["cognitive_revision"]
 
-        terminal_room_utterance = self._normalized_terminal_room_utterance(
-            proposal.room_utterance
-        )
-        if room_utterance_streamed:
+        if target_reply_then_board:
+            # Target's proposal is produced by the retained baseline finalizer.
+            # It is already the durable, audience-safe reply; do not send it back
+            # through raw-model evidence wording normalization.
+            terminal_room_utterance = self._authoritative_terminal_room_utterance(
+                proposal.room_utterance
+            )
+        else:
+            terminal_room_utterance = self._normalized_terminal_room_utterance(
+                proposal.room_utterance
+            )
+        if not target_reply_then_board and room_utterance_streamed:
             self._require_streamed_room_utterance_matches_terminal(
                 streamed="".join(streamed_room_utterance_parts),
                 terminal=terminal_room_utterance,
             )
-        else:
+        elif not target_reply_then_board:
             # Compatibility for a graph/parser that does not expose model reply
             # deltas.  It intentionally keeps the former terminal chunk behavior,
             # while still preserving the room-before-dossier publication order.
@@ -359,7 +382,17 @@ class CompiledIntakeGraphShadowExecutor:
             raise GraphTerminalBindingError(
                 "Intake generic result was not bound to the terminal fence"
             )
-        for update in self._terminal_normalized_dossier_updates(proposal):
+        if target_reply_then_board:
+            # Do not synthesize one room blob and then one dossier blob.  Replay
+            # the exact baseline-finalized proposal through the same visible-field
+            # projector used by the provider stream.  Its reply-first root gate is
+            # therefore the single publication-order authority: all left-room
+            # deltas precede every right-board delta, including when the terminal
+            # room text and the first dossier key share a source chunk.
+            terminal_updates = self._target_canonical_replay_updates(proposal)
+        else:
+            terminal_updates = self._terminal_normalized_dossier_updates(proposal)
+        for update in terminal_updates:
             self._validate_public_update(update)
             yield self._event(
                 execution,
@@ -494,9 +527,9 @@ class CompiledIntakeGraphShadowExecutor:
         delta = update.payload.delta
         if field not in _INTAKE_VISIBLE_FIELDS or not isinstance(delta, str) or not delta:
             raise GraphContractError("compiled Intake Graph visible update is invalid")
-        # The streaming room reply is checked against the normalized terminal
-        # proposal before any durable commit.  The terminal-only compatibility
-        # fallback remains normalized by _room_utterance_updates.
+        # Legacy streaming room replies are checked against the normalized
+        # terminal proposal before any durable commit. Target candidates suppress
+        # those raw updates and publish only the committed terminal reply.
         if field == "room_utterance":
             return
         if (
@@ -563,7 +596,7 @@ class CompiledIntakeGraphShadowExecutor:
                 node=node,
                 field=_INTAKE_ROOM_UTTERANCE_FIELD,
                 # Python slices operate on Unicode code points, so no UTF-8 byte
-                # sequence can be cut in half.  The terminal comparison below
+                # sequence can be cut in half. The legacy terminal comparison
                 # covers the exact concatenated string, not just each fragment.
                 delta=delta[offset : offset + _AGENT_STREAM_DELTA_MAX_LENGTH],
             )
@@ -575,6 +608,20 @@ class CompiledIntakeGraphShadowExecutor:
         if not isinstance(room_utterance, str) or not room_utterance.strip():
             raise GraphTerminalBindingError("Intake terminal room utterance is invalid")
         return _normalized_intake_room_utterance(room_utterance)
+
+    @staticmethod
+    def _uses_target_reply_then_board_boundary(execution: GatewayExecution) -> bool:
+        """Keep target-visible Intake content behind the durable terminal fence."""
+
+        return execution.fence.execution_lane is GraphGatewayMode.TARGET_E2E_CANDIDATE
+
+    @staticmethod
+    def _authoritative_terminal_room_utterance(room_utterance: object) -> str:
+        """Validate, but never rewrite, a baseline-finalized target reply."""
+
+        if not isinstance(room_utterance, str) or not room_utterance.strip():
+            raise GraphTerminalBindingError("Intake terminal room utterance is invalid")
+        return room_utterance
 
     @staticmethod
     def _require_streamed_room_utterance_matches_terminal(
@@ -604,6 +651,163 @@ class CompiledIntakeGraphShadowExecutor:
                 delta=normalized[offset : offset + _AGENT_STREAM_DELTA_MAX_LENGTH],
             )
             for offset in range(0, len(normalized), _AGENT_STREAM_DELTA_MAX_LENGTH)
+        )
+
+    @staticmethod
+    def _authoritative_room_utterance_updates(
+        room_utterance: str,
+    ) -> tuple[GraphPublicUpdate, ...]:
+        """Chunk a durable target reply exactly as it was finalized by baseline."""
+
+        # The complete terminal reply is checked as nonblank before replay.  A
+        # later source slice may legitimately contain only whitespace, and must
+        # still be published verbatim to preserve the finalizer's exact text.
+        if not isinstance(room_utterance, str) or not room_utterance:
+            raise GraphContractError("INTAKE_ROOM_UTTERANCE_STREAM_INVALID")
+        return tuple(
+            GraphPublicUpdate.visible_delta(
+                node=BASELINE_INTAKE_NODE_NAME,
+                field="room_utterance",
+                # Every chunk stays within AgentStreamV2's delta bound while their
+                # concatenation remains byte-for-character equal to the durable
+                # terminal proposal.
+                delta=room_utterance[offset : offset + _AGENT_STREAM_DELTA_MAX_LENGTH],
+            )
+            for offset in range(0, len(room_utterance), _AGENT_STREAM_DELTA_MAX_LENGTH)
+        )
+
+    @classmethod
+    def _target_canonical_replay_updates(
+        cls,
+        proposal: IntakeTurnProposal,
+    ) -> tuple[GraphPublicUpdate, ...]:
+        """Replay a committed baseline Intake proposal via the target projector.
+
+        Target candidates deliberately expose no model-provisional deltas.  Once
+        the immutable proposal and its fenced terminal result have committed, the
+        canonical proposal is projected in the exact same reply-first field shape
+        as a live model document.  This preserves the finalizer's wording while
+        restoring real string-prefix leaf updates and complete JSON branch
+        snapshots for the right-side dossier.
+        """
+
+        document = cls._target_canonical_replay_document(proposal)
+        projector = IncrementalVisibleJsonProjector(
+            TARGET_INTAKE_REPLY_FIRST_VISIBLE_FIELDS
+        )
+        updates: list[GraphPublicUpdate] = []
+        replayed_room_parts: list[str] = []
+        terminal_room_utterance = cls._authoritative_terminal_room_utterance(
+            proposal.room_utterance
+        )
+
+        for offset in range(
+            0,
+            len(document),
+            _TARGET_INTAKE_CANONICAL_REPLAY_SOURCE_CHUNK_LENGTH,
+        ):
+            source_chunk = document[
+                offset : offset + _TARGET_INTAKE_CANONICAL_REPLAY_SOURCE_CHUNK_LENGTH
+            ]
+            for field, delta in projector.feed(source_chunk):
+                if field == _INTAKE_ROOM_UTTERANCE_FIELD:
+                    room_updates = cls._authoritative_room_utterance_updates(delta)
+                    updates.extend(room_updates)
+                    replayed_room_parts.append(delta)
+                    continue
+                # The projector's root gate must never disclose a dossier value
+                # until the complete, exact finalizer reply has been replayed.
+                if "".join(replayed_room_parts) != terminal_room_utterance:
+                    raise GraphContractError(
+                        "INTAKE_TARGET_REPLY_FIRST_REPLAY_ORDER_INVALID"
+                    )
+                updates.extend(
+                    cls._target_canonical_dossier_field_updates(field=field, delta=delta)
+                )
+
+        if "".join(replayed_room_parts) != terminal_room_utterance:
+            raise GraphTerminalBindingError(
+                "Intake terminal room utterance was not fully replayed"
+            )
+        return tuple(updates)
+
+    @staticmethod
+    def _target_canonical_replay_document(proposal: IntakeTurnProposal) -> str:
+        """Serialize a room-first canonical public object without changing values."""
+
+        room_utterance = (
+            CompiledIntakeGraphShadowExecutor._authoritative_terminal_room_utterance(
+                proposal.room_utterance
+            )
+        )
+        try:
+            dossier = proposal.dossier_patch.model_dump(
+                mode="json",
+                exclude_none=True,
+                exclude_unset=True,
+            )
+        except (AttributeError, TypeError, ValueError) as error:
+            raise GraphTerminalBindingError(
+                "Intake terminal dossier patch is invalid"
+            ) from error
+        if not isinstance(dossier, Mapping):
+            raise GraphTerminalBindingError("Intake terminal dossier patch is invalid")
+
+        # Keep the object shape deterministic and root-gate friendly.  The outer
+        # key order is intentionally not sorted: ``room_utterance`` must remain
+        # first.  ``DossierPatch.model_dump`` preserves the baseline schema field
+        # order, which is also the historical board section order; re-sorting it
+        # alphabetically would alter that presentation contract.
+        try:
+            room_json = json.dumps(
+                room_utterance,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            dossier_json = json.dumps(
+                dict(dossier),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        except (TypeError, ValueError) as error:
+            raise GraphTerminalBindingError(
+                "Intake terminal dossier patch is not JSON serializable"
+            ) from error
+        return f'{{"room_utterance":{room_json},"case_detail":{dossier_json}}}'
+
+    @staticmethod
+    def _target_canonical_dossier_field_updates(
+        *,
+        field: str,
+        delta: str,
+    ) -> tuple[GraphPublicUpdate, ...]:
+        """Translate projector deltas without allowing a huge root snapshot."""
+
+        value_mode = _INTAKE_REPLY_FIRST_VISIBLE_FIELD_MODES.get(field)
+        if value_mode is None or field == _INTAKE_ROOM_UTTERANCE_FIELD:
+            raise GraphContractError("INTAKE_TARGET_CANONICAL_REPLAY_FIELD_INVALID")
+        if value_mode == "string_prefix":
+            return CompiledIntakeGraphShadowExecutor._string_prefix_dossier_updates(
+                node=BASELINE_INTAKE_NODE_NAME,
+                field=field,
+                delta=delta,
+            )
+        if value_mode != "json_value":
+            raise GraphContractError("INTAKE_TARGET_CANONICAL_REPLAY_FIELD_INVALID")
+        if CompiledIntakeGraphShadowExecutor._is_oversized_root_dossier_snapshot(
+            field,
+            delta,
+        ):
+            # A root JSON snapshot is only meaningful as one complete document.
+            # Retain previously replayed leaf prefixes; the normal terminal
+            # result refresh remains the authority for this oversized branch.
+            return ()
+        return (
+            GraphPublicUpdate.visible_delta(
+                node=BASELINE_INTAKE_NODE_NAME,
+                field=field,
+                delta=delta,
+            ),
         )
 
     @staticmethod

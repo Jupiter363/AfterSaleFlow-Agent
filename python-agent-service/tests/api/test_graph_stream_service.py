@@ -842,6 +842,140 @@ async def test_stream_prefetches_one_source_event_before_downstream_resumes() ->
 
 
 @pytest.mark.asyncio
+async def test_lease_heartbeat_renews_while_downstream_pauses_after_attempt_started() -> None:
+    """A slow first model response cannot make renewal depend on another HTTP pull."""
+
+    admission = _admission(AdmissionAction.ACQUIRE)
+    model_started = asyncio.Event()
+    release_terminal = asyncio.Event()
+    three_renewals = asyncio.Event()
+
+    class CountingRenewGateway(_Gateway):
+        def __init__(self, admission: GatewayAdmission) -> None:
+            super().__init__(admission)
+            self.renewal_input_revisions: list[int] = []
+
+        async def renew_execution(self, current: GatewayExecution) -> LeaseRecord:
+            self.renewal_input_revisions.append(current.lease.revision)
+            self.renewed += 1
+            if self.renewed >= 3:
+                three_renewals.set()
+            return replace(current.lease, revision=current.lease.revision + 1)
+
+    class ModelWaitExecutor(_Executor):
+        async def stream(self, execution: GatewayExecution):
+            self.calls += 1
+            yield _event(execution.admission.command, 0, "attempt_started")
+            model_started.set()
+            await release_terminal.wait()
+            yield _event(execution.admission.command, 1, "final")
+
+    gateway = CountingRenewGateway(admission)
+    service, gate = await _service(
+        gateway,
+        ModelWaitExecutor(),
+        renewal_seconds=0.001,
+    )
+    stream = await service.open_stream(
+        command=admission.command,
+        verified_invocation=cast(VerifiedInvocation, object()),
+        expected_thread=admission.thread,
+    )
+
+    assert (await anext(stream)).event_type == "attempt_started"
+    await asyncio.wait_for(model_started.wait(), timeout=0.1)
+    # Do not pull the public stream again: wait for three independent shortened ticks
+    # through the gateway-side event so the test never sleeps for a wall-clock duration.
+    await asyncio.wait_for(three_renewals.wait(), timeout=0.2)
+    assert gateway.renewed >= 3
+    assert gateway.renewal_input_revisions == list(range(gateway.renewed))
+
+    release_terminal.set()
+    assert (await anext(stream)).event_type == "final"
+    with pytest.raises(StopAsyncIteration):
+        await anext(stream)
+    assert await gate.drain(0.01) is True
+
+
+@pytest.mark.asyncio
+async def test_lease_heartbeat_stops_when_durable_terminal_arrives_between_ticks() -> None:
+    """A delivery barrier cannot cause a fresh renewal after durable lease release."""
+
+    admission = _admission(AdmissionAction.ACQUIRE)
+    model_waiting = asyncio.Event()
+    release_terminal = asyncio.Event()
+    barrier_entered = asyncio.Event()
+    release_barrier = asyncio.Event()
+    first_renewal = asyncio.Event()
+    second_renewal = asyncio.Event()
+
+    class BarrierGateway(_Gateway):
+        async def execute_stream(
+            self,
+            *,
+            execution: GatewayExecution,
+            executor: Any,
+            durable_terminal_signal: asyncio.Event | None = None,
+            terminal_processing_started: asyncio.Event | None = None,
+        ):
+            async for event in executor.stream(execution):
+                if event.event_type == "final":
+                    assert durable_terminal_signal is not None
+                    assert terminal_processing_started is not None
+                    terminal_processing_started.set()
+                    durable_terminal_signal.set()
+                    barrier_entered.set()
+                    await release_barrier.wait()
+                yield event
+
+        async def renew_execution(self, current: GatewayExecution) -> LeaseRecord:
+            self.renewed += 1
+            if self.renewed == 1:
+                first_renewal.set()
+            else:
+                second_renewal.set()
+            return current.lease
+
+    class DelayedTerminalExecutor(_Executor):
+        async def stream(self, execution: GatewayExecution):
+            self.calls += 1
+            yield _event(execution.admission.command, 0, "attempt_started")
+            model_waiting.set()
+            await release_terminal.wait()
+            yield _event(execution.admission.command, 1, "final")
+
+    gateway = BarrierGateway(admission)
+    service, gate = await _service(
+        gateway,
+        DelayedTerminalExecutor(),
+        renewal_seconds=0.005,
+    )
+    stream = await service.open_stream(
+        command=admission.command,
+        verified_invocation=cast(VerifiedInvocation, object()),
+        expected_thread=admission.thread,
+    )
+
+    assert (await anext(stream)).event_type == "attempt_started"
+    await asyncio.wait_for(model_waiting.wait(), timeout=0.1)
+    await asyncio.wait_for(first_renewal.wait(), timeout=0.1)
+    # The first timed renewal returns into the next interval before this task resumes.
+    # Set durable while that interval and the post-commit delivery barrier are both
+    # pending, without reading the public stream again.
+    release_terminal.set()
+    await asyncio.wait_for(barrier_entered.wait(), timeout=0.1)
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(second_renewal.wait(), timeout=0.05)
+    assert gateway.renewed == 1
+
+    release_barrier.set()
+    assert (await anext(stream)).event_type == "final"
+    with pytest.raises(StopAsyncIteration):
+        await anext(stream)
+    assert await gate.drain(0.01) is True
+
+
+@pytest.mark.asyncio
 async def test_prefetched_source_is_cancelled_and_closed_on_downstream_disconnect() -> None:
     admission = _admission(AdmissionAction.ACQUIRE)
     execution = _execution(admission)
@@ -1010,6 +1144,10 @@ async def test_durable_terminal_signal_suppresses_renewal_failure_while_prefetch
                     assert durable_terminal_signal is not None
                     assert terminal_processing_started is not None
                     terminal_processing_started.set()
+                    # Make the overlap explicit: the in-flight renewal began while
+                    # the lease was still active, so its post-release failure must be
+                    # suppressed after the durable terminal signal.
+                    await renewal_waiting.wait()
                     # Mirrors GraphCommandGateway: durable reconciliation/release is
                     # complete before the final delivery barrier is allowed to wait.
                     durable_terminal_signal.set()

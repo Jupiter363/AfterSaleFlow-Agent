@@ -18,6 +18,8 @@ from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel
 
 from app.agents.dispute_intake_officer.schemas import IntakeCaseDetailLlmOutput
+from app.agents.dispute_intake_officer.workflow import _limit_follow_up_questions
+import app.graph_runtime.intake_executor as intake_executor
 import app.graph_runtime.production_bindings as production_bindings
 from app.api.graph_lifecycle import GraphExecutorKernel
 from app.api.graph_stream_service import (
@@ -622,6 +624,30 @@ def _intake_execution(
         ),
     )
     return execution
+
+
+def _target_candidate_intake_execution(command: RoomGraphCommand) -> GatewayExecution:
+    """Build a complete candidate fence for target-only publication tests."""
+
+    execution = _intake_execution(command)
+    return replace(
+        execution,
+        fence=replace(
+            execution.fence,
+            execution_lane=GraphGatewayMode.TARGET_E2E_CANDIDATE,
+            activation_id=f"p9act.v1.{'a' * 32}",
+            room_fencing_token=1,
+            command_hash="b" * 64,
+            command_envelope_hash="c" * 64,
+            environment_id="target-intake-test",
+            environment_generation=1,
+            tenant_surrogate=command.tenant_surrogate,
+            case_id=command.case_id,
+            room_type="INTAKE",
+            binding_hash="d" * 64,
+            code_build_id="target-intake-build",
+        ),
+    )
 
 
 @pytest.mark.asyncio
@@ -2158,7 +2184,620 @@ async def test_compiled_intake_executor_suppresses_provisional_dossier_without_m
 
 
 @pytest.mark.asyncio
-async def test_compiled_intake_executor_rejects_mismatched_streamed_room_before_terminal_commit(
+@pytest.mark.parametrize(
+    ("failure_stage", "replay_suffix"),
+    [
+        (None, ""),
+        (None, "\n另请保留“引号”和反斜杠\\的原样文本。"),
+        ("storage", ""),
+        ("commit", ""),
+    ],
+    ids=(
+        "success_normal_unicode",
+        "success_json_escaped_unicode",
+        "storage_failure",
+        "commit_failure",
+    ),
+)
+async def test_target_intake_executor_replays_committed_baseline_reply_before_board(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_stage: str | None,
+    replay_suffix: str,
+) -> None:
+    command, _, _ = _intake_command()
+    execution = _target_candidate_intake_execution(command)
+    first_two_questions = (
+        "请确认订单号？商品故障对您的使用造成了什么影响？"
+    )
+    third_question = "【RAW_THIRD_QUESTION】您是否已经联系过商家？"
+    terminal_room_utterance = (
+        "您好🙂，我已记录您补充的订单与使用情况。"
+        "为准确整理争议，请核对以下信息，并说明下列两点："
+        + replay_suffix
+        + first_two_questions
+    )
+    streamed_room_utterance = terminal_room_utterance + third_question
+    assert streamed_room_utterance.count("？") == 3
+    assert _limit_follow_up_questions(streamed_room_utterance, limit=2) == (
+        terminal_room_utterance
+    )
+    assert streamed_room_utterance != terminal_room_utterance
+    oversized_title = "终态长标题🙂" * 1025
+    dossier_payload = {
+        "case_story": {
+            "title": oversized_title,
+            "one_sentence_summary": "这是基线终结器确认后的争议摘要。",
+        },
+        "references": {
+            "order_reference": "ORDER-TERMINAL-UNICODE-001",
+            "after_sales_reference": "AFTER-TERMINAL-001",
+        },
+    }
+    assert len(
+        json.dumps(
+            dossier_payload["case_story"],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    ) > 4096
+
+    class DossierPatch:
+        def model_dump(self, **_: Any) -> dict[str, Any]:
+            return deepcopy(dossier_payload)
+
+    state = {
+        "terminal_draft": {"same": True},
+        "result_json": {"same": True},
+        "cognitive_revision": 1,
+    }
+    final_config = bind_fence_context(
+        {
+            "configurable": {
+                "thread_id": command.thread_id,
+                "checkpoint_ns": "",
+                "checkpoint_id": "cp-intake-terminal",
+            }
+        },
+        execution.fence,
+    )
+    proposal = SimpleNamespace(
+        room_utterance=terminal_room_utterance,
+        dossier_patch=DossierPatch(),
+    )
+    canonical = SimpleNamespace(
+        artifact_id="intake-proposal-terminal",
+        schema_version="intake-turn-proposal.v2",
+        sha256="a" * 64,
+        size_bytes=1,
+    )
+    result = SimpleNamespace(
+        result_ref="urn:intake:canonical-reply:result",
+        result_hash="b" * 64,
+        proposal_hash="c" * 64,
+        result_envelope_hash="d" * 64,
+    )
+    raw_dossier_delta = '{"order_reference":"RAW-UNCOMMITTED"}'
+    usage = Usage(input_tokens=3, output_tokens=2, total_tokens=5)
+
+    class Saver:
+        def __init__(self) -> None:
+            self.preflights = 0
+            self.commits = 0
+            self.terminal_committed = False
+
+        async def avalidate_external_terminal_checkpoint(self, *args: Any, **kwargs: Any) -> None:
+            self.preflights += 1
+            assert args == (final_config,)
+            assert kwargs == {"cognitive_revision": 1}
+
+        async def acommit_external_terminal(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            self.commits += 1
+            assert args[0] is final_config
+            if failure_stage == "commit":
+                raise GraphTerminalBindingError("terminal commit failed")
+            self.terminal_committed = True
+            return {
+                "configurable": {
+                    FENCE_CONTEXT_KEY: replace(
+                        execution.fence,
+                        result_ref=result.result_ref,
+                        result_hash=result.result_hash,
+                        proposal_hash=result.proposal_hash,
+                        result_envelope_hash=result.result_envelope_hash,
+                    )
+                }
+            }
+
+    saver = Saver()
+
+    class Graph:
+        checkpointer = saver
+
+        async def astream(self, input: Any, config: Any, **kwargs: Any):
+            assert kwargs["stream_mode"] == ["messages", "custom"]
+            yield (
+                "messages",
+                (
+                    AIMessageChunk(
+                        content="",
+                        additional_kwargs={
+                            "governed_events": [
+                                {
+                                    "schema_version": "governed-model-event.v1",
+                                    "event_type": "visible_delta",
+                                    "node_name": BASELINE_INTAKE_NODE_NAME,
+                                    "field": "room_utterance",
+                                    "delta": streamed_room_utterance,
+                                }
+                            ]
+                        },
+                    ),
+                    {"langgraph_node": BASELINE_INTAKE_NODE_NAME},
+                ),
+            )
+            yield (
+                "messages",
+                (
+                    AIMessageChunk(
+                        content="",
+                        additional_kwargs={
+                            "governed_events": [
+                                {
+                                    "schema_version": "governed-model-event.v1",
+                                    "event_type": "visible_delta",
+                                    "node_name": BASELINE_INTAKE_NODE_NAME,
+                                    "field": "case_detail.references",
+                                    "delta": raw_dossier_delta,
+                                }
+                            ]
+                        },
+                    ),
+                    {"langgraph_node": BASELINE_INTAKE_NODE_NAME},
+                ),
+            )
+            yield ("custom", GraphPublicUpdate.usage(usage))
+
+        async def aget_state(self, config: Any) -> object:
+            return object()
+
+    class Store:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def put(
+            self,
+            selected_execution: GatewayExecution,
+            *,
+            proposal: Any,
+            **kwargs: Any,
+        ) -> Any:
+            self.calls += 1
+            assert selected_execution is execution
+            assert proposal is canonical
+            assert kwargs == {
+                "checkpoint_ns": "",
+                "checkpoint_id": "cp-intake-terminal",
+                "cognitive_revision": 1,
+            }
+            if failure_stage == "storage":
+                raise GraphTerminalBindingError("terminal storage failed")
+            return SimpleNamespace(
+                artifact_id=canonical.artifact_id,
+                schema_version=canonical.schema_version,
+                uri="s3://intake-proposals/canonical-reply.json",
+                sha256=canonical.sha256,
+                size_bytes=canonical.size_bytes,
+            )
+
+    class Materializer:
+        def materialize(self, checkpoint_ns: str, checkpoint_id: str, *, fence: Any) -> Any:
+            assert checkpoint_ns == ""
+            assert checkpoint_id == "cp-intake-terminal"
+            assert fence is execution.fence
+            return result
+
+    async def load_context(*_: Any, **__: Any) -> object:
+        return object()
+
+    monkeypatch.setattr(
+        "app.graph_runtime.intake_executor.build_governed_intake_runtime",
+        lambda **kwargs: SimpleNamespace(graph=Graph()),
+    )
+    monkeypatch.setattr(CompiledIntakeGraphShadowExecutor, "_load_context", load_context)
+    monkeypatch.setattr(
+        CompiledIntakeGraphShadowExecutor,
+        "_graph_input",
+        staticmethod(lambda _: {}),
+    )
+    monkeypatch.setattr(
+        CompiledIntakeGraphShadowExecutor,
+        "_graph_config",
+        staticmethod(lambda _: {"configurable": {}}),
+    )
+    monkeypatch.setattr(
+        CompiledIntakeGraphShadowExecutor,
+        "_snapshot",
+        staticmethod(lambda *_: (state, final_config)),
+    )
+    monkeypatch.setattr(
+        IntakeRuntimeBundle,
+        "terminal_proposal",
+        staticmethod(lambda _: proposal),
+    )
+    monkeypatch.setattr(
+        CompiledIntakeGraphShadowExecutor,
+        "_command_usage",
+        staticmethod(lambda *_: usage),
+    )
+    monkeypatch.setattr(
+        "app.graph_runtime.intake_executor.canonical_intake_proposal",
+        lambda _: canonical,
+    )
+    monkeypatch.setattr(
+        CompiledIntakeGraphShadowExecutor,
+        "_materializer",
+        staticmethod(lambda *_, **__: Materializer()),
+    )
+    monkeypatch.setattr(
+        CompiledIntakeGraphShadowExecutor,
+        "_target_proposal_source",
+        staticmethod(lambda *_: None),
+    )
+    monkeypatch.setattr(
+        "app.graph_runtime.intake_executor.ExternalTerminalCommit",
+        lambda **kwargs: SimpleNamespace(**kwargs),
+    )
+
+    class Loader:
+        async def load(self, *args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("the test harness patches the Intake context loader")
+
+    store = Store()
+    executor = CompiledIntakeGraphShadowExecutor(
+        saver=cast(Any, saver),
+        transport=cast(Any, object()),
+        provider="synthetic",
+        model="intake-model",
+        input_loader=Loader(),
+        proposal_store=store,
+    )
+
+    events = []
+    visible_commit_states = []
+
+    async def collect() -> None:
+        async for event in executor.stream(execution):
+            events.append(event)
+            if event.event_type == "visible_delta":
+                visible_commit_states.append(saver.terminal_committed)
+
+    if failure_stage is not None:
+        with pytest.raises(GraphTerminalBindingError, match=f"terminal {failure_stage} failed"):
+            await collect()
+        assert [event.event_type for event in events] == ["attempt_started"]
+        assert visible_commit_states == []
+        assert saver.preflights == 1
+        assert store.calls == 1
+        assert saver.commits == (1 if failure_stage == "commit" else 0)
+        assert not saver.terminal_committed
+        return
+
+    await collect()
+    visible = [event for event in events if event.event_type == "visible_delta"]
+    room_events = [event for event in visible if event.payload.field == "room_utterance"]
+    board_events = [
+        event
+        for event in visible
+        if (event.payload.field or "").startswith("case_detail.")
+    ]
+    title_leaf_events = [
+        event
+        for event in board_events
+        if event.payload.field == "case_detail.case_story.title"
+    ]
+    references_leaf_events = [
+        event
+        for event in board_events
+        if event.payload.field == "case_detail.references.order_reference"
+    ]
+    references_root_events = [
+        event
+        for event in board_events
+        if event.payload.field == "case_detail.references"
+    ]
+
+    assert [event.sequence_no for event in events] == list(range(len(events)))
+    assert len(room_events) > 1
+    assert "".join(
+        event.payload.delta or "" for event in room_events
+    ) == terminal_room_utterance
+    assert all(
+        0 < len(event.payload.delta or "") <= 64 for event in room_events
+    )
+    assert all(visible_commit_states)
+    assert max(event.sequence_no for event in room_events) < min(
+        event.sequence_no for event in board_events
+    )
+    assert "".join(event.payload.delta or "" for event in title_leaf_events) == oversized_title
+    assert "".join(
+        event.payload.delta or "" for event in references_leaf_events
+    ) == dossier_payload["references"]["order_reference"]
+    assert len(references_root_events) == 1
+    assert json.loads(references_root_events[0].payload.delta or "") == dossier_payload[
+        "references"
+    ]
+    assert min(
+        event.sequence_no
+        for event in board_events
+        if (event.payload.field or "").startswith("case_detail.case_story")
+    ) < min(event.sequence_no for event in references_leaf_events)
+    assert not any(
+        event.payload.field == "case_detail.case_story" for event in board_events
+    )
+    all_visible_text = "".join(event.payload.delta or "" for event in visible)
+    assert third_question not in all_visible_text
+    assert "RAW-UNCOMMITTED" not in all_visible_text
+    assert events[-2].event_type == "usage"
+    assert events[-2].payload.usage == usage
+    assert events[-1].event_type == "final"
+    assert saver.preflights == 1
+    assert store.calls == 1
+    assert saver.commits == 1
+    assert saver.terminal_committed
+
+
+@pytest.mark.asyncio
+async def test_target_intake_executor_preserves_baseline_ready_handoff_after_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command, _, _ = _intake_command()
+    execution = _target_candidate_intake_execution(command)
+    baseline_ready_handoff = (
+        "已记录本轮补充，当前信息已经可以提交。"
+        "请问还有没有需要备注给证据书记官或后续审理环节的案情内容？"
+    )
+    assert (
+        intake_executor._normalized_intake_room_utterance(baseline_ready_handoff)
+        != baseline_ready_handoff
+    )
+    raw_room_utterance = "raw provisional model reply that must remain private"
+    raw_dossier_delta = '{"order_reference":"RAW-UNCOMMITTED"}'
+    state = {
+        "terminal_draft": {"same": True},
+        "result_json": {"same": True},
+        "cognitive_revision": 1,
+    }
+    final_config = bind_fence_context(
+        {
+            "configurable": {
+                "thread_id": command.thread_id,
+                "checkpoint_ns": "",
+                "checkpoint_id": "cp-intake-ready-handoff",
+            }
+        },
+        execution.fence,
+    )
+
+    class DossierPatch:
+        def model_dump(self, **_: Any) -> dict[str, Any]:
+            return {"references": {"order_reference": "ORDER-READY-HANDOFF"}}
+
+    proposal = SimpleNamespace(
+        room_utterance=baseline_ready_handoff,
+        dossier_patch=DossierPatch(),
+    )
+    canonical = SimpleNamespace(
+        artifact_id="intake-proposal-ready-handoff",
+        schema_version="intake-turn-proposal.v2",
+        sha256="a" * 64,
+        size_bytes=1,
+    )
+    result = SimpleNamespace(
+        result_ref="urn:intake:ready-handoff:result",
+        result_hash="b" * 64,
+        proposal_hash="c" * 64,
+        result_envelope_hash="d" * 64,
+    )
+
+    class Saver:
+        def __init__(self) -> None:
+            self.preflights = 0
+            self.commits = 0
+            self.terminal_committed = False
+
+        async def avalidate_external_terminal_checkpoint(self, config: Any, **kwargs: Any) -> None:
+            self.preflights += 1
+            assert config is final_config
+            assert kwargs == {"cognitive_revision": 1}
+
+        async def acommit_external_terminal(self, config: Any, commit: Any) -> dict[str, Any]:
+            self.commits += 1
+            assert config is final_config
+            assert store.stored
+            assert commit.result is result
+            self.terminal_committed = True
+            return {
+                "configurable": {
+                    FENCE_CONTEXT_KEY: replace(
+                        execution.fence,
+                        result_ref=result.result_ref,
+                        result_hash=result.result_hash,
+                        proposal_hash=result.proposal_hash,
+                        result_envelope_hash=result.result_envelope_hash,
+                    )
+                }
+            }
+
+    saver = Saver()
+
+    class Graph:
+        checkpointer = saver
+
+        async def astream(self, input: Any, config: Any, **kwargs: Any):
+            assert kwargs["stream_mode"] == ["messages", "custom"]
+            for field, delta in (
+                ("room_utterance", raw_room_utterance),
+                ("case_detail.references", raw_dossier_delta),
+            ):
+                yield (
+                    "messages",
+                    (
+                        AIMessageChunk(
+                            content="",
+                            additional_kwargs={
+                                "governed_events": [
+                                    {
+                                        "schema_version": "governed-model-event.v1",
+                                        "event_type": "visible_delta",
+                                        "node_name": BASELINE_INTAKE_NODE_NAME,
+                                        "field": field,
+                                        "delta": delta,
+                                    }
+                                ]
+                            },
+                        ),
+                        {"langgraph_node": BASELINE_INTAKE_NODE_NAME},
+                    ),
+                )
+
+        async def aget_state(self, config: Any) -> object:
+            return object()
+
+    class Store:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.stored = False
+
+        async def put(
+            self,
+            selected_execution: GatewayExecution,
+            *,
+            proposal: Any,
+            **kwargs: Any,
+        ) -> Any:
+            self.calls += 1
+            assert selected_execution is execution
+            assert proposal is canonical
+            assert kwargs == {
+                "checkpoint_ns": "",
+                "checkpoint_id": "cp-intake-ready-handoff",
+                "cognitive_revision": 1,
+            }
+            self.stored = True
+            return SimpleNamespace(
+                artifact_id=canonical.artifact_id,
+                schema_version=canonical.schema_version,
+                uri="s3://intake-proposals/ready-handoff.json",
+                sha256=canonical.sha256,
+                size_bytes=canonical.size_bytes,
+            )
+
+    class Materializer:
+        def materialize(self, checkpoint_ns: str, checkpoint_id: str, *, fence: Any) -> Any:
+            assert checkpoint_ns == ""
+            assert checkpoint_id == "cp-intake-ready-handoff"
+            assert fence is execution.fence
+            return result
+
+    async def load_context(*_: Any, **__: Any) -> object:
+        return object()
+
+    monkeypatch.setattr(
+        "app.graph_runtime.intake_executor.build_governed_intake_runtime",
+        lambda **kwargs: SimpleNamespace(graph=Graph()),
+    )
+    monkeypatch.setattr(CompiledIntakeGraphShadowExecutor, "_load_context", load_context)
+    monkeypatch.setattr(
+        CompiledIntakeGraphShadowExecutor,
+        "_graph_input",
+        staticmethod(lambda _: {}),
+    )
+    monkeypatch.setattr(
+        CompiledIntakeGraphShadowExecutor,
+        "_graph_config",
+        staticmethod(lambda _: {"configurable": {}}),
+    )
+    monkeypatch.setattr(
+        CompiledIntakeGraphShadowExecutor,
+        "_snapshot",
+        staticmethod(lambda *_: (state, final_config)),
+    )
+    monkeypatch.setattr(
+        IntakeRuntimeBundle,
+        "terminal_proposal",
+        staticmethod(lambda _: proposal),
+    )
+    monkeypatch.setattr(
+        CompiledIntakeGraphShadowExecutor,
+        "_command_usage",
+        staticmethod(lambda *_: Usage(input_tokens=0, output_tokens=0, total_tokens=0)),
+    )
+    monkeypatch.setattr(
+        "app.graph_runtime.intake_executor.canonical_intake_proposal",
+        lambda _: canonical,
+    )
+    monkeypatch.setattr(
+        CompiledIntakeGraphShadowExecutor,
+        "_materializer",
+        staticmethod(lambda *_, **__: Materializer()),
+    )
+    monkeypatch.setattr(
+        CompiledIntakeGraphShadowExecutor,
+        "_target_proposal_source",
+        staticmethod(lambda *_: None),
+    )
+    monkeypatch.setattr(
+        "app.graph_runtime.intake_executor.ExternalTerminalCommit",
+        lambda **kwargs: SimpleNamespace(**kwargs),
+    )
+
+    class Loader:
+        async def load(self, *args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("the test harness patches the Intake context loader")
+
+    store = Store()
+    executor = CompiledIntakeGraphShadowExecutor(
+        saver=cast(Any, saver),
+        transport=cast(Any, object()),
+        provider="synthetic",
+        model="intake-model",
+        input_loader=Loader(),
+        proposal_store=store,
+    )
+
+    events = []
+    visible_commit_states = []
+    async for event in executor.stream(execution):
+        events.append(event)
+        if event.event_type == "visible_delta":
+            visible_commit_states.append(saver.terminal_committed)
+
+    visible = [event for event in events if event.event_type == "visible_delta"]
+    room_events = [event for event in visible if event.payload.field == "room_utterance"]
+    board_events = [event for event in visible if event not in room_events]
+
+    assert [event.sequence_no for event in events] == list(range(len(events)))
+    assert "".join(
+        event.payload.delta or "" for event in room_events
+    ) == baseline_ready_handoff
+    assert all(visible_commit_states)
+    assert max(event.sequence_no for event in room_events) < min(
+        event.sequence_no for event in board_events
+    )
+    assert raw_room_utterance not in "".join(event.payload.delta or "" for event in visible)
+    assert raw_dossier_delta not in "".join(event.payload.delta or "" for event in visible)
+    assert any(
+        event.payload.field == "case_detail.references" for event in board_events
+    )
+    assert events[-1].event_type == "final"
+    assert saver.preflights == 1
+    assert store.calls == 1
+    assert saver.commits == 1
+    assert saver.terminal_committed
+
+
+@pytest.mark.asyncio
+async def test_legacy_intake_executor_rejects_mismatched_room_before_terminal_commit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     command, _, _ = _intake_command()

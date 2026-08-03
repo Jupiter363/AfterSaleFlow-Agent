@@ -607,6 +607,13 @@ async def test_real_langgraph_terminal_update_materializes_the_versioned_result_
     result = saver.terminal_results[0]
     assert result.result_hash == events[-1].payload.final_result_hash
     assert result.checkpoint_id
+    terminal_fence = replace(
+        _execution().fence,
+        result_hash=result.result_hash,
+        result_ref=result.result_ref,
+        proposal_hash=result.proposal_hash,
+        result_envelope_hash=result.result_envelope_hash,
+    )
     assert result.cognitive_revision == 3
     snapshot = await graph.aget_state(
         bind_fence_context(
@@ -616,7 +623,7 @@ async def test_real_langgraph_terminal_update_materializes_the_versioned_result_
                     "checkpoint_ns": "",
                 }
             },
-            _execution().fence,
+            terminal_fence,
         )
     )
     assert snapshot.values["result_json"] == dict(result.result_json)

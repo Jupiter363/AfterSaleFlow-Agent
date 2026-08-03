@@ -133,6 +133,10 @@ public class AgentRunV2RecoveryService {
             return terminalize(state, "AGENT_RUN_RECOVERY_PREPARER_MISSING", now);
         }
         preparation.verifyAllocatedRequest(state, request);
+        if (attempt.attemptNo() == 1
+                && !preparation.mayReplayInitialAttemptFromRecovery(state)) {
+            return Optional.empty();
+        }
         return Optional.of(request);
     }
 

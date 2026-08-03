@@ -199,6 +199,14 @@ class _AdmissionToken:
     serial: int
 
 
+@dataclass(slots=True)
+class _LeaseHeartbeatState:
+    """Share the newest lease and a deferred heartbeat failure with the stream owner."""
+
+    execution: GatewayExecution
+    failure: BaseException | None = None
+
+
 class GraphStreamAdmissionGate:
     """Reject new streams during shutdown and bound graceful draining."""
 
@@ -472,23 +480,30 @@ class GatewayBackedGraphCommandStreamService:
     ) -> AsyncIterator[AgentStreamEvent]:
         iterator: AsyncIterator[AgentStreamEvent] | None = None
         next_event: asyncio.Task[AgentStreamEvent] | None = None
-        renewal: asyncio.Task[Any] | None = None
-        renewal_deferred = False
+        heartbeat_stop = asyncio.Event()
+        heartbeat_state = _LeaseHeartbeatState(execution)
+        heartbeat: asyncio.Task[None] | None = None
         terminal_seen = False
         try:
             iterator = source.__aiter__()
             next_event = asyncio.create_task(anext(iterator))
-            renewal = asyncio.create_task(self._renew_after(execution))
+            heartbeat = asyncio.create_task(
+                self._run_lease_heartbeat(
+                    heartbeat_state,
+                    stop_signal=heartbeat_stop,
+                    durable_terminal_signal=durable_terminal_signal,
+                )
+            )
             while next_event is not None:
+                heartbeat_deferred = False
                 if self._durable_terminal_reached(durable_terminal_signal):
-                    renewed_execution = await self._join_terminal_renewal(
-                        renewal,
+                    execution = await self._join_terminal_heartbeat(
+                        heartbeat,
+                        heartbeat_stop,
+                        heartbeat_state,
                         suppress_all=True,
                     )
-                    if renewed_execution is not None:
-                        execution = renewed_execution
-                    renewal = None
-                    renewal_deferred = False
+                    heartbeat = None
                 elif self._terminal_processing_inflight(
                     terminal_processing_started,
                     durable_terminal_signal,
@@ -499,25 +514,24 @@ class GatewayBackedGraphCommandStreamService:
                     # transaction-commit -> Event.set scheduling window.  This is a
                     # deferral fence only: a source failure before the durable signal
                     # still falls through to the ordinary fail-closed abort path.
-                    renewal_deferred = renewal is not None
+                    heartbeat_deferred = heartbeat is not None
                 watched = {next_event}
-                if renewal is not None and not renewal_deferred:
-                    watched.add(renewal)
+                if heartbeat is not None and not heartbeat_deferred:
+                    watched.add(heartbeat)
                 done, _ = await asyncio.wait(watched, return_when=asyncio.FIRST_COMPLETED)
                 if self._durable_terminal_reached(durable_terminal_signal):
-                    renewed_execution = await self._join_terminal_renewal(
-                        renewal,
+                    execution = await self._join_terminal_heartbeat(
+                        heartbeat,
+                        heartbeat_stop,
+                        heartbeat_state,
                         suppress_all=True,
                     )
-                    if renewed_execution is not None:
-                        execution = renewed_execution
-                    renewal = None
-                    renewal_deferred = False
+                    heartbeat = None
                 elif self._terminal_processing_inflight(
                     terminal_processing_started,
                     durable_terminal_signal,
                 ):
-                    renewal_deferred = renewal is not None
+                    heartbeat_deferred = heartbeat is not None
                 if next_event in done:
                     try:
                         event = next_event.result()
@@ -530,16 +544,15 @@ class GatewayBackedGraphCommandStreamService:
                         # has durably reconciled/terminated the command and released
                         # its exact lease.  A concurrent renewal can therefore lose
                         # that lease legitimately; suppress only that expected loss.
-                        renewed_execution = await self._join_terminal_renewal(
-                            renewal,
+                        execution = await self._join_terminal_heartbeat(
+                            heartbeat,
+                            heartbeat_stop,
+                            heartbeat_state,
                             suppress_all=self._durable_terminal_reached(
                                 durable_terminal_signal
                             ),
                         )
-                        if renewed_execution is not None:
-                            execution = renewed_execution
-                        renewal = None
-                        renewal_deferred = False
+                        heartbeat = None
                     else:
                         if self._durable_terminal_reached(durable_terminal_signal):
                             raise GraphContractError(
@@ -552,48 +565,22 @@ class GatewayBackedGraphCommandStreamService:
                             raise GraphContractError(
                                 "terminal processing preceded a nonterminal stream event"
                             )
-                        if (
-                            renewal is not None
-                            and renewal.done()
-                            and not renewal_deferred
-                        ):
-                            try:
-                                # Before a terminal is durably observed, every renewal
-                                # failure remains authoritative and must fail closed.
-                                execution = renewal.result()
-                            except GraphLeaseLostError:
-                                if not self._durable_terminal_reached(
-                                    durable_terminal_signal
-                                ):
-                                    raise
-                            renewal = None
+                        if heartbeat is not None and heartbeat.done() and not heartbeat_deferred:
+                            # Before a terminal is durably observed, every heartbeat
+                            # failure remains authoritative and must fail closed.
+                            self._raise_heartbeat_failure(heartbeat_state)
                         # Keep exactly one source pull in flight while the caller
                         # sends the current event.  Without this bounded prefetch,
                         # an ASGI/HTTP backpressure gap after ``attempt_started``
                         # prevents the executor from loading context or beginning
                         # provider work until the next downstream read.
                         next_event = asyncio.create_task(anext(iterator))
-                        if (
-                            renewal is None
-                            and not self._durable_terminal_reached(durable_terminal_signal)
-                        ):
-                            renewal = asyncio.create_task(self._renew_after(execution))
-                            renewal_deferred = False
                     yield event
                     if terminal_seen:
                         next_event = None
                     continue
-                if renewal is not None and renewal in done and not renewal_deferred:
-                    try:
-                        execution = renewal.result()
-                    except GraphLeaseLostError:
-                        if not self._durable_terminal_reached(durable_terminal_signal):
-                            raise
-                    if self._durable_terminal_reached(durable_terminal_signal):
-                        renewal = None
-                    else:
-                        renewal = asyncio.create_task(self._renew_after(execution))
-                        renewal_deferred = False
+                if heartbeat is not None and heartbeat in done and not heartbeat_deferred:
+                    self._raise_heartbeat_failure(heartbeat_state)
             if not terminal_seen:
                 raise GraphContractError("gateway stream ended without a terminal event")
         except BaseException as error:
@@ -623,42 +610,26 @@ class GatewayBackedGraphCommandStreamService:
                     # though the command is already durably terminal.
                     failure = prefetched_failure
                 if terminal_seen or durable_terminal_reached:
-                    renewed_execution = await self._join_terminal_renewal(
-                        renewal,
+                    execution = await self._join_terminal_heartbeat(
+                        heartbeat,
+                        heartbeat_stop,
+                        heartbeat_state,
                         suppress_all=durable_terminal_reached,
                     )
-                    if renewed_execution is not None:
-                        execution = renewed_execution
-                    renewal = None
+                    heartbeat = None
                 else:
-                    if renewal is not None and renewal.done():
-                        try:
-                            execution = renewal.result()
-                        except BaseException:
-                            # The original source/cancellation failure is already the
-                            # authority here.  In particular, a terminal source failure
-                            # before durable completion must not be obscured by a
-                            # deferred renewal failure.
-                            pass
-                        renewal = None
-                    if self._durable_terminal_reached(durable_terminal_signal):
-                        durable_terminal_reached = True
-                    if durable_terminal_reached:
-                        renewed_execution = await self._join_terminal_renewal(
-                            renewal,
-                            suppress_all=True,
-                        )
-                        if renewed_execution is not None:
-                            execution = renewed_execution
-                        renewal = None
-                    else:
-                        # Persist the cancellation fence before touching provider tasks. A task
-                        # that suppresses cancellation can no longer checkpoint with the old token.
-                        await self._best_effort_abort(execution, failure)
+                    # The original source/cancellation failure is already the authority
+                    # here.  In particular, a terminal source failure before durable
+                    # completion must not be obscured by a deferred heartbeat failure.
+                    execution = heartbeat_state.execution
+                    # Persist the cancellation fence before touching provider tasks. A task
+                    # that suppresses cancellation can no longer checkpoint with the old token.
+                    await self._best_effort_abort(execution, failure)
+            heartbeat_stop.set()
             await _cancel_task(next_event)
             next_event = None
-            await _cancel_task(renewal)
-            renewal = None
+            await _cancel_task(heartbeat)
+            heartbeat = None
             if iterator is not None:
                 await _close_iterator_safely(iterator)
                 iterator = None
@@ -666,8 +637,10 @@ class GatewayBackedGraphCommandStreamService:
                 raise
             raise failure from error
         finally:
+            heartbeat_stop.set()
             await _cancel_task(next_event)
-            await _cancel_task(renewal)
+            await _cancel_task(heartbeat)
+            execution = heartbeat_state.execution
             try:
                 if iterator is not None:
                     await _close_iterator(iterator)
@@ -678,27 +651,40 @@ class GatewayBackedGraphCommandStreamService:
                 self._gateway.cleanup_execution_lease(execution)
 
     @staticmethod
-    async def _join_terminal_renewal(
-        renewal: asyncio.Task[Any] | None,
+    async def _join_terminal_heartbeat(
+        heartbeat: asyncio.Task[None] | None,
+        stop_signal: asyncio.Event,
+        state: _LeaseHeartbeatState,
         *,
         suppress_all: bool = False,
-    ) -> Any | None:
+    ) -> GatewayExecution:
         """Join terminal cleanup without mistaking its lease release for a failure."""
 
-        if renewal is None:
-            return None
-        if not renewal.done():
-            renewal.cancel()
-        (result,) = await asyncio.gather(renewal, return_exceptions=True)
-        if isinstance(result, asyncio.CancelledError):
-            return None
+        stop_signal.set()
+        failure = state.failure
+        if heartbeat is not None:
+            if not heartbeat.done():
+                heartbeat.cancel()
+            (result,) = await asyncio.gather(heartbeat, return_exceptions=True)
+            if (
+                failure is None
+                and isinstance(result, BaseException)
+                and not isinstance(result, asyncio.CancelledError)
+            ):
+                failure = result
         if suppress_all:
-            return None
-        if isinstance(result, GraphLeaseLostError):
-            return None
-        if isinstance(result, BaseException):
-            raise result
-        return result
+            return state.execution
+        if isinstance(failure, GraphLeaseLostError):
+            return state.execution
+        if failure is not None:
+            raise failure
+        return state.execution
+
+    @staticmethod
+    def _raise_heartbeat_failure(state: _LeaseHeartbeatState) -> None:
+        if state.failure is not None:
+            raise state.failure
+        raise GraphContractError("lease heartbeat stopped before terminal durability")
 
     @staticmethod
     def _durable_terminal_reached(signal: asyncio.Event | None) -> bool:
@@ -764,10 +750,64 @@ class GatewayBackedGraphCommandStreamService:
             return False, error
         return event.event_type in TERMINAL_STREAM_EVENTS, None
 
-    async def _renew_after(self, execution: GatewayExecution) -> GatewayExecution:
-        await asyncio.sleep(self._renewal_seconds)
-        lease = await self._gateway.renew_execution(execution)
-        return replace(execution, lease=lease)
+    async def _run_lease_heartbeat(
+        self,
+        state: _LeaseHeartbeatState,
+        *,
+        stop_signal: asyncio.Event,
+        durable_terminal_signal: asyncio.Event | None,
+    ) -> None:
+        """Renew independently of downstream reads until terminal durability is known."""
+
+        try:
+            while (
+                not stop_signal.is_set()
+                and not self._durable_terminal_reached(durable_terminal_signal)
+            ):
+                if not await self._await_heartbeat_tick(
+                    stop_signal=stop_signal,
+                    durable_terminal_signal=durable_terminal_signal,
+                ):
+                    return
+                if (
+                    stop_signal.is_set()
+                    or self._durable_terminal_reached(durable_terminal_signal)
+                ):
+                    return
+                lease = await self._gateway.renew_execution(state.execution)
+                state.execution = replace(state.execution, lease=lease)
+        except asyncio.CancelledError:
+            raise
+        except BaseException as error:
+            state.failure = error
+
+    async def _await_heartbeat_tick(
+        self,
+        *,
+        stop_signal: asyncio.Event,
+        durable_terminal_signal: asyncio.Event | None,
+    ) -> bool:
+        """Return only when a renewal interval elapses before terminal/stop signals."""
+
+        if (
+            stop_signal.is_set()
+            or self._durable_terminal_reached(durable_terminal_signal)
+        ):
+            return False
+        waiters: set[asyncio.Task[bool]] = {asyncio.create_task(stop_signal.wait())}
+        if durable_terminal_signal is not None:
+            waiters.add(asyncio.create_task(durable_terminal_signal.wait()))
+        try:
+            done, _ = await asyncio.wait(
+                waiters,
+                timeout=self._renewal_seconds,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            return not done
+        finally:
+            for waiter in waiters:
+                waiter.cancel()
+            await asyncio.gather(*waiters, return_exceptions=True)
 
     async def _best_effort_abort(
         self,

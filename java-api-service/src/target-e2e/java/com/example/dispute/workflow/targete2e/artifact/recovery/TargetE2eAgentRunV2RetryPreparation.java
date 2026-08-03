@@ -78,6 +78,14 @@ public final class TargetE2eAgentRunV2RetryPreparation
   }
 
   @Override
+  public boolean mayReplayInitialAttemptFromRecovery(RecoveryState state) {
+    Objects.requireNonNull(state, "state");
+    // Durable room-material verification establishes Target room workflow authority here;
+    // detector recovery owns only later attempts.
+    return false;
+  }
+
+  @Override
   public AttemptAllocation prepareNextAttempt(
       RecoveryState state, AgentRunV2NextAttemptFactory factory, java.time.Instant preparedAt) {
     Objects.requireNonNull(preparedAt, "preparedAt");

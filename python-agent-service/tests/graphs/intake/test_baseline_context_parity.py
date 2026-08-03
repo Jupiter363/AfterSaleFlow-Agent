@@ -334,8 +334,13 @@ def _target_state(
     )
     state["initial_snapshot_ref"] = "SNAPSHOT_BASELINE_PARITY_1"
     state["initial_snapshot_hash"] = _SNAPSHOT_HASH
+    state["initial_domain_revision"] = 1
     state["last_event_ref"] = cast(Any, None)
     state["last_event_hash"] = cast(Any, None)
+    state["last_event_sequence"] = max(
+        (int(message["sequence"]) for message in turn.messages),
+        default=0,
+    )
     if turn.messages:
         state["last_event_ref"] = "EVENT_BASELINE_PARITY_1"
         state["last_event_hash"] = _EVENT_HASH

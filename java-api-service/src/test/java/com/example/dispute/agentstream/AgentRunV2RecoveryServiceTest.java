@@ -1,7 +1,12 @@
 package com.example.dispute.agentstream;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -43,6 +48,8 @@ import java.util.List;
 import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 
 class AgentRunV2RecoveryServiceTest {
 
@@ -92,6 +99,7 @@ class AgentRunV2RecoveryServiceTest {
         secondAttempt = runningAttempt(secondCommand, 2, firstCommand.attemptId());
         allocation = new AttemptAllocation(2, secondCommand, binding(secondCommand));
         when(preparation.supports(any())).thenReturn(true);
+        when(preparation.mayReplayInitialAttemptFromRecovery(any())).thenReturn(true);
         when(factory.verifiedCommand(any())).thenAnswer(invocation -> {
             RecoveryState state = invocation.getArgument(0);
             return state.latestAttempt().attemptNo() == 1 ? firstCommand : secondCommand;
@@ -139,6 +147,7 @@ class AgentRunV2RecoveryServiceTest {
         verify(ledger, times(1))
                 .startNextAttempt(firstCommand.logicalRunId(), allocation, NOW);
         verify(preparation).verifyAllocatedRequest(running, replayed);
+        verify(preparation, never()).mayReplayInitialAttemptFromRecovery(running);
     }
 
     @Test
@@ -157,6 +166,125 @@ class AgentRunV2RecoveryServiceTest {
         assertThat(request.previousAttemptId()).isNull();
         verify(ledger, never()).startNextAttempt(any(), any(), any());
         verify(preparation).verifyAllocatedRequest(initialRunning, request);
+        verify(preparation).mayReplayInitialAttemptFromRecovery(initialRunning);
+    }
+
+    @Test
+    void leavesInitialRunningAttemptForTheLaneOwnerWhenInitialReplayIsDisabled() {
+        RecoveryState initialRunning = state(
+                "RUNNING",
+                runningAttempt(firstCommand, 1, null));
+        when(ledger.lockV2RecoveryState(firstCommand.logicalRunId()))
+                .thenReturn(Optional.of(initialRunning));
+        when(preparation.mayReplayInitialAttemptFromRecovery(initialRunning)).thenReturn(false);
+
+        assertThat(service(List.of(preparation)).prepare(firstCommand.logicalRunId())).isEmpty();
+
+        ArgumentCaptor<ExecuteAgentRunRequest> verifiedRequest =
+                ArgumentCaptor.forClass(ExecuteAgentRunRequest.class);
+        InOrder preparationOrder = inOrder(preparation);
+        preparationOrder.verify(preparation).supports(initialRunning);
+        preparationOrder.verify(preparation)
+                .verifyAllocatedRequest(eq(initialRunning), verifiedRequest.capture());
+        preparationOrder.verify(preparation).mayReplayInitialAttemptFromRecovery(initialRunning);
+        assertThat(verifiedRequest.getValue().attemptNo()).isEqualTo(1);
+        verify(ledger, never()).startNextAttempt(any(), any(), any());
+        verify(ledger, never())
+                .terminalizeV2RecoveryCandidate(any(), any(), anyLong(), any(), any());
+        verify(factory).verifiedCommand(initialRunning);
+        verifyNoInteractions(streamEventService);
+    }
+
+    @Test
+    void terminalizesADisabledInitialReplayWhenTheDeadlineIsMissing() {
+        RecoveryState missingDeadline = state(
+                "RUNNING",
+                runningAttempt(firstCommand, 1, null),
+                3,
+                null);
+        when(ledger.lockV2RecoveryState(firstCommand.logicalRunId()))
+                .thenReturn(Optional.of(missingDeadline));
+        when(preparation.mayReplayInitialAttemptFromRecovery(missingDeadline)).thenReturn(false);
+
+        assertThat(service(List.of(preparation)).prepare(firstCommand.logicalRunId())).isEmpty();
+
+        verify(ledger)
+                .terminalizeV2RecoveryCandidate(
+                        firstCommand.logicalRunId(),
+                        firstCommand.attemptId(),
+                        1,
+                        "AGENT_RUN_RECOVERY_DEADLINE_MISSING",
+                        NOW);
+        verifyNoInteractions(factory, preparation);
+    }
+
+    @Test
+    void terminalizesADisabledInitialReplayWhenTheDeadlineIsExceeded() {
+        RecoveryState expired = state(
+                "RUNNING",
+                runningAttempt(firstCommand, 1, null),
+                3,
+                NOW);
+        when(ledger.lockV2RecoveryState(firstCommand.logicalRunId()))
+                .thenReturn(Optional.of(expired));
+        when(preparation.mayReplayInitialAttemptFromRecovery(expired)).thenReturn(false);
+
+        assertThat(service(List.of(preparation)).prepare(firstCommand.logicalRunId())).isEmpty();
+
+        verify(ledger)
+                .terminalizeV2RecoveryCandidate(
+                        firstCommand.logicalRunId(),
+                        firstCommand.attemptId(),
+                        1,
+                        "AGENT_RUN_RECOVERY_DEADLINE_EXCEEDED",
+                        NOW);
+        verifyNoInteractions(factory, preparation);
+    }
+
+    @Test
+    void terminalizesADisabledInitialReplayWhenTheCommandIsInvalid() {
+        RecoveryState initialRunning = state(
+                "RUNNING",
+                runningAttempt(firstCommand, 1, null));
+        when(ledger.lockV2RecoveryState(firstCommand.logicalRunId()))
+                .thenReturn(Optional.of(initialRunning));
+        when(factory.verifiedCommand(initialRunning))
+                .thenThrow(new IllegalArgumentException("invalid command"));
+        when(preparation.mayReplayInitialAttemptFromRecovery(initialRunning)).thenReturn(false);
+
+        assertThat(service(List.of(preparation)).prepare(firstCommand.logicalRunId())).isEmpty();
+
+        verify(ledger)
+                .terminalizeV2RecoveryCandidate(
+                        firstCommand.logicalRunId(),
+                        firstCommand.attemptId(),
+                        1,
+                        "AGENT_RUN_RECOVERY_COMMAND_INVALID",
+                        NOW);
+        verifyNoInteractions(preparation);
+    }
+
+    @Test
+    void failsClosedBeforeDeferringInitialReplayWhenTargetMaterialCannotBeVerified() {
+        RecoveryState initialRunning = state(
+                "RUNNING",
+                runningAttempt(firstCommand, 1, null));
+        when(ledger.lockV2RecoveryState(firstCommand.logicalRunId()))
+                .thenReturn(Optional.of(initialRunning));
+        when(preparation.mayReplayInitialAttemptFromRecovery(initialRunning)).thenReturn(false);
+        doThrow(new IllegalStateException("allocated target retry material is absent"))
+                .when(preparation)
+                .verifyAllocatedRequest(eq(initialRunning), any());
+
+        assertThatThrownBy(() -> service(List.of(preparation)).prepare(firstCommand.logicalRunId()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("allocated target retry material is absent");
+
+        verify(preparation).verifyAllocatedRequest(eq(initialRunning), any());
+        verify(preparation, never()).mayReplayInitialAttemptFromRecovery(initialRunning);
+        verify(ledger, never())
+                .terminalizeV2RecoveryCandidate(any(), any(), anyLong(), any(), any());
+        verifyNoInteractions(streamEventService);
     }
 
     @Test
