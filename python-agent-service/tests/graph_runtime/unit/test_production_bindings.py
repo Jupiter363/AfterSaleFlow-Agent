@@ -1232,6 +1232,7 @@ async def test_authorized_intake_adapter_builds_the_real_governed_graph_proposal
     assert bundle.model_node.model.profile.profile_id == "intake-model.synthetic.v1"
 
     state = build_intake_execution_state(execution)
+    assert state["cognitive_revision"] == 1
     result = await bundle.graph.ainvoke(
         state,
         {"configurable": {"thread_id": command.thread_id}},
@@ -1242,6 +1243,8 @@ async def test_authorized_intake_adapter_builds_the_real_governed_graph_proposal
 
     assert transport.generate_calls == 1
     assert len(transport.requests) == 1
+    assert result["cognitive_revision"] == 1
+    assert result["result_json"]["cognitive_revision"] == 1
     assert result["terminal_draft"] == result["result_json"]
     assert proposal.schema_version == "intake-turn-proposal.v2"
     assert proposal.command_id == command.command_id
@@ -1336,6 +1339,8 @@ async def test_compiled_intake_executor_persists_one_pointer_without_replacing_s
     )
     assert source_transport.generate_calls == 1
     assert len(source_transport.requests) == 1
+    assert durable_state["cognitive_revision"] == 1
+    assert durable_state["result_json"]["cognitive_revision"] == 1
     durable_state["usage_by_invocation"][command.attempt_id] = {
         "input_tokens": 3,
         "output_tokens": 2,
@@ -1359,6 +1364,7 @@ async def test_compiled_intake_executor_persists_one_pointer_without_replacing_s
 
         async def avalidate_external_terminal_checkpoint(self, config, **kwargs):
             self.preflights += 1
+            assert kwargs == {"cognitive_revision": 1}
 
         async def acommit_external_terminal(self, config, commit):
             self.commits.append(commit)
@@ -1584,6 +1590,11 @@ async def test_compiled_intake_executor_persists_one_pointer_without_replacing_s
 
         async def put(self, selected_execution, *, proposal, **kwargs):
             self.calls += 1
+            assert kwargs == {
+                "checkpoint_ns": "",
+                "checkpoint_id": "cp-intake-terminal",
+                "cognitive_revision": 1,
+            }
             self.proposals.append(proposal)
             return StoredIntakeProposal(
                 artifact_id=proposal.artifact_id,

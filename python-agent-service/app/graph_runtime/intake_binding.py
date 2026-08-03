@@ -242,7 +242,9 @@ def build_intake_execution_state(execution: GatewayExecution) -> IntakeGraphStat
         bindings=bindings,
         version_pins=_version_pins(execution),
     )
-    # The process saver requires the first durable command checkpoint to advance revision 0.
+    # The process saver labels its fresh durable command checkpoint as revision 1.
+    # ``next_intake_cognitive_revision`` treats that as the first terminal target,
+    # so the external registry still commits the opening turn through strict CAS 0 -> 1.
     state["cognitive_revision"] = 1
     return state
 

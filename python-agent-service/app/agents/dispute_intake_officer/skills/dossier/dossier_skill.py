@@ -1493,7 +1493,8 @@ def _question_targets_resolved_intake_field(
         and requested_resolution
         and requested_resolution != "UNKNOWN"
         and re.search(
-        r"具体诉求|诉求是|希望.{0,12}(怎么处理|如何处理)|"
+        r"具体诉求|诉求是(?!否.{0,16}(?:回应|回复|同意|接受|处理))|"
+        r"希望.{0,12}(怎么处理|如何处理)|"
         r"换货.{0,12}退货退款|处理方式",
         question,
         )

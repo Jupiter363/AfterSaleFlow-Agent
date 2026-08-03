@@ -63,6 +63,7 @@ from app.graphs.intake.state import (
 )
 from app.graphs.intake.validators import (
     MATRIX_AUTHORITY_RECORD_KEY,
+    next_intake_cognitive_revision,
     validate_matrix_patch,
 )
 from app.harness.invocation_context import AgentInvocationContext
@@ -1300,6 +1301,16 @@ def test_baseline_new_fact_key_is_preserved_before_target_projection(
     assert projected["summary_source_fact_keys"] == ["NEW_DAMAGE"]
 
 
+def test_next_intake_revision_rejects_non_terminal_committed_result() -> None:
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_COGNITIVE_REVISION_INVALID",
+    ):
+        next_intake_cognitive_revision(
+            {"cognitive_revision": 1, "result_json": {}}
+        )
+
+
 def test_two_turn_baseline_context_preserves_formal_fact_authority_privately(
     bindings,
     version_pins,
@@ -1348,6 +1359,9 @@ def test_two_turn_baseline_context_preserves_formal_fact_authority_privately(
         context=_bootstrap_event_context(snapshot, event),
     )
 
+    # A standalone fresh graph begins at 0 and its first terminal proposal is 1.
+    assert first_result["cognitive_revision"] == 1
+    assert first_result["result_json"]["cognitive_revision"] == 1
     assert "case_fact_matrix" not in first_result["dossier_draft"]
     assert "baseline_previous_case_detail" not in first_result["result_json"]
     baseline_context = first_result["baseline_previous_case_detail"]
@@ -1481,6 +1495,9 @@ def test_two_turn_baseline_context_preserves_formal_fact_authority_privately(
         context=IntakeTurnContext("EVENT", next_event),
     )
 
+    # A resumed graph starts from the committed terminal revision and advances once.
+    assert second_result["cognitive_revision"] == 2
+    assert second_result["result_json"]["cognitive_revision"] == 2
     assert second_transport.generate_calls == 1
     assert prior_fact_id in str(second_transport.requests[0].messages[1].content)
     assert "case_fact_matrix" not in second_result["dossier_draft"]

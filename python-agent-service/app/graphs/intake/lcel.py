@@ -51,6 +51,7 @@ from app.graphs.intake.state import IntakeGraphStateV2, merge_intake_dossier
 from app.graphs.intake.validators import (
     MATRIX_AUTHORITY_RECORD_KEY,
     build_baseline_pending_case_detail,
+    next_intake_cognitive_revision,
     validate_cognition_patch,
     validate_dossier_transition,
     validate_matrix_patch,
@@ -946,7 +947,7 @@ class IntakePatchProjectorRunnable(Runnable[Mapping[str, Any], dict[str, Any]]):
         )
         response_message_id = _intake_response_message_id(state, output_hash)
         patch = {
-            "cognitive_revision": state["cognitive_revision"] + 1,
+            "cognitive_revision": next_intake_cognitive_revision(state),
             "terminal_draft": draft_json,
             "baseline_pending_case_detail": baseline_pending_case_detail,
             "messages": {

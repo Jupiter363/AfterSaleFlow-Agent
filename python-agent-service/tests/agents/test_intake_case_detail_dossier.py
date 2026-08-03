@@ -15,6 +15,7 @@ from app.agents.dispute_intake_officer.skills.dossier.dossier_skill import (
     _enforce_case_story_summary,
     _enforce_claim_resolution,
     _is_evidence_material_request,
+    _question_targets_resolved_intake_field,
     _reported_attitude_position,
 )
 from app.agents.dispute_intake_officer.workflow import (
@@ -926,6 +927,64 @@ def test_intake_question_boundary_removes_question_answered_by_claim_seed() -> N
 
     assert "具体诉求" not in result
     assert "售后单" in result
+
+
+def test_resolved_claim_guard_keeps_counterparty_response_question() -> None:
+    case_detail = {
+        "claim_resolution": {
+            "initiator_role": "USER",
+            "requested_resolution": "REFUND",
+        }
+    }
+
+    assert not _question_targets_resolved_intake_field(
+        "商家目前对这笔费用的退还诉求是否有过回应？",
+        case_detail,
+        actor_role="USER",
+    )
+    assert _question_targets_resolved_intake_field(
+        "您的诉求是什么？",
+        case_detail,
+        actor_role="USER",
+    )
+    assert _question_targets_resolved_intake_field(
+        "您的具体诉求是什么？",
+        case_detail,
+        actor_role="USER",
+    )
+    assert _question_targets_resolved_intake_field(
+        "您的诉求是否为退款？",
+        case_detail,
+        actor_role="USER",
+    )
+
+
+def test_intake_question_boundary_keeps_known_claim_response_follow_up() -> None:
+    utterance = (
+        "您好，我是小衡。已收到您关于电视安装服务额外收费的反馈。"
+        "为了更准确地梳理案情，请问上门人员收取的150元是否有提供收据或具体的收费名目说明？"
+        "另外，商家目前对这笔费用的退还诉求是否有过回应？"
+    )
+    case_detail = {
+        "intake_quality": {"score": 72, "ready_for_next_step": False},
+        "claim_resolution": {
+            "initiator_role": "USER",
+            "requested_resolution": "REFUND",
+        },
+        "respondent_attitude": {"attitude": "NOT_RESPONDED"},
+        "missing_information": {
+            "next_questions": [
+                "上门人员收取的150元是否有提供收据或具体的收费名目说明？",
+                "商家目前对这笔费用的退还诉求是否有过回应？",
+            ]
+        },
+    }
+
+    assert _enforce_intake_question_boundary(
+        utterance,
+        case_detail,
+        actor_role="USER",
+    ) == utterance
 
 
 def test_respondent_resolution_question_is_not_replaced_by_initiator_claim() -> None:

@@ -515,7 +515,7 @@ def validate_cognition_patch(
         _COGNITION_PATCH_FIELDS
     ):
         raise IntakeGraphContractError("INTAKE_COGNITION_PATCH_FIELDS_INVALID")
-    expected_revision = _next_revision(state)
+    expected_revision = next_intake_cognitive_revision(state)
     if patch.get("cognitive_revision") != expected_revision:
         raise IntakeGraphContractError("INTAKE_COGNITIVE_REVISION_INVALID")
     draft = patch.get("terminal_draft")
@@ -2215,7 +2215,7 @@ def build_baseline_pending_case_detail(
         "logical_run_id": command["logical_run_id"],
         "attempt_id": command["attempt_id"],
         "source_turn_hash": _current_source_turn_hash(state),
-        "target_cognitive_revision": _next_revision(state),
+        "target_cognitive_revision": next_intake_cognitive_revision(state),
         "terminal_draft_hash": terminal_draft_hash,
         "execution_receipt_invocation_id": execution_receipt_invocation_id,
         "execution_receipt_node_name": execution_receipt_node_name,
@@ -3281,8 +3281,34 @@ def _validate_optional_state_refs(state: IntakeGraphStateV2) -> None:
         raise IntakeGraphContractError("INTAKE_EVENT_STATE_INCOMPLETE")
 
 
-def _next_revision(state: IntakeGraphStateV2) -> int:
+def next_intake_cognitive_revision(state: Mapping[str, Any]) -> int:
+    """Return the one terminal revision permitted for the current Intake turn.
+
+    The process-owned fresh checkpoint is labelled ``1`` before it contains a
+    terminal proposal, while the external thread registry remains at revision
+    ``0``.  That label represents the first turn's target revision, not an
+    already committed turn.  Standalone graph construction begins at ``0`` and
+    has the same first target.  Once a terminal proposal exists, each resumed
+    turn advances exactly once from that committed revision.
+    """
+
     revision = _strict_int(state.get("cognitive_revision"), minimum=0)
+    result = state.get("result_json")
+    if result is None:
+        if revision in {0, 1}:
+            return 1
+        raise IntakeGraphContractError("INTAKE_COGNITIVE_REVISION_INVALID")
+    if not isinstance(result, Mapping) or revision < 1:
+        raise IntakeGraphContractError("INTAKE_COGNITIVE_REVISION_INVALID")
+    try:
+        validate_terminal_proposal(result)
+    except IntakeGraphContractError as error:
+        raise IntakeGraphContractError(
+            "INTAKE_COGNITIVE_REVISION_INVALID"
+        ) from error
+    result_revision = _strict_int(result.get("cognitive_revision"), minimum=1)
+    if result_revision != revision:
+        raise IntakeGraphContractError("INTAKE_COGNITIVE_REVISION_INVALID")
     if revision >= _MAX_COGNITIVE_REVISION:
         raise IntakeGraphContractError("INTAKE_COGNITIVE_REVISION_EXHAUSTED")
     return revision + 1
