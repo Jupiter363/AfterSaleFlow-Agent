@@ -2194,7 +2194,12 @@ function resetStreamedCaseDetail() {
 
 function applyStreamedCaseDetailEvent(event, snapshot = currentWorkspaceSnapshot()) {
   if (!isCurrentWorkspace(snapshot)) return;
-  if (event?.event === "attempt_reset") {
+  // A V2 abort and its replacement reset are delivered as separate durable
+  // events. Clear the provisional overlay at the abort boundary so a lost or
+  // delayed reset cannot leave facts from the failed attempt on screen. This
+  // only removes streamed sections; the persisted dossier remains the base
+  // rendered by caseDetailDossier.
+  if (event?.event === "attempt_aborted" || event?.event === "attempt_reset") {
     resetStreamedCaseDetail();
     return;
   }

@@ -1197,6 +1197,44 @@ describe("IntakeRoomView", () => {
     wrapper.unmount();
   });
 
+  it("clears a provisional right-side board when its V2 attempt aborts before reset", async () => {
+    const persistedSummary = "已持久化的正式案情摘要";
+    const abortedDraft = "已中止的临时案情摘要";
+    const wrapper = await mountInteractiveView({
+      initialTurnMemory: {
+        ...readyTurnMemory,
+        case_intake_dossier: {
+          ...readyTurnMemory.case_intake_dossier,
+          dossier: {
+            ...readyTurnMemory.case_intake_dossier.dossier,
+            case_story: {
+              ...readyTurnMemory.case_intake_dossier.dossier.case_story,
+              one_sentence_summary: persistedSummary,
+            },
+          },
+        },
+      },
+      eventStreamer: vi.fn(async () => {}),
+    });
+
+    const applyEvent = wrapper.vm.$.setupState.applyStreamedCaseDetailEvent;
+    applyEvent({
+      event: "visible_delta",
+      fieldPath: "case_detail.case_story.one_sentence_summary",
+      delta: abortedDraft,
+    });
+    await wrapper.vm.$nextTick();
+    expect(wrapper.get("[data-dispute-detail-summary]").text()).toContain(abortedDraft);
+
+    applyEvent({ event: "attempt_aborted" });
+    await wrapper.vm.$nextTick();
+
+    const summary = wrapper.get("[data-dispute-detail-summary]").text();
+    expect(summary).toContain(persistedSummary);
+    expect(summary).not.toContain(abortedDraft);
+    wrapper.unmount();
+  });
+
   it("replaces the streamed right-side board after a V2 attempt reset", async () => {
     const runId = "run-v2-attempt-reset-board";
     const streamUrl = `/api/private-agent-streams/${runId}/events`;

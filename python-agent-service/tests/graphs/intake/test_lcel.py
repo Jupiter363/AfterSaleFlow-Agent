@@ -400,6 +400,8 @@ def test_system_prompt_is_the_role_scoped_baseline_intake_contract() -> None:
     assert "主动提出第一轮案情问题" in system_prompt
     assert "最多追问 2 个" in system_prompt
     assert "不得索要截图、照片、视频、聊天记录、物流凭证等证据材料" in system_prompt
+    assert "本阶段禁止向用户索要、要求补充或发送任何文件、附件、图片/截图、链接、网盘或其他材料型证据" in system_prompt
+    assert "可继续询问与案件有关的事实" in system_prompt
     assert "统一双方案情事实矩阵" in system_prompt
     assert "case_detail" in normalized_prompt
     assert "case_matrix_delta" in normalized_prompt
