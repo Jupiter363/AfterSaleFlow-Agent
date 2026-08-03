@@ -4,12 +4,15 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.example.dispute.workflow.application.intake.IntakeFinalizationReceipt;
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationRejectedException;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.RetryBudget;
+import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.TurnFinalizationReceipt;
 import com.example.dispute.workflow.temporal.room.intake.IntakeAgentRunFinalizationReceiptReadPort;
 import com.example.dispute.workflow.temporal.room.intake.IntakeCommandExecutionContext;
+import com.example.dispute.workflow.temporal.room.intake.IntakeParty;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
@@ -31,6 +34,15 @@ class JdbcTargetIntakeAgentRunFinalizationReceiptReadPortTest {
             "fixtures",
             "valid",
             "room-graph-command-valid.json");
+    private static final Path FORMAL_RECEIPT_FIXTURE = Path.of(
+            "..",
+            "contracts",
+            "agent-platform",
+            "intake",
+            "v2",
+            "fixtures",
+            "valid",
+            "intake-finalization-receipt-valid.json");
 
     private static final String TARGET_RECEIPT_HASH = ContractJson.sha256Hex(
             JsonMapper.builder().build().valueToTree(Map.of(
@@ -217,9 +229,96 @@ class JdbcTargetIntakeAgentRunFinalizationReceiptReadPortTest {
                 .isEqualTo(ContractJson.sha256Hex(event));
     }
 
+    @Test
+    void projectsFormalAuthorityPreconditionsToOneCommittedSuccessorRevision() throws Exception {
+        IntakeFinalizationReceipt freshFormal = formalReceipt(0, 0);
+        TurnFinalizationReceipt freshProjected = projection(freshFormal).toActivityReceipt(
+                "a".repeat(64), IntakeParty.INITIATOR, "checkpoint-1");
+        IntakeFinalizationReceipt formal = formalReceipt(6, 3);
+        TurnFinalizationReceipt projected = projection(formal).toActivityReceipt(
+                "a".repeat(64), IntakeParty.INITIATOR, "checkpoint-1");
+
+        assertThat(freshProjected.operation().processRevision()).isEqualTo(1);
+        assertThat(freshProjected.operation().roomRevision()).isEqualTo(1);
+        assertThat(freshProjected.formalReceipt().processRevision()).isEqualTo(1);
+        assertThat(freshProjected.formalReceipt().roomRevision()).isEqualTo(1);
+        assertThat(freshProjected.committedEvent().processRevision()).isEqualTo(1);
+        assertThat(freshProjected.committedEvent().roomRevision()).isEqualTo(1);
+        assertThat(formal.processRevision()).isEqualTo(6);
+        assertThat(formal.roomRevision()).isEqualTo(3);
+        assertThat(projected.operation().processRevision()).isEqualTo(7);
+        assertThat(projected.operation().roomRevision()).isEqualTo(4);
+        assertThat(projected.formalReceipt().processRevision()).isEqualTo(7);
+        assertThat(projected.formalReceipt().roomRevision()).isEqualTo(4);
+        assertThat(projected.committedEvent().processRevision()).isEqualTo(7);
+        assertThat(projected.committedEvent().roomRevision()).isEqualTo(4);
+        assertThat(projected.formalReceipt().receiptHash()).isEqualTo(formal.receiptHash());
+    }
+
+    @Test
+    void rejectsCommittedSuccessorRevisionOverflowWithoutWrapping() throws Exception {
+        assertProjectionOverflow(Long.MAX_VALUE, 3);
+        assertProjectionOverflow(6, Long.MAX_VALUE);
+    }
+
     private static ObjectNode commandJson() throws Exception {
         JsonNode wrapper = MAPPER.readTree(COMMAND_FIXTURE.toFile());
         return (ObjectNode) wrapper.required("instance").deepCopy();
+    }
+
+    private static JdbcTargetIntakeAgentRunFinalizationReceiptReadPort.FormalProjection projection(
+            IntakeFinalizationReceipt formal) {
+        return new JdbcTargetIntakeAgentRunFinalizationReceiptReadPort.FormalProjection(
+                formal,
+                new JdbcTargetIntakeAgentRunFinalizationReceiptReadPort.EventRow(
+                        formal.domainEventIds().getFirst(),
+                        formal.caseId(),
+                        1,
+                        "TURN_NEEDS_INPUT",
+                        "{}"),
+                "b".repeat(64),
+                "c".repeat(64));
+    }
+
+    private static IntakeFinalizationReceipt formalReceipt(
+            long processRevision, long roomRevision) throws Exception {
+        IntakeFinalizationReceipt fixture =
+                MAPPER.readValue(FORMAL_RECEIPT_FIXTURE.toFile(), IntakeFinalizationReceipt.class);
+        return IntakeFinalizationReceipt.committed(new IntakeFinalizationReceipt.CommitFacts(
+                fixture.operationKey(),
+                fixture.tenantSurrogate(),
+                fixture.caseId(),
+                fixture.roomEpoch(),
+                fixture.threadId(),
+                fixture.actorScopeHash(),
+                fixture.agentSessionId(),
+                fixture.commandId(),
+                fixture.logicalRunId(),
+                fixture.attemptId(),
+                fixture.resultHash(),
+                fixture.proposalHash(),
+                processRevision,
+                roomRevision,
+                fixture.fencingToken(),
+                fixture.formalMessageId(),
+                fixture.dossierVersion(),
+                fixture.matrixVersion(),
+                fixture.domainEventIds(),
+                fixture.outboxIds(),
+                fixture.committedAt()));
+    }
+
+    private static void assertProjectionOverflow(
+            long processRevision, long roomRevision) throws Exception {
+        JdbcTargetIntakeAgentRunFinalizationReceiptReadPort.FormalProjection projection =
+                projection(formalReceipt(processRevision, roomRevision));
+
+        assertThatThrownBy(() -> projection.toActivityReceipt(
+                        "a".repeat(64), IntakeParty.INITIATOR, "checkpoint-1"))
+                .isInstanceOf(TargetE2eFinalizationRejectedException.class)
+                .hasMessage("formal Intake revision cannot advance to its committed successor")
+                .extracting(failure -> ((TargetE2eFinalizationRejectedException) failure).code())
+                .isEqualTo("TARGET_E2E_FINALIZATION_REVISION_OVERFLOW");
     }
 
     private static void assertCompletionHashRejected(String completionHash) {

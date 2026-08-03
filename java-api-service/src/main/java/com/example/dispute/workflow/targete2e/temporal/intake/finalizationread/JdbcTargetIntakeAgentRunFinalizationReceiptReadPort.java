@@ -637,9 +637,9 @@ public final class JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
             String materialCanonicalJson, String materialSha256) {}
     private record OperationRow(String requestHash, String resultUri, String resultHash, String status,
             String caseId, long roomEpoch, long processRevision, long fencingToken) {}
-    private record EventRow(String id, String caseId, long sequence, String eventType, String eventJson) {}
+    record EventRow(String id, String caseId, long sequence, String eventType, String eventJson) {}
 
-    private record FormalProjection(
+    record FormalProjection(
             IntakeFinalizationReceipt formal,
             EventRow event,
             String eventHash,
@@ -648,6 +648,12 @@ public final class JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
                 String workflowCommandRequestHash,
                 com.example.dispute.workflow.temporal.room.intake.IntakeParty party,
                 String checkpointId) {
+            // The persisted formal receipt binds the authority precondition. Temporal consumes an
+            // activity-only projection of the authority after that commit, so every exposed
+            // revision advances exactly once and remains mutually consistent. The receipt hash
+            // below remains the immutable identity of the already-verified source receipt.
+            long committedProcessRevision = committedRevision(formal.processRevision());
+            long committedRoomRevision = committedRevision(formal.roomRevision());
             IntakeDomainEventType eventType = IntakeDomainEventType.valueOf(event.eventType());
             IntakeAgentRunRef agentRun = new IntakeAgentRunRef("intake-agent-run-ref.v1", formal.logicalRunId(),
                     formal.attemptId(), formal.resultHash());
@@ -661,16 +667,27 @@ public final class JdbcTargetIntakeAgentRunFinalizationReceiptReadPort
                     event.sequence(), eventType, party,
                     formal.commandId(), formal.tenantSurrogate(), formal.caseId(), formal.roomEpoch(), formal.fencingToken(),
                     formal.actorScopeHash(), formal.operationKey(), workflowCommandRequestHash, formal.resultHash(),
-                    formal.processRevision(), formal.roomRevision(), agentRun, graph);
+                    committedProcessRevision, committedRoomRevision, agentRun, graph);
             FormalFinalizationReceipt activityFormal = new FormalFinalizationReceipt("intake-finalization-receipt.v1",
                     formal.operationKey(), formal.tenantSurrogate(), formal.caseId(), formal.roomEpoch(), formal.threadId(),
                     formal.actorScopeHash(), formal.agentSessionId(), formal.commandId(), formal.logicalRunId(), formal.attemptId(),
-                    formal.resultHash(), formal.proposalHash(), formal.processRevision(), formal.roomRevision(), formal.fencingToken(),
+                    formal.resultHash(), formal.proposalHash(), committedProcessRevision, committedRoomRevision, formal.fencingToken(),
                     formal.formalMessageId(), formal.dossierVersion(), formal.matrixVersion(), formal.domainEventIds(), formal.outboxIds(),
                     formal.status().name(), formal.committedAt().toString(), formal.receiptHash());
             return new TurnFinalizationReceipt("intake-turn-finalization-activity-receipt.v1",
                     new OperationReceipt("intake-operation-receipt.v1", formal.operationKey(), workflowCommandRequestHash,
-                            formal.resultHash(), formal.processRevision(), formal.roomRevision()), activityFormal, committed);
+                            formal.resultHash(), committedProcessRevision, committedRoomRevision), activityFormal, committed);
+        }
+
+        private static long committedRevision(long authorityRevision) {
+            try {
+                return Math.incrementExact(authorityRevision);
+            } catch (ArithmeticException overflow) {
+                throw rejected(
+                        "TARGET_E2E_FINALIZATION_REVISION_OVERFLOW",
+                        "formal Intake revision cannot advance to its committed successor",
+                        overflow);
+            }
         }
     }
 }
