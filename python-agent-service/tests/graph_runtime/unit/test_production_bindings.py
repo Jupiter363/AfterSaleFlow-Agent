@@ -516,10 +516,12 @@ class _StrictBaselineIntakeTransport:
         form_source: str,
         form_description: str,
         agent_session_id: str,
+        output: dict[str, Any] | None = None,
     ) -> None:
         self._form_source = form_source
         self._form_description = form_description
         self._agent_session_id = agent_session_id
+        self._output = deepcopy(output) if output is not None else _strict_baseline_opening_output()
         self.generate_calls = 0
         self.requests: list[ModelTransportRequest] = []
 
@@ -529,7 +531,7 @@ class _StrictBaselineIntakeTransport:
         self._assert_baseline_opening_request(request)
         return ModelTransportResult(
             json_document=json.dumps(
-                _strict_baseline_opening_output(),
+                self._output,
                 ensure_ascii=False,
                 separators=(",", ":"),
             ),
@@ -564,12 +566,15 @@ class _StrictBaselineIntakeTransport:
 def _strict_baseline_opening_transport(
     execution: GatewayExecution,
     snapshot: dict[str, Any],
+    *,
+    output: dict[str, Any] | None = None,
 ) -> _StrictBaselineIntakeTransport:
     facts = snapshot["initial_case_facts"]
     return _StrictBaselineIntakeTransport(
         form_source=facts["form_source"],
         form_description=facts["form_description"],
         agent_session_id=execution.thread_record.identity.agent_session_id,
+        output=output,
     )
 
 
@@ -638,6 +643,8 @@ def _target_candidate_intake_execution(command: RoomGraphCommand) -> GatewayExec
             room_fencing_token=1,
             command_hash="b" * 64,
             command_envelope_hash="c" * 64,
+            execution_provider="synthetic",
+            execution_model="intake-model",
             environment_id="target-intake-test",
             environment_generation=1,
             tenant_surrogate=command.tenant_surrogate,
@@ -1307,12 +1314,25 @@ async def test_authorized_intake_adapter_builds_the_real_governed_graph_proposal
     [False, True],
     ids=("success", "commit_failure"),
 )
-async def test_compiled_intake_executor_persists_one_pointer_without_replacing_state(
+async def test_target_intake_executor_persists_historical_evidence_reference_to_final(
     monkeypatch: pytest.MonkeyPatch,
     commit_fails: bool,
 ) -> None:
     command, snapshot, payload = _intake_command()
-    execution = _intake_execution(command)
+    execution = _target_candidate_intake_execution(command)
+    historical_fact = "商家稍后将上传官方链接以佐证标准编号123345"
+    historical_missing_field = "official_document_link_123345"
+    terminal_document = _strict_baseline_opening_output()
+    terminal_document["case_detail"].update(
+        {
+            "case_story": {"one_sentence_summary": historical_fact},
+            "missing_information": {
+                "missing_facts": [historical_fact],
+                "next_questions": [historical_fact],
+            },
+        }
+    )
+    terminal_document["missing_fields"] = [historical_missing_field]
     loaded = LoadedIntakePayload(
         artifact_id=command.domain_snapshot_ref.artifact_id,
         schema_version=command.domain_snapshot_ref.schema_version,
@@ -1323,7 +1343,11 @@ async def test_compiled_intake_executor_persists_one_pointer_without_replacing_s
         canonical_payload=payload,
     )
     context = decode_authorized_intake_ingress(command=command, loaded=loaded)
-    source_transport = _strict_baseline_opening_transport(execution, snapshot)
+    source_transport = _strict_baseline_opening_transport(
+        execution,
+        snapshot,
+        output=terminal_document,
+    )
     source_bundle = build_governed_intake_runtime(
         execution=execution,
         transport=cast(Any, source_transport),
@@ -1347,6 +1371,11 @@ async def test_compiled_intake_executor_persists_one_pointer_without_replacing_s
     }
     proposal_before = dict(durable_state["result_json"])
     terminal_proposal = IntakeTurnProposal.model_validate(proposal_before)
+    terminal_dossier = terminal_proposal.dossier_patch.model_dump(mode="json", exclude_none=True)
+    assert terminal_dossier["case_story"]["one_sentence_summary"] == historical_fact
+    assert historical_fact in terminal_dossier["missing_information"]["missing_facts"]
+    assert historical_fact in terminal_dossier["missing_information"]["next_questions"]
+    assert historical_missing_field in terminal_proposal.missing_fields
     terminal_room_utterance = terminal_proposal.room_utterance
     model_room_deltas = (
         terminal_room_utterance[:20],
@@ -1367,12 +1396,18 @@ async def test_compiled_intake_executor_persists_one_pointer_without_replacing_s
 
         async def acommit_external_terminal(self, config, commit):
             self.commits.append(commit)
+            canonical_dossier = json.loads(store.proposals[0].canonical_payload)["dossier_patch"]
+            assert canonical_dossier["case_story"]["one_sentence_summary"] == historical_fact
+            assert historical_fact in canonical_dossier["missing_information"]["missing_facts"]
+            assert historical_fact in canonical_dossier["missing_information"]["next_questions"]
             if self.fail_commit:
                 raise GraphTerminalBindingError("terminal commit failed")
             effective = replace(
                 execution.fence,
                 result_ref=commit.result.result_ref,
                 result_hash=commit.result.result_hash,
+                proposal_hash=commit.result.proposal_hash,
+                result_envelope_hash=commit.result.result_envelope_hash,
             )
             configurable = dict(config["configurable"])
             configurable[FENCE_CONTEXT_KEY] = effective
@@ -1461,8 +1496,15 @@ async def test_compiled_intake_executor_persists_one_pointer_without_replacing_s
                                     "schema_version": "governed-model-event.v1",
                                     "event_type": "visible_delta",
                                     "node_name": BASELINE_INTAKE_NODE_NAME,
-                                    "field": "case_detail.case_story.title",
-                                    "delta": json.dumps("请上传截图作为证据。", ensure_ascii=False),
+                                    "field": "case_detail.case_story",
+                                    "delta": json.dumps(
+                                        {
+                                            "one_sentence_summary": (
+                                                "商家稍后将上传官方链接以佐证标准编号123345"
+                                            )
+                                        },
+                                        ensure_ascii=False,
+                                    ),
                                 }
                             ]
                         },
@@ -1483,7 +1525,14 @@ async def test_compiled_intake_executor_persists_one_pointer_without_replacing_s
                                     "node_name": BASELINE_INTAKE_NODE_NAME,
                                     "field": "case_detail.missing_information",
                                     "delta": json.dumps(
-                                        {"next_questions": ["请上传截图作为证据。"]},
+                                        {
+                                            "missing_facts": [
+                                                "商家稍后将上传官方链接以佐证标准编号123345"
+                                            ],
+                                            "next_questions": [
+                                                "商家稍后将上传官方链接以佐证标准编号123345"
+                                            ],
+                                        },
                                         ensure_ascii=False,
                                     ),
                                 }
@@ -1595,6 +1644,10 @@ async def test_compiled_intake_executor_persists_one_pointer_without_replacing_s
                 "cognitive_revision": 1,
             }
             self.proposals.append(proposal)
+            canonical_dossier = json.loads(proposal.canonical_payload)["dossier_patch"]
+            assert canonical_dossier["case_story"]["one_sentence_summary"] == historical_fact
+            assert historical_fact in canonical_dossier["missing_information"]["missing_facts"]
+            assert historical_fact in canonical_dossier["missing_information"]["next_questions"]
             return StoredIntakeProposal(
                 artifact_id=proposal.artifact_id,
                 schema_version=proposal.schema_version,
@@ -1628,7 +1681,7 @@ async def test_compiled_intake_executor_persists_one_pointer_without_replacing_s
             await collect()
         assert [event.event_type for event in events] == [
             "attempt_started",
-            *["visible_delta"] * 6,
+            *["visible_delta"] * 8,
         ]
         assert [event.payload.field for event in events[1:3]] == [
             "room_utterance",
@@ -1636,14 +1689,24 @@ async def test_compiled_intake_executor_persists_one_pointer_without_replacing_s
         ]
         assert [event.payload.delta for event in events[1:3]] == list(model_room_deltas)
         assert events[3].payload.field == "case_detail.case_story"
-        assert events[4].payload.field == "case_detail.references"
-        assert [event.payload.delta for event in events[5:7]] == [
+        assert json.loads(events[3].payload.delta or "")["one_sentence_summary"] == (
+            "商家稍后将上传官方链接以佐证标准编号123345"
+        )
+        assert events[4].payload.field == "case_detail.missing_information"
+        assert "商家稍后将上传官方链接以佐证标准编号123345" in json.loads(
+            events[4].payload.delta or ""
+        )["missing_facts"]
+        assert events[5].payload.field == "case_detail.case_story"
+        assert events[6].payload.field == "case_detail.references"
+        assert [event.payload.delta for event in events[7:9]] == [
             "Order ",
             "delivery dispute",
         ]
         assert visible_commit_states == [
             ("room_utterance", False),
             ("room_utterance", False),
+            ("case_detail.case_story", False),
+            ("case_detail.missing_information", False),
             ("case_detail.case_story", False),
             ("case_detail.references", False),
             ("case_detail.case_story.title", False),
@@ -1659,7 +1722,7 @@ async def test_compiled_intake_executor_persists_one_pointer_without_replacing_s
     await collect()
     assert [event.event_type for event in events] == [
         "attempt_started",
-        *["visible_delta"] * 15,
+        *["visible_delta"] * 8,
         "usage",
         "final",
     ]
@@ -1670,49 +1733,46 @@ async def test_compiled_intake_executor_persists_one_pointer_without_replacing_s
     assert [event.payload.delta for event in events[1:3]] == list(model_room_deltas)
     assert "".join(event.payload.delta or "" for event in events[1:3]) == terminal_room_utterance
     assert events[3].payload.field == "case_detail.case_story"
-    assert events[3].payload.delta == '{"one_sentence_summary":"Case summary."}'
-    assert events[4].payload.field == "case_detail.references"
-    assert events[4].payload.delta == '{"order_reference":"ORDER-1"}'
-    assert [event.payload.delta for event in events[5:7]] == [
+    assert json.loads(events[3].payload.delta or "")["one_sentence_summary"] == (
+        "商家稍后将上传官方链接以佐证标准编号123345"
+    )
+    assert events[4].payload.field == "case_detail.missing_information"
+    assert "商家稍后将上传官方链接以佐证标准编号123345" in json.loads(
+        events[4].payload.delta or ""
+    )["missing_facts"]
+    assert events[5].payload.field == "case_detail.case_story"
+    assert events[5].payload.delta == '{"one_sentence_summary":"Case summary."}'
+    assert events[6].payload.field == "case_detail.references"
+    assert events[6].payload.delta == '{"order_reference":"ORDER-1"}'
+    assert [event.payload.delta for event in events[7:9]] == [
         "Order ",
         "delivery dispute",
     ]
-    terminal_dossier_fields = [
-        "case_story",
-        "references",
-        "party_positions",
-        "claim_resolution",
-        "dispute_core_state",
-        "dispute_focus",
-        "risk_assessment",
-        "missing_information",
-        "intake_quality",
-    ]
-    assert [event.payload.field for event in events[7:16]] == [
-        f"case_detail.{field}" for field in terminal_dossier_fields
-    ]
-    assert {
-        event.payload.field.removeprefix("case_detail."): json.loads(event.payload.delta)
-        for event in events[7:16]
-    } == {
-        field: proposal_before["dossier_patch"][field]
-        for field in terminal_dossier_fields
-    }
-    assert events[16].payload.usage == Usage(input_tokens=3, output_tokens=2, total_tokens=5)
+    assert events[9].payload.usage == Usage(input_tokens=3, output_tokens=2, total_tokens=5)
     assert visible_commit_states == [
         ("room_utterance", False),
         ("room_utterance", False),
         ("case_detail.case_story", False),
+        ("case_detail.missing_information", False),
+        ("case_detail.case_story", False),
         ("case_detail.references", False),
         ("case_detail.case_story.title", False),
         ("case_detail.case_story.title", False),
-        *[(f"case_detail.{field}", True) for field in terminal_dossier_fields],
     ]
     assert saver.preflights == 1
     assert store.calls == 1
-    assert json.loads(store.proposals[0].canonical_payload)["room_utterance"] == terminal_room_utterance
+    canonical_document = json.loads(store.proposals[0].canonical_payload)
+    assert canonical_document["room_utterance"] == terminal_room_utterance
+    assert canonical_document["dossier_patch"]["case_story"]["one_sentence_summary"] == historical_fact
+    assert historical_fact in canonical_document["dossier_patch"]["missing_information"][
+        "missing_facts"
+    ]
+    assert historical_fact in canonical_document["dossier_patch"]["missing_information"][
+        "next_questions"
+    ]
     assert len(saver.commits) == 1
     assert saver.terminal_commit_succeeded
+    assert events[-1].event_type == "final"
     result_json = saver.commits[0].result.result_json
     assert len(result_json["artifact_operations"]) == 1
     assert result_json["artifact_operations"][0]["operation"] == "PROPOSE_PATCH"
@@ -4007,33 +4067,20 @@ def test_compiled_intake_executor_preserves_prompt_owned_room_utterance() -> Non
     assert preserved.payload.delta == update.payload.delta
 
 
-def test_compiled_intake_executor_suppresses_provisional_evidence_dossier_update() -> None:
+def test_compiled_intake_executor_allows_historical_evidence_dossier_update() -> None:
+    historical_fact = "商家稍后将上传官方链接以佐证标准编号123345"
     update = GraphPublicUpdate.visible_delta(
         node="intake_lcel",
-        field="case_detail.missing_information",
+        field="case_detail.case_story",
         delta=json.dumps(
             {
-                "missing_facts": ["活动页面截图"],
-                "next_questions": ["能否提供活动页面截图？"],
+                "one_sentence_summary": historical_fact,
             },
             ensure_ascii=False,
         ),
     )
 
-    assert CompiledIntakeGraphShadowExecutor._should_suppress_evidence_dossier_update(update)
-
-    non_question_branch = GraphPublicUpdate.visible_delta(
-        node="intake_lcel",
-        field="case_detail.case_story",
-        delta=json.dumps(
-            {"请上传截图作为证据。": "untrusted key"},
-            ensure_ascii=False,
-        ),
-    )
-
-    assert CompiledIntakeGraphShadowExecutor._should_suppress_evidence_dossier_update(
-        non_question_branch
-    )
+    CompiledIntakeGraphShadowExecutor._validate_public_update(update)
 
 
 def test_compiled_intake_executor_rejects_forged_custom_visible_delta() -> None:

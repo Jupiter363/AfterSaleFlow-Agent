@@ -49,9 +49,6 @@ from app.graph_runtime.target_e2e import (
 from app.graphs.intake.lcel import (
     _ABSENT_RESPONDENT_ATTITUDES,
     _SUBSTANTIVE_RESPONDENT_ATTITUDES,
-    _contains_forbidden_evidence_request,
-    _is_evidence_material_gap,
-    _nested_strings,
     _normalized_intake_room_utterance,
     _respondent_attitude_discriminator,
 )
@@ -191,7 +188,7 @@ class CompiledIntakeGraphShadowExecutor:
         try:
             async for candidate in source:
                 for update in self._public_updates(candidate):
-                    self._validate_public_update(update, enforce_evidence_policy=False)
+                    self._validate_public_update(update)
                     if update.event_type == "usage":
                         if pending_usage_update is not None:
                             raise GraphContractError("INTAKE_USAGE_STREAM_DUPLICATE")
@@ -278,8 +275,6 @@ class CompiledIntakeGraphShadowExecutor:
                         # The provider-facing branch is intentionally open for
                         # incremental generation and may contain legacy aliases.
                         # Publish it only from the normalized terminal proposal.
-                        continue
-                    if self._should_suppress_evidence_dossier_update(update):
                         continue
                     self._validate_public_update(update)
                     # The upstream Target projector opens this path only after the
@@ -537,8 +532,6 @@ class CompiledIntakeGraphShadowExecutor:
     @staticmethod
     def _validate_public_update(
         update: GraphPublicUpdate,
-        *,
-        enforce_evidence_policy: bool = True,
     ) -> None:
         if update.event_type != "visible_delta":
             if update.event_type != "usage":
@@ -553,12 +546,6 @@ class CompiledIntakeGraphShadowExecutor:
         # their reply-first stream, but cannot commit a different formal reply.
         if field == "room_utterance":
             return
-        if (
-            enforce_evidence_policy
-            and field == "case_detail.missing_information"
-            and (_contains_forbidden_evidence_request(delta) or _is_evidence_material_gap(delta))
-        ):
-            raise GraphContractError("INTAKE_EVIDENCE_REQUEST_FORBIDDEN")
 
     @staticmethod
     def _validated_room_utterance_update(
@@ -864,29 +851,6 @@ class CompiledIntakeGraphShadowExecutor:
             and field.count(".") == 1
             and _INTAKE_MODEL_VISIBLE_FIELD_MODES.get(field) == "json_value"
             and len(delta) > _AGENT_STREAM_DELTA_MAX_LENGTH
-        )
-
-    @staticmethod
-    def _should_suppress_evidence_dossier_update(update: GraphPublicUpdate) -> bool:
-        payload = update.payload
-        field = payload.field
-        if not field.startswith("case_detail."):
-            return False
-        value_mode = _INTAKE_MODEL_VISIBLE_FIELD_MODES.get(field)
-        if value_mode == "string_prefix":
-            texts = (payload.delta or "",)
-        elif value_mode == "json_value":
-            try:
-                document = json.loads(payload.delta or "")
-            except (TypeError, json.JSONDecodeError) as error:
-                raise GraphContractError("INTAKE_DOSSIER_STREAM_INVALID") from error
-            texts = tuple(_nested_strings(document))
-        else:
-            raise GraphContractError("INTAKE_DOSSIER_STREAM_INVALID")
-        return any(
-            _contains_forbidden_evidence_request(text)
-            or (field == "case_detail.missing_information" and _is_evidence_material_gap(text))
-            for text in texts
         )
 
     @staticmethod

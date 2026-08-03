@@ -27,7 +27,6 @@ from app.agents.dispute_intake_officer.case_fact_matrix import finalize_case_fac
 from app.graph_runtime.state_lens import StateLens
 from app.agents.dispute_intake_officer.schemas import IntakeCaseDetailLlmOutput
 from app.agents.dispute_intake_officer.skills.dossier.dossier_skill import (
-    _is_evidence_material_request,
     _reported_attitude_from_text,
     _reported_attitude_position,
 )
@@ -80,27 +79,7 @@ from app.streaming import TARGET_INTAKE_REPLY_FIRST_VISIBLE_FIELDS
 # prepared by ``prepare_intake_baseline_invocation`` below.
 INTAKE_SYSTEM_PROMPT = PromptComposer().render_system_prompt(BASELINE_INTAKE_NODE_NAME)
 
-_SAFE_INTAKE_CASE_SUMMARY = "当前争议围绕已导入案件事实、处理经过及发起方诉求展开。"
-
 _TARGET_INTAKE_VISIBLE_FIELDS = TARGET_INTAKE_REPLY_FIRST_VISIBLE_FIELDS
-
-_EVIDENCE_MATERIAL_IDENTIFIER = re.compile(
-    r"(?:evidence|proof|screenshot|screen_shot|photo|picture|video|chat_(?:record|log)|"
-    r"logistics_(?:voucher|proof|receipt)|tracking_(?:receipt|proof)|attachment|document)",
-    re.IGNORECASE,
-)
-_EVIDENCE_MATERIAL_TEXT = (
-    "证据",
-    "凭证",
-    "截图",
-    "照片",
-    "图片",
-    "视频",
-    "聊天记录",
-    "物流单",
-    "运单",
-    "附件",
-)
 _DIRECT_RESPONDENT_ATTITUDE_ZH = re.compile(
     r"(?:^|[。！？!?；;\n])\s*(?:(?:我|本人|我方|我们)\s*)?"
     r"(?:同意|接受|拒绝|不同意|不支持|不接受|愿意|只同意|只接受|要求|提出|建议)"
@@ -1479,7 +1458,6 @@ def _adapt_and_normalize_generation_parts(
     )
     normalized = _normalize_model_matrix_fact_keys(typed_state, adapted)
     normalized = _normalize_model_respondent_attitude(typed_state, normalized)
-    normalized = _normalize_model_evidence_boundaries(normalized)
     return (
         typed_state,
         message,
@@ -1577,117 +1555,9 @@ def _normalize_model_respondent_attitude(
     return _pin_model_respondent_attitude_position(draft, grounded_position)
 
 
-_DROP_EVIDENCE_VALUE = object()
-_ATOMIC_EVIDENCE_SANITIZE_BRANCHES = frozenset(
-    {
-        "requested_resolution",
-        "claim_resolution",
-        "respondent_attitude",
-        "risk_assessment",
-        "intake_quality",
-        "admission",
-    }
-)
-
-
 def _normalized_intake_room_utterance(value: str) -> str:
     """Preserve the prompt-owned Intake reply without semantic rewriting."""
 
-    return value
-
-
-def _normalize_model_evidence_boundaries(
-    draft: IntakeCognitionDraft,
-) -> IntakeCognitionDraft:
-    """Discard untrusted evidence suggestions from structured dossier fields.
-
-    Intake may ask for facts, but evidence collection belongs to the later Evidence
-    room. The visible ``room_utterance`` remains prompt-owned and byte-preserving;
-    this normalizer only governs structured fields.
-    """
-
-    normalized = draft.model_dump(mode="json", exclude_none=True, exclude_unset=True)
-    if not isinstance(normalized.get("room_utterance"), str):
-        raise IntakeGraphContractError("INTAKE_ROOM_UTTERANCE_STREAM_INVALID")
-
-    missing_fields = normalized.get("missing_fields")
-    if isinstance(missing_fields, list):
-        normalized["missing_fields"] = [
-            field
-            for field in missing_fields
-            if isinstance(field, str) and not _is_evidence_material_gap(field)
-        ]
-
-    dossier_patch = normalized.get("dossier_patch")
-    if not isinstance(dossier_patch, dict):
-        raise IntakeGraphContractError("INTAKE_LCEL_DOSSIER_PATCH_INVALID")
-    sanitized: dict[str, Any] = {}
-    for branch, branch_value in dossier_patch.items():
-        if branch in _ATOMIC_EVIDENCE_SANITIZE_BRANCHES and any(
-            _contains_forbidden_evidence_request(text) for text in _nested_strings(branch_value)
-        ):
-            # These envelopes carry linked semantic fields.  Removing one leaf
-            # could leave a discriminator without its required explanation (or
-            # an admission/risk decision without its basis), so omit the whole
-            # optional patch branch and preserve any already-authorized state.
-            continue
-        candidate = branch_value
-        if branch == "case_story" and isinstance(branch_value, Mapping):
-            candidate = dict(branch_value)
-            for summary_field in ("one_sentence_summary", "summary"):
-                summary = candidate.get(summary_field)
-                if isinstance(summary, str) and _contains_forbidden_evidence_request(summary):
-                    candidate[summary_field] = _SAFE_INTAKE_CASE_SUMMARY
-        cleaned = _sanitize_model_dossier_value(
-            candidate,
-            in_missing_information=(branch == "missing_information"),
-        )
-        if cleaned is not _DROP_EVIDENCE_VALUE:
-            sanitized[branch] = cleaned
-    normalized["dossier_patch"] = sanitized
-    return IntakeCognitionDraft.model_validate(normalized)
-
-
-def _sanitize_model_dossier_value(
-    value: Any,
-    *,
-    in_missing_information: bool,
-) -> Any:
-    if isinstance(value, str):
-        if _contains_forbidden_evidence_request(value) or (
-            in_missing_information and _is_evidence_material_gap(value)
-        ):
-            return _DROP_EVIDENCE_VALUE
-        return value
-    if isinstance(value, Mapping):
-        sanitized: dict[str, Any] = {}
-        for key, child in value.items():
-            if isinstance(key, str) and (
-                _contains_forbidden_evidence_request(key)
-                or (in_missing_information and _is_evidence_material_gap(key))
-            ):
-                continue
-            cleaned = _sanitize_model_dossier_value(
-                child,
-                in_missing_information=(in_missing_information or key == "missing_information"),
-            )
-            if cleaned is not _DROP_EVIDENCE_VALUE:
-                sanitized[key] = cleaned
-        if value and not sanitized:
-            return _DROP_EVIDENCE_VALUE
-        return sanitized
-    if isinstance(value, list | tuple):
-        sanitized_items: list[Any] = []
-        for child in value:
-            cleaned = _sanitize_model_dossier_value(
-                child,
-                in_missing_information=in_missing_information,
-            )
-            if cleaned is not _DROP_EVIDENCE_VALUE:
-                sanitized_items.append(cleaned)
-        if value and not sanitized_items:
-            return _DROP_EVIDENCE_VALUE
-        return sanitized_items
     return value
 
 
@@ -2159,11 +2029,6 @@ def _validate_business_output(
     room_utterance_is_baseline_finalized: bool = False,
 ) -> None:
     output = draft.model_dump(mode="json", exclude_none=True, exclude_unset=True)
-    _validate_no_evidence_collection(
-        draft,
-        output,
-        room_utterance_is_baseline_finalized=room_utterance_is_baseline_finalized,
-    )
     catalog = _source_catalog(state)
     existing_fact_ids = intake_baseline_authorized_fact_ids(state)
     _validate_output_tree(
@@ -2188,63 +2053,6 @@ def _validate_business_output(
         recommendation == "NOT_ADMISSIBLE" and readiness != "NEEDS_REVIEW"
     ):
         raise IntakeGraphContractError("INTAKE_LCEL_READINESS_PRECONDITION_FAILED")
-
-
-def _validate_no_evidence_collection(
-    draft: IntakeCognitionDraft,
-    output: Mapping[str, Any],
-    *,
-    room_utterance_is_baseline_finalized: bool = False,
-) -> None:
-    if (
-        not room_utterance_is_baseline_finalized
-        and _contains_forbidden_evidence_request(draft.room_utterance)
-    ):
-        raise IntakeGraphContractError("INTAKE_EVIDENCE_REQUEST_FORBIDDEN")
-    if any(_is_evidence_material_gap(field) for field in draft.missing_fields):
-        raise IntakeGraphContractError("INTAKE_EVIDENCE_MISSING_FIELD_FORBIDDEN")
-    dossier_patch = output.get("dossier_patch")
-    if isinstance(dossier_patch, Mapping):
-        for text in _nested_strings(dossier_patch):
-            if _contains_forbidden_evidence_request(text):
-                raise IntakeGraphContractError("INTAKE_EVIDENCE_REQUEST_FORBIDDEN")
-        missing_information = dossier_patch.get("missing_information")
-        if isinstance(missing_information, Mapping) and any(
-            _is_evidence_material_gap(text) for text in _nested_strings(missing_information)
-        ):
-            raise IntakeGraphContractError("INTAKE_EVIDENCE_MISSING_FIELD_FORBIDDEN")
-
-
-def _is_evidence_material_gap(value: str) -> bool:
-    normalized = value.strip().replace("-", "_").replace(" ", "_")
-    return bool(_EVIDENCE_MATERIAL_IDENTIFIER.search(normalized)) or any(
-        term in value for term in _EVIDENCE_MATERIAL_TEXT
-    )
-
-
-def _contains_forbidden_evidence_request(value: str) -> bool:
-    """Use the baseline transfer-action boundary for Target-visible text.
-
-    A factual question can mention an order-confirmation record, a
-    communication record, or a file without asking the user to transfer it.
-    Reuse the baseline action-plus-object detector so Target normalizers cannot
-    drift from the baseline distinction between clarification and collection.
-    """
-
-    return _is_evidence_material_request(value)
-
-
-def _nested_strings(value: Any) -> Iterator[str]:
-    if isinstance(value, str):
-        yield value
-    elif isinstance(value, Mapping):
-        for key, child in value.items():
-            if isinstance(key, str):
-                yield key
-            yield from _nested_strings(child)
-    elif isinstance(value, list | tuple):
-        for child in value:
-            yield from _nested_strings(child)
 
 
 def _validate_output_tree(

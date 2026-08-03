@@ -43,13 +43,10 @@ from app.graphs.intake.nodes import (
     project_intake_proposal,
 )
 from app.graphs.intake.lcel import (
-    _SAFE_INTAKE_CASE_SUMMARY,
-    _contains_forbidden_evidence_request,
     _generation_parts as _production_generation_parts,
     _intake_response_message_id,
     _is_vetted_intake_model_runnable,
     _normalize_model_dispute_core_state,
-    _normalize_model_evidence_boundaries,
     _normalize_model_matrix_fact_keys,
     _normalize_model_respondent_attitude,
     _validate_business_output,
@@ -263,7 +260,6 @@ def _generation_parts(
     if isinstance(draft, IntakeCognitionDraft):
         normalized = _normalize_model_matrix_fact_keys(state, draft)
         normalized = _normalize_model_respondent_attitude(state, normalized)
-        normalized = _normalize_model_evidence_boundaries(normalized)
         return (
             state,
             selected["generation"]["message"],
@@ -1914,7 +1910,7 @@ def test_matrix_patch_allows_factual_evidence_status_without_treating_it_as_coll
     validate_matrix_patch(state, matrix_patch)
 
 
-def test_post_normalizer_capsule_and_next_prompt_exclude_unsafe_first_summary(
+def test_post_normalizer_capsule_and_next_prompt_preserve_prompt_owned_first_summary(
     bindings,
     version_pins,
     snapshot,
@@ -1959,11 +1955,9 @@ def test_post_normalizer_capsule_and_next_prompt_exclude_unsafe_first_summary(
     first_result = first_graph.invoke(state, context=_bootstrap_event_context(snapshot, event))
 
     first_context = first_result["baseline_previous_case_detail"]
-    assert first_result["dossier_draft"]["case_story"]["one_sentence_summary"] == (
-        _SAFE_INTAKE_CASE_SUMMARY
-    )
-    assert unsafe_summary not in json.dumps(first_context, ensure_ascii=False)
-    assert unsafe_summary not in json.dumps(first_context["formal_matrix"], ensure_ascii=False)
+    assert first_result["dossier_draft"]["case_story"]["one_sentence_summary"] == unsafe_summary
+    assert unsafe_summary in json.dumps(first_context, ensure_ascii=False)
+    assert unsafe_summary in json.dumps(first_context["formal_matrix"], ensure_ascii=False)
 
     prior_row = first_context["formal_matrix"]["fact_rows"][0]
     prior_position = prior_row["positions"]["USER"]
@@ -2033,14 +2027,11 @@ def test_post_normalizer_capsule_and_next_prompt_exclude_unsafe_first_summary(
             agent_context=second_context,
         ).runnable
     )
-    second_result = second_graph.invoke(
+    second_graph.invoke(
         first_result, context=IntakeTurnContext("EVENT", next_event)
     )
 
-    assert unsafe_summary not in str(second_transport.requests[0].messages[1].content)
-    second_context = second_result["baseline_previous_case_detail"]
-    assert unsafe_summary not in json.dumps(second_context, ensure_ascii=False)
-    assert unsafe_summary not in json.dumps(second_context["formal_matrix"], ensure_ascii=False)
+    assert unsafe_summary in str(second_transport.requests[0].messages[1].content)
 
 
 def test_imported_m0_allows_verified_respondent_successor_capsule_without_public_matrix(
@@ -2743,28 +2734,31 @@ def test_model_ungrounded_optional_core_branch_is_discarded_for_java_baseline_fa
     assert projected.dossier_patch.dispute_core_state is None
 
 
-def test_model_evidence_request_is_preserved_while_structured_evidence_gaps_are_removed(
+def test_historical_evidence_reference_survives_target_projection_and_terminal_validation(
     bindings,
     version_pins,
+    snapshot,
+    event,
 ) -> None:
-    state = _state_with_matrix_roles(bindings, version_pins, actor="USER", initiator="USER")
+    state = _event_state(bindings, version_pins, snapshot, event)
+    historical_fact = "商家稍后将上传官方链接以佐证标准编号123345"
+    historical_missing_field = "official_document_link_123345"
     draft = IntakeCognitionDraft.model_validate(
         _draft(
-            room_utterance="请上传活动页面截图作为证据？",
             dossier_patch={
+                "case_story": {"one_sentence_summary": historical_fact},
                 "missing_information": {
-                    "missing_facts": ["活动页面截图", "下单时活动是否仍在进行"],
-                    "next_questions": [
-                        "能否提供活动页面截图？",
-                        "请说明下单时活动是否仍在进行？",
-                    ],
-                }
+                    "missing_facts": [historical_fact],
+                    "next_questions": [historical_fact],
+                },
             },
             readiness="INCOMPLETE",
-            missing_fields=["screenshot", "promotion_window"],
+            missing_fields=[historical_missing_field],
             recommendation="NEED_MORE_INFO",
         )
     )
+
+    _validate_business_output(state, draft)
 
     _, _, projected = _generation_parts(
         {
@@ -2773,11 +2767,11 @@ def test_model_evidence_request_is_preserved_while_structured_evidence_gaps_are_
         }
     )
 
-    assert projected.room_utterance == "请上传活动页面截图作为证据？"
-    assert projected.missing_fields == ("promotion_window",)
+    assert projected.dossier_patch.case_story == {"one_sentence_summary": historical_fact}
+    assert projected.missing_fields == (historical_missing_field,)
     assert projected.dossier_patch.missing_information == {
-        "missing_facts": ["下单时活动是否仍在进行"],
-        "next_questions": ["请说明下单时活动是否仍在进行？"],
+        "missing_facts": [historical_fact],
+        "next_questions": [historical_fact],
     }
 
 
@@ -2803,94 +2797,6 @@ def test_production_generation_preserves_raw_model_room_request(
     )
 
     assert projected.room_utterance == "Upload a screenshot as evidence."
-
-
-def test_target_evidence_boundary_keeps_factual_record_clarification() -> None:
-    factual_clarification = "订单确认稿具体是指哪一版本的沟通记录或文件？"
-    draft = IntakeCognitionDraft.model_validate(
-        _draft(room_utterance=factual_clarification)
-    )
-    normalized = _normalize_model_evidence_boundaries(draft)
-
-    assert not _contains_forbidden_evidence_request(factual_clarification)
-    assert normalized.room_utterance == factual_clarification
-
-
-@pytest.mark.parametrize(
-    "utterance",
-    [
-        "上传活动页面截图作为证据。",
-        "提供物流凭证。",
-        "提交聊天记录。",
-        "发送照片作为证据。",
-        "附上相关附件。",
-        "Upload a screenshot as evidence.",
-        "Provide the delivery receipt.",
-        "Submit the chat records.",
-        "Send a photo as evidence.",
-        "Attach the document.",
-    ],
-)
-def test_explicit_evidence_transfer_actions_remain_governed(utterance: str) -> None:
-    assert _contains_forbidden_evidence_request(utterance)
-
-
-def test_model_evidence_requests_are_removed_from_non_question_dossier_branches(
-    bindings,
-    version_pins,
-) -> None:
-    state = _state_with_matrix_roles(bindings, version_pins, actor="USER", initiator="USER")
-    draft = IntakeCognitionDraft.model_validate(
-        _draft(
-            dossier_patch={
-                "case_story": {
-                    "one_sentence_summary": "请上传截图作为证据。",
-                    "timeline": ["用户称商品未按约定送达。"],
-                },
-                "party_positions": {
-                    "initiator_statements": ["用户主张商品未按约定送达。"],
-                    "platform_note": "请提供物流凭证。",
-                    "请上传截图作为证据。": "untrusted key",
-                },
-            }
-        )
-    )
-
-    _, _, projected = _generation_parts(
-        {
-            "state": state,
-            "generation": {"message": AIMessage(content="{}"), "draft": draft},
-        }
-    )
-
-    assert projected.dossier_patch.case_story == {
-        "one_sentence_summary": _SAFE_INTAKE_CASE_SUMMARY,
-        "timeline": ["用户称商品未按约定送达。"],
-    }
-    assert projected.dossier_patch.party_positions == {
-        "initiator_statements": ["用户主张商品未按约定送达。"]
-    }
-
-
-def test_model_evidence_cleanup_omits_linked_semantic_branch_instead_of_truncating_it() -> None:
-    draft = IntakeCognitionDraft.model_validate(
-        _draft(
-            dossier_patch={
-                "case_story": {"one_sentence_summary": "用户称商品未按约定送达。"},
-                "respondent_attitude": {
-                    "attitude": "NEED_MORE_INFO",
-                    "position_summary": "请提供物流凭证后再处理。",
-                },
-            }
-        )
-    )
-
-    normalized = _normalize_model_evidence_boundaries(draft)
-
-    assert normalized.dossier_patch.case_story == {
-        "one_sentence_summary": "用户称商品未按约定送达。"
-    }
-    assert normalized.dossier_patch.respondent_attitude is None
 
 
 def test_model_empty_core_arrays_cannot_clear_existing_canonical_state(
