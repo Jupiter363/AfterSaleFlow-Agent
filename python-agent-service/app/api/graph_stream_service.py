@@ -8,6 +8,8 @@ from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import Any, Protocol
 
+import anyio
+
 from app.contracts.v1.models import AgentStreamEvent, RoomGraphCommand
 from app.graph_runtime.errors import (
     GraphContractError,
@@ -316,10 +318,15 @@ class GatewayBackedGraphCommandStreamService:
             async for event in stream:
                 yield event
         finally:
-            try:
-                await _close_iterator(stream)
-            finally:
-                await self._gate.leave(token)
+            # Starlette cancels the response task in an AnyIO cancel scope when its
+            # downstream client disconnects.  That is level cancellation, so every
+            # await in this finally block would otherwise be cancelled again and can
+            # leak both the durable execution and its admission token.
+            with anyio.CancelScope(shield=True):
+                try:
+                    await _close_iterator_bounded(stream)
+                finally:
+                    await self._gate.leave(token)
 
     async def _stream_admission(
         self,
@@ -373,9 +380,10 @@ class GatewayBackedGraphCommandStreamService:
                 terminal_processing_started=terminal_processing_started,
             )
         except BaseException as error:
-            await self._best_effort_abort(execution, error)
-            if source is not None:
-                await _close_iterator_safely(source)
+            with anyio.CancelScope(shield=True):
+                await self._best_effort_abort(execution, error)
+                if source is not None:
+                    await _close_iterator_safely(source)
             raise
         renewing_stream = self._renewing_stream(
             validated,
@@ -391,7 +399,8 @@ class GatewayBackedGraphCommandStreamService:
             # async generator.  Make the ownership explicit so a public HTTP stream
             # close reaches the bounded terminal-processing drain in
             # ``_renewing_stream`` instead of orphaning its prefetched source task.
-            await _close_iterator(renewing_stream)
+            with anyio.CancelScope(shield=True):
+                await _close_iterator_bounded(renewing_stream)
 
     @staticmethod
     def _bind_execution_identity(
@@ -497,13 +506,14 @@ class GatewayBackedGraphCommandStreamService:
             while next_event is not None:
                 heartbeat_deferred = False
                 if self._durable_terminal_reached(durable_terminal_signal):
-                    execution = await self._join_terminal_heartbeat(
+                    execution, heartbeat_joined = await self._join_terminal_heartbeat(
                         heartbeat,
                         heartbeat_stop,
                         heartbeat_state,
                         suppress_all=True,
                     )
-                    heartbeat = None
+                    if heartbeat_joined:
+                        heartbeat = None
                 elif self._terminal_processing_inflight(
                     terminal_processing_started,
                     durable_terminal_signal,
@@ -520,13 +530,14 @@ class GatewayBackedGraphCommandStreamService:
                     watched.add(heartbeat)
                 done, _ = await asyncio.wait(watched, return_when=asyncio.FIRST_COMPLETED)
                 if self._durable_terminal_reached(durable_terminal_signal):
-                    execution = await self._join_terminal_heartbeat(
+                    execution, heartbeat_joined = await self._join_terminal_heartbeat(
                         heartbeat,
                         heartbeat_stop,
                         heartbeat_state,
                         suppress_all=True,
                     )
-                    heartbeat = None
+                    if heartbeat_joined:
+                        heartbeat = None
                 elif self._terminal_processing_inflight(
                     terminal_processing_started,
                     durable_terminal_signal,
@@ -544,7 +555,7 @@ class GatewayBackedGraphCommandStreamService:
                         # has durably reconciled/terminated the command and released
                         # its exact lease.  A concurrent renewal can therefore lose
                         # that lease legitimately; suppress only that expected loss.
-                        execution = await self._join_terminal_heartbeat(
+                        execution, heartbeat_joined = await self._join_terminal_heartbeat(
                             heartbeat,
                             heartbeat_stop,
                             heartbeat_state,
@@ -552,7 +563,8 @@ class GatewayBackedGraphCommandStreamService:
                                 durable_terminal_signal
                             ),
                         )
-                        heartbeat = None
+                        if heartbeat_joined:
+                            heartbeat = None
                     else:
                         if self._durable_terminal_reached(durable_terminal_signal):
                             raise GraphContractError(
@@ -585,70 +597,83 @@ class GatewayBackedGraphCommandStreamService:
                 raise GraphContractError("gateway stream ended without a terminal event")
         except BaseException as error:
             failure = error
-            if not terminal_seen:
-                if (
-                    isinstance(error, (asyncio.CancelledError, GeneratorExit))
-                    and self._terminal_processing_inflight(
-                        terminal_processing_started,
-                        durable_terminal_signal,
+            # A disconnect reaches this generator as ``CancelledError``/``GeneratorExit``.
+            # Shield the entire fail-closed sequence: AnyIO's level cancellation otherwise
+            # interrupts the first cleanup await and leaves the command/attempt EXECUTING.
+            with anyio.CancelScope(shield=True):
+                if not terminal_seen:
+                    if (
+                        isinstance(error, (asyncio.CancelledError, GeneratorExit))
+                        and self._terminal_processing_inflight(
+                            terminal_processing_started,
+                            durable_terminal_signal,
+                        )
+                    ):
+                        # A downstream disconnect must not tear down a validated terminal
+                        # transaction in-flight, but it also must never wait forever for a
+                        # hung control-plane operation.  Keep the source alive only for the
+                        # bounded drain window, then retain the regular cancellation fence.
+                        await self._await_terminal_processing_boundary(
+                            next_event,
+                            durable_terminal_signal,
+                        )
+                    terminal_seen, prefetched_failure = self._completed_prefetch_outcome(
+                        next_event
                     )
-                ):
-                    # A downstream disconnect must not tear down a validated terminal
-                    # transaction in-flight, but it also must never wait forever for a
-                    # hung control-plane operation.  Keep the source alive only for the
-                    # bounded drain window, then retain the regular cancellation fence.
-                    await self._await_terminal_processing_boundary(
-                        next_event,
-                        durable_terminal_signal,
+                    durable_terminal_reached = self._durable_terminal_reached(
+                        durable_terminal_signal
                     )
-                terminal_seen, prefetched_failure = self._completed_prefetch_outcome(next_event)
-                durable_terminal_reached = self._durable_terminal_reached(
-                    durable_terminal_signal
-                )
-                if prefetched_failure is not None:
-                    # A post-commit barrier/source failure must remain visible even
-                    # though the command is already durably terminal.
-                    failure = prefetched_failure
-                if terminal_seen or durable_terminal_reached:
-                    execution = await self._join_terminal_heartbeat(
-                        heartbeat,
-                        heartbeat_stop,
-                        heartbeat_state,
-                        suppress_all=durable_terminal_reached,
-                    )
-                    heartbeat = None
-                else:
-                    # The original source/cancellation failure is already the authority
-                    # here.  In particular, a terminal source failure before durable
-                    # completion must not be obscured by a deferred heartbeat failure.
-                    execution = heartbeat_state.execution
-                    # Persist the cancellation fence before touching provider tasks. A task
-                    # that suppresses cancellation can no longer checkpoint with the old token.
-                    await self._best_effort_abort(execution, failure)
-            heartbeat_stop.set()
-            await _cancel_task(next_event)
-            next_event = None
-            await _cancel_task(heartbeat)
-            heartbeat = None
-            if iterator is not None:
-                await _close_iterator_safely(iterator)
-                iterator = None
+                    if prefetched_failure is not None:
+                        # A post-commit barrier/source failure must remain visible even
+                        # though the command is already durably terminal.
+                        failure = prefetched_failure
+                    if terminal_seen or durable_terminal_reached:
+                        execution, heartbeat_joined = await self._join_terminal_heartbeat(
+                            heartbeat,
+                            heartbeat_stop,
+                            heartbeat_state,
+                            suppress_all=durable_terminal_reached,
+                        )
+                        if heartbeat_joined:
+                            heartbeat = None
+                    else:
+                        # The original source/cancellation failure is already the authority
+                        # here.  In particular, a terminal source failure before durable
+                        # completion must not be obscured by a deferred heartbeat failure.
+                        execution = heartbeat_state.execution
+                        # Persist the cancellation fence before touching provider tasks. A task
+                        # that suppresses cancellation can no longer checkpoint with the old token.
+                        await self._best_effort_abort(execution, failure)
+                heartbeat_stop.set()
+                await _cancel_task(next_event)
+                next_event = None
+                if iterator is not None:
+                    await _close_iterator_safely(iterator)
+                    iterator = None
             if failure is error:
                 raise
             raise failure from error
         finally:
-            heartbeat_stop.set()
-            await _cancel_task(next_event)
-            await _cancel_task(heartbeat)
-            execution = heartbeat_state.execution
-            try:
-                if iterator is not None:
-                    await _close_iterator(iterator)
-            finally:
-                # A renewal task can commit just as a final/error path becomes
-                # terminal.  Join it and close the source first, then clear the
-                # exact fence once so a late renewal cannot reinsert the cache.
-                self._gateway.cleanup_execution_lease(execution)
+            with anyio.CancelScope(shield=True):
+                heartbeat_stop.set()
+                await _cancel_task(next_event)
+                heartbeat_joined = await _cancel_task(heartbeat)
+                execution = heartbeat_state.execution
+                try:
+                    if iterator is not None:
+                        await _close_iterator_bounded(iterator)
+                finally:
+                    # A renewal task can commit just as a final/error path becomes
+                    # terminal.  Join it and close the source first, then clear the
+                    # exact fence once so a late renewal cannot reinsert the cache.
+                    if heartbeat_joined:
+                        self._gateway.cleanup_execution_lease(execution)
+                    elif heartbeat is not None:
+                        _cleanup_execution_lease_after_heartbeat(
+                            heartbeat,
+                            self._gateway,
+                            heartbeat_state,
+                        )
 
     @staticmethod
     async def _join_terminal_heartbeat(
@@ -657,28 +682,21 @@ class GatewayBackedGraphCommandStreamService:
         state: _LeaseHeartbeatState,
         *,
         suppress_all: bool = False,
-    ) -> GatewayExecution:
+    ) -> tuple[GatewayExecution, bool]:
         """Join terminal cleanup without mistaking its lease release for a failure."""
 
         stop_signal.set()
+        heartbeat_joined = await _cancel_task(heartbeat)
+        if not heartbeat_joined:
+            return state.execution, False
         failure = state.failure
-        if heartbeat is not None:
-            if not heartbeat.done():
-                heartbeat.cancel()
-            (result,) = await asyncio.gather(heartbeat, return_exceptions=True)
-            if (
-                failure is None
-                and isinstance(result, BaseException)
-                and not isinstance(result, asyncio.CancelledError)
-            ):
-                failure = result
         if suppress_all:
-            return state.execution
+            return state.execution, True
         if isinstance(failure, GraphLeaseLostError):
-            return state.execution
+            return state.execution, True
         if failure is not None:
             raise failure
-        return state.execution
+        return state.execution, True
 
     @staticmethod
     def _raise_heartbeat_failure(state: _LeaseHeartbeatState) -> None:
@@ -817,11 +835,13 @@ class GatewayBackedGraphCommandStreamService:
         cancelled = isinstance(error, (asyncio.CancelledError, GeneratorExit))
         code = "GRAPH_STREAM_CANCELLED" if cancelled else "GRAPH_STREAM_INTERRUPTED"
         try:
-            await self._gateway.finish_execution_attempt(
-                execution,
-                status=(AttemptStatus.CANCELLED if cancelled else AttemptStatus.FAILED),
-                error_code=code,
-                error_classification="STREAM_INTERRUPTED",
+            await _await_cleanup_bounded(
+                self._gateway.finish_execution_attempt(
+                    execution,
+                    status=(AttemptStatus.CANCELLED if cancelled else AttemptStatus.FAILED),
+                    error_code=code,
+                    error_classification="STREAM_INTERRUPTED",
+                )
             )
         except BaseException:
             return
@@ -835,12 +855,20 @@ class _Executor:
         return self._source
 
 
-async def _cancel_task(task: asyncio.Task[Any] | None) -> None:
+async def _cancel_task(task: asyncio.Task[Any] | None) -> bool:
     if task is None:
-        return
-    if not task.done():
+        return True
+    if not task.done() and task.cancelling() == 0:
         task.cancel()
-    await asyncio.gather(task, return_exceptions=True)
+    try:
+        await _await_task_bounded(task)
+    except TimeoutError:
+        return False
+    except BaseException:
+        # A cancelled/failed child is fully joined.  Its failure belongs to the
+        # stream path that initiated teardown, not to this cleanup join.
+        return True
+    return True
 
 
 async def _close_iterator(iterator: AsyncIterator[Any]) -> None:
@@ -849,8 +877,63 @@ async def _close_iterator(iterator: AsyncIterator[Any]) -> None:
         await close()
 
 
+async def _close_iterator_bounded(iterator: AsyncIterator[Any]) -> None:
+    close = getattr(iterator, "aclose", None)
+    if close is not None:
+        with anyio.CancelScope(shield=True):
+            await _await_cleanup_bounded(close())
+
+
 async def _close_iterator_safely(iterator: AsyncIterator[Any]) -> None:
     try:
-        await _close_iterator(iterator)
-    except Exception:
+        await _close_iterator_bounded(iterator)
+    except BaseException:
         return
+
+
+async def _await_cleanup_bounded(operation: Any) -> Any:
+    """Run a new cleanup operation outside AnyIO level cancellation, with a hard bound."""
+
+    with anyio.fail_after(MAX_CANCEL_DRAIN_SECONDS, shield=True):
+        return await operation
+
+
+async def _await_task_bounded(task: asyncio.Task[Any]) -> Any:
+    """Await a cleanup task without letting a cancellation-resistant task stall teardown."""
+
+    try:
+        with anyio.fail_after(MAX_CANCEL_DRAIN_SECONDS, shield=True):
+            return await asyncio.shield(task)
+    except TimeoutError:
+        task.add_done_callback(_consume_task_exception)
+        raise
+
+
+def _consume_task_exception(task: asyncio.Task[Any]) -> None:
+    try:
+        task.exception()
+    except (asyncio.CancelledError, Exception):
+        return
+
+
+def _cleanup_execution_lease_after_heartbeat(
+    heartbeat: asyncio.Task[Any],
+    gateway: GraphGatewayPort,
+    state: _LeaseHeartbeatState,
+) -> None:
+    """Clear the exact cache only after a cancellation-resistant renew has stopped.
+
+    A bounded disconnect cleanup cannot wait indefinitely for a control-plane call
+    that suppresses cancellation.  Deferring cache removal to the heartbeat's done
+    callback keeps the same ordering as the normal joined path: any final successful
+    renew can cache its lease first, and the cleanup that follows removes that exact
+    fence.  The durable abort still fences the late renewal at the database.
+    """
+
+    def cleanup(_: asyncio.Task[Any]) -> None:
+        try:
+            gateway.cleanup_execution_lease(state.execution)
+        except Exception:
+            return
+
+    heartbeat.add_done_callback(cleanup)

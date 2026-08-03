@@ -10,9 +10,15 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import httpx
+import anyio
 import pytest
 from pydantic import BaseModel
 
+from app.api.graph_commands import (
+    AgentStreamProtocolValidator,
+    _encode_event,
+    _stream_ndjson,
+)
 from app.api.graph_stream_service import (
     ExactShadowExecutorRegistry,
     GatewayBackedGraphCommandStreamService,
@@ -21,6 +27,7 @@ from app.api.graph_stream_service import (
     ProviderRuntimeBinding,
     ShadowExecutorRegistration,
 )
+from app.contracts.v1.codec import ContractCodec
 from app.contracts.v1.models import AgentStreamEvent, AgentStreamPayload, RoomGraphCommand
 from app.graph_runtime.errors import (
     GraphContractError,
@@ -53,6 +60,7 @@ from app.security.invocation_envelope import VerifiedInvocation
 
 ROOT = Path(__file__).resolve().parents[3]
 COMMAND_FIXTURE = ROOT / "contracts/agent-platform/v1/fixtures/valid/room-graph-command-valid.json"
+CONTRACT_ROOT = ROOT / "contracts/agent-platform/v1"
 NOW = datetime(2026, 7, 19, 9, 0, tzinfo=timezone.utc)
 
 
@@ -1455,6 +1463,65 @@ async def test_downstream_disconnect_bounds_pre_durable_terminal_processing() ->
 
 
 @pytest.mark.asyncio
+async def test_bounded_disconnect_cleanup_removes_a_late_heartbeat_lease_cache_entry() -> None:
+    """A cancellation-resistant renew cannot repopulate the exact cache after teardown."""
+
+    admission = _admission(AdmissionAction.ACQUIRE)
+    execution = _execution(admission)
+    release_renew = asyncio.Event()
+
+    class LateRenewGateway(_Gateway):
+        def __init__(self) -> None:
+            super().__init__(admission)
+            self.renew_started = asyncio.Event()
+            self.renew_cancelled = asyncio.Event()
+            self.lease_cached = False
+            self.cleaned_lease_revisions: list[int] = []
+
+        async def renew_execution(self, current: GatewayExecution) -> LeaseRecord:
+            self.renewed += 1
+            self.renew_started.set()
+            try:
+                await release_renew.wait()
+            except asyncio.CancelledError:
+                self.renew_cancelled.set()
+                await release_renew.wait()
+            self.lease_cached = True
+            return replace(current.lease, revision=current.lease.revision + 1)
+
+        def cleanup_execution_lease(self, current: GatewayExecution) -> None:
+            self.cleaned_execution_leases += 1
+            self.cleaned_lease_revisions.append(current.lease.revision)
+            self.lease_cached = False
+
+    async def source() -> AsyncIterator[AgentStreamEvent]:
+        yield _event(admission.command, 0, "attempt_started")
+        await asyncio.Event().wait()
+
+    gateway = LateRenewGateway()
+    service, _ = await _service(gateway, _Executor(), renewal_seconds=0.001)
+    stream = service._renewing_stream(source(), execution)
+
+    assert (await anext(stream)).event_type == "attempt_started"
+    await asyncio.wait_for(gateway.renew_started.wait(), timeout=0.1)
+
+    close_task = asyncio.create_task(stream.aclose())
+    await asyncio.wait_for(gateway.renew_cancelled.wait(), timeout=0.1)
+    await asyncio.wait_for(close_task, timeout=MAX_CANCEL_DRAIN_SECONDS + 0.3)
+
+    # The heartbeat is still alive, so cleanup is deferred rather than allowing
+    # its late successful renewal to reinsert the exact lease cache after teardown.
+    assert gateway.cleaned_execution_leases == 0
+    release_renew.set()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert gateway.lease_cached is False
+    assert gateway.cleaned_execution_leases == 1
+    assert gateway.cleaned_lease_revisions == [1]
+
+
+@pytest.mark.asyncio
 async def test_preterminal_lease_loss_remains_fail_closed_with_a_prefetched_source() -> None:
     admission = _admission(AdmissionAction.ACQUIRE)
     execution = _execution(admission)
@@ -1860,3 +1927,56 @@ async def test_stream_cleanup_failure_cannot_leak_an_admission_token() -> None:
         await guarded.aclose()
 
     assert await gate.drain(0.01) is True
+
+
+def test_http_disconnect_level_cancellation_durably_aborts_preterminal_target_stream() -> None:
+    """The ASGI body's AnyIO cancellation must reach the durable graph cleanup path."""
+
+    async def exercise_disconnect() -> None:
+        admission = _admission(AdmissionAction.ACQUIRE)
+        source_closed = asyncio.Event()
+        source_waiting = asyncio.Event()
+
+        class BlockingExecutor(_Executor):
+            async def stream(self, execution: GatewayExecution):
+                try:
+                    yield _event(execution.admission.command, 0, "attempt_started")
+                    source_waiting.set()
+                    await asyncio.Event().wait()
+                finally:
+                    source_closed.set()
+
+        gateway = _Gateway(admission)
+        service, gate = await _service(gateway, BlockingExecutor())
+        iterator = await service.open_stream(
+            command=admission.command,
+            verified_invocation=cast(VerifiedInvocation, object()),
+            expected_thread=admission.thread,
+        )
+        first = await anext(iterator)
+        await source_waiting.wait()
+        validator = AgentStreamProtocolValidator(
+            run_id=admission.command.logical_run_id,
+            attempt_id=admission.command.attempt_id,
+            audience=admission.command.actor_scope.audience,
+        )
+        codec = ContractCodec(CONTRACT_ROOT)
+        body = _stream_ndjson(
+            codec=codec,
+            iterator=iterator,
+            validator=validator,
+            first_line=_encode_event(codec, validator, first),
+        )
+
+        assert await anext(body)
+        with anyio.CancelScope() as scope:
+            scope.cancel()
+            await body.aclose()
+
+        assert source_closed.is_set()
+        assert gateway.finished == 1
+        assert gateway.finished_statuses == [AttemptStatus.CANCELLED]
+        assert gateway.cleaned_execution_leases == 1
+        assert await gate.drain(0.01) is True
+
+    anyio.run(exercise_disconnect)

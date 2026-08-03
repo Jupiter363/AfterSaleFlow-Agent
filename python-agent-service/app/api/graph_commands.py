@@ -3,12 +3,13 @@ from __future__ import annotations
 import json
 import logging
 import re
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from email.message import Message
-from typing import Any, Protocol, cast
+from typing import Any, Protocol
 
+import anyio
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -86,6 +87,7 @@ _TARGET_RESULT_REF_HEADER = "x-graph-result-ref"
 _TARGET_PROPOSAL_HASH_HEADER = "x-graph-proposal-hash"
 _TARGET_RESULT_REF = re.compile(r"^(?:s3|minio|urn):[!-~]{1,507}$")
 _TARGET_PROPOSAL_HASH = re.compile(r"^[0-9a-f]{64}$")
+_STREAM_CLOSE_TIMEOUT_SECONDS = 3.0
 
 
 class TransportIdentityResolver(Protocol):
@@ -982,7 +984,11 @@ async def _close_iterator_safely(iterator: AsyncIterator[AgentStreamEvent]) -> N
     close = getattr(iterator, "aclose", None)
     if close is not None:
         try:
-            await cast(Callable[[], Awaitable[None]], close)()
+            # ASGI disconnect handling uses AnyIO level cancellation.  Run the
+            # nested service generator in an AnyIO shield so its durable
+            # abort/heartbeat/lease teardown is not cancelled at its first await.
+            with anyio.fail_after(_STREAM_CLOSE_TIMEOUT_SECONDS, shield=True):
+                await close()
         except Exception as error:
             _log_safe_failure("graph stream iterator cleanup", error)
 
