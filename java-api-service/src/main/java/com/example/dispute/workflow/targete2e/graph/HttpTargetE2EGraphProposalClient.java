@@ -9,9 +9,11 @@ import com.example.dispute.workflow.infrastructure.agent.GraphCommandHttpTranspo
 import com.example.dispute.workflow.infrastructure.agent.GraphCommandTransportException;
 import com.example.dispute.workflow.infrastructure.agent.GraphTransportBundle;
 import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -21,11 +23,16 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** Bounded NDJSON command client for the isolated target-E2E proposal lane. */
 public final class HttpTargetE2EGraphProposalClient implements TargetE2EGraphProposalClient {
 
   public static final String PATH = "internal/graphs/target-e2e/commands/stream";
+  private static final Logger LOG = LoggerFactory.getLogger(HttpTargetE2EGraphProposalClient.class);
+  private static final String DIAGNOSTIC_UNAVAILABLE = "UNAVAILABLE";
+  private static final String DIAGNOSTIC_NOT_APPLICABLE = "NOT_APPLICABLE";
 
   private final GraphCommandHttpTransport transport;
   private final HttpTargetE2EGraphReconciliationClient reconciliationClient;
@@ -96,17 +103,20 @@ public final class HttpTargetE2EGraphProposalClient implements TargetE2EGraphPro
       cancellationToken.throwIfCancellationRequested();
       session.requireComplete();
     } catch (TargetE2EGraphClientException exception) {
+      if ("TARGET_E2E_GRAPH_PROTOCOL_REJECTED".equals(exception.errorCode())) {
+        session.logProtocolRejection();
+      }
       throw exception;
     } catch (GraphCommandTransportException exception) {
       cancellationToken.throwIfCancellationRequested();
       if (exception.protocolViolation()) {
-        throw TargetE2EGraphClientException.protocol(
+        throw protocol(session,
             "target Graph command transport violated the protocol", exception);
       }
       throw TargetE2EGraphClientException.transport(
           "target Graph command transport failed", exception);
     } catch (AgentStreamProtocolException | IllegalArgumentException exception) {
-      throw TargetE2EGraphClientException.protocol(
+      throw protocol(session,
           "target Graph command stream is invalid", exception);
     } catch (RuntimeException exception) {
       cancellationToken.throwIfCancellationRequested();
@@ -119,7 +129,7 @@ public final class HttpTargetE2EGraphProposalClient implements TargetE2EGraphPro
       Boolean retryable = terminal.payload().retryable();
       String code = terminal.payload().errorCode();
       if (retryable == null || code == null || code.isBlank()) {
-        throw TargetE2EGraphClientException.protocol(
+        throw protocol(session,
             "target Graph error terminal is incomplete", null);
       }
       throw TargetE2EGraphClientException.remote(
@@ -128,13 +138,13 @@ public final class HttpTargetE2EGraphProposalClient implements TargetE2EGraphPro
     if (terminal.eventType() == StreamEventType.ATTEMPT_ABORTED) {
       String reasonCode = terminal.payload().reasonCode();
       if (reasonCode == null || reasonCode.isBlank()) {
-        throw TargetE2EGraphClientException.protocol(
+        throw protocol(session,
             "target Graph attempt-aborted terminal is incomplete", null);
       }
       throw TargetE2EGraphClientException.attemptAborted(reasonCode);
     }
     if (terminal.eventType() != StreamEventType.FINAL) {
-      throw TargetE2EGraphClientException.protocol(
+      throw protocol(session,
           "target Graph command did not produce a final proposal", null);
     }
     return reconciliationClient.reconcile(
@@ -142,6 +152,12 @@ public final class HttpTargetE2EGraphProposalClient implements TargetE2EGraphPro
         terminal.payload().finalResultRef(),
         terminal.payload().finalResultHash(),
         cancellationToken);
+  }
+
+  private static TargetE2EGraphClientException protocol(
+      StreamSession session, String message, Throwable cause) {
+    session.logProtocolRejection();
+    return TargetE2EGraphClientException.protocol(message, cause);
   }
 
   private Map<String, String> requestHeaders(TargetE2ESealedGraphCommand sealed) {
@@ -170,6 +186,8 @@ public final class HttpTargetE2EGraphProposalClient implements TargetE2EGraphPro
     private final Consumer<AgentStreamEvent> sink;
     private boolean responseReceived;
     private AgentStreamEvent terminal;
+    private long lastAcceptedSequence = -1;
+    private ProtocolLineMetadata lastLineMetadata = ProtocolLineMetadata.unavailable();
 
     private StreamSession(
         TargetE2EGraphCommandEnvelope envelope,
@@ -203,6 +221,7 @@ public final class HttpTargetE2EGraphProposalClient implements TargetE2EGraphPro
 
     @Override
     public void onLine(String line) {
+      lastLineMetadata = safeProtocolLineMetadata(line);
       if (!responseReceived) {
         throw TargetE2EGraphClientException.protocol(
             "target Graph command emitted data before response metadata", null);
@@ -214,6 +233,7 @@ public final class HttpTargetE2EGraphProposalClient implements TargetE2EGraphPro
         throw TargetE2EGraphClientException.protocol(
             "target Graph command emitted data after terminal", null);
       }
+      lastAcceptedSequence = event.sequenceNo();
       sink.accept(event);
       if (event.eventType() == StreamEventType.FINAL
           || event.eventType() == StreamEventType.ERROR
@@ -232,6 +252,77 @@ public final class HttpTargetE2EGraphProposalClient implements TargetE2EGraphPro
 
     private AgentStreamEvent terminal() {
       return terminal;
+    }
+
+    private void logProtocolRejection() {
+      LOG.warn(
+          "target_e2e_graph_protocol_rejected run_id={} attempt_id={} last_accepted_sequence={} line_bytes={} event_type={} field={}",
+          envelope.command().logicalRunId(),
+          envelope.command().attemptId(),
+          lastAcceptedSequence,
+          lastLineMetadata.byteSize(),
+          lastLineMetadata.eventType(),
+          lastLineMetadata.field());
+    }
+
+    private ProtocolLineMetadata safeProtocolLineMetadata(String line) {
+      if (line == null) {
+        return ProtocolLineMetadata.unavailable();
+      }
+      int byteSize = line.getBytes(StandardCharsets.UTF_8).length;
+      try {
+        JsonNode root = mapper.readTree(line);
+        if (root == null || !root.isObject()) {
+          return new ProtocolLineMetadata(byteSize, DIAGNOSTIC_UNAVAILABLE, DIAGNOSTIC_UNAVAILABLE);
+        }
+        String eventType = safeEventType(root.path("event_type"));
+        if (!"visible_delta".equals(eventType)) {
+          return new ProtocolLineMetadata(byteSize, eventType, DIAGNOSTIC_NOT_APPLICABLE);
+        }
+        JsonNode payload = root.path("payload");
+        return new ProtocolLineMetadata(
+            byteSize, eventType, safeAllowedVisibleField(payload));
+      } catch (RuntimeException | com.fasterxml.jackson.core.JsonProcessingException ignored) {
+        return new ProtocolLineMetadata(byteSize, DIAGNOSTIC_UNAVAILABLE, DIAGNOSTIC_UNAVAILABLE);
+      }
+    }
+
+    private static String safeEventType(JsonNode value) {
+      if (!value.isTextual()) {
+        return DIAGNOSTIC_UNAVAILABLE;
+      }
+      try {
+        return StreamEventType.fromWire(value.asText()).wireValue();
+      } catch (IllegalArgumentException ignored) {
+        return DIAGNOSTIC_UNAVAILABLE;
+      }
+    }
+
+    private static String safeIdentifier(JsonNode value) {
+      if (!value.isTextual()) {
+        return DIAGNOSTIC_UNAVAILABLE;
+      }
+      String identifier = value.asText();
+      return identifier.matches("[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
+          ? identifier
+          : DIAGNOSTIC_UNAVAILABLE;
+    }
+
+    private String safeAllowedVisibleField(JsonNode payload) {
+      String node = safeIdentifier(payload.path("node"));
+      String field = safeIdentifier(payload.path("field"));
+      if (DIAGNOSTIC_UNAVAILABLE.equals(node)
+          || DIAGNOSTIC_UNAVAILABLE.equals(field)
+          || !protocolState.allowsVisibleField(node, field)) {
+        return DIAGNOSTIC_UNAVAILABLE;
+      }
+      return field;
+    }
+  }
+
+  private record ProtocolLineMetadata(int byteSize, String eventType, String field) {
+    private static ProtocolLineMetadata unavailable() {
+      return new ProtocolLineMetadata(-1, DIAGNOSTIC_UNAVAILABLE, DIAGNOSTIC_UNAVAILABLE);
     }
   }
 

@@ -430,7 +430,7 @@ public class AgentNdjsonStreamClient implements AgentStreamClient {
                     throw new AgentStreamProtocolException(
                             "agent stream v2 attempted to expose a non-public field");
                 }
-                String delta = requiredV2Text(payload, "delta");
+                String delta = requiredV2VisibleDelta(payload);
                 if (delta.length() > 4096
                         || state.visibleCharacters + delta.length() > MAX_VISIBLE_CHARS) {
                     throw new AgentStreamProtocolException("agent stream v2 visible output exceeds limit");
@@ -495,6 +495,14 @@ public class AgentNdjsonStreamClient implements AgentStreamClient {
         JsonNode value = node.get(field);
         if (value == null || !value.isTextual() || value.asText().isBlank()) {
             throw new AgentStreamProtocolException("agent stream v2 is missing " + field);
+        }
+        return value.asText();
+    }
+
+    private static String requiredV2VisibleDelta(JsonNode payload) {
+        JsonNode value = payload.get("delta");
+        if (value == null || !value.isTextual() || value.asText().isEmpty()) {
+            throw new AgentStreamProtocolException("agent stream v2 is missing delta");
         }
         return value.asText();
     }
@@ -868,7 +876,7 @@ public class AgentNdjsonStreamClient implements AgentStreamClient {
             }
         }
 
-        private boolean allowsVisibleField(String node, String field) {
+        public boolean allowsVisibleField(String node, String field) {
             if (visibleFieldsByNode == null) {
                 return legacyVisibleFieldPaths.contains(field);
             }

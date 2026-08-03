@@ -10,7 +10,9 @@ import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
 import com.example.dispute.workflow.contract.v1.ContractTypes.StreamEventType;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import org.junit.jupiter.api.Test;
@@ -43,6 +45,66 @@ class AgentNdjsonStreamClientV2Test {
                         .payload()
                         .finalResultHash())
                 .isEqualTo("a".repeat(64));
+    }
+
+    @Test
+    void preservesWhitespaceOnlyVisibleDeltasWithoutNormalizingAdjacentOutput() {
+        var state = new AgentNdjsonStreamClient.V2ProtocolState(
+                "run-1", "attempt-1", Audience.USER, Set.of("room_utterance"));
+        parse(state, event(0, "attempt_started", "{\"node\":\"evidence_turn\"}"));
+
+        List<String> deltas = List.of(
+                parse(state, event(
+                                1,
+                                "visible_delta",
+                                "{\"node\":\"evidence_turn\",\"field\":\"room_utterance\","
+                                        + "\"delta\":\"before\"}"))
+                        .payload()
+                        .delta(),
+                parse(state, event(
+                                2,
+                                "visible_delta",
+                                "{\"node\":\"evidence_turn\",\"field\":\"room_utterance\","
+                                        + "\"delta\":\" \"}"))
+                        .payload()
+                        .delta(),
+                parse(state, event(
+                                3,
+                                "visible_delta",
+                                "{\"node\":\"evidence_turn\",\"field\":\"room_utterance\","
+                                        + "\"delta\":\"\\n\"}"))
+                        .payload()
+                        .delta(),
+                parse(state, event(
+                                4,
+                                "visible_delta",
+                                "{\"node\":\"evidence_turn\",\"field\":\"room_utterance\","
+                                        + "\"delta\":\"\\t\"}"))
+                        .payload()
+                        .delta(),
+                parse(state, event(
+                                5,
+                                "visible_delta",
+                                "{\"node\":\"evidence_turn\",\"field\":\"room_utterance\","
+                                        + "\"delta\":\"after\"}"))
+                        .payload()
+                        .delta());
+
+        String combined = String.join("", deltas);
+        assertThat(deltas).containsExactly("before", " ", "\n", "\t", "after");
+        assertThat(combined).isEqualTo("before \n\tafter");
+        assertThat(combined.getBytes(StandardCharsets.UTF_8))
+                .isEqualTo("before \n\tafter".getBytes(StandardCharsets.UTF_8));
+
+        var emptyDelta = new AgentNdjsonStreamClient.V2ProtocolState(
+                "run-1", "attempt-1", Audience.USER, Set.of("room_utterance"));
+        parse(emptyDelta, event(0, "attempt_started", "{\"node\":\"evidence_turn\"}"));
+        assertThatThrownBy(() -> parse(emptyDelta, event(
+                        1,
+                        "visible_delta",
+                        "{\"node\":\"evidence_turn\",\"field\":\"room_utterance\",\"delta\":\"\"}")))
+                .isInstanceOf(AgentStreamProtocolException.class)
+                .hasMessageContaining("missing delta");
     }
 
     @Test

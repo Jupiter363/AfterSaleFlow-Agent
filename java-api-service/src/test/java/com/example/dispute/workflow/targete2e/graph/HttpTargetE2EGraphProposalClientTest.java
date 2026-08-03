@@ -14,6 +14,9 @@ import com.example.dispute.workflow.infrastructure.agent.GraphReconciliationHttp
 import com.example.dispute.workflow.infrastructure.agent.GraphTransportBundle;
 import com.example.dispute.workflow.infrastructure.agent.GraphTransportSecurityProof;
 import com.example.dispute.workflow.infrastructure.agent.LocalGraphTransportFactory;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import java.io.IOException;
 import java.lang.reflect.Constructor;
 import java.net.URI;
@@ -24,9 +27,11 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 
 class HttpTargetE2EGraphProposalClientTest {
 
@@ -170,6 +175,77 @@ class HttpTargetE2EGraphProposalClientTest {
         .containsExactly(StreamEventType.ATTEMPT_STARTED, StreamEventType.ATTEMPT_ABORTED);
     assertThat(events.getLast().payload().reasonCode()).isEqualTo("GRAPH_LEASE_LOST");
     assertThat(reconciliation.requests).isEmpty();
+  }
+
+  @Test
+  void logsBoundedProtocolDiagnosticsWithoutStreamingModelContent() {
+    var codec = TargetE2EGraphTestFixtures.codec();
+    TargetE2ESealedGraphCommand sealed =
+        codec.sealCommand(
+            ACTIVATION_ID,
+            7L,
+            TargetE2EGraphTestFixtures.command(),
+            REGISTRY_BINDING,
+            (envelope, binding) -> credential());
+    GraphTransportSecurityProof proof = mutualTlsProof();
+    String secretDelta = "model-content-must-not-reach-diagnostics";
+    String rejectedLine =
+        event(
+            sealed,
+            1,
+            "visible_delta",
+            "{\"node\":\"intake.reason\",\"field\":\"reasoning_content\",\"delta\":\""
+                + secretDelta
+                + "\"}");
+    GraphCommandHttpTransport rejecting =
+        new FakeCommandTransport("0".repeat(64), proof) {
+          @Override
+          public void stream(
+              Request request, AgentRunCancellationToken cancellationToken, Listener listener) {
+            listener.onResponse(
+                successHead(request.uri(), sealed, sealed.envelope().activationId()));
+            listener.onLine(
+                event(sealed, 0, "attempt_started", "{\"node\":\"intake.reason\"}"));
+            listener.onLine(rejectedLine);
+          }
+        };
+    FakeReconciliationTransport reconciliation =
+        new FakeReconciliationTransport("{}".getBytes(StandardCharsets.UTF_8), proof);
+    var client = proposalClient(rejecting, reconciliation, proof, codec);
+    Logger logger = (Logger) LoggerFactory.getLogger(HttpTargetE2EGraphProposalClient.class);
+    ListAppender<ILoggingEvent> appender = new ListAppender<>();
+    appender.start();
+    logger.addAppender(appender);
+    try {
+      assertThatThrownBy(
+              () ->
+                  client.execute(
+                      sealed,
+                      Map.of("intake.reason", Set.of("room_utterance")),
+                      ignored -> {},
+                      new AgentRunCancellationToken()))
+          .isInstanceOfSatisfying(
+              TargetE2EGraphClientException.class,
+              failure ->
+                  assertThat(failure.errorCode())
+                      .isEqualTo("TARGET_E2E_GRAPH_PROTOCOL_REJECTED"));
+    } finally {
+      logger.detachAppender(appender);
+      appender.stop();
+    }
+
+    assertThat(appender.list).hasSize(1);
+    String diagnostic = appender.list.getFirst().getFormattedMessage();
+    assertThat(diagnostic)
+        .contains("target_e2e_graph_protocol_rejected")
+        .contains("run_id=" + sealed.envelope().command().logicalRunId())
+        .contains("attempt_id=" + sealed.envelope().command().attemptId())
+        .contains("last_accepted_sequence=0")
+        .contains("line_bytes=" + rejectedLine.getBytes(StandardCharsets.UTF_8).length)
+        .contains("event_type=visible_delta")
+        .contains("field=UNAVAILABLE")
+        .doesNotContain(secretDelta)
+        .doesNotContain("reasoning_content");
   }
 
   @Test
