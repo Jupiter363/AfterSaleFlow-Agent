@@ -2232,12 +2232,12 @@ _EVIDENCE_TRANSFER_OBJECT_RE = re.compile(
     r"检测报告|检验报告|发票|交易流水|支付流水|快递底单|签收单|物流单(?!号)|运单(?!号)|文件|文档|附件|材料|订单确认稿|"
     r"screenshots?|images?|photos?|videos?|chat\s+records?|communication\s+records?|"
     r"recordings?|vouchers?|receipts?|documents?|files?|materials?|attachments?|"
-    r"order[-\s]?confirmation\s+(?:draft|document)"
+    r"order[-\s]?confirmation\s+(?:draft|document)|\b(?:evidence|proofs?)\b"
     r")",
     re.IGNORECASE,
 )
 _EVIDENCE_TRANSFER_ACTION_RE = re.compile(
-    r"(?:上传|补交|提供|提交|发送|发来|附上|出示|发给|发至|寄给|分享|共享|"
+    r"(?:上传|补交|补充(?!说明)|提供|提交|发送|发来|附上|出示|发给|发至|寄给|分享|共享|"
     r"\b(?:upload|provide|submit|send|attach|show|email|share)\b)",
     re.IGNORECASE,
 )

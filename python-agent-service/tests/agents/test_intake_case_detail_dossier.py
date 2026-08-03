@@ -621,6 +621,8 @@ def test_intake_question_boundary_keeps_explanation_of_named_material_byte_ident
         "请确认订单确认稿的提供方是谁？",
         "请问用户是否上传过聊天记录？",
         "请问商家需要提供物流凭证吗？",
+        "请补充说明“订单确认稿”具体是指哪一版本的沟通记录或文件？",
+        "请补充说明事件经过。",
     ],
 )
 def test_intake_question_boundary_keeps_factual_material_references_byte_identical(
@@ -643,6 +645,8 @@ def test_intake_question_boundary_keeps_factual_material_references_byte_identic
     "utterance",
     [
         "请上传开箱视频、聊天记录截图和物流签收凭证。",
+        "请补充物流凭证。",
+        "请补充证据。",
         "请上传图片。",
         "请上传物流单。",
         "请上传运单。",
@@ -652,6 +656,8 @@ def test_intake_question_boundary_keeps_factual_material_references_byte_identic
         "请将照片和视频发送过来，并提交物流凭证。",
         "Please upload the screenshots and attach the order-confirmation document.",
         "Please upload an image.",
+        "Please provide evidence.",
+        "Please submit proof.",
         "Could you provide the chat records and show the shipping voucher?",
         "需要出示检测报告。",
         "还需提交凭证。",
