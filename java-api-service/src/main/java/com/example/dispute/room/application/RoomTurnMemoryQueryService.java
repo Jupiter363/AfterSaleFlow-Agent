@@ -16,6 +16,8 @@ import com.example.dispute.room.infrastructure.persistence.entity.AgentConversat
 import com.example.dispute.room.infrastructure.persistence.entity.CaseAccessSessionEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseIntakeDossierEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.RoomTurnMemoryEntity;
+import com.example.dispute.room.infrastructure.persistence.repository.AgentConversationSessionRepository;
+import com.example.dispute.room.infrastructure.persistence.repository.CaseAccessSessionRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseParticipantRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseIntakeDossierRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.RoomTurnMemoryRepository;
@@ -42,6 +44,8 @@ public class RoomTurnMemoryQueryService {
     private final CaseParticipantRepository participantRepository;
     private final RoomTurnMemoryRepository memoryRepository;
     private final CaseIntakeDossierRepository intakeDossierRepository;
+    private final AgentConversationSessionRepository agentSessionRepository;
+    private final CaseAccessSessionRepository accessSessionRepository;
     private final AccessSessionResolver accessSessionResolver;
     private final AgentSessionResolver agentSessionResolver;
     private final SessionPermissionService permissionService;
@@ -59,6 +63,8 @@ public class RoomTurnMemoryQueryService {
             CaseParticipantRepository participantRepository,
             RoomTurnMemoryRepository memoryRepository,
             CaseIntakeDossierRepository intakeDossierRepository,
+            AgentConversationSessionRepository agentSessionRepository,
+            CaseAccessSessionRepository accessSessionRepository,
             AccessSessionResolver accessSessionResolver,
             AgentSessionResolver agentSessionResolver,
             SessionPermissionService permissionService,
@@ -68,6 +74,8 @@ public class RoomTurnMemoryQueryService {
         this.participantRepository = participantRepository;
         this.memoryRepository = memoryRepository;
         this.intakeDossierRepository = intakeDossierRepository;
+        this.agentSessionRepository = agentSessionRepository;
+        this.accessSessionRepository = accessSessionRepository;
         this.accessSessionResolver = accessSessionResolver;
         this.agentSessionResolver = agentSessionResolver;
         this.permissionService = permissionService;
@@ -88,6 +96,9 @@ public class RoomTurnMemoryQueryService {
                 caseRepository
                         .findById(caseId)
                         .orElseThrow(() -> new IllegalArgumentException("case not found"));
+        if (isCurrentTargetIntakeRoute(caseId, roomType, actor)) {
+            return latestTargetIntakeMemory(dispute, actor);
+        }
         CaseAccessSessionEntity accessSession = accessSessionResolver.resolve(caseId, actor);
         permissionService.requireRoomRead(accessSession, roomType);
         if (roomType == RoomType.INTAKE) {
@@ -116,6 +127,91 @@ public class RoomTurnMemoryQueryService {
                 .findTopByCaseIdAndRoomTypeAndAgentRoleIsNotNullOrderByTurnNoDesc(
                         caseId, roomType)
                 .map(this::view);
+    }
+
+    private boolean isCurrentTargetIntakeRoute(
+            String caseId, RoomType roomType, AuthenticatedActor actor) {
+        if (roomType != RoomType.INTAKE || !isParty(actor.role())) {
+            return false;
+        }
+        List<String> routeIds = agentSessionRepository.findActiveTargetIntakeRouteIds(caseId);
+        if (routeIds.size() > 1) {
+            throw new IllegalStateException("multiple active target Intake authorities");
+        }
+        return routeIds.size() == 1;
+    }
+
+    private Optional<RoomTurnMemoryView> latestTargetIntakeMemory(
+            FulfillmentCaseEntity dispute, AuthenticatedActor actor) {
+        assertCanRead(dispute, actor);
+        intakeProgressService.assertIntakeRead(dispute, actor);
+        List<AgentConversationSessionEntity> sessions =
+                agentSessionRepository.findCurrentRegisteredTargetIntakePartySession(
+                        dispute.getId(),
+                        actor.actorId(),
+                        actor.role().name(),
+                        IntakeAgentTurnService.AGENT_ROLE);
+        if (sessions.size() > 1) {
+            throw new IllegalStateException("multiple registered target Intake private sessions");
+        }
+        if (sessions.isEmpty()) {
+            return targetDossierOnlyView(dispute.getId());
+        }
+        AgentConversationSessionEntity agentSession = sessions.getFirst();
+        if (!matchesTargetSession(dispute.getId(), actor, agentSession)) {
+            return targetDossierOnlyView(dispute.getId());
+        }
+        Optional<CaseAccessSessionEntity> accessSession =
+                accessSessionRepository.findById(agentSession.getAccessSessionId());
+        if (accessSession.isEmpty()
+                || !matchesTargetAccessSession(dispute.getId(), actor, agentSession, accessSession.get())) {
+            return targetDossierOnlyView(dispute.getId());
+        }
+        permissionService.requireRoomRead(accessSession.get(), RoomType.INTAKE);
+        Optional<RoomTurnMemoryView> memory =
+                memoryRepository
+                        .findTopByCaseIdAndRoomTypeAndAgentSessionIdAndAccessSessionIdAndConversationScopeAndSessionActorIdAndSessionActorRoleAndPromptProfileIdAndAgentRoleAndAgentResponseIsNotNullOrderByTurnNoDesc(
+                                dispute.getId(),
+                                RoomType.INTAKE,
+                                agentSession.getId(),
+                                accessSession.get().getId(),
+                                agentSession.getConversationScope(),
+                                actor.actorId(),
+                                actor.role().name(),
+                                agentSession.getPromptProfileId(),
+                                IntakeAgentTurnService.AGENT_ROLE)
+                        .map(this::view);
+        return memory.isPresent() ? memory : targetDossierOnlyView(dispute.getId());
+    }
+
+    private static boolean matchesTargetSession(
+            String caseId,
+            AuthenticatedActor actor,
+            AgentConversationSessionEntity agentSession) {
+        return caseId.equals(agentSession.getCaseId())
+                && agentSession.getRoomType() == RoomType.INTAKE
+                && actor.actorId().equals(agentSession.getActorId())
+                && actor.role() == agentSession.getActorRole()
+                && IntakeAgentTurnService.AGENT_ROLE.equals(agentSession.getAgentKey())
+                && "GRAPH_PRIVATE_NO_MEMORY_FRAME_V1".equals(agentSession.getMemoryPolicyId());
+    }
+
+    private static boolean matchesTargetAccessSession(
+            String caseId,
+            AuthenticatedActor actor,
+            AgentConversationSessionEntity agentSession,
+            CaseAccessSessionEntity accessSession) {
+        return agentSession.getAccessSessionId().equals(accessSession.getId())
+                && agentSession.getTenantId().equals(accessSession.getTenantId())
+                && caseId.equals(accessSession.getCaseId())
+                && actor.actorId().equals(accessSession.getActorId())
+                && actor.role() == accessSession.getActorRole();
+    }
+
+    private Optional<RoomTurnMemoryView> targetDossierOnlyView(String caseId) {
+        return intakeDossierRepository
+                .findByCaseIdAndRoomType(caseId, RoomType.INTAKE)
+                .map(this::dossierOnlyView);
     }
 
     private RoomTurnMemoryView dossierOnlyView(CaseIntakeDossierEntity dossier) {

@@ -41,6 +41,18 @@ public interface RoomTurnMemoryRepository
             findTopByAgentSessionIdAndAgentRoleIsNotNullOrderByTurnNoDesc(
                     String agentSessionId);
 
+    Optional<RoomTurnMemoryEntity>
+            findTopByCaseIdAndRoomTypeAndAgentSessionIdAndAccessSessionIdAndConversationScopeAndSessionActorIdAndSessionActorRoleAndPromptProfileIdAndAgentRoleAndAgentResponseIsNotNullOrderByTurnNoDesc(
+                    String caseId,
+                    RoomType roomType,
+                    String agentSessionId,
+                    String accessSessionId,
+                    String conversationScope,
+                    String sessionActorId,
+                    String sessionActorRole,
+                    String promptProfileId,
+                    String agentRole);
+
     // 所属模块：【房间协作与权限 / 仓储接口层】「RoomTurnMemoryRepository.findTop10ByCaseIdAndRoomTypeOrderByTurnNoDesc(String,RoomType)」。
     // 具体功能：「RoomTurnMemoryRepository.findTop10ByCaseIdAndRoomTypeOrderByTurnNoDesc(String,RoomType)」：声明按10按案件标识、房间类型访问房间轮次记忆的 Spring Data 查询，由框架根据方法签名生成 SQL，并以「List<RoomTurnMemoryEntity>」返回。
     // 上游调用：「RoomTurnMemoryRepository.findTop10ByCaseIdAndRoomTypeOrderByTurnNoDesc(String,RoomType)」的上游是持有该仓储的应用服务或 Activity，调用发生在其事务边界内。

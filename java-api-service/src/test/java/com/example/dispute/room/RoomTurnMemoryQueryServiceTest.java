@@ -8,9 +8,11 @@ package com.example.dispute.room;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.Mockito.when;
-import static org.mockito.Mockito.lenient;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
 import com.example.dispute.common.exception.ForbiddenException;
 import com.example.dispute.config.ActorRole;
@@ -30,6 +32,8 @@ import com.example.dispute.room.infrastructure.persistence.entity.AgentConversat
 import com.example.dispute.room.infrastructure.persistence.entity.CaseAccessSessionEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.CaseIntakeDossierEntity;
 import com.example.dispute.room.infrastructure.persistence.entity.RoomTurnMemoryEntity;
+import com.example.dispute.room.infrastructure.persistence.repository.AgentConversationSessionRepository;
+import com.example.dispute.room.infrastructure.persistence.repository.CaseAccessSessionRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseParticipantRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseIntakeDossierRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.RoomTurnMemoryRepository;
@@ -55,6 +59,8 @@ class RoomTurnMemoryQueryServiceTest {
     @Mock private CaseParticipantRepository participantRepository;
     @Mock private RoomTurnMemoryRepository memoryRepository;
     @Mock private CaseIntakeDossierRepository intakeDossierRepository;
+    @Mock private AgentConversationSessionRepository agentSessionRepository;
+    @Mock private CaseAccessSessionRepository accessSessionRepository;
     @Mock private AccessSessionResolver accessSessionResolver;
     @Mock private AgentSessionResolver agentSessionResolver;
     @Mock private SessionPermissionService permissionService;
@@ -75,6 +81,8 @@ class RoomTurnMemoryQueryServiceTest {
                         participantRepository,
                         memoryRepository,
                         intakeDossierRepository,
+                        agentSessionRepository,
+                        accessSessionRepository,
                         accessSessionResolver,
                         agentSessionResolver,
                         permissionService,
@@ -97,6 +105,9 @@ class RoomTurnMemoryQueryServiceTest {
                                         invocation.getArgument(2),
                                         invocation.getArgument(3),
                                         invocation.getArgument(4)));
+        lenient()
+                .when(agentSessionRepository.findActiveTargetIntakeRouteIds(any()))
+                .thenReturn(List.of());
     }
 
     // 所属模块：【房间协作与权限 / 自动化测试层】「RoomTurnMemoryQueryServiceTest.latestAgentMemoryReturnsStructuredScrollSnapshotForCaseOwner()」。
@@ -150,6 +161,110 @@ class RoomTurnMemoryQueryServiceTest {
         assertThat(result.orElseThrow().caseIntakeDossier().qualityScore()).isEqualTo(88);
         assertThat(result.orElseThrow().caseIntakeDossier().readyForNextStep()).isTrue();
         assertThat(result.orElseThrow().canvasOperations()).hasSize(1);
+    }
+
+    @Test
+    void latestTargetIntakeMemoryUsesRegisteredAuthorityWithoutResolvingSession() {
+        FulfillmentCaseEntity dispute = intakeCase();
+        AuthenticatedActor actor = new AuthenticatedActor("user-local", ActorRole.USER);
+        CaseAccessSessionEntity targetAccessSession =
+                accessSession("legacy-default", dispute.getId(), actor);
+        AgentConversationSessionEntity targetAgentSession =
+                AgentConversationSessionEntity.create(
+                        "AGENT_SESSION_TARGET_INTAKE",
+                        targetAccessSession,
+                        RoomType.INTAKE,
+                        "DISPUTE_INTAKE_OFFICER",
+                        "DISPUTE_INTAKE_OFFICER:USER:v1",
+                        "GRAPH_PRIVATE_NO_MEMORY_FRAME_V1",
+                        actor.actorId());
+        RoomTurnMemoryEntity targetMemory =
+                RoomTurnMemoryEntity.agentTurn(
+                        "MEMORY_TARGET_INTAKE",
+                        dispute.getId(),
+                        RoomType.INTAKE,
+                        1,
+                        "dispute-intake-officer",
+                        "DISPUTE_INTAKE_OFFICER",
+                        "target formal reply",
+                        "{}",
+                        "{\"schema_version\":\"intake-dossier.v2\"}",
+                        "[]",
+                        "RUN_TARGET",
+                        targetAgentSession,
+                        targetAccessSession,
+                        "{}");
+
+        when(caseRepository.findById(dispute.getId())).thenReturn(Optional.of(dispute));
+        when(agentSessionRepository.findActiveTargetIntakeRouteIds(dispute.getId()))
+                .thenReturn(List.of("EPOCH_TARGET_INTAKE"));
+        when(agentSessionRepository.findCurrentRegisteredTargetIntakePartySession(
+                        dispute.getId(),
+                        actor.actorId(),
+                        actor.role().name(),
+                        "DISPUTE_INTAKE_OFFICER"))
+                .thenReturn(List.of(targetAgentSession));
+        when(accessSessionRepository.findById(targetAccessSession.getId()))
+                .thenReturn(Optional.of(targetAccessSession));
+        when(memoryRepository
+                        .findTopByCaseIdAndRoomTypeAndAgentSessionIdAndAccessSessionIdAndConversationScopeAndSessionActorIdAndSessionActorRoleAndPromptProfileIdAndAgentRoleAndAgentResponseIsNotNullOrderByTurnNoDesc(
+                                dispute.getId(),
+                                RoomType.INTAKE,
+                                targetAgentSession.getId(),
+                                targetAccessSession.getId(),
+                                targetAgentSession.getConversationScope(),
+                                actor.actorId(),
+                                actor.role().name(),
+                                targetAgentSession.getPromptProfileId(),
+                                "DISPUTE_INTAKE_OFFICER"))
+                .thenReturn(Optional.of(targetMemory));
+
+        var result = service.latestAgentMemory(dispute.getId(), RoomType.INTAKE, actor);
+
+        assertThat(result).isPresent();
+        assertThat(result.orElseThrow().agentResponse()).isEqualTo("target formal reply");
+        verify(accessSessionRepository).findById(targetAccessSession.getId());
+        verifyNoInteractions(accessSessionResolver);
+        verifyNoInteractions(agentSessionResolver);
+    }
+
+    @Test
+    void targetIntakeWithoutRegisteredAuthorityDoesNotCreateSessions() {
+        FulfillmentCaseEntity dispute = intakeCase();
+        AuthenticatedActor actor = new AuthenticatedActor("user-local", ActorRole.USER);
+        CaseIntakeDossierEntity dossier =
+                CaseIntakeDossierEntity.create(
+                        "INTAKE_DOSSIER_TARGET_PENDING",
+                        dispute.getId(),
+                        RoomType.INTAKE,
+                        "{\"schema_version\":\"intake-dossier.v2\"}",
+                        0,
+                        false,
+                        "PENDING",
+                        1,
+                        "dispute-intake-officer");
+
+        when(caseRepository.findById(dispute.getId())).thenReturn(Optional.of(dispute));
+        when(agentSessionRepository.findActiveTargetIntakeRouteIds(dispute.getId()))
+                .thenReturn(List.of("EPOCH_TARGET_INTAKE"));
+        when(agentSessionRepository.findCurrentRegisteredTargetIntakePartySession(
+                        dispute.getId(),
+                        actor.actorId(),
+                        actor.role().name(),
+                        "DISPUTE_INTAKE_OFFICER"))
+                .thenReturn(List.of());
+        when(intakeDossierRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.INTAKE))
+                .thenReturn(Optional.of(dossier));
+
+        var result = service.latestAgentMemory(dispute.getId(), RoomType.INTAKE, actor);
+
+        assertThat(result).isPresent();
+        assertThat(result.orElseThrow().agentResponse()).isEmpty();
+        assertThat(result.orElseThrow().caseIntakeDossier().dossier().path("schema_version").asText())
+                .isEqualTo("intake-dossier.v2");
+        verifyNoInteractions(accessSessionRepository);
+        verifyNoInteractions(accessSessionResolver);
+        verifyNoInteractions(agentSessionResolver);
     }
 
     @Test
@@ -303,13 +418,18 @@ class RoomTurnMemoryQueryServiceTest {
     // 下游影响：「RoomTurnMemoryQueryServiceTest.accessSession(String,AuthenticatedActor)」的下游是测试夹具或被测对象，不写入生产数据库，也不发起真实线上副作用。
     // 系统意义：「RoomTurnMemoryQueryServiceTest.accessSession(String,AuthenticatedActor)」守住「房间协作与权限」的可执行规格，尤其防止 「ACCESS_」、「default」 语义漂移；后续重构若破坏契约会在进入集成环境前失败。
     private static CaseAccessSessionEntity accessSession(String caseId, AuthenticatedActor actor) {
+        return accessSession("default", caseId, actor);
+    }
+
+    private static CaseAccessSessionEntity accessSession(
+            String tenantId, String caseId, AuthenticatedActor actor) {
         PermissionLevel level =
                 actor.role() == ActorRole.MERCHANT
                         ? PermissionLevel.PARTY_MERCHANT
                         : PermissionLevel.PARTY_USER;
         return CaseAccessSessionEntity.create(
                 "ACCESS_" + actor.actorId(),
-                "default",
+                tenantId,
                 caseId,
                 actor.actorId(),
                 actor.role(),
