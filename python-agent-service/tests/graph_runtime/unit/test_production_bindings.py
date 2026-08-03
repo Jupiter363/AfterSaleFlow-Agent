@@ -2575,7 +2575,7 @@ async def test_target_intake_executor_streams_room_equal_to_terminal_before_term
             ("case_detail.references", raw_dossier_delta),
         ]
         assert visible_commit_states == [False, False, False]
-        assert visible_source_completion_states == [False, False, False]
+        assert visible_source_completion_states == [False, False, True]
         assert saver.preflights == 1
         assert store.calls == 1
         assert saver.commits == (1 if failure_stage == "commit" else 0)
@@ -2613,7 +2613,7 @@ async def test_target_intake_executor_streams_room_equal_to_terminal_before_term
         event.payload.delta or "" for event in room_events
     ) == terminal_room_utterance
     assert visible_commit_states == [False, False, False]
-    assert visible_source_completion_states == [False, False, False]
+    assert visible_source_completion_states == [False, False, True]
     assert max(event.sequence_no for event in room_events) < min(
         event.sequence_no for event in board_events
     )
@@ -3204,14 +3204,444 @@ async def test_target_intake_executor_streams_governed_ready_handoff_equal_to_te
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("target_candidate", "finalizer_trims_third_question"),
-    ((False, False), (True, False), (True, True)),
-    ids=("legacy", "target", "target_finalizer_trims_third_question"),
+    (
+        "raw_room_deltas",
+        "expected_live_room_after_each_delta",
+        "terminal_room_utterance",
+        "withheld_marker",
+        "marker_is_retained",
+    ),
+    (
+        (
+            (
+                "为了更准确地梳理案情，请问：1. 您是否曾就此事与商家沟通过",
+                "？如有，商家是如何回复的",
+                "？",
+                "2",
+                ". 您收到的主商品包裹外包装或内部清单上，"
+                "是否有提及【RAW_THIRD_QUESTION】赠品的信息",
+                "？",
+            ),
+            (
+                "为了更准确地梳理案情，请问：1. 您是否曾就此事与商家沟通过",
+                "为了更准确地梳理案情，请问：1. 您是否曾就此事与商家沟通过"
+                "？如有，商家是如何回复的",
+                "为了更准确地梳理案情，请问：1. 您是否曾就此事与商家沟通过"
+                "？如有，商家是如何回复的？",
+                "为了更准确地梳理案情，请问：1. 您是否曾就此事与商家沟通过"
+                "？如有，商家是如何回复的？",
+                "为了更准确地梳理案情，请问：1. 您是否曾就此事与商家沟通过"
+                "？如有，商家是如何回复的？",
+                "为了更准确地梳理案情，请问：1. 您是否曾就此事与商家沟通过"
+                "？如有，商家是如何回复的？",
+            ),
+            "为了更准确地梳理案情，请问：1. 您是否曾就此事与商家沟通过"
+            "？如有，商家是如何回复的？",
+            "RAW_THIRD_QUESTION",
+            False,
+        ),
+        (
+            (
+                "Please confirm the order number?",
+                " How did the fault affect use?【TERMINAL_STATEMENT_TAIL】",
+            ),
+            (
+                "Please confirm the order number?",
+                "Please confirm the order number? How did the fault affect use?",
+            ),
+            (
+                "Please confirm the order number? How did the fault affect use?"
+                "【TERMINAL_STATEMENT_TAIL】"
+            ),
+            "TERMINAL_STATEMENT_TAIL",
+            True,
+        ),
+    ),
+    ids=("two_numbered_items_three_questions", "two_questions_statement_tail"),
 )
-async def test_compiled_intake_executor_rejects_mismatched_room_before_terminal_commit(
+async def test_target_intake_executor_projects_question_limited_room_before_releasing_board(
+    monkeypatch: pytest.MonkeyPatch,
+    raw_room_deltas: tuple[str, ...],
+    expected_live_room_after_each_delta: tuple[str, ...],
+    terminal_room_utterance: str,
+    withheld_marker: str,
+    marker_is_retained: bool,
+) -> None:
+    command, _, _ = _intake_command()
+    execution = _target_candidate_intake_execution(command)
+    raw_room_utterance = "".join(raw_room_deltas)
+    assert _limit_follow_up_questions(raw_room_utterance, limit=2) == terminal_room_utterance
+    if withheld_marker == "RAW_THIRD_QUESTION":
+        assert raw_room_utterance.count("?") + raw_room_utterance.count("？") == 3
+        assert "1." in raw_room_utterance and "2." in raw_room_utterance
+
+    state = {
+        "terminal_draft": {"same": True},
+        "result_json": {"same": True},
+        "cognitive_revision": 1,
+    }
+    final_config = bind_fence_context(
+        {
+            "configurable": {
+                "thread_id": command.thread_id,
+                "checkpoint_ns": "",
+                "checkpoint_id": "cp-intake-question-projection",
+            }
+        },
+        execution.fence,
+    )
+    proposal = SimpleNamespace(room_utterance=terminal_room_utterance)
+    canonical = SimpleNamespace(
+        artifact_id="intake-proposal-question-projection",
+        schema_version="intake-turn-proposal.v2",
+        sha256="a" * 64,
+        size_bytes=1,
+    )
+    result = SimpleNamespace(
+        result_ref="urn:intake:question-projection:result",
+        result_hash="b" * 64,
+        proposal_hash="c" * 64,
+        result_envelope_hash="d" * 64,
+    )
+    raw_board_delta = '{"order_reference":"RAW-AFTER-ROOM"}'
+    usage = Usage(input_tokens=3, output_tokens=2, total_tokens=5)
+    events: list[Any] = []
+
+    def governed_visible_delta(field: str, delta: str) -> tuple[str, tuple[Any, dict[str, str]]]:
+        return (
+            "messages",
+            (
+                AIMessageChunk(
+                    content="",
+                    additional_kwargs={
+                        "governed_events": [
+                            {
+                                "schema_version": "governed-model-event.v1",
+                                "event_type": "visible_delta",
+                                "node_name": BASELINE_INTAKE_NODE_NAME,
+                                "field": field,
+                                "delta": delta,
+                            }
+                        ]
+                    },
+                ),
+                {"langgraph_node": BASELINE_INTAKE_NODE_NAME},
+            ),
+        )
+
+    class Saver:
+        def __init__(self) -> None:
+            self.preflights = 0
+            self.commits = 0
+            self.terminal_committed = False
+
+        async def avalidate_external_terminal_checkpoint(self, config: Any, **kwargs: Any) -> None:
+            self.preflights += 1
+            assert config is final_config
+            assert kwargs == {"cognitive_revision": 1}
+            assert any(
+                event.event_type == "visible_delta"
+                and event.payload.field == "case_detail.references"
+                for event in events
+            )
+
+        async def acommit_external_terminal(self, config: Any, commit: Any) -> dict[str, Any]:
+            self.commits += 1
+            assert config is final_config
+            assert commit.result is result
+            self.terminal_committed = True
+            return {
+                "configurable": {
+                    FENCE_CONTEXT_KEY: replace(
+                        execution.fence,
+                        result_ref=result.result_ref,
+                        result_hash=result.result_hash,
+                        proposal_hash=result.proposal_hash,
+                        result_envelope_hash=result.result_envelope_hash,
+                    )
+                }
+            }
+
+    saver = Saver()
+
+    class Graph:
+        checkpointer = saver
+
+        def __init__(self) -> None:
+            self.source_completed = False
+            self.room_after_each_delta: list[str] = []
+            self.room_before_board = ""
+
+        async def astream(self, input: Any, config: Any, **kwargs: Any):
+            assert kwargs["stream_mode"] == ["messages", "custom"]
+            for raw_delta, expected_live_room in zip(
+                raw_room_deltas,
+                expected_live_room_after_each_delta,
+                strict=True,
+            ):
+                yield governed_visible_delta("room_utterance", raw_delta)
+                visible_room = "".join(
+                    event.payload.delta or ""
+                    for event in events
+                    if event.event_type == "visible_delta"
+                    and event.payload.field == "room_utterance"
+                )
+                self.room_after_each_delta.append(visible_room)
+                assert visible_room == expected_live_room
+            self.room_before_board = "".join(
+                event.payload.delta or ""
+                for event in events
+                if event.event_type == "visible_delta"
+                and event.payload.field == "room_utterance"
+            )
+            yield governed_visible_delta("case_detail.references", raw_board_delta)
+            yield ("custom", GraphPublicUpdate.usage(usage))
+            self.source_completed = True
+
+        async def aget_state(self, config: Any) -> object:
+            return object()
+
+    class Store:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.stored = False
+
+        async def put(
+            self,
+            selected_execution: GatewayExecution,
+            *,
+            proposal: Any,
+            **kwargs: Any,
+        ) -> Any:
+            self.calls += 1
+            assert selected_execution is execution
+            assert proposal is canonical
+            assert kwargs == {
+                "checkpoint_ns": "",
+                "checkpoint_id": "cp-intake-question-projection",
+                "cognitive_revision": 1,
+            }
+            self.stored = True
+            return SimpleNamespace(
+                artifact_id=canonical.artifact_id,
+                schema_version=canonical.schema_version,
+                uri="s3://intake-proposals/question-projection.json",
+                sha256=canonical.sha256,
+                size_bytes=canonical.size_bytes,
+            )
+
+    class Materializer:
+        def materialize(self, checkpoint_ns: str, checkpoint_id: str, *, fence: Any) -> Any:
+            assert checkpoint_ns == ""
+            assert checkpoint_id == "cp-intake-question-projection"
+            assert fence is execution.fence
+            return result
+
+    async def load_context(*_: Any, **__: Any) -> object:
+        return object()
+
+    graph = Graph()
+    monkeypatch.setattr(
+        "app.graph_runtime.intake_executor.build_governed_intake_runtime",
+        lambda **kwargs: SimpleNamespace(graph=graph),
+    )
+    monkeypatch.setattr(CompiledIntakeGraphShadowExecutor, "_load_context", load_context)
+    monkeypatch.setattr(
+        CompiledIntakeGraphShadowExecutor,
+        "_graph_input",
+        staticmethod(lambda _: {}),
+    )
+    monkeypatch.setattr(
+        CompiledIntakeGraphShadowExecutor,
+        "_graph_config",
+        staticmethod(lambda _: {"configurable": {}}),
+    )
+    monkeypatch.setattr(
+        CompiledIntakeGraphShadowExecutor,
+        "_snapshot",
+        staticmethod(lambda *_: (state, final_config)),
+    )
+    monkeypatch.setattr(
+        IntakeRuntimeBundle,
+        "terminal_proposal",
+        staticmethod(lambda _: proposal),
+    )
+    monkeypatch.setattr(
+        CompiledIntakeGraphShadowExecutor,
+        "_command_usage",
+        staticmethod(lambda *_: usage),
+    )
+    monkeypatch.setattr(
+        "app.graph_runtime.intake_executor.canonical_intake_proposal",
+        lambda _: canonical,
+    )
+    monkeypatch.setattr(
+        CompiledIntakeGraphShadowExecutor,
+        "_materializer",
+        staticmethod(lambda *_, **__: Materializer()),
+    )
+    monkeypatch.setattr(
+        CompiledIntakeGraphShadowExecutor,
+        "_target_proposal_source",
+        staticmethod(lambda *_: None),
+    )
+    monkeypatch.setattr(
+        "app.graph_runtime.intake_executor.ExternalTerminalCommit",
+        lambda **kwargs: SimpleNamespace(**kwargs),
+    )
+
+    class Loader:
+        async def load(self, *args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("the test harness patches the Intake context loader")
+
+    store = Store()
+    executor = CompiledIntakeGraphShadowExecutor(
+        saver=cast(Any, saver),
+        transport=cast(Any, object()),
+        provider="synthetic",
+        model="intake-model",
+        input_loader=Loader(),
+        proposal_store=store,
+    )
+
+    visible_commit_states = []
+    visible_source_completion_states = []
+    async for event in executor.stream(execution):
+        events.append(event)
+        if event.event_type == "visible_delta":
+            visible_commit_states.append(saver.terminal_committed)
+            visible_source_completion_states.append(
+                (event.payload.field, graph.source_completed)
+            )
+
+    visible = [event for event in events if event.event_type == "visible_delta"]
+    room_events = [event for event in visible if event.payload.field == "room_utterance"]
+    board_events = [event for event in visible if event.payload.field != "room_utterance"]
+    visible_text = "".join(event.payload.delta or "" for event in visible)
+
+    assert graph.room_after_each_delta == list(expected_live_room_after_each_delta)
+    assert graph.room_before_board == expected_live_room_after_each_delta[-1]
+    assert withheld_marker not in graph.room_before_board
+    assert events[1].payload.field == "room_utterance"
+    assert events[1].payload.delta == raw_room_deltas[0]
+    assert "".join(event.payload.delta or "" for event in room_events) == terminal_room_utterance
+    assert (withheld_marker in visible_text) is marker_is_retained
+    assert max(event.sequence_no for event in room_events) < min(
+        event.sequence_no for event in board_events
+    )
+    assert [(event.payload.field, event.payload.delta) for event in board_events] == [
+        ("case_detail.references", raw_board_delta)
+    ]
+    assert visible_commit_states == [False] * len(visible)
+    assert visible_source_completion_states[-1] == ("case_detail.references", True)
+    assert events[-2].event_type == "usage"
+    assert events[-1].event_type == "final"
+    assert saver.preflights == 1
+    assert store.calls == 1
+    assert saver.commits == 1
+    assert saver.terminal_committed
+
+
+@pytest.mark.asyncio
+async def test_target_intake_executor_rejects_room_append_after_root_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command, _, _ = _intake_command()
+    execution = _target_candidate_intake_execution(command)
+    saver = object()
+
+    def governed_visible_delta(field: str, delta: str) -> tuple[str, tuple[Any, dict[str, str]]]:
+        return (
+            "messages",
+            (
+                AIMessageChunk(
+                    content="",
+                    additional_kwargs={
+                        "governed_events": [
+                            {
+                                "schema_version": "governed-model-event.v1",
+                                "event_type": "visible_delta",
+                                "node_name": BASELINE_INTAKE_NODE_NAME,
+                                "field": field,
+                                "delta": delta,
+                            }
+                        ]
+                    },
+                ),
+                {"langgraph_node": BASELINE_INTAKE_NODE_NAME},
+            ),
+        )
+
+    class Graph:
+        checkpointer = saver
+
+        async def astream(self, input: Any, config: Any, **kwargs: Any):
+            assert kwargs["stream_mode"] == ["messages", "custom"]
+            yield governed_visible_delta("room_utterance", "Please confirm the order number?")
+            yield governed_visible_delta(
+                "case_detail.references",
+                '{"order_reference":"RAW-AFTER-ROOM"}',
+            )
+            yield governed_visible_delta("room_utterance", " This must be rejected.")
+
+        async def aget_state(self, config: Any) -> object:
+            raise AssertionError("the order breach must fail before terminal state")
+
+    async def load_context(*_: Any, **__: Any) -> object:
+        return object()
+
+    monkeypatch.setattr(
+        "app.graph_runtime.intake_executor.build_governed_intake_runtime",
+        lambda **kwargs: SimpleNamespace(graph=Graph()),
+    )
+    monkeypatch.setattr(CompiledIntakeGraphShadowExecutor, "_load_context", load_context)
+    monkeypatch.setattr(
+        CompiledIntakeGraphShadowExecutor,
+        "_graph_input",
+        staticmethod(lambda _: {}),
+    )
+    monkeypatch.setattr(
+        CompiledIntakeGraphShadowExecutor,
+        "_graph_config",
+        staticmethod(lambda _: {"configurable": {}}),
+    )
+
+    class Loader:
+        async def load(self, *args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("the test harness patches the Intake context loader")
+
+    class Store:
+        async def put(self, *args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("the order breach must fail before proposal storage")
+
+    executor = CompiledIntakeGraphShadowExecutor(
+        saver=cast(Any, saver),
+        transport=cast(Any, object()),
+        provider="synthetic",
+        model="intake-model",
+        input_loader=Loader(),
+        proposal_store=Store(),
+    )
+
+    events = []
+    with pytest.raises(GraphContractError, match="INTAKE_ROOM_UTTERANCE_STREAM_ORDER_INVALID"):
+        async for event in executor.stream(execution):
+            events.append(event)
+
+    assert [event.event_type for event in events] == ["attempt_started", "visible_delta"]
+    assert events[-1].payload.field == "room_utterance"
+    assert events[-1].payload.delta == "Please confirm the order number?"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "target_candidate",
+    (False, True),
+    ids=("legacy_non_prefix", "target_non_prefix"),
+)
+async def test_compiled_intake_executor_rejects_non_prefix_room_before_terminal_commit(
     monkeypatch: pytest.MonkeyPatch,
     target_candidate: bool,
-    finalizer_trims_third_question: bool,
 ) -> None:
     command, _, _ = _intake_command()
     execution = (
@@ -3219,26 +3649,8 @@ async def test_compiled_intake_executor_rejects_mismatched_room_before_terminal_
         if target_candidate
         else _intake_execution(command)
     )
-    if finalizer_trims_third_question:
-        first_two_questions = (
-            "请确认订单号？商品故障对您的使用造成了什么影响？"
-        )
-        third_question = "【RAW_THIRD_QUESTION】您是否已经联系过商家？"
-        streamed_room_utterance = (
-            "您好，我已记录您补充的订单与使用情况。"
-            "为准确整理争议，请核对以下信息，并说明下列两点："
-            + first_two_questions
-            + third_question
-        )
-        terminal_room_utterance = _limit_follow_up_questions(
-            streamed_room_utterance,
-            limit=2,
-        )
-        assert streamed_room_utterance.count("？") == 3
-        assert terminal_room_utterance.count("？") == 2
-    else:
-        streamed_room_utterance = "Please confirm the requested resolution."
-        terminal_room_utterance = "Please describe the desired resolution."
+    streamed_room_utterance = "Please confirm the requested resolution."
+    terminal_room_utterance = "Please describe the desired resolution."
     assert streamed_room_utterance != terminal_room_utterance
     state = {
         "terminal_draft": {"same": True},

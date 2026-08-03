@@ -11,6 +11,7 @@ from typing import Any, Literal, Protocol, cast
 from langchain_core.messages import AIMessageChunk
 from langchain_core.runnables import RunnableConfig
 
+from app.agents.dispute_intake_officer.workflow import _limit_follow_up_questions
 from app.contracts.v1.models import (
     AgentStreamEvent,
     AgentStreamPayload,
@@ -87,6 +88,7 @@ _INTAKE_TERMINAL_DOSSIER_FIELDS = tuple(
     )
 )
 _AGENT_STREAM_DELTA_MAX_LENGTH = 4096
+_TARGET_INTAKE_FOLLOW_UP_QUESTION_LIMIT = 2
 # Replaying a terminal, baseline-finalized Intake proposal is deliberately much
 # smaller than the protocol maximum.  Python slices are code-point safe and the
 # projector retains incomplete JSON escape sequences between slices, so a
@@ -175,8 +177,11 @@ class CompiledIntakeGraphShadowExecutor:
         emitted_usage: list[Usage] = []
         pending_usage_update: GraphPublicUpdate | None = None
         streamed_room_utterance_parts: list[str] = []
-        room_utterance_streamed = False
+        target_raw_room_utterance_parts: list[str] = []
+        target_buffered_board_updates: list[GraphPublicUpdate] = []
+        room_utterance_received = False
         room_utterance_completed = False
+        target_room_canonical_closed = False
         case_detail_seen_before_room_utterance = False
         target_reply_then_board = self._uses_target_reply_then_board_boundary(execution)
         source = graph.astream(
@@ -212,7 +217,7 @@ class CompiledIntakeGraphShadowExecutor:
                         room_delta = self._streamed_room_utterance_delta(update)
                         if target_reply_then_board:
                             candidate_room_utterance = "".join(
-                                (*streamed_room_utterance_parts, room_delta)
+                                (*target_raw_room_utterance_parts, room_delta)
                             )
                             # A Target-visible room prefix must already be its
                             # cumulative governed form. Checking it before it reaches
@@ -225,10 +230,13 @@ class CompiledIntakeGraphShadowExecutor:
                                 raise GraphContractError(
                                     "INTAKE_ROOM_UTTERANCE_STREAM_NORMALIZATION_DIVERGED"
                                 )
-                            # Record Target's exact source text before exposing a
-                            # fragment so the terminal equality guard observes the
-                            # same byte sequence that reached the room.
-                            streamed_room_utterance_parts.append(room_delta)
+                            target_raw_room_utterance_parts.append(room_delta)
+                            projected_room_utterance = (
+                                self._target_room_utterance_projection(
+                                    raw=candidate_room_utterance,
+                                    emitted="".join(streamed_room_utterance_parts),
+                                )
+                            )
                         else:
                             candidate_room_utterance = "".join(
                                 (*streamed_room_utterance_parts, room_delta)
@@ -242,27 +250,28 @@ class CompiledIntakeGraphShadowExecutor:
                                 raise GraphContractError(
                                     "INTAKE_ROOM_UTTERANCE_STREAM_NORMALIZATION_DIVERGED"
                                 )
-                        for room_update in self._streamed_room_utterance_updates(
-                            node=update.payload.node,
-                            delta=room_delta,
-                        ):
-                            self._validate_public_update(room_update)
-                            yield self._event(
-                                execution,
-                                sequence,
-                                room_update.event_type,
-                                room_update.payload,
-                            )
-                            sequence += 1
-                        if not target_reply_then_board:
-                            streamed_room_utterance_parts.append(room_delta)
-                        room_utterance_streamed = True
+                            projected_room_utterance = room_delta
+                        if projected_room_utterance:
+                            for room_update in self._streamed_room_utterance_updates(
+                                node=update.payload.node,
+                                delta=projected_room_utterance,
+                            ):
+                                self._validate_public_update(room_update)
+                                yield self._event(
+                                    execution,
+                                    sequence,
+                                    room_update.event_type,
+                                    room_update.payload,
+                                )
+                                sequence += 1
+                            streamed_room_utterance_parts.append(projected_room_utterance)
+                        room_utterance_received = True
                         continue
                     if not field.startswith("case_detail."):
                         raise GraphContractError(
                             "compiled Intake Graph emitted an unsupported visible field"
                         )
-                    if not room_utterance_streamed:
+                    if not room_utterance_received:
                         # The Target projector uses the same root completion gate as
                         # the baseline: it cannot expose a board field until the full
                         # root ``room_utterance`` property closes.  Keep the defensive
@@ -274,6 +283,12 @@ class CompiledIntakeGraphShadowExecutor:
                         case_detail_seen_before_room_utterance = True
                         continue
                     room_utterance_completed = True
+                    if target_reply_then_board and not target_room_canonical_closed:
+                        self._target_limited_room_utterance(
+                            raw="".join(target_raw_room_utterance_parts),
+                            emitted="".join(streamed_room_utterance_parts),
+                        )
+                        target_room_canonical_closed = True
                     if self._should_suppress_respondent_attitude_update(update):
                         continue
                     if update.payload.field.startswith("case_detail.dispute_core_state"):
@@ -284,6 +299,13 @@ class CompiledIntakeGraphShadowExecutor:
                     if self._should_suppress_evidence_dossier_update(update):
                         continue
                     self._validate_public_update(update)
+                    if target_reply_then_board:
+                        # Target's board is held until the formal proposal proves it
+                        # can only append to the room text the user already saw. This
+                        # preserves reply-before-board even when a later baseline
+                        # finalizer safely appends text after the second question.
+                        target_buffered_board_updates.append(update)
+                        continue
                     # The frontend treats streamed dossier sections as a provisional
                     # view and discards them on ERROR, attempt reset, workspace change,
                     # or failed formal-readiness reconciliation.  Publish each complete
@@ -301,6 +323,20 @@ class CompiledIntakeGraphShadowExecutor:
                     sequence += 1
         finally:
             await cast(Callable[[], Awaitable[None]], close)()
+
+        if (
+            target_reply_then_board
+            and room_utterance_received
+            and not target_room_canonical_closed
+        ):
+            # The provider may end immediately after the room root.  Apply the
+            # exact baseline limiter at that boundary too, but retain any suffix
+            # until the real terminal proposal has passed the prefix guard below.
+            self._target_limited_room_utterance(
+                raw="".join(target_raw_room_utterance_parts),
+                emitted="".join(streamed_room_utterance_parts),
+            )
+            target_room_canonical_closed = True
 
         snapshot = await graph.aget_state(self._latest_checkpoint_config(config))
         state, final_config = self._snapshot(snapshot, runtime_execution)
@@ -328,7 +364,39 @@ class CompiledIntakeGraphShadowExecutor:
             terminal_room_utterance = self._normalized_terminal_room_utterance(
                 proposal.room_utterance
             )
-        if room_utterance_streamed:
+        if target_reply_then_board and room_utterance_received:
+            streamed_room_utterance = "".join(streamed_room_utterance_parts)
+            terminal_room_suffix = self._target_terminal_room_utterance_suffix(
+                streamed=streamed_room_utterance,
+                terminal=terminal_room_utterance,
+            )
+            if terminal_room_suffix:
+                for room_update in self._authoritative_room_utterance_updates(
+                    terminal_room_suffix
+                ):
+                    self._validate_public_update(room_update)
+                    yield self._event(
+                        execution,
+                        sequence,
+                        room_update.event_type,
+                        room_update.payload,
+                    )
+                    sequence += 1
+                streamed_room_utterance_parts.append(terminal_room_suffix)
+            self._require_streamed_room_utterance_matches_terminal(
+                streamed="".join(streamed_room_utterance_parts),
+                terminal=terminal_room_utterance,
+            )
+            for board_update in target_buffered_board_updates:
+                self._validate_public_update(board_update)
+                yield self._event(
+                    execution,
+                    sequence,
+                    board_update.event_type,
+                    board_update.payload,
+                )
+                sequence += 1
+        elif room_utterance_received:
             self._require_streamed_room_utterance_matches_terminal(
                 streamed="".join(streamed_room_utterance_parts),
                 terminal=terminal_room_utterance,
@@ -395,7 +463,7 @@ class CompiledIntakeGraphShadowExecutor:
             raise GraphTerminalBindingError(
                 "Intake generic result was not bound to the terminal fence"
             )
-        if target_reply_then_board and not room_utterance_streamed:
+        if target_reply_then_board and not room_utterance_received:
             # A parser / provider that never exposed a governed preview retains the
             # durable canonical fallback.  It is intentionally reply-first and runs
             # only after immutable proposal storage plus the fenced terminal commit.
@@ -618,6 +686,61 @@ class CompiledIntakeGraphShadowExecutor:
             )
             for offset in range(0, len(delta), _AGENT_STREAM_DELTA_MAX_LENGTH)
         )
+
+    @staticmethod
+    def _target_limited_room_utterance(*, raw: str, emitted: str) -> str:
+        """Apply the baseline question limit and retain an append-only prefix."""
+
+        if not isinstance(raw, str) or not raw:
+            raise GraphContractError("INTAKE_TARGET_ROOM_UTTERANCE_STREAM_INVALID")
+        canonical = _limit_follow_up_questions(
+            raw,
+            limit=_TARGET_INTAKE_FOLLOW_UP_QUESTION_LIMIT,
+        )
+        if (
+            not canonical
+            or _normalized_intake_room_utterance(canonical) != canonical
+            or not canonical.startswith(emitted)
+        ):
+            raise GraphContractError("INTAKE_TARGET_ROOM_UTTERANCE_PROJECTION_DIVERGED")
+        return canonical
+
+    @classmethod
+    def _target_room_utterance_projection(cls, *, raw: str, emitted: str) -> str:
+        """Project Target's raw reply through the exact baseline question limiter.
+
+        The part after the second question remains withheld until the terminal
+        proposal is available.  This keeps the published prefix monotonic even if
+        a later third question causes baseline to remove its containing segment.
+        """
+
+        canonical = cls._target_limited_room_utterance(raw=raw, emitted=emitted)
+        already_emitted_questions = emitted.count("？") + emitted.count("?")
+        if already_emitted_questions > _TARGET_INTAKE_FOLLOW_UP_QUESTION_LIMIT:
+            raise GraphContractError("INTAKE_TARGET_ROOM_UTTERANCE_PROJECTION_DIVERGED")
+        if already_emitted_questions == _TARGET_INTAKE_FOLLOW_UP_QUESTION_LIMIT:
+            return ""
+
+        suffix = canonical[len(emitted) :]
+        questions_remaining = (
+            _TARGET_INTAKE_FOLLOW_UP_QUESTION_LIMIT - already_emitted_questions
+        )
+        for index, character in enumerate(suffix):
+            if character in {"？", "?"}:
+                questions_remaining -= 1
+                if questions_remaining == 0:
+                    return suffix[: index + 1]
+        return suffix
+
+    @staticmethod
+    def _target_terminal_room_utterance_suffix(*, streamed: str, terminal: str) -> str:
+        """Return only a terminal append after proving the live prefix is stable."""
+
+        if not streamed or not terminal.startswith(streamed):
+            raise GraphTerminalBindingError(
+                "Intake streamed room utterance differs from normalized terminal proposal"
+            )
+        return terminal[len(streamed) :]
 
     @staticmethod
     def _normalized_terminal_room_utterance(room_utterance: object) -> str:
