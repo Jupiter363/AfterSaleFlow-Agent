@@ -161,6 +161,25 @@ function installDisplayPacer(run) {
   }));
 }
 
+function isReplyThenBoardBarrierEnabled(run) {
+  return Boolean(
+    run.replyThenBoard &&
+    run.roomType === "INTAKE",
+  );
+}
+
+async function awaitReplyThenBoardBarrier(run, signal) {
+  if (!isReplyThenBoardBarrierEnabled(run) || !run.replyThenBoardPending) return;
+  // Intake's visible reply owns the first paint. Do not acknowledge the first
+  // case-detail event until that text pacer has finished: advancing the cursor
+  // first would make a reload or abort permanently skip a durable event that
+  // has never reached the right-side projection.
+  await run.displayPacer.drain();
+  if (signal?.aborted) {
+    throw signal.reason || new DOMException("Aborted", "AbortError");
+  }
+}
+
 function resetAttemptProjection(run, resetAttemptId, nextAttemptId) {
   if (run.currentAttemptId && run.currentAttemptId !== resetAttemptId) {
     const error = new Error("数字人 reset 与当前 attempt 不匹配");
@@ -178,6 +197,7 @@ function resetAttemptProjection(run, resetAttemptId, nextAttemptId) {
   run.cardOrder = [];
   run.activeCardKey = "default";
   run.pacedFieldMeta = {};
+  run.replyThenBoardPending = isReplyThenBoardBarrierEnabled(run);
   run.currentAttemptId = nextAttemptId;
   run.pendingAttemptId = "";
   run.resetCount += 1;
@@ -324,6 +344,7 @@ export async function consumeAgentRun({
   signal,
   reconnectAttempts = 8,
   reconnectBaseDelayMs = 350,
+  replyThenBoard = false,
   fetchImpl = globalThis.fetch,
 }) {
   const descriptor = extractAgentRunDescriptor(rawDescriptor) || rawDescriptor;
@@ -366,6 +387,13 @@ export async function consumeAgentRun({
     cardOrder: [],
     activeCardKey: "default",
     pacedFieldMeta: {},
+    // This presentation policy is intentionally opt-in. Intake enables it so
+    // the person-facing reply finishes before its dossier begins to render;
+    // evidence, hearing, and other agent surfaces retain their existing order.
+    replyThenBoard: Boolean(replyThenBoard) &&
+      String(roomType || "").toUpperCase() === "INTAKE",
+    replyThenBoardPending: Boolean(replyThenBoard) &&
+      String(roomType || "").toUpperCase() === "INTAKE",
     seenEventSequences: markRaw(new Set()),
     lastEventId: "-1",
     usage: null,
@@ -468,6 +496,12 @@ export async function consumeAgentRun({
                 if (!structuredField) {
                   run.displayPacer.assertCapacity(event.delta);
                 }
+                if (structuredField) {
+                  // Keep this event unacknowledged while the reply is still
+                  // typing. The stream reader may back-pressure here, but a
+                  // reconnect can safely replay the same durable event.
+                  await awaitReplyThenBoardBarrier(run, controller.signal);
+                }
                 if (isV2 && run.attempts[event.attemptId]) {
                   run.attempts[event.attemptId].hasVisibleOutput = true;
                 }
@@ -503,6 +537,20 @@ export async function consumeAgentRun({
                     nodeName: event.nodeName || "",
                   };
                   run.displayPacer.enqueue(pacedFieldKey, event.delta);
+                }
+                // The Intake barrier is committed only after the right-side
+                // projection observer has applied this first structured event.
+                // This is deliberately different from the default stream path:
+                // cursor/seen state must never get ahead of an unpainted dossier.
+                if (structuredField && isReplyThenBoardBarrierEnabled(run)) {
+                  await onEvent?.(event, run);
+                  if (controller.signal.aborted) {
+                    throw controller.signal.reason || new DOMException("Aborted", "AbortError");
+                  }
+                  run.seenEventSequences.add(identity);
+                  run.lastEventId = event.cursor;
+                  run.replyThenBoardPending = false;
+                  return;
                 }
               } else if (event.event === "usage") {
                 run.usage = event.usage;

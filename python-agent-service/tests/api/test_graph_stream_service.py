@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -16,6 +17,7 @@ from app.api.graph_stream_service import (
     ExactShadowExecutorRegistry,
     GatewayBackedGraphCommandStreamService,
     GraphStreamAdmissionGate,
+    MAX_CANCEL_DRAIN_SECONDS,
     ProviderRuntimeBinding,
     ShadowExecutorRegistration,
 )
@@ -23,6 +25,7 @@ from app.contracts.v1.models import AgentStreamEvent, AgentStreamPayload, RoomGr
 from app.graph_runtime.errors import (
     GraphContractError,
     GraphGatewayDisabledError,
+    GraphLeaseLostError,
     GraphNewAgentAttemptRequiredError,
     GraphVersionUnavailableError,
 )
@@ -337,8 +340,25 @@ class _Gateway:
         self.acquired += 1
         return _execution(admission)
 
-    async def execute_stream(self, *, execution: GatewayExecution, executor: Any):
+    async def execute_stream(
+        self,
+        *,
+        execution: GatewayExecution,
+        executor: Any,
+        durable_terminal_signal: asyncio.Event | None = None,
+        terminal_processing_started: asyncio.Event | None = None,
+    ):
         async for event in executor.stream(execution):
+            if (
+                terminal_processing_started is not None
+                and event.event_type in {"attempt_aborted", "final", "error"}
+            ):
+                terminal_processing_started.set()
+            if (
+                durable_terminal_signal is not None
+                and event.event_type in {"attempt_aborted", "final", "error"}
+            ):
+                durable_terminal_signal.set()
             yield event
 
     async def renew_execution(self, execution: GatewayExecution) -> LeaseRecord:
@@ -777,6 +797,620 @@ async def test_stream_cancellation_persists_fence_before_stopping_provider() -> 
     assert gateway.finished == 1
     assert gateway.finished_statuses == [AttemptStatus.CANCELLED]
     assert await gate.drain(0.01) is True
+
+
+@pytest.mark.asyncio
+async def test_stream_prefetches_one_source_event_before_downstream_resumes() -> None:
+    admission = _admission(AdmissionAction.ACQUIRE)
+    execution = _execution(admission)
+    gateway = _Gateway(admission)
+    service, _ = await _service(gateway, _Executor())
+    second_pull_started = asyncio.Event()
+    release_terminal = asyncio.Event()
+
+    class PrefetchTrackingSource:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def __aiter__(self) -> PrefetchTrackingSource:
+            return self
+
+        async def __anext__(self) -> AgentStreamEvent:
+            self.calls += 1
+            if self.calls == 1:
+                return _event(admission.command, 0, "attempt_started")
+            if self.calls == 2:
+                second_pull_started.set()
+                await release_terminal.wait()
+                return _event(admission.command, 1, "final")
+            raise StopAsyncIteration
+
+        async def aclose(self) -> None:
+            return None
+
+    source = PrefetchTrackingSource()
+    stream = service._renewing_stream(source, execution)
+
+    assert (await anext(stream)).event_type == "attempt_started"
+    await asyncio.wait_for(second_pull_started.wait(), timeout=0.1)
+    assert source.calls == 2
+
+    release_terminal.set()
+    assert (await anext(stream)).event_type == "final"
+    with pytest.raises(StopAsyncIteration):
+        await anext(stream)
+
+
+@pytest.mark.asyncio
+async def test_prefetched_source_is_cancelled_and_closed_on_downstream_disconnect() -> None:
+    admission = _admission(AdmissionAction.ACQUIRE)
+    execution = _execution(admission)
+    gateway = _Gateway(admission)
+    service, _ = await _service(gateway, _Executor())
+    second_pull_started = asyncio.Event()
+    second_pull_cancelled = asyncio.Event()
+    source_closed = asyncio.Event()
+
+    class DisconnectAwareSource:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def __aiter__(self) -> DisconnectAwareSource:
+            return self
+
+        async def __anext__(self) -> AgentStreamEvent:
+            self.calls += 1
+            if self.calls == 1:
+                return _event(admission.command, 0, "attempt_started")
+            second_pull_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                second_pull_cancelled.set()
+                raise
+            raise AssertionError("prefetched source pull unexpectedly completed")
+
+        async def aclose(self) -> None:
+            source_closed.set()
+
+    source = DisconnectAwareSource()
+    stream = service._renewing_stream(source, execution)
+
+    assert (await anext(stream)).event_type == "attempt_started"
+    await asyncio.wait_for(second_pull_started.wait(), timeout=0.1)
+    await asyncio.wait_for(stream.aclose(), timeout=0.1)
+
+    assert second_pull_cancelled.is_set()
+    assert source_closed.is_set()
+    assert gateway.finished == 1
+    assert gateway.finished_statuses == [AttemptStatus.CANCELLED]
+
+
+@pytest.mark.asyncio
+async def test_prefetched_source_exception_is_propagated_on_the_next_read() -> None:
+    admission = _admission(AdmissionAction.ACQUIRE)
+    execution = _execution(admission)
+    gateway = _Gateway(admission)
+    service, _ = await _service(gateway, _Executor())
+    source_failed = asyncio.Event()
+
+    class FailingPrefetchSource:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def __aiter__(self) -> FailingPrefetchSource:
+            return self
+
+        async def __anext__(self) -> AgentStreamEvent:
+            self.calls += 1
+            if self.calls == 1:
+                return _event(admission.command, 0, "attempt_started")
+            source_failed.set()
+            raise RuntimeError("prefetched source failed")
+
+        async def aclose(self) -> None:
+            return None
+
+    stream = service._renewing_stream(FailingPrefetchSource(), execution)
+
+    assert (await anext(stream)).event_type == "attempt_started"
+    await asyncio.wait_for(source_failed.wait(), timeout=0.1)
+    with pytest.raises(RuntimeError, match="prefetched source failed"):
+        await anext(stream)
+
+    assert gateway.finished == 1
+    assert gateway.finished_statuses == [AttemptStatus.FAILED]
+
+
+@pytest.mark.asyncio
+async def test_terminal_reconciliation_release_does_not_surface_a_renewal_lease_loss() -> None:
+    admission = _admission(AdmissionAction.ACQUIRE)
+    execution = _execution(admission)
+    release_terminal = asyncio.Event()
+    source_waiting = asyncio.Event()
+    terminal_reconciled = asyncio.Event()
+    renewal_waiting = asyncio.Event()
+    lease_lost = asyncio.Event()
+
+    class LeaseLossGateway(_Gateway):
+        async def renew_execution(self, current: GatewayExecution) -> LeaseRecord:
+            del current
+            self.renewed += 1
+            renewal_waiting.set()
+            await terminal_reconciled.wait()
+            lease_lost.set()
+            raise GraphLeaseLostError("lease was displaced")
+
+    class ReconciledTerminalSource:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def __aiter__(self) -> ReconciledTerminalSource:
+            return self
+
+        async def __anext__(self) -> AgentStreamEvent:
+            self.calls += 1
+            if self.calls == 1:
+                return _event(admission.command, 0, "attempt_started")
+            source_waiting.set()
+            await release_terminal.wait()
+            # This mirrors Gateway.execute_stream: it only yields ``final`` after
+            # durable terminal reconciliation has released the exact lease.
+            terminal_reconciled.set()
+            await lease_lost.wait()
+            return _event(admission.command, 1, "final")
+
+        async def aclose(self) -> None:
+            return None
+
+    gateway = LeaseLossGateway(admission)
+    service, _ = await _service(gateway, _Executor(), renewal_seconds=0.001)
+    stream = service._renewing_stream(ReconciledTerminalSource(), execution)
+
+    assert (await anext(stream)).event_type == "attempt_started"
+    await asyncio.wait_for(source_waiting.wait(), timeout=0.1)
+    await asyncio.wait_for(renewal_waiting.wait(), timeout=0.1)
+    release_terminal.set()
+    await asyncio.wait_for(terminal_reconciled.wait(), timeout=0.1)
+    await asyncio.wait_for(lease_lost.wait(), timeout=0.1)
+    await asyncio.sleep(0)
+
+    assert (await anext(stream)).event_type == "final"
+    with pytest.raises(StopAsyncIteration):
+        await anext(stream)
+
+    assert gateway.finished == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "renewal_failure_type",
+    (GraphLeaseLostError, RuntimeError),
+)
+async def test_durable_terminal_signal_suppresses_renewal_failure_while_prefetched_final_waits_barrier(
+    renewal_failure_type: type[Exception],
+) -> None:
+    admission = _admission(AdmissionAction.ACQUIRE)
+    barrier_entered = asyncio.Event()
+    release_barrier = asyncio.Event()
+    renewal_waiting = asyncio.Event()
+    renewal_failed = asyncio.Event()
+
+    class BarrierPendingGateway(_Gateway):
+        async def execute_stream(
+            self,
+            *,
+            execution: GatewayExecution,
+            executor: Any,
+            durable_terminal_signal: asyncio.Event | None = None,
+            terminal_processing_started: asyncio.Event | None = None,
+        ):
+            async for event in executor.stream(execution):
+                if event.event_type == "final":
+                    assert durable_terminal_signal is not None
+                    assert terminal_processing_started is not None
+                    terminal_processing_started.set()
+                    # Mirrors GraphCommandGateway: durable reconciliation/release is
+                    # complete before the final delivery barrier is allowed to wait.
+                    durable_terminal_signal.set()
+                    barrier_entered.set()
+                    await release_barrier.wait()
+                yield event
+
+        async def renew_execution(self, current: GatewayExecution) -> LeaseRecord:
+            del current
+            self.renewed += 1
+            renewal_waiting.set()
+            await barrier_entered.wait()
+            renewal_failed.set()
+            raise renewal_failure_type("renewal failed after durable terminal")
+
+    gateway = BarrierPendingGateway(admission)
+    service, gate = await _service(gateway, _Executor(), renewal_seconds=0.001)
+    stream = await service.open_stream(
+        command=admission.command,
+        verified_invocation=cast(VerifiedInvocation, object()),
+        expected_thread=admission.thread,
+    )
+
+    assert (await anext(stream)).event_type == "attempt_started"
+    await asyncio.wait_for(barrier_entered.wait(), timeout=0.1)
+    await asyncio.wait_for(renewal_waiting.wait(), timeout=0.1)
+    await asyncio.wait_for(renewal_failed.wait(), timeout=0.1)
+
+    pending_final = asyncio.create_task(anext(stream))
+    await asyncio.sleep(0)
+    assert pending_final.done() is False
+    assert gateway.finished == 0
+
+    release_barrier.set()
+    assert (await pending_final).event_type == "final"
+    with pytest.raises(StopAsyncIteration):
+        await anext(stream)
+    assert await gate.drain(0.01) is True
+
+
+@pytest.mark.asyncio
+async def test_durable_terminal_signal_skips_abort_when_downstream_disconnects_during_barrier() -> None:
+    admission = _admission(AdmissionAction.ACQUIRE)
+    barrier_entered = asyncio.Event()
+    source_closed = asyncio.Event()
+
+    class BarrierPendingGateway(_Gateway):
+        async def execute_stream(
+            self,
+            *,
+            execution: GatewayExecution,
+            executor: Any,
+            durable_terminal_signal: asyncio.Event | None = None,
+            terminal_processing_started: asyncio.Event | None = None,
+        ):
+            try:
+                async for event in executor.stream(execution):
+                    if event.event_type == "final":
+                        assert durable_terminal_signal is not None
+                        assert terminal_processing_started is not None
+                        terminal_processing_started.set()
+                        durable_terminal_signal.set()
+                        barrier_entered.set()
+                        await asyncio.Event().wait()
+                    yield event
+            finally:
+                source_closed.set()
+
+    gateway = BarrierPendingGateway(admission)
+    service, gate = await _service(gateway, _Executor())
+    stream = await service.open_stream(
+        command=admission.command,
+        verified_invocation=cast(VerifiedInvocation, object()),
+        expected_thread=admission.thread,
+    )
+
+    assert (await anext(stream)).event_type == "attempt_started"
+    await asyncio.wait_for(barrier_entered.wait(), timeout=0.1)
+    await asyncio.wait_for(stream.aclose(), timeout=0.1)
+
+    await asyncio.wait_for(source_closed.wait(), timeout=0.1)
+    assert gateway.finished == 0
+    assert await gate.drain(0.01) is True
+
+
+@pytest.mark.asyncio
+async def test_durable_terminal_signal_propagates_barrier_failure_without_reaborting() -> None:
+    admission = _admission(AdmissionAction.ACQUIRE)
+    barrier_entered = asyncio.Event()
+
+    class BarrierFailureGateway(_Gateway):
+        async def execute_stream(
+            self,
+            *,
+            execution: GatewayExecution,
+            executor: Any,
+            durable_terminal_signal: asyncio.Event | None = None,
+            terminal_processing_started: asyncio.Event | None = None,
+        ):
+            async for event in executor.stream(execution):
+                if event.event_type == "final":
+                    assert durable_terminal_signal is not None
+                    assert terminal_processing_started is not None
+                    terminal_processing_started.set()
+                    durable_terminal_signal.set()
+                    barrier_entered.set()
+                    raise RuntimeError("post-commit barrier failed")
+                yield event
+
+    gateway = BarrierFailureGateway(admission)
+    service, gate = await _service(gateway, _Executor())
+    stream = await service.open_stream(
+        command=admission.command,
+        verified_invocation=cast(VerifiedInvocation, object()),
+        expected_thread=admission.thread,
+    )
+
+    assert (await anext(stream)).event_type == "attempt_started"
+    await asyncio.wait_for(barrier_entered.wait(), timeout=0.1)
+    with pytest.raises(RuntimeError, match="post-commit barrier failed"):
+        await anext(stream)
+
+    assert gateway.finished == 0
+    assert await gate.drain(0.01) is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("renewal_failure_type", (GraphLeaseLostError, RuntimeError))
+async def test_terminal_processing_defers_any_renewal_failure_until_durable_final(
+    renewal_failure_type: type[Exception],
+) -> None:
+    """A terminal commit's scheduler gap cannot let renewal cancel its source."""
+
+    admission = _admission(AdmissionAction.ACQUIRE)
+    processing_entered = asyncio.Event()
+    release_durable_commit = asyncio.Event()
+    renewal_failed = asyncio.Event()
+
+    class ProcessingGateway(_Gateway):
+        async def execute_stream(
+            self,
+            *,
+            execution: GatewayExecution,
+            executor: Any,
+            durable_terminal_signal: asyncio.Event | None = None,
+            terminal_processing_started: asyncio.Event | None = None,
+        ):
+            async for event in executor.stream(execution):
+                if event.event_type == "final":
+                    assert durable_terminal_signal is not None
+                    assert terminal_processing_started is not None
+                    # This represents the instant after the envelope passed all
+                    # structural checks but before reconciliation can commit.
+                    terminal_processing_started.set()
+                    processing_entered.set()
+                    await release_durable_commit.wait()
+                    durable_terminal_signal.set()
+                yield event
+
+        async def renew_execution(self, current: GatewayExecution) -> LeaseRecord:
+            del current
+            self.renewed += 1
+            await processing_entered.wait()
+            renewal_failed.set()
+            raise renewal_failure_type("renewal failed while final commit was in flight")
+
+    gateway = ProcessingGateway(admission)
+    service, gate = await _service(gateway, _Executor(), renewal_seconds=0.001)
+    stream = await service.open_stream(
+        command=admission.command,
+        verified_invocation=cast(VerifiedInvocation, object()),
+        expected_thread=admission.thread,
+    )
+
+    assert (await anext(stream)).event_type == "attempt_started"
+    await asyncio.wait_for(processing_entered.wait(), timeout=0.1)
+    await asyncio.wait_for(renewal_failed.wait(), timeout=0.1)
+
+    pending_final = asyncio.create_task(anext(stream))
+    await asyncio.sleep(0)
+    assert pending_final.done() is False
+    assert gateway.finished == 0
+
+    release_durable_commit.set()
+    assert (await pending_final).event_type == "final"
+    with pytest.raises(StopAsyncIteration):
+        await anext(stream)
+    assert gateway.finished == 0
+    assert await gate.drain(0.01) is True
+
+
+@pytest.mark.asyncio
+async def test_terminal_processing_source_failure_before_durable_completion_fails_closed() -> None:
+    """The deferral fence does not turn a failed terminal operation into success."""
+
+    admission = _admission(AdmissionAction.ACQUIRE)
+    processing_entered = asyncio.Event()
+    release_failed_reconciliation = asyncio.Event()
+    renewal_failed = asyncio.Event()
+
+    class ProcessingFailureGateway(_Gateway):
+        async def execute_stream(
+            self,
+            *,
+            execution: GatewayExecution,
+            executor: Any,
+            durable_terminal_signal: asyncio.Event | None = None,
+            terminal_processing_started: asyncio.Event | None = None,
+        ):
+            del durable_terminal_signal
+            async for event in executor.stream(execution):
+                if event.event_type == "final":
+                    assert terminal_processing_started is not None
+                    terminal_processing_started.set()
+                    processing_entered.set()
+                    await release_failed_reconciliation.wait()
+                    raise RuntimeError("terminal reconciliation failed before commit")
+                yield event
+
+        async def renew_execution(self, current: GatewayExecution) -> LeaseRecord:
+            del current
+            self.renewed += 1
+            await processing_entered.wait()
+            renewal_failed.set()
+            raise GraphLeaseLostError("renewal failed while reconciliation was pending")
+
+    gateway = ProcessingFailureGateway(admission)
+    service, gate = await _service(gateway, _Executor(), renewal_seconds=0.001)
+    stream = await service.open_stream(
+        command=admission.command,
+        verified_invocation=cast(VerifiedInvocation, object()),
+        expected_thread=admission.thread,
+    )
+
+    assert (await anext(stream)).event_type == "attempt_started"
+    await asyncio.wait_for(processing_entered.wait(), timeout=0.1)
+    await asyncio.wait_for(renewal_failed.wait(), timeout=0.1)
+
+    pending_final = asyncio.create_task(anext(stream))
+    await asyncio.sleep(0)
+    assert pending_final.done() is False
+
+    release_failed_reconciliation.set()
+    with pytest.raises(RuntimeError, match="reconciliation failed before commit"):
+        await pending_final
+
+    assert gateway.finished == 1
+    assert gateway.finished_statuses == [AttemptStatus.FAILED]
+    assert await gate.drain(0.01) is True
+
+
+@pytest.mark.asyncio
+async def test_downstream_disconnect_bounds_pre_durable_terminal_processing() -> None:
+    """Disconnects wait briefly for a valid terminal commit, then retain cancellation safety."""
+
+    admission = _admission(AdmissionAction.ACQUIRE)
+    processing_entered = asyncio.Event()
+    source_closed = asyncio.Event()
+
+    class HangingProcessingGateway(_Gateway):
+        async def execute_stream(
+            self,
+            *,
+            execution: GatewayExecution,
+            executor: Any,
+            durable_terminal_signal: asyncio.Event | None = None,
+            terminal_processing_started: asyncio.Event | None = None,
+        ):
+            del durable_terminal_signal
+            try:
+                async for event in executor.stream(execution):
+                    if event.event_type == "final":
+                        assert terminal_processing_started is not None
+                        terminal_processing_started.set()
+                        processing_entered.set()
+                        await asyncio.Event().wait()
+                    yield event
+            finally:
+                source_closed.set()
+
+    gateway = HangingProcessingGateway(admission)
+    service, gate = await _service(gateway, _Executor())
+    stream = await service.open_stream(
+        command=admission.command,
+        verified_invocation=cast(VerifiedInvocation, object()),
+        expected_thread=admission.thread,
+    )
+
+    assert (await anext(stream)).event_type == "attempt_started"
+    await asyncio.wait_for(processing_entered.wait(), timeout=0.1)
+
+    loop = asyncio.get_running_loop()
+    started_at = loop.time()
+    await asyncio.wait_for(stream.aclose(), timeout=MAX_CANCEL_DRAIN_SECONDS + 0.5)
+    elapsed = loop.time() - started_at
+
+    # The bounded drain protects a terminal commit already in the gateway, while the
+    # timeout guarantees a stuck persistence operation cannot leak the HTTP attempt.
+    assert elapsed >= MAX_CANCEL_DRAIN_SECONDS * 0.75
+    assert elapsed < MAX_CANCEL_DRAIN_SECONDS + 0.5
+    await asyncio.wait_for(source_closed.wait(), timeout=0.1)
+    assert gateway.finished == 1
+    assert gateway.finished_statuses == [AttemptStatus.CANCELLED]
+    assert await gate.drain(0.01) is True
+
+
+@pytest.mark.asyncio
+async def test_preterminal_lease_loss_remains_fail_closed_with_a_prefetched_source() -> None:
+    admission = _admission(AdmissionAction.ACQUIRE)
+    execution = _execution(admission)
+    release_lease_loss = asyncio.Event()
+    source_waiting = asyncio.Event()
+    renewal_waiting = asyncio.Event()
+
+    class LeaseLossGateway(_Gateway):
+        async def renew_execution(self, current: GatewayExecution) -> LeaseRecord:
+            del current
+            self.renewed += 1
+            renewal_waiting.set()
+            await release_lease_loss.wait()
+            raise GraphLeaseLostError("lease was displaced before terminal")
+
+    async def source() -> AsyncIterator[AgentStreamEvent]:
+        yield _event(admission.command, 0, "attempt_started")
+        source_waiting.set()
+        await asyncio.Event().wait()
+        raise AssertionError("preterminal source pull unexpectedly completed")
+
+    gateway = LeaseLossGateway(admission)
+    service, _ = await _service(gateway, _Executor(), renewal_seconds=0.001)
+    stream = service._renewing_stream(source(), execution)
+
+    assert (await anext(stream)).event_type == "attempt_started"
+    await asyncio.wait_for(source_waiting.wait(), timeout=0.1)
+    await asyncio.wait_for(renewal_waiting.wait(), timeout=0.1)
+    release_lease_loss.set()
+
+    with pytest.raises(GraphLeaseLostError, match="before terminal"):
+        await anext(stream)
+
+    assert gateway.finished == 1
+    assert gateway.finished_statuses == [AttemptStatus.FAILED]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("event_type", ("final", "error"))
+async def test_downstream_close_does_not_cancel_a_prefetched_durable_terminal(
+    event_type: str,
+) -> None:
+    admission = _admission(AdmissionAction.ACQUIRE)
+    execution = _execution(admission)
+    gateway = _Gateway(admission)
+    service, _ = await _service(gateway, _Executor())
+    terminal_prefetched = asyncio.Event()
+    source_closed = asyncio.Event()
+
+    async def source() -> AsyncIterator[AgentStreamEvent]:
+        try:
+            yield _event(admission.command, 0, "attempt_started")
+            terminal_prefetched.set()
+            yield cast(Any, SimpleNamespace(event_type=event_type))
+        finally:
+            source_closed.set()
+
+    stream = service._renewing_stream(source(), execution)
+
+    assert (await anext(stream)).event_type == "attempt_started"
+    await asyncio.wait_for(terminal_prefetched.wait(), timeout=0.1)
+    await asyncio.wait_for(stream.aclose(), timeout=0.1)
+
+    assert source_closed.is_set()
+    assert gateway.finished == 0
+
+
+@pytest.mark.asyncio
+async def test_downstream_close_records_a_prefetched_source_exception_as_failed() -> None:
+    admission = _admission(AdmissionAction.ACQUIRE)
+    execution = _execution(admission)
+    gateway = _Gateway(admission)
+    service, _ = await _service(gateway, _Executor())
+    source_failed = asyncio.Event()
+    source_closed = asyncio.Event()
+
+    async def source() -> AsyncIterator[AgentStreamEvent]:
+        try:
+            yield _event(admission.command, 0, "attempt_started")
+            source_failed.set()
+            raise RuntimeError("prefetched source failed during downstream close")
+        finally:
+            source_closed.set()
+
+    stream = service._renewing_stream(source(), execution)
+
+    assert (await anext(stream)).event_type == "attempt_started"
+    await asyncio.wait_for(source_failed.wait(), timeout=0.1)
+    with pytest.raises(RuntimeError, match="during downstream close"):
+        await asyncio.wait_for(stream.aclose(), timeout=0.1)
+
+    assert source_closed.is_set()
+    assert gateway.finished == 1
+    assert gateway.finished_statuses == [AttemptStatus.FAILED]
 
 
 @pytest.mark.asyncio

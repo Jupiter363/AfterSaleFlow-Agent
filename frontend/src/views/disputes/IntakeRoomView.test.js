@@ -262,6 +262,62 @@ function dossierStreamResponse(runId, summary) {
   });
 }
 
+function replyThenDossierStreamResponse(runId, reply, summary) {
+  const frames = [
+    "id: 0",
+    "event: start",
+    `data: ${JSON.stringify({
+      schemaVersion: "agent_stream.v1",
+      runId,
+      sequence: 0,
+      type: "start",
+    })}`,
+    "",
+    "id: 1",
+    "event: visible_delta",
+    `data: ${JSON.stringify({
+      schemaVersion: "agent_stream.v1",
+      runId,
+      sequence: 1,
+      type: "visible_delta",
+      field: "room_utterance",
+      delta: reply,
+    })}`,
+    "",
+    "id: 2",
+    "event: visible_delta",
+    `data: ${JSON.stringify({
+      schemaVersion: "agent_stream.v1",
+      runId,
+      sequence: 2,
+      type: "visible_delta",
+      field: "case_detail.case_story",
+      delta: JSON.stringify({ one_sentence_summary: summary }),
+    })}`,
+    "",
+    "id: 3",
+    "event: final",
+    `data: ${JSON.stringify({
+      schemaVersion: "agent_stream.v1",
+      runId,
+      sequence: 3,
+      type: "final",
+      result: {},
+    })}`,
+    "",
+    "",
+  ].join("\n");
+  return new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(frames));
+      controller.close();
+    },
+  }), {
+    status: 200,
+    headers: { "Content-Type": "text/event-stream" },
+  });
+}
+
 function caseDetailSequenceStreamResponse(runId, deltas) {
   const frame = (sequence, event, payload = {}) => [
     `id: ${sequence}`,
@@ -314,10 +370,15 @@ function v2AttemptResetDossierStreamResponse(runId, oldSummary, newSummary) {
     frame(oldAttemptId, 0, "attempt_started", { node: "turn" }),
     frame(oldAttemptId, 1, "visible_delta", {
       node: "turn",
+      field: "room_utterance",
+      delta: "旧 attempt 的接待回复。",
+    }),
+    frame(oldAttemptId, 2, "visible_delta", {
+      node: "turn",
       field: "case_detail.case_story.one_sentence_summary",
       delta: oldSummary,
     }),
-    frame(oldAttemptId, 2, "attempt_aborted", {
+    frame(oldAttemptId, 3, "attempt_aborted", {
       reasonCode: "MODEL_TRANSIENT_FAILURE",
     }),
     frame(newAttemptId, 0, "attempt_started", { node: "turn" }),
@@ -352,16 +413,27 @@ function failedDossierStreamResponse(runId, summary) {
       runId,
       sequence: 1,
       type: "visible_delta",
-      field: "case_detail.case_story",
-      delta: JSON.stringify({ one_sentence_summary: summary }),
+      field: "room_utterance",
+      delta: "先完成这段接待回复。",
     })}`,
     "",
     "id: 2",
-    "event: error",
+    "event: visible_delta",
     `data: ${JSON.stringify({
       schemaVersion: "agent_stream.v1",
       runId,
       sequence: 2,
+      type: "visible_delta",
+      field: "case_detail.case_story",
+      delta: JSON.stringify({ one_sentence_summary: summary }),
+    })}`,
+    "",
+    "id: 3",
+    "event: error",
+    `data: ${JSON.stringify({
+      schemaVersion: "agent_stream.v1",
+      runId,
+      sequence: 3,
       type: "error",
       error: {
         code: "INTAKE_TEST_FAILURE",
@@ -2257,6 +2329,82 @@ describe("IntakeRoomView", () => {
     wrapper.unmount();
   });
 
+  it("keeps a recovered Intake dossier behind the reply pacer", async () => {
+    vi.useFakeTimers();
+    const runId = "run-recovered-reply-then-board";
+    const reply = "恢复中的接待回复。".repeat(500);
+    const summary = "恢复流在回复完成后才展示的案情摘要";
+    const status = intakeStatusWithProjection(currentProcessProjection({
+      room_phase: "AGENT_RUNNING",
+      active_logical_run_id: runId,
+      active_attempt_id: null,
+      active_run_status: "PENDING",
+      stream_cursor: "-1",
+    }));
+    let messagesCalls = 0;
+    let memoryCalls = 0;
+    let resolveFinalMessages;
+    let resolveFinalMemory;
+    const finalMessages = new Promise((resolve) => {
+      resolveFinalMessages = resolve;
+    });
+    const finalMemory = new Promise((resolve) => {
+      resolveFinalMemory = resolve;
+    });
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url === "/api/disputes/CASE_INTAKE_1") return apiResponse(dispute);
+      if (url === "/api/disputes/CASE_INTAKE_1/intake/status") {
+        return apiResponse(status);
+      }
+      if (url === "/api/disputes/CASE_INTAKE_1/rooms/INTAKE/messages") {
+        messagesCalls += 1;
+        return messagesCalls === 1 ? apiResponse([]) : finalMessages;
+      }
+      if (url === "/api/disputes/CASE_INTAKE_1/rooms/INTAKE/turn-memory/latest") {
+        memoryCalls += 1;
+        return memoryCalls === 1 ? apiResponse(null) : finalMemory;
+      }
+      if (url === "/api/disputes/CASE_INTAKE_1/rooms/INTAKE/agent-runs/active") {
+        return apiResponse([{
+          run_id: runId,
+          stream_url: `/api/private-agent-streams/${runId}/events`,
+          status: "RUNNING",
+        }]);
+      }
+      if (url.startsWith(`/api/private-agent-streams/${runId}/events`)) {
+        return replyThenDossierStreamResponse(runId, reply, summary);
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    const wrapper = await mountInteractiveView({
+      initialDispute: null,
+      initialMessages: null,
+      initialTurnMemory: null,
+      eventStreamer: vi.fn(async () => {}),
+    });
+    await flushPromises();
+
+    expect(agentStreamStore.runs[runId]?.lastEventId).toBe("1");
+    expect(wrapper.get("[data-dispute-detail-summary]").text())
+      .not.toContain(summary);
+
+    await vi.advanceTimersByTimeAsync(1_500);
+    await flushPromises();
+
+    expect(agentStreamStore.runs[runId]?.status).toBe("FINALIZING");
+    expect(wrapper.get("[data-dispute-detail-summary]").text()).toContain(summary);
+
+    resolveFinalMessages(apiResponse([]));
+    resolveFinalMemory(apiResponse(null));
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(100);
+    await flushPromises();
+    expect(agentStreamStore.runs[runId]?.status).toBe("COMPLETED");
+    wrapper.unmount();
+  });
+
   it("rejects projected recovery when the authorized descriptor omits its stream URL", async () => {
     const status = intakeStatusWithProjection(currentProcessProjection({
       room_phase: "AGENT_RUNNING",
@@ -2813,6 +2961,61 @@ describe("IntakeRoomView", () => {
     expect(wrapper.text()).toContain("Refund request recorded.");
     expect(wrapper.text()).not.toContain("REFUND");
     expect(wrapper.text()).not.toContain("delivery conflict");
+  });
+
+  it("keeps a user-submitted Intake dossier behind the reply pacer", async () => {
+    vi.useFakeTimers();
+    const runId = "run-user-submit-reply-then-board";
+    const streamUrl = `/api/private-agent-streams/${runId}/events`;
+    const reply = "提交后的接待回复。".repeat(500);
+    const summary = "用户提交后只会在回复完成后展示的案情摘要";
+    let resolveFinalMessages;
+    let resolveFinalMemory;
+    const finalMessages = new Promise((resolve) => {
+      resolveFinalMessages = resolve;
+    });
+    const finalMemory = new Promise((resolve) => {
+      resolveFinalMemory = resolve;
+    });
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      if (String(input).startsWith(streamUrl)) {
+        return replyThenDossierStreamResponse(runId, reply, summary);
+      }
+      throw new Error(`unexpected fetch: ${String(input)}`);
+    });
+    const wrapper = await mountInteractiveView({
+      initialTurnMemory: null,
+      postMessageAction: vi.fn().mockResolvedValue({
+        run_id: runId,
+        stream_url: streamUrl,
+      }),
+      messagesLoader: vi.fn(() => finalMessages),
+      turnMemoryLoader: vi.fn(() => finalMemory),
+      eventStreamer: vi.fn(async () => {}),
+    });
+
+    await wrapper.get(".conversation-stream__composer textarea")
+      .setValue("请核实订单的延迟送达。");
+    await wrapper.get("[data-send-message]").trigger("submit");
+    await flushPromises();
+
+    expect(agentStreamStore.runs[runId]?.lastEventId).toBe("1");
+    expect(wrapper.get("[data-dispute-detail-summary]").text())
+      .not.toContain(summary);
+
+    await vi.advanceTimersByTimeAsync(1_500);
+    await flushPromises();
+
+    expect(agentStreamStore.runs[runId]?.status).toBe("FINALIZING");
+    expect(wrapper.get("[data-dispute-detail-summary]").text()).toContain(summary);
+
+    resolveFinalMessages([]);
+    resolveFinalMemory(null);
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(100);
+    await flushPromises();
+    expect(agentStreamStore.runs[runId]?.status).toBe("COMPLETED");
+    wrapper.unmount();
   });
 
   // 业务位置：【前端接待室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。

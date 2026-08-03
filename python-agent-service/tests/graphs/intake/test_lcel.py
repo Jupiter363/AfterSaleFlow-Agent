@@ -1064,6 +1064,7 @@ def test_real_intake_lcel_is_governed_object_flow_with_human_text_isolation(
         (spec.property_name, spec.field, spec.value_mode)
         for spec in transport.requests[0].visible_fields
     ] == [
+        ("room_utterance", "room_utterance", "string_prefix"),
         ("title", "case_detail.case_story.title", "string_prefix"),
         (
             "one_sentence_summary",
@@ -1203,10 +1204,17 @@ async def test_async_graph_emits_only_governed_model_deltas_before_terminal_patc
     for _, field, delta in governed:
         streamed[field] = streamed.get(field, "") + delta
     assert streamed == {
+        "room_utterance": document["room_utterance"],
         "case_detail.case_story.one_sentence_summary": ("用户就订单商品问题提出售后诉求。"),
         "case_detail.case_story": ('{"one_sentence_summary":"用户就订单商品问题提出售后诉求。"}'),
     }
-    assert "room_utterance" not in streamed
+    room_positions = [position for position, field, _ in governed if field == "room_utterance"]
+    dossier_positions = [
+        position for position, field, _ in governed if field.startswith("case_detail.")
+    ]
+    assert room_positions
+    assert dossier_positions
+    assert max(room_positions) <= min(dossier_positions)
     assert terminal_positions
     assert all(position < terminal_positions[0] for position, _, _ in governed)
     assert transport.generate_calls == 1

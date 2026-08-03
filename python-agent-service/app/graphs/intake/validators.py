@@ -661,11 +661,43 @@ def _proposal_matrix_is_attested_by_current_pending_context(
     state: IntakeGraphStateV2,
     proposal: Mapping[str, Any],
 ) -> bool:
-    """Replay the original validator against the capsule's exact M0/Mn input."""
+    """Accept only a capsule bound to this exact turn and proposal.
+
+    During cognition/apply the current capsule is held in
+    ``baseline_pending_case_detail``.  ``checkpoint_terminal`` then promotes that
+    same capsule to ``baseline_previous_case_detail`` before the runtime extracts
+    and validates the terminal proposal one last time.  In that promoted state,
+    re-reading the capsule's freshly derived formal matrix as historical authority
+    would make a valid first-turn unilateral proposal reject itself.
+
+    A promoted capsule is therefore an attestation only when its complete binding,
+    committed result, public dossier, normalized patch, and deterministic formal
+    derivation all match the exact current proposal.  A prior-turn capsule has a
+    different proposal identity and falls through to the ordinary authority
+    validator.
+    """
 
     pending = state.get("baseline_pending_case_detail")
     if not _is_baseline_context_envelope(pending):
-        return False
+        previous = state.get("baseline_previous_case_detail")
+        if (
+            not _is_baseline_context_envelope(previous)
+            or previous.get("proposal_hash") != proposal.get("proposal_hash")
+        ):
+            return False
+        # The promoted shortcut is intentionally limited to a genuine M0 opening:
+        # no formal authority entered this graph and the deterministic finalizer
+        # consumed no prior matrix.  If either authority exists, fall back to the
+        # full matrix validator so a self-consistent, re-hashed capsule cannot
+        # smuggle an invented M1/Mn into the authority chain.
+        if (
+            previous.get("authority_input_matrix") is not None
+            or _ingress_matrix_authority_anchor_hash(state) is not None
+        ):
+            return False
+        _require_promoted_current_capsule_attestation(state, previous, proposal)
+        return True
+
     terminal_draft = state.get("terminal_draft")
     if not isinstance(terminal_draft, Mapping):
         raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_PENDING_PROPOSAL_MISSING")
@@ -711,6 +743,39 @@ def _proposal_matrix_is_attested_by_current_pending_context(
     # shortcut.  It cannot recurse into this proposal attestation path.
     validate_matrix_patch(cast(IntakeGraphStateV2, replay_state), proposal.get("matrix_patch"))
     return True
+
+
+def _require_promoted_current_capsule_attestation(
+    state: IntakeGraphStateV2,
+    envelope: Mapping[str, Any],
+    proposal: Mapping[str, Any],
+) -> None:
+    """Prove that a promoted capsule is the result being extracted right now."""
+
+    _validate_baseline_context_envelope(
+        envelope,
+        require_bound=True,
+        state=state,
+    )
+    _require_baseline_previous_result_lineage(state, envelope)
+    _require_pending_envelope_matches_proposal(state, envelope, proposal)
+    _require_pending_public_dossier_matches_state(state, envelope)
+    terminal_draft = state.get("terminal_draft")
+    committed_result = state.get("result_json")
+    if (
+        not isinstance(terminal_draft, Mapping)
+        or not isinstance(committed_result, Mapping)
+        or dict(terminal_draft) != dict(proposal)
+        or dict(committed_result) != dict(proposal)
+    ):
+        raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_COMMITTED_RESULT_MISMATCH")
+    _require_pending_normalized_matrix_patch(envelope, proposal.get("matrix_patch"))
+    _require_pending_formal_matrix_derivation(
+        state,
+        envelope,
+        matrix_patch=proposal.get("matrix_patch"),
+        response_content=proposal.get("room_utterance"),
+    )
 
 
 def validate_matrix_patch(

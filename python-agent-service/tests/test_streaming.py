@@ -28,6 +28,8 @@ from app.streaming import (
     STREAM_MAX_MODEL_DOCUMENT_CHARS,
     STREAM_MAX_VISIBLE_OUTPUT_CHARS,
     StreamUsageEvent,
+    TARGET_INTAKE_REPLY_FIRST_VISIBLE_FIELDS,
+    VISIBLE_FIELD_REGISTRY,
     VisibleFieldSpec,
     current_stream_observer,
     workflow_ndjson_response,
@@ -98,6 +100,98 @@ def test_incremental_projector_streams_completed_case_detail_sections() -> None:
         )
     ]
     assert projector.feed(',"risk_assessment":{}}}') == []
+
+
+def test_target_intake_projector_streams_room_utterance_before_case_detail() -> None:
+    projector = IncrementalVisibleJsonProjector(
+        TARGET_INTAKE_REPLY_FIRST_VISIBLE_FIELDS
+    )
+
+    assert projector.feed(
+        '{"case_detail":{"case_story":{"title":"商品无法开机"}}'
+    ) == []
+    first = projector.feed(',"room_utterance":"您好，')
+    second = projector.feed('请先确认订单问题。"')
+
+    assert first == [("room_utterance", "您好，")]
+    assert second == [
+        ("room_utterance", "请先确认订单问题。"),
+        ("case_detail.case_story.title", "商品无法开机"),
+        ("case_detail.case_story", '{"title":"商品无法开机"}'),
+    ]
+    assert [field for field, _ in first + second] == [
+        "room_utterance",
+        "room_utterance",
+        "case_detail.case_story.title",
+        "case_detail.case_story",
+    ]
+
+
+def test_target_intake_projector_preserves_unicode_before_opening_case_detail() -> None:
+    projector = IncrementalVisibleJsonProjector(
+        TARGET_INTAKE_REPLY_FIRST_VISIBLE_FIELDS
+    )
+
+    assert projector.feed('{"room_utterance":"你\\uD83D') == [
+        ("room_utterance", "你")
+    ]
+    assert projector.feed('\\uDE00好"') == [("room_utterance", "😀好")]
+    assert projector.feed(
+        ',"case_detail":{"case_story":{"one_sentence_summary":"已记录"'
+    ) == [
+        ("case_detail.case_story.one_sentence_summary", "已记录")
+    ]
+
+
+def test_target_intake_projector_hides_unapproved_fields() -> None:
+    unapproved = IncrementalVisibleJsonProjector(
+        TARGET_INTAKE_REPLY_FIRST_VISIBLE_FIELDS
+    )
+    assert unapproved.feed(
+        '{"private_reasoning":"must-not-project","room_utterance":"请说明订单情况"'
+    ) == [
+        ("room_utterance", "请说明订单情况")
+    ]
+
+    nested_unapproved = IncrementalVisibleJsonProjector(
+        TARGET_INTAKE_REPLY_FIRST_VISIBLE_FIELDS
+    )
+    assert nested_unapproved.feed('{"room_utterance":"请说明订单情况"') == [
+        ("room_utterance", "请说明订单情况")
+    ]
+    assert nested_unapproved.feed(
+        ',"case_detail":{"private":{"title":"must-not-project"'
+    ) == []
+
+
+def test_legacy_intake_registry_is_independent_from_target_reply_first_fields() -> None:
+    legacy_fields = VISIBLE_FIELD_REGISTRY["intake_turn"]["intake_turn_case_detail"]
+    legacy_signature = tuple(
+        (spec.property_name, spec.field, spec.value_mode)
+        for spec in legacy_fields
+    )
+
+    assert legacy_fields is not TARGET_INTAKE_REPLY_FIRST_VISIBLE_FIELDS
+    assert all(spec.field != "room_utterance" for spec in legacy_fields)
+    assert all(
+        spec.requires_completed_root_property is None for spec in legacy_fields
+    )
+
+    target_with_extra_field = TARGET_INTAKE_REPLY_FIRST_VISIBLE_FIELDS + (
+        VisibleFieldSpec(
+            "target_only",
+            "case_detail.target_only",
+            requires_completed_root_property="room_utterance",
+        ),
+    )
+    assert target_with_extra_field[-1] not in legacy_fields
+    assert tuple(
+        (spec.property_name, spec.field, spec.value_mode)
+        for spec in legacy_fields
+    ) == legacy_signature
+
+    projector = IncrementalVisibleJsonProjector(legacy_fields)
+    assert projector.feed('{"room_utterance":"model draft"') == []
 
 
 # 所属模块：Python 支撑模块 > test_streaming；函数角色：回归测试用例。

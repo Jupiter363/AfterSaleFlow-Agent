@@ -3,6 +3,7 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  abortAgentStream,
   clearAgentStreams,
   consumeAgentRun,
   durableMessagesOutsideActiveStreams,
@@ -20,8 +21,15 @@ function streamResponse(frames) {
   }), { status: 200, headers: { "Content-Type": "text/event-stream" } });
 }
 
+async function flushMicrotasks(turns = 24) {
+  for (let turn = 0; turn < turns; turn += 1) {
+    await Promise.resolve();
+  }
+}
+
 afterEach(() => {
   clearAgentStreams({}, { abort: true });
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -64,6 +72,188 @@ describe("agentStreamStore", () => {
     releaseRefresh();
     await consuming;
     expect(getAgentStreamRun("AGENT_RUN_STORE")?.status).toBe("COMPLETED");
+  });
+
+  it("keeps an Intake dossier unacknowledged until the reply pacer has drained", async () => {
+    vi.useFakeTimers();
+    const runId = "AGENT_RUN_REPLY_THEN_BOARD";
+    const reply = "接待官回复".repeat(600);
+    const dossier = JSON.stringify({ one_sentence_summary: "回复后才展示的卷宗" });
+    const observed = [];
+    const fetchImpl = vi.fn().mockResolvedValue(streamResponse([
+      `id: 0\nevent: start\ndata: ${JSON.stringify({
+        schemaVersion: "agent_stream.v1",
+        runId,
+        sequence: 0,
+        type: "start",
+      })}\n\n`,
+      `id: 1\nevent: visible_delta\ndata: ${JSON.stringify({
+        schemaVersion: "agent_stream.v1",
+        runId,
+        sequence: 1,
+        type: "visible_delta",
+        field: "room_utterance",
+        delta: reply,
+      })}\n\n`,
+      `id: 2\nevent: visible_delta\ndata: ${JSON.stringify({
+        schemaVersion: "agent_stream.v1",
+        runId,
+        sequence: 2,
+        type: "visible_delta",
+        field: "case_detail.case_story",
+        delta: dossier,
+      })}\n\n`,
+      `id: 3\nevent: final\ndata: ${JSON.stringify({
+        schemaVersion: "agent_stream.v1",
+        runId,
+        sequence: 3,
+        type: "final",
+        result: {},
+      })}\n\n`,
+    ]));
+
+    const consuming = consumeAgentRun({
+      actor,
+      caseId: "CASE_1",
+      roomType: "INTAKE",
+      replyThenBoard: true,
+      descriptor: {
+        runId,
+        streamUrl: `/api/agent-runs/${runId}/events`,
+      },
+      fetchImpl,
+      onEvent: (event) => observed.push(event.sequence),
+    });
+
+    await flushMicrotasks();
+    const beforeDrain = getAgentStreamRun(runId);
+    expect(beforeDrain.receivedContent).toBe(reply);
+    expect(beforeDrain.content.length).toBeLessThan(reply.length);
+    expect(beforeDrain.fieldText["case_detail.case_story"]).toBeUndefined();
+    expect(beforeDrain.receivedFieldText["case_detail.case_story"]).toBeUndefined();
+    expect(beforeDrain.lastEventId).toBe("1");
+    expect(observed).toEqual([0, 1]);
+
+    await vi.advanceTimersByTimeAsync(1_500);
+    await vi.runAllTimersAsync();
+    await consuming;
+
+    const completed = getAgentStreamRun(runId);
+    expect(completed.content).toBe(reply);
+    expect(completed.fieldText["case_detail.case_story"]).toBe(dossier);
+    expect(completed.receivedFieldText["case_detail.case_story"]).toBe(dossier);
+    expect(completed.lastEventId).toBe("3");
+    expect(observed).toEqual([0, 1, 2, 3]);
+  });
+
+  it("does not acknowledge an Intake dossier that is aborted behind the reply barrier", async () => {
+    vi.useFakeTimers();
+    const runId = "AGENT_RUN_REPLY_THEN_BOARD_ABORT";
+    const reply = "仍在打字".repeat(600);
+    const dossier = JSON.stringify({ one_sentence_summary: "不应提前确认" });
+    const firstResponse = streamResponse([
+      `id: 0\nevent: start\ndata: ${JSON.stringify({
+        schemaVersion: "agent_stream.v1",
+        runId,
+        sequence: 0,
+        type: "start",
+      })}\n\n`,
+      `id: 1\nevent: visible_delta\ndata: ${JSON.stringify({
+        schemaVersion: "agent_stream.v1",
+        runId,
+        sequence: 1,
+        type: "visible_delta",
+        field: "room_utterance",
+        delta: reply,
+      })}\n\n`,
+      `id: 2\nevent: visible_delta\ndata: ${JSON.stringify({
+        schemaVersion: "agent_stream.v1",
+        runId,
+        sequence: 2,
+        type: "visible_delta",
+        field: "case_detail.case_story",
+        delta: dossier,
+      })}\n\n`,
+    ]);
+    const replayResponse = streamResponse([
+      `id: 0\nevent: start\ndata: ${JSON.stringify({
+        schemaVersion: "agent_stream.v1",
+        runId,
+        sequence: 0,
+        type: "start",
+      })}\n\n`,
+      `id: 1\nevent: visible_delta\ndata: ${JSON.stringify({
+        schemaVersion: "agent_stream.v1",
+        runId,
+        sequence: 1,
+        type: "visible_delta",
+        field: "room_utterance",
+        delta: reply,
+      })}\n\n`,
+      `id: 2\nevent: visible_delta\ndata: ${JSON.stringify({
+        schemaVersion: "agent_stream.v1",
+        runId,
+        sequence: 2,
+        type: "visible_delta",
+        field: "case_detail.case_story",
+        delta: dossier,
+      })}\n\n`,
+      `id: 3\nevent: final\ndata: ${JSON.stringify({
+        schemaVersion: "agent_stream.v1",
+        runId,
+        sequence: 3,
+        type: "final",
+        result: {},
+      })}\n\n`,
+    ]);
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(firstResponse)
+      .mockResolvedValueOnce(replayResponse);
+
+    const first = consumeAgentRun({
+      actor,
+      caseId: "CASE_1",
+      roomType: "INTAKE",
+      replyThenBoard: true,
+      descriptor: {
+        runId,
+        streamUrl: `/api/agent-runs/${runId}/events`,
+      },
+      fetchImpl,
+    });
+    await flushMicrotasks();
+    const blocked = getAgentStreamRun(runId);
+    expect(blocked.lastEventId).toBe("1");
+    expect(blocked.fieldText["case_detail.case_story"]).toBeUndefined();
+
+    abortAgentStream(runId);
+    await first;
+
+    const aborted = getAgentStreamRun(runId);
+    expect(aborted.status).toBe("ABORTED");
+    expect(aborted.lastEventId).toBe("1");
+    expect(aborted.fieldText["case_detail.case_story"]).toBeUndefined();
+
+    const replay = consumeAgentRun({
+      actor,
+      caseId: "CASE_1",
+      roomType: "INTAKE",
+      replyThenBoard: true,
+      descriptor: {
+        runId,
+        streamUrl: `/api/agent-runs/${runId}/events`,
+      },
+      fetchImpl,
+    });
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(1_500);
+    await vi.runAllTimersAsync();
+    await replay;
+
+    const replayed = getAgentStreamRun(runId);
+    expect(fetchImpl.mock.calls[1][0]).toContain("last_event_id=-1");
+    expect(replayed.fieldText["case_detail.case_story"]).toBe(dossier);
+    expect(replayed.lastEventId).toBe("3");
   });
 
   it("replaces a model root JSON snapshot with the terminal snapshot while case-detail leaves append", async () => {
@@ -114,6 +304,7 @@ describe("agentStreamStore", () => {
       actor,
       caseId: "CASE_1",
       roomType: "INTAKE",
+      replyThenBoard: true,
       descriptor: {
         runId,
         streamUrl: `/api/agent-runs/${runId}/events`,

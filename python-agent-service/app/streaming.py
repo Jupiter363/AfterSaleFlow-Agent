@@ -309,42 +309,285 @@ class VisibleFieldSpec:
     property_name: str
     field: str
     value_mode: Literal["string_prefix", "json_value"] = "string_prefix"
+    requires_completed_root_property: str | None = None
+
+
+@dataclass(frozen=True)
+class _RootProjectionGate:
+    """一个需要先完成前导字符串、再开放后续字段的公开流契约。"""
+
+    leading_spec: VisibleFieldSpec
+
+
+def _root_projection_gate_for(
+    specs: tuple[VisibleFieldSpec, ...],
+) -> _RootProjectionGate | None:
+    """从显式字段标记构造公开发布门控，错误配置直接拒绝。"""
+
+    dependent_specs = tuple(
+        spec for spec in specs if spec.requires_completed_root_property is not None
+    )
+    if not dependent_specs:
+        return None
+    gate_names = {
+        spec.requires_completed_root_property for spec in dependent_specs
+    }
+    if len(gate_names) != 1:
+        raise ValueError("visible stream fields must use one completed-root gate")
+    gate_name = gate_names.pop()
+    assert gate_name is not None
+    leading_specs = tuple(
+        spec
+        for spec in specs
+        if (
+            spec.property_name == gate_name
+            and spec.field == gate_name
+            and spec.requires_completed_root_property is None
+        )
+    )
+    if len(leading_specs) != 1:
+        raise ValueError("visible stream gate requires exactly one root string field")
+    leading = leading_specs[0]
+    if (
+        leading.value_mode != "string_prefix"
+        or "." in leading.field
+    ):
+        raise ValueError("visible stream gate must be a root string prefix")
+    if specs[0] is not leading:
+        raise ValueError("visible stream gate field must be first in publication order")
+    if any(spec is not leading and spec not in dependent_specs for spec in specs):
+        raise ValueError("visible stream gate cannot contain an ungated field")
+    return _RootProjectionGate(leading_spec=leading)
+
+
+def _intake_case_detail_field(
+    property_name: str,
+    field: str,
+    value_mode: Literal["string_prefix", "json_value"] = "string_prefix",
+) -> VisibleFieldSpec:
+    """注册必须在接待话术完成后才公开的右侧卷宗字段。"""
+
+    return VisibleFieldSpec(
+        property_name,
+        field,
+        value_mode,
+        requires_completed_root_property="room_utterance",
+    )
+
+
+# Target 图使用独立注册表：它规定公开发布顺序，而不要求模型 JSON 的根键顺序。
+# 精确根路径的 room_utterance closing quote 到达后才会开放右侧 case_detail 投影。
+TARGET_INTAKE_REPLY_FIRST_VISIBLE_FIELDS: tuple[VisibleFieldSpec, ...] = (
+            # 元组顺序决定客户端看到的先后：先接待官话术，后右侧卷宗。
+            VisibleFieldSpec(
+                "room_utterance",
+                "room_utterance",
+            ),
+            _intake_case_detail_field("title", "case_detail.case_story.title"),
+            _intake_case_detail_field(
+                "one_sentence_summary",
+                "case_detail.case_story.one_sentence_summary",
+            ),
+            _intake_case_detail_field(
+                "order_reference",
+                "case_detail.references.order_reference",
+            ),
+            _intake_case_detail_field(
+                "after_sales_reference",
+                "case_detail.references.after_sales_reference",
+            ),
+            _intake_case_detail_field(
+                "logistics_reference",
+                "case_detail.references.logistics_reference",
+            ),
+            _intake_case_detail_field(
+                "user_claim",
+                "case_detail.party_positions.user_claim",
+            ),
+            _intake_case_detail_field(
+                "merchant_claim",
+                "case_detail.party_positions.merchant_claim",
+            ),
+            _intake_case_detail_field(
+                "initiator_position",
+                "case_detail.party_positions.initiator_position",
+            ),
+            _intake_case_detail_field(
+                "platform_observation",
+                "case_detail.party_positions.platform_observation",
+            ),
+            _intake_case_detail_field(
+                "normalized_statement",
+                "case_detail.claim_resolution.normalized_statement",
+            ),
+            _intake_case_detail_field(
+                "request_reason",
+                "case_detail.claim_resolution.request_reason",
+            ),
+            _intake_case_detail_field(
+                "requested_items",
+                "case_detail.claim_resolution.requested_items",
+            ),
+            _intake_case_detail_field(
+                "position",
+                "case_detail.respondent_attitude.position",
+            ),
+            _intake_case_detail_field(
+                "core_conflict",
+                "case_detail.dispute_core_state.core_conflict",
+            ),
+            _intake_case_detail_field(
+                "core_issue",
+                "case_detail.dispute_focus.core_issue",
+            ),
+            _intake_case_detail_field(
+                "improvement_reason",
+                "case_detail.intake_quality.improvement_reason",
+            ),
+            _intake_case_detail_field(
+                "case_story",
+                "case_detail.case_story",
+                "json_value",
+            ),
+            _intake_case_detail_field(
+                "references",
+                "case_detail.references",
+                "json_value",
+            ),
+            _intake_case_detail_field(
+                "party_positions",
+                "case_detail.party_positions",
+                "json_value",
+            ),
+            _intake_case_detail_field(
+                "claim_resolution",
+                "case_detail.claim_resolution",
+                "json_value",
+            ),
+            _intake_case_detail_field(
+                "respondent_attitude",
+                "case_detail.respondent_attitude",
+                "json_value",
+            ),
+            _intake_case_detail_field(
+                "dispute_core_state",
+                "case_detail.dispute_core_state",
+                "json_value",
+            ),
+            _intake_case_detail_field(
+                "dispute_focus",
+                "case_detail.dispute_focus",
+                "json_value",
+            ),
+            _intake_case_detail_field(
+                "risk_assessment",
+                "case_detail.risk_assessment",
+                "json_value",
+            ),
+            _intake_case_detail_field(
+                "missing_information",
+                "case_detail.missing_information",
+                "json_value",
+            ),
+            _intake_case_detail_field(
+                "intake_quality",
+                "case_detail.intake_quality",
+                "json_value",
+            ),
+)
+
+
+# Legacy Intake 工作流仍只公开经确定性护栏归一化后的终态话术；不能把原始
+# room_utterance 放进其注册表，否则会与终态追加语义冲突。这里必须是独立的
+# 基线字段清单，不能从 Target tuple 过滤或派生，以免 Target 变更影响 Legacy。
+_LEGACY_INTAKE_CASE_DETAIL_VISIBLE_FIELDS: tuple[VisibleFieldSpec, ...] = (
+    VisibleFieldSpec("title", "case_detail.case_story.title"),
+    VisibleFieldSpec(
+        "one_sentence_summary",
+        "case_detail.case_story.one_sentence_summary",
+    ),
+    VisibleFieldSpec("order_reference", "case_detail.references.order_reference"),
+    VisibleFieldSpec(
+        "after_sales_reference",
+        "case_detail.references.after_sales_reference",
+    ),
+    VisibleFieldSpec(
+        "logistics_reference",
+        "case_detail.references.logistics_reference",
+    ),
+    VisibleFieldSpec("user_claim", "case_detail.party_positions.user_claim"),
+    VisibleFieldSpec("merchant_claim", "case_detail.party_positions.merchant_claim"),
+    VisibleFieldSpec(
+        "initiator_position",
+        "case_detail.party_positions.initiator_position",
+    ),
+    VisibleFieldSpec(
+        "platform_observation",
+        "case_detail.party_positions.platform_observation",
+    ),
+    VisibleFieldSpec(
+        "normalized_statement",
+        "case_detail.claim_resolution.normalized_statement",
+    ),
+    VisibleFieldSpec(
+        "request_reason",
+        "case_detail.claim_resolution.request_reason",
+    ),
+    VisibleFieldSpec(
+        "requested_items",
+        "case_detail.claim_resolution.requested_items",
+    ),
+    VisibleFieldSpec("position", "case_detail.respondent_attitude.position"),
+    VisibleFieldSpec(
+        "core_conflict",
+        "case_detail.dispute_core_state.core_conflict",
+    ),
+    VisibleFieldSpec("core_issue", "case_detail.dispute_focus.core_issue"),
+    VisibleFieldSpec(
+        "improvement_reason",
+        "case_detail.intake_quality.improvement_reason",
+    ),
+    VisibleFieldSpec("case_story", "case_detail.case_story", "json_value"),
+    VisibleFieldSpec("references", "case_detail.references", "json_value"),
+    VisibleFieldSpec(
+        "party_positions",
+        "case_detail.party_positions",
+        "json_value",
+    ),
+    VisibleFieldSpec(
+        "claim_resolution",
+        "case_detail.claim_resolution",
+        "json_value",
+    ),
+    VisibleFieldSpec(
+        "respondent_attitude",
+        "case_detail.respondent_attitude",
+        "json_value",
+    ),
+    VisibleFieldSpec(
+        "dispute_core_state",
+        "case_detail.dispute_core_state",
+        "json_value",
+    ),
+    VisibleFieldSpec("dispute_focus", "case_detail.dispute_focus", "json_value"),
+    VisibleFieldSpec(
+        "risk_assessment",
+        "case_detail.risk_assessment",
+        "json_value",
+    ),
+    VisibleFieldSpec(
+        "missing_information",
+        "case_detail.missing_information",
+        "json_value",
+    ),
+    VisibleFieldSpec("intake_quality", "case_detail.intake_quality", "json_value"),
+)
 
 
 # 注册表默认拒绝：内部推理、矩阵 patch、工具参数、评议过程和私有 A2A 数据没有条目，因此不能流出。
 VISIBLE_FIELD_REGISTRY: dict[str, dict[str, tuple[VisibleFieldSpec, ...]]] = {
     "intake_turn": {
-        "intake_turn_case_detail": (
-            # 接待话术会在卷宗渲染和 readiness 护栏中被确定性改写，不能直接公开
-            # 模型原稿。IntakeTurnWorkflow.run 会在全部护栏通过后发布最终话术；
-            # 其余卷宗分区仍可在模型生成期间实时更新。
-            VisibleFieldSpec("title", "case_detail.case_story.title"),
-            VisibleFieldSpec("one_sentence_summary", "case_detail.case_story.one_sentence_summary"),
-            VisibleFieldSpec("order_reference", "case_detail.references.order_reference"),
-            VisibleFieldSpec("after_sales_reference", "case_detail.references.after_sales_reference"),
-            VisibleFieldSpec("logistics_reference", "case_detail.references.logistics_reference"),
-            VisibleFieldSpec("user_claim", "case_detail.party_positions.user_claim"),
-            VisibleFieldSpec("merchant_claim", "case_detail.party_positions.merchant_claim"),
-            VisibleFieldSpec("initiator_position", "case_detail.party_positions.initiator_position"),
-            VisibleFieldSpec("platform_observation", "case_detail.party_positions.platform_observation"),
-            VisibleFieldSpec("normalized_statement", "case_detail.claim_resolution.normalized_statement"),
-            VisibleFieldSpec("request_reason", "case_detail.claim_resolution.request_reason"),
-            VisibleFieldSpec("requested_items", "case_detail.claim_resolution.requested_items"),
-            VisibleFieldSpec("position", "case_detail.respondent_attitude.position"),
-            VisibleFieldSpec("core_conflict", "case_detail.dispute_core_state.core_conflict"),
-            VisibleFieldSpec("core_issue", "case_detail.dispute_focus.core_issue"),
-            VisibleFieldSpec("improvement_reason", "case_detail.intake_quality.improvement_reason"),
-            VisibleFieldSpec("case_story", "case_detail.case_story", "json_value"),
-            VisibleFieldSpec("references", "case_detail.references", "json_value"),
-            VisibleFieldSpec("party_positions", "case_detail.party_positions", "json_value"),
-            VisibleFieldSpec("claim_resolution", "case_detail.claim_resolution", "json_value"),
-            VisibleFieldSpec("respondent_attitude", "case_detail.respondent_attitude", "json_value"),
-            VisibleFieldSpec("dispute_core_state", "case_detail.dispute_core_state", "json_value"),
-            VisibleFieldSpec("dispute_focus", "case_detail.dispute_focus", "json_value"),
-            VisibleFieldSpec("risk_assessment", "case_detail.risk_assessment", "json_value"),
-            VisibleFieldSpec("missing_information", "case_detail.missing_information", "json_value"),
-            VisibleFieldSpec("intake_quality", "case_detail.intake_quality", "json_value"),
-        ),
+        "intake_turn_case_detail": _LEGACY_INTAKE_CASE_DETAIL_VISIBLE_FIELDS,
     },
     "evidence_turn": {
         "evidence_turn": (
@@ -414,6 +657,7 @@ class IncrementalVisibleJsonProjector:
     # 系统意义：没有 spec 就不会投影任何字段；已发送长度防止每次扫描累计缓冲时重复向前端发送旧文本。
     def __init__(self, specs: tuple[VisibleFieldSpec, ...]) -> None:
         self._specs = specs
+        self._root_projection_gate = _root_projection_gate_for(specs)
         self._buffer = ""
         self._emitted_lengths = {spec.field: 0 for spec in specs}
         self._emitted_json_fields: set[str] = set()
@@ -438,13 +682,28 @@ class IncrementalVisibleJsonProjector:
         # 字符串缓冲保存从流开始到当前的 JSON 文档，扫描器才能判断字段名、冒号和转义上下文。
         self._buffer += content_delta
         deltas: list[tuple[str, str]] = []
-        for spec in self._specs:
+        specs = self._specs
+        gated_projection = self._root_projection_gate is not None
+        if gated_projection:
+            assert self._root_projection_gate is not None
+            if not _root_projection_gate_is_open(
+                self._buffer,
+                self._root_projection_gate,
+            ):
+                # 在前导话术的 closing quote 到来前，后续卷宗字段即使已被扫描到也
+                # 不可见；这样客户端永远先得到左侧接待官文本，再收到右侧展板更新。
+                specs = (self._root_projection_gate.leading_spec,)
+        for spec in specs:
             if spec.value_mode == "json_value":
                 if spec.field in self._emitted_json_fields:
                     continue
-                value = _find_complete_json_property_value(
-                    self._buffer,
-                    spec.property_name,
+                value = (
+                    _find_complete_json_path_value(self._buffer, spec.field)
+                    if gated_projection
+                    else _find_complete_json_property_value(
+                        self._buffer,
+                        spec.property_name,
+                    )
                 )
                 if value is None:
                     continue
@@ -460,9 +719,13 @@ class IncrementalVisibleJsonProjector:
                     )
                 )
                 continue
-            prefix = _find_json_string_property_prefix(
-                self._buffer,
-                spec.property_name,
+            prefix = (
+                _find_json_string_path_prefix(self._buffer, spec.field)
+                if gated_projection
+                else _find_json_string_property_prefix(
+                    self._buffer,
+                    spec.property_name,
+                )
             )
             if prefix is None:
                 continue
@@ -898,6 +1161,171 @@ def _public_stream_error(
     if isinstance(exception, PermissionError):
         return "AGENT_PERMISSION_DENIED", str(exception), False, None
     return "INTERNAL_ERROR", "internal service error", False, None
+
+
+def _root_projection_gate_is_open(
+    document: str,
+    gate: _RootProjectionGate,
+) -> bool:
+    """只在精确根路径的前导公开字符串闭合后开放后续字段。"""
+
+    return _find_complete_json_string_path(
+        document,
+        gate.leading_spec.field,
+    ) is not None
+
+
+def _find_json_string_path_prefix(document: str, field: str) -> str | None:
+    """在不完整 JSON 中按完整字段路径读取字符串前缀。"""
+
+    start = _find_json_path_value_start(document, field)
+    if start is None or start >= len(document) or document[start] != '"':
+        return None
+    value, _, _ = _decode_json_string(document, start)
+    return value
+
+
+def _find_complete_json_string_path(document: str, field: str) -> str | None:
+    """只在精确路径的 JSON 字符串 closing quote 到达后返回完整文本。"""
+
+    start = _find_json_path_value_start(document, field)
+    if start is None or start >= len(document) or document[start] != '"':
+        return None
+    value, _, complete = _decode_json_string(document, start)
+    return value if complete else None
+
+
+def _find_complete_json_path_value(document: str, field: str) -> Any | None:
+    """只在完整字段路径的 JSON 值闭合后返回其公开投影。"""
+
+    start = _find_json_path_value_start(document, field)
+    if start is None:
+        return None
+    try:
+        value, _ = json.JSONDecoder().raw_decode(document, start)
+    except ValueError:
+        return None
+    return value
+
+
+def _find_json_path_value_start(document: str, field: str) -> int | None:
+    """定位部分 JSON 文档中精确路径的值起点，避免同名私有字段冒充公开字段。"""
+
+    target_path = tuple(field.split("."))
+    status, value = _scan_json_path_value(
+        document,
+        _skip_whitespace(document, 0),
+        (),
+        target_path,
+    )
+    return value if status == "found" else None
+
+
+def _scan_json_path_value(
+    document: str,
+    index: int,
+    path: tuple[str, ...],
+    target_path: tuple[str, ...],
+) -> tuple[Literal["found", "complete", "incomplete"], int]:
+    """在一个 JSON 值中寻找精确路径；未闭合前缀只返回 incomplete。"""
+
+    index = _skip_whitespace(document, index)
+    if index >= len(document):
+        return "incomplete", index
+    if path == target_path:
+        return "found", index
+
+    token = document[index]
+    if token == "{":
+        return _scan_json_object_path(document, index, path, target_path)
+    if token == "[":
+        return _scan_json_array_path(document, index, path, target_path)
+    if token == '"':
+        _, end, complete = _decode_json_string(document, index)
+        return ("complete", end) if complete else ("incomplete", end)
+
+    cursor = index
+    while cursor < len(document) and document[cursor] not in ",]} \t\r\n":
+        cursor += 1
+    if cursor == index or cursor == len(document):
+        return "incomplete", cursor
+    return "complete", cursor
+
+
+def _scan_json_object_path(
+    document: str,
+    index: int,
+    path: tuple[str, ...],
+    target_path: tuple[str, ...],
+) -> tuple[Literal["found", "complete", "incomplete"], int]:
+    cursor = _skip_whitespace(document, index + 1)
+    if cursor >= len(document):
+        return "incomplete", cursor
+    if document[cursor] == "}":
+        return "complete", cursor + 1
+
+    while True:
+        if cursor >= len(document) or document[cursor] != '"':
+            return "incomplete", cursor
+        key, cursor, complete = _decode_json_string(document, cursor)
+        if not complete:
+            return "incomplete", cursor
+        cursor = _skip_whitespace(document, cursor)
+        if cursor >= len(document) or document[cursor] != ":":
+            return "incomplete", cursor
+        status, value_end = _scan_json_path_value(
+            document,
+            cursor + 1,
+            path + (key,),
+            target_path,
+        )
+        if status != "complete":
+            return status, value_end
+        cursor = _skip_whitespace(document, value_end)
+        if cursor >= len(document):
+            return "incomplete", cursor
+        if document[cursor] == "}":
+            return "complete", cursor + 1
+        if document[cursor] != ",":
+            return "incomplete", cursor
+        cursor = _skip_whitespace(document, cursor + 1)
+        if cursor >= len(document):
+            return "incomplete", cursor
+
+
+def _scan_json_array_path(
+    document: str,
+    index: int,
+    path: tuple[str, ...],
+    target_path: tuple[str, ...],
+) -> tuple[Literal["found", "complete", "incomplete"], int]:
+    cursor = _skip_whitespace(document, index + 1)
+    if cursor >= len(document):
+        return "incomplete", cursor
+    if document[cursor] == "]":
+        return "complete", cursor + 1
+
+    item_index = 0
+    while True:
+        status, value_end = _scan_json_path_value(
+            document,
+            cursor,
+            path + (str(item_index),),
+            target_path,
+        )
+        if status != "complete":
+            return status, value_end
+        cursor = _skip_whitespace(document, value_end)
+        if cursor >= len(document):
+            return "incomplete", cursor
+        if document[cursor] == "]":
+            return "complete", cursor + 1
+        if document[cursor] != ",":
+            return "incomplete", cursor
+        cursor = _skip_whitespace(document, cursor + 1)
+        if cursor >= len(document):
+            return "incomplete", cursor
+        item_index += 1
 
 
 # 所属模块：Agent 流式协议 > JSON 可见投影 > 目标属性前缀扫描。

@@ -49,7 +49,6 @@ from app.graph_runtime.target_e2e import (
 from app.graphs.intake.lcel import (
     _ABSENT_RESPONDENT_ATTITUDES,
     _SUBSTANTIVE_RESPONDENT_ATTITUDES,
-    _TARGET_INTAKE_VISIBLE_FIELDS,
     _contains_forbidden_evidence_request,
     _is_evidence_material_gap,
     _nested_strings,
@@ -63,17 +62,24 @@ from app.graphs.intake.state import IntakeGraphStateV2, IntakeTurnContext
 from app.graphs.intake.validators import validate_state
 from app.model_runtime.callbacks import governed_events_from_chunk
 from app.model_runtime.transports import ModelTransport
+from app.streaming import TARGET_INTAKE_REPLY_FIRST_VISIBLE_FIELDS
 
 
+_INTAKE_REPLY_FIRST_VISIBLE_FIELD_MODES = {
+    spec.field: spec.value_mode for spec in TARGET_INTAKE_REPLY_FIRST_VISIBLE_FIELDS
+}
+_INTAKE_ROOM_UTTERANCE_FIELD = "room_utterance"
 _INTAKE_MODEL_VISIBLE_FIELD_MODES = {
-    spec.field: spec.value_mode for spec in _TARGET_INTAKE_VISIBLE_FIELDS
+    field: value_mode
+    for field, value_mode in _INTAKE_REPLY_FIRST_VISIBLE_FIELD_MODES.items()
+    if field != _INTAKE_ROOM_UTTERANCE_FIELD
 }
 _INTAKE_MODEL_VISIBLE_FIELDS = frozenset(_INTAKE_MODEL_VISIBLE_FIELD_MODES)
-_INTAKE_VISIBLE_FIELDS = _INTAKE_MODEL_VISIBLE_FIELDS | frozenset({"room_utterance"})
+_INTAKE_VISIBLE_FIELDS = frozenset(_INTAKE_REPLY_FIRST_VISIBLE_FIELD_MODES)
 _INTAKE_TERMINAL_DOSSIER_FIELDS = tuple(
     dict.fromkeys(
         spec.field
-        for spec in _TARGET_INTAKE_VISIBLE_FIELDS
+        for spec in TARGET_INTAKE_REPLY_FIRST_VISIBLE_FIELDS
         if spec.value_mode == "json_value" and spec.field.count(".") == 1
     )
 )
@@ -160,6 +166,10 @@ class CompiledIntakeGraphShadowExecutor:
         config = self._graph_config(runtime_execution)
         emitted_usage: list[Usage] = []
         pending_usage_update: GraphPublicUpdate | None = None
+        streamed_room_utterance_parts: list[str] = []
+        room_utterance_streamed = False
+        room_utterance_completed = False
+        case_detail_seen_before_room_utterance = False
         source = graph.astream(
             graph_input,
             config,
@@ -181,10 +191,62 @@ class CompiledIntakeGraphShadowExecutor:
                         emitted_usage.append(usage_update)
                         pending_usage_update = update
                         continue
-                    if not update.payload.field.startswith("case_detail."):
+                    field = update.payload.field
+                    if field == _INTAKE_ROOM_UTTERANCE_FIELD:
+                        if (
+                            room_utterance_completed
+                            or case_detail_seen_before_room_utterance
+                        ):
+                            raise GraphContractError(
+                                "INTAKE_ROOM_UTTERANCE_STREAM_ORDER_INVALID"
+                            )
+                        room_delta = self._streamed_room_utterance_delta(update)
+                        candidate_room_utterance = "".join(
+                            (*streamed_room_utterance_parts, room_delta)
+                        )
+                        # The model's individual prefix chunks must remain a prefix
+                        # of their normalized public text.  If a policy replacement
+                        # becomes necessary, this attempt cannot safely continue:
+                        # some provisional text may already have reached the room.
+                        # Raising makes the outer stream publish its normal failure /
+                        # reset path rather than committing a different reply.
+                        if (
+                            _normalized_intake_room_utterance(candidate_room_utterance)
+                            != candidate_room_utterance
+                        ):
+                            raise GraphContractError(
+                                "INTAKE_ROOM_UTTERANCE_STREAM_NORMALIZATION_DIVERGED"
+                            )
+                        for room_update in self._streamed_room_utterance_updates(
+                            node=update.payload.node,
+                            delta=room_delta,
+                        ):
+                            self._validate_public_update(room_update)
+                            yield self._event(
+                                execution,
+                                sequence,
+                                room_update.event_type,
+                                room_update.payload,
+                            )
+                            sequence += 1
+                        streamed_room_utterance_parts.append(room_delta)
+                        room_utterance_streamed = True
+                        continue
+                    if not field.startswith("case_detail."):
                         raise GraphContractError(
                             "compiled Intake Graph emitted an unsupported visible field"
                         )
+                    if not room_utterance_streamed:
+                        # A legacy parser may not expose the model reply at all.  Do
+                        # not leak a dossier before the left-side reply in that
+                        # compatibility path; if no reply ever arrives, the
+                        # authoritative terminal fallback below publishes the old
+                        # bounded reply chunks followed by its normalized dossier.
+                        # If a room delta arrives later, the order breach is rejected
+                        # rather than silently reordering two user-visible streams.
+                        case_detail_seen_before_room_utterance = True
+                        continue
+                    room_utterance_completed = True
                     if self._should_suppress_respondent_attitude_update(update):
                         continue
                     if update.payload.field.startswith("case_detail.dispute_core_state"):
@@ -227,19 +289,27 @@ class CompiledIntakeGraphShadowExecutor:
         checkpoint_id = str(configurable.get("checkpoint_id") or "")
         revision = state["cognitive_revision"]
 
-        # Baseline Intake publishes the room utterance only after its dossier and
-        # readiness guards have produced the final text.  It is still provisional
-        # until the fenced commit below (like the streamed board sections), but it
-        # is byte-for-byte the value that will be persisted on success.
-        for room_update in self._room_utterance_updates(proposal.room_utterance):
-            self._validate_public_update(room_update)
-            yield self._event(
-                execution,
-                sequence,
-                room_update.event_type,
-                room_update.payload,
+        terminal_room_utterance = self._normalized_terminal_room_utterance(
+            proposal.room_utterance
+        )
+        if room_utterance_streamed:
+            self._require_streamed_room_utterance_matches_terminal(
+                streamed="".join(streamed_room_utterance_parts),
+                terminal=terminal_room_utterance,
             )
-            sequence += 1
+        else:
+            # Compatibility for a graph/parser that does not expose model reply
+            # deltas.  It intentionally keeps the former terminal chunk behavior,
+            # while still preserving the room-before-dossier publication order.
+            for room_update in self._room_utterance_updates(terminal_room_utterance):
+                self._validate_public_update(room_update)
+                yield self._event(
+                    execution,
+                    sequence,
+                    room_update.event_type,
+                    room_update.payload,
+                )
+                sequence += 1
 
         await self._saver.avalidate_external_terminal_checkpoint(
             final_config,
@@ -363,11 +433,21 @@ class CompiledIntakeGraphShadowExecutor:
             if (
                 event.get("schema_version") != "governed-model-event.v1"
                 or event.get("node_name") != BASELINE_INTAKE_NODE_NAME
-                or event.get("field") not in _INTAKE_MODEL_VISIBLE_FIELDS
+                or event.get("field") not in _INTAKE_VISIBLE_FIELDS
             ):
                 raise GraphContractError("compiled Intake Graph governed event is invalid")
             field = event["field"]
             delta = event["delta"]
+            if field == _INTAKE_ROOM_UTTERANCE_FIELD:
+                if not delta:
+                    raise GraphContractError("INTAKE_ROOM_UTTERANCE_STREAM_INVALID")
+                updates.extend(
+                    CompiledIntakeGraphShadowExecutor._streamed_room_utterance_updates(
+                        node=event["node_name"],
+                        delta=delta,
+                    )
+                )
+                continue
             # A structured root snapshot must be a complete JSON document for the
             # frontend to parse it.  Splitting it would publish invalid fragments,
             # while allowing it through would violate AgentStreamV2's 4096-char
@@ -414,9 +494,9 @@ class CompiledIntakeGraphShadowExecutor:
         delta = update.payload.delta
         if field not in _INTAKE_VISIBLE_FIELDS or not isinstance(delta, str) or not delta:
             raise GraphContractError("compiled Intake Graph visible update is invalid")
-        # room_utterance is the finalized baseline text, not provider JSON.  It is
-        # normalized by _validated_room_utterance_update immediately before
-        # publication.
+        # The streaming room reply is checked against the normalized terminal
+        # proposal before any durable commit.  The terminal-only compatibility
+        # fallback remains normalized by _room_utterance_updates.
         if field == "room_utterance":
             return
         if (
@@ -447,6 +527,65 @@ class CompiledIntakeGraphShadowExecutor:
             field=payload.field,
             delta=room_utterance,
         )
+
+    @staticmethod
+    def _streamed_room_utterance_delta(update: GraphPublicUpdate) -> str:
+        """Validate a model reply prefix without rewriting its incremental text.
+
+        Rewriting one chunk independently would make a later terminal equality
+        check meaningless.  The caller instead normalizes the accumulated prefix
+        and fail-closes if a replacement would be needed.
+        """
+
+        payload = update.payload
+        if (
+            update.event_type != "visible_delta"
+            or payload.node != BASELINE_INTAKE_NODE_NAME
+            or payload.field != _INTAKE_ROOM_UTTERANCE_FIELD
+            or not isinstance(payload.delta, str)
+            or not payload.delta
+        ):
+            raise GraphContractError("INTAKE_ROOM_UTTERANCE_STREAM_INVALID")
+        return payload.delta
+
+    @staticmethod
+    def _streamed_room_utterance_updates(
+        *,
+        node: str,
+        delta: str,
+    ) -> tuple[GraphPublicUpdate, ...]:
+        """Bound a raw model reply prefix without normalizing it per chunk."""
+
+        if node != BASELINE_INTAKE_NODE_NAME or not isinstance(delta, str) or not delta:
+            raise GraphContractError("INTAKE_ROOM_UTTERANCE_STREAM_INVALID")
+        return tuple(
+            GraphPublicUpdate.visible_delta(
+                node=node,
+                field=_INTAKE_ROOM_UTTERANCE_FIELD,
+                # Python slices operate on Unicode code points, so no UTF-8 byte
+                # sequence can be cut in half.  The terminal comparison below
+                # covers the exact concatenated string, not just each fragment.
+                delta=delta[offset : offset + _AGENT_STREAM_DELTA_MAX_LENGTH],
+            )
+            for offset in range(0, len(delta), _AGENT_STREAM_DELTA_MAX_LENGTH)
+        )
+
+    @staticmethod
+    def _normalized_terminal_room_utterance(room_utterance: object) -> str:
+        if not isinstance(room_utterance, str) or not room_utterance.strip():
+            raise GraphTerminalBindingError("Intake terminal room utterance is invalid")
+        return _normalized_intake_room_utterance(room_utterance)
+
+    @staticmethod
+    def _require_streamed_room_utterance_matches_terminal(
+        *,
+        streamed: str,
+        terminal: str,
+    ) -> None:
+        if not streamed or streamed != terminal:
+            raise GraphTerminalBindingError(
+                "Intake streamed room utterance differs from normalized terminal proposal"
+            )
 
     @staticmethod
     def _room_utterance_updates(room_utterance: str) -> tuple[GraphPublicUpdate, ...]:

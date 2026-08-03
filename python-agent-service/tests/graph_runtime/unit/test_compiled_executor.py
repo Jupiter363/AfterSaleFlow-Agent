@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -12,6 +13,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
+from langchain_core.messages import AIMessageChunk
 from typing_extensions import TypedDict
 
 from app.contracts.v1.codec import canonical_sha256
@@ -30,6 +32,8 @@ from app.graph_runtime.compiled_executor import (
 )
 from app.graph_runtime.errors import GraphContractError, GraphTerminalBindingError
 from app.graph_runtime.gateway import GatewayExecution
+import app.graph_runtime.intake_executor as intake_executor
+from app.graph_runtime.intake_executor import CompiledIntakeGraphShadowExecutor
 from app.graph_runtime.persistence_models import GraphFenceContext
 from app.graph_runtime.result import CompletedDraft, ResultBindings
 from app.graph_runtime.state import CommonGraphState
@@ -672,3 +676,368 @@ def test_terminal_plan_rejects_profile_or_command_drift() -> None:
 
     with pytest.raises(GraphTerminalBindingError, match="signed command"):
         plan.materialize(drifted, "room", "cp-final")
+
+
+def _intake_governed_delta(field: str, delta: str) -> tuple[str, tuple[AIMessageChunk, dict[str, str]]]:
+    return (
+        "messages",
+        (
+            AIMessageChunk(
+                content="",
+                additional_kwargs={
+                    "governed_events": [
+                        {
+                            "schema_version": "governed-model-event.v1",
+                            "event_type": "visible_delta",
+                            "node_name": "intake_turn_case_detail",
+                            "field": field,
+                            "delta": delta,
+                        }
+                    ]
+                },
+            ),
+            {"langgraph_node": "intake_turn_case_detail"},
+        ),
+    )
+
+
+def _intake_stream_executor(
+    monkeypatch: pytest.MonkeyPatch,
+    candidates: list[Any],
+    *,
+    terminal_room_utterance: str,
+    terminal_dossier_updates: tuple[GraphPublicUpdate, ...] = (),
+) -> tuple[CompiledIntakeGraphShadowExecutor, GatewayExecution, Any, Any, Any]:
+    """Build a narrow durable Intake stream harness for publication-order tests."""
+
+    execution = _execution()
+    terminal_state = {
+        "terminal_draft": {"same": True},
+        "result_json": {"same": True},
+        "cognitive_revision": 1,
+    }
+    final_config = {
+        "configurable": {"checkpoint_ns": "", "checkpoint_id": "cp-intake-terminal"}
+    }
+    canonical = SimpleNamespace(
+        artifact_id="intake-proposal",
+        schema_version="intake-proposal-v1",
+        sha256="a" * 64,
+        size_bytes=1,
+    )
+    result = SimpleNamespace(
+        result_ref="urn:test:intake-result",
+        result_hash="b" * 64,
+        proposal_hash="c" * 64,
+        result_envelope_hash="d" * 64,
+    )
+
+    class Saver:
+        def __init__(self) -> None:
+            self.preflights = 0
+            self.commits = 0
+
+        async def avalidate_external_terminal_checkpoint(self, *_: Any, **__: Any) -> None:
+            self.preflights += 1
+
+        async def acommit_external_terminal(self, *_: Any, **__: Any) -> dict[str, Any]:
+            self.commits += 1
+            return {
+                "configurable": {
+                    FENCE_CONTEXT_KEY: replace(
+                        execution.fence,
+                        result_ref=result.result_ref,
+                        result_hash=result.result_hash,
+                        proposal_hash=result.proposal_hash,
+                        result_envelope_hash=result.result_envelope_hash,
+                    )
+                }
+            }
+
+    saver = Saver()
+
+    class Graph:
+        def __init__(self) -> None:
+            self.checkpointer = saver
+            self.closed = False
+
+        async def astream(self, *_: Any, **__: Any):
+            try:
+                for candidate in candidates:
+                    if isinstance(candidate, BaseException):
+                        raise candidate
+                    yield candidate
+                await asyncio.sleep(0)
+            finally:
+                self.closed = True
+
+        async def aget_state(self, *_: Any) -> object:
+            return object()
+
+    graph = Graph()
+
+    class Store:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def put(self, *_: Any, **__: Any) -> Any:
+            self.calls += 1
+            return SimpleNamespace(
+                artifact_id=canonical.artifact_id,
+                schema_version=canonical.schema_version,
+                uri="s3://intake-proposals/test.json",
+                sha256=canonical.sha256,
+                size_bytes=canonical.size_bytes,
+            )
+
+    store = Store()
+    proposal = SimpleNamespace(room_utterance=terminal_room_utterance)
+
+    class Materializer:
+        def materialize(self, *_: Any, **__: Any) -> Any:
+            return result
+
+    async def load_context(*_: Any, **__: Any) -> object:
+        return object()
+
+    monkeypatch.setattr(
+        intake_executor,
+        "build_governed_intake_runtime",
+        lambda **_: SimpleNamespace(graph=graph),
+    )
+    monkeypatch.setattr(CompiledIntakeGraphShadowExecutor, "_load_context", load_context)
+    monkeypatch.setattr(
+        CompiledIntakeGraphShadowExecutor,
+        "_graph_input",
+        staticmethod(lambda _: {}),
+    )
+    monkeypatch.setattr(
+        CompiledIntakeGraphShadowExecutor,
+        "_graph_config",
+        staticmethod(lambda _: {"configurable": {}}),
+    )
+    monkeypatch.setattr(
+        CompiledIntakeGraphShadowExecutor,
+        "_snapshot",
+        staticmethod(lambda *_: (terminal_state, final_config)),
+    )
+    monkeypatch.setattr(
+        intake_executor.IntakeRuntimeBundle,
+        "terminal_proposal",
+        staticmethod(lambda _: proposal),
+    )
+    monkeypatch.setattr(
+        CompiledIntakeGraphShadowExecutor,
+        "_command_usage",
+        staticmethod(lambda *_: Usage(input_tokens=0, output_tokens=0, total_tokens=0)),
+    )
+    monkeypatch.setattr(intake_executor, "canonical_intake_proposal", lambda _: canonical)
+    monkeypatch.setattr(
+        CompiledIntakeGraphShadowExecutor,
+        "_materializer",
+        staticmethod(lambda *_, **__: Materializer()),
+    )
+    monkeypatch.setattr(
+        CompiledIntakeGraphShadowExecutor,
+        "_target_proposal_source",
+        staticmethod(lambda *_: None),
+    )
+    monkeypatch.setattr(
+        CompiledIntakeGraphShadowExecutor,
+        "_terminal_normalized_dossier_updates",
+        staticmethod(lambda _: terminal_dossier_updates),
+    )
+    monkeypatch.setattr(
+        intake_executor,
+        "ExternalTerminalCommit",
+        lambda **kwargs: SimpleNamespace(**kwargs),
+    )
+
+    class Loader:
+        async def load(self, *_: Any, **__: Any) -> Any:
+            raise AssertionError("the test harness patches the Intake context loader")
+
+    return (
+        CompiledIntakeGraphShadowExecutor(
+            saver=cast(Any, saver),
+            transport=cast(Any, object()),
+            provider="synthetic",
+            model="intake-model",
+            input_loader=Loader(),
+            proposal_store=store,
+        ),
+        execution,
+        graph,
+        saver,
+        store,
+    )
+
+
+@pytest.mark.asyncio
+async def test_intake_executor_streams_room_reply_before_dossier_and_does_not_repeat_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    terminal_room = "您好，请补充订单当前的处理进展。"
+    executor, execution, graph, saver, store = _intake_stream_executor(
+        monkeypatch,
+        [
+            _intake_governed_delta("room_utterance", "您好，"),
+            _intake_governed_delta("room_utterance", "请补充订单当前的处理进展。"),
+            _intake_governed_delta("case_detail.case_story.title", "订单争议"),
+        ],
+        terminal_room_utterance=terminal_room,
+    )
+
+    events = [event async for event in executor.stream(execution)]
+    visible = [event for event in events if event.event_type == "visible_delta"]
+
+    assert [event.payload.field for event in visible] == [
+        "room_utterance",
+        "room_utterance",
+        "case_detail.case_story.title",
+    ]
+    assert "".join(
+        event.payload.delta or ""
+        for event in visible
+        if event.payload.field == "room_utterance"
+    ) == terminal_room
+    assert events[-1].event_type == "final"
+    assert graph.closed is True
+    assert saver.preflights == 1
+    assert saver.commits == 1
+    assert store.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_intake_executor_fails_closed_when_dossier_precedes_model_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executor, execution, graph, saver, store = _intake_stream_executor(
+        monkeypatch,
+        [
+            _intake_governed_delta("case_detail.case_story.title", "out-of-order"),
+            _intake_governed_delta("room_utterance", "late reply"),
+        ],
+        terminal_room_utterance="late reply",
+    )
+
+    events = []
+    with pytest.raises(GraphContractError, match="INTAKE_ROOM_UTTERANCE_STREAM_ORDER_INVALID"):
+        async for event in executor.stream(execution):
+            events.append(event)
+
+    assert [event.event_type for event in events] == ["attempt_started"]
+    assert graph.closed is True
+    assert saver.preflights == 0
+    assert saver.commits == 0
+    assert store.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_intake_executor_fails_closed_before_commit_when_terminal_reply_differs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    unsafe_terminal_reply = "Please upload a screenshot as evidence."
+    assert (
+        intake_executor._normalized_intake_room_utterance(unsafe_terminal_reply)
+        != unsafe_terminal_reply
+    )
+    executor, execution, graph, saver, store = _intake_stream_executor(
+        monkeypatch,
+        [_intake_governed_delta("room_utterance", "streamed reply")],
+        terminal_room_utterance=unsafe_terminal_reply,
+    )
+
+    events = []
+    with pytest.raises(
+        GraphTerminalBindingError,
+        match="streamed room utterance differs from normalized terminal proposal",
+    ):
+        async for event in executor.stream(execution):
+            events.append(event)
+
+    assert [event.payload.field for event in events if event.event_type == "visible_delta"] == [
+        "room_utterance"
+    ]
+    assert graph.closed is True
+    assert saver.preflights == 0
+    assert saver.commits == 0
+    assert store.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_intake_executor_uses_terminal_reply_chunks_only_when_model_reply_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    terminal_update = GraphPublicUpdate.visible_delta(
+        node="intake_turn_case_detail",
+        field="case_detail.case_story.title",
+        delta="authoritative title",
+    )
+    executor, execution, graph, saver, store = _intake_stream_executor(
+        monkeypatch,
+        [_intake_governed_delta("case_detail.case_story.title", "suppressed provisional title")],
+        terminal_room_utterance="fallback reply",
+        terminal_dossier_updates=(terminal_update,),
+    )
+
+    events = [event async for event in executor.stream(execution)]
+    visible = [event for event in events if event.event_type == "visible_delta"]
+
+    assert [(event.payload.field, event.payload.delta) for event in visible] == [
+        ("room_utterance", "fallback reply"),
+        ("case_detail.case_story.title", "authoritative title"),
+    ]
+    assert events[-1].event_type == "final"
+    assert graph.closed is True
+    assert saver.preflights == 1
+    assert saver.commits == 1
+    assert store.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_intake_executor_closes_model_stream_without_terminal_commit_on_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executor, execution, graph, saver, store = _intake_stream_executor(
+        monkeypatch,
+        [
+            _intake_governed_delta("room_utterance", "partial reply"),
+            RuntimeError("provider stream failed"),
+        ],
+        terminal_room_utterance="partial reply",
+    )
+
+    events = []
+    with pytest.raises(RuntimeError, match="provider stream failed"):
+        async for event in executor.stream(execution):
+            events.append(event)
+
+    assert [event.payload.field for event in events if event.event_type == "visible_delta"] == [
+        "room_utterance"
+    ]
+    assert graph.closed is True
+    assert saver.preflights == 0
+    assert saver.commits == 0
+    assert store.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_intake_executor_closes_model_stream_without_terminal_commit_on_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executor, execution, graph, saver, store = _intake_stream_executor(
+        monkeypatch,
+        [_intake_governed_delta("room_utterance", "partial reply")],
+        terminal_room_utterance="partial reply",
+    )
+
+    stream = executor.stream(execution)
+    assert (await anext(stream)).event_type == "attempt_started"
+    assert (await anext(stream)).payload.field == "room_utterance"
+    await stream.aclose()
+
+    assert graph.closed is True
+    assert saver.preflights == 0
+    assert saver.commits == 0
+    assert store.calls == 0

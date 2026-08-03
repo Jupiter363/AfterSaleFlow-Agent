@@ -70,7 +70,7 @@ from app.harness.context_window import ContextWindowManager
 from app.harness.invocation_context import AgentInvocationContext
 from app.harness.prompt_composer import PromptRepository
 from app.llm import AgentOutputSchemaError
-from app.streaming import VISIBLE_FIELD_REGISTRY
+from app.streaming import TARGET_INTAKE_REPLY_FIRST_VISIBLE_FIELDS
 
 
 # Backward-compatible generic constant for static diagnostics only.  Production
@@ -84,13 +84,7 @@ _SAFE_INTAKE_ROOM_UTTERANCE = (
 )
 _SAFE_INTAKE_CASE_SUMMARY = "当前争议围绕已导入案件事实、处理经过及发起方诉求展开。"
 
-_TARGET_INTAKE_VISIBLE_FIELDS = (
-    # Match the baseline publication boundary: the model-facing utterance is
-    # finalized by the deterministic dossier/readiness nodes before it becomes
-    # public.  The executor publishes that finalized value while the remaining
-    # dossier fields below continue to stream directly from the governed model.
-    *VISIBLE_FIELD_REGISTRY["intake_turn"][BASELINE_INTAKE_NODE_NAME],
-)
+_TARGET_INTAKE_VISIBLE_FIELDS = TARGET_INTAKE_REPLY_FIRST_VISIBLE_FIELDS
 
 _EVIDENCE_MATERIAL_IDENTIFIER = re.compile(
     r"(?:evidence|proof|screenshot|screen_shot|photo|picture|video|chat_(?:record|log)|"

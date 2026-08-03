@@ -1988,6 +1988,10 @@ async function consumeIntakeAgentRun(descriptor, snapshot = currentWorkspaceSnap
     descriptor: normalizedDescriptor,
     agentLabel: "争议接待官",
     senderRole: "INTAKE_OFFICER",
+    // The opening/reply bubble is the person-facing first output. Keep the
+    // dossier stream behind it so provisional right-side facts never race the
+    // answer the user is still reading.
+    replyThenBoard: true,
     signal: eventAbortController.signal,
     onEvent: (event) => {
       if (isCurrentIntakeRunContext(context, snapshot)) {
@@ -2366,6 +2370,7 @@ async function resumeActiveIntakeRuns(snapshot = currentWorkspaceSnapshot()) {
     descriptor,
     agentLabel: "争议接待官",
     senderRole: "INTAKE_OFFICER",
+    replyThenBoard: true,
     signal: eventAbortController.signal,
     onEvent: (event) => {
       if (isCurrentIntakeRunContext(context, snapshot)) {
@@ -2547,6 +2552,7 @@ async function postMessage(command) {
         descriptor,
         agentLabel: "争议接待官",
         senderRole: "INTAKE_OFFICER",
+        replyThenBoard: true,
         signal: eventAbortController.signal,
         onEvent: (event) => {
           if (isCurrentIntakeRunContext(finalizationContext, snapshot)) {

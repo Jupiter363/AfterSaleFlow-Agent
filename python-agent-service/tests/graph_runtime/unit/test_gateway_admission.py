@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -18,6 +19,7 @@ from app.graph_runtime.errors import (
     GraphNewAgentAttemptRequiredError,
     GraphNonceReplayError,
     GraphResultNotCommittedError,
+    GraphTerminalBindingError,
     GraphThreadBindingError,
     GraphVersionBindingError,
     GraphVersionUnavailableError,
@@ -1124,6 +1126,45 @@ async def test_reconcile_only_rejects_execution_credential_before_database_acces
     assert audit.events[-1].code == "GRAPH_THREAD_BINDING_CONFLICT"
 
 
+@pytest.mark.asyncio
+async def test_reconcile_terminal_signals_after_commit_before_audit_delivery() -> None:
+    pool = _Pool()
+    audit_entered = asyncio.Event()
+    release_audit = asyncio.Event()
+    durable_terminal_signal = asyncio.Event()
+
+    class BlockingAudit:
+        async def emit(self, event: GatewayAuditEvent) -> None:
+            assert event.event_type == "graph.command.reconciled"
+            audit_entered.set()
+            await release_audit.wait()
+
+    gateway = GraphCommandGateway(
+        mode=GraphGatewayMode.SHADOW,
+        pool=pool,
+        input_authorizer=_InputAuthorizer(pool.events),
+        audit_sink=BlockingAudit(),
+    )
+    gateway._recovery = _ReconcileRecovery(pool.events)  # type: ignore[assignment]
+    execution = _execution()
+    task = asyncio.create_task(
+        gateway.reconcile_terminal(
+            execution.admission,
+            owner_id=execution.fence.owner_id,
+            durable_terminal_signal=durable_terminal_signal,
+        )
+    )
+
+    await asyncio.wait_for(audit_entered.wait(), timeout=0.1)
+    assert "transaction:commit" in pool.events
+    assert durable_terminal_signal.is_set()
+    assert task.done() is False
+
+    release_audit.set()
+    _, result = await task
+    assert result.result_hash
+
+
 def _execution() -> GatewayExecution:
     command = _command()
     registry = _registry()
@@ -1214,8 +1255,16 @@ class _StreamGateway(GraphCommandGateway):
         self.reconciled = False
         self.finished = False
 
-    async def reconcile_terminal(self, admission: GatewayAdmission, *, owner_id: str):
+    async def reconcile_terminal(
+        self,
+        admission: GatewayAdmission,
+        *,
+        owner_id: str,
+        durable_terminal_signal: asyncio.Event | None = None,
+    ):
         self.reconciled = True
+        if durable_terminal_signal is not None:
+            durable_terminal_signal.set()
         result = ResultRecord(
             result_id="result-1",
             thread_id=admission.binding.thread_id,
@@ -1859,6 +1908,216 @@ async def test_stream_waits_at_post_commit_barrier_before_yielding_final() -> No
     assert events == []
     assert (await anext(stream)).event_type == "final"
     assert events == ["barrier"]
+
+
+@pytest.mark.asyncio
+async def test_stream_signals_durable_final_before_its_post_commit_barrier() -> None:
+    barrier_entered = asyncio.Event()
+    release_barrier = asyncio.Event()
+    durable_terminal_signal = asyncio.Event()
+
+    class Barrier:
+        async def wait_after_durable_commit(self, **kwargs: Any) -> None:
+            assert kwargs["result"].checkpoint_id == "checkpoint-1"
+            barrier_entered.set()
+            await release_barrier.wait()
+
+    gateway = _StreamGateway(terminal_result_barrier=Barrier())
+    executor = _Executor(
+        [
+            _event(0, "attempt_started", {"node": "intake.start"}),
+            _event(
+                1,
+                "final",
+                {
+                    "final_result_ref": "s3://graph-results/result-1.json",
+                    "final_result_hash": "f" * 64,
+                },
+            ),
+        ]
+    )
+
+    stream = gateway.execute_stream(
+        execution=_execution(),
+        executor=executor,
+        durable_terminal_signal=durable_terminal_signal,
+    )
+    assert (await anext(stream)).event_type == "attempt_started"
+    pending_final = asyncio.create_task(anext(stream))
+    await asyncio.wait_for(barrier_entered.wait(), timeout=0.1)
+
+    assert gateway.reconciled is True
+    assert durable_terminal_signal.is_set()
+    assert pending_final.done() is False
+
+    release_barrier.set()
+    assert (await pending_final).event_type == "final"
+
+
+@pytest.mark.asyncio
+async def test_stream_marks_terminal_processing_before_reconciliation_can_await() -> None:
+    """The early signal closes commit-release -> durable-signal scheduler interleaving."""
+
+    processing_started = asyncio.Event()
+    durable_terminal_signal = asyncio.Event()
+    reconciliation_entered = asyncio.Event()
+    release_reconciliation = asyncio.Event()
+
+    class BlockingReconciliationGateway(_StreamGateway):
+        async def reconcile_terminal(
+            self,
+            admission: GatewayAdmission,
+            *,
+            owner_id: str,
+            durable_terminal_signal: asyncio.Event | None = None,
+        ):
+            assert processing_started.is_set()
+            assert durable_terminal_signal is not None
+            assert durable_terminal_signal.is_set() is False
+            reconciliation_entered.set()
+            await release_reconciliation.wait()
+            return await super().reconcile_terminal(
+                admission,
+                owner_id=owner_id,
+                durable_terminal_signal=durable_terminal_signal,
+            )
+
+    gateway = BlockingReconciliationGateway()
+    executor = _Executor(
+        [
+            _event(0, "attempt_started", {"node": "intake.start"}),
+            _event(
+                1,
+                "final",
+                {
+                    "final_result_ref": "s3://graph-results/result-1.json",
+                    "final_result_hash": "f" * 64,
+                },
+            ),
+        ]
+    )
+
+    stream = gateway.execute_stream(
+        execution=_execution(),
+        executor=executor,
+        durable_terminal_signal=durable_terminal_signal,
+        terminal_processing_started=processing_started,
+    )
+    assert (await anext(stream)).event_type == "attempt_started"
+    pending_final = asyncio.create_task(anext(stream))
+    await asyncio.wait_for(reconciliation_entered.wait(), timeout=0.1)
+
+    assert processing_started.is_set()
+    assert durable_terminal_signal.is_set() is False
+    assert pending_final.done() is False
+
+    release_reconciliation.set()
+    assert (await pending_final).event_type == "final"
+    assert durable_terminal_signal.is_set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("event_type", "payload"),
+    [
+        ("attempt_aborted", {"reason_code": "PROVIDER_TIMEOUT"}),
+        ("error", {"error_code": "GRAPH_STREAM_ERROR", "retryable": False}),
+    ],
+)
+async def test_stream_signals_durable_abort_or_error_before_terminal_yield(
+    event_type: str,
+    payload: dict[str, Any],
+) -> None:
+    durable_terminal_signal = asyncio.Event()
+    terminal_processing_started = asyncio.Event()
+    gateway = _StreamGateway()
+    executor = _Executor(
+        [
+            _event(0, "attempt_started", {"node": "intake.start"}),
+            _event(1, event_type, payload),
+        ]
+    )
+
+    stream = gateway.execute_stream(
+        execution=_execution(),
+        executor=executor,
+        durable_terminal_signal=durable_terminal_signal,
+        terminal_processing_started=terminal_processing_started,
+    )
+    assert (await anext(stream)).event_type == "attempt_started"
+
+    assert (await anext(stream)).event_type == event_type
+    assert gateway.finished is True
+    assert terminal_processing_started.is_set()
+    assert durable_terminal_signal.is_set()
+
+
+@pytest.mark.asyncio
+async def test_stream_keeps_durable_terminal_signal_when_post_commit_barrier_fails() -> None:
+    durable_terminal_signal = asyncio.Event()
+
+    class FailingBarrier:
+        async def wait_after_durable_commit(self, **kwargs: Any) -> None:
+            assert kwargs["result"].checkpoint_id == "checkpoint-1"
+            raise RuntimeError("post-commit barrier failed")
+
+    gateway = _StreamGateway(terminal_result_barrier=FailingBarrier())
+    executor = _Executor(
+        [
+            _event(0, "attempt_started", {"node": "intake.start"}),
+            _event(
+                1,
+                "final",
+                {
+                    "final_result_ref": "s3://graph-results/result-1.json",
+                    "final_result_hash": "f" * 64,
+                },
+            ),
+        ]
+    )
+
+    stream = gateway.execute_stream(
+        execution=_execution(),
+        executor=executor,
+        durable_terminal_signal=durable_terminal_signal,
+    )
+    assert (await anext(stream)).event_type == "attempt_started"
+    with pytest.raises(RuntimeError, match="post-commit barrier failed"):
+        await anext(stream)
+
+    assert gateway.reconciled is True
+    assert durable_terminal_signal.is_set()
+
+
+@pytest.mark.asyncio
+async def test_stream_keeps_durable_terminal_signal_when_final_binding_validation_fails() -> None:
+    durable_terminal_signal = asyncio.Event()
+    gateway = _StreamGateway()
+    executor = _Executor(
+        [
+            _event(0, "attempt_started", {"node": "intake.start"}),
+            _event(
+                1,
+                "final",
+                {
+                    "final_result_ref": "s3://graph-results/wrong-result.json",
+                    "final_result_hash": "a" * 64,
+                },
+            ),
+        ]
+    )
+
+    stream = gateway.execute_stream(
+        execution=_execution(),
+        executor=executor,
+        durable_terminal_signal=durable_terminal_signal,
+    )
+    assert (await anext(stream)).event_type == "attempt_started"
+    with pytest.raises(GraphTerminalBindingError, match="conflicts with ledger"):
+        await anext(stream)
+
+    assert gateway.reconciled is True
+    assert durable_terminal_signal.is_set()
 
 
 @pytest.mark.asyncio

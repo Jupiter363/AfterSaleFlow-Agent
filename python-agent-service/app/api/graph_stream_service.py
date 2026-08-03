@@ -12,6 +12,7 @@ from app.contracts.v1.models import AgentStreamEvent, RoomGraphCommand
 from app.graph_runtime.errors import (
     GraphContractError,
     GraphGatewayDisabledError,
+    GraphLeaseLostError,
     GraphNewAgentAttemptRequiredError,
     GraphVersionUnavailableError,
 )
@@ -62,6 +63,8 @@ class GraphGatewayPort(Protocol):
         *,
         execution: GatewayExecution,
         executor: ShadowGraphExecutor,
+        durable_terminal_signal: asyncio.Event | None = None,
+        terminal_processing_started: asyncio.Event | None = None,
     ) -> AsyncIterator[AgentStreamEvent]: ...
 
     async def renew_execution(self, execution: GatewayExecution) -> Any: ...
@@ -353,17 +356,34 @@ class GatewayBackedGraphCommandStreamService:
                 provider_binding,
                 execution,
             )
+            durable_terminal_signal = asyncio.Event()
+            terminal_processing_started = asyncio.Event()
             validated = self._gateway.execute_stream(
                 execution=execution,
                 executor=_Executor(source),
+                durable_terminal_signal=durable_terminal_signal,
+                terminal_processing_started=terminal_processing_started,
             )
         except BaseException as error:
             await self._best_effort_abort(execution, error)
             if source is not None:
                 await _close_iterator_safely(source)
             raise
-        async for event in self._renewing_stream(validated, execution):
-            yield event
+        renewing_stream = self._renewing_stream(
+            validated,
+            execution,
+            durable_terminal_signal=durable_terminal_signal,
+            terminal_processing_started=terminal_processing_started,
+        )
+        try:
+            async for event in renewing_stream:
+                yield event
+        finally:
+            # ``async for`` does not itself await ``aclose`` on a suspended nested
+            # async generator.  Make the ownership explicit so a public HTTP stream
+            # close reaches the bounded terminal-processing drain in
+            # ``_renewing_stream`` instead of orphaning its prefetched source task.
+            await _close_iterator(renewing_stream)
 
     @staticmethod
     def _bind_execution_identity(
@@ -446,20 +466,58 @@ class GatewayBackedGraphCommandStreamService:
         self,
         source: AsyncIterator[AgentStreamEvent],
         execution: GatewayExecution,
+        *,
+        durable_terminal_signal: asyncio.Event | None = None,
+        terminal_processing_started: asyncio.Event | None = None,
     ) -> AsyncIterator[AgentStreamEvent]:
         iterator: AsyncIterator[AgentStreamEvent] | None = None
         next_event: asyncio.Task[AgentStreamEvent] | None = None
         renewal: asyncio.Task[Any] | None = None
+        renewal_deferred = False
         terminal_seen = False
         try:
             iterator = source.__aiter__()
             next_event = asyncio.create_task(anext(iterator))
             renewal = asyncio.create_task(self._renew_after(execution))
             while next_event is not None:
+                if self._durable_terminal_reached(durable_terminal_signal):
+                    renewed_execution = await self._join_terminal_renewal(
+                        renewal,
+                        suppress_all=True,
+                    )
+                    if renewed_execution is not None:
+                        execution = renewed_execution
+                    renewal = None
+                    renewal_deferred = False
+                elif self._terminal_processing_inflight(
+                    terminal_processing_started,
+                    durable_terminal_signal,
+                ):
+                    # A validated terminal envelope has entered the gateway, but its
+                    # durable transaction has not yet reported completion.  Do not
+                    # let a renewal task preempt and cancel that source in the narrow
+                    # transaction-commit -> Event.set scheduling window.  This is a
+                    # deferral fence only: a source failure before the durable signal
+                    # still falls through to the ordinary fail-closed abort path.
+                    renewal_deferred = renewal is not None
                 watched = {next_event}
-                if renewal is not None:
+                if renewal is not None and not renewal_deferred:
                     watched.add(renewal)
                 done, _ = await asyncio.wait(watched, return_when=asyncio.FIRST_COMPLETED)
+                if self._durable_terminal_reached(durable_terminal_signal):
+                    renewed_execution = await self._join_terminal_renewal(
+                        renewal,
+                        suppress_all=True,
+                    )
+                    if renewed_execution is not None:
+                        execution = renewed_execution
+                    renewal = None
+                    renewal_deferred = False
+                elif self._terminal_processing_inflight(
+                    terminal_processing_started,
+                    durable_terminal_signal,
+                ):
+                    renewal_deferred = renewal is not None
                 if next_event in done:
                     try:
                         event = next_event.result()
@@ -468,24 +526,135 @@ class GatewayBackedGraphCommandStreamService:
                         break
                     terminal_seen = event.event_type in TERMINAL_STREAM_EVENTS
                     if terminal_seen:
-                        await _cancel_task(renewal)
+                        # ``Gateway.execute_stream`` yields a terminal only after it
+                        # has durably reconciled/terminated the command and released
+                        # its exact lease.  A concurrent renewal can therefore lose
+                        # that lease legitimately; suppress only that expected loss.
+                        renewed_execution = await self._join_terminal_renewal(
+                            renewal,
+                            suppress_all=self._durable_terminal_reached(
+                                durable_terminal_signal
+                            ),
+                        )
+                        if renewed_execution is not None:
+                            execution = renewed_execution
                         renewal = None
-                    elif renewal is not None and renewal in done:
-                        execution = renewal.result()
-                        renewal = asyncio.create_task(self._renew_after(execution))
+                        renewal_deferred = False
+                    else:
+                        if self._durable_terminal_reached(durable_terminal_signal):
+                            raise GraphContractError(
+                                "durable terminal signal preceded a nonterminal stream event"
+                            )
+                        if self._terminal_processing_inflight(
+                            terminal_processing_started,
+                            durable_terminal_signal,
+                        ):
+                            raise GraphContractError(
+                                "terminal processing preceded a nonterminal stream event"
+                            )
+                        if (
+                            renewal is not None
+                            and renewal.done()
+                            and not renewal_deferred
+                        ):
+                            try:
+                                # Before a terminal is durably observed, every renewal
+                                # failure remains authoritative and must fail closed.
+                                execution = renewal.result()
+                            except GraphLeaseLostError:
+                                if not self._durable_terminal_reached(
+                                    durable_terminal_signal
+                                ):
+                                    raise
+                            renewal = None
+                        # Keep exactly one source pull in flight while the caller
+                        # sends the current event.  Without this bounded prefetch,
+                        # an ASGI/HTTP backpressure gap after ``attempt_started``
+                        # prevents the executor from loading context or beginning
+                        # provider work until the next downstream read.
+                        next_event = asyncio.create_task(anext(iterator))
+                        if (
+                            renewal is None
+                            and not self._durable_terminal_reached(durable_terminal_signal)
+                        ):
+                            renewal = asyncio.create_task(self._renew_after(execution))
+                            renewal_deferred = False
                     yield event
-                    next_event = asyncio.create_task(anext(iterator))
+                    if terminal_seen:
+                        next_event = None
                     continue
-                if renewal is not None and renewal in done:
-                    execution = renewal.result()
-                    renewal = asyncio.create_task(self._renew_after(execution))
+                if renewal is not None and renewal in done and not renewal_deferred:
+                    try:
+                        execution = renewal.result()
+                    except GraphLeaseLostError:
+                        if not self._durable_terminal_reached(durable_terminal_signal):
+                            raise
+                    if self._durable_terminal_reached(durable_terminal_signal):
+                        renewal = None
+                    else:
+                        renewal = asyncio.create_task(self._renew_after(execution))
+                        renewal_deferred = False
             if not terminal_seen:
                 raise GraphContractError("gateway stream ended without a terminal event")
         except BaseException as error:
+            failure = error
             if not terminal_seen:
-                # Persist the cancellation fence before touching provider tasks. A task
-                # that suppresses cancellation can no longer checkpoint with the old token.
-                await self._best_effort_abort(execution, error)
+                if (
+                    isinstance(error, (asyncio.CancelledError, GeneratorExit))
+                    and self._terminal_processing_inflight(
+                        terminal_processing_started,
+                        durable_terminal_signal,
+                    )
+                ):
+                    # A downstream disconnect must not tear down a validated terminal
+                    # transaction in-flight, but it also must never wait forever for a
+                    # hung control-plane operation.  Keep the source alive only for the
+                    # bounded drain window, then retain the regular cancellation fence.
+                    await self._await_terminal_processing_boundary(
+                        next_event,
+                        durable_terminal_signal,
+                    )
+                terminal_seen, prefetched_failure = self._completed_prefetch_outcome(next_event)
+                durable_terminal_reached = self._durable_terminal_reached(
+                    durable_terminal_signal
+                )
+                if prefetched_failure is not None:
+                    # A post-commit barrier/source failure must remain visible even
+                    # though the command is already durably terminal.
+                    failure = prefetched_failure
+                if terminal_seen or durable_terminal_reached:
+                    renewed_execution = await self._join_terminal_renewal(
+                        renewal,
+                        suppress_all=durable_terminal_reached,
+                    )
+                    if renewed_execution is not None:
+                        execution = renewed_execution
+                    renewal = None
+                else:
+                    if renewal is not None and renewal.done():
+                        try:
+                            execution = renewal.result()
+                        except BaseException:
+                            # The original source/cancellation failure is already the
+                            # authority here.  In particular, a terminal source failure
+                            # before durable completion must not be obscured by a
+                            # deferred renewal failure.
+                            pass
+                        renewal = None
+                    if self._durable_terminal_reached(durable_terminal_signal):
+                        durable_terminal_reached = True
+                    if durable_terminal_reached:
+                        renewed_execution = await self._join_terminal_renewal(
+                            renewal,
+                            suppress_all=True,
+                        )
+                        if renewed_execution is not None:
+                            execution = renewed_execution
+                        renewal = None
+                    else:
+                        # Persist the cancellation fence before touching provider tasks. A task
+                        # that suppresses cancellation can no longer checkpoint with the old token.
+                        await self._best_effort_abort(execution, failure)
             await _cancel_task(next_event)
             next_event = None
             await _cancel_task(renewal)
@@ -493,7 +662,9 @@ class GatewayBackedGraphCommandStreamService:
             if iterator is not None:
                 await _close_iterator_safely(iterator)
                 iterator = None
-            raise
+            if failure is error:
+                raise
+            raise failure from error
         finally:
             await _cancel_task(next_event)
             await _cancel_task(renewal)
@@ -505,6 +676,93 @@ class GatewayBackedGraphCommandStreamService:
                 # terminal.  Join it and close the source first, then clear the
                 # exact fence once so a late renewal cannot reinsert the cache.
                 self._gateway.cleanup_execution_lease(execution)
+
+    @staticmethod
+    async def _join_terminal_renewal(
+        renewal: asyncio.Task[Any] | None,
+        *,
+        suppress_all: bool = False,
+    ) -> Any | None:
+        """Join terminal cleanup without mistaking its lease release for a failure."""
+
+        if renewal is None:
+            return None
+        if not renewal.done():
+            renewal.cancel()
+        (result,) = await asyncio.gather(renewal, return_exceptions=True)
+        if isinstance(result, asyncio.CancelledError):
+            return None
+        if suppress_all:
+            return None
+        if isinstance(result, GraphLeaseLostError):
+            return None
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    @staticmethod
+    def _durable_terminal_reached(signal: asyncio.Event | None) -> bool:
+        return signal is not None and signal.is_set()
+
+    @classmethod
+    def _terminal_processing_inflight(
+        cls,
+        processing_started: asyncio.Event | None,
+        durable_terminal_signal: asyncio.Event | None,
+    ) -> bool:
+        """Whether a validated terminal envelope still lacks durable completion."""
+
+        return (
+            processing_started is not None
+            and processing_started.is_set()
+            and not cls._durable_terminal_reached(durable_terminal_signal)
+        )
+
+    @staticmethod
+    async def _await_terminal_processing_boundary(
+        next_event: asyncio.Task[AgentStreamEvent] | None,
+        durable_terminal_signal: asyncio.Event | None,
+    ) -> None:
+        """Bound a downstream-close drain without cancelling the terminal source early."""
+
+        if (
+            next_event is None
+            or next_event.done()
+            or (
+                durable_terminal_signal is not None
+                and durable_terminal_signal.is_set()
+            )
+        ):
+            return
+        signal_waiter: asyncio.Task[bool] | None = None
+        watched: set[asyncio.Task[Any]] = {next_event}
+        if durable_terminal_signal is not None:
+            signal_waiter = asyncio.create_task(durable_terminal_signal.wait())
+            watched.add(signal_waiter)
+        try:
+            await asyncio.wait(
+                watched,
+                timeout=MAX_CANCEL_DRAIN_SECONDS,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            await _cancel_task(signal_waiter)
+
+    @staticmethod
+    def _completed_prefetch_outcome(
+        next_event: asyncio.Task[AgentStreamEvent] | None,
+    ) -> tuple[bool, BaseException | None]:
+        """Classify a completed prefetched item while a downstream disconnect arrives."""
+
+        if next_event is None or not next_event.done():
+            return False, None
+        try:
+            event = next_event.result()
+        except StopAsyncIteration:
+            return False, GraphContractError("gateway stream ended without a terminal event")
+        except BaseException as error:
+            return False, error
+        return event.event_type in TERMINAL_STREAM_EVENTS, None
 
     async def _renew_after(self, execution: GatewayExecution) -> GatewayExecution:
         await asyncio.sleep(self._renewal_seconds)

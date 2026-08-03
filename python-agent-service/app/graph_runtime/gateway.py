@@ -920,6 +920,7 @@ class GraphCommandGateway:
         admission: GatewayAdmission,
         *,
         owner_id: str,
+        durable_terminal_signal: asyncio.Event | None = None,
     ) -> tuple[CommandRecord, ResultRecord]:
         self._require_shadow()
         async with self._pool.connection(timeout=self._acquire_timeout_seconds) as connection:
@@ -929,6 +930,11 @@ class GraphCommandGateway:
                     binding=admission.binding,
                     owner_id=owner_id,
                 )
+            # The transaction has committed and released its durable lease before
+            # audit delivery can block.  Wake stream renewal immediately so a valid
+            # post-terminal renew failure is never treated as a live-command abort.
+            if durable_terminal_signal is not None:
+                durable_terminal_signal.set()
         await self._emit(
             admission,
             event_type="graph.command.reconciled",
@@ -950,8 +956,23 @@ class GraphCommandGateway:
         *,
         execution: GatewayExecution,
         executor: ShadowGraphExecutor,
+        durable_terminal_signal: asyncio.Event | None = None,
+        terminal_processing_started: asyncio.Event | None = None,
     ) -> AsyncIterator[AgentStreamEvent]:
-        """Validate Agent Stream v2 identity/order and fence ``final`` through reconciliation."""
+        """Validate Agent Stream v2 identity/order and fence ``final`` through reconciliation.
+
+        When supplied, ``durable_terminal_signal`` is set once the durable command has
+        transitioned to a terminal state, before any post-commit final validation or
+        delivery barrier.  The caller can then stop lease renewal without confusing a
+        valid terminal lease release for an execution failure.
+
+        ``terminal_processing_started`` is deliberately weaker: it is set immediately
+        after a validated terminal envelope is read and before its first terminal
+        control-plane await.  It closes the scheduling gap between a terminal SQL
+        transaction committing/releasing its lease and the durable signal being
+        resumed.  Callers must still fail closed unless the durable signal eventually
+        arrives (or the terminal source itself fails).
+        """
 
         self._require_shadow()
         expected_sequence = 0
@@ -966,11 +987,23 @@ class GraphCommandGateway:
                 raise GraphContractError("stream cannot contain another attempt_started event")
             if event.event_type == "attempt_reset":
                 raise GraphContractError("AGENT_RUN_STREAM_RESET_AUTHORITY_VIOLATION")
+            if (
+                event.event_type in {"final", "attempt_aborted", "error"}
+                and terminal_processing_started is not None
+            ):
+                terminal_processing_started.set()
             if event.event_type == "final":
-                _, result = await self.reconcile_terminal(
-                    execution.admission,
-                    owner_id=execution.fence.owner_id,
-                )
+                if durable_terminal_signal is not None:
+                    _, result = await self.reconcile_terminal(
+                        execution.admission,
+                        owner_id=execution.fence.owner_id,
+                        durable_terminal_signal=durable_terminal_signal,
+                    )
+                else:
+                    _, result = await self.reconcile_terminal(
+                        execution.admission,
+                        owner_id=execution.fence.owner_id,
+                    )
                 self.cleanup_execution_lease(execution)
                 payload = event.payload
                 if (
@@ -990,6 +1023,8 @@ class GraphCommandGateway:
                     error_code=event.payload.reason_code or "ATTEMPT_ABORTED",
                     error_classification="RECOVERABLE_ATTEMPT",
                 )
+                if durable_terminal_signal is not None:
+                    durable_terminal_signal.set()
                 terminal_seen = True
             elif event.event_type == "error":
                 execution = await self.finish_execution_attempt(
@@ -998,6 +1033,8 @@ class GraphCommandGateway:
                     error_code=event.payload.error_code or "GRAPH_STREAM_ERROR",
                     error_classification="STREAM_ERROR",
                 )
+                if durable_terminal_signal is not None:
+                    durable_terminal_signal.set()
                 terminal_seen = True
             expected_sequence += 1
             yield event
