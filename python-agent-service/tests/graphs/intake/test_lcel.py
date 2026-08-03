@@ -1851,46 +1851,43 @@ def test_receipt_seal_rejects_coherent_preproject_matrix_patch_rehash(
 
 
 @pytest.mark.parametrize(
-    "unsafe_text",
+    "factual_text",
     [
-        "Upload a screenshot of the chat.",
-        "上传聊天截图。",
+        "The user did not provide a tracking receipt.",
+        "The order page provides proof of the next-day delivery promise.",
+        "Current verification still needs the proof status checked.",
+        "\u7528\u6237\u672a\u63d0\u4f9b\u7269\u6d41\u51ed\u8bc1\u3002",
+        "\u8ba2\u5355\u9875\u9762\u63d0\u4f9b\u6b21\u65e5\u8fbe\u627f\u8bfa\u622a\u56fe\u3002",
+        "\u662f\u5426\u63d0\u4f9b\u7269\u6d41\u51ed\u8bc1\u5c1a\u5f85\u6838\u5b9e\u3002",
+        "\u53cc\u65b9\u5bf9\u662f\u5426\u63d0\u4f9b\u7269\u6d41\u51ed\u8bc1\u5b58\u5728\u4e89\u8bae\u3002",
+        "\u5f53\u524d\u4ecd\u9700\u6838\u5b9e\u7269\u6d41\u51ed\u8bc1\u662f\u5426\u5b58\u5728\u3002",
     ],
 )
-def test_matrix_patch_rejects_nested_evidence_collection_instruction_at_contract_boundary(
+def test_matrix_patch_allows_factual_evidence_status_without_treating_it_as_collection(
     bindings,
     version_pins,
     snapshot,
     event,
-    unsafe_text: str,
+    factual_text: str,
 ) -> None:
     state = _event_state(bindings, version_pins, snapshot, event)
     matrix_patch = {
         "schema_version": "unilateral_case_matrix.draft.v1",
         "fact_rows": [
             {
-                "fact_key": "NEW_DAMAGE",
-                "category": "PRODUCT_STATE",
-                "fact_target": "Whether the order arrived damaged.",
+                "fact_key": "NEW_DELIVERY_PROMISE",
+                "category": "LOGISTICS",
+                "fact_target": "Whether the next-day delivery promise was met.",
                 "materiality": "CORE",
-                # This is an exact negative: a factual reference to a screenshot
-                # is allowed; an instruction to collect one is not.
-                "position_summary": "The user says a chat screenshot exists.",
-                "asserted_value": "damaged",
+                "position_summary": factual_text,
+                "asserted_value": "delayed",
                 "source_scope": "CURRENT_SOURCE",
             }
         ],
-        "summary_source_fact_keys": ["NEW_DAMAGE"],
+        "summary_source_fact_keys": ["NEW_DELIVERY_PROMISE"],
     }
-    validate_matrix_patch(state, matrix_patch)
 
-    unsafe_patch = copy.deepcopy(matrix_patch)
-    unsafe_patch["fact_rows"][0]["position_summary"] = unsafe_text
-    with pytest.raises(
-        IntakeGraphContractError,
-        match="INTAKE_MATRIX_EVIDENCE_REQUEST_FORBIDDEN",
-    ):
-        validate_matrix_patch(state, unsafe_patch)
+    validate_matrix_patch(state, matrix_patch)
 
 
 def test_post_normalizer_capsule_and_next_prompt_exclude_unsafe_first_summary(

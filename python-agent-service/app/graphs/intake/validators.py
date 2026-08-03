@@ -61,24 +61,6 @@ _THREAD_ID = re.compile(r"^grt\.v1\.[0-9a-f]{32}$")
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _MATRIX_FACT_ID = re.compile(r"^FACT_[A-Za-z0-9_:-]{1,123}$")
 _FROZEN_MATRIX_ID = re.compile(r"^CASE_MATRIX_[A-F0-9]{20}$")
-_MATRIX_EVIDENCE_REQUEST_EN = re.compile(
-    r"(?:please|kindly|must|can you|could you|need (?:you|the party)?\s*to|required to|"
-    r"upload|provide|submit|attach|send)"
-    r"[^.!?]{0,64}(?:evidence|proof|screenshot|photo|picture|video|chat (?:record|log)|"
-    r"logistics (?:voucher|receipt)|tracking (?:receipt|proof)|document|attachment)"
-    r"|(?:evidence|proof|screenshot|photo|picture|video|chat (?:record|log)|document|attachment)"
-    r"[^.!?]{0,32}(?:please provide|please upload|must submit|need to send|required to attach)",
-    re.IGNORECASE,
-)
-_MATRIX_EVIDENCE_REQUEST_ZH = re.compile(
-    "(?:\\u8bf7|\\u70e6\\u8bf7|\\u9700\\u8981|\\u5fc5\\u987b|\\u80fd\\u5426|"
-    "\\u4e0a\\u4f20|\\u63d0\\u4f9b|\\u63d0\\u4ea4|\\u9644\\u4e0a|\\u53d1\\u9001)"
-    ".{0,32}(?:\\u8bc1\\u636e|\\u51ed\\u8bc1|\\u622a\\u56fe|\\u7167\\u7247|\\u56fe\\u7247|"
-    "\\u89c6\\u9891|\\u804a\\u5929\\u8bb0\\u5f55|\\u8fd0\\u5355|\\u9644\\u4ef6|\\u6750\\u6599)"
-    "|(?:\\u8bc1\\u636e|\\u51ed\\u8bc1|\\u622a\\u56fe|\\u7167\\u7247|\\u56fe\\u7247|"
-    "\\u89c6\\u9891|\\u804a\\u5929\\u8bb0\\u5f55|\\u8fd0\\u5355|\\u9644\\u4ef6|\\u6750\\u6599)"
-    ".{0,24}(?:\\u8bf7\\u63d0\\u4f9b|\\u8bf7\\u4e0a\\u4f20|\\u8bf7\\u8865\\u5145|\\u9700\\u8981\\u63d0\\u4ea4)",
-)
 MATRIX_AUTHORITY_RECORD_KEY = "matrix-authority:v1"
 _MATRIX_PROPOSAL_UNILATERAL = "UNILATERAL"
 _MATRIX_PROPOSAL_INITIATOR_DELTA = "INITIATOR_DELTA"
@@ -786,8 +768,9 @@ def validate_matrix_patch(
         return
     if not isinstance(matrix_patch, Mapping):
         raise IntakeGraphContractError("INTAKE_MATRIX_PATCH_INVALID")
-    if _matrix_patch_contains_evidence_request(matrix_patch):
-        raise IntakeGraphContractError("INTAKE_MATRIX_EVIDENCE_REQUEST_FORBIDDEN")
+    # Matrix text records facts and may legitimately describe whether material
+    # was provided. Public evidence-collection policy belongs to the visible
+    # room/dossier boundary; applying it here misclassifies factual provenance.
     schema_version = matrix_patch.get("schema_version")
     if schema_version == "unilateral_case_matrix.draft.v1":
         model_type = UnilateralCaseMatrixDraftV1
@@ -901,25 +884,6 @@ def validate_matrix_patch(
         if resolution is None or resolution in summary_resolutions:
             raise IntakeGraphContractError("INTAKE_MATRIX_SUMMARY_SOURCE_INVALID")
         summary_resolutions.add(resolution)
-
-
-def _matrix_patch_contains_evidence_request(value: Any) -> bool:
-    """Fail closed on evidence-collection instructions in formal matrix text."""
-
-    stack = [value]
-    while stack:
-        candidate = stack.pop()
-        if isinstance(candidate, str):
-            if _MATRIX_EVIDENCE_REQUEST_EN.search(candidate) or _MATRIX_EVIDENCE_REQUEST_ZH.search(
-                candidate
-            ):
-                return True
-        elif isinstance(candidate, Mapping):
-            stack.extend(candidate.keys())
-            stack.extend(candidate.values())
-        elif isinstance(candidate, list | tuple):
-            stack.extend(candidate)
-    return False
 
 
 def _trusted_initiator_role(state: IntakeGraphStateV2) -> str:
