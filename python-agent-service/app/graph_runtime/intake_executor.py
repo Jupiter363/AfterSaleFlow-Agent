@@ -175,7 +175,6 @@ class CompiledIntakeGraphShadowExecutor:
         emitted_usage: list[Usage] = []
         pending_usage_update: GraphPublicUpdate | None = None
         streamed_room_utterance_parts: list[str] = []
-        target_buffered_board_updates: list[GraphPublicUpdate] = []
         room_utterance_received = False
         room_utterance_completed = False
         case_detail_seen_before_room_utterance = False
@@ -283,19 +282,16 @@ class CompiledIntakeGraphShadowExecutor:
                     if self._should_suppress_evidence_dossier_update(update):
                         continue
                     self._validate_public_update(update)
-                    if target_reply_then_board:
-                        # Target's board is held until the formal proposal proves the
-                        # complete streamed room text is exactly authoritative.
-                        target_buffered_board_updates.append(update)
-                        continue
-                    # The frontend treats streamed dossier sections as a provisional
-                    # view and discards them on ERROR, attempt reset, workspace change,
-                    # or failed formal-readiness reconciliation.  Publish each complete
-                    # governed JSON section as soon as it is available so the board can
-                    # evolve alongside the utterance; the durable proposal and formal
-                    # dossier remain authoritative only after the fenced terminal commit
-                    # below succeeds. String leaves arrive as real prefixes;
-                    # structured sections arrive once their JSON value closes.
+                    # The upstream Target projector opens this path only after the
+                    # complete root ``room_utterance`` property closes.  Every board
+                    # update remains provisional: the frontend discards it on ERROR,
+                    # attempt reset, workspace change, or failed formal-readiness
+                    # reconciliation.  Publish each complete governed JSON section as
+                    # soon as it arrives instead of holding the board until the graph
+                    # and terminal proposal finish.  String leaves arrive as real
+                    # prefixes; structured sections arrive once their JSON value closes.
+                    # The durable proposal and formal dossier remain authoritative only
+                    # after the fenced terminal commit below succeeds.
                     yield self._event(
                         execution,
                         sequence,
@@ -337,15 +333,6 @@ class CompiledIntakeGraphShadowExecutor:
                 streamed="".join(streamed_room_utterance_parts),
                 terminal=terminal_room_utterance,
             )
-            for board_update in target_buffered_board_updates:
-                self._validate_public_update(board_update)
-                yield self._event(
-                    execution,
-                    sequence,
-                    board_update.event_type,
-                    board_update.payload,
-                )
-                sequence += 1
         elif room_utterance_received:
             self._require_streamed_room_utterance_matches_terminal(
                 streamed="".join(streamed_room_utterance_parts),

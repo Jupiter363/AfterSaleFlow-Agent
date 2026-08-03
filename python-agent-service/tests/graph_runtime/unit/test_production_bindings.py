@@ -2571,7 +2571,10 @@ async def test_target_intake_executor_streams_room_equal_to_terminal_before_term
             ("case_detail.references", raw_dossier_delta),
         ]
         assert visible_commit_states == [False, False, False]
-        assert visible_source_completion_states == [False, False, True]
+        # The third visible frame is a provisional board update.  It must reach
+        # the client before the graph source completes; the later failure is
+        # still fail-closed and lets the client discard this provisional view.
+        assert visible_source_completion_states == [False, False, False]
         assert saver.preflights == 1
         assert store.calls == 1
         assert saver.commits == (1 if failure_stage == "commit" else 0)
@@ -2609,7 +2612,9 @@ async def test_target_intake_executor_streams_room_equal_to_terminal_before_term
         event.payload.delta or "" for event in room_events
     ) == terminal_room_utterance
     assert visible_commit_states == [False, False, False]
-    assert visible_source_completion_states == [False, False, True]
+    # The board is emitted while the source is still open, after both room
+    # chunks.  The terminal commit remains the durable authority.
+    assert visible_source_completion_states == [False, False, False]
     assert max(event.sequence_no for event in room_events) < min(
         event.sequence_no for event in board_events
     )
@@ -3199,7 +3204,7 @@ async def test_target_intake_executor_streams_governed_ready_handoff_equal_to_te
 
 
 @pytest.mark.asyncio
-async def test_target_intake_executor_streams_three_full_width_questions_before_releasing_board(
+async def test_target_intake_executor_streams_three_full_width_questions_before_streaming_board(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     command, _, _ = _intake_command()
@@ -3480,7 +3485,7 @@ async def test_target_intake_executor_streams_three_full_width_questions_before_
         ("case_detail.references", raw_board_delta)
     ]
     assert visible_commit_states == [False] * len(visible)
-    assert visible_source_completion_states[-1] == ("case_detail.references", True)
+    assert visible_source_completion_states[-1] == ("case_detail.references", False)
     assert events[-2].event_type == "usage"
     assert events[-1].event_type == "final"
     assert saver.preflights == 1
@@ -3575,9 +3580,18 @@ async def test_target_intake_executor_rejects_room_append_after_root_close(
         async for event in executor.stream(execution):
             events.append(event)
 
-    assert [event.event_type for event in events] == ["attempt_started", "visible_delta"]
-    assert events[-1].payload.field == "room_utterance"
-    assert events[-1].payload.delta == "Please confirm the order number?"
+    # The provisional board was already visible when the later room-order breach
+    # failed the stream.  The caller must emit its normal ERROR/reset path rather
+    # than treating that provisional board as a terminal result.
+    assert [event.event_type for event in events] == [
+        "attempt_started",
+        "visible_delta",
+        "visible_delta",
+    ]
+    assert [(event.payload.field, event.payload.delta) for event in events[1:]] == [
+        ("room_utterance", "Please confirm the order number?"),
+        ("case_detail.references", '{"order_reference":"RAW-AFTER-ROOM"}'),
+    ]
 
 
 @pytest.mark.asyncio
@@ -3598,6 +3612,7 @@ async def test_compiled_intake_executor_rejects_non_prefix_room_before_terminal_
     )
     streamed_room_utterance = "Please confirm the requested resolution."
     terminal_room_utterance = "Please describe the desired resolution."
+    provisional_board_delta = '{"order_reference":"PROVISIONAL-BEFORE-MISMATCH"}'
     assert streamed_room_utterance != terminal_room_utterance
     state = {
         "terminal_draft": {"same": True},
@@ -3649,6 +3664,26 @@ async def test_compiled_intake_executor_rejects_non_prefix_room_before_terminal_
                                     "node_name": BASELINE_INTAKE_NODE_NAME,
                                     "field": "room_utterance",
                                     "delta": streamed_room_utterance,
+                                }
+                            ]
+                        },
+                    ),
+                    {"langgraph_node": "intake_lcel"},
+                ),
+            )
+            yield (
+                "messages",
+                (
+                    AIMessageChunk(
+                        content="",
+                        additional_kwargs={
+                            "governed_events": [
+                                {
+                                    "schema_version": "governed-model-event.v1",
+                                    "event_type": "visible_delta",
+                                    "node_name": BASELINE_INTAKE_NODE_NAME,
+                                    "field": "case_detail.references",
+                                    "delta": provisional_board_delta,
                                 }
                             ]
                         },
@@ -3718,9 +3753,15 @@ async def test_compiled_intake_executor_rejects_non_prefix_room_before_terminal_
         async for event in executor.stream(execution):
             events.append(event)
 
-    assert [event.event_type for event in events] == ["attempt_started", "visible_delta"]
-    assert events[1].payload.field == "room_utterance"
-    assert events[1].payload.delta == streamed_room_utterance
+    assert [event.event_type for event in events] == [
+        "attempt_started",
+        "visible_delta",
+        "visible_delta",
+    ]
+    assert [(event.payload.field, event.payload.delta) for event in events[1:]] == [
+        ("room_utterance", streamed_room_utterance),
+        ("case_detail.references", provisional_board_delta),
+    ]
     assert saver.preflights == 0
     assert saver.commits == 0
     assert store.calls == 0
