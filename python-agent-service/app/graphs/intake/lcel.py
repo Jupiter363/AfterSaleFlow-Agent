@@ -27,6 +27,7 @@ from app.agents.dispute_intake_officer.case_fact_matrix import finalize_case_fac
 from app.graph_runtime.state_lens import StateLens
 from app.agents.dispute_intake_officer.schemas import IntakeCaseDetailLlmOutput
 from app.agents.dispute_intake_officer.skills.dossier.dossier_skill import (
+    _is_evidence_material_request,
     _reported_attitude_from_text,
     _reported_attitude_position,
 )
@@ -102,20 +103,6 @@ _EVIDENCE_MATERIAL_TEXT = (
     "物流单",
     "运单",
     "附件",
-)
-_EVIDENCE_REQUEST_ZH = re.compile(
-    r"(?:请|请您|烦请|麻烦|需要|还需|必须|能否|是否|可否)"
-    r"[^。！？!?]{0,32}(?:证据|凭证|截图|照片|图片|视频|聊天记录|物流单|运单|附件|材料)"
-    r"|(?:证据|凭证|截图|照片|图片|视频|聊天记录|物流单|运单|附件|材料)"
-    r"[^。！？!?]{0,16}(?:请补充|请提供|请上传|需提交|需要出示|请发送|请附上)",
-)
-_EVIDENCE_REQUEST_EN = re.compile(
-    r"(?:please|kindly|must|can you|could you|need (?:you|the party)?\s*to|required to)"
-    r"[^.!?]{0,64}(?:evidence|proof|screenshot|photo|picture|video|chat (?:record|log)|"
-    r"logistics (?:voucher|receipt)|tracking (?:receipt|proof)|document|attachment)"
-    r"|(?:evidence|proof|screenshot|photo|picture|video|chat (?:record|log)|document|attachment)"
-    r"[^.!?]{0,32}(?:please provide|please upload|must submit|need to send|required to attach)",
-    re.IGNORECASE,
 )
 _DIRECT_RESPONDENT_ATTITUDE_ZH = re.compile(
     r"(?:^|[。！？!?；;\n])\s*(?:(?:我|本人|我方|我们)\s*)?"
@@ -2269,9 +2256,15 @@ def _is_evidence_material_gap(value: str) -> bool:
 
 
 def _contains_forbidden_evidence_request(value: str) -> bool:
-    if _EVIDENCE_REQUEST_ZH.search(value) or _EVIDENCE_REQUEST_EN.search(value):
-        return True
-    return ("?" in value or "？" in value) and _is_evidence_material_gap(value)
+    """Use the baseline transfer-action boundary for Target-visible text.
+
+    A factual question can mention an order-confirmation record, a
+    communication record, or a file without asking the user to transfer it.
+    Reuse the baseline action-plus-object detector so Target normalizers cannot
+    drift from the baseline distinction between clarification and collection.
+    """
+
+    return _is_evidence_material_request(value)
 
 
 def _nested_strings(value: Any) -> Iterator[str]:

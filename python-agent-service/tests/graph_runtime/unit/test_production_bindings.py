@@ -2243,7 +2243,7 @@ async def test_compiled_intake_executor_suppresses_provisional_dossier_without_m
         "commit_failure",
     ),
 )
-async def test_target_intake_executor_streams_governed_preview_before_terminal_commit(
+async def test_target_intake_executor_streams_room_equal_to_terminal_before_terminal_commit(
     monkeypatch: pytest.MonkeyPatch,
     failure_stage: str | None,
     replay_suffix: str,
@@ -2253,19 +2253,18 @@ async def test_target_intake_executor_streams_governed_preview_before_terminal_c
     first_two_questions = (
         "请确认订单号？商品故障对您的使用造成了什么影响？"
     )
-    third_question = "【RAW_THIRD_QUESTION】您是否已经联系过商家？"
     terminal_room_utterance = (
         "您好🙂，我已记录您补充的订单与使用情况。"
         "为准确整理争议，请核对以下信息，并说明下列两点："
         + replay_suffix
         + first_two_questions
     )
-    streamed_room_utterance = terminal_room_utterance + third_question
-    assert streamed_room_utterance.count("？") == 3
+    streamed_room_utterance = terminal_room_utterance
+    assert streamed_room_utterance == terminal_room_utterance
+    assert streamed_room_utterance.count("？") == 2
     assert _limit_follow_up_questions(streamed_room_utterance, limit=2) == (
         terminal_room_utterance
     )
-    assert streamed_room_utterance != terminal_room_utterance
     preview_split_at = len(streamed_room_utterance) // 2
     preview_room_deltas = (
         streamed_room_utterance[:preview_split_at],
@@ -2601,8 +2600,7 @@ async def test_target_intake_executor_streams_governed_preview_before_terminal_c
     assert len(room_events) == 2
     assert "".join(
         event.payload.delta or "" for event in room_events
-    ) == streamed_room_utterance
-    assert third_question in "".join(event.payload.delta or "" for event in room_events)
+    ) == terminal_room_utterance
     assert visible_commit_states == [False, False, False]
     assert visible_source_completion_states == [False, False, False]
     assert max(event.sequence_no for event in room_events) < min(
@@ -2615,7 +2613,7 @@ async def test_target_intake_executor_streams_governed_preview_before_terminal_c
     assert references_leaf_events == []
     assert references_root_events == [board_events[0]]
     all_visible_text = "".join(event.payload.delta or "" for event in visible)
-    assert third_question in all_visible_text
+    assert terminal_room_utterance in all_visible_text
     assert "RAW-UNCOMMITTED" in all_visible_text
     assert dossier_payload["references"]["order_reference"] not in all_visible_text
     assert events[-2].event_type == "usage"
@@ -2942,7 +2940,7 @@ async def test_target_intake_preview_does_not_turn_graph_failure_into_formal_res
 
 
 @pytest.mark.asyncio
-async def test_target_intake_executor_preserves_baseline_ready_handoff_after_commit(
+async def test_target_intake_executor_streams_governed_ready_handoff_equal_to_terminal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     command, _, _ = _intake_command()
@@ -2953,9 +2951,9 @@ async def test_target_intake_executor_preserves_baseline_ready_handoff_after_com
     )
     assert (
         intake_executor._normalized_intake_room_utterance(baseline_ready_handoff)
-        != baseline_ready_handoff
+        == baseline_ready_handoff
     )
-    raw_room_utterance = "raw provisional model reply that must remain private"
+    governed_room_utterance = baseline_ready_handoff
     raw_dossier_delta = '{"order_reference":"RAW-UNCOMMITTED"}'
     state = {
         "terminal_draft": {"same": True},
@@ -2978,7 +2976,7 @@ async def test_target_intake_executor_preserves_baseline_ready_handoff_after_com
             return {"references": {"order_reference": "ORDER-READY-HANDOFF"}}
 
     proposal = SimpleNamespace(
-        room_utterance=baseline_ready_handoff,
+        room_utterance=governed_room_utterance,
         dossier_patch=DossierPatch(),
     )
     canonical = SimpleNamespace(
@@ -3031,7 +3029,7 @@ async def test_target_intake_executor_preserves_baseline_ready_handoff_after_com
         async def astream(self, input: Any, config: Any, **kwargs: Any):
             assert kwargs["stream_mode"] == ["messages", "custom"]
             for field, delta in (
-                ("room_utterance", raw_room_utterance),
+                ("room_utterance", governed_room_utterance),
                 ("case_detail.references", raw_dossier_delta),
             ):
                 yield (
@@ -3174,15 +3172,15 @@ async def test_target_intake_executor_preserves_baseline_ready_handoff_after_com
     assert [event.sequence_no for event in events] == list(range(len(events)))
     assert "".join(
         event.payload.delta or "" for event in room_events
-    ) == raw_room_utterance
+    ) == governed_room_utterance
     assert visible_commit_states == [False, False]
     assert max(event.sequence_no for event in room_events) < min(
         event.sequence_no for event in board_events
     )
     all_visible_text = "".join(event.payload.delta or "" for event in visible)
-    assert raw_room_utterance in all_visible_text
+    assert governed_room_utterance in all_visible_text
     assert raw_dossier_delta in all_visible_text
-    assert baseline_ready_handoff not in all_visible_text
+    assert baseline_ready_handoff in all_visible_text
     assert [(event.payload.field, event.payload.delta) for event in board_events] == [
         ("case_detail.references", raw_dossier_delta)
     ]
@@ -3194,13 +3192,42 @@ async def test_target_intake_executor_preserves_baseline_ready_handoff_after_com
 
 
 @pytest.mark.asyncio
-async def test_legacy_intake_executor_rejects_mismatched_room_before_terminal_commit(
+@pytest.mark.parametrize(
+    ("target_candidate", "finalizer_trims_third_question"),
+    ((False, False), (True, False), (True, True)),
+    ids=("legacy", "target", "target_finalizer_trims_third_question"),
+)
+async def test_compiled_intake_executor_rejects_mismatched_room_before_terminal_commit(
     monkeypatch: pytest.MonkeyPatch,
+    target_candidate: bool,
+    finalizer_trims_third_question: bool,
 ) -> None:
     command, _, _ = _intake_command()
-    execution = _intake_execution(command)
-    streamed_room_utterance = "Please confirm the requested resolution."
-    terminal_room_utterance = "Please describe the desired resolution."
+    execution = (
+        _target_candidate_intake_execution(command)
+        if target_candidate
+        else _intake_execution(command)
+    )
+    if finalizer_trims_third_question:
+        first_two_questions = (
+            "请确认订单号？商品故障对您的使用造成了什么影响？"
+        )
+        third_question = "【RAW_THIRD_QUESTION】您是否已经联系过商家？"
+        streamed_room_utterance = (
+            "您好，我已记录您补充的订单与使用情况。"
+            "为准确整理争议，请核对以下信息，并说明下列两点："
+            + first_two_questions
+            + third_question
+        )
+        terminal_room_utterance = _limit_follow_up_questions(
+            streamed_room_utterance,
+            limit=2,
+        )
+        assert streamed_room_utterance.count("？") == 3
+        assert terminal_room_utterance.count("？") == 2
+    else:
+        streamed_room_utterance = "Please confirm the requested resolution."
+        terminal_room_utterance = "Please describe the desired resolution."
     assert streamed_room_utterance != terminal_room_utterance
     state = {
         "terminal_draft": {"same": True},

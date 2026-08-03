@@ -2225,48 +2225,150 @@ def _list_values(value: Any) -> list[str]:
     return []
 
 
+# 接待室只拒绝把材料交到当前房间的指令；不能因普通案情澄清提到材料名就覆盖模型回复。
+_EVIDENCE_TRANSFER_OBJECT_RE = re.compile(
+    r"(?:"
+    r"截图|图片|照片|视频|聊天记录|沟通记录|通话记录|物流记录|交易记录|录音|凭证|证明材料|证据材料|证据(?!书记官|室)|"
+    r"检测报告|检验报告|发票|交易流水|支付流水|快递底单|签收单|物流单(?!号)|运单(?!号)|文件|文档|附件|材料|订单确认稿|"
+    r"screenshots?|images?|photos?|videos?|chat\s+records?|communication\s+records?|"
+    r"recordings?|vouchers?|receipts?|documents?|files?|materials?|attachments?|"
+    r"order[-\s]?confirmation\s+(?:draft|document)"
+    r")",
+    re.IGNORECASE,
+)
+_EVIDENCE_TRANSFER_ACTION_RE = re.compile(
+    r"(?:上传|补交|提供|提交|发送|发来|附上|出示|发给|发至|寄给|分享|共享|"
+    r"\b(?:upload|provide|submit|send|attach|show|email|share)\b)",
+    re.IGNORECASE,
+)
+_EVIDENCE_TRANSFER_REQUEST_CUE_RE = re.compile(
+    r"(?:请(?:您)?|麻烦(?:您)?|劳烦|烦请|还请|能否|可否|是否(?:可以|能)|方便|"
+    r"please|could\s+you|can\s+you|would\s+you|kindly)",
+    re.IGNORECASE,
+)
+_EVIDENCE_TRANSFER_DIRECT_CUE_RE = re.compile(
+    r"^(?:请(?:您)?|麻烦(?:您)?|劳烦|烦请|还请|能否|可否|是否(?:可以|能)|方便|"
+    r"please|could\s+you|can\s+you|would\s+you|kindly)\s*",
+    re.IGNORECASE,
+)
+_EVIDENCE_TRANSFER_OBLIGATION_RE = re.compile(
+    r"(?:还需要|还需|需要|必须|务必|应当|"
+    r"\bmust\b|\bneed\s+to\b|\brequired\s+to\b)",
+    re.IGNORECASE,
+)
+_EVIDENCE_TRANSFER_ATTRIBUTION_RE = re.compile(
+    r"(?:商家|用户|对方|发起方|被发起方).{0,24}(?:称|表示|说|回复|主张|认为|告知|反馈)",
+)
+_EVIDENCE_FACTUAL_HISTORY_RE = re.compile(
+    r"(?:确认|核实|说明|告知|提到).{0,80}(?:已经|已|此前|之前|曾|曾经|目前)",
+)
+_EVIDENCE_FACTUAL_ACTOR_QUERY_RE = re.compile(
+    r"(?:请问|确认|核实|说明|告知|提到).{0,80}"
+    r"(?:商家|用户|对方|发起方|被发起方).{0,48}"
+    r"(?:是否|还需要|还需|需要|必须|务必|应当)",
+)
+
+
+def _is_evidence_action_history_form(text: str, action: re.Match[str]) -> bool:
+    """Recognize forms such as ``提供的`` and ``上传过`` as material history."""
+
+    return text[action.end() :].lstrip().startswith(("的", "方", "过", "了"))
+
+
+def _is_current_evidence_transfer_instruction(
+    clause: str,
+    action: re.Match[str] | None,
+) -> bool:
+    """Recognize a current officer-to-user transfer direction before attribution checks."""
+
+    if action is None:
+        return False
+    leading = re.sub(r"^(?:[-*•]|\d+[.、)])\s*", "", clause).lstrip()
+    leading_action = _EVIDENCE_TRANSFER_ACTION_RE.match(leading)
+    if leading_action is not None:
+        return not _is_evidence_action_history_form(leading, leading_action)
+
+    direct_cue = _EVIDENCE_TRANSFER_DIRECT_CUE_RE.match(leading)
+    if direct_cue is None:
+        return False
+    remainder = re.sub(
+        r"^(?:现在|立即|马上|尽快|now|immediately|right\s+away)\s*",
+        "",
+        leading[direct_cue.end() :],
+        flags=re.IGNORECASE,
+    )
+    direct_action = _EVIDENCE_TRANSFER_ACTION_RE.match(remainder)
+    if direct_action is not None:
+        return not _is_evidence_action_history_form(remainder, direct_action)
+    return remainder.startswith(("把", "将"))
+
+
+def _is_factual_evidence_reference(
+    clause: str,
+    action: re.Match[str] | None,
+) -> bool:
+    """Return whether a clause refers to material history rather than asks for delivery."""
+
+    if _EVIDENCE_TRANSFER_ATTRIBUTION_RE.search(clause):
+        return True
+    if action is None:
+        return False
+    before_action = clause[: action.start()]
+    if _is_evidence_action_history_form(clause, action):
+        return True
+    if re.search(r"(?:由谁|谁|哪一方|哪个主体)\s*$", before_action):
+        return True
+    return (
+        _EVIDENCE_FACTUAL_HISTORY_RE.search(before_action) is not None
+        or _EVIDENCE_FACTUAL_ACTOR_QUERY_RE.search(before_action) is not None
+    )
+
+
 # 所属模块：接待室 Agent > 接待卷宗确定性整理；函数角色：模块私有业务函数。
-# 具体功能：`_is_evidence_material_request` 判断当前可见证据是否满足当前业务分支条件；关键协作调用：`strip`。
+# 具体功能：`_is_evidence_material_request` 仅识别要求在接待室传递证据材料的明确指令；关键协作调用：`strip`、`search`。
 # 上下游：上游为 表单、当前参与方私聊、上一版卷宗；下游为 协作调用 `strip`。
-# 系统意义：该函数在系统中的业务边界是：只建档追问，不收正式证据、不定责、不承诺赔付。
+# 系统意义：该函数在系统中的业务边界是：只建档追问，不收正式证据、不定责、不承诺赔付，同时保留正常事实澄清。
 def _is_evidence_material_request(value: Any) -> bool:
     text = str(value or "").strip()
     if not text:
         return False
-    if any(
-        marker in text
-        for marker in (
-            "截图",
-            "照片",
-            "视频",
-            "聊天记录",
-            "沟通记录",
-            "录音",
-            "凭证",
-            "证明材料",
-            "证据材料",
-            "上传",
-            "补交",
-            "提供证据",
-            "提供材料",
-            "提交材料",
-        )
-    ):
-        return True
-    evidence_actions = ("提供", "提交", "出示", "发送", "发来", "附上")
-    evidence_objects = (
-        "检测报告",
-        "检验报告",
-        "发票",
-        "交易流水",
-        "支付流水",
-        "快递底单",
-        "签收单",
-        "文件",
-    )
-    return any(action in text for action in evidence_actions) and any(
-        evidence_object in text for evidence_object in evidence_objects
-    )
+    for clause in re.split(r"[，,。！？?；;\n]+", text):
+        evidence_object = _EVIDENCE_TRANSFER_OBJECT_RE.search(clause)
+        if evidence_object is None:
+            continue
+
+        action = _EVIDENCE_TRANSFER_ACTION_RE.search(clause)
+        # 先识别接待官当下向用户发出的交付指令。这样“请上传商家称需要的
+        # 物流凭证”不会因修饰语中的归属转述而放行。
+        if _is_current_evidence_transfer_instruction(clause, action):
+            return True
+        # 转述商家/任一当事人对材料的要求，或询问已经提供的材料内容，都是
+        # 事实澄清而非接待官要求当前用户交付，不能覆盖已流式生成的话术。
+        if _is_factual_evidence_reference(clause, action):
+            continue
+
+        # “还需要物流凭证”“必须提供发票”均是要求把材料补入当前房间的
+        # 明确义务；前者即便省略交付动作，也不能作为普通事实澄清放行。
+        if _EVIDENCE_TRANSFER_OBLIGATION_RE.search(clause):
+            return True
+
+        if action is None:
+            continue
+
+        # 「订单确认稿具体是哪个版本的沟通记录或文件」这类事实澄清会提到
+        # 材料名称，但没有要求用户把材料传入接待室，必须原样保留。
+        if _EVIDENCE_TRANSFER_REQUEST_CUE_RE.search(clause):
+            return True
+
+        # “把/将材料发送、上传”本身构成明确的交付指令，即使省略了“请”。
+        if re.search(
+            r"(?:把|将).{0,80}(?:上传|补交|提供|提交|发送|发来|附上|出示|发给|发至|寄给|分享|共享|"
+            r"\b(?:send|email|share)\b)",
+            clause,
+            re.IGNORECASE,
+        ):
+            return True
+    return False
 
 
 # 所属模块：接待室 Agent > 接待卷宗确定性整理；函数角色：模块私有业务函数。

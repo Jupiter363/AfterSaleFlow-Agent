@@ -210,18 +210,31 @@ class CompiledIntakeGraphShadowExecutor:
                                 "INTAKE_ROOM_UTTERANCE_STREAM_ORDER_INVALID"
                             )
                         room_delta = self._streamed_room_utterance_delta(update)
-                        if not target_reply_then_board:
+                        if target_reply_then_board:
+                            candidate_room_utterance = "".join(
+                                (*streamed_room_utterance_parts, room_delta)
+                            )
+                            # A Target-visible room prefix must already be its
+                            # cumulative governed form. Checking it before it reaches
+                            # the room prevents a later formal proposal from silently
+                            # replacing text that the user already saw.
+                            if (
+                                _normalized_intake_room_utterance(candidate_room_utterance)
+                                != candidate_room_utterance
+                            ):
+                                raise GraphContractError(
+                                    "INTAKE_ROOM_UTTERANCE_STREAM_NORMALIZATION_DIVERGED"
+                                )
+                            # Record Target's exact source text before exposing a
+                            # fragment so the terminal equality guard observes the
+                            # same byte sequence that reached the room.
+                            streamed_room_utterance_parts.append(room_delta)
+                        else:
                             candidate_room_utterance = "".join(
                                 (*streamed_room_utterance_parts, room_delta)
                             )
                             # A legacy model prefix must remain identical to its
-                            # normalized terminal text.  Target preview is different:
-                            # it is explicitly non-durable, and the retained baseline
-                            # finalizer may legitimately trim a third follow-up or
-                            # replace a ready/handoff phrase before the formal result
-                            # is committed.  Do not turn that expected finalization
-                            # difference into a failed attempt after a preview has
-                            # already reached the room.
+                            # normalized terminal text.
                             if (
                                 _normalized_intake_room_utterance(candidate_room_utterance)
                                 != candidate_room_utterance
@@ -304,9 +317,10 @@ class CompiledIntakeGraphShadowExecutor:
         revision = state["cognitive_revision"]
 
         if target_reply_then_board:
-            # Target's proposal is produced by the retained baseline finalizer.
-            # It is already the durable, audience-safe reply; do not send it back
-            # through raw-model evidence wording normalization.
+            # Target's baseline-finalized proposal is the only formal room text.
+            # It must already satisfy the public normalizer as an identity;
+            # otherwise Target could show a different reply from the proposal it
+            # is about to make durable.
             terminal_room_utterance = self._authoritative_terminal_room_utterance(
                 proposal.room_utterance
             )
@@ -314,14 +328,14 @@ class CompiledIntakeGraphShadowExecutor:
             terminal_room_utterance = self._normalized_terminal_room_utterance(
                 proposal.room_utterance
             )
-        if not target_reply_then_board and room_utterance_streamed:
+        if room_utterance_streamed:
             self._require_streamed_room_utterance_matches_terminal(
                 streamed="".join(streamed_room_utterance_parts),
                 terminal=terminal_room_utterance,
             )
         elif not target_reply_then_board:
             # Compatibility for a graph/parser that does not expose model reply
-            # deltas.  It intentionally keeps the former terminal chunk behavior,
+            # deltas. It intentionally keeps the former terminal chunk behavior,
             # while still preserving the room-before-dossier publication order.
             for room_update in self._room_utterance_updates(terminal_room_utterance):
                 self._validate_public_update(room_update)
@@ -385,9 +399,10 @@ class CompiledIntakeGraphShadowExecutor:
             # A parser / provider that never exposed a governed preview retains the
             # durable canonical fallback.  It is intentionally reply-first and runs
             # only after immutable proposal storage plus the fenced terminal commit.
-            # When a preview did arrive, do not append the terminal proposal again:
-            # the consumer's final-result rehydrate replaces that provisional view
-            # with the authoritative baseline-finalized room text and dossier.
+            # When a room stream did arrive, its exact equality with the formal
+            # proposal was verified above; do not append the same room content a
+            # second time. The normal final-result rehydrate remains authoritative
+            # for the durable dossier.
             terminal_updates = self._target_canonical_replay_updates(proposal)
         elif target_reply_then_board:
             terminal_updates = ()
@@ -528,9 +543,9 @@ class CompiledIntakeGraphShadowExecutor:
         delta = update.payload.delta
         if field not in _INTAKE_VISIBLE_FIELDS or not isinstance(delta, str) or not delta:
             raise GraphContractError("compiled Intake Graph visible update is invalid")
-        # Legacy streaming room replies are checked against the normalized
-        # terminal proposal before any durable commit. Target candidates suppress
-        # those raw updates and publish only the committed terminal reply.
+        # Every live room reply is cumulatively checked against its governed
+        # terminal proposal before any durable commit.  Target candidates retain
+        # their reply-first stream, but cannot commit a different formal reply.
         if field == "room_utterance":
             return
         if (
@@ -597,8 +612,8 @@ class CompiledIntakeGraphShadowExecutor:
                 node=node,
                 field=_INTAKE_ROOM_UTTERANCE_FIELD,
                 # Python slices operate on Unicode code points, so no UTF-8 byte
-                # sequence can be cut in half. The legacy terminal comparison
-                # covers the exact concatenated string, not just each fragment.
+                # sequence can be cut in half. The terminal comparison covers the
+                # exact concatenated string, not just each fragment.
                 delta=delta[offset : offset + _AGENT_STREAM_DELTA_MAX_LENGTH],
             )
             for offset in range(0, len(delta), _AGENT_STREAM_DELTA_MAX_LENGTH)
@@ -612,16 +627,20 @@ class CompiledIntakeGraphShadowExecutor:
 
     @staticmethod
     def _uses_target_reply_then_board_boundary(execution: GatewayExecution) -> bool:
-        """Select Target's reply-first preview and canonical-fallback contract."""
+        """Select Target's reply-first stream and canonical no-preview fallback."""
 
         return execution.fence.execution_lane is GraphGatewayMode.TARGET_E2E_CANDIDATE
 
     @staticmethod
     def _authoritative_terminal_room_utterance(room_utterance: object) -> str:
-        """Validate, but never rewrite, a baseline-finalized target reply."""
+        """Validate, but never rewrite, a baseline-finalized Target reply."""
 
         if not isinstance(room_utterance, str) or not room_utterance.strip():
             raise GraphTerminalBindingError("Intake terminal room utterance is invalid")
+        if _normalized_intake_room_utterance(room_utterance) != room_utterance:
+            raise GraphTerminalBindingError(
+                "Intake terminal room utterance requires normalization"
+            )
         return room_utterance
 
     @staticmethod
@@ -684,11 +703,12 @@ class CompiledIntakeGraphShadowExecutor:
     ) -> tuple[GraphPublicUpdate, ...]:
         """Replay a committed proposal only when Target had no governed preview.
 
-        The normal Target path exposes a non-durable, governed preview while the
-        graph is still streaming.  This fallback is reserved for parsers/providers
-        that produced no room preview at all; after immutable storage and the
-        fenced commit, it projects the baseline-finalized proposal in the same
-        reply-first shape so legacy source gaps cannot leave the room blank.
+        The normal Target path exposes a governed reply-first stream whose
+        concatenated room text must exactly match the terminal proposal before it
+        can commit. This fallback is reserved for parsers/providers that produced
+        no room text at all; after immutable storage and the fenced commit, it
+        projects the baseline-finalized proposal in the same reply-first shape so
+        legacy source gaps cannot leave the room blank.
         """
 
         document = cls._target_canonical_replay_document(proposal)

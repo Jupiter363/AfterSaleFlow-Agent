@@ -14,6 +14,7 @@ from app.agents.dispute_intake_officer.skills.dossier.dossier_skill import (
     _canonical_verification_focus,
     _enforce_case_story_summary,
     _enforce_claim_resolution,
+    _is_evidence_material_request,
     _reported_attitude_position,
 )
 from app.agents.dispute_intake_officer.workflow import (
@@ -576,6 +577,115 @@ def test_intake_question_boundary_replaces_evidence_requests_with_case_questions
     assert "凭证" not in result
     assert result.count("？") == 2
     assert "什么时间联系了商家" not in result
+
+
+def test_intake_question_boundary_keeps_factual_material_clarification_byte_identical() -> None:
+    utterance = "您提到的“订单确认稿”具体是指哪一版本的沟通记录或文件？"
+    case_detail = {
+        "intake_quality": {"score": 72, "ready_for_next_step": False},
+        "missing_information": {
+            "next_questions": ["商品目前是否已被用户签收或使用？"]
+        },
+    }
+
+    result = _enforce_intake_question_boundary(utterance, case_detail)
+
+    assert _is_evidence_material_request(utterance) is False
+    assert result.encode("utf-8") == utterance.encode("utf-8")
+
+
+def test_intake_question_boundary_keeps_explanation_of_named_material_byte_identical() -> None:
+    utterance = "请您补充说明“订单确认稿”具体是指哪一版本的沟通记录或文件？"
+    case_detail = {
+        "intake_quality": {"score": 72, "ready_for_next_step": False},
+        "missing_information": {
+            "next_questions": ["商品目前是否已被用户签收或使用？"]
+        },
+    }
+
+    result = _enforce_intake_question_boundary(utterance, case_detail)
+
+    assert _is_evidence_material_request(utterance) is False
+    assert result.encode("utf-8") == utterance.encode("utf-8")
+
+
+@pytest.mark.parametrize(
+    "utterance",
+    [
+        "请确认商家是否已经提供物流凭证？",
+        "请说明提供的订单确认稿中写明了什么？",
+        "请问您此前提供的物流凭证显示的签收时间是？",
+        "商家称还需要物流凭证才能核验延误。",
+        "已记录本轮补充，请问还有没有需要备注给证据书记官或后续审理环节的案情内容？",
+        "请问物流凭证由谁提供？",
+        "请确认订单确认稿的提供方是谁？",
+        "请问用户是否上传过聊天记录？",
+        "请问商家需要提供物流凭证吗？",
+    ],
+)
+def test_intake_question_boundary_keeps_factual_material_references_byte_identical(
+    utterance: str,
+) -> None:
+    case_detail = {
+        "intake_quality": {"score": 72, "ready_for_next_step": False},
+        "missing_information": {
+            "next_questions": ["商品目前是否已被用户签收或使用？"]
+        },
+    }
+
+    result = _enforce_intake_question_boundary(utterance, case_detail)
+
+    assert _is_evidence_material_request(utterance) is False
+    assert result.encode("utf-8") == utterance.encode("utf-8")
+
+
+@pytest.mark.parametrize(
+    "utterance",
+    [
+        "请上传开箱视频、聊天记录截图和物流签收凭证。",
+        "请上传图片。",
+        "请上传物流单。",
+        "请上传运单。",
+        "请提供订单确认稿。",
+        "请提供订单确认稿文件，并附上相关沟通记录。",
+        "请提交物流记录。",
+        "请将照片和视频发送过来，并提交物流凭证。",
+        "Please upload the screenshots and attach the order-confirmation document.",
+        "Please upload an image.",
+        "Could you provide the chat records and show the shipping voucher?",
+        "需要出示检测报告。",
+        "还需提交凭证。",
+        "必须提供发票。",
+        "务必上传截图。",
+        "You must submit the document.",
+        "You need to send the screenshots.",
+        "You are required to attach the file.",
+        "还需要物流凭证。",
+        "需要证据。",
+        "需要证据材料。",
+        "请把截图发给我。",
+        "请确认您是否可以提供物流凭证？",
+        "请上传截图，商家称收到后处理。",
+        "用户称未提供凭证，请现在提供凭证。",
+        "请上传商家称需要的物流凭证。",
+        "Please email the screenshot to me.",
+        "Please share the document with me.",
+    ],
+)
+def test_intake_question_boundary_replaces_explicit_evidence_transfer_requests(
+    utterance: str,
+) -> None:
+    case_detail = {
+        "intake_quality": {"score": 72, "ready_for_next_step": False},
+        "missing_information": {
+            "next_questions": ["商品目前是否已被用户签收或使用？"]
+        },
+    }
+
+    result = _enforce_intake_question_boundary(utterance, case_detail)
+
+    assert _is_evidence_material_request(utterance) is True
+    assert result == "我已记录本轮补充。为了继续梳理案情，请补充：商品目前是否已被用户签收或使用？"
 
 
 def test_intake_question_boundary_normalizes_unpunctuated_uat_safe_questions() -> None:

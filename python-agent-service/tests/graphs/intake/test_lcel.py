@@ -45,6 +45,7 @@ from app.graphs.intake.nodes import (
 from app.graphs.intake.lcel import (
     _SAFE_INTAKE_CASE_SUMMARY,
     _SAFE_INTAKE_ROOM_UTTERANCE,
+    _contains_forbidden_evidence_request,
     _generation_parts as _production_generation_parts,
     _intake_response_message_id,
     _is_vetted_intake_model_runnable,
@@ -1518,13 +1519,13 @@ def test_two_turn_baseline_context_preserves_formal_fact_authority_privately(
     assert second_context["public_dossier_hash"] == canonical_sha256(second_result["dossier_draft"])
 
 
-def test_baseline_finalized_ready_handoff_survives_real_lcel_terminal_draft(
+def test_baseline_finalized_ready_handoff_owns_target_terminal_room_utterance(
     bindings,
     version_pins,
     snapshot,
     event,
 ) -> None:
-    """The shared baseline finalizer owns the ready/handoff room utterance."""
+    """Target keeps the baseline finalizer as terminal room-copy authority."""
 
     event["text"] = (
         "Order ORDER_1001 arrived damaged; logistics reference SF1001001001 confirms delivery. "
@@ -1575,6 +1576,8 @@ def test_baseline_finalized_ready_handoff_survives_real_lcel_terminal_draft(
     ][0]
     prior_position = prior_row["positions"]["USER"]
     second_document = _ready_handoff_document(next_event)
+    raw_provider_room_utterance = "The streamed clarification is not the terminal authority."
+    second_document["room_utterance"] = raw_provider_room_utterance
     second_document["matrix_patch"] = {
         "schema_version": "case_fact_matrix.delta.v2",
         "fact_rows": [
@@ -1619,9 +1622,17 @@ def test_baseline_finalized_ready_handoff_survives_real_lcel_terminal_draft(
         interrupt_before=["checkpoint_terminal"],
     )
 
-    assert projected["terminal_draft"]["room_utterance"] == (
+    baseline_finalized_room_utterance = (
         "已记录本轮补充，当前信息已经可以提交。"
         "请问还有没有需要备注给证据书记官或后续审理环节的案情内容？"
+    )
+    assert projected["terminal_draft"]["room_utterance"] == baseline_finalized_room_utterance
+    assert projected["terminal_draft"]["room_utterance"] != raw_provider_room_utterance
+    assert projected["readiness"]["status"] == "READY_TO_CONFIRM"
+    assert projected["dossier_draft"]["intake_quality"]["ready_for_next_step"] is True
+    assert any(
+        message["role"] == "AI" and message["content"] == baseline_finalized_room_utterance
+        for message in projected["messages"].values()
     )
 
 
@@ -2767,7 +2778,7 @@ def test_production_generation_replaces_raw_model_evidence_room_request(
 
     state = _event_state(bindings, version_pins, snapshot, event)
     raw_document = _event_document(event)
-    raw_document["room_utterance"] = "Please upload a screenshot as evidence."
+    raw_document["room_utterance"] = "Upload a screenshot as evidence."
     raw_output = IntakeCaseDetailLlmOutput.model_validate(_baseline_document(raw_document))
 
     _, _, projected = _production_generation_parts(
@@ -2779,6 +2790,36 @@ def test_production_generation_replaces_raw_model_evidence_room_request(
     )
 
     assert projected.room_utterance == _SAFE_INTAKE_ROOM_UTTERANCE
+
+
+def test_target_evidence_boundary_keeps_factual_record_clarification() -> None:
+    factual_clarification = "订单确认稿具体是指哪一版本的沟通记录或文件？"
+    draft = IntakeCognitionDraft.model_validate(
+        _draft(room_utterance=factual_clarification)
+    )
+    normalized = _normalize_model_evidence_boundaries(draft)
+
+    assert not _contains_forbidden_evidence_request(factual_clarification)
+    assert normalized.room_utterance == factual_clarification
+
+
+@pytest.mark.parametrize(
+    "utterance",
+    [
+        "上传活动页面截图作为证据。",
+        "提供物流凭证。",
+        "提交聊天记录。",
+        "发送照片作为证据。",
+        "附上相关附件。",
+        "Upload a screenshot as evidence.",
+        "Provide the delivery receipt.",
+        "Submit the chat records.",
+        "Send a photo as evidence.",
+        "Attach the document.",
+    ],
+)
+def test_explicit_evidence_transfer_actions_remain_governed(utterance: str) -> None:
+    assert _contains_forbidden_evidence_request(utterance)
 
 
 def test_model_evidence_requests_are_removed_from_non_question_dossier_branches(
