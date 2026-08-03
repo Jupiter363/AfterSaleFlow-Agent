@@ -520,7 +520,7 @@ final class IntakeOuterCommitIntegrationFixture {
                     access_session_id, prompt_profile_id, memory_policy_id, conversation_scope,
                     status, created_at, updated_at, created_by
                 ) values (?, ?, ?, 'INTAKE', ?, 'USER', 'DISPUTE_INTAKE_OFFICER', ?,
-                    'intake-prompt.v2', 'MEMORY_DEFAULT', ?, 'ACTIVE', ?, ?, 'test')
+                    'intake-prompt.v2', 'GRAPH_PRIVATE_NO_MEMORY_FRAME_V1', ?, 'ACTIVE', ?, ?, 'test')
                 """,
                 sessionId,
                 fixture.tenant(),

@@ -2199,7 +2199,7 @@ async def test_compiled_intake_executor_suppresses_provisional_dossier_without_m
         "commit_failure",
     ),
 )
-async def test_target_intake_executor_replays_committed_baseline_reply_before_board(
+async def test_target_intake_executor_streams_governed_preview_before_terminal_commit(
     monkeypatch: pytest.MonkeyPatch,
     failure_stage: str | None,
     replay_suffix: str,
@@ -2222,6 +2222,12 @@ async def test_target_intake_executor_replays_committed_baseline_reply_before_bo
         terminal_room_utterance
     )
     assert streamed_room_utterance != terminal_room_utterance
+    preview_split_at = len(streamed_room_utterance) // 2
+    preview_room_deltas = (
+        streamed_room_utterance[:preview_split_at],
+        streamed_room_utterance[preview_split_at:],
+    )
+    assert all(preview_room_deltas)
     oversized_title = "终态长标题🙂" * 1025
     dossier_payload = {
         "case_story": {
@@ -2312,6 +2318,7 @@ async def test_target_intake_executor_replays_committed_baseline_reply_before_bo
 
     class Graph:
         checkpointer = saver
+        source_completed = False
 
         async def astream(self, input: Any, config: Any, **kwargs: Any):
             assert kwargs["stream_mode"] == ["messages", "custom"]
@@ -2327,7 +2334,27 @@ async def test_target_intake_executor_replays_committed_baseline_reply_before_bo
                                     "event_type": "visible_delta",
                                     "node_name": BASELINE_INTAKE_NODE_NAME,
                                     "field": "room_utterance",
-                                    "delta": streamed_room_utterance,
+                                    "delta": preview_room_deltas[0],
+                                }
+                            ]
+                        },
+                    ),
+                    {"langgraph_node": BASELINE_INTAKE_NODE_NAME},
+                ),
+            )
+            yield (
+                "messages",
+                (
+                    AIMessageChunk(
+                        content="",
+                        additional_kwargs={
+                            "governed_events": [
+                                {
+                                    "schema_version": "governed-model-event.v1",
+                                    "event_type": "visible_delta",
+                                    "node_name": BASELINE_INTAKE_NODE_NAME,
+                                    "field": "room_utterance",
+                                    "delta": preview_room_deltas[1],
                                 }
                             ]
                         },
@@ -2356,6 +2383,7 @@ async def test_target_intake_executor_replays_committed_baseline_reply_before_bo
                 ),
             )
             yield ("custom", GraphPublicUpdate.usage(usage))
+            self.source_completed = True
 
         async def aget_state(self, config: Any) -> object:
             return object()
@@ -2399,9 +2427,10 @@ async def test_target_intake_executor_replays_committed_baseline_reply_before_bo
     async def load_context(*_: Any, **__: Any) -> object:
         return object()
 
+    graph = Graph()
     monkeypatch.setattr(
         "app.graph_runtime.intake_executor.build_governed_intake_runtime",
-        lambda **kwargs: SimpleNamespace(graph=Graph()),
+        lambda **kwargs: SimpleNamespace(graph=graph),
     )
     monkeypatch.setattr(CompiledIntakeGraphShadowExecutor, "_load_context", load_context)
     monkeypatch.setattr(
@@ -2464,18 +2493,35 @@ async def test_target_intake_executor_replays_committed_baseline_reply_before_bo
 
     events = []
     visible_commit_states = []
+    visible_source_completion_states = []
 
     async def collect() -> None:
         async for event in executor.stream(execution):
             events.append(event)
             if event.event_type == "visible_delta":
                 visible_commit_states.append(saver.terminal_committed)
+                visible_source_completion_states.append(graph.source_completed)
 
     if failure_stage is not None:
         with pytest.raises(GraphTerminalBindingError, match=f"terminal {failure_stage} failed"):
             await collect()
-        assert [event.event_type for event in events] == ["attempt_started"]
-        assert visible_commit_states == []
+        assert [event.event_type for event in events] == [
+            "attempt_started",
+            "visible_delta",
+            "visible_delta",
+            "visible_delta",
+        ]
+        assert [
+            (event.payload.field, event.payload.delta)
+            for event in events
+            if event.event_type == "visible_delta"
+        ] == [
+            ("room_utterance", preview_room_deltas[0]),
+            ("room_utterance", preview_room_deltas[1]),
+            ("case_detail.references", raw_dossier_delta),
+        ]
+        assert visible_commit_states == [False, False, False]
+        assert visible_source_completion_states == [False, False, False]
         assert saver.preflights == 1
         assert store.calls == 1
         assert saver.commits == (1 if failure_stage == "commit" else 0)
@@ -2507,36 +2553,27 @@ async def test_target_intake_executor_replays_committed_baseline_reply_before_bo
     ]
 
     assert [event.sequence_no for event in events] == list(range(len(events)))
-    assert len(room_events) > 1
+    assert [event.payload.delta for event in room_events] == list(preview_room_deltas)
+    assert len(room_events) == 2
     assert "".join(
         event.payload.delta or "" for event in room_events
-    ) == terminal_room_utterance
-    assert all(
-        0 < len(event.payload.delta or "") <= 64 for event in room_events
-    )
-    assert all(visible_commit_states)
+    ) == streamed_room_utterance
+    assert third_question in "".join(event.payload.delta or "" for event in room_events)
+    assert visible_commit_states == [False, False, False]
+    assert visible_source_completion_states == [False, False, False]
     assert max(event.sequence_no for event in room_events) < min(
         event.sequence_no for event in board_events
     )
-    assert "".join(event.payload.delta or "" for event in title_leaf_events) == oversized_title
-    assert "".join(
-        event.payload.delta or "" for event in references_leaf_events
-    ) == dossier_payload["references"]["order_reference"]
-    assert len(references_root_events) == 1
-    assert json.loads(references_root_events[0].payload.delta or "") == dossier_payload[
-        "references"
+    assert [(event.payload.field, event.payload.delta) for event in board_events] == [
+        ("case_detail.references", raw_dossier_delta)
     ]
-    assert min(
-        event.sequence_no
-        for event in board_events
-        if (event.payload.field or "").startswith("case_detail.case_story")
-    ) < min(event.sequence_no for event in references_leaf_events)
-    assert not any(
-        event.payload.field == "case_detail.case_story" for event in board_events
-    )
+    assert title_leaf_events == []
+    assert references_leaf_events == []
+    assert references_root_events == [board_events[0]]
     all_visible_text = "".join(event.payload.delta or "" for event in visible)
-    assert third_question not in all_visible_text
-    assert "RAW-UNCOMMITTED" not in all_visible_text
+    assert third_question in all_visible_text
+    assert "RAW-UNCOMMITTED" in all_visible_text
+    assert dossier_payload["references"]["order_reference"] not in all_visible_text
     assert events[-2].event_type == "usage"
     assert events[-2].payload.usage == usage
     assert events[-1].event_type == "final"
@@ -2544,6 +2581,320 @@ async def test_target_intake_executor_replays_committed_baseline_reply_before_bo
     assert store.calls == 1
     assert saver.commits == 1
     assert saver.terminal_committed
+
+
+@pytest.mark.asyncio
+async def test_target_intake_executor_uses_canonical_reply_then_board_when_no_preview(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command, _, _ = _intake_command()
+    execution = _target_candidate_intake_execution(command)
+    terminal_room_utterance = "Committed baseline reply."
+    raw_board_delta = '{"order_reference":"RAW-BEFORE-ROOM"}'
+    state = {
+        "terminal_draft": {"same": True},
+        "result_json": {"same": True},
+        "cognitive_revision": 1,
+    }
+    final_config = bind_fence_context(
+        {
+            "configurable": {
+                "thread_id": command.thread_id,
+                "checkpoint_ns": "",
+                "checkpoint_id": "cp-intake-no-preview",
+            }
+        },
+        execution.fence,
+    )
+
+    class DossierPatch:
+        def model_dump(self, **_: Any) -> dict[str, Any]:
+            return {"references": {"order_reference": "ORDER-TERMINAL-NO-PREVIEW"}}
+
+    proposal = SimpleNamespace(
+        room_utterance=terminal_room_utterance,
+        dossier_patch=DossierPatch(),
+    )
+    canonical = SimpleNamespace(
+        artifact_id="intake-proposal-no-preview",
+        schema_version="intake-turn-proposal.v2",
+        sha256="a" * 64,
+        size_bytes=1,
+    )
+    result = SimpleNamespace(
+        result_ref="urn:intake:no-preview:result",
+        result_hash="b" * 64,
+        proposal_hash="c" * 64,
+        result_envelope_hash="d" * 64,
+    )
+
+    class Saver:
+        def __init__(self) -> None:
+            self.terminal_committed = False
+
+        async def avalidate_external_terminal_checkpoint(self, config: Any, **kwargs: Any) -> None:
+            assert config is final_config
+            assert kwargs == {"cognitive_revision": 1}
+
+        async def acommit_external_terminal(self, config: Any, commit: Any) -> dict[str, Any]:
+            assert config is final_config
+            assert commit.result is result
+            self.terminal_committed = True
+            return {
+                "configurable": {
+                    FENCE_CONTEXT_KEY: replace(
+                        execution.fence,
+                        result_ref=result.result_ref,
+                        result_hash=result.result_hash,
+                        proposal_hash=result.proposal_hash,
+                        result_envelope_hash=result.result_envelope_hash,
+                    )
+                }
+            }
+
+    saver = Saver()
+
+    class Graph:
+        checkpointer = saver
+
+        async def astream(self, input: Any, config: Any, **kwargs: Any):
+            assert kwargs["stream_mode"] == ["messages", "custom"]
+            yield (
+                "messages",
+                (
+                    AIMessageChunk(
+                        content="",
+                        additional_kwargs={
+                            "governed_events": [
+                                {
+                                    "schema_version": "governed-model-event.v1",
+                                    "event_type": "visible_delta",
+                                    "node_name": BASELINE_INTAKE_NODE_NAME,
+                                    "field": "case_detail.references",
+                                    "delta": raw_board_delta,
+                                }
+                            ]
+                        },
+                    ),
+                    {"langgraph_node": BASELINE_INTAKE_NODE_NAME},
+                ),
+            )
+
+        async def aget_state(self, config: Any) -> object:
+            return object()
+
+    class Store:
+        async def put(
+            self,
+            selected_execution: GatewayExecution,
+            *,
+            proposal: Any,
+            **kwargs: Any,
+        ) -> Any:
+            assert selected_execution is execution
+            assert proposal is canonical
+            assert kwargs == {
+                "checkpoint_ns": "",
+                "checkpoint_id": "cp-intake-no-preview",
+                "cognitive_revision": 1,
+            }
+            return SimpleNamespace(
+                artifact_id=canonical.artifact_id,
+                schema_version=canonical.schema_version,
+                uri="s3://intake-proposals/no-preview.json",
+                sha256=canonical.sha256,
+                size_bytes=canonical.size_bytes,
+            )
+
+    class Materializer:
+        def materialize(self, checkpoint_ns: str, checkpoint_id: str, *, fence: Any) -> Any:
+            assert checkpoint_ns == ""
+            assert checkpoint_id == "cp-intake-no-preview"
+            assert fence is execution.fence
+            return result
+
+    async def load_context(*_: Any, **__: Any) -> object:
+        return object()
+
+    graph = Graph()
+    monkeypatch.setattr(
+        "app.graph_runtime.intake_executor.build_governed_intake_runtime",
+        lambda **kwargs: SimpleNamespace(graph=graph),
+    )
+    monkeypatch.setattr(CompiledIntakeGraphShadowExecutor, "_load_context", load_context)
+    monkeypatch.setattr(
+        CompiledIntakeGraphShadowExecutor,
+        "_graph_input",
+        staticmethod(lambda _: {}),
+    )
+    monkeypatch.setattr(
+        CompiledIntakeGraphShadowExecutor,
+        "_graph_config",
+        staticmethod(lambda _: {"configurable": {}}),
+    )
+    monkeypatch.setattr(
+        CompiledIntakeGraphShadowExecutor,
+        "_snapshot",
+        staticmethod(lambda *_: (state, final_config)),
+    )
+    monkeypatch.setattr(
+        IntakeRuntimeBundle,
+        "terminal_proposal",
+        staticmethod(lambda _: proposal),
+    )
+    monkeypatch.setattr(
+        CompiledIntakeGraphShadowExecutor,
+        "_command_usage",
+        staticmethod(lambda *_: Usage(input_tokens=0, output_tokens=0, total_tokens=0)),
+    )
+    monkeypatch.setattr(
+        "app.graph_runtime.intake_executor.canonical_intake_proposal",
+        lambda _: canonical,
+    )
+    monkeypatch.setattr(
+        CompiledIntakeGraphShadowExecutor,
+        "_materializer",
+        staticmethod(lambda *_, **__: Materializer()),
+    )
+    monkeypatch.setattr(
+        CompiledIntakeGraphShadowExecutor,
+        "_target_proposal_source",
+        staticmethod(lambda *_: None),
+    )
+    monkeypatch.setattr(
+        "app.graph_runtime.intake_executor.ExternalTerminalCommit",
+        lambda **kwargs: SimpleNamespace(**kwargs),
+    )
+
+    class Loader:
+        async def load(self, *args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("the test harness patches the Intake context loader")
+
+    executor = CompiledIntakeGraphShadowExecutor(
+        saver=cast(Any, saver),
+        transport=cast(Any, object()),
+        provider="synthetic",
+        model="intake-model",
+        input_loader=Loader(),
+        proposal_store=Store(),
+    )
+
+    events = []
+    visible_commit_states = []
+    async for event in executor.stream(execution):
+        events.append(event)
+        if event.event_type == "visible_delta":
+            visible_commit_states.append(saver.terminal_committed)
+
+    visible = [event for event in events if event.event_type == "visible_delta"]
+    room_events = [event for event in visible if event.payload.field == "room_utterance"]
+    board_events = [event for event in visible if event not in room_events]
+
+    assert "".join(event.payload.delta or "" for event in room_events) == terminal_room_utterance
+    assert all(visible_commit_states)
+    assert max(event.sequence_no for event in room_events) < min(
+        event.sequence_no for event in board_events
+    )
+    assert raw_board_delta not in "".join(event.payload.delta or "" for event in visible)
+    assert any(event.payload.field == "case_detail.references" for event in board_events)
+    assert events[-1].event_type == "final"
+    assert saver.terminal_committed
+
+
+@pytest.mark.asyncio
+async def test_target_intake_preview_does_not_turn_graph_failure_into_formal_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command, _, _ = _intake_command()
+    execution = _target_candidate_intake_execution(command)
+    saver = object()
+    preview = "Provisional response before the provider failure."
+
+    class Graph:
+        checkpointer = saver
+
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def astream(self, input: Any, config: Any, **kwargs: Any):
+            try:
+                assert kwargs["stream_mode"] == ["messages", "custom"]
+                yield (
+                    "messages",
+                    (
+                        AIMessageChunk(
+                            content="",
+                            additional_kwargs={
+                                "governed_events": [
+                                    {
+                                        "schema_version": "governed-model-event.v1",
+                                        "event_type": "visible_delta",
+                                        "node_name": BASELINE_INTAKE_NODE_NAME,
+                                        "field": "room_utterance",
+                                        "delta": preview,
+                                    }
+                                ]
+                            },
+                        ),
+                        {"langgraph_node": BASELINE_INTAKE_NODE_NAME},
+                    ),
+                )
+                raise RuntimeError("provider stream failed after preview")
+            finally:
+                self.closed = True
+
+    class Store:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def put(self, *args: Any, **kwargs: Any) -> Any:
+            self.calls += 1
+            raise AssertionError("a failed graph must not store a formal proposal")
+
+    async def load_context(*_: Any, **__: Any) -> object:
+        return object()
+
+    graph = Graph()
+    monkeypatch.setattr(
+        "app.graph_runtime.intake_executor.build_governed_intake_runtime",
+        lambda **kwargs: SimpleNamespace(graph=graph),
+    )
+    monkeypatch.setattr(CompiledIntakeGraphShadowExecutor, "_load_context", load_context)
+    monkeypatch.setattr(
+        CompiledIntakeGraphShadowExecutor,
+        "_graph_input",
+        staticmethod(lambda _: {}),
+    )
+    monkeypatch.setattr(
+        CompiledIntakeGraphShadowExecutor,
+        "_graph_config",
+        staticmethod(lambda _: {"configurable": {}}),
+    )
+
+    class Loader:
+        async def load(self, *args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("the test harness patches the Intake context loader")
+
+    store = Store()
+    executor = CompiledIntakeGraphShadowExecutor(
+        saver=cast(Any, saver),
+        transport=cast(Any, object()),
+        provider="synthetic",
+        model="intake-model",
+        input_loader=Loader(),
+        proposal_store=store,
+    )
+
+    events = []
+    with pytest.raises(RuntimeError, match="provider stream failed after preview"):
+        async for event in executor.stream(execution):
+            events.append(event)
+
+    assert [event.event_type for event in events] == ["attempt_started", "visible_delta"]
+    assert events[-1].payload.field == "room_utterance"
+    assert events[-1].payload.delta == preview
+    assert graph.closed is True
+    assert store.calls == 0
 
 
 @pytest.mark.asyncio
@@ -2779,16 +3130,18 @@ async def test_target_intake_executor_preserves_baseline_ready_handoff_after_com
     assert [event.sequence_no for event in events] == list(range(len(events)))
     assert "".join(
         event.payload.delta or "" for event in room_events
-    ) == baseline_ready_handoff
-    assert all(visible_commit_states)
+    ) == raw_room_utterance
+    assert visible_commit_states == [False, False]
     assert max(event.sequence_no for event in room_events) < min(
         event.sequence_no for event in board_events
     )
-    assert raw_room_utterance not in "".join(event.payload.delta or "" for event in visible)
-    assert raw_dossier_delta not in "".join(event.payload.delta or "" for event in visible)
-    assert any(
-        event.payload.field == "case_detail.references" for event in board_events
-    )
+    all_visible_text = "".join(event.payload.delta or "" for event in visible)
+    assert raw_room_utterance in all_visible_text
+    assert raw_dossier_delta in all_visible_text
+    assert baseline_ready_handoff not in all_visible_text
+    assert [(event.payload.field, event.payload.delta) for event in board_events] == [
+        ("case_detail.references", raw_dossier_delta)
+    ]
     assert events[-1].event_type == "final"
     assert saver.preflights == 1
     assert store.calls == 1

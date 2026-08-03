@@ -128,6 +128,88 @@ class JdbcIntakeFormalCommitPortTest {
     }
 
     @Test
+    void formalCommitPersistsBaselineCompatibleSessionScopedAgentMemoryBeforeRoomMessage()
+            throws Exception {
+        Fixture fixture = fixture("MEMORY_BINDING_" + SEQUENCE.incrementAndGet());
+        insertFixture(fixture);
+
+        IntakeFinalizationReceipt receipt = port.commit(fixture.commitCommand());
+
+        Map<String, Object> memory = jdbc.queryForMap(
+                """
+                select id, case_id, room_type, turn_no, actor_id, agent_role, agent_response,
+                       dossier_patch_json::text as dossier_patch_json,
+                       scroll_snapshot_json::text as scroll_snapshot_json,
+                       canvas_operations_json::text as canvas_operations_json,
+                       agent_run_id, agent_session_id, access_session_id, conversation_scope,
+                       session_actor_id, session_actor_role, prompt_profile_id,
+                       memory_policy_snapshot_json::text as memory_policy_snapshot_json,
+                       created_by
+                  from room_turn_memory
+                 where case_id = ?
+                """,
+                fixture.caseId());
+        var actor = fixture.binding().registration().actorScope();
+        IntakeTurnProposal proposal = fixture.loadedProposal().proposal();
+
+        assertThat(memory.get("id"))
+                .isEqualTo(deterministicId("MEMI_", fixture.request().operationKey(), "memory"));
+        assertThat(memory.get("case_id")).isEqualTo(fixture.caseId());
+        assertThat(memory.get("room_type")).isEqualTo("INTAKE");
+        assertThat(((Number) memory.get("turn_no")).intValue())
+                .isEqualTo((int) fixture.event().sequenceNo());
+        assertThat(memory.get("actor_id")).isEqualTo("dispute-intake-officer");
+        assertThat(memory.get("agent_role")).isEqualTo("DISPUTE_INTAKE_OFFICER");
+        assertThat(memory.get("agent_response")).isEqualTo(proposal.roomUtterance());
+        assertThat(memory.get("agent_run_id")).isEqualTo(fixture.authority().logicalRunId());
+        assertThat(memory.get("agent_session_id")).isEqualTo(fixture.authority().agentSessionId());
+        assertThat(memory.get("access_session_id")).isEqualTo("ACCESS_" + fixture.caseId());
+        assertThat(memory.get("conversation_scope")).isEqualTo("scope:" + fixture.caseId());
+        assertThat(memory.get("session_actor_id")).isEqualTo(actor.actorId());
+        assertThat(memory.get("session_actor_role")).isEqualTo(actor.actorRole().name());
+        assertThat(memory.get("prompt_profile_id")).isEqualTo("intake-prompt.v2");
+        assertThat(memory.get("canvas_operations_json")).isEqualTo("[]");
+        assertThat(objectMapper.readTree((String) memory.get("memory_policy_snapshot_json")))
+                .isEqualTo(objectMapper.createObjectNode());
+        assertThat(objectMapper.readTree((String) memory.get("dossier_patch_json")))
+                .isEqualTo(proposal.dossierPatch());
+        assertThat(objectMapper.readTree((String) memory.get("scroll_snapshot_json")))
+                .isEqualTo(objectMapper.readTree(scalar(
+                        "select dossier_json::text from case_intake_dossier where case_id = ?",
+                        fixture.caseId())));
+        assertThat(scalar("select message_text from room_message where id = ?", receipt.formalMessageId()))
+                .isEqualTo(proposal.roomUtterance());
+        assertCounts(fixture.caseId(), 1, 1, 1, 1, 1, 1);
+    }
+
+    @Test
+    void preexistingDeterministicFormalMemoryRollsBackTheDossierAndPreventsRoomMessage() {
+        Fixture fixture = fixture("MEMORY_CONFLICT_" + SEQUENCE.incrementAndGet());
+        insertFixture(fixture);
+        insertConflictingFormalMemory(fixture);
+
+        assertThatThrownBy(() -> port.commit(fixture.commitCommand()))
+                .isInstanceOf(
+                        com.example.dispute.workflow.application.intake.IntakeFinalizationRejectedException.class)
+                .hasMessageContaining("memory identity");
+
+        assertThat(count("select count(*) from room_turn_memory where case_id = ?", fixture.caseId()))
+                .isEqualTo(1);
+        assertThat(count("select count(*) from room_message where case_id = ?", fixture.caseId()))
+                .isZero();
+        assertThat(count("select count(*) from case_intake_dossier where case_id = ?", fixture.caseId()))
+                .isZero();
+        assertThat(count("select count(*) from case_timeline_event where case_id = ?", fixture.caseId()))
+                .isZero();
+        assertThat(count("select count(*) from notification_outbox where case_id = ?", fixture.caseId()))
+                .isZero();
+        assertThat(count("select count(*) from audit_log where case_id = ?", fixture.caseId()))
+                .isZero();
+        assertThat(count("select count(*) from domain_operation where case_id = ?", fixture.caseId()))
+                .isZero();
+    }
+
+    @Test
     void sameOperationKeyWithAnotherCanonicalRequestHashIsAConflict() {
         Fixture fixture = fixture("CONFLICT_" + SEQUENCE.incrementAndGet());
         insertFixture(fixture);
@@ -419,6 +501,8 @@ class JdbcIntakeFormalCommitPortTest {
             int operations) {
         assertThat(count("select count(*) from room_message where case_id = ?", caseId))
                 .isEqualTo(messages);
+        assertThat(count("select count(*) from room_turn_memory where case_id = ?", caseId))
+                .isEqualTo(messages);
         assertThat(count("select count(*) from case_intake_dossier where case_id = ?", caseId))
                 .isEqualTo(dossiers);
         assertThat(count("select count(*) from case_timeline_event where case_id = ?", caseId))
@@ -436,6 +520,40 @@ class JdbcIntakeFormalCommitPortTest {
 
     private static long count(String sql, Object... values) {
         return jdbc.queryForObject(sql, Long.class, values);
+    }
+
+    private static String deterministicId(String prefix, String operationKey, String purpose) {
+        return prefix
+                + sha256(operationKey + ':' + purpose).substring(0, 64 - prefix.length());
+    }
+
+    private static void insertConflictingFormalMemory(Fixture fixture) {
+        var actor = fixture.binding().registration().actorScope();
+        jdbc.update(
+                """
+                insert into room_turn_memory (
+                    id, case_id, room_type, turn_no, actor_id, agent_role, agent_response,
+                    dossier_patch_json, scroll_snapshot_json, canvas_operations_json, agent_run_id,
+                    agent_session_id, access_session_id, conversation_scope,
+                    session_actor_id, session_actor_role, prompt_profile_id,
+                    memory_policy_snapshot_json, created_at, created_by
+                ) values (
+                    ?, ?, 'INTAKE', ?, 'dispute-intake-officer', 'DISPUTE_INTAKE_OFFICER',
+                    'conflicting response', '{}'::jsonb, '{}'::jsonb, '[]'::jsonb, ?,
+                    ?, ?, ?, ?, ?, ?, '{}'::jsonb, ?, 'test'
+                )
+                """,
+                deterministicId("MEMI_", fixture.request().operationKey(), "memory"),
+                fixture.caseId(),
+                fixture.event().sequenceNo(),
+                fixture.authority().logicalRunId(),
+                fixture.authority().agentSessionId(),
+                "ACCESS_" + fixture.caseId(),
+                "scope:" + fixture.caseId(),
+                actor.actorId(),
+                actor.actorRole().name(),
+                "intake-prompt.v2",
+                NOW.atOffset(ZoneOffset.UTC));
     }
 
     private static String scalar(String sql, Object... args) {
@@ -917,7 +1035,7 @@ class JdbcIntakeFormalCommitPortTest {
                 "ACCESS_" + c, tenant, c, actorId, actorRole.name(),
                 actorRole == ActorRole.USER ? "PARTY_USER" : "PARTY_MERCHANT",
                 "[\"CASE_READ\",\"INTAKE_PRIVATE_READ\",\"INTAKE_PARTICIPATE\",\"AGENT_SESSION_WRITE\"]", now, now);
-        jdbc.update("insert into agent_conversation_session (id, tenant_id, case_id, room_type, actor_id, actor_role, agent_key, access_session_id, prompt_profile_id, memory_policy_id, conversation_scope, status, created_at, updated_at, created_by) values (?, ?, ?, 'INTAKE', ?, ?, 'DISPUTE_INTAKE_OFFICER', ?, 'intake-prompt.v2', 'MEMORY_DEFAULT', ?, 'ACTIVE', ?, ?, 'test')",
+        jdbc.update("insert into agent_conversation_session (id, tenant_id, case_id, room_type, actor_id, actor_role, agent_key, access_session_id, prompt_profile_id, memory_policy_id, conversation_scope, status, created_at, updated_at, created_by) values (?, ?, ?, 'INTAKE', ?, ?, 'DISPUTE_INTAKE_OFFICER', ?, 'intake-prompt.v2', 'GRAPH_PRIVATE_NO_MEMORY_FRAME_V1', ?, 'ACTIVE', ?, ?, 'test')",
                 sessionId, tenant, c, actorId, actorRole.name(), "ACCESS_" + c, "scope:" + c, now, now);
 
         NamedParameterJdbcTemplate named = new NamedParameterJdbcTemplate(jdbc.getDataSource());

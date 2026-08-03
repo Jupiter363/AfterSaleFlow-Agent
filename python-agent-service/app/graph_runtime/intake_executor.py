@@ -200,12 +200,6 @@ class CompiledIntakeGraphShadowExecutor:
                         emitted_usage.append(usage_update)
                         pending_usage_update = update
                         continue
-                    if target_reply_then_board:
-                        # A target candidate may not expose model-provisional room
-                        # text or dossier sections.  The terminal proposal is the
-                        # first user-visible source of truth, after its immutable
-                        # storage and fenced external commit both succeed.
-                        continue
                     field = update.payload.field
                     if field == _INTAKE_ROOM_UTTERANCE_FIELD:
                         if (
@@ -216,22 +210,25 @@ class CompiledIntakeGraphShadowExecutor:
                                 "INTAKE_ROOM_UTTERANCE_STREAM_ORDER_INVALID"
                             )
                         room_delta = self._streamed_room_utterance_delta(update)
-                        candidate_room_utterance = "".join(
-                            (*streamed_room_utterance_parts, room_delta)
-                        )
-                        # The model's individual prefix chunks must remain a prefix
-                        # of their normalized public text.  If a policy replacement
-                        # becomes necessary, this attempt cannot safely continue:
-                        # some provisional text may already have reached the room.
-                        # Raising makes the outer stream publish its normal failure /
-                        # reset path rather than committing a different reply.
-                        if (
-                            _normalized_intake_room_utterance(candidate_room_utterance)
-                            != candidate_room_utterance
-                        ):
-                            raise GraphContractError(
-                                "INTAKE_ROOM_UTTERANCE_STREAM_NORMALIZATION_DIVERGED"
+                        if not target_reply_then_board:
+                            candidate_room_utterance = "".join(
+                                (*streamed_room_utterance_parts, room_delta)
                             )
+                            # A legacy model prefix must remain identical to its
+                            # normalized terminal text.  Target preview is different:
+                            # it is explicitly non-durable, and the retained baseline
+                            # finalizer may legitimately trim a third follow-up or
+                            # replace a ready/handoff phrase before the formal result
+                            # is committed.  Do not turn that expected finalization
+                            # difference into a failed attempt after a preview has
+                            # already reached the room.
+                            if (
+                                _normalized_intake_room_utterance(candidate_room_utterance)
+                                != candidate_room_utterance
+                            ):
+                                raise GraphContractError(
+                                    "INTAKE_ROOM_UTTERANCE_STREAM_NORMALIZATION_DIVERGED"
+                                )
                         for room_update in self._streamed_room_utterance_updates(
                             node=update.payload.node,
                             delta=room_delta,
@@ -244,7 +241,8 @@ class CompiledIntakeGraphShadowExecutor:
                                 room_update.payload,
                             )
                             sequence += 1
-                        streamed_room_utterance_parts.append(room_delta)
+                        if not target_reply_then_board:
+                            streamed_room_utterance_parts.append(room_delta)
                         room_utterance_streamed = True
                         continue
                     if not field.startswith("case_detail."):
@@ -252,13 +250,14 @@ class CompiledIntakeGraphShadowExecutor:
                             "compiled Intake Graph emitted an unsupported visible field"
                         )
                     if not room_utterance_streamed:
-                        # A legacy parser may not expose the model reply at all.  Do
-                        # not leak a dossier before the left-side reply in that
-                        # compatibility path; if no reply ever arrives, the
-                        # authoritative terminal fallback below publishes the old
-                        # bounded reply chunks followed by its normalized dossier.
-                        # If a room delta arrives later, the order breach is rejected
-                        # rather than silently reordering two user-visible streams.
+                        # The Target projector uses the same root completion gate as
+                        # the baseline: it cannot expose a board field until the full
+                        # root ``room_utterance`` property closes.  Keep the defensive
+                        # compatibility behavior here as well: suppress a malformed
+                        # / legacy board-first source and let the terminal canonical
+                        # fallback publish reply then board.  If the source later
+                        # tries to append a room preview, the order breach below is
+                        # rejected rather than silently reordering visible content.
                         case_detail_seen_before_room_utterance = True
                         continue
                     room_utterance_completed = True
@@ -382,14 +381,16 @@ class CompiledIntakeGraphShadowExecutor:
             raise GraphTerminalBindingError(
                 "Intake generic result was not bound to the terminal fence"
             )
-        if target_reply_then_board:
-            # Do not synthesize one room blob and then one dossier blob.  Replay
-            # the exact baseline-finalized proposal through the same visible-field
-            # projector used by the provider stream.  Its reply-first root gate is
-            # therefore the single publication-order authority: all left-room
-            # deltas precede every right-board delta, including when the terminal
-            # room text and the first dossier key share a source chunk.
+        if target_reply_then_board and not room_utterance_streamed:
+            # A parser / provider that never exposed a governed preview retains the
+            # durable canonical fallback.  It is intentionally reply-first and runs
+            # only after immutable proposal storage plus the fenced terminal commit.
+            # When a preview did arrive, do not append the terminal proposal again:
+            # the consumer's final-result rehydrate replaces that provisional view
+            # with the authoritative baseline-finalized room text and dossier.
             terminal_updates = self._target_canonical_replay_updates(proposal)
+        elif target_reply_then_board:
+            terminal_updates = ()
         else:
             terminal_updates = self._terminal_normalized_dossier_updates(proposal)
         for update in terminal_updates:
@@ -611,7 +612,7 @@ class CompiledIntakeGraphShadowExecutor:
 
     @staticmethod
     def _uses_target_reply_then_board_boundary(execution: GatewayExecution) -> bool:
-        """Keep target-visible Intake content behind the durable terminal fence."""
+        """Select Target's reply-first preview and canonical-fallback contract."""
 
         return execution.fence.execution_lane is GraphGatewayMode.TARGET_E2E_CANDIDATE
 
@@ -681,14 +682,13 @@ class CompiledIntakeGraphShadowExecutor:
         cls,
         proposal: IntakeTurnProposal,
     ) -> tuple[GraphPublicUpdate, ...]:
-        """Replay a committed baseline Intake proposal via the target projector.
+        """Replay a committed proposal only when Target had no governed preview.
 
-        Target candidates deliberately expose no model-provisional deltas.  Once
-        the immutable proposal and its fenced terminal result have committed, the
-        canonical proposal is projected in the exact same reply-first field shape
-        as a live model document.  This preserves the finalizer's wording while
-        restoring real string-prefix leaf updates and complete JSON branch
-        snapshots for the right-side dossier.
+        The normal Target path exposes a non-durable, governed preview while the
+        graph is still streaming.  This fallback is reserved for parsers/providers
+        that produced no room preview at all; after immutable storage and the
+        fenced commit, it projects the baseline-finalized proposal in the same
+        reply-first shape so legacy source gaps cannot leave the room blank.
         """
 
         document = cls._target_canonical_replay_document(proposal)

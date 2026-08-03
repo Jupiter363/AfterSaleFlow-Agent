@@ -1,5 +1,6 @@
 package com.example.dispute.room.infrastructure.persistence;
 
+import com.example.dispute.workflow.application.authority.epoch.AgentSessionProfileRegistry;
 import com.example.dispute.workflow.application.intake.IntakeDossierProjectionMerger;
 import com.example.dispute.workflow.application.intake.IntakeDossierProjectionMerger.ClaimResolutionAuthority;
 import com.example.dispute.workflow.application.intake.IntakeDossierProjectionMerger.MatrixAuthority;
@@ -247,6 +248,7 @@ public final class JdbcIntakeFormalCommitPort
 
         IntakeTurnProposal proposal = command.loadedProposal().proposal();
         DossierWrite dossier = writeDossier(command, proposal, current, now);
+        writeFormalMemory(command, current, run, dossier, now);
         String messageId = deterministicId("MSGI_", request.operationKey(), "message");
         writeFormalMessage(command, current.roomId(), run, messageId, now);
 
@@ -412,16 +414,23 @@ public final class JdbcIntakeFormalCommitPort
                    and projection.last_command_sequence = :stageSequence
                  """ + (lockRows ? " for update of epoch, room, projection" : ""),
                 parameters,
-                (row, ignored) -> new CurrentRows(row.getString("room_id"), null, null, null));
+                (row, ignored) -> new CurrentRows(row.getString("room_id"), null, null, null, null));
         if (rows.size() != 1) {
             throw rejected(
                     "INTAKE_STALE_AUTHORITY",
                     "current Intake epoch, stage, revision, or fence no longer matches");
         }
 
-        List<String> privateAuthority = jdbc.queryForList(
+        List<PrivateSessionRows> privateAuthority = jdbc.query(
                 """
-                select binding.registration_id
+                select binding.registration_id,
+                       session.id as agent_session_id,
+                       session.access_session_id as access_session_id,
+                       session.conversation_scope as conversation_scope,
+                       session.prompt_profile_id as prompt_profile_id,
+                       session.memory_policy_id as memory_policy_id,
+                       session.actor_id as session_actor_id,
+                       session.actor_role as session_actor_role
                   from case_intake_graph_thread_binding binding
                   join agent_conversation_session session
                     on session.id = binding.agent_session_id
@@ -507,11 +516,26 @@ public final class JdbcIntakeFormalCommitPort
                         ? " for update of binding, session, access, participant"
                         : ""),
                 parameters,
-                String.class);
+                (row, ignored) -> new PrivateSessionRows(
+                        row.getString("agent_session_id"),
+                        row.getString("access_session_id"),
+                        row.getString("conversation_scope"),
+                        row.getString("prompt_profile_id"),
+                        row.getString("memory_policy_id"),
+                        row.getString("session_actor_id"),
+                        row.getString("session_actor_role")));
         if (privateAuthority.size() != 1) {
             throw rejected(
                     "INTAKE_AUTHORIZATION_REVOKED",
                     "private thread, participation, access, or Agent Session is no longer active");
+        }
+        PrivateSessionRows privateSession = privateAuthority.getFirst();
+        if (!request.authority().agentSessionId().equals(privateSession.agentSessionId())
+                || !AgentSessionProfileRegistry.MEMORY_POLICY_ID.equals(
+                        privateSession.memoryPolicyId())) {
+            throw rejected(
+                    "INTAKE_MEMORY_POLICY_REVOKED",
+                    "private Agent Session no longer has the frozen graph memory policy");
         }
         CurrentRows current = rows.getFirst();
         IntakeInitialCaseFacts initialCaseFacts = IntakeCaseSeedMetadata
@@ -521,7 +545,8 @@ public final class JdbcIntakeFormalCommitPort
                 current.roomId(),
                 string(caseRow, "initiator_role"),
                 string(caseRow, "respondent_role"),
-                initialCaseFacts);
+                initialCaseFacts,
+                privateSession);
     }
 
     private void requirePersistedPrivateReferences(
@@ -817,7 +842,89 @@ public final class JdbcIntakeFormalCommitPort
                         "INTAKE_DOSSIER_STALE", "Intake dossier changed while it was locked");
             }
         }
-        return new DossierWrite(version, merged.matrixVersion());
+        return new DossierWrite(version, merged.matrixVersion(), merged.canonicalDossierJson());
+    }
+
+    /**
+     * Writes the session-scoped agent memory that the baseline Intake turn persists before its
+     * formal room message. The row is intentionally derived only from the locked authority,
+     * immutable proposal, and merged formal dossier; it never trusts a graph-side memory frame.
+     */
+    private void writeFormalMemory(
+            CommitCommand command,
+            CurrentRows current,
+            AgentRunRow run,
+            DossierWrite dossier,
+            OffsetDateTime now) {
+        IntakeGraphFinalizationRequest request = command.request();
+        PrivateSessionRows session = Objects.requireNonNull(
+                current.privateSession(), "locked private session");
+        if (run.lastSequenceNo() < 0) {
+            throw rejected(
+                    "INTAKE_FORMAL_MEMORY_WRITE_FAILED",
+                    "formal Intake memory lacks a valid result-ready attempt sequence");
+        }
+        String memoryId = deterministicId("MEMI_", request.operationKey(), "memory");
+        int turnNo = sourceTurn(request);
+        String dossierPatch =
+                ContractJson.canonicalString(command.loadedProposal().proposal().dossierPatch());
+        String scrollSnapshot = dossier.scrollSnapshotJson();
+        String memoryPolicySnapshot = memoryPolicySnapshot(session.memoryPolicyId());
+        MapSqlParameterSource parameters = authorityParameters(request)
+                .addValue("memoryId", memoryId)
+                .addValue("turnNo", turnNo)
+                .addValue("agentResponse", command.loadedProposal().proposal().roomUtterance())
+                .addValue("dossierPatch", dossierPatch)
+                .addValue("scrollSnapshot", scrollSnapshot)
+                .addValue("memoryPolicySnapshot", memoryPolicySnapshot)
+                .addValue("memoryAgentSessionId", session.agentSessionId())
+                .addValue("accessSessionId", session.accessSessionId())
+                .addValue("conversationScope", session.conversationScope())
+                .addValue("sessionActorId", session.actorId())
+                .addValue("sessionActorRole", session.actorRole())
+                .addValue("promptProfileId", session.promptProfileId())
+                .addValue("agentRunId", request.authority().logicalRunId())
+                .addValue("now", now)
+                .addValue("agentId", AGENT_ID)
+                .addValue("agentRole", AGENT_ROLE);
+        int inserted = jdbc.update(
+                """
+                insert into room_turn_memory (
+                    id, case_id, room_type, turn_no, actor_id,
+                    agent_role, agent_response,
+                    dossier_patch_json, scroll_snapshot_json, canvas_operations_json, agent_run_id,
+                    agent_session_id, access_session_id, conversation_scope,
+                    session_actor_id, session_actor_role, prompt_profile_id,
+                    memory_policy_snapshot_json, created_at, created_by
+                ) values (
+                    :memoryId, :caseId, 'INTAKE', :turnNo, :agentId,
+                    :agentRole, :agentResponse,
+                    cast(:dossierPatch as jsonb), cast(:scrollSnapshot as jsonb), '[]'::jsonb,
+                    :agentRunId,
+                    :memoryAgentSessionId, :accessSessionId, :conversationScope,
+                    :sessionActorId, :sessionActorRole, :promptProfileId,
+                    cast(:memoryPolicySnapshot as jsonb), :now, :agentId
+                )
+                on conflict do nothing
+                """,
+                parameters);
+        if (inserted != 1) {
+            throw rejected(
+                    "INTAKE_FORMAL_MEMORY_CONFLICT",
+                    "formal Intake memory identity is already bound to another value");
+        }
+    }
+
+    private String memoryPolicySnapshot(String memoryPolicyId) {
+        if (!AgentSessionProfileRegistry.MEMORY_POLICY_ID.equals(memoryPolicyId)) {
+            throw rejected(
+                    "INTAKE_MEMORY_POLICY_REVOKED",
+                    "private Agent Session no longer has the frozen graph memory policy");
+        }
+        // Legacy Intake stores no policy frame in this append-only snapshot. The graph lane
+        // keeps that byte-level baseline contract while the current session policy is verified
+        // above from locked authority rows.
+        return "{}";
     }
 
     private void writeFormalMessage(
@@ -1276,11 +1383,21 @@ public final class JdbcIntakeFormalCommitPort
             String roomId,
             String initiatorRole,
             String respondentRole,
-            IntakeInitialCaseFacts initialCaseFacts) {}
+            IntakeInitialCaseFacts initialCaseFacts,
+            PrivateSessionRows privateSession) {}
+
+    private record PrivateSessionRows(
+            String agentSessionId,
+            String accessSessionId,
+            String conversationScope,
+            String promptProfileId,
+            String memoryPolicyId,
+            String actorId,
+            String actorRole) {}
 
     private record AgentRunRow(long lastSequenceNo) {}
 
     private record DossierRow(String id, long version, String json) {}
 
-    private record DossierWrite(long version, Long matrixVersion) {}
+    private record DossierWrite(long version, Long matrixVersion, String scrollSnapshotJson) {}
 }
