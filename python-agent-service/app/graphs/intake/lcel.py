@@ -30,8 +30,7 @@ from app.agents.dispute_intake_officer.skills.dossier.dossier_skill import (
     DIRECT_RESPONDENT_SOURCE,
     SUBJECTIVE_RESPONDENT_CONFIDENCE_NOTE,
     SUBJECTIVE_RESPONDENT_SOURCE,
-    _reported_attitude_from_text,
-    _reported_attitude_position,
+    attributed_reported_respondent_attitude,
     detect_direct_respondent_attitude,
 )
 from app.harness.prompt_composer import PromptComposer
@@ -85,23 +84,6 @@ from app.streaming import TARGET_INTAKE_REPLY_FIRST_VISIBLE_FIELDS
 INTAKE_SYSTEM_PROMPT = PromptComposer().render_system_prompt(BASELINE_INTAKE_NODE_NAME)
 
 _TARGET_INTAKE_VISIBLE_FIELDS = TARGET_INTAKE_REPLY_FIRST_VISIBLE_FIELDS
-_RESPONDENT_ATTITUDE_TERM_EN = (
-    r"partially\s+(?:agreed|accepted)|agreed|accepted|rejected|refused|disagreed|"
-    r"offered|proposed"
-)
-_RESPONDENT_ATTITUDE_MODIFIER_EN = (
-    r"has|have|had|explicitly|clearly|already|also|firmly|directly|"
-    r"previously|now"
-)
-_ATTITUDE_NEGATION_EN = re.compile(
-    r"\b(?:not|never|no\s+longer|without|hardly)\b|n['’]t\b",
-    re.IGNORECASE,
-)
-_ATTITUDE_POST_NEGATION_EN = re.compile(
-    r"\b(?:no|none|nothing|neither|not|never|without)\b|n['’]t\b",
-    re.IGNORECASE,
-)
-
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _NO_TOOLS_POLICY_VERSION = "no-tools.v1"
@@ -1850,25 +1832,10 @@ def _grounded_respondent_attitude(
         if attitude not in _SUBSTANTIVE_RESPONDENT_ATTITUDES:
             raise IntakeGraphContractError("INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED")
         return cast(str, attitude), source_text
-    reported_position = _reported_attitude_position(source_text, initiator_role)
-    reported_en = _reported_respondent_attitude_from_text_en(source_text, initiator_role)
-    if not reported_position and reported_en is None:
-        return None
-    reported = (
-        _reported_attitude_from_text(reported_position, initiator_role)
-        if reported_position
-        else None
-    )
-    fallback_position = reported_position or source_text
-    grounded = _grounded_attitude_value(
-        reported,
-        fallback_position=fallback_position,
-    )
-    if grounded is not None:
-        return grounded
+    reported = attributed_reported_respondent_attitude(source_text, initiator_role)
     return _grounded_attitude_value(
-        reported_en,
-        fallback_position=fallback_position,
+        reported,
+        fallback_position=source_text,
     )
 
 
@@ -1905,85 +1872,6 @@ def _current_authorized_turn_text(
     initial = memory.get("authorized_initial_case_facts") if isinstance(memory, dict) else None
     description = initial.get("form_description") if isinstance(initial, Mapping) else None
     return description.strip() if isinstance(description, str) else ""
-
-
-def _reported_respondent_attitude_from_text_en(
-    text: str,
-    initiator_role: str,
-) -> dict[str, str] | None:
-    """Extract only an attitude grammatically attributed to the counterparty.
-
-    Proximity is insufficient here: ``I rejected the merchant's proposal`` mentions
-    both a merchant and an attitude verb, but it reports the initiator's decision.
-    Accept a counterparty-subject predicate or an explicit passive ``... by`` form.
-    """
-
-    respondent = (
-        r"user|buyer|customer|consumer|counterparty"
-        if initiator_role == "MERCHANT"
-        else r"merchant|seller|store|customer service|counterparty"
-    )
-    subject = re.compile(
-        rf"\b(?:the\s+)?(?:{respondent})\b(?!['’]s)"
-        rf"(?:\s+(?:{_RESPONDENT_ATTITUDE_MODIFIER_EN}))*\s+"
-        rf"(?P<attitude>{_RESPONDENT_ATTITUDE_TERM_EN})\b(?!\s+by\b)",
-        re.IGNORECASE,
-    )
-    passive = re.compile(
-        rf"\b(?P<attitude>{_RESPONDENT_ATTITUDE_TERM_EN})\b"
-        rf"\s+by\s+(?:the\s+)?(?:{respondent})\b",
-        re.IGNORECASE,
-    )
-    matches = [
-        match
-        for pattern in (subject, passive)
-        if (match := pattern.search(text))
-        and not _is_negated_en_attitude(
-            text,
-            match.start("attitude"),
-            match.end("attitude"),
-        )
-    ]
-    if not matches:
-        return None
-    attributed = min(matches, key=lambda match: match.start())
-    attitude = _attitude_code_from_en_term(attributed.group("attitude"))
-    if attitude is None:
-        return None
-    return {"attitude": attitude, "position": text.strip()}
-
-
-def _is_negated_en_attitude(text: str, attitude_start: int, attitude_end: int) -> bool:
-    prefix = text[:attitude_start]
-    clause_start = max((prefix.rfind(boundary) for boundary in ".!?;\n"), default=-1)
-    bounded_clause_prefix = prefix[max(clause_start + 1, len(prefix) - 64) :]
-    if _ATTITUDE_NEGATION_EN.search(bounded_clause_prefix) is not None:
-        return True
-    suffix = text[attitude_end:]
-    clause_end_candidates = [
-        index for boundary in ".!?;\n" if (index := suffix.find(boundary)) >= 0
-    ]
-    clause_end = min(clause_end_candidates, default=len(suffix))
-    bounded_clause_suffix = suffix[: min(clause_end, 64)]
-    return _ATTITUDE_POST_NEGATION_EN.search(bounded_clause_suffix) is not None
-
-
-def _attitude_code_from_en_term(value: str) -> str | None:
-    normalized = " ".join(value.lower().split())
-    if normalized in {
-        "partially agree",
-        "partially agreed",
-        "partially accept",
-        "partially accepted",
-    }:
-        return "PARTIALLY_AGREE"
-    if normalized in {"reject", "rejected", "refuse", "refused", "disagree", "disagreed"}:
-        return "DISAGREE"
-    if normalized in {"agree", "agreed", "accept", "accepted"}:
-        return "AGREE"
-    if normalized in {"offer", "offered", "propose", "proposed"}:
-        return "ALTERNATIVE_PROPOSED"
-    return None
 
 
 def _grounded_attitude_value(

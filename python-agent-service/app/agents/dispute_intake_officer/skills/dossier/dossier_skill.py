@@ -79,6 +79,22 @@ _DIRECT_ATTITUDE_SIGNAL_ZH = re.compile(
 _DIRECT_ATTITUDE_SELF_ZH = re.compile(
     r"^\s*(?:我|本人|我方|我们|本方|本公司|我司)(?P<body>.*)$"
 )
+_REPORTED_RESPONDENT_ATTITUDE_TERM_EN = (
+    r"partially\s+(?:agreed|accepted)|agreed|accepted|rejected|refused|disagreed|"
+    r"offered|proposed"
+)
+_REPORTED_RESPONDENT_ATTITUDE_MODIFIER_EN = (
+    r"has|have|had|explicitly|clearly|already|also|firmly|directly|"
+    r"previously|now"
+)
+_REPORTED_ATTITUDE_NEGATION_EN = re.compile(
+    r"\b(?:not|never|no\s+longer|without|hardly)\b|n['’]t\b",
+    re.IGNORECASE,
+)
+_REPORTED_ATTITUDE_POST_NEGATION_EN = re.compile(
+    r"\b(?:no|none|nothing|neither|not|never|without)\b|n['’]t\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -1251,31 +1267,24 @@ def _enforce_respondent_attitude_source(
         }
         return
     form_description = str(getattr(initial, "form_description", None) or "")
-    current_reports_attitude = current is not None and _has_explicit_respondent_report(
-        current.text,
-        initiator_role,
+    current_reported_attitude = (
+        attributed_reported_respondent_attitude(current.text, initiator_role)
+        if current is not None
+        else None
     )
     llm_attitude = _nested_attitude(llm_case_detail)
-    previous_candidate = _subjective_attitude(previous_attitude)
 
-    if current is not None and not current_reports_attitude:
+    if current is not None and current_reported_attitude is None:
         if carried_previous_attitude is not None:
             detail["respondent_attitude"] = copy.deepcopy(carried_previous_attitude)
             return
         candidate = None
         grounding_source = ""
         grounding_message_id = ""
-    elif current_reports_attitude:
-        candidate = (
-            _reported_attitude(llm_attitude)
-            or _reported_attitude_from_text(current.text, initiator_role)
-            or previous_candidate
-        )
-        candidate = _pin_attitude_position_to_source(
-            candidate,
-            current.text,
-            initiator_role,
-        )
+    elif current_reported_attitude is not None:
+        candidate = _reported_attitude(llm_attitude) or current_reported_attitude
+        candidate = dict(candidate)
+        candidate["position"] = current_reported_attitude["position"]
         grounding_source = "PARTICIPANT_MESSAGE"
         grounding_message_id = current.message_id if current is not None else ""
     elif form_description and _has_explicit_respondent_report(
@@ -1594,6 +1603,100 @@ def _reported_attitude_position(text: str, initiator_role: str) -> str:
     if not extracted:
         return ""
     return "；".join(extracted)[:500].rstrip("。；; ") + "。"
+
+
+def attributed_reported_respondent_attitude(
+    text: str,
+    initiator_role: str,
+) -> dict[str, Any] | None:
+    """Return only a substantive attitude from a counterparty-attributed slice."""
+
+    position = _reported_attitude_position(text, initiator_role)
+    if position:
+        candidate = _reported_attitude_from_text(position, initiator_role)
+        if candidate.get("attitude") in _SUBSTANTIVE_RESPONDENT_ATTITUDE_CODES:
+            return candidate
+    return _reported_respondent_attitude_from_text_en(text, initiator_role)
+
+
+def _reported_respondent_attitude_from_text_en(
+    text: str,
+    initiator_role: str,
+) -> dict[str, Any] | None:
+    respondent = (
+        r"user|buyer|customer|consumer|counterparty"
+        if initiator_role == "MERCHANT"
+        else r"merchant|seller|store|customer service|counterparty"
+    )
+    subject = re.compile(
+        rf"\b(?:the\s+)?(?:{respondent})\b(?!['’]s)"
+        rf"(?:\s+(?:{_REPORTED_RESPONDENT_ATTITUDE_MODIFIER_EN}))*\s+"
+        rf"(?P<attitude>{_REPORTED_RESPONDENT_ATTITUDE_TERM_EN})\b(?!\s+by\b)",
+        re.IGNORECASE,
+    )
+    passive = re.compile(
+        rf"\b(?P<attitude>{_REPORTED_RESPONDENT_ATTITUDE_TERM_EN})\b"
+        rf"\s+by\s+(?:the\s+)?(?:{respondent})\b",
+        re.IGNORECASE,
+    )
+    matches = [
+        match
+        for pattern in (subject, passive)
+        if (match := pattern.search(text))
+        and not _is_negated_en_reported_attitude(
+            text,
+            match.start("attitude"),
+            match.end("attitude"),
+        )
+    ]
+    if not matches:
+        return None
+    attributed = min(matches, key=lambda match: match.start())
+    attitude = _reported_attitude_code_from_en_term(attributed.group("attitude"))
+    if attitude not in _SUBSTANTIVE_RESPONDENT_ATTITUDE_CODES:
+        return None
+    return {
+        "attitude": attitude,
+        "position": text.strip(),
+        "confidence": 0.65,
+    }
+
+
+def _is_negated_en_reported_attitude(
+    text: str,
+    attitude_start: int,
+    attitude_end: int,
+) -> bool:
+    prefix = text[:attitude_start]
+    clause_start = max((prefix.rfind(boundary) for boundary in ".!?;\n"), default=-1)
+    bounded_clause_prefix = prefix[max(clause_start + 1, len(prefix) - 64) :]
+    if _REPORTED_ATTITUDE_NEGATION_EN.search(bounded_clause_prefix) is not None:
+        return True
+    suffix = text[attitude_end:]
+    clause_end_candidates = [
+        index for boundary in ".!?;\n" if (index := suffix.find(boundary)) >= 0
+    ]
+    clause_end = min(clause_end_candidates, default=len(suffix))
+    bounded_clause_suffix = suffix[: min(clause_end, 64)]
+    return _REPORTED_ATTITUDE_POST_NEGATION_EN.search(bounded_clause_suffix) is not None
+
+
+def _reported_attitude_code_from_en_term(value: str) -> str | None:
+    normalized = " ".join(value.lower().split())
+    if normalized in {
+        "partially agree",
+        "partially agreed",
+        "partially accept",
+        "partially accepted",
+    }:
+        return "PARTIALLY_AGREE"
+    if normalized in {"reject", "rejected", "refuse", "refused", "disagree", "disagreed"}:
+        return "DISAGREE"
+    if normalized in {"agree", "agreed", "accept", "accepted"}:
+        return "AGREE"
+    if normalized in {"offer", "offered", "propose", "proposed"}:
+        return "ALTERNATIVE_PROPOSED"
+    return None
 
 
 def _follow_up_questions_from_utterance(value: Any) -> list[str]:

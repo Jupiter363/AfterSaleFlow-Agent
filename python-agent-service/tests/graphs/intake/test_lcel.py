@@ -333,6 +333,16 @@ class IntakeTransport:
         yield ModelTransportCompleted(result=await self.agenerate(request))
 
 
+class RawBaselineIntakeTransport(IntakeTransport):
+    """Return an already baseline-shaped provider document without fixture repair."""
+
+    def __init__(self, document: dict[str, Any]) -> None:
+        self.document = copy.deepcopy(document)
+        self.token_usage = {"input": 8, "output": 5, "total": 13}
+        self.generate_calls = 0
+        self.requests: list[ModelTransportRequest] = []
+
+
 class StreamingIntakeTransport(IntakeTransport):
     def stream(self, request: ModelTransportRequest):
         yield ModelTransportCompleted(result=self.generate(request))
@@ -942,6 +952,181 @@ def test_source_bound_attitude_carry_survives_twenty_turn_checkpoint_reloads(
     assert len(event_ids) == 20
     assert state["cognitive_revision"] == 20
     assert prior_matrix is not None and prior_matrix["matrix_version"] == 20
+
+
+def test_fifth_initiator_full_snapshot_carries_verified_prior_after_checkpoint_reload(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+) -> None:
+    imported = copy.deepcopy(snapshot)
+    imported["own_messages"] = []
+    imported["snapshot_hash"] = canonical_sha256_omitting(imported, "snapshot_hash")
+    state = new_intake_graph_state(
+        bindings=copy.deepcopy(bindings),
+        version_pins=copy.deepcopy(version_pins),
+    )
+    saver = InMemorySaver()
+    config = {"configurable": {"thread_id": "intake-fifth-full-snapshot"}}
+    round_four_attitude: dict[str, Any] | None = None
+    round_four_claim: dict[str, Any] | None = None
+    round_four_matrix: dict[str, Any] | None = None
+    round_five_message_id: str | None = None
+
+    for round_no in range(1, 6):
+        current_event = _bounded_turn_event(
+            event,
+            round_no=round_no,
+            first_sequence=1,
+            first_domain_revision=event["domain_revision"],
+        )
+        if round_no == 4:
+            current_event["text"] = "商家明确拒绝退款。"
+        elif round_no == 5:
+            current_event["text"] = (
+                "订单确认页对应承诺期限，物流轨迹对应交付时间线，"
+                "沟通记录对应商家回复，购买记录对应270元计算；"
+                "本方没有其他重大事实或额外诉求，并确认以上内容可提交。"
+            )
+            round_five_message_id = current_event["message_id"]
+        current_event["event_hash"] = canonical_sha256_omitting(
+            current_event,
+            "event_hash",
+        )
+
+        command_id = f"COMMAND_FIFTH_FULL_SNAPSHOT_USER_{round_no:02d}"
+        logical_run_id = f"RUN_FIFTH_FULL_SNAPSHOT_USER_{round_no:02d}"
+        attempt_id = f"ATTEMPT_FIFTH_FULL_SNAPSHOT_USER_{round_no:02d}_1"
+        next_bindings = copy.deepcopy(state["bindings"])
+        next_bindings["command"].update(
+            command_id=command_id,
+            logical_run_id=logical_run_id,
+            attempt_id=attempt_id,
+        )
+        context = _agent_context(
+            case_id=str(next_bindings["private"]["case_id"]),
+            agent_session_id=str(next_bindings["private"]["agent_session_id"]),
+            invocation_id=attempt_id,
+        )
+        document = _bounded_turn_document(state, current_event, round_no=round_no)
+        if round_no == 4:
+            document["dossier_patch"]["respondent_attitude"] = {
+                "attitude": "DISAGREE",
+                "position": "This model wording must be pinned to the source.",
+            }
+
+        if round_no == 5:
+            assert round_four_attitude is not None
+            assert round_four_claim is not None
+            assert round_four_matrix is not None
+            assert state["baseline_pending_case_detail"] is None
+            prior = state["baseline_previous_case_detail"]
+            assert prior["snapshot"]["respondent_attitude"] == round_four_attitude
+            assert prior["formal_matrix"] == round_four_matrix
+            assert prior["formal_matrix_hash"] == canonical_sha256(round_four_matrix)
+            assert prior["public_dossier_hash"] == canonical_sha256(
+                state["dossier_draft"]
+            )
+            raw_document = {
+                "room_utterance": document["room_utterance"],
+                "case_detail": copy.deepcopy(state["dossier_draft"]),
+                "admission_recommendation": document["recommendation"],
+                "missing_fields": document["missing_fields"],
+                "knowledge_query_intent": False,
+                "knowledge_answer_mode": document["knowledge_answer_mode"],
+                "confidence": document["confidence"],
+                "case_matrix_delta": copy.deepcopy(document["matrix_patch"]),
+            }
+            transport: IntakeTransport = RawBaselineIntakeTransport(raw_document)
+        else:
+            transport = IntakeTransport(document)
+
+        policy = _policy().model_copy(
+            update={
+                "invocation_id": attempt_id,
+                "trusted_system_sha256": system_prompt_sha256(
+                    _trusted_system_prompt(context)
+                ),
+            }
+        )
+        graph = compile_intake_v2_graph(
+            intake_lcel=build_intake_model_node(
+                transport=transport,
+                profile=_profile(),
+                policy=policy,
+                agent_context=context,
+            ).runnable,
+            checkpointer=saver,
+        )
+        invocation_context = (
+            _bootstrap_event_context(imported, current_event)
+            if round_no == 1
+            else IntakeTurnContext("EVENT", current_event)
+        )
+        graph_input = state if round_no == 1 else {"bindings": next_bindings}
+        if round_no == 1:
+            state["bindings"] = next_bindings
+
+        state = graph.invoke(
+            graph_input,
+            config,
+            context=invocation_context,
+        )
+
+        assert transport.generate_calls == 1
+        assert state["cognitive_revision"] == round_no
+        assert state["baseline_pending_case_detail"] is None
+        assert state["terminal_draft"]["command_id"] == command_id
+        assert state["terminal_draft"]["logical_run_id"] == logical_run_id
+        assert state["terminal_draft"]["attempt_id"] == attempt_id
+        matrix = state["baseline_previous_case_detail"]["formal_matrix"]
+        assert matrix["matrix_version"] == round_no
+
+        if round_no == 4:
+            round_four_attitude = copy.deepcopy(
+                state["dossier_draft"]["respondent_attitude"]
+            )
+            assert {
+                "respondent_role",
+                "attitude",
+                "position",
+                "source",
+                "confidence",
+                "confidence_note",
+                "grounding",
+            } <= set(round_four_attitude)
+            assert round_four_attitude["grounding"] == {
+                "source": "PARTICIPANT_MESSAGE",
+                "message_id": current_event["message_id"],
+            }
+            round_four_matrix = copy.deepcopy(matrix)
+            round_four_claim = copy.deepcopy(
+                matrix["claims"]["respondent_reported_by_initiator"]
+            )
+            assert round_four_claim["source_refs"] == [current_event["message_id"]]
+
+    assert round_four_attitude is not None
+    assert round_four_claim is not None
+    assert round_four_matrix is not None
+    assert round_five_message_id is not None
+    assert state["cognitive_revision"] == 5
+    assert state["result_json"]["cognitive_revision"] == 5
+    assert state["baseline_pending_case_detail"] is None
+    assert state["dossier_draft"]["respondent_attitude"] == round_four_attitude
+    final_matrix = state["baseline_previous_case_detail"]["formal_matrix"]
+    assert final_matrix["matrix_version"] == 5
+    assert final_matrix["parent_ref"] == {
+        "matrix_id": round_four_matrix["matrix_id"],
+        "matrix_version": 4,
+        "content_hash": round_four_matrix["content_hash"],
+    }
+    assert final_matrix["claims"]["respondent_reported_by_initiator"] == round_four_claim
+    assert round_five_message_id not in round_four_claim["source_refs"]
+    assert (
+        state["dossier_draft"]["respondent_attitude"]["grounding"]["message_id"]
+        != round_five_message_id
+    )
 
 
 def test_bounded_derivation_rejects_under_capacity_message_loss(
