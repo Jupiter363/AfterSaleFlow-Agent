@@ -195,6 +195,8 @@ public class IntakeProcessProjectionCompletionService {
             validateProjectionReplay(evidence, existing, command);
             return new CompletionResult(
                     CompletionOutcome.IDEMPOTENT_REPLAY,
+                    receipt.logicalRunId(),
+                    receipt.attemptId(),
                     newProcessRevision,
                     newRoomRevision,
                     evidence.eventSequence(),
@@ -207,6 +209,8 @@ public class IntakeProcessProjectionCompletionService {
         ApplyProjectionResult applied = projectionService.apply(command);
         return new CompletionResult(
                 CompletionOutcome.APPLIED,
+                receipt.logicalRunId(),
+                receipt.attemptId(),
                 applied.processRevision(),
                 applied.roomRevision(),
                 evidence.eventSequence(),
@@ -689,6 +693,8 @@ public class IntakeProcessProjectionCompletionService {
 
     public record CompletionResult(
             CompletionOutcome outcome,
+            String logicalRunId,
+            String attemptId,
             long processRevision,
             long roomRevision,
             long lastCaseEventSequence,
@@ -698,6 +704,12 @@ public class IntakeProcessProjectionCompletionService {
 
         public CompletionResult {
             Objects.requireNonNull(outcome, "outcome");
+            if (logicalRunId == null
+                    || logicalRunId.isBlank()
+                    || attemptId == null
+                    || attemptId.isBlank()) {
+                throw new IllegalArgumentException("completion AgentRun identity is invalid");
+            }
             if (processRevision < 1 || roomRevision < 1 || lastCaseEventSequence < 1) {
                 throw new IllegalArgumentException("completion revisions are invalid");
             }

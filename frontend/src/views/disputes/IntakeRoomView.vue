@@ -27,6 +27,7 @@ import RoomShell from "../../components/room/RoomShell.vue";
 import { actor } from "../../state/actor";
 import {
   createRoomState,
+  primeRoomEventCursor,
   streamRoomEvents,
 } from "../../stores/room";
 import {
@@ -72,7 +73,7 @@ const PROJECTION_MISSING = Symbol("projection-missing");
 const READINESS_RETRY_FAST_ATTEMPTS = 40;
 const READINESS_RETRY_FAST_DELAY_MS = 250;
 const READINESS_RETRY_SLOW_DELAY_MS = 1_000;
-const FORMAL_READINESS_MAX_POLL_DELAY_MS = 2_000;
+const FORMAL_READINESS_EVENT_TYPE = "INTAKE_PROJECTION_READY";
 const FORMAL_AGENT_SENDER_ROLES = new Set([
   "CUSTOMER_SERVICE",
   "INTAKE_OFFICER",
@@ -352,8 +353,8 @@ const props = defineProps({
   modelHealthLoader: { type: Function, default: null },
   evidenceReadyPollAttempts: { type: Number, default: 4 },
   evidenceReadyPollDelayMs: { type: Number, default: 200 },
-  formalReadinessPollAttempts: { type: Number, default: 40 },
-  formalReadinessPollDelayMs: { type: Number, default: 250 },
+  formalReadinessPollAttempts: { type: Number, default: 13 },
+  formalReadinessPollDelayMs: { type: Number, default: 5_000 },
 });
 
 const route = useRoute();
@@ -387,8 +388,10 @@ let openingRunRetryInFlight = null;
 let openingRunRetryAttempts = 0;
 let formalReadinessRetryTimer = null;
 let formalReadinessRetryCancel = null;
+let formalReadinessRetryWake = null;
 let formalReadinessRetryToken = 0;
 let formalReadinessActiveRunId = "";
+let formalReadinessReadySignalSequence = 0;
 let roomMessagesRefreshToken = 0;
 let roomTurnMemoryRefreshToken = 0;
 let roomIntakeStatusRefreshToken = 0;
@@ -534,6 +537,20 @@ const serverPartyCanChat = computed(() => {
 const partyCanChat = computed(() =>
   serverPartyCanChat.value && projectionAllowsMessages.value,
 );
+const ownIntakeFormalizationPending = computed(() =>
+  serverPartyCanChat.value &&
+  !projectionAllowsMessages.value &&
+  (submitting.value || intakeStreamingRuns.value.length > 0),
+);
+const intakeComposerVisible = computed(() =>
+  !historyMode.value &&
+  (partyCanChat.value || ownIntakeFormalizationPending.value),
+);
+const intakeComposerHint = computed(() =>
+  ownIntakeFormalizationPending.value
+    ? "本轮回复已生成，正在同步正式卷宗；完成后即可继续补充。"
+    : "消息提交后成为不可变房间记录",
+);
 const currentActorIntakeCompleted = computed(() => Boolean(
   intakeStatus.value?.current_actor_completed ??
   intakeStatus.value?.currentActorCompleted,
@@ -570,8 +587,17 @@ const intakeComposerDisabledReason = computed(() => {
   if (!["USER", "MERCHANT"].includes(actor.role)) {
     return "当前是平台观察/审核身份。请切换为用户或商家身份，才能继续与争议接待官对话。";
   }
-  if (!partyCanChat.value) {
-    return "对方完成接待后，你的私有接待会话会自动开放。";
+  if (!serverPartyCanChat.value) {
+    if (intakeRecipientView.value) {
+      return "发起方完成接待后，你的私有接待会话会自动开放。";
+    }
+    if (currentActorIntakeCompleted.value) {
+      return "你已完成本方接待，正在等待对方完成接待。";
+    }
+    return "当前接待会话暂不可用，请等待接待状态同步。";
+  }
+  if (!projectionAllowsMessages.value) {
+    return "本轮回复已生成，正在同步正式卷宗；完成后即可继续补充。";
   }
   if (!modelConnected.value) {
     return modelConnectionState.value === "checking"
@@ -1685,6 +1711,81 @@ function normalizeAgentRunId(value) {
   return typeof value === "string" && value.trim() ? value.trim() : "";
 }
 
+function intakeCaseEventType(event) {
+  return String(
+    event?.event ||
+    event?.eventType ||
+    event?.event_type ||
+    event?.data?.eventType ||
+    event?.data?.event_type ||
+    "",
+  ).trim().toUpperCase();
+}
+
+function intakeCaseEventPayload(event) {
+  const envelope = event?.data && typeof event.data === "object" && !Array.isArray(event.data)
+    ? event.data
+    : event;
+  const raw = envelope?.payload_json ?? envelope?.payloadJson;
+  if (typeof raw === "string") {
+    try {
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+  return raw && typeof raw === "object" && !Array.isArray(raw) ? raw : null;
+}
+
+function nonNegativeInteger(value) {
+  const number = Number(value);
+  return Number.isInteger(number) && number >= 0 ? number : null;
+}
+
+function positiveInteger(value) {
+  const number = Number(value);
+  return Number.isInteger(number) && number > 0 ? number : null;
+}
+
+function formalReadinessSignal(event) {
+  if (intakeCaseEventType(event) !== FORMAL_READINESS_EVENT_TYPE) return null;
+  const payload = intakeCaseEventPayload(event);
+  if (!payload) return null;
+  const requiredFields = [
+    "logical_run_id",
+    "attempt_id",
+    "process_revision",
+    "room_revision",
+    "room_epoch",
+    "fencing_token",
+    "command_sequence",
+    "event_id",
+    "command_admission_state",
+  ];
+  if (requiredFields.some((field) => !Object.hasOwn(payload, field))) return null;
+  const logicalRunId = normalizeAgentRunId(payload.logical_run_id);
+  const attemptId = normalizeAgentRunId(payload.attempt_id);
+  const eventId = normalizeAgentRunId(payload.event_id);
+  const processRevision = positiveInteger(payload.process_revision);
+  const roomRevision = positiveInteger(payload.room_revision);
+  const roomEpoch = nonNegativeInteger(payload.room_epoch);
+  const fencingToken = positiveInteger(payload.fencing_token);
+  const commandSequence = positiveInteger(payload.command_sequence);
+  if (
+    !logicalRunId ||
+    !attemptId ||
+    !eventId ||
+    processRevision === null ||
+    roomRevision === null ||
+    roomEpoch === null ||
+    fencingToken === null ||
+    commandSequence === null ||
+    String(payload.command_admission_state || "").trim().toUpperCase() !== "READY"
+  ) return null;
+  return { logicalRunId };
+}
+
 function formalMessageAgentRunId(message) {
   if (!message || typeof message !== "object" || Array.isArray(message)) return "";
   const declaredFields = ["agent_run_id", "agentRunId"]
@@ -1811,17 +1912,37 @@ function isCurrentIntakeRunContext(context, snapshot = currentWorkspaceSnapshot(
     isCurrentFormalReadinessContext(context, snapshot);
 }
 
+function consumeFormalReadinessReadySignal(context, snapshot) {
+  if (!isCurrentFormalReadinessContext(context, snapshot)) return false;
+  if (formalReadinessReadySignalSequence <= context.consumedReadySignalSequence) {
+    return false;
+  }
+  context.consumedReadySignalSequence = formalReadinessReadySignalSequence;
+  return true;
+}
+
+function wakeFormalReadinessFromEvent(event, snapshot) {
+  if (!isCurrentWorkspace(snapshot) || !formalReadinessActiveRunId) return false;
+  const signal = formalReadinessSignal(event);
+  if (!signal || signal.logicalRunId !== formalReadinessActiveRunId) return false;
+  formalReadinessReadySignalSequence += 1;
+  formalReadinessRetryWake?.();
+  return true;
+}
+
 function clearFormalReadinessRetry() {
   roomSnapshotWriteBarrier += 1;
   roomIntakeStatusRefreshToken += 1;
   formalReadinessRetryToken += 1;
   formalReadinessActiveRunId = "";
+  formalReadinessReadySignalSequence = 0;
   if (formalReadinessRetryTimer !== null) {
     window.clearTimeout(formalReadinessRetryTimer);
     formalReadinessRetryTimer = null;
   }
   const cancel = formalReadinessRetryCancel;
   formalReadinessRetryCancel = null;
+  formalReadinessRetryWake = null;
   cancel?.();
 }
 
@@ -1840,6 +1961,7 @@ function createIntakeRunFinalizationContext(runId) {
     expectedRunId,
     readinessToken: formalReadinessRetryToken,
     baseline: captureFormalReadinessBaseline(expectedRunId),
+    consumedReadySignalSequence: formalReadinessReadySignalSequence,
   };
 }
 
@@ -1869,22 +1991,17 @@ function discardProvisionalIntakeRun(context, snapshot, failure = null) {
   return true;
 }
 
-function formalReadinessRetryDelayMs(baseDelayMs, failedAttempt) {
-  const base = Math.max(0, Number(baseDelayMs) || 0);
-  if (base === 0) return 0;
-  const attemptIndex = Math.max(0, Math.floor(Number(failedAttempt) || 0));
-  const maxDelay = Math.max(base, FORMAL_READINESS_MAX_POLL_DELAY_MS);
-  const backoffStep = Math.floor(attemptIndex / 4);
-  return Math.min(maxDelay, base * (2 ** backoffStep));
+function formalReadinessRetryDelayMs(baseDelayMs) {
+  return Math.max(0, Number(baseDelayMs) || 0);
 }
 
-// Public FINAL may precede the independent fenced finalizer's readable commit;
-// poll quickly first, then back off to cover transient finalizer retries.
-function waitForFormalReadinessRetry(snapshot, token, failedAttempt) {
-  const delay = formalReadinessRetryDelayMs(
-    props.formalReadinessPollDelayMs,
-    failedAttempt,
-  );
+// The durable READY case event is only a wake-up hint. The next exact snapshot
+// refresh remains the authority; a low-frequency timer covers missed events.
+function waitForFormalReadinessRetry(snapshot, context) {
+  if (consumeFormalReadinessReadySignal(context, snapshot)) {
+    return Promise.resolve(true);
+  }
+  const delay = formalReadinessRetryDelayMs(props.formalReadinessPollDelayMs);
   if (delay === 0) return Promise.resolve(isCurrentWorkspace(snapshot));
   return new Promise((resolve) => {
     let settled = false;
@@ -1898,13 +2015,18 @@ function waitForFormalReadinessRetry(snapshot, token, failedAttempt) {
       if (formalReadinessRetryCancel === cancel) {
         formalReadinessRetryCancel = null;
       }
+      if (formalReadinessRetryWake === wake) {
+        formalReadinessRetryWake = null;
+      }
       resolve(ready);
     };
     const cancel = () => finish(false);
+    const wake = () => finish(consumeFormalReadinessReadySignal(context, snapshot));
     formalReadinessRetryCancel = cancel;
+    formalReadinessRetryWake = wake;
     formalReadinessRetryTimer = window.setTimeout(
       () => finish(
-        token === formalReadinessRetryToken && isCurrentWorkspace(snapshot),
+        isCurrentFormalReadinessContext(context, snapshot),
       ),
       delay,
     );
@@ -1912,7 +2034,6 @@ function waitForFormalReadinessRetry(snapshot, token, failedAttempt) {
 }
 
 async function refreshUntilFormalReadiness(snapshot, context) {
-  const token = context.readinessToken;
   const configuredAttempts = Number(props.formalReadinessPollAttempts);
   const attempts = Number.isFinite(configuredAttempts)
     ? Math.max(1, Math.floor(configuredAttempts))
@@ -1936,7 +2057,7 @@ async function refreshUntilFormalReadiness(snapshot, context) {
     }
     if (formalReadinessVisible(context)) return true;
     if (attempt < attempts - 1) {
-      const shouldContinue = await waitForFormalReadinessRetry(snapshot, token, attempt);
+      const shouldContinue = await waitForFormalReadinessRetry(snapshot, context);
       if (!shouldContinue) return false;
     }
   }
@@ -2495,9 +2616,25 @@ function removeOptimisticMessage(id) {
 }
 
 // 业务位置：【前端接待室】startEventStream：启动或关闭与 Agent 流事件 相关的后台任务或订阅，控制运行资源和生命周期。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
-function startEventStream(snapshot = currentWorkspaceSnapshot()) {
-  if (historyMode.value) return;
+async function startEventStream(snapshot = currentWorkspaceSnapshot()) {
+  if (historyMode.value || !isCurrentWorkspace(snapshot)) return false;
   const streamer = props.eventStreamer || streamRoomEvents;
+  if (!props.eventStreamer) {
+    try {
+      await primeRoomEventCursor({
+        actor: snapshot.actor,
+        caseId: snapshot.caseId,
+        roomType: "INTAKE",
+        state: eventState,
+      });
+    } catch (failure) {
+      if (isCurrentWorkspace(snapshot)) {
+        eventState.connected = false;
+        eventState.streamError = failure;
+      }
+    }
+    if (!isCurrentWorkspace(snapshot)) return false;
+  }
   void streamer({
     actor: snapshot.actor,
     caseId: snapshot.caseId,
@@ -2507,14 +2644,19 @@ function startEventStream(snapshot = currentWorkspaceSnapshot()) {
     snapshotLoader: () => refreshRoomSnapshot(snapshot),
     applyEvent: async (event) => {
       if (!isCurrentWorkspace(snapshot)) return;
-      if (event.event === "RESPONDENT_CONFIRMED") {
+      const eventType = intakeCaseEventType(event);
+      if (eventType === FORMAL_READINESS_EVENT_TYPE) {
+        wakeFormalReadinessFromEvent(event, snapshot);
+        return;
+      }
+      if (eventType === "RESPONDENT_CONFIRMED") {
         const evidenceReady = await verifyEvidenceReady(snapshot);
         if (evidenceReady && isCurrentWorkspace(snapshot)) {
           await router.push(`/disputes/${snapshot.caseId}/evidence`);
         }
         return;
       }
-      if (event.event === "EVIDENCE_OPENED") {
+      if (eventType === "EVIDENCE_OPENED") {
         if (props.initialIntakeStatus === null && props.initialDispute === null) {
           await refreshIntakeStatus(snapshot);
         }
@@ -2529,6 +2671,7 @@ function startEventStream(snapshot = currentWorkspaceSnapshot()) {
       }
     },
   });
+  return true;
 }
 
 // 业务位置：【前端接待室】postMessage：执行 房间消息和对话记录 对应的业务动作，并将结果交给 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
@@ -2727,20 +2870,22 @@ function dismissError() {
 onMounted(async () => {
   const snapshot = currentWorkspaceSnapshot();
   if (!historyMode.value) startModelHealthPolling();
-  await load(snapshot);
   if (!historyMode.value && (props.eventStreamer || props.initialMessages === null)) {
-    startEventStream(snapshot);
+    await startEventStream(snapshot);
+    if (!isCurrentWorkspace(snapshot)) return;
   }
+  await load(snapshot);
 });
 watch(
   () => [caseId.value, actor.id, actor.role],
   async () => {
     resetWorkspaceForActorChange();
     const snapshot = currentWorkspaceSnapshot();
-    await load(snapshot);
     if (!historyMode.value && (props.eventStreamer || props.initialMessages === null)) {
-      startEventStream(snapshot);
+      await startEventStream(snapshot);
+      if (!isCurrentWorkspace(snapshot)) return;
     }
+    await load(snapshot);
   },
 );
 watch(
@@ -2799,7 +2944,7 @@ watch(historyMode, (historical) => {
     startModelHealthPolling();
     scheduleProjectionStatusRetry();
     if (props.eventStreamer || props.initialMessages === null) {
-      startEventStream(currentWorkspaceSnapshot());
+      void startEventStream(currentWorkspaceSnapshot());
     }
     return;
   }
@@ -2889,7 +3034,8 @@ onBeforeUnmount(() => {
             :messages="intakeRecipientView ? [] : messages"
             :streaming-runs="historyMode || intakeRecipientView ? [] : intakeStreamingRuns"
             :disabled="historyMode || submitting || intakeStreamingRuns.length > 0 || admitted || !partyCanChat || !modelConnected"
-            :composer-visible="!historyMode && partyCanChat"
+            :composer-visible="intakeComposerVisible"
+            :composer-hint="intakeComposerHint"
             :disabled-reason="intakeComposerDisabledReason"
             :empty-text="intakeConversationEmptyText"
             placeholder="补充订单、物流、双方沟通或你的期望…"

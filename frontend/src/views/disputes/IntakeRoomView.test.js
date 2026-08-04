@@ -105,6 +105,27 @@ function formalTurnMemory(summary, dossierVersion = 1, sourceTurnNo = 1) {
   };
 }
 
+function intakeProjectionReadyEvent(logicalRunId, payloadOverrides = {}) {
+  return {
+    id: 41,
+    event: "INTAKE_PROJECTION_READY",
+    data: {
+      payload_json: JSON.stringify({
+        logical_run_id: logicalRunId,
+        attempt_id: `${logicalRunId}:1`,
+        process_revision: 13,
+        room_revision: 8,
+        room_epoch: 4,
+        fencing_token: 9,
+        command_sequence: 7,
+        event_id: `intake-ready:${logicalRunId}`,
+        command_admission_state: "READY",
+        ...payloadOverrides,
+      }),
+    },
+  };
+}
+
 const connectedModelHealth = vi.fn().mockResolvedValue({
   status: "UP",
   model_status: "CONNECTED",
@@ -987,6 +1008,152 @@ describe("IntakeRoomView", () => {
     wrapper.unmount();
   });
 
+  it("subscribes before opening and wakes its formal wait from the READY event", async () => {
+    vi.useFakeTimers();
+    const runId = "run-temporal-opening-ready-event";
+    const streamUrl = `/api/private-agent-streams/${runId}/events`;
+    const order = [];
+    let applyCaseEvent;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      if (String(input).startsWith(streamUrl)) return terminalStreamResponse(runId);
+      throw new Error(`unexpected fetch: ${String(input)}`);
+    });
+    const pendingStatus = intakeStatusWithProjection(
+      currentProcessProjection({
+        writer_mode: "TEMPORAL",
+        command_admission_state: "PENDING",
+      }),
+    );
+    const readyStatus = intakeStatusWithProjection(
+      currentProcessProjection({ writer_mode: "TEMPORAL" }),
+    );
+    const messagesLoader = vi.fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([{
+        id: "MESSAGE_OPENING_READY_EVENT",
+        sequence_no: 1,
+        sender_type: "AGENT",
+        sender_role: "CUSTOMER_SERVICE",
+        agent_run_id: runId,
+        message_text: "首轮正式回复已就绪",
+      }]);
+    const turnMemoryLoader = vi.fn().mockResolvedValue(
+      formalTurnMemory("首轮事件驱动正式卷宗", 1, 1),
+    );
+    const intakeStatusLoader = vi.fn()
+      .mockResolvedValueOnce(pendingStatus)
+      .mockResolvedValueOnce(readyStatus);
+    const openingAction = vi.fn(async () => {
+      order.push("opening");
+      return { accepted_run: { run_id: runId, stream_url: streamUrl } };
+    });
+    const eventStreamer = vi.fn(async ({ applyEvent }) => {
+      order.push("subscribed");
+      applyCaseEvent = applyEvent;
+    });
+
+    const wrapper = await mountInteractiveView({
+      initialMessages: null,
+      initialTurnMemory: null,
+      initialIntakeStatus: readyStatus,
+      messagesLoader,
+      turnMemoryLoader,
+      intakeStatusLoader,
+      openingAction,
+      eventStreamer,
+    });
+    await vi.waitFor(() => {
+      expect(applyCaseEvent).toBeTypeOf("function");
+      expect(intakeStatusLoader).toHaveBeenCalledTimes(1);
+      expect(agentStreamStore.runs[runId]?.status).toBe("FINALIZING");
+    });
+
+    expect(order).toEqual(["subscribed", "opening"]);
+    await applyCaseEvent(intakeProjectionReadyEvent(runId));
+    await flushPromises();
+    await vi.waitFor(() => {
+      expect(agentStreamStore.runs[runId]?.status).toBe("COMPLETED");
+    });
+
+    expect(openingAction).toHaveBeenCalledTimes(1);
+    expect(intakeStatusLoader).toHaveBeenCalledTimes(2);
+    expect(wrapper.text()).toContain("首轮事件驱动正式卷宗");
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(intakeStatusLoader).toHaveBeenCalledTimes(2);
+    wrapper.unmount();
+  });
+
+  it("keeps opening and formal fallback available when event cursor priming fails", async () => {
+    vi.useFakeTimers();
+    const runId = "run-temporal-opening-prime-degraded";
+    const streamUrl = `/api/private-agent-streams/${runId}/events`;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes("/events/replay")) {
+        return new Response(JSON.stringify({
+          code: "EVENT_REPLAY_UNAVAILABLE",
+          message: "event replay unavailable",
+        }), {
+          status: 503,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url.startsWith(streamUrl)) return terminalStreamResponse(runId);
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+    const pendingStatus = intakeStatusWithProjection(
+      currentProcessProjection({
+        writer_mode: "TEMPORAL",
+        command_admission_state: "PENDING",
+      }),
+    );
+    const readyStatus = intakeStatusWithProjection(
+      currentProcessProjection({ writer_mode: "TEMPORAL" }),
+    );
+    const messagesLoader = vi.fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([{
+        id: "MESSAGE_OPENING_PRIME_DEGRADED",
+        sequence_no: 1,
+        sender_type: "AGENT",
+        sender_role: "CUSTOMER_SERVICE",
+        agent_run_id: runId,
+        message_text: "事件通道降级时的正式首轮回复",
+      }]);
+    const turnMemoryLoader = vi.fn().mockResolvedValue(
+      formalTurnMemory("事件通道降级时的正式首轮卷宗", 1, 1),
+    );
+    const intakeStatusLoader = vi.fn()
+      .mockResolvedValueOnce(pendingStatus)
+      .mockResolvedValueOnce(readyStatus);
+    const openingAction = vi.fn().mockResolvedValue({
+      accepted_run: { run_id: runId, stream_url: streamUrl },
+    });
+
+    const wrapper = await mountInteractiveView({
+      initialMessages: null,
+      initialTurnMemory: null,
+      initialIntakeStatus: readyStatus,
+      messagesLoader,
+      turnMemoryLoader,
+      intakeStatusLoader,
+      openingAction,
+      formalReadinessPollAttempts: 3,
+      formalReadinessPollDelayMs: 0,
+    });
+    await flushPromises();
+    await vi.waitFor(() => {
+      expect(agentStreamStore.runs[runId]?.status).toBe("COMPLETED");
+    });
+
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/events/replay")))
+      .toBe(true);
+    expect(openingAction).toHaveBeenCalledTimes(1);
+    expect(intakeStatusLoader).toHaveBeenCalledTimes(2);
+    expect(wrapper.text()).toContain("事件通道降级时的正式首轮卷宗");
+    wrapper.unmount();
+  });
+
   it("uses the default AgentRun events URL when Java opening returns only runId", async () => {
     const runId = "run-temporal-opening-run-id-only";
     const defaultStreamUrl = `/api/agent-runs/${runId}/events`;
@@ -1105,10 +1272,11 @@ describe("IntakeRoomView", () => {
     wrapper.unmount();
   });
 
-  it("keeps a TEMPORAL final locked until formal command admission becomes READY", async () => {
+  it("wakes a locked TEMPORAL final on its exact projection READY event", async () => {
     vi.useFakeTimers();
     const runId = "run-temporal-command-admission";
     const streamUrl = `/api/private-agent-streams/${runId}/events`;
+    let applyCaseEvent;
     const pendingStatus = intakeStatusWithProjection(
       currentProcessProjection({
         writer_mode: "TEMPORAL",
@@ -1148,6 +1316,9 @@ describe("IntakeRoomView", () => {
       run_id: runId,
       stream_url: streamUrl,
     });
+    const eventStreamer = vi.fn(async ({ applyEvent }) => {
+      applyCaseEvent = applyEvent;
+    });
     const wrapper = await mountInteractiveView({
       initialMessages: [],
       initialTurnMemory: null,
@@ -1156,10 +1327,11 @@ describe("IntakeRoomView", () => {
       messagesLoader,
       turnMemoryLoader,
       intakeStatusLoader,
-      eventStreamer: vi.fn(async () => {}),
+      eventStreamer,
       formalReadinessPollAttempts: 3,
       formalReadinessPollDelayMs: 1_000,
     });
+    await vi.waitFor(() => expect(applyCaseEvent).toBeTypeOf("function"));
 
     wrapper.findComponent(ConversationStream).vm.$emit("submit", {
       message_type: "PARTY_TEXT",
@@ -1179,9 +1351,13 @@ describe("IntakeRoomView", () => {
     ]));
     expect(wrapper.vm.$.setupState.turnMemory.case_intake_dossier.dossier.case_story)
       .toEqual({ one_sentence_summary: "正式卷宗已可见，等待命令准入" });
-    expect(wrapper.find(".conversation-stream__composer").exists()).toBe(false);
+    expect(wrapper.find(".conversation-stream__composer").exists()).toBe(true);
+    expect(wrapper.get("textarea").attributes("disabled")).toBeDefined();
+    expect(wrapper.text()).toContain("本轮回复已生成，正在同步正式卷宗");
+    expect(wrapper.text()).not.toContain("对方完成接待后");
+    expect(postMessageAction).toHaveBeenCalledTimes(1);
 
-    await vi.advanceTimersByTimeAsync(1_000);
+    await applyCaseEvent(intakeProjectionReadyEvent(runId));
     await flushPromises();
     await vi.waitFor(() => {
       expect(agentStreamStore.runs[runId]?.status).toBe("COMPLETED");
@@ -1192,15 +1368,20 @@ describe("IntakeRoomView", () => {
     expect(messagesLoader).toHaveBeenCalledTimes(2);
     expect(turnMemoryLoader).toHaveBeenCalledTimes(2);
     expect(wrapper.get("textarea").attributes("disabled")).toBeUndefined();
-    await vi.advanceTimersByTimeAsync(100);
+    await vi.advanceTimersByTimeAsync(999);
     expect(intakeStatusLoader).toHaveBeenCalledTimes(2);
     wrapper.unmount();
   });
 
-  it("keeps a Target TEMPORAL final locked until the 21st admission poll", async () => {
+  it("does not lose a projection READY event that arrives before the fallback waiter", async () => {
     vi.useFakeTimers();
-    const runId = "run-target-temporal-command-admission-backoff";
+    const runId = "run-target-temporal-ready-before-waiter";
     const streamUrl = `/api/private-agent-streams/${runId}/events`;
+    let applyCaseEvent;
+    let resolveFirstStatus;
+    const firstStatus = new Promise((resolve) => {
+      resolveFirstStatus = resolve;
+    });
     const pendingStatus = intakeStatusWithProjection(
       currentProcessProjection({
         writer_mode: "TEMPORAL",
@@ -1229,7 +1410,7 @@ describe("IntakeRoomView", () => {
       throw new Error(`unexpected fetch: ${String(input)}`);
     });
     const messagesLoader = vi.fn().mockResolvedValue([{
-      id: "MESSAGE_FORMAL_TARGET_TEMPORAL",
+      id: "MESSAGE_FORMAL_TARGET_EVENT_LATCH",
       sequence_no: 5,
       sender_type: "AGENT",
       sender_role: "CUSTOMER_SERVICE",
@@ -1237,12 +1418,13 @@ describe("IntakeRoomView", () => {
       message_text: "正式回复已完成准入",
     }]);
     const turnMemoryLoader = vi.fn().mockResolvedValue(formalMemory);
-    const intakeStatusLoader = vi.fn().mockImplementation(() =>
-      Promise.resolve(
-        intakeStatusLoader.mock.calls.length >= 21 ? readyStatus : pendingStatus,
-      )
-    );
+    const intakeStatusLoader = vi.fn()
+      .mockImplementationOnce(() => firstStatus)
+      .mockResolvedValueOnce(readyStatus);
     const postMessageAction = vi.fn().mockResolvedValue(targetTemporalRun);
+    const eventStreamer = vi.fn(async ({ applyEvent }) => {
+      applyCaseEvent = applyEvent;
+    });
     const wrapper = await mountInteractiveView({
       initialMessages: [],
       initialTurnMemory: baselineTurnMemory,
@@ -1251,32 +1433,38 @@ describe("IntakeRoomView", () => {
       messagesLoader,
       turnMemoryLoader,
       intakeStatusLoader,
-      eventStreamer: vi.fn(async () => {}),
+      eventStreamer,
     });
+    await vi.waitFor(() => expect(applyCaseEvent).toBeTypeOf("function"));
 
     wrapper.findComponent(ConversationStream).vm.$emit("submit", {
       message_type: "PARTY_TEXT",
       text: "等待 Target TEMPORAL 正式准入",
       attachment_refs: [],
     });
-    await flushPromises();
     await vi.waitFor(() => {
       expect(intakeStatusLoader).toHaveBeenCalledTimes(1);
       expect(agentStreamStore.runs[runId]?.status).toBe("FINALIZING");
     });
 
-    expect(wrapper.find(".conversation-stream__composer").exists()).toBe(false);
+    await applyCaseEvent(intakeProjectionReadyEvent(runId));
+    await flushPromises();
+    expect(intakeStatusLoader).toHaveBeenCalledTimes(1);
+    expect(wrapper.find(".conversation-stream__composer").exists()).toBe(true);
+    expect(wrapper.get("textarea").attributes("disabled")).toBeDefined();
+    expect(wrapper.text()).not.toContain("对方完成接待后");
+    expect(postMessageAction).toHaveBeenCalledTimes(1);
     expect(messagesLoader).toHaveBeenCalledTimes(1);
     expect(turnMemoryLoader).toHaveBeenCalledTimes(1);
-
-    await vi.advanceTimersByTimeAsync(25_000);
+    resolveFirstStatus(pendingStatus);
     await flushPromises();
+
     await vi.waitFor(() => {
       expect(agentStreamStore.runs[runId]?.status).toBe("COMPLETED");
     });
 
     expect(postMessageAction).toHaveBeenCalledTimes(1);
-    expect(intakeStatusLoader).toHaveBeenCalledTimes(21);
+    expect(intakeStatusLoader).toHaveBeenCalledTimes(2);
     expect(wrapper.vm.$.setupState.messages).toEqual(expect.arrayContaining([
       expect.objectContaining({
         agent_run_id: runId,
@@ -1290,6 +1478,92 @@ describe("IntakeRoomView", () => {
     expect(wrapper.text()).not.toContain("流式草稿卷宗");
     expect(wrapper.text()).not.toContain("正式卷宗尚未同步完成");
     expect(wrapper.get("textarea").attributes("disabled")).toBeUndefined();
+    wrapper.unmount();
+  });
+
+  it("ignores malformed and wrong-run projection READY events", async () => {
+    vi.useFakeTimers();
+    const runId = "run-target-temporal-ignore-ready-signals";
+    const streamUrl = `/api/private-agent-streams/${runId}/events`;
+    let applyCaseEvent;
+    const pendingStatus = intakeStatusWithProjection(
+      currentProcessProjection({
+        writer_mode: "TEMPORAL",
+        command_admission_state: "PENDING",
+      }),
+    );
+    const readyStatus = intakeStatusWithProjection(
+      currentProcessProjection({ writer_mode: "TEMPORAL" }),
+    );
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      if (String(input).startsWith(streamUrl)) {
+        return dossierStreamResponse(runId, "仅在正式事件后替换的流式草稿");
+      }
+      throw new Error(`unexpected fetch: ${String(input)}`);
+    });
+    const messagesLoader = vi.fn().mockResolvedValue([{
+      id: "MESSAGE_FORMAL_IGNORE_READY_SIGNALS",
+      sequence_no: 5,
+      sender_type: "AGENT",
+      sender_role: "CUSTOMER_SERVICE",
+      agent_run_id: runId,
+      message_text: "正式事件契约已通过",
+    }]);
+    const turnMemoryLoader = vi.fn().mockResolvedValue(
+      formalTurnMemory("正式事件契约卷宗", 2, 2),
+    );
+    const intakeStatusLoader = vi.fn()
+      .mockResolvedValueOnce(pendingStatus)
+      .mockResolvedValueOnce(readyStatus);
+    const postMessageAction = vi.fn().mockResolvedValue({
+      run_id: runId,
+      stream_url: streamUrl,
+    });
+    const eventStreamer = vi.fn(async ({ applyEvent }) => {
+      applyCaseEvent = applyEvent;
+    });
+    const wrapper = await mountInteractiveView({
+      initialMessages: [],
+      initialTurnMemory: formalTurnMemory("事件契约基线", 1, 1),
+      initialIntakeStatus: readyStatus,
+      postMessageAction,
+      messagesLoader,
+      turnMemoryLoader,
+      intakeStatusLoader,
+      eventStreamer,
+    });
+    await vi.waitFor(() => expect(applyCaseEvent).toBeTypeOf("function"));
+
+    wrapper.findComponent(ConversationStream).vm.$emit("submit", {
+      message_type: "PARTY_TEXT",
+      text: "验证错误事件不能解锁",
+      attachment_refs: [],
+    });
+    await flushPromises();
+    await vi.waitFor(() => {
+      expect(intakeStatusLoader).toHaveBeenCalledTimes(1);
+      expect(agentStreamStore.runs[runId]?.status).toBe("FINALIZING");
+    });
+
+    await applyCaseEvent(intakeProjectionReadyEvent("run-other-target"));
+    await applyCaseEvent({
+      event: "INTAKE_PROJECTION_READY",
+      data: { payload_json: "{not-json" },
+    });
+    await applyCaseEvent(intakeProjectionReadyEvent(runId, { attempt_id: "" }));
+    await flushPromises();
+
+    expect(intakeStatusLoader).toHaveBeenCalledTimes(1);
+    expect(agentStreamStore.runs[runId]?.status).toBe("FINALIZING");
+    expect(postMessageAction).toHaveBeenCalledTimes(1);
+
+    await applyCaseEvent(intakeProjectionReadyEvent(runId));
+    await flushPromises();
+    await vi.waitFor(() => {
+      expect(agentStreamStore.runs[runId]?.status).toBe("COMPLETED");
+    });
+    expect(intakeStatusLoader).toHaveBeenCalledTimes(2);
+    expect(postMessageAction).toHaveBeenCalledTimes(1);
     wrapper.unmount();
   });
 
@@ -1487,6 +1761,7 @@ describe("IntakeRoomView", () => {
     vi.useFakeTimers();
     const runId = "run-temporal-workspace-cancel";
     const streamUrl = `/api/private-agent-streams/${runId}/events`;
+    const caseEventCallbacks = [];
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       if (String(input).startsWith(streamUrl)) {
         return dossierStreamResponse(runId, "workspace-scoped stream");
@@ -1520,6 +1795,9 @@ describe("IntakeRoomView", () => {
     const turnMemoryLoader = vi.fn().mockResolvedValue(
       formalTurnMemory("旧工作区正式卷宗", 1, 1),
     );
+    const eventStreamer = vi.fn(async ({ applyEvent }) => {
+      caseEventCallbacks.push(applyEvent);
+    });
     const wrapper = await mountInteractiveView({
       initialMessages: [],
       initialTurnMemory: null,
@@ -1531,7 +1809,7 @@ describe("IntakeRoomView", () => {
       messagesLoader,
       turnMemoryLoader,
       intakeStatusLoader,
-      eventStreamer: vi.fn(async () => {}),
+      eventStreamer,
       formalReadinessPollAttempts: 5,
       formalReadinessPollDelayMs: 1_000,
     });
@@ -1547,11 +1825,15 @@ describe("IntakeRoomView", () => {
       expect(intakeStatusLoader).toHaveBeenCalledTimes(1);
       expect(agentStreamStore.runs[runId]?.status).toBe("FINALIZING");
     });
-    expect(wrapper.find(".conversation-stream__composer").exists()).toBe(false);
+    expect(wrapper.find(".conversation-stream__composer").exists()).toBe(true);
+    expect(wrapper.get("textarea").attributes("disabled")).toBeDefined();
+    expect(wrapper.text()).toContain("正在同步正式卷宗");
+    const staleCaseEvent = caseEventCallbacks[0];
 
     actor.id = "user-other";
     await wrapper.vm.$nextTick();
     await flushPromises();
+    await staleCaseEvent(intakeProjectionReadyEvent(runId));
     await vi.advanceTimersByTimeAsync(1_000);
     await flushPromises();
 
@@ -4611,6 +4893,7 @@ describe("IntakeRoomView", () => {
       initialTurnMemory: null,
       messagesLoader,
       turnMemoryLoader,
+      eventStreamer: vi.fn(async () => {}),
     });
     await flushPromises();
 

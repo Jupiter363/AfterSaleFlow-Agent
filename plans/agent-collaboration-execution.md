@@ -6,6 +6,18 @@ This policy governs sub-agent assignment, model selection, concurrency, review, 
 
 The primary agent owns decomposition, path boundaries, integration order, final decisions, and communication. Delegated agents may edit, test, and commit only within the paths in their written brief.
 
+## Provisioned A2A task priority
+
+For this project, the primary must use the following provisioned Codex tasks as the first candidates for every compatible delegated wave:
+
+- `019fcb08-ed40-70e0-9ca7-5ed2bf4e669a`
+- `019fcb08-9dbf-7941-8b81-b2adf45f18cf`
+- `019fcb07-7690-7c91-b58a-eb3bdebb3135`
+
+The primary continues these tasks through the task/thread messaging interface before spawning a new sub-agent. A task remains eligible even when it is not exposed as a child collaboration target in the current turn. Every assignment still requires exact owned paths, forbidden paths, acceptance criteria, and an explicit handoff format.
+
+A new sub-agent is allowed only when every compatible provisioned task is already running, unavailable, blocked by disjoint path ownership, or insufficient for a required independent lane. The primary records the concrete exception in its user-facing progress update before creating the new agent. Safe disjoint work already in flight may finish; this priority applies to the next assignment wave without destroying partial work.
+
 ## Target topology
 
 When the collaboration runtime has capacity, use one primary agent and eleven delegated logical roles:

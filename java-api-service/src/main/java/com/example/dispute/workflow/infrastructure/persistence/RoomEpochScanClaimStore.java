@@ -156,6 +156,7 @@ public class RoomEpochScanClaimStore {
                         select timeline.sequence_no, timeline.created_at
                           from case_timeline_event timeline
                          where timeline.case_id = epoch.case_id
+                           and timeline.event_type <> 'INTAKE_PROJECTION_READY'
                          order by timeline.sequence_no desc,
                                   timeline.created_at desc,
                                   timeline.id

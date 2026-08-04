@@ -25,6 +25,7 @@ import com.example.dispute.workflow.application.intake.IntakeTurnProposalLoader;
 import com.example.dispute.workflow.targete2e.artifact.finalization.JdbcTargetE2eFinalizationAuthority;
 import com.example.dispute.workflow.targete2e.artifact.finalization.JdbcTargetE2eIntakeCommandCompletionWriter;
 import com.example.dispute.workflow.targete2e.artifact.finalization.ReconciledTargetE2eFinalizationEvidenceProvider;
+import com.example.dispute.workflow.targete2e.artifact.finalization.TargetE2eIntakeDomainEventLiveRelay;
 import com.example.dispute.workflow.targete2e.artifact.finalization.TargetE2eMultiRoomFinalizationGateway;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eGraphOutputSnapshotMaterializer;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eMultiRoomOuterFinalizer;
@@ -66,7 +67,9 @@ import com.example.dispute.workflow.targete2e.lifecycle.TargetE2eActivationLifec
 import com.example.dispute.workflow.targete2e.lifecycle.TargetE2eActivationLifecycleControl.DeploymentBinding;
 import com.example.dispute.workflow.targete2e.persistence.JdbcTargetE2eActivationStores;
 import com.example.dispute.workflow.targete2e.persistence.TargetE2EActivationLedger;
+import com.example.dispute.workflow.temporal.caseprocess.CaseProcessLedgerActivities;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.temporal.client.WorkflowClient;
 import io.minio.MinioClient;
 import java.time.Clock;
 import java.util.List;
@@ -79,6 +82,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.core.env.Environment;
 import org.springframework.core.env.Profiles;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
 
 /** Target-only AgentRun and proposal Graph assembly, absent from the ordinary Java artifact. */
@@ -450,9 +454,23 @@ public class TargetE2eArtifactConfiguration {
     }
 
     @Bean
+    TargetE2eIntakeDomainEventLiveRelay targetE2eIntakeDomainEventLiveRelay(
+            DataSource dataSource,
+            ObjectMapper objectMapper,
+            CaseProcessLedgerActivities ledgerActivities,
+            WorkflowClient workflowClient) {
+        return new TargetE2eIntakeDomainEventLiveRelay(
+                new NamedParameterJdbcTemplate(dataSource),
+                objectMapper,
+                ledgerActivities,
+                workflowClient);
+    }
+
+    @Bean
     AgentRunFinalizationGateway targetE2eMultiRoomFinalizationGateway(
-            TargetE2eMultiRoomOuterFinalizer outerFinalizer) {
-        return new TargetE2eMultiRoomFinalizationGateway(outerFinalizer);
+            TargetE2eMultiRoomOuterFinalizer outerFinalizer,
+            TargetE2eIntakeDomainEventLiveRelay liveRelay) {
+        return new TargetE2eMultiRoomFinalizationGateway(outerFinalizer, liveRelay);
     }
 
     /*

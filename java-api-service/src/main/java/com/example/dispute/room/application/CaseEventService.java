@@ -193,6 +193,14 @@ public class CaseEventService {
         return emitter;
     }
 
+    /** Redis calls this only as a hint; every subscriber still catches up from PostgreSQL. */
+    public void wakeUp(String caseId) {
+        if (caseId == null || caseId.isBlank()) {
+            throw new IllegalArgumentException("caseId must not be blank");
+        }
+        publish(caseId);
+    }
+
     // 所属模块：【房间协作与权限 / 应用编排层】「CaseEventService.heartbeat()」。
     // 具体功能：「CaseEventService.heartbeat()」：发送心跳案件事件：先维持服务端事件连接并支持断线续传；实际协作者为 「SseEmitter.event」、「subscription.emitter」、「catchUp」、「removeDisconnected」；处理的关键状态/协议值包括 「heartbeat」，最终返回「void」。
     // 上游调用：「CaseEventService.heartbeat()」由 Spring 定时调度器触发；它在固定间隔扫描未收敛记录，不由浏览器直接触发。

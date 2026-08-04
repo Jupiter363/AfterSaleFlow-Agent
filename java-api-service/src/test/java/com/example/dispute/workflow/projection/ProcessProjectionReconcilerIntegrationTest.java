@@ -488,6 +488,8 @@ class ProcessProjectionReconcilerIntegrationTest {
             long lastCaseEventSequence) {
         return new CompletionResult(
                 outcome,
+                "target-intake-run:reconciler",
+                "target-intake-attempt:reconciler:1",
                 processRevision,
                 roomRevision,
                 lastCaseEventSequence,

@@ -2,7 +2,12 @@
 // 说明：本注释用于帮助读者先了解本文件职责，再继续阅读具体实现。
 
 import { describe, expect, it, vi } from "vitest";
-import { createRoomState, resumeRoomEvents, streamRoomEvents } from "./room";
+import {
+  createRoomState,
+  primeRoomEventCursor,
+  resumeRoomEvents,
+  streamRoomEvents,
+} from "./room";
 
 vi.mock("../api/rooms", () => ({
   consumeCaseEvents: vi.fn(),
@@ -170,6 +175,112 @@ describe("room event recovery", () => {
     });
   });
 
+  it("does not let a late prime from an old case contaminate the active cursor", async () => {
+    const state = createRoomState();
+    const actor = { id: "user-local", role: "USER" };
+    let resolveOldPrime;
+    let deliverNewEvent;
+    roomApi.events
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveOldPrime = resolve;
+      }))
+      .mockResolvedValueOnce([
+        { sequence_no: 2, event_type: "ROOM_MESSAGE_CREATED" },
+      ]);
+
+    const oldPrime = primeRoomEventCursor({
+      actor,
+      caseId: "CASE_OLD",
+      roomType: "INTAKE",
+      state,
+    });
+    await primeRoomEventCursor({
+      actor,
+      caseId: "CASE_NEW",
+      roomType: "INTAKE",
+      state,
+    });
+    const activeStream = resumeRoomEvents({
+      state,
+      cursorKey: "CASE_NEW:INTAKE:user-local:USER",
+      snapshotLoader: vi.fn(),
+      eventConsumer: ({ lastEventId, onEvent }) => {
+        expect(lastEventId).toBe(2);
+        return new Promise((resolve) => {
+          deliverNewEvent = async () => {
+            await onEvent({ id: 3, event: "INTAKE_PROJECTION_READY", data: {} });
+            resolve(3);
+          };
+        });
+      },
+    });
+    await vi.waitFor(() => expect(deliverNewEvent).toBeTypeOf("function"));
+
+    resolveOldPrime([
+      { sequence_no: 99, event_type: "ROOM_MESSAGE_CREATED" },
+    ]);
+    await oldPrime;
+    await deliverNewEvent();
+    await activeStream;
+
+    expect(state.lastEventIds).toEqual({
+      "CASE_OLD:INTAKE:user-local:USER": 99,
+      "CASE_NEW:INTAKE:user-local:USER": 3,
+    });
+    expect(state.lastEventId).toBe(3);
+  });
+
+  it.each(["snapshot", "apply"])(
+    "replays an event when %s processing fails before cursor commit",
+    async (failureStage) => {
+      const state = createRoomState();
+      const cursorKey = `CASE_REPLAY_${failureStage.toUpperCase()}`;
+      const event = { id: 8, event: "INTAKE_PROJECTION_READY", data: {} };
+      const consumedCursors = [];
+      let snapshotCalls = 0;
+      let applyCalls = 0;
+      state.lastEventIds[cursorKey] = 7;
+      const snapshotLoader = vi.fn(async () => {
+        snapshotCalls += 1;
+        if (failureStage === "snapshot" && snapshotCalls === 2) {
+          throw new Error("snapshot unavailable");
+        }
+      });
+      const applyEvent = vi.fn(async () => {
+        applyCalls += 1;
+        if (failureStage === "apply" && applyCalls === 1) {
+          throw new Error("apply failed");
+        }
+      });
+      const consume = async ({ lastEventId, onEvent }) => {
+        consumedCursors.push(lastEventId);
+        await onEvent(event);
+        return event.id;
+      };
+
+      await expect(resumeRoomEvents({
+        state,
+        cursorKey,
+        snapshotLoader,
+        eventConsumer: consume,
+        applyEvent,
+      })).rejects.toThrow();
+      expect(state.lastEventIds[cursorKey]).toBe(7);
+
+      await resumeRoomEvents({
+        state,
+        cursorKey,
+        snapshotLoader,
+        eventConsumer: consume,
+        applyEvent,
+      });
+
+      expect(consumedCursors).toEqual([7, 7]);
+      expect(state.lastEventIds[cursorKey]).toBe(8);
+      expect(state.lastEventId).toBe(8);
+    },
+  );
+
   it("starts a fresh room subscription after the replayed snapshot baseline", async () => {
     const state = createRoomState();
     const abortController = new AbortController();
@@ -194,5 +305,50 @@ describe("room event recovery", () => {
     });
 
     expect(state.lastEventIds["CASE_BASELINE:HEARING:user-local:USER"]).toBe(9);
+  });
+
+  it("replays events emitted after a cursor is primed and before SSE connects", async () => {
+    const state = createRoomState();
+    const abortController = new AbortController();
+    const actor = { id: "user-local", role: "USER" };
+    roomApi.events.mockResolvedValueOnce([
+      { sequence_no: 12, event_type: "ROOM_MESSAGE_CREATED" },
+    ]);
+
+    await primeRoomEventCursor({
+      actor,
+      caseId: "CASE_OPENING",
+      roomType: "INTAKE",
+      state,
+    });
+    const replayCallsAfterPrime = roomApi.events.mock.calls.length;
+
+    const readyEvent = {
+      id: 13,
+      event: "INTAKE_PROJECTION_READY",
+      data: { payload_json: "{}" },
+    };
+    const applyEvent = vi.fn(async () => abortController.abort());
+    consumeCaseEvents.mockImplementationOnce(async ({ lastEventId, onEvent }) => {
+      expect(lastEventId).toBe(12);
+      await onEvent(readyEvent);
+      return 13;
+    });
+
+    await streamRoomEvents({
+      actor,
+      caseId: "CASE_OPENING",
+      roomType: "INTAKE",
+      state,
+      signal: abortController.signal,
+      snapshotLoader: vi.fn(),
+      applyEvent,
+      retryDelayMs: 0,
+    });
+
+    expect(roomApi.events).toHaveBeenLastCalledWith(actor, "CASE_OPENING", 0);
+    expect(roomApi.events).toHaveBeenCalledTimes(replayCallsAfterPrime);
+    expect(applyEvent).toHaveBeenCalledWith(readyEvent);
+    expect(state.lastEventIds["CASE_OPENING:INTAKE:user-local:USER"]).toBe(13);
   });
 });

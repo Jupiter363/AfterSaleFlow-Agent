@@ -89,6 +89,7 @@ class RoomEpochScanClaimStoreIntegrationTest {
                        projection_reconciliation_next_scan_at = clock_timestamp() - interval '1 second',
                        projection_reconciliation_claim_token = null,
                        projection_reconciliation_claimed_until = null
+                 where case_id like 'CASE_Scan%'
                 """);
     }
 
@@ -162,6 +163,61 @@ class RoomEpochScanClaimStoreIntegrationTest {
 
         isolateCandidate(ScanKind.PROJECTION, "EPOCH_Scan8");
         assertThat(worker.claimProjectionReconciliation(1, Duration.ofMinutes(5))).isEmpty();
+    }
+
+    @Test
+    void readyNotificationDoesNotCreatePermanentPriorityClaimOrBreakGapLoading() {
+        RoomEpochScanClaimStore worker = store();
+        String fixtureSuffix = "ReadyPriority";
+        String caseId = "CASE_" + fixtureSuffix;
+        String epochId = "EPOCH_" + fixtureSuffix;
+        insertCandidate(jdbc, fixtureSuffix, 91, true);
+        isolateCandidate(ScanKind.DOMAIN_EVENT, epochId);
+        jdbc.update(
+                """
+                update case_room_epoch
+                   set projection_reconciliation_next_scan_at =
+                           clock_timestamp() + interval '1 hour'
+                 where id = ?
+                """,
+                epochId);
+        jdbc.update(
+                "update case_process_projection set last_case_event_sequence = 10 where case_id = ?",
+                caseId);
+        insertTimelineEvent(caseId, 11, "INTAKE_PROJECTION_READY");
+
+        assertThat(worker.claimPriorityDomainEventRecovery(1, Duration.ofMinutes(5))).isEmpty();
+
+        List<ClaimedRoomEpoch> fairClaims =
+                worker.claimDomainEventRecovery(1, Duration.ofMinutes(5));
+        assertThat(fairClaims).extracting(ClaimedRoomEpoch::epochId).containsExactly(epochId);
+        jdbc.update(
+                """
+                update case_room_epoch
+                   set domain_event_recovery_next_scan_at = clock_timestamp() - interval '1 second',
+                       domain_event_recovery_claim_token = null,
+                       domain_event_recovery_claimed_until = null
+                 where id = ?
+                """,
+                epochId);
+
+        insertTimelineEvent(caseId, 12, "ROOM_MESSAGE_CREATED");
+
+        assertThat(worker.claimPriorityDomainEventRecovery(1, Duration.ofMinutes(5)))
+                .extracting(ClaimedRoomEpoch::epochId)
+                .containsExactly(epochId);
+        assertThat(
+                        jdbc.queryForList(
+                                """
+                                select sequence_no
+                                  from case_timeline_event
+                                 where case_id = ?
+                                   and sequence_no between 11 and 12
+                                 order by sequence_no
+                                """,
+                                Long.class,
+                                caseId))
+                .containsExactly(11L, 12L);
     }
 
     @Test
@@ -343,19 +399,24 @@ class RoomEpochScanClaimStoreIntegrationTest {
     }
 
     private static void insertCandidate(JdbcTemplate jdbc, int index, boolean ready) {
-        String suffix = "Scan" + index;
+        insertCandidate(jdbc, "Scan" + index, index, ready);
+    }
+
+    private static void insertCandidate(
+            JdbcTemplate jdbc, String suffix, int fencingToken, boolean ready) {
         String caseId = "CASE_" + suffix;
         String roomId = "ROOM_" + suffix;
         OffsetDateTime createdAt =
-                OffsetDateTime.ofInstant(SCAN_TIME.minusSeconds(100L - index), ZoneOffset.UTC);
+                OffsetDateTime.ofInstant(
+                        SCAN_TIME.minusSeconds(100L - fencingToken), ZoneOffset.UTC);
         String caseWorkflowId =
                 CaseProcessWorkflowProtocol.caseWorkflowId("tenant-scan-claim", caseId);
         String roomWorkflowId =
                 CaseProcessWorkflowProtocol.roomWorkflowId(caseId, RoomType.EVIDENCE, 1);
         String provisioningStatus = ready ? "READY" : "PENDING";
         String activationStatus = ready ? "READY" : "PREPARING";
-        String caseRunId = ready ? "run-scan-claim-" + index : null;
-        String roomRunId = ready ? "run-room-scan-claim-" + index : null;
+        String caseRunId = ready ? "run-scan-claim-" + fencingToken : null;
+        String roomRunId = ready ? "run-room-scan-claim-" + fencingToken : null;
         jdbc.update(
                 """
                 insert into fulfillment_dispute_case (
@@ -404,7 +465,7 @@ class RoomEpochScanClaimStoreIntegrationTest {
                 caseId,
                 roomId,
                 provisioningStatus,
-                index,
+                fencingToken,
                 caseWorkflowId,
                 caseRunId,
                 roomWorkflowId,
@@ -427,10 +488,30 @@ class RoomEpochScanClaimStoreIntegrationTest {
                 """,
                 caseId,
                 activationStatus,
-                index,
+                fencingToken,
                 caseWorkflowId,
                 caseRunId,
                 createdAt,
+                createdAt);
+    }
+
+    private static void insertTimelineEvent(String caseId, long sequence, String eventType) {
+        OffsetDateTime createdAt =
+                OffsetDateTime.ofInstant(SCAN_TIME.plusSeconds(sequence), ZoneOffset.UTC);
+        jdbc.update(
+                """
+                insert into case_timeline_event (
+                    id, case_id, sequence_no, event_type, event_time,
+                    source_refs_json, event_json, audience_json,
+                    audience_actor_ids_json, event_key, created_at, created_by
+                ) values (?, ?, ?, ?, ?, '[]', '{}', '[]', '[]', ?, ?, 'test')
+                """,
+                "EVENT_" + caseId.replace("CASE_", "") + "_" + sequence,
+                caseId,
+                sequence,
+                eventType,
+                createdAt,
+                "scan-claim-event:" + sequence,
                 createdAt);
     }
 
