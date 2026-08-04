@@ -527,6 +527,356 @@ def _event_state(bindings, version_pins, snapshot, event):
     return state
 
 
+def _bounded_turn_event(
+    template: dict[str, Any],
+    *,
+    round_no: int,
+    first_sequence: int,
+    first_domain_revision: int,
+) -> dict[str, Any]:
+    message_id = f"MESSAGE_CAPACITY_USER_{round_no:02d}"
+    value = copy.deepcopy(template)
+    value.update(
+        event_id=f"EVENT_CAPACITY_USER_{round_no:02d}",
+        message_id=message_id,
+        sequence_no=first_sequence + round_no - 1,
+        domain_revision=first_domain_revision + round_no - 1,
+        text=f"Capacity-bound intake update {round_no}.",
+        source_refs=[message_id],
+        occurred_at=(
+            datetime(2026, 7, 20, 8, tzinfo=timezone.utc) + timedelta(days=round_no)
+        )
+        .isoformat()
+        .replace("+00:00", "Z"),
+    )
+    value["event_hash"] = canonical_sha256_omitting(value, "event_hash")
+    return value
+
+
+def _bounded_turn_document(
+    state: dict[str, Any],
+    event: dict[str, Any],
+    *,
+    round_no: int,
+) -> dict[str, Any]:
+    prior_context = state.get("baseline_previous_case_detail")
+    prior_matrix = (
+        prior_context.get("formal_matrix")
+        if isinstance(prior_context, dict)
+        else None
+    )
+    fact_rows: list[dict[str, Any]] = []
+    summary_keys: list[str] = []
+    if isinstance(prior_matrix, dict):
+        for row in prior_matrix["fact_rows"]:
+            position = row["positions"]["USER"]
+            fact_rows.append(
+                {
+                    "fact_key": row["fact_id"],
+                    "category": row["category"],
+                    "fact_target": row["fact_target"],
+                    "materiality": row["materiality"],
+                    "stance": position["stance"],
+                    "position_summary": position["position_summary"],
+                    "asserted_value": position["asserted_value"],
+                    "source_scope": "PREVIOUS_MATRIX",
+                }
+            )
+            summary_keys.append(row["fact_id"])
+
+    current_key = f"NEW_CAPACITY_FACT_{round_no:02d}"
+    current_text = event["text"]
+    fact_rows.append(
+        {
+            "fact_key": current_key,
+            "category": "OTHER",
+            "fact_target": current_text,
+            "materiality": "SUPPORTING" if prior_matrix is not None else "CORE",
+            **({"stance": "CONFIRM"} if prior_matrix is not None else {}),
+            "position_summary": current_text,
+            "asserted_value": current_text,
+            "source_scope": "CURRENT_SOURCE",
+        }
+    )
+    summary_keys.append(current_key)
+    matrix_patch = {
+        "schema_version": (
+            "case_fact_matrix.delta.v2"
+            if prior_matrix is not None
+            else "unilateral_case_matrix.draft.v1"
+        ),
+        "fact_rows": fact_rows,
+        "summary_source_fact_keys": summary_keys,
+    }
+    return _draft(
+        room_utterance=f"Capacity-bound response {round_no}.",
+        dossier_patch={
+            "case_story": {
+                "one_sentence_summary": f"Capacity-bound intake round {round_no}."
+            }
+        },
+        matrix_patch=matrix_patch,
+        readiness="INCOMPLETE",
+        missing_fields=["ADDITIONAL_CONTEXT"],
+        recommendation="NEED_MORE_INFO",
+    )
+
+
+def _run_bounded_baseline_turns(
+    *,
+    bindings: dict[str, Any],
+    version_pins: VersionPinsState,
+    snapshot: dict[str, Any],
+    event: dict[str, Any],
+    turn_count: int,
+    interrupt_last_before_checkpoint: bool = False,
+) -> dict[str, Any]:
+    imported = copy.deepcopy(snapshot)
+    imported["own_messages"] = []
+    imported["snapshot_hash"] = canonical_sha256_omitting(imported, "snapshot_hash")
+    state = new_intake_graph_state(
+        bindings=copy.deepcopy(bindings),
+        version_pins=copy.deepcopy(version_pins),
+    )
+    prior_matrix: dict[str, Any] | None = None
+
+    for round_no in range(1, turn_count + 1):
+        current_event = _bounded_turn_event(
+            event,
+            round_no=round_no,
+            first_sequence=1,
+            first_domain_revision=event["domain_revision"],
+        )
+        command_id = f"COMMAND_CAPACITY_USER_{round_no:02d}"
+        logical_run_id = f"RUN_CAPACITY_USER_{round_no:02d}"
+        attempt_id = f"ATTEMPT_CAPACITY_USER_{round_no:02d}_1"
+        state["bindings"]["command"].update(
+            command_id=command_id,
+            logical_run_id=logical_run_id,
+            attempt_id=attempt_id,
+        )
+        context = _agent_context(
+            case_id=str(state["bindings"]["private"]["case_id"]),
+            agent_session_id=str(
+                state["bindings"]["private"]["agent_session_id"]
+            ),
+            invocation_id=attempt_id,
+        )
+        transport = IntakeTransport(
+            _bounded_turn_document(state, current_event, round_no=round_no)
+        )
+        policy = _policy().model_copy(
+            update={
+                "invocation_id": attempt_id,
+                "trusted_system_sha256": system_prompt_sha256(
+                    _trusted_system_prompt(context)
+                ),
+            }
+        )
+        graph = compile_intake_v2_graph(
+            intake_lcel=build_intake_model_node(
+                transport=transport,
+                profile=_profile(),
+                policy=policy,
+                agent_context=context,
+            ).runnable
+        )
+        invocation_context = (
+            _bootstrap_event_context(imported, current_event)
+            if round_no == 1
+            else IntakeTurnContext("EVENT", current_event)
+        )
+        interrupt = interrupt_last_before_checkpoint and round_no == turn_count
+        state = graph.invoke(
+            state,
+            context=invocation_context,
+            **({"interrupt_before": ["checkpoint_terminal"]} if interrupt else {}),
+        )
+
+        assert transport.generate_calls == 1
+        assert len(state["messages"]) <= 6
+        assert len(state["memory_summary"].encode("utf-8")) < 16 * 1024
+        assert state["cognitive_revision"] == round_no
+        assert state["terminal_draft"]["command_id"] == command_id
+        assert state["terminal_draft"]["logical_run_id"] == logical_run_id
+        assert state["terminal_draft"]["attempt_id"] == attempt_id
+        assert state["terminal_draft"]["source_event_hash"] == current_event["event_hash"]
+
+        if interrupt:
+            assert state["baseline_pending_case_detail"] is not None
+            break
+
+        assert state["baseline_pending_case_detail"] is None
+        assert state["result_json"]["cognitive_revision"] == round_no
+        matrix = state["baseline_previous_case_detail"]["formal_matrix"]
+        assert matrix["matrix_version"] == round_no
+        if prior_matrix is None:
+            assert matrix["parent_ref"] is None
+        else:
+            assert matrix["parent_ref"] == {
+                "matrix_id": prior_matrix["matrix_id"],
+                "matrix_version": prior_matrix["matrix_version"],
+                "content_hash": prior_matrix["content_hash"],
+            }
+        prior_matrix = matrix
+
+    return state
+
+
+def test_fourth_turn_accepts_only_the_required_oldest_suffix_compaction(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+) -> None:
+    projected = _run_bounded_baseline_turns(
+        bindings=bindings,
+        version_pins=version_pins,
+        snapshot=snapshot,
+        event=event,
+        turn_count=4,
+        interrupt_last_before_checkpoint=True,
+    )
+
+    terminal_patch = checkpoint_terminal(projected)
+
+    assert len(projected["messages"]) == 6
+    assert terminal_patch["baseline_pending_case_detail"] is None
+    assert (
+        terminal_patch["baseline_previous_case_detail"]
+        == projected["baseline_pending_case_detail"]
+    )
+
+
+def test_same_party_thread_completes_twenty_bounded_graph_turns_with_monotonic_matrix(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+) -> None:
+    completed = _run_bounded_baseline_turns(
+        bindings=bindings,
+        version_pins=version_pins,
+        snapshot=snapshot,
+        event=event,
+        turn_count=20,
+    )
+
+    assert completed["cognitive_revision"] == 20
+    assert completed["result_json"]["cognitive_revision"] == 20
+    assert completed["baseline_pending_case_detail"] is None
+    assert completed["baseline_previous_case_detail"]["formal_matrix"]["matrix_version"] == 20
+    assert len(completed["messages"]) == 6
+    memory_summary_bytes = len(completed["memory_summary"].encode("utf-8"))
+    assert memory_summary_bytes < 16 * 1024
+    print(f"twenty-turn memory_summary_utf8_bytes={memory_summary_bytes}")
+
+
+def test_bounded_derivation_rejects_under_capacity_message_loss(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+) -> None:
+    projected = _run_bounded_baseline_turns(
+        bindings=bindings,
+        version_pins=version_pins,
+        snapshot=snapshot,
+        event=event,
+        turn_count=1,
+        interrupt_last_before_checkpoint=True,
+    )
+    tampered = copy.deepcopy(projected)
+    oldest = min(
+        tampered["messages"],
+        key=lambda message_id: (
+            tampered["messages"][message_id]["sequence"],
+            message_id,
+        ),
+    )
+    tampered["messages"].pop(oldest)
+
+    with pytest.raises(IntakeGraphContractError):
+        checkpoint_terminal(tampered)
+
+
+def test_bounded_derivation_rejects_noncanonical_full_window_or_ai_binding(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+) -> None:
+    projected = _run_bounded_baseline_turns(
+        bindings=bindings,
+        version_pins=version_pins,
+        snapshot=snapshot,
+        event=event,
+        turn_count=4,
+        interrupt_last_before_checkpoint=True,
+    )
+    ordered_ids = sorted(
+        projected["messages"],
+        key=lambda message_id: (
+            projected["messages"][message_id]["sequence"],
+            message_id,
+        ),
+    )
+    ai_id = next(
+        message_id
+        for message_id, message in projected["messages"].items()
+        if message["role"] == "AI"
+        and message["source_hash"]
+        == projected["baseline_pending_case_detail"]["terminal_draft_hash"]
+    )
+
+    variants: list[tuple[str, dict[str, Any]]] = []
+
+    drop_non_oldest = copy.deepcopy(projected)
+    drop_non_oldest["messages"].pop(ordered_ids[-2])
+    variants.append(("drop_non_oldest", drop_non_oldest))
+
+    drop_extra_oldest = copy.deepcopy(projected)
+    drop_extra_oldest["messages"].pop(ordered_ids[0])
+    variants.append(("drop_extra_oldest", drop_extra_oldest))
+
+    reordered = copy.deepcopy(projected)
+    first_survivor_id, second_survivor_id = [
+        message_id for message_id in ordered_ids if message_id != ai_id
+    ][-2:]
+    first_sequence = reordered["messages"][first_survivor_id]["sequence"]
+    second_sequence = reordered["messages"][second_survivor_id]["sequence"]
+    reordered["messages"][first_survivor_id]["sequence"] = second_sequence
+    reordered["messages"][second_survivor_id]["sequence"] = first_sequence
+    variants.append(("reordered", reordered))
+
+    surviving_tamper = copy.deepcopy(projected)
+    surviving_tamper["messages"][ordered_ids[-1]]["content"] = "tampered-survivor"
+    variants.append(("surviving_content", surviving_tamper))
+
+    for field, value in (
+        ("content", "tampered-ai"),
+        ("source_hash", "f" * 64),
+        ("sequence", projected["messages"][ai_id]["sequence"] + 1),
+        ("audience", "MERCHANT"),
+    ):
+        wrong_ai = copy.deepcopy(projected)
+        wrong_ai["messages"][ai_id][field] = value
+        variants.append((f"ai_{field}", wrong_ai))
+
+    wrong_ai_identity = copy.deepcopy(projected)
+    ai = wrong_ai_identity["messages"].pop(ai_id)
+    ai["message_id"] = "INTAKE_AI_TAMPERED_ID"
+    wrong_ai_identity["messages"][ai["message_id"]] = ai
+    variants.append(("ai_identity", wrong_ai_identity))
+
+    for name, tampered in variants:
+        try:
+            checkpoint_terminal(tampered)
+        except IntakeGraphContractError:
+            continue
+        pytest.fail(f"bounded derivation accepted tampering variant: {name}")
+
+
 def test_initial_form_grounding_empty_message_id_sentinel_passes_full_graph_path(
     bindings,
     version_pins,

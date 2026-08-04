@@ -110,6 +110,7 @@ class IntakeRoomAgentRunChildWorkflowTest {
   private static final String THREE_ROUND_FIRST_COMMAND_ID = "CMD:P9:THREE_ROUND:1";
   private static final String THREE_ROUND_SECOND_COMMAND_ID = "CMD:P9:THREE_ROUND:2";
   private static final String THREE_ROUND_THIRD_COMMAND_ID = "CMD:P9:THREE_ROUND:3";
+  private static final String TEN_ROUND_COMMAND_PREFIX = "CMD:P9:TEN_ROUND:";
   private static final String FUTURE_CURSOR_FIRST_COMMAND_ID = "CMD:P9:FUTURE_CURSOR:1";
   private static final String FUTURE_CURSOR_SECOND_COMMAND_ID = "CMD:P9:FUTURE_CURSOR:2";
 
@@ -262,6 +263,107 @@ class IntakeRoomAgentRunChildWorkflowTest {
       assertThat(RecordingAgentRunWorkflow.requests)
           .containsExactly(targetRequest(first), targetRequest(second), targetRequest(third));
       assertThat(RecordingFinalizationReads.requests).hasSize(3);
+    }
+  }
+
+  @Test
+  void tenTargetAgentRunChildrenConsumeTheCompleteFormalProjectionAndRoomTimeline() {
+    try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+      String roomQueue = "phase9-intake-child-ten-round-global-cursor";
+      RecordingAgentRunWorkflow.requests.clear();
+      RecordingFinalizationReads.requests.clear();
+      RecordingFinalizationReads.pendingResponses.set(0);
+      RecordingFinalizationReads finalizationReads = new RecordingFinalizationReads();
+
+      Worker roomWorker = environment.newWorker(roomQueue);
+      roomWorker.registerWorkflowImplementationTypes(IntakeRoomWorkflowImpl.class);
+      Worker agentWorker = environment.newWorker(AGENT_EXECUTION);
+      agentWorker.registerWorkflowImplementationTypes(RecordingAgentRunWorkflow.class);
+      Worker controlWorker = environment.newWorker(CASE_CONTROL);
+      controlWorker.registerActivitiesImplementations(finalizationReads);
+      environment.start();
+
+      IntakeRoomWorkflow workflow =
+          environment
+              .getWorkflowClient()
+              .newWorkflowStub(
+                  IntakeRoomWorkflow.class,
+                  WorkflowOptions.newBuilder()
+                      .setWorkflowId("intake-room:ten-round-cursor:" + CASE_ID + ":" + EPOCH)
+                      .setTaskQueue(roomQueue)
+                      .build());
+      WorkflowClient.start(workflow::run, targetStart());
+
+      List<IntakeWorkflowCommand> commands = new CopyOnWriteArrayList<>();
+      for (int round = 1; round <= 10; round++) {
+        int expectedRound = round;
+        long formalSequence = 1L + (round - 1L) * 3L;
+        IntakeWorkflowCommand command =
+            targetCommand(TEN_ROUND_COMMAND_PREFIX + round, round, round - 1L);
+        commands.add(command);
+        workflow.commandAccepted(command);
+
+        IntakeRoomSnapshot formalized =
+            awaitState(
+                workflow,
+                snapshot ->
+                    snapshot.processedCommandCount() == expectedRound
+                        && snapshot.processedEventCount() == expectedRound
+                        && snapshot.pendingCommand() == null
+                        && snapshot.activityExecution() == null
+                        && snapshot.lastGraphExecutionRef() != null
+                        && command
+                            .commandId()
+                            .equals(snapshot.lastGraphExecutionRef().graphCommandId()));
+
+        assertThat(formalized.nextCommandSequence()).isEqualTo(round + 1L);
+        assertThat(formalized.nextEventSequence()).isEqualTo(formalSequence + 1L);
+        assertThat(formalized.processRevision()).isEqualTo(round);
+        assertThat(formalized.roomRevision()).isEqualTo(round);
+        assertThat(formalized.protocolErrorCode()).isNull();
+        assertThat(workflow.lastCommandDecision().commandId()).isEqualTo(command.commandId());
+        assertThat(workflow.lastCommandDecision().status()).isEqualTo("ACCEPTED");
+
+        workflow.targetSourceEventObserved(
+            cursor(
+                formalSequence + 1L,
+                "EVENT_P9_TEN_ROUND_READY_" + round,
+                "INTAKE_PROJECTION_READY"));
+        awaitState(workflow, snapshot -> snapshot.nextEventSequence() == formalSequence + 2L);
+
+        if (round < 10) {
+          workflow.targetSourceEventObserved(
+              cursor(
+                  formalSequence + 2L,
+                  "EVENT_P9_TEN_ROUND_ROOM_" + (round + 1),
+                  "ROOM_MESSAGE_CREATED"));
+          awaitState(workflow, snapshot -> snapshot.nextEventSequence() == formalSequence + 3L);
+        }
+      }
+
+      IntakeRoomSnapshot completed = workflow.state();
+      assertThat(completed.nextCommandSequence()).isEqualTo(11);
+      assertThat(completed.nextEventSequence()).isEqualTo(30);
+      assertThat(completed.processedCommandCount()).isEqualTo(10);
+      assertThat(completed.processedEventCount()).isEqualTo(10);
+      assertThat(completed.pendingCommand()).isNull();
+      assertThat(completed.activityExecution()).isNull();
+      assertThat(completed.processRevision()).isEqualTo(10);
+      assertThat(completed.roomRevision()).isEqualTo(10);
+      assertThat(completed.protocolErrorCode()).isNull();
+      assertThat(RecordingAgentRunWorkflow.requests)
+          .containsExactlyElementsOf(commands.stream().map(IntakeRoomAgentRunChildWorkflowTest::targetRequest).toList());
+      assertThat(
+              RecordingAgentRunWorkflow.requests.stream()
+                  .map(request -> request.command().commandId())
+                  .distinct()
+                  .toList())
+          .hasSize(10);
+      assertThat(RecordingFinalizationReads.requests).hasSize(10);
+      assertThat(finalizationReads.committedEvents.stream()
+              .map(IntakeDomainEventRef::eventSequence)
+              .toList())
+          .containsExactly(1L, 4L, 7L, 10L, 13L, 16L, 19L, 22L, 25L, 28L);
     }
   }
 
@@ -1803,6 +1905,26 @@ class IntakeRoomAgentRunChildWorkflowTest {
     return Long.toString(Math.abs(value) % 10).repeat(64);
   }
 
+  private static long formalEventSequence(IntakeWorkflowCommand command) {
+    return switch (command.commandId()) {
+      case GAP_FIRST_COMMAND_ID -> 2;
+      case GAP_SECOND_COMMAND_ID -> 3;
+      case LIFECYCLE_SECOND_COMMAND_ID -> 1;
+      case THREE_ROUND_FIRST_COMMAND_ID -> 1;
+      case THREE_ROUND_SECOND_COMMAND_ID -> 4;
+      case THREE_ROUND_THIRD_COMMAND_ID -> 7;
+      case FUTURE_CURSOR_FIRST_COMMAND_ID -> 1;
+      case FUTURE_CURSOR_SECOND_COMMAND_ID -> 4;
+      default -> {
+        if (command.commandId().startsWith(TEN_ROUND_COMMAND_PREFIX)) {
+          long round = Long.parseLong(command.commandId().substring(TEN_ROUND_COMMAND_PREFIX.length()));
+          yield 1L + (round - 1L) * 3L;
+        }
+        yield command.sequence();
+      }
+    };
+  }
+
   private enum WinningMismatch {
     NONE,
     ATTEMPT,
@@ -2403,17 +2525,7 @@ class IntakeRoomAgentRunChildWorkflowTest {
               eventId,
               "urn:after-sale-flow:intake-event:" + eventId,
               hash(5),
-               switch (command.commandId()) {
-                 case GAP_FIRST_COMMAND_ID -> 2;
-                 case GAP_SECOND_COMMAND_ID -> 3;
-                 case LIFECYCLE_SECOND_COMMAND_ID -> 1;
-                 case THREE_ROUND_FIRST_COMMAND_ID -> 1;
-                 case THREE_ROUND_SECOND_COMMAND_ID -> 4;
-                 case THREE_ROUND_THIRD_COMMAND_ID -> 7;
-                 case FUTURE_CURSOR_FIRST_COMMAND_ID -> 1;
-                 case FUTURE_CURSOR_SECOND_COMMAND_ID -> 4;
-                 default -> command.sequence();
-               },
+              formalEventSequence(command),
               formalEventType,
               IntakeParty.INITIATOR,
               command.commandId(),

@@ -2938,7 +2938,7 @@ def _pre_model_state_for_pending_derivation(
     envelope: Mapping[str, Any],
     response_content: Any,
     allow_response_absent: bool,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], bool]:
     """Remove only the capsule-bound current-turn AI response.
 
     The response is identified from the immutable cognitive draft hash retained
@@ -2972,7 +2972,7 @@ def _pre_model_state_for_pending_derivation(
         if not allow_response_absent:
             raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_DERIVATION_RESPONSE_MISSING")
         candidate["messages"] = candidate_messages
-        return candidate
+        return candidate, False
     private = (
         state.get("bindings", {}).get("private")
         if isinstance(state.get("bindings"), Mapping)
@@ -2990,7 +2990,38 @@ def _pre_model_state_for_pending_derivation(
         raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_DERIVATION_RESPONSE_INVALID")
     candidate_messages.pop(response_message_id)
     candidate["messages"] = candidate_messages
-    return candidate
+    return candidate, True
+
+
+def _matches_derivation_request_forward_compaction(
+    authoritative: Mapping[str, Any],
+    actual: Mapping[str, Any],
+) -> bool:
+    """Accept only the bounded suffix produced by appending one verified AI response."""
+
+    if dict(actual) == dict(authoritative):
+        return True
+    message_capacity = _INTAKE_LIMITS.message_count
+    if message_capacity < 2:
+        return False
+    authoritative_recent = authoritative.get("recent_dialogue_messages")
+    authoritative_current = authoritative.get("current_user_message")
+    actual_recent = actual.get("recent_dialogue_messages")
+    if (
+        not isinstance(authoritative_recent, list)
+        or not isinstance(authoritative_current, Mapping)
+        or not isinstance(actual_recent, list)
+    ):
+        return False
+    # The authoritative window is recent + current. Appending the already
+    # verified AI response may evict only its mathematically required oldest
+    # prefix under merge_intake_messages; removing that AI leaves this suffix.
+    dropped = max(0, len(authoritative_recent) + 2 - message_capacity)
+    if dropped != 1:
+        return False
+    expected = deepcopy(dict(authoritative))
+    expected["recent_dialogue_messages"] = deepcopy(authoritative_recent[dropped:])
+    return expected == dict(actual)
 
 
 def _require_pending_derivation_request_matches_pre_model_state(
@@ -3009,7 +3040,7 @@ def _require_pending_derivation_request_matches_pre_model_state(
         envelope,
         expected_private_binding=private_binding,
     )
-    pre_model_state = _pre_model_state_for_pending_derivation(
+    pre_model_state, response_removed = _pre_model_state_for_pending_derivation(
         state,
         envelope=envelope,
         response_content=response_content,
@@ -3027,7 +3058,17 @@ def _require_pending_derivation_request_matches_pre_model_state(
     # The complete prior detail is deliberately not retained.  Its only formal
     # authority is checked separately through ``authority_input_matrix``.
     expected["previous_case_detail"] = None
-    if expected != envelope.get("matrix_derivation_request_base"):
+    authoritative = envelope.get("matrix_derivation_request_base")
+    if expected == authoritative:
+        return
+    # Before the AI patch is merged, response_removed is false and the original
+    # exact authority check above remains mandatory. Only the terminal state may
+    # account for the one oldest recent message evicted by the bounded reducer.
+    if (
+        not response_removed
+        or not isinstance(authoritative, Mapping)
+        or not _matches_derivation_request_forward_compaction(authoritative, expected)
+    ):
         raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_DERIVATION_REQUEST_BINDING_INVALID")
 
 

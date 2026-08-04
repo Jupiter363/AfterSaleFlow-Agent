@@ -117,6 +117,32 @@ class FakeStreamService:
         return emit()
 
 
+async def _collect_validated_ndjson(
+    command: RoomGraphCommand,
+    events: tuple[AgentStreamEvent, ...],
+) -> list[dict[str, Any]]:
+    async def remaining() -> AsyncIterator[AgentStreamEvent]:
+        for event in events[1:]:
+            yield event
+
+    validator = AgentStreamProtocolValidator(
+        run_id=command.logical_run_id,
+        attempt_id=command.attempt_id,
+        audience=command.actor_scope.audience,
+    )
+    codec = ContractCodec(CONTRACT_ROOT)
+    first_line = _encode_event(codec, validator, events[0])
+    return [
+        json.loads(line)
+        async for line in _stream_ndjson(
+            codec=codec,
+            iterator=remaining(),
+            validator=validator,
+            first_line=first_line,
+        )
+    ]
+
+
 class ThreadResolver:
     async def resolve(
         self,
@@ -971,6 +997,78 @@ def test_truncated_extra_terminal_and_gapped_streams_end_with_one_protocol_error
         "retryable": False,
     }
     assert service.closed is True
+
+
+def test_twenty_independent_runs_accept_eighty_seven_deltas_then_one_usage_and_final() -> None:
+    async def scenario() -> None:
+        template, _ = _command()
+
+        for round_no in range(1, 21):
+            command = template.model_copy(
+                update={
+                    "logical_run_id": f"target-intake-run:long-stream:{round_no:02d}",
+                    "attempt_id": f"target-intake-attempt:long-stream:{round_no:02d}",
+                }
+            )
+            events = (
+                _event(command, "attempt_started", 0),
+                *(
+                    _event(command, "visible_delta", sequence)
+                    for sequence in range(1, 88)
+                ),
+                _event(command, "usage", 88),
+                _event(command, "final", 89),
+            )
+
+            decoded = await _collect_validated_ndjson(command, events)
+
+            assert [event["sequence_no"] for event in decoded] == list(range(90))
+            assert decoded[0]["event_type"] == "attempt_started"
+            assert [event["event_type"] for event in decoded[1:88]] == [
+                "visible_delta"
+            ] * 87
+            assert [event["event_type"] for event in decoded].count("usage") == 1
+            assert [event["event_type"] for event in decoded].count("final") == 1
+            assert [event["event_type"] for event in decoded].count("error") == 0
+            assert decoded[-2]["event_type"] == "usage"
+            assert decoded[-1]["event_type"] == "final"
+            assert {event["run_id"] for event in decoded} == {command.logical_run_id}
+            assert {event["attempt_id"] for event in decoded} == {command.attempt_id}
+
+    asyncio.run(scenario())
+
+
+def test_eighty_seven_deltas_without_usage_or_final_end_in_one_safe_protocol_error() -> None:
+    async def scenario() -> None:
+        template, _ = _command()
+        command = template.model_copy(
+            update={
+                "logical_run_id": "target-intake-run:long-stream:truncated",
+                "attempt_id": "target-intake-attempt:long-stream:truncated",
+            }
+        )
+        events = (
+            _event(command, "attempt_started", 0),
+            *(
+                _event(command, "visible_delta", sequence)
+                for sequence in range(1, 88)
+            ),
+        )
+
+        decoded = await _collect_validated_ndjson(command, events)
+
+        assert [event["sequence_no"] for event in decoded] == list(range(89))
+        assert [event["event_type"] for event in decoded].count("visible_delta") == 87
+        assert [event["event_type"] for event in decoded].count("usage") == 0
+        assert [event["event_type"] for event in decoded].count("final") == 0
+        assert [event["event_type"] for event in decoded].count("error") == 1
+        assert decoded[-1]["event_type"] == "error"
+        assert decoded[-1]["payload"] == {
+            "error_code": "GRAPH_STREAM_PROTOCOL_REJECTED",
+            "retryable": False,
+        }
+
+    asyncio.run(scenario())
 
 
 def test_stream_protocol_rejects_identity_sequence_payload_and_missing_terminal() -> None:
