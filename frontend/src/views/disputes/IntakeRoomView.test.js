@@ -1197,6 +1197,102 @@ describe("IntakeRoomView", () => {
     wrapper.unmount();
   });
 
+  it("keeps a Target TEMPORAL final locked until the 21st admission poll", async () => {
+    vi.useFakeTimers();
+    const runId = "run-target-temporal-command-admission-backoff";
+    const streamUrl = `/api/private-agent-streams/${runId}/events`;
+    const pendingStatus = intakeStatusWithProjection(
+      currentProcessProjection({
+        writer_mode: "TEMPORAL",
+        command_admission_state: "PENDING",
+      }),
+    );
+    const initialReadyStatus = intakeStatusWithProjection(
+      currentProcessProjection({ writer_mode: "TEMPORAL" }),
+    );
+    const readyStatus = intakeStatusWithProjection(
+      currentCamelProcessProjection({
+        writerMode: "TEMPORAL",
+        commandAdmissionState: "READY",
+      }),
+    );
+    const baselineTurnMemory = formalTurnMemory("基线正式卷宗", 1, 1);
+    const formalMemory = formalTurnMemory("正式卷宗已同步完成", 2, 2);
+    const targetTemporalRun = {
+      run_id: runId,
+      stream_url: streamUrl,
+    };
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      if (String(input).startsWith(streamUrl)) {
+        return dossierStreamResponse(runId, "流式草稿卷宗");
+      }
+      throw new Error(`unexpected fetch: ${String(input)}`);
+    });
+    const messagesLoader = vi.fn().mockResolvedValue([{
+      id: "MESSAGE_FORMAL_TARGET_TEMPORAL",
+      sequence_no: 5,
+      sender_type: "AGENT",
+      sender_role: "CUSTOMER_SERVICE",
+      agent_run_id: runId,
+      message_text: "正式回复已完成准入",
+    }]);
+    const turnMemoryLoader = vi.fn().mockResolvedValue(formalMemory);
+    const intakeStatusLoader = vi.fn().mockImplementation(() =>
+      Promise.resolve(
+        intakeStatusLoader.mock.calls.length >= 21 ? readyStatus : pendingStatus,
+      )
+    );
+    const postMessageAction = vi.fn().mockResolvedValue(targetTemporalRun);
+    const wrapper = await mountInteractiveView({
+      initialMessages: [],
+      initialTurnMemory: baselineTurnMemory,
+      initialIntakeStatus: initialReadyStatus,
+      postMessageAction,
+      messagesLoader,
+      turnMemoryLoader,
+      intakeStatusLoader,
+      eventStreamer: vi.fn(async () => {}),
+    });
+
+    wrapper.findComponent(ConversationStream).vm.$emit("submit", {
+      message_type: "PARTY_TEXT",
+      text: "等待 Target TEMPORAL 正式准入",
+      attachment_refs: [],
+    });
+    await flushPromises();
+    await vi.waitFor(() => {
+      expect(intakeStatusLoader).toHaveBeenCalledTimes(1);
+      expect(agentStreamStore.runs[runId]?.status).toBe("FINALIZING");
+    });
+
+    expect(wrapper.find(".conversation-stream__composer").exists()).toBe(false);
+    expect(messagesLoader).toHaveBeenCalledTimes(1);
+    expect(turnMemoryLoader).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(25_000);
+    await flushPromises();
+    await vi.waitFor(() => {
+      expect(agentStreamStore.runs[runId]?.status).toBe("COMPLETED");
+    });
+
+    expect(postMessageAction).toHaveBeenCalledTimes(1);
+    expect(intakeStatusLoader).toHaveBeenCalledTimes(21);
+    expect(wrapper.vm.$.setupState.messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        agent_run_id: runId,
+        message_text: "正式回复已完成准入",
+      }),
+    ]));
+    expect(wrapper.vm.$.setupState.turnMemory.case_intake_dossier.dossier.case_story)
+      .toEqual({ one_sentence_summary: "正式卷宗已同步完成" });
+    expect(wrapper.text()).toContain("正式回复已完成准入");
+    expect(wrapper.text()).toContain("正式卷宗已同步完成");
+    expect(wrapper.text()).not.toContain("流式草稿卷宗");
+    expect(wrapper.text()).not.toContain("正式卷宗尚未同步完成");
+    expect(wrapper.get("textarea").attributes("disabled")).toBeUndefined();
+    wrapper.unmount();
+  });
+
   it("clears a provisional right-side board when its V2 attempt aborts before reset", async () => {
     const persistedSummary = "已持久化的正式案情摘要";
     const abortedDraft = "已中止的临时案情摘要";

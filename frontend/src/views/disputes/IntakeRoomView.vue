@@ -72,6 +72,7 @@ const PROJECTION_MISSING = Symbol("projection-missing");
 const READINESS_RETRY_FAST_ATTEMPTS = 40;
 const READINESS_RETRY_FAST_DELAY_MS = 250;
 const READINESS_RETRY_SLOW_DELAY_MS = 1_000;
+const FORMAL_READINESS_MAX_POLL_DELAY_MS = 2_000;
 const FORMAL_AGENT_SENDER_ROLES = new Set([
   "CUSTOMER_SERVICE",
   "INTAKE_OFFICER",
@@ -351,7 +352,7 @@ const props = defineProps({
   modelHealthLoader: { type: Function, default: null },
   evidenceReadyPollAttempts: { type: Number, default: 4 },
   evidenceReadyPollDelayMs: { type: Number, default: 200 },
-  formalReadinessPollAttempts: { type: Number, default: 20 },
+  formalReadinessPollAttempts: { type: Number, default: 40 },
   formalReadinessPollDelayMs: { type: Number, default: 250 },
 });
 
@@ -1868,8 +1869,22 @@ function discardProvisionalIntakeRun(context, snapshot, failure = null) {
   return true;
 }
 
-function waitForFormalReadinessRetry(snapshot, token) {
-  const delay = Math.max(0, Number(props.formalReadinessPollDelayMs) || 0);
+function formalReadinessRetryDelayMs(baseDelayMs, failedAttempt) {
+  const base = Math.max(0, Number(baseDelayMs) || 0);
+  if (base === 0) return 0;
+  const attemptIndex = Math.max(0, Math.floor(Number(failedAttempt) || 0));
+  const maxDelay = Math.max(base, FORMAL_READINESS_MAX_POLL_DELAY_MS);
+  const backoffStep = Math.floor(attemptIndex / 4);
+  return Math.min(maxDelay, base * (2 ** backoffStep));
+}
+
+// Public FINAL may precede the independent fenced finalizer's readable commit;
+// poll quickly first, then back off to cover transient finalizer retries.
+function waitForFormalReadinessRetry(snapshot, token, failedAttempt) {
+  const delay = formalReadinessRetryDelayMs(
+    props.formalReadinessPollDelayMs,
+    failedAttempt,
+  );
   if (delay === 0) return Promise.resolve(isCurrentWorkspace(snapshot));
   return new Promise((resolve) => {
     let settled = false;
@@ -1921,7 +1936,7 @@ async function refreshUntilFormalReadiness(snapshot, context) {
     }
     if (formalReadinessVisible(context)) return true;
     if (attempt < attempts - 1) {
-      const shouldContinue = await waitForFormalReadinessRetry(snapshot, token);
+      const shouldContinue = await waitForFormalReadinessRetry(snapshot, token, attempt);
       if (!shouldContinue) return false;
     }
   }
