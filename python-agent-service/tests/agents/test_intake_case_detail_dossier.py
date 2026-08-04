@@ -9,14 +9,18 @@ import pytest
 from app.agents.dispute_intake_officer.schemas import IntakeCaseDetailLlmOutput
 from app.agents.dispute_intake_officer.skills.dossier.dossier_skill import (
     CaseDetailDossierSkill,
+    DIRECT_RESPONDENT_SOURCE,
     ORIGINAL_STATEMENT_SEPARATOR,
     SUBJECTIVE_RESPONDENT_SOURCE,
+    SUBJECTIVE_RESPONDENT_CONFIDENCE_NOTE,
     _canonical_verification_focus,
     _enforce_case_story_summary,
     _enforce_claim_resolution,
+    _enforce_respondent_attitude_source,
     _question_targets_resolved_intake_field,
     _reported_attitude_position,
 )
+from app.llm import AgentOutputSchemaError
 from app.schemas import IntakeTurnRequest
 from app.streaming import (
     AgentStreamObserver,
@@ -462,6 +466,283 @@ def test_real_intake_replay_keeps_summary_attitude_statement_and_focus_clean() -
     assert len(second_focus) <= 4
     assert not any("完整度" in item for item in second_focus)
     assert sum("商家" in item and "诉求" in item for item in second_focus) <= 1
+
+
+def test_prior_attitude_grounding_carries_exactly_and_factual_only_response_stays_absent() -> None:
+    base_attitude = {
+        "respondent_role": "MERCHANT",
+        "attitude": "DISAGREE",
+        "position": "The merchant explicitly rejected the requested refund.",
+        "source": SUBJECTIVE_RESPONDENT_SOURCE,
+        "confidence": 0.8,
+        "confidence_note": SUBJECTIVE_RESPONDENT_CONFIDENCE_NOTE,
+    }
+    for grounding in (
+        {"source": "INITIAL_FORM", "message_id": ""},
+        {
+            "source": "PARTICIPANT_MESSAGE",
+            "message_id": "MESSAGE_PRIOR_ATTITUDE",
+        },
+    ):
+        prior_attitude = {**base_attitude, "grounding": grounding}
+        previous = {
+            "schema_version": "intake_case_detail.v1",
+            "claim_resolution": {
+                "initiator_role": "USER",
+                "requested_resolution": "REFUND",
+            },
+            "respondent_attitude": prior_attitude,
+        }
+        request = _request(
+            current_user_message={
+                "message_id": "MESSAGE_NEUTRAL_FACT",
+                "sequence_no": 5,
+                "role": "USER",
+                "source": "ROOM_MESSAGE",
+                "text": "The order reference was corrected in this turn.",
+            },
+            previous_case_detail=previous,
+            initiator_statement_transcript=[
+                {
+                    "message_id": "MESSAGE_PRIOR_ATTITUDE",
+                    "role": "USER",
+                    "text": base_attitude["position"],
+                }
+            ],
+        )
+        detail = {"respondent_attitude": dict(prior_attitude)}
+
+        _enforce_respondent_attitude_source(detail, request, previous, None)
+
+        assert detail["respondent_attitude"] == prior_attitude
+
+    case_id = "CASE_respondent_factual_only"
+    merchant_context = _agent_context(case_id)
+    merchant_context.update(
+        actor_id="MERCHANT_local_1",
+        actor_role="MERCHANT",
+        permission_level="PARTY_MERCHANT",
+        scope_type="INTAKE_PARTY_PRIVATE",
+        allowed_actor_ids=["MERCHANT_local_1"],
+        allowed_actor_roles=["MERCHANT"],
+    )
+    previous = {
+        "schema_version": "intake_case_detail.v1",
+        "claim_resolution": {
+            "initiator_role": "USER",
+            "requested_resolution": "REFUND",
+        },
+        "case_fact_matrix": {
+            "schema_version": "case_fact_matrix.v2",
+            "party_map": {
+                "initiator_role": "USER",
+                "respondent_role": "MERCHANT",
+            },
+        },
+    }
+    request = IntakeTurnRequest.model_validate(
+        {
+            "case_id": case_id,
+            "room_type": "INTAKE",
+            "turn_source": "ROOM_MESSAGE",
+            "current_user_message": {
+                "message_id": "MESSAGE_MERCHANT_FACT_ONLY",
+                "sequence_no": 2,
+                "role": "MERCHANT",
+                "source": "ROOM_MESSAGE",
+                "text": "The service reference number is SERVICE-2026-001.",
+            },
+            "recent_dialogue_messages": [],
+            "previous_case_detail": previous,
+            "agent_context": merchant_context,
+        }
+    )
+    detail = {
+        "respondent_attitude": {
+            "respondent_role": "MERCHANT",
+            "attitude": "NOT_RESPONDED",
+            "position": "The respondent has not expressed an attitude.",
+            "source": "尚未回应",
+            "confidence": 0.5,
+        }
+    }
+
+    _enforce_respondent_attitude_source(detail, request, previous, None)
+    factual_only = detail["respondent_attitude"]
+
+    assert factual_only["attitude"] == "NOT_RESPONDED"
+    assert factual_only["source"] != DIRECT_RESPONDENT_SOURCE
+    assert "grounding" not in factual_only
+
+
+@pytest.mark.parametrize(
+    ("text", "expected", "provide_candidate"),
+    [
+        ("We did not cause X, but we accept Y.", "AGREE", False),
+        ("Our company accepts Y.", "AGREE", True),
+        ("我方并不同意Y。", "DISAGREE", False),
+        ("我方没有同意Y。", "DISAGREE", True),
+    ],
+)
+def test_direct_respondent_adversarial_substantive_signal_updates_current_grounding(
+    text: str,
+    expected: str,
+    provide_candidate: bool,
+) -> None:
+    case_id = "CASE_direct_attitude_adversarial"
+    message_id = "MESSAGE_MERCHANT_CURRENT_ATTITUDE"
+    merchant_context = _agent_context(case_id)
+    merchant_context.update(
+        actor_id="MERCHANT_local_1",
+        actor_role="MERCHANT",
+        permission_level="PARTY_MERCHANT",
+        scope_type="INTAKE_PARTY_PRIVATE",
+        allowed_actor_ids=["MERCHANT_local_1"],
+        allowed_actor_roles=["MERCHANT"],
+    )
+    prior_attitude = {
+        "respondent_role": "MERCHANT",
+        "attitude": "DISAGREE" if expected == "AGREE" else "AGREE",
+        "position": "The prior respondent attitude must not be carried.",
+        "source": DIRECT_RESPONDENT_SOURCE,
+        "confidence": 0.7,
+        "grounding": {
+            "source": "RESPONDENT_PARTICIPANT_MESSAGE",
+            "message_id": "MESSAGE_MERCHANT_PRIOR_ATTITUDE",
+        },
+    }
+    previous = {
+        "respondent_attitude": prior_attitude,
+        "case_fact_matrix": {
+            "party_map": {
+                "initiator_role": "USER",
+                "respondent_role": "MERCHANT",
+            }
+        },
+    }
+    request = IntakeTurnRequest.model_validate(
+        {
+            "case_id": case_id,
+            "room_type": "INTAKE",
+            "turn_source": "ROOM_MESSAGE",
+            "current_user_message": {
+                "message_id": message_id,
+                "sequence_no": 2,
+                "role": "MERCHANT",
+                "source": "ROOM_MESSAGE",
+                "text": text,
+            },
+            "recent_dialogue_messages": [],
+            "previous_case_detail": previous,
+            "agent_context": merchant_context,
+        }
+    )
+    detail = {"respondent_attitude": dict(prior_attitude)}
+    llm_case_detail = (
+        {
+            "respondent_attitude": {
+                "attitude": expected,
+                "position": text,
+                "confidence": 0.9,
+            }
+        }
+        if provide_candidate
+        else None
+    )
+
+    _enforce_respondent_attitude_source(
+        detail,
+        request,
+        previous,
+        llm_case_detail,
+    )
+
+    attitude = detail["respondent_attitude"]
+    assert attitude["respondent_role"] == "MERCHANT"
+    assert attitude["attitude"] == expected
+    assert attitude["position"] == text
+    assert attitude["source"] == DIRECT_RESPONDENT_SOURCE
+    assert attitude["grounding"] == {
+        "source": "RESPONDENT_PARTICIPANT_MESSAGE",
+        "message_id": message_id,
+    }
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "建议Y的是对方，不是我方。",
+        "同意Y的是对方，我方未表态。",
+        "The buyer accepted Y; our company only recorded it.",
+        "We do not disagree with Y.",
+        "We do not accept Y.",
+        "I have not accepted Y.",
+        "We accept no Y.",
+        "We do not propose Y.",
+    ],
+)
+def test_direct_respondent_adversarial_unresolved_signal_fails_closed(
+    text: str,
+) -> None:
+    case_id = "CASE_direct_attitude_unresolved"
+    merchant_context = _agent_context(case_id)
+    merchant_context.update(
+        actor_id="MERCHANT_local_1",
+        actor_role="MERCHANT",
+        permission_level="PARTY_MERCHANT",
+        scope_type="INTAKE_PARTY_PRIVATE",
+        allowed_actor_ids=["MERCHANT_local_1"],
+        allowed_actor_roles=["MERCHANT"],
+    )
+    prior_attitude = {
+        "respondent_role": "MERCHANT",
+        "attitude": "DISAGREE",
+        "position": "The prior respondent attitude must not resolve ambiguity.",
+        "source": DIRECT_RESPONDENT_SOURCE,
+        "confidence": 0.7,
+        "grounding": {
+            "source": "RESPONDENT_PARTICIPANT_MESSAGE",
+            "message_id": "MESSAGE_MERCHANT_PRIOR_ATTITUDE",
+        },
+    }
+    previous = {
+        "respondent_attitude": prior_attitude,
+        "case_fact_matrix": {
+            "party_map": {
+                "initiator_role": "USER",
+                "respondent_role": "MERCHANT",
+            }
+        },
+    }
+    request = IntakeTurnRequest.model_validate(
+        {
+            "case_id": case_id,
+            "room_type": "INTAKE",
+            "turn_source": "ROOM_MESSAGE",
+            "current_user_message": {
+                "message_id": "MESSAGE_MERCHANT_UNRESOLVED",
+                "sequence_no": 2,
+                "role": "MERCHANT",
+                "source": "ROOM_MESSAGE",
+                "text": text,
+            },
+            "recent_dialogue_messages": [],
+            "previous_case_detail": previous,
+            "agent_context": merchant_context,
+        }
+    )
+    detail = {"respondent_attitude": dict(prior_attitude)}
+
+    with pytest.raises(
+        AgentOutputSchemaError,
+        match="respondent attitude signal unresolved",
+    ):
+        _enforce_respondent_attitude_source(
+            detail,
+            request,
+            previous,
+            None,
+        )
 
 
 def test_intake_model_output_requires_a_complete_case_summary_each_turn() -> None:

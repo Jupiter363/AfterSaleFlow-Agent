@@ -27,6 +27,7 @@ from app.schemas.final_agents import IntakeTurnRequest
 
 
 SUBJECTIVE_RESPONDENT_SOURCE = "发起方单方陈述（主观）"
+DIRECT_RESPONDENT_SOURCE = "被发起方接待室直接陈述"
 _SUBSTANTIVE = {FactStance.CONFIRM, FactStance.DENY, FactStance.PARTIAL}
 _CONTENT_HASH = re.compile(r"^[0-9a-f]{64}$")
 
@@ -450,7 +451,12 @@ def _claims(
         claim_refs.append(current_ref)
 
     reported = _reported_position(
-        case_detail, previous, respondent_role, current_ref, actor_role == initiator_role
+        request,
+        case_detail,
+        previous,
+        respondent_role,
+        current_ref,
+        actor_role == initiator_role,
     )
     direct = (
         previous.claims.respondent_direct.model_dump(mode="json")
@@ -465,14 +471,30 @@ def _claims(
     if actor_role == respondent_role and respondent_claim is None and direct is None:
         respondent_claim = _fallback_respondent_claim(case_detail, request)
     if actor_role == respondent_role and respondent_claim is not None:
-        direct = {
+        direct_candidate = {
             "respondent_role": respondent_role,
             **respondent_claim,
             "source_type": "RESPONDENT_DIRECT_INTAKE",
-            "source_refs": _deduplicate(
-                [*(direct.get("source_refs", []) if direct else []), current_ref]
-            )[:50],
         }
+        if direct is not None and {
+            key: value for key, value in direct.items() if key != "source_refs"
+        } == direct_candidate:
+            pass
+        else:
+            if not _attitude_grounding_matches_source(
+                request,
+                case_detail,
+                current_ref=current_ref,
+                expected_dossier_source=DIRECT_RESPONDENT_SOURCE,
+                expected_message_source="RESPONDENT_PARTICIPANT_MESSAGE",
+            ):
+                _schema_error("changed respondent direct claim is not bound to the current source")
+            direct = {
+                **direct_candidate,
+                "source_refs": _deduplicate(
+                    [*(direct.get("source_refs", []) if direct else []), current_ref]
+                )[:50],
+            }
     return {
         "initiator_claim": {
             **material,
@@ -538,6 +560,7 @@ def _fallback_respondent_claim(
 
 
 def _reported_position(
+    request: IntakeTurnRequest,
     case_detail: dict[str, Any],
     previous: CaseFactMatrixV2 | None,
     respondent_role: str,
@@ -561,18 +584,140 @@ def _reported_position(
         "PLATFORM_UNKNOWN",
     } or not position:
         return prior.model_dump(mode="json") if prior is not None else None
+    candidate = {
+        "respondent_role": respondent_role,
+        "attitude": code,
+        "position_summary": position,
+        "source_type": "INITIATOR_SUBJECTIVE_REPORT",
+    }
+    if prior is not None:
+        prior_payload = prior.model_dump(mode="json")
+        if {
+            key: value for key, value in prior_payload.items() if key != "source_refs"
+        } == candidate:
+            return prior_payload
+    elif _is_legacy_dossier_attitude_exact_carry(
+        request,
+        attitude,
+        respondent_role=respondent_role,
+    ):
+        # A pre-matrix checkpoint can carry a valid historical dossier branch but
+        # has no formal source_refs to preserve.  Keep it dossier-only until a
+        # future turn supplies a fresh, current-source-bound update.
+        return None
+    if not current_is_initiator or not _attitude_grounding_matches_source(
+        request,
+        case_detail,
+        current_ref=current_ref,
+        expected_dossier_source=SUBJECTIVE_RESPONDENT_SOURCE,
+        expected_message_source="PARTICIPANT_MESSAGE",
+        allow_initial_form=True,
+    ):
+        _schema_error("changed reported respondent position is not bound to the current source")
     refs = list(prior.source_refs) if prior is not None else []
     if current_is_initiator:
         refs.append(current_ref)
     if not refs:
         refs.append(current_ref)
     return {
-        "respondent_role": respondent_role,
-        "attitude": code,
-        "position_summary": position,
-        "source_type": "INITIATOR_SUBJECTIVE_REPORT",
+        **candidate,
         "source_refs": _deduplicate(refs)[:50],
     }
+
+
+def _is_legacy_dossier_attitude_exact_carry(
+    request: IntakeTurnRequest,
+    current: Mapping[str, Any],
+    *,
+    respondent_role: str,
+) -> bool:
+    previous_detail = request.previous_case_detail
+    if not isinstance(previous_detail, dict):
+        return False
+    previous = previous_detail.get("respondent_attitude")
+    if not isinstance(previous, dict) or not _canonical_json_equal(previous, current):
+        return False
+    if (
+        previous.get("respondent_role") != respondent_role
+        or _optional_text(previous.get("source")) != SUBJECTIVE_RESPONDENT_SOURCE
+        or "attitude" not in previous
+        or "status" in previous
+        or str(previous.get("attitude") or "").strip()
+        not in {
+            "AGREE",
+            "PARTIALLY_AGREE",
+            "DISAGREE",
+            "ALTERNATIVE_PROPOSED",
+            "NEED_MORE_INFO",
+        }
+        or _optional_text(previous.get("position")) is None
+    ):
+        return False
+    confidence = previous.get("confidence")
+    if (
+        isinstance(confidence, bool)
+        or not isinstance(confidence, int | float)
+        or not 0 <= confidence <= 1
+        or _optional_text(previous.get("confidence_note")) is None
+    ):
+        return False
+    grounding = _mapping(previous.get("grounding"))
+    if not {"source", "message_id"} <= set(grounding):
+        return False
+    grounding_source = grounding.get("source")
+    message_id = grounding.get("message_id")
+    return (
+        grounding_source == "INITIAL_FORM" and message_id == ""
+    ) or (
+        grounding_source == "PARTICIPANT_MESSAGE"
+        and isinstance(message_id, str)
+        and bool(message_id)
+    )
+
+
+def _attitude_grounding_matches_source(
+    request: IntakeTurnRequest,
+    case_detail: dict[str, Any],
+    *,
+    current_ref: str,
+    expected_dossier_source: str,
+    expected_message_source: str,
+    allow_initial_form: bool = False,
+) -> bool:
+    attitude = _mapping(case_detail.get("respondent_attitude"))
+    if _optional_text(attitude.get("source")) != expected_dossier_source:
+        return False
+    grounding = _mapping(attitude.get("grounding"))
+    if not {"source", "message_id"} <= set(grounding):
+        return False
+    current = request.current_user_message
+    if current is not None:
+        return (
+            grounding.get("source") == expected_message_source
+            and grounding.get("message_id") == current.message_id
+            and current_ref == current.message_id
+        )
+    return (
+        allow_initial_form
+        and request.initial_case_facts is not None
+        and grounding.get("source") == "INITIAL_FORM"
+        and grounding.get("message_id") == ""
+        and current_ref == f"INTAKE_FORM_{request.case_id}"
+    )
+
+
+def _canonical_json_equal(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+    return json.dumps(
+        left,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ) == json.dumps(
+        right,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 def _previous_matrix(request: IntakeTurnRequest) -> CaseFactMatrixV2 | None:

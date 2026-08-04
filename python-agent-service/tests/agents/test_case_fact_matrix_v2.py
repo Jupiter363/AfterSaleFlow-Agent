@@ -10,6 +10,11 @@ from app.agents.dispute_intake_officer.case_fact_matrix import (
     finalize_case_fact_matrix,
     validate_case_fact_matrix_content_hash,
 )
+from app.agents.dispute_intake_officer.skills.dossier.dossier_skill import (
+    DIRECT_RESPONDENT_SOURCE,
+    SUBJECTIVE_RESPONDENT_CONFIDENCE_NOTE,
+    SUBJECTIVE_RESPONDENT_SOURCE,
+)
 from app.contracts.v1.codec import canonical_sha256_omitting
 from app.llm import AgentOutputSchemaError
 from app.schemas import CaseFactMatrixDeltaV2, CaseFactMatrixV2, IntakeTurnRequest
@@ -565,6 +570,20 @@ def test_unified_matrix_evolves_from_initiator_to_bilateral_without_changing_fac
     assert initiator.fact_rows[0].requires_resolution is None
     assert initiator.fact_indexes.not_computed_fact_ids == [fact_id]
 
+    respondent_detail = _detail(
+        "用户主张页面包含基础安装并要求退费；商家确认页面说明，但称收费对应额外墙体加固。"
+    )
+    respondent_detail["respondent_attitude"] = {
+        "respondent_role": "MERCHANT",
+        "attitude": "DISAGREE",
+        "position": "商家不同意退还额外服务费。",
+        "source": DIRECT_RESPONDENT_SOURCE,
+        "confidence": 0.8,
+        "grounding": {
+            "source": "RESPONDENT_PARTICIPANT_MESSAGE",
+            "message_id": "MESSAGE_MERCHANT_1",
+        },
+    }
     respondent = finalize_case_fact_matrix(
         request=IntakeTurnRequest.model_validate(
             {
@@ -585,9 +604,7 @@ def test_unified_matrix_evolves_from_initiator_to_bilateral_without_changing_fac
                 "agent_context": _context(case_id, "MERCHANT", "merchant-local"),
             }
         ),
-        case_detail=_detail(
-            "用户主张页面包含基础安装并要求退费；商家确认页面说明，但称收费对应额外墙体加固。"
-        ),
+        case_detail=respondent_detail,
         delta=CaseFactMatrixDeltaV2.model_validate(
             {
                 "fact_rows": [
@@ -647,6 +664,53 @@ def test_unified_matrix_evolves_from_initiator_to_bilateral_without_changing_fac
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()
+
+
+@pytest.mark.parametrize(
+    "grounding",
+    [
+        None,
+        {
+            "source": "RESPONDENT_PARTICIPANT_MESSAGE",
+            "message_id": "MESSAGE_WRONG_DIRECT_SOURCE",
+        },
+    ],
+)
+def test_changed_direct_claim_requires_exact_current_grounding(
+    grounding: dict[str, str] | None,
+) -> None:
+    case_id = "CASE_direct_claim_grounding"
+    previous = _single_fact_initiator_matrix(case_id)
+    fact_id = previous.fact_rows[0].fact_id
+    detail = _detail("The respondent proposes a different resolution.")
+    attitude = {
+        "respondent_role": "MERCHANT",
+        "attitude": "DISAGREE",
+        "position": "The respondent rejects the requested refund.",
+        "source": DIRECT_RESPONDENT_SOURCE,
+        "confidence": 0.8,
+    }
+    if grounding is not None:
+        attitude["grounding"] = grounding
+    detail["respondent_attitude"] = attitude
+    delta_payload = _existing_fact_delta(fact_id).model_dump(mode="json")
+    delta_payload["respondent_claim"] = {
+        "attitude": "DISAGREE",
+        "position_summary": "The respondent rejects the requested refund.",
+    }
+
+    with pytest.raises(
+        AgentOutputSchemaError,
+        match="changed respondent direct claim is not bound to the current source",
+    ):
+        finalize_case_fact_matrix(
+            request=_respondent_request(
+                case_id,
+                previous.model_dump(mode="json"),
+            ),
+            case_detail=detail,
+            delta=CaseFactMatrixDeltaV2.model_validate(delta_payload),
+        )
 
 
 def test_respondent_fact_only_turn_does_not_invent_or_erase_a_claim() -> None:
@@ -732,6 +796,18 @@ def test_respondent_fact_only_turn_does_not_invent_or_erase_a_claim() -> None:
     assert fact_only.claims.respondent_direct is None
     assert fact_only.claims.claim_conflict is None
 
+    claim_answer_detail = _detail("双方确认页面标注，但商家不同意退还安装费。")
+    claim_answer_detail["respondent_attitude"] = {
+        "respondent_role": "MERCHANT",
+        "attitude": "DISAGREE",
+        "position": "商家不同意退还安装费。",
+        "source": DIRECT_RESPONDENT_SOURCE,
+        "confidence": 0.8,
+        "grounding": {
+            "source": "RESPONDENT_PARTICIPANT_MESSAGE",
+            "message_id": "MESSAGE_MERCHANT_CLAIM",
+        },
+    }
     claim_answer = finalize_case_fact_matrix(
         request=IntakeTurnRequest.model_validate(
             {
@@ -755,7 +831,7 @@ def test_respondent_fact_only_turn_does_not_invent_or_erase_a_claim() -> None:
                 "agent_context": _context(case_id, "MERCHANT", "merchant-local"),
             }
         ),
-        case_detail=_detail("双方确认页面标注，但商家不同意退还安装费。"),
+        case_detail=claim_answer_detail,
         delta=CaseFactMatrixDeltaV2.model_validate(
             {
                 "fact_rows": [
@@ -823,6 +899,199 @@ def test_respondent_fact_only_turn_does_not_invent_or_erase_a_claim() -> None:
     assert carried.claims.respondent_direct.attitude == "DISAGREE"
     assert carried.claims.respondent_direct.source_refs == claim_refs
     assert "MESSAGE_MERCHANT_LATER_FACT" not in carried.claims.respondent_direct.source_refs
+
+
+def test_historical_reported_attitude_exact_carry_does_not_append_neutral_current_source() -> None:
+    case_id = "CASE_reported_attitude_exact_carry"
+    prior_attitude = {
+        "respondent_role": "MERCHANT",
+        "attitude": "DISAGREE",
+        "position": "The merchant explicitly rejected the requested refund.",
+        "source": SUBJECTIVE_RESPONDENT_SOURCE,
+        "confidence": 0.8,
+        "confidence_note": SUBJECTIVE_RESPONDENT_CONFIDENCE_NOTE,
+        "grounding": {"source": "INITIAL_FORM", "message_id": ""},
+    }
+    opening = IntakeTurnRequest.model_validate(
+        {
+            "case_id": case_id,
+            "room_type": "INTAKE",
+            "turn_source": "FORM_SUBMISSION",
+            "initial_case_facts": {
+                "form_source": "FORM_SUBMISSION",
+                "form_description": prior_attitude["position"],
+                "order_reference": "ORDER_REPORTED_ATTITUDE_CARRY",
+                "initiator_role": "USER",
+            },
+            "agent_context": _context(case_id, "USER", "user-local"),
+        }
+    )
+    opening_detail = _detail("The initiator reports the respondent's position.")
+    opening_detail["respondent_attitude"] = deepcopy(prior_attitude)
+    first = finalize_case_fact_matrix(
+        request=opening,
+        case_detail=opening_detail,
+        delta=CaseFactMatrixDeltaV2.model_validate(
+            {
+                "fact_rows": [
+                    {
+                        "fact_key": "NEW_REPORTED_ATTITUDE_FACT",
+                        "category": "OTHER",
+                        "fact_target": "Whether the respondent rejected the request",
+                        "materiality": "CORE",
+                        "stance": "CONFIRM",
+                        "position_summary": "The initiator reports a rejection.",
+                        "asserted_value": "rejected",
+                        "source_scope": "CURRENT_SOURCE",
+                    }
+                ],
+                "summary_source_fact_keys": ["NEW_REPORTED_ATTITUDE_FACT"],
+            }
+        ),
+    )
+    prior_claim = first.claims.respondent_reported_by_initiator
+    assert prior_claim is not None
+    prior_refs = list(prior_claim.source_refs)
+    fact_id = first.fact_rows[0].fact_id
+
+    neutral_message_id = "MESSAGE_USER_NEUTRAL_FACT"
+    carried_detail = _detail("The current turn adds a factual reference only.")
+    carried_detail["respondent_attitude"] = deepcopy(prior_attitude)
+    carried = finalize_case_fact_matrix(
+        request=IntakeTurnRequest.model_validate(
+            {
+                "case_id": case_id,
+                "room_type": "INTAKE",
+                "turn_source": "ROOM_MESSAGE",
+                "current_user_message": {
+                    "message_id": neutral_message_id,
+                    "sequence_no": 2,
+                    "role": "USER",
+                    "source": "ROOM_MESSAGE",
+                    "text": "The order reference was corrected in this turn.",
+                },
+                "recent_dialogue_messages": [],
+                "previous_case_detail": {
+                    "case_fact_matrix": first.model_dump(mode="json")
+                },
+                "agent_context": _context(case_id, "USER", "user-local"),
+            }
+        ),
+        case_detail=carried_detail,
+        delta=CaseFactMatrixDeltaV2.model_validate(
+            {
+                "fact_rows": [
+                    {
+                        "fact_key": fact_id,
+                        "category": "OTHER",
+                        "fact_target": "Whether the respondent rejected the request",
+                        "materiality": "CORE",
+                        "stance": "CONFIRM",
+                        "position_summary": "The initiator reports a rejection.",
+                        "asserted_value": "rejected",
+                        "source_scope": "PREVIOUS_MATRIX",
+                    }
+                ],
+                "summary_source_fact_keys": [fact_id],
+            }
+        ),
+    )
+
+    reported = carried.claims.respondent_reported_by_initiator
+    assert reported is not None
+    assert reported.model_dump(mode="json") == prior_claim.model_dump(mode="json")
+    assert reported.source_refs == prior_refs
+    assert neutral_message_id not in reported.source_refs
+
+
+def test_legacy_dossier_exact_attitude_carry_does_not_mint_a_current_reported_claim() -> None:
+    case_id = "CASE_legacy_attitude_migration"
+    current_message_id = "MESSAGE_USER_LEGACY_NEUTRAL"
+    prior_attitude = {
+        "respondent_role": "MERCHANT",
+        "attitude": "DISAGREE",
+        "position": "The merchant explicitly rejected the requested refund.",
+        "source": SUBJECTIVE_RESPONDENT_SOURCE,
+        "confidence": 0.8,
+        "confidence_note": SUBJECTIVE_RESPONDENT_CONFIDENCE_NOTE,
+        "grounding": {"source": "INITIAL_FORM", "message_id": ""},
+    }
+    legacy_dossier = {
+        "schema_version": "intake_case_detail.v1",
+        "claim_resolution": {
+            "initiator_role": "USER",
+            "requested_resolution": "REFUND",
+        },
+        "respondent_attitude": deepcopy(prior_attitude),
+    }
+    request = IntakeTurnRequest.model_validate(
+        {
+            "case_id": case_id,
+            "room_type": "INTAKE",
+            "turn_source": "ROOM_MESSAGE",
+            "current_user_message": {
+                "message_id": current_message_id,
+                "sequence_no": 5,
+                "role": "USER",
+                "source": "ROOM_MESSAGE",
+                "text": "The order reference was corrected in this turn.",
+            },
+            "recent_dialogue_messages": [],
+            "previous_case_detail": legacy_dossier,
+            "agent_context": _context(case_id, "USER", "user-local"),
+        }
+    )
+    delta = CaseFactMatrixDeltaV2.model_validate(
+        {
+            "fact_rows": [
+                {
+                    "fact_key": "NEW_LEGACY_MIGRATION_FACT",
+                    "category": "ORDER",
+                    "fact_target": "Whether the corrected order reference is current",
+                    "materiality": "SUPPORTING",
+                    "stance": "CONFIRM",
+                    "position_summary": "The initiator corrected the order reference.",
+                    "asserted_value": "corrected",
+                    "source_scope": "CURRENT_SOURCE",
+                }
+            ],
+            "summary_source_fact_keys": ["NEW_LEGACY_MIGRATION_FACT"],
+        }
+    )
+
+    def finalize(attitude: dict[str, object]):
+        detail = _detail("The current turn corrects an order reference.")
+        detail["respondent_attitude"] = deepcopy(attitude)
+        return finalize_case_fact_matrix(
+            request=request,
+            case_detail=detail,
+            delta=delta,
+        )
+
+    migrated = finalize(prior_attitude)
+
+    assert migrated.matrix_kind == "INITIATOR_FROZEN"
+    assert len(migrated.fact_rows) == 1
+    assert migrated.fact_rows[0].positions.USER.source_refs == [current_message_id]
+    assert migrated.claims.respondent_reported_by_initiator is None
+
+    variants: list[dict[str, object]] = []
+    changed_attitude = deepcopy(prior_attitude)
+    changed_attitude["attitude"] = "AGREE"
+    variants.append(changed_attitude)
+    changed_position = deepcopy(prior_attitude)
+    changed_position["position"] = "The merchant accepted the requested refund."
+    variants.append(changed_position)
+    changed_grounding_source = deepcopy(prior_attitude)
+    changed_grounding_source["grounding"]["source"] = "PARTICIPANT_MESSAGE"
+    variants.append(changed_grounding_source)
+    changed_grounding_message = deepcopy(prior_attitude)
+    changed_grounding_message["grounding"]["message_id"] = "MESSAGE_WRONG_LEGACY_SOURCE"
+    variants.append(changed_grounding_message)
+
+    for changed in variants:
+        with pytest.raises(AgentOutputSchemaError):
+            finalize(changed)
 
 
 def test_missing_delta_carries_the_prior_matrix_without_renumbering_facts() -> None:

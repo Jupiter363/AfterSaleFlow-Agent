@@ -6,7 +6,7 @@ import copy
 import re
 from difflib import SequenceMatcher
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from app.schemas import IntakeTurnRequest
 from app.schemas.intake_case_matrix import UnilateralCaseMatrixDraftV1
@@ -14,6 +14,7 @@ from app.schemas.case_fact_matrix import CaseFactMatrixDeltaV2
 from app.agents.dispute_intake_officer.case_fact_matrix import (
     finalize_case_fact_matrix,
 )
+from app.llm import AgentOutputSchemaError
 
 
 ORDER_REFERENCE_RE = re.compile(r"\b(?:ORDER|ORD|订单)[-_]?[A-Za-z0-9]{3,40}\b", re.IGNORECASE)
@@ -43,6 +44,47 @@ RESPONDENT_ATTITUDE_CODES = {
     "NEED_MORE_INFO",
     "PLATFORM_UNKNOWN",
 }
+_SUBSTANTIVE_RESPONDENT_ATTITUDE_CODES = frozenset(
+    {
+        "AGREE",
+        "PARTIALLY_AGREE",
+        "DISAGREE",
+        "ALTERNATIVE_PROPOSED",
+        "NEED_MORE_INFO",
+    }
+)
+_RESPONDENT_ATTITUDE_SOURCE_IDENTIFIER = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+)
+_DIRECT_ATTITUDE_CLAUSE_BOUNDARY = re.compile(
+    r"[。！？!?；;，,\n]+|\b(?:but|however|nevertheless|yet)\b",
+    re.IGNORECASE,
+)
+_DIRECT_ATTITUDE_SIGNAL_EN = re.compile(
+    r"\b(?:partially\s+(?:agree|agreed|accept|accepted)|agree|agreed|agrees|accept|"
+    r"accepted|accepts|reject|rejected|rejects|refuse|refused|refuses|disagree|"
+    r"disagreed|disagrees|offer|offered|offers|propose|proposed|proposes|suggest|"
+    r"suggested|suggests|need\s+more\s+information|"
+    r"request\s+more\s+information)\b",
+    re.IGNORECASE,
+)
+_DIRECT_ATTITUDE_SELF_EN = re.compile(
+    r"^\s*(?:i|we|our\s+(?:company|side|firm|business|organization))\b(?P<body>.*)$",
+    re.IGNORECASE,
+)
+_DIRECT_ATTITUDE_SIGNAL_ZH = re.compile(
+    r"部分(?:同意|接受)|同意|接受|拒绝|不同意|不支持|不接受|愿意|"
+    r"提出|建议|替代方案|要求补充|需要更多信息|未表态|没有表态"
+)
+_DIRECT_ATTITUDE_SELF_ZH = re.compile(
+    r"^\s*(?:我|本人|我方|我们|本方|本公司|我司)(?P<body>.*)$"
+)
+
+
+@dataclass(frozen=True)
+class DirectRespondentAttitudeDetection:
+    state: Literal["NONE", "SUBSTANTIVE", "UNRESOLVED"]
+    candidate: dict[str, Any] | None = None
 
 CASE_DETAIL_TOP_LEVEL_FIELDS = frozenset(
     {
@@ -1164,15 +1206,38 @@ def _enforce_respondent_attitude_source(
         or (current.role if current is not None else None)
     )
     actor_role = str(request.agent_context.actor_role or "").upper()
+    previous_attitude = (
+        previous.get("respondent_attitude") if isinstance(previous, dict) else None
+    )
+    if not isinstance(previous_attitude, dict):
+        previous_attitude = {}
+    carried_previous_attitude = _grounded_prior_respondent_attitude(
+        previous_attitude,
+        expected_respondent_role=_opposite_party(initiator_role),
+    )
     if current is not None and actor_role == _opposite_party(initiator_role):
-        llm_attitude = _nested_attitude(llm_case_detail)
-        candidate = _reported_attitude(llm_attitude)
+        detection = detect_direct_respondent_attitude(current.text)
+        if detection.state == "UNRESOLVED":
+            raise AgentOutputSchemaError(
+                "intake_turn_case_detail",
+                "respondent attitude signal unresolved",
+            )
+        if detection.state == "NONE":
+            detail["respondent_attitude"] = (
+                copy.deepcopy(carried_previous_attitude)
+                if carried_previous_attitude is not None
+                else _default_respondent_attitude(
+                    initial,
+                    allow_subjective_seed=False,
+                )
+            )
+            return
+        candidate = detection.candidate
         if candidate is None:
-            candidate = {
-                "attitude": "NEED_MORE_INFO",
-                "position": current.text,
-                "confidence": 0.5,
-            }
+            raise AgentOutputSchemaError(
+                "intake_turn_case_detail",
+                "respondent attitude signal unresolved",
+            )
         detail["respondent_attitude"] = {
             "respondent_role": actor_role,
             "attitude": candidate["attitude"],
@@ -1190,40 +1255,16 @@ def _enforce_respondent_attitude_source(
         current.text,
         initiator_role,
     )
-    prior_reported_texts = [form_description] if form_description else []
-    prior_reported_texts.extend(
-        message.text
-        for message in request.initiator_statement_transcript
-        if current is None or message.message_id != current.message_id
-    )
-    prior_has_report = any(
-        _has_explicit_respondent_report(text, initiator_role)
-        for text in prior_reported_texts
-    )
-
     llm_attitude = _nested_attitude(llm_case_detail)
-    previous_attitude = (
-        previous.get("respondent_attitude") if isinstance(previous, dict) else None
-    )
-    if not isinstance(previous_attitude, dict):
-        previous_attitude = {}
-
     previous_candidate = _subjective_attitude(previous_attitude)
-    previous_grounding = previous_attitude.get("grounding")
-    previous_is_grounded = prior_has_report or (
-        isinstance(previous_grounding, dict)
-        and str(previous_grounding.get("source") or "")
-        in {"INITIAL_FORM", "PARTICIPANT_MESSAGE"}
-    )
 
     if current is not None and not current_reports_attitude:
-        candidate = previous_candidate if previous_is_grounded else None
-        grounding_source = "PARTICIPANT_MESSAGE"
-        grounding_message_id = str(
-            (previous_grounding or {}).get("message_id")
-            if isinstance(previous_grounding, dict)
-            else ""
-        )
+        if carried_previous_attitude is not None:
+            detail["respondent_attitude"] = copy.deepcopy(carried_previous_attitude)
+            return
+        candidate = None
+        grounding_source = ""
+        grounding_message_id = ""
     elif current_reports_attitude:
         candidate = (
             _reported_attitude(llm_attitude)
@@ -1256,10 +1297,9 @@ def _enforce_respondent_attitude_source(
         )
         grounding_source = "INITIAL_FORM"
         grounding_message_id = ""
-    elif previous_is_grounded:
-        candidate = previous_candidate
-        grounding_source = "PARTICIPANT_MESSAGE"
-        grounding_message_id = ""
+    elif carried_previous_attitude is not None:
+        detail["respondent_attitude"] = copy.deepcopy(carried_previous_attitude)
+        return
     else:
         candidate = None
         grounding_source = ""
@@ -1308,6 +1348,131 @@ def _has_explicit_respondent_report(text: str, initiator_role: str) -> bool:
         re.search(rf"{party_pattern}.{{0,24}}{attitude_pattern}", normalized)
         or re.search(rf"{attitude_pattern}.{{0,16}}{party_pattern}", normalized)
     )
+
+
+def detect_direct_respondent_attitude(text: str) -> DirectRespondentAttitudeDetection:
+    """Classify only explicit self-authored respondent attitude clauses."""
+
+    normalized = str(text or "").strip()
+    if not normalized:
+        return DirectRespondentAttitudeDetection("NONE")
+    resolved: list[str] = []
+    unresolved_signal = False
+    for clause in _DIRECT_ATTITUDE_CLAUSE_BOUNDARY.split(normalized):
+        clause = clause.strip()
+        if not clause:
+            continue
+        if _DIRECT_ATTITUDE_SIGNAL_ZH.search(clause):
+            code = _direct_respondent_attitude_clause_zh(clause)
+            if code is None:
+                unresolved_signal = True
+            elif code != "NONE":
+                resolved.append(code)
+            continue
+        if _DIRECT_ATTITUDE_SIGNAL_EN.search(clause):
+            code = _direct_respondent_attitude_clause_en(clause)
+            if code is None:
+                unresolved_signal = True
+            elif code != "NONE":
+                resolved.append(code)
+    codes = set(resolved)
+    if len(codes) > 1:
+        return DirectRespondentAttitudeDetection("UNRESOLVED")
+    if codes:
+        return DirectRespondentAttitudeDetection(
+            "SUBSTANTIVE",
+            {
+                "attitude": next(iter(codes)),
+                "position": normalized,
+                "confidence": 0.65,
+            },
+        )
+    if unresolved_signal:
+        return DirectRespondentAttitudeDetection("UNRESOLVED")
+    return DirectRespondentAttitudeDetection("NONE")
+
+
+def _direct_respondent_attitude_clause_zh(clause: str) -> str | None:
+    subject = _DIRECT_ATTITUDE_SELF_ZH.match(clause)
+    if subject is None:
+        return None
+    body = subject.group("body").strip()
+    if re.search(r"(?:并非|不是|没有|未)\s*(?:不同意|不接受|拒绝|不支持)", body):
+        return None
+    if re.search(r"(?:并不|没有|未|不)\s*(?:同意|接受|支持|愿意)", body):
+        return "DISAGREE"
+    if re.search(r"部分(?:同意|接受)|只(?:同意|接受)", body):
+        return "PARTIALLY_AGREE"
+    if re.search(r"不同意|不接受|拒绝|不支持", body):
+        return "DISAGREE"
+    if re.search(r"同意|接受|支持|愿意", body):
+        return "AGREE"
+    if re.search(r"提出|建议|替代方案", body):
+        return "ALTERNATIVE_PROPOSED"
+    if re.search(r"要求补充|需要更多信息", body):
+        return "NEED_MORE_INFO"
+    return None
+
+
+def _direct_respondent_attitude_clause_en(clause: str) -> str | None:
+    subject = _DIRECT_ATTITUDE_SELF_EN.match(clause)
+    if subject is None:
+        return None
+    body = subject.group("body").strip()
+    matches = list(_DIRECT_ATTITUDE_SIGNAL_EN.finditer(body))
+    if not matches:
+        return None
+    codes: set[str] = set()
+    for match in matches:
+        term = re.sub(r"\s+", " ", match.group(0).strip().lower())
+        prefix = body[max(0, match.start() - 32) : match.start()]
+        suffix = body[match.end() : match.end() + 32]
+        negated = re.search(
+            r"\b(?:not|never|no\s+longer|without|hardly)\b|n['’]t\b",
+            prefix,
+            re.IGNORECASE,
+        ) is not None
+        if term in {
+            "disagree",
+            "disagreed",
+            "disagrees",
+            "reject",
+            "rejected",
+            "rejects",
+            "refuse",
+            "refused",
+            "refuses",
+        }:
+            if negated:
+                return None
+            codes.add("DISAGREE")
+        elif term.startswith("partially "):
+            if negated:
+                return None
+            codes.add("PARTIALLY_AGREE")
+        elif term in {"agree", "agreed", "agrees", "accept", "accepted", "accepts"}:
+            if negated or re.match(r"\s+(?:no|none|nothing|neither|not|never)\b", suffix):
+                return None
+            codes.add("AGREE")
+        elif term in {
+            "offer",
+            "offered",
+            "offers",
+            "propose",
+            "proposed",
+            "proposes",
+            "suggest",
+            "suggested",
+            "suggests",
+        }:
+            if negated:
+                return None
+            codes.add("ALTERNATIVE_PROPOSED")
+        else:
+            if negated:
+                return None
+            codes.add("NEED_MORE_INFO")
+    return next(iter(codes)) if len(codes) == 1 else None
 
 
 # 所属模块：接待室 Agent > 接待卷宗确定性整理；函数角色：模块私有业务函数。
@@ -1626,6 +1791,59 @@ def _subjective_attitude(candidate: dict[str, Any]) -> dict[str, Any] | None:
     if str(candidate.get("source") or "").strip() != SUBJECTIVE_RESPONDENT_SOURCE:
         return None
     return _reported_attitude(candidate)
+
+
+def _grounded_prior_respondent_attitude(
+    candidate: dict[str, Any],
+    *,
+    expected_respondent_role: str,
+) -> dict[str, Any] | None:
+    """Return only an immutable, source-bound substantive prior branch."""
+
+    if (
+        candidate.get("respondent_role") != expected_respondent_role
+        or "attitude" not in candidate
+        or "status" in candidate
+    ):
+        return None
+    attitude = str(candidate.get("attitude") or "").strip().upper()
+    position = candidate.get("position")
+    confidence = candidate.get("confidence")
+    if (
+        attitude not in _SUBSTANTIVE_RESPONDENT_ATTITUDE_CODES
+        or not isinstance(position, str)
+        or not position.strip()
+        or isinstance(confidence, bool)
+        or not isinstance(confidence, int | float)
+        or not 0 <= confidence <= 1
+    ):
+        return None
+    grounding = candidate.get("grounding")
+    if not isinstance(grounding, dict) or not {"source", "message_id"} <= set(grounding):
+        return None
+    grounding_source = grounding.get("source")
+    message_id = grounding.get("message_id")
+    if not isinstance(message_id, str):
+        return None
+    source = str(candidate.get("source") or "").strip()
+    if source == SUBJECTIVE_RESPONDENT_SOURCE:
+        if candidate.get("confidence_note") != SUBJECTIVE_RESPONDENT_CONFIDENCE_NOTE:
+            return None
+        if grounding_source == "INITIAL_FORM" and message_id == "":
+            return copy.deepcopy(candidate)
+        if (
+            grounding_source == "PARTICIPANT_MESSAGE"
+            and _RESPONDENT_ATTITUDE_SOURCE_IDENTIFIER.fullmatch(message_id)
+        ):
+            return copy.deepcopy(candidate)
+        return None
+    if (
+        source == DIRECT_RESPONDENT_SOURCE
+        and grounding_source == "RESPONDENT_PARTICIPANT_MESSAGE"
+        and _RESPONDENT_ATTITUDE_SOURCE_IDENTIFIER.fullmatch(message_id)
+    ):
+        return copy.deepcopy(candidate)
+    return None
 
 
 # 所属模块：接待室 Agent > 接待卷宗确定性整理；函数角色：模块私有业务函数。

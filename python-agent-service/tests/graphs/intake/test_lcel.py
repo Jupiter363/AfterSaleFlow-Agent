@@ -19,6 +19,7 @@ from langchain_core.runnables import (
     RunnablePassthrough,
     RunnableSequence,
 )
+from langgraph.checkpoint.memory import InMemorySaver
 
 from app.contracts.v1.codec import canonical_sha256, canonical_sha256_omitting
 from app.agents.dispute_intake_officer.case_fact_matrix import (
@@ -31,6 +32,7 @@ from app.graph_runtime.state import VersionPinsState
 from app.graphs.intake.baseline import (
     BASELINE_INTAKE_NODE_NAME,
     normalize_model_matrix_fact_key_payload,
+    read_intake_baseline_memory_summary,
 )
 from app.graphs.intake.errors import IntakeGraphContractError
 from app.graphs.intake.graph import (
@@ -55,6 +57,7 @@ from app.graphs.intake.lcel import (
 from app.graphs.intake.contracts import IntakeCognitionDraft
 from app.graphs.intake.state import (
     IntakeTurnContext,
+    merge_intake_dossier,
     new_intake_graph_state,
 )
 from app.graphs.intake.validators import (
@@ -770,6 +773,175 @@ def test_same_party_thread_completes_twenty_bounded_graph_turns_with_monotonic_m
     memory_summary_bytes = len(completed["memory_summary"].encode("utf-8"))
     assert memory_summary_bytes < 16 * 1024
     print(f"twenty-turn memory_summary_utf8_bytes={memory_summary_bytes}")
+
+
+def test_source_bound_attitude_carry_survives_twenty_turn_checkpoint_reloads(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+) -> None:
+    imported = copy.deepcopy(snapshot)
+    imported["own_messages"] = []
+    imported["snapshot_hash"] = canonical_sha256_omitting(imported, "snapshot_hash")
+    state = new_intake_graph_state(
+        bindings=copy.deepcopy(bindings),
+        version_pins=copy.deepcopy(version_pins),
+    )
+    saver = InMemorySaver()
+    config = {"configurable": {"thread_id": "intake-attitude-checkpoint-20"}}
+    expected_attitude: dict[str, Any] | None = None
+    expected_reported_claim: dict[str, Any] | None = None
+    prior_matrix: dict[str, Any] | None = None
+    command_ids: set[str] = set()
+    logical_run_ids: set[str] = set()
+    attempt_ids: set[str] = set()
+    event_ids: set[str] = set()
+
+    for round_no in range(1, 21):
+        current_event = _bounded_turn_event(
+            event,
+            round_no=round_no,
+            first_sequence=1,
+            first_domain_revision=event["domain_revision"],
+        )
+        if round_no == 4:
+            current_event["text"] = "商家明确拒绝退款。"
+            current_event["event_hash"] = canonical_sha256_omitting(
+                current_event,
+                "event_hash",
+            )
+
+        command_id = f"COMMAND_ATTITUDE_CHECKPOINT_USER_{round_no:02d}"
+        logical_run_id = f"RUN_ATTITUDE_CHECKPOINT_USER_{round_no:02d}"
+        attempt_id = f"ATTEMPT_ATTITUDE_CHECKPOINT_USER_{round_no:02d}_1"
+        next_bindings = copy.deepcopy(state["bindings"])
+        next_bindings["command"].update(
+            command_id=command_id,
+            logical_run_id=logical_run_id,
+            attempt_id=attempt_id,
+        )
+        context = _agent_context(
+            case_id=str(next_bindings["private"]["case_id"]),
+            agent_session_id=str(next_bindings["private"]["agent_session_id"]),
+            invocation_id=attempt_id,
+        )
+        document = _bounded_turn_document(state, current_event, round_no=round_no)
+        if round_no == 4:
+            document["dossier_patch"]["respondent_attitude"] = {
+                "attitude": "DISAGREE",
+                "position": "This model wording must be pinned to the source.",
+            }
+        transport = IntakeTransport(document)
+        policy = _policy().model_copy(
+            update={
+                "invocation_id": attempt_id,
+                "trusted_system_sha256": system_prompt_sha256(
+                    _trusted_system_prompt(context)
+                ),
+            }
+        )
+        graph = compile_intake_v2_graph(
+            intake_lcel=build_intake_model_node(
+                transport=transport,
+                profile=_profile(),
+                policy=policy,
+                agent_context=context,
+            ).runnable,
+            checkpointer=saver,
+        )
+        invocation_context = (
+            _bootstrap_event_context(imported, current_event)
+            if round_no == 1
+            else IntakeTurnContext("EVENT", current_event)
+        )
+        graph_input = (
+            state
+            if round_no == 1
+            else {"bindings": next_bindings}
+        )
+        if round_no == 1:
+            state["bindings"] = next_bindings
+
+        state = graph.invoke(
+            graph_input,
+            config,
+            context=invocation_context,
+        )
+
+        command_ids.add(command_id)
+        logical_run_ids.add(logical_run_id)
+        attempt_ids.add(attempt_id)
+        event_ids.add(current_event["event_id"])
+        assert transport.generate_calls == 1
+        assert len(state["messages"]) <= 6
+        memory_bytes = len(state["memory_summary"].encode("utf-8"))
+        assert memory_bytes < 16 * 1024
+        _, transcript = read_intake_baseline_memory_summary(state["memory_summary"])
+        assert [statement["message_id"] for statement in transcript] == [
+            f"INTAKE_TURN_{sequence}" for sequence in range(1, round_no + 1)
+        ]
+        assert all(statement["role"] == "USER" for statement in transcript)
+        assert state["cognitive_revision"] == round_no
+        assert state["result_json"]["cognitive_revision"] == round_no
+        assert state["baseline_pending_case_detail"] is None
+        assert state["terminal_draft"]["command_id"] == command_id
+        assert state["terminal_draft"]["logical_run_id"] == logical_run_id
+        assert state["terminal_draft"]["attempt_id"] == attempt_id
+        assert state["terminal_draft"]["source_event_hash"] == current_event["event_hash"]
+
+        matrix = state["baseline_previous_case_detail"]["formal_matrix"]
+        assert matrix["matrix_version"] == round_no
+        if prior_matrix is None:
+            assert matrix["parent_ref"] is None
+        else:
+            assert matrix["parent_ref"] == {
+                "matrix_id": prior_matrix["matrix_id"],
+                "matrix_version": prior_matrix["matrix_version"],
+                "content_hash": prior_matrix["content_hash"],
+            }
+        prior_matrix = matrix
+        reported_claim = matrix["claims"]["respondent_reported_by_initiator"]
+
+        if round_no < 4:
+            assert reported_claim is None
+        elif round_no == 4:
+            expected_attitude = copy.deepcopy(
+                state["dossier_draft"]["respondent_attitude"]
+            )
+            assert expected_attitude["grounding"] == {
+                "source": "PARTICIPANT_MESSAGE",
+                "message_id": "MESSAGE_CAPACITY_USER_04",
+            }
+            expected_reported_claim = copy.deepcopy(reported_claim)
+            assert expected_reported_claim["source_refs"] == [
+                "MESSAGE_CAPACITY_USER_04"
+            ]
+        else:
+            assert expected_attitude is not None
+            assert expected_reported_claim is not None
+            assert state["dossier_draft"]["respondent_attitude"] == expected_attitude
+            assert (
+                state["baseline_previous_case_detail"]["snapshot"][
+                    "respondent_attitude"
+                ]
+                == expected_attitude
+            )
+            assert reported_claim == expected_reported_claim
+            assert "MESSAGE_CAPACITY_USER_04" == expected_attitude["grounding"][
+                "message_id"
+            ]
+            assert current_event["message_id"] not in reported_claim["source_refs"]
+
+        if round_no >= 7:
+            assert "MESSAGE_CAPACITY_USER_04" not in state["messages"]
+
+    assert len(command_ids) == 20
+    assert len(logical_run_ids) == 20
+    assert len(attempt_ids) == 20
+    assert len(event_ids) == 20
+    assert state["cognitive_revision"] == 20
+    assert prior_matrix is not None and prior_matrix["matrix_version"] == 20
 
 
 def test_bounded_derivation_rejects_under_capacity_message_loss(
@@ -3340,6 +3512,236 @@ def test_model_substantive_respondent_attitude_is_preserved(
     }
 
 
+def test_adapted_full_snapshot_carries_exact_prior_attitude_on_neutral_current_turn(
+    bindings,
+    version_pins,
+) -> None:
+    state = _state_with_matrix_roles(
+        bindings,
+        version_pins,
+        actor="USER",
+        initiator="USER",
+    )
+    prior_attitude = {
+        "respondent_role": "MERCHANT",
+        "attitude": "DISAGREE",
+        "position": "The merchant explicitly rejected the requested refund.",
+        "source": "发起方单方陈述（主观）",
+        "confidence": 0.8,
+        "confidence_note": "仅表示从发起方单方陈述中提取态度的明确度，不代表事实真实性。",
+        "grounding": {
+            "source": "PARTICIPANT_MESSAGE",
+            "message_id": "MESSAGE_ATTITUDE_SOURCE",
+        },
+    }
+    state["dossier_draft"] = {
+        "respondent_attitude": copy.deepcopy(prior_attitude)
+    }
+    state["messages"] = {
+        "MESSAGE_ATTITUDE_SOURCE": {
+            "message_id": "MESSAGE_ATTITUDE_SOURCE",
+            "role": "HUMAN",
+            "audience": "USER",
+            "content": prior_attitude["position"],
+            "sequence": 4,
+            "source_hash": "4" * 64,
+        },
+        "MESSAGE_NEUTRAL_CURRENT": {
+            "message_id": "MESSAGE_NEUTRAL_CURRENT",
+            "role": "HUMAN",
+            "audience": "USER",
+            "content": "The order reference was corrected in this turn.",
+            "sequence": 5,
+            "source_hash": "5" * 64,
+        },
+    }
+    adapted_full_snapshot = IntakeCognitionDraft.model_validate(
+        _draft(
+            dossier_patch={
+                "respondent_attitude": copy.deepcopy(prior_attitude),
+            }
+        )
+    )
+
+    _, _, normalized = _generation_parts(
+        {
+            "state": state,
+            "generation": {
+                "message": AIMessage(content="{}"),
+                "draft": adapted_full_snapshot,
+            },
+        }
+    )
+
+    assert normalized.dossier_patch.respondent_attitude is None
+    normalized_patch = normalized.dossier_patch.model_dump(
+        mode="json",
+        exclude_none=True,
+        exclude_unset=True,
+    )
+    assert "respondent_attitude" not in normalized_patch
+    materialized = merge_intake_dossier(state["dossier_draft"], normalized_patch)
+    assert materialized["respondent_attitude"] == prior_attitude
+
+
+@pytest.mark.parametrize(
+    ("variant", "path", "value", "delete", "valid"),
+    [
+        ("missing_respondent_role", ("respondent_role",), None, True, False),
+        ("wrong_respondent_role", ("respondent_role",), "USER", False, False),
+        ("missing_source", ("source",), None, True, False),
+        ("wrong_source", ("source",), "尚未回应", False, False),
+        ("missing_position", ("position",), None, True, False),
+        ("wrong_position", ("position",), "", False, False),
+        ("missing_confidence", ("confidence",), None, True, False),
+        ("wrong_confidence", ("confidence",), 1.5, False, False),
+        ("missing_confidence_note", ("confidence_note",), None, True, False),
+        (
+            "wrong_confidence_note",
+            ("confidence_note",),
+            "This note does not carry subjective-source authority.",
+            False,
+            False,
+        ),
+        ("missing_grounding", ("grounding",), None, True, False),
+        ("missing_grounding_source", ("grounding", "source"), None, True, False),
+        (
+            "missing_grounding_message_id",
+            ("grounding", "message_id"),
+            None,
+            True,
+            False,
+        ),
+        (
+            "participant_empty_message_id",
+            ("grounding", "message_id"),
+            "",
+            False,
+            False,
+        ),
+        (
+            "initial_form_nonempty_message_id",
+            ("grounding", "source"),
+            "INITIAL_FORM",
+            False,
+            False,
+        ),
+        ("dual_attitude_status", ("status",), "UNKNOWN", False, False),
+        (
+            "direct_source_with_subjective_grounding",
+            ("source",),
+            "被发起方接待室直接陈述",
+            False,
+            False,
+        ),
+        (
+            "harmless_extension",
+            ("extension_metadata",),
+            {"display_hint": "historical-authority"},
+            False,
+            True,
+        ),
+    ],
+)
+def test_exact_attitude_carry_rejects_malformed_prior_authority(
+    bindings,
+    version_pins,
+    variant: str,
+    path: tuple[str, ...],
+    value: object,
+    delete: bool,
+    valid: bool,
+) -> None:
+    del variant
+    state = _state_with_matrix_roles(
+        bindings,
+        version_pins,
+        actor="USER",
+        initiator="USER",
+    )
+    prior_attitude: dict[str, Any] = {
+        "respondent_role": "MERCHANT",
+        "attitude": "DISAGREE",
+        "position": "The merchant explicitly rejected the requested refund.",
+        "source": "发起方单方陈述（主观）",
+        "confidence": 0.8,
+        "confidence_note": "仅表示从发起方单方陈述中提取态度的明确度，不代表事实真实性。",
+        "grounding": {
+            "source": "PARTICIPANT_MESSAGE",
+            "message_id": "MESSAGE_ATTITUDE_SOURCE",
+        },
+    }
+    owner: dict[str, Any] = prior_attitude
+    for member in path[:-1]:
+        owner = owner[member]
+    if delete:
+        owner.pop(path[-1], None)
+    else:
+        owner[path[-1]] = value
+    state["dossier_draft"] = {
+        "respondent_attitude": copy.deepcopy(prior_attitude)
+    }
+    state["messages"] = {
+        "MESSAGE_ATTITUDE_SOURCE": {
+            "message_id": "MESSAGE_ATTITUDE_SOURCE",
+            "role": "HUMAN",
+            "audience": "USER",
+            "content": "The merchant explicitly rejected the requested refund.",
+            "sequence": 4,
+            "source_hash": "4" * 64,
+        },
+        "MESSAGE_NEUTRAL_CURRENT": {
+            "message_id": "MESSAGE_NEUTRAL_CURRENT",
+            "role": "HUMAN",
+            "audience": "USER",
+            "content": "The order reference was corrected in this turn.",
+            "sequence": 5,
+            "source_hash": "5" * 64,
+        },
+    }
+    adapted_full_snapshot = IntakeCognitionDraft.model_validate(
+        _draft(
+            dossier_patch={
+                "respondent_attitude": copy.deepcopy(prior_attitude),
+            }
+        )
+    )
+
+    if not valid:
+        with pytest.raises(
+            IntakeGraphContractError,
+            match="INTAKE_RESPONDENT_ATTITUDE_SOURCE_AUTHORITY_INVALID",
+        ):
+            _generation_parts(
+                {
+                    "state": state,
+                    "generation": {
+                        "message": AIMessage(content="{}"),
+                        "draft": adapted_full_snapshot,
+                    },
+                }
+            )
+        return
+
+    _, _, normalized = _generation_parts(
+        {
+            "state": state,
+            "generation": {
+                "message": AIMessage(content="{}"),
+                "draft": adapted_full_snapshot,
+            },
+        }
+    )
+    normalized_patch = normalized.dossier_patch.model_dump(
+        mode="json",
+        exclude_none=True,
+        exclude_unset=True,
+    )
+    assert "respondent_attitude" not in normalized_patch
+    materialized = merge_intake_dossier(state["dossier_draft"], normalized_patch)
+    assert materialized["respondent_attitude"] == prior_attitude
+
+
 def test_model_attitude_code_cannot_contradict_the_authorized_source(
     bindings,
     version_pins,
@@ -3722,6 +4124,139 @@ def test_user_respondent_direct_message_cannot_be_hidden_by_an_absence_marker(
         )
 
 
+def _direct_respondent_adversarial_state(
+    bindings,
+    version_pins,
+    *,
+    text: str,
+    prior_attitude: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    state = _state_with_matrix_roles(
+        bindings,
+        version_pins,
+        actor="MERCHANT",
+        initiator="USER",
+    )
+    prior = {
+        "respondent_role": "MERCHANT",
+        "attitude": prior_attitude,
+        "position": "The prior respondent attitude must not decide this turn.",
+        "source": "被发起方接待室直接陈述",
+        "confidence": 0.7,
+        "grounding": {
+            "source": "RESPONDENT_PARTICIPANT_MESSAGE",
+            "message_id": "MESSAGE_MERCHANT_PRIOR_ATTITUDE",
+        },
+    }
+    state["dossier_draft"] = {"respondent_attitude": copy.deepcopy(prior)}
+    state["messages"] = {
+        "MESSAGE_MERCHANT_ADVERSARIAL_CURRENT": {
+            "message_id": "MESSAGE_MERCHANT_ADVERSARIAL_CURRENT",
+            "role": "HUMAN",
+            "audience": "MERCHANT",
+            "content": text,
+            "sequence": 2,
+            "source_hash": "6" * 64,
+        }
+    }
+    return state, prior
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("We did not cause X, but we accept Y.", "AGREE"),
+        ("Our company accepts Y.", "AGREE"),
+        ("我方并不同意Y。", "DISAGREE"),
+        ("我方没有同意Y。", "DISAGREE"),
+    ],
+)
+def test_lcel_direct_respondent_adversarial_substantive_signal_pins_current_source(
+    bindings,
+    version_pins,
+    text: str,
+    expected: str,
+) -> None:
+    state, _ = _direct_respondent_adversarial_state(
+        bindings,
+        version_pins,
+        text=text,
+        prior_attitude="DISAGREE" if expected == "AGREE" else "AGREE",
+    )
+    draft = IntakeCognitionDraft.model_validate(
+        _draft(
+            dossier_patch={
+                "respondent_attitude": {
+                    "attitude": expected,
+                    "position": "This model wording must be pinned to current source.",
+                }
+            }
+        )
+    )
+
+    _, _, normalized = _generation_parts(
+        {
+            "state": state,
+            "generation": {
+                "message": AIMessage(content="{}"),
+                "draft": draft,
+            },
+        }
+    )
+
+    assert normalized.dossier_patch.respondent_attitude == {
+        "attitude": expected,
+        "position": text,
+    }
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "建议Y的是对方，不是我方。",
+        "同意Y的是对方，我方未表态。",
+        "The buyer accepted Y; our company only recorded it.",
+        "We do not disagree with Y.",
+        "We do not accept Y.",
+        "I have not accepted Y.",
+        "We accept no Y.",
+        "We do not propose Y.",
+    ],
+)
+def test_lcel_direct_respondent_adversarial_unresolved_signal_fails_closed(
+    bindings,
+    version_pins,
+    text: str,
+) -> None:
+    state, prior = _direct_respondent_adversarial_state(
+        bindings,
+        version_pins,
+        text=text,
+        prior_attitude="DISAGREE",
+    )
+    draft = IntakeCognitionDraft.model_validate(
+        _draft(
+            dossier_patch={
+                "respondent_attitude": copy.deepcopy(prior),
+            }
+        )
+    )
+
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED",
+    ):
+        _generation_parts(
+            {
+                "state": state,
+                "generation": {
+                    "message": AIMessage(content="{}"),
+                    "draft": draft,
+                },
+            }
+        )
+
+
 def test_negated_english_direct_response_does_not_ground_agreement(
     bindings,
     version_pins,
@@ -3750,7 +4285,7 @@ def test_negated_english_direct_response_does_not_ground_agreement(
 
     with pytest.raises(
         IntakeGraphContractError,
-        match="INTAKE_RESPONDENT_ATTITUDE_SOURCE_MISSING",
+        match="INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED",
     ):
         _generation_parts(
             {
@@ -3788,7 +4323,7 @@ def test_post_negated_english_direct_response_does_not_ground_agreement(
 
     with pytest.raises(
         IntakeGraphContractError,
-        match="INTAKE_RESPONDENT_ATTITUDE_SOURCE_MISSING",
+        match="INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED",
     ):
         _generation_parts(
             {
