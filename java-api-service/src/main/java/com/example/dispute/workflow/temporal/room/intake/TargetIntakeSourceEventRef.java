@@ -7,7 +7,7 @@ import java.util.Objects;
 /**
  * Target-only observation of a case-timeline event that occupies the Intake event sequence.
  *
- * <p>The source event carries no Intake business transition. It exists only so the child can
+ * <p>The cursor event carries no Intake business transition. It exists only so the child can
  * observe the same contiguous case-event cursor used by the durable formal turn receipts.
  */
 public record TargetIntakeSourceEventRef(
@@ -57,6 +57,26 @@ public record TargetIntakeSourceEventRef(
         event.roomEpoch(),
         fencingToken,
         event.payloadRef().sha256());
+  }
+
+  /** Formal Intake events must arrive through their exact committed operation receipt. */
+  public static boolean isCursorOnlyEventType(String eventType) {
+    requireText(eventType, "eventType");
+    return switch (eventType) {
+      case "TURN_NEEDS_INPUT",
+          "INTAKE_TURN_NEEDS_INPUT",
+          "TURN_READY_TO_CONFIRM",
+          "INTAKE_TURN_READY_TO_CONFIRM",
+          "INITIATOR_ACCEPTED",
+          "INITIATOR_INTAKE_COMPLETED",
+          "NOT_ADMISSIBLE",
+          "INTAKE_REJECTED",
+          "CANCELLED",
+          "INTAKE_CANCELLED",
+          "RESPONDENT_CONFIRMED",
+          "RESPONDENT_INTAKE_COMPLETED" -> false;
+      default -> true;
+    };
   }
 
   private static void requireText(String value, String field) {

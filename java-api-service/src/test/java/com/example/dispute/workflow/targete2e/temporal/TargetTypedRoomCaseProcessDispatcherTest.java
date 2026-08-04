@@ -10,6 +10,7 @@ import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
 import com.example.dispute.workflow.contract.v1.ContractTypes.PayloadRef;
 import com.example.dispute.workflow.contract.v1.ProvisionRoomEpoch;
 import com.example.dispute.workflow.temporal.caseprocess.CaseDomainEventRef;
+import com.example.dispute.workflow.temporal.room.intake.IntakeDomainEventType;
 import com.example.dispute.workflow.temporal.room.intake.IntakeRoomStart;
 import com.example.dispute.workflow.temporal.room.intake.TargetIntakeSourceEventRef;
 import com.example.dispute.workflow.temporal.room.evidence.EvidenceRoomStart;
@@ -150,9 +151,9 @@ class TargetTypedRoomCaseProcessDispatcherTest {
   }
 
   @Test
-  void targetIntakeForwardsOnlyTheSourceTimelineEventIntoTheChildCursor() {
+  void targetIntakeForwardsEveryNonFormalTimelineEventIntoTheChildCursor() {
     CaseDomainEventRef source = caseEvent(1, "ROOM_MESSAGE_CREATED");
-    CaseDomainEventRef formal = caseEvent(2, "TURN_READY_TO_CONFIRM");
+    CaseDomainEventRef readiness = caseEvent(2, "INTAKE_PROJECTION_READY");
 
     TargetIntakeSourceEventRef observation =
         TargetTypedRoomCaseProcessDispatcher.targetIntakeSourceCursorObservation(source, 11);
@@ -165,13 +166,47 @@ class TargetTypedRoomCaseProcessDispatcherTest {
     assertThat(observation.roomEpoch()).isEqualTo(source.roomEpoch());
     assertThat(observation.fencingToken()).isEqualTo(11);
     assertThat(observation.payloadHash()).isEqualTo(source.payloadRef().sha256());
+    TargetIntakeSourceEventRef readinessObservation =
+        TargetTypedRoomCaseProcessDispatcher.targetIntakeSourceCursorObservation(readiness, 11);
+    assertThat(readinessObservation.eventId()).isEqualTo(readiness.eventId());
+    assertThat(readinessObservation.eventSequence()).isEqualTo(2);
+    assertThat(readinessObservation.eventType()).isEqualTo("INTAKE_PROJECTION_READY");
+    assertThat(TargetTypedRoomCaseProcessDispatcher.targetIntakeSourceCursorChangeId(observation))
+        .isEqualTo(
+            TargetTypedRoomCaseProcessDispatcher.TARGET_INTAKE_SOURCE_EVENT_CURSOR_CHANGE_ID);
     assertThat(
-            TargetTypedRoomCaseProcessDispatcher.targetIntakeSourceCursorObservation(
-                formal, 11))
-        .isNull();
+            TargetTypedRoomCaseProcessDispatcher.targetIntakeSourceCursorChangeId(
+                readinessObservation))
+        .isEqualTo(
+            TargetTypedRoomCaseProcessDispatcher
+                .TARGET_INTAKE_COMPLETE_TIMELINE_CURSOR_CHANGE_ID);
+    for (IntakeDomainEventType formalType : IntakeDomainEventType.values()) {
+      assertThat(
+              TargetTypedRoomCaseProcessDispatcher.targetIntakeSourceCursorObservation(
+                  caseEvent(3 + formalType.ordinal(), formalType.name()), 11))
+          .isNull();
+    }
+    String[] formalAliases = {
+      "INTAKE_TURN_NEEDS_INPUT",
+      "INTAKE_TURN_READY_TO_CONFIRM",
+      "INITIATOR_INTAKE_COMPLETED",
+      "INTAKE_REJECTED",
+      "INTAKE_CANCELLED",
+      "RESPONDENT_INTAKE_COMPLETED"
+    };
+    for (int index = 0; index < formalAliases.length; index++) {
+      assertThat(
+              TargetTypedRoomCaseProcessDispatcher.targetIntakeSourceCursorObservation(
+                  caseEvent(3 + index, formalAliases[index]), 11))
+          .isNull();
+    }
     assertThat(
             TargetTypedRoomCaseProcessDispatcher.TARGET_INTAKE_SOURCE_EVENT_CURSOR_CHANGE_ID)
         .isEqualTo("target-intake-source-event-cursor-v1");
+    assertThat(
+            TargetTypedRoomCaseProcessDispatcher
+                .TARGET_INTAKE_COMPLETE_TIMELINE_CURSOR_CHANGE_ID)
+        .isEqualTo("target-intake-complete-timeline-cursor-v1");
   }
 
   private static TargetIntakePartyScopeSource.ResolvedPartyScopes partyScopes(

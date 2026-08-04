@@ -97,7 +97,64 @@ class TargetIntakeSourceEventCursorWorkflowTest {
   }
 
   @Test
-  void unknownGapAndScopeMismatchFailClosedWithoutClearingPendingCommand() {
+  void tenConsecutiveTurnsConsumeTheCompleteGlobalTimelineCursor() {
+    long formalSequence = 1;
+
+    for (long round = 1; round <= 10; round++) {
+      IntakeWorkflowCommand command = message(round, "CMD_TEN_TURN_" + round);
+      workflow.commandAccepted(command);
+      tick();
+
+      assertThat(workflow.lastCommandDecision().status()).isEqualTo("ACCEPTED");
+      assertThat(workflow.lastCommandDecision().commandId()).isEqualTo(command.commandId());
+      assertThat(workflow.state().pendingCommandId()).isEqualTo(command.commandId());
+
+      workflow.domainEventCommitted(
+          formalTurn(formalSequence, "EVENT_TEN_FORMAL_" + round, command));
+      tick();
+
+      IntakeRoomSnapshot formalized = workflow.state();
+      assertThat(formalized.pendingCommand()).isNull();
+      assertThat(formalized.processedCommandCount()).isEqualTo(round);
+      assertThat(formalized.processedEventCount()).isEqualTo(round);
+      assertThat(formalized.nextCommandSequence()).isEqualTo(round + 1);
+      assertThat(formalized.nextEventSequence()).isEqualTo(formalSequence + 1);
+      assertThat(formalized.protocolErrorCode()).isNull();
+
+      workflow.targetSourceEventObserved(
+          cursor(
+              formalSequence + 1,
+              "EVENT_TEN_READY_" + round,
+              "INTAKE_PROJECTION_READY"));
+      tick();
+      assertThat(workflow.state().nextEventSequence()).isEqualTo(formalSequence + 2);
+      assertThat(workflow.state().processedEventCount()).isEqualTo(round);
+      assertThat(workflow.state().protocolErrorCode()).isNull();
+
+      if (round < 10) {
+        workflow.targetSourceEventObserved(
+            source(formalSequence + 2, "EVENT_TEN_ROOM_" + (round + 1)));
+        tick();
+        assertThat(workflow.state().nextEventSequence()).isEqualTo(formalSequence + 3);
+        assertThat(workflow.state().processedEventCount()).isEqualTo(round);
+        assertThat(workflow.state().protocolErrorCode()).isNull();
+        formalSequence += 3;
+      }
+    }
+
+    IntakeRoomSnapshot completed = workflow.state();
+    assertThat(completed.nextCommandSequence()).isEqualTo(11);
+    assertThat(completed.nextEventSequence()).isEqualTo(30);
+    assertThat(completed.processedCommandCount()).isEqualTo(10);
+    assertThat(completed.processedEventCount()).isEqualTo(10);
+    assertThat(completed.pendingCommand()).isNull();
+    assertThat(completed.lastAgentRunRef().logicalRunId()).isEqualTo("RUN_CMD_TEN_TURN_10");
+    assertThat(completed.lastGraphExecutionRef().graphCommandId()).isEqualTo("CMD_TEN_TURN_10");
+    assertThat(completed.protocolErrorCode()).isNull();
+  }
+
+  @Test
+  void formalTypeGapAndScopeMismatchFailClosedWithoutClearingPendingCommand() {
     IntakeWorkflowCommand pending = message(1, "CMD_FAIL_CLOSED");
     workflow.commandAccepted(pending);
     tick();
@@ -105,9 +162,9 @@ class TargetIntakeSourceEventCursorWorkflowTest {
     workflow.targetSourceEventObserved(
         new TargetIntakeSourceEventRef(
             TargetIntakeSourceEventRef.SCHEMA_VERSION,
-            "EVENT_UNKNOWN",
+            "EVENT_FORMAL_AS_CURSOR",
             1,
-            "SOMETHING_ELSE",
+            IntakeDomainEventType.TURN_NEEDS_INPUT.name(),
             TENANT,
             CASE_ID,
             RoomType.INTAKE,
@@ -136,7 +193,8 @@ class TargetIntakeSourceEventCursorWorkflowTest {
     tick();
     assertFailClosed("TARGET_SOURCE_EVENT_SCOPE_MISMATCH", pending.commandId(), 1);
 
-    workflow.targetSourceEventObserved(source(1, "EVENT_SOURCE_1"));
+    workflow.targetSourceEventObserved(
+        cursor(1, "EVENT_READY_1", "INTAKE_PROJECTION_READY"));
     tick();
     assertThat(workflow.state().protocolErrorCode()).isNull();
     assertThat(workflow.state().nextEventSequence()).isEqualTo(2);
@@ -409,11 +467,16 @@ class TargetIntakeSourceEventCursorWorkflowTest {
   }
 
   private static TargetIntakeSourceEventRef source(long sequence, String eventId) {
+    return cursor(sequence, eventId, TargetIntakeSourceEventRef.ROOM_MESSAGE_CREATED);
+  }
+
+  private static TargetIntakeSourceEventRef cursor(
+      long sequence, String eventId, String eventType) {
     return new TargetIntakeSourceEventRef(
         TargetIntakeSourceEventRef.SCHEMA_VERSION,
         eventId,
         sequence,
-        TargetIntakeSourceEventRef.ROOM_MESSAGE_CREATED,
+        eventType,
         TENANT,
         CASE_ID,
         RoomType.INTAKE,

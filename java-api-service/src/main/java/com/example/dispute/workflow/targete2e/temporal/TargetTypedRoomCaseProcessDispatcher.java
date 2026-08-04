@@ -89,6 +89,8 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
       "target-intake-party-scope-authority-v1";
   public static final String TARGET_INTAKE_SOURCE_EVENT_CURSOR_CHANGE_ID =
       "target-intake-source-event-cursor-v1";
+  public static final String TARGET_INTAKE_COMPLETE_TIMELINE_CURSOR_CHANGE_ID =
+      "target-intake-complete-timeline-cursor-v1";
   public static final String TARGET_REVIEW_NON_EXECUTION_CHANGE_ID =
       "target-review-non-execution-v1";
 
@@ -339,9 +341,16 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
   static TargetIntakeSourceEventRef targetIntakeSourceCursorObservation(
       CaseDomainEventRef event, long fencingToken) {
     Objects.requireNonNull(event, "event");
-    return TargetIntakeSourceEventRef.ROOM_MESSAGE_CREATED.equals(event.eventType())
+    return TargetIntakeSourceEventRef.isCursorOnlyEventType(event.eventType())
         ? TargetIntakeSourceEventRef.from(event, fencingToken)
         : null;
+  }
+
+  static String targetIntakeSourceCursorChangeId(TargetIntakeSourceEventRef cursor) {
+    Objects.requireNonNull(cursor, "cursor");
+    return TargetIntakeSourceEventRef.ROOM_MESSAGE_CREATED.equals(cursor.eventType())
+        ? TARGET_INTAKE_SOURCE_EVENT_CURSOR_CHANGE_ID
+        : TARGET_INTAKE_COMPLETE_TIMELINE_CURSOR_CHANGE_ID;
   }
 
   private TargetTypedRoomChildHandle startEvidence(ProvisionRoomEpoch request) {
@@ -693,17 +702,17 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
 
     @Override
     protected void onDomainEvent(CaseDomainEventRef event) {
-      if (!TargetIntakeSourceEventRef.ROOM_MESSAGE_CREATED.equals(event.eventType())) {
+      TargetIntakeSourceEventRef cursor =
+          targetIntakeSourceCursorObservation(event, fencingToken);
+      if (cursor == null) {
         return;
       }
-      int sourceCursorVersion =
-          Workflow.getVersion(
-              TARGET_INTAKE_SOURCE_EVENT_CURSOR_CHANGE_ID, Workflow.DEFAULT_VERSION, 1);
-      if (sourceCursorVersion == Workflow.DEFAULT_VERSION) {
+      if (Workflow.getVersion(
+              targetIntakeSourceCursorChangeId(cursor), Workflow.DEFAULT_VERSION, 1)
+          == Workflow.DEFAULT_VERSION) {
         return;
       }
-      child.targetSourceEventObserved(
-          targetIntakeSourceCursorObservation(event, fencingToken));
+      child.targetSourceEventObserved(cursor);
     }
 
     @Override
