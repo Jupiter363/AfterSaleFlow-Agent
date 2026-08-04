@@ -103,6 +103,8 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
       "case-process-child-compensation-invariant-v1";
   private static final String TARGET_INTAKE_PROJECTION_COMPLETION_CHANGE_ID =
       "case-process-target-intake-projection-completion-v1";
+  private static final String TARGET_INTAKE_PROJECTION_READY_HIGH_WATER_CHANGE_ID =
+      "case-process-target-intake-projection-ready-high-water-v1";
   private static final String TARGET_INTAKE_GLOBAL_PROJECTION_CURSOR_CHANGE_ID =
       "case-process-target-intake-global-projection-cursor-v1";
   private static final String AUTHORITY_CHECKPOINT_MEMO_KEY =
@@ -2380,6 +2382,29 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
           "projection completion receipt does not match the consumed Intake event",
           null);
     }
+    observeTargetIntakeProjectionReadyHighWater(completed);
+  }
+
+  private void observeTargetIntakeProjectionReadyHighWater(
+      CompleteConsumedIntakeProjectionResult completed) {
+    if (completed.readyEventId() == null && completed.readyEventSequence() == null) {
+      return;
+    }
+    if (completed.readyEventId() == null || completed.readyEventSequence() == null) {
+      throw new TypedChildOperationFailure(
+          "INTAKE_PROCESS_PROJECTION_COMPLETION_INVALID",
+          "projection completion receipt contains an incomplete ready event cursor",
+          null);
+    }
+    if (Workflow.getVersion(
+            TARGET_INTAKE_PROJECTION_READY_HIGH_WATER_CHANGE_ID,
+            Workflow.DEFAULT_VERSION,
+            1)
+        != 1) {
+      return;
+    }
+    highestObservedEventSequence =
+        Math.max(highestObservedEventSequence, completed.readyEventSequence());
   }
 
   static boolean requiresTargetIntakeProjectionCompletion(

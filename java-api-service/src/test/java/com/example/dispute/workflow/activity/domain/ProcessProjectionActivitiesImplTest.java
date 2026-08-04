@@ -71,6 +71,8 @@ class ProcessProjectionActivitiesImplTest {
         assertThat(result.roomRevision()).isEqualTo(1);
         assertThat(result.firstExecutionRunId()).isEqualTo(command.firstExecutionRunId());
         assertThat(result.activeChildRunId()).isEqualTo(command.activeChildRunId());
+        assertThat(result.readyEventId()).isEqualTo(readyEventId(41));
+        assertThat(result.readyEventSequence()).isEqualTo(41);
 
         @SuppressWarnings("unchecked")
         ArgumentCaptor<Map<String, Object>> payload = ArgumentCaptor.forClass(Map.class);
@@ -126,8 +128,13 @@ class ProcessProjectionActivitiesImplTest {
         when(completionService.completeConsumedEvent(command))
                 .thenReturn(completion(CompletionOutcome.IDEMPOTENT_REPLAY));
 
-        activities.completeConsumedIntakeProjection(command);
-        activities.completeConsumedIntakeProjection(command);
+        var first = activities.completeConsumedIntakeProjection(command);
+        var replay = activities.completeConsumedIntakeProjection(command);
+
+        assertThat(first.readyEventId()).isEqualTo(readyEventId(42));
+        assertThat(first.readyEventSequence()).isEqualTo(42);
+        assertThat(replay.readyEventId()).isEqualTo(first.readyEventId());
+        assertThat(replay.readyEventSequence()).isEqualTo(first.readyEventSequence());
 
         verify(caseEventService, times(2))
                 .recordLifecycleEvent(
@@ -227,6 +234,8 @@ class ProcessProjectionActivitiesImplTest {
 
         assertThat(result.outcome())
                 .isEqualTo(CompleteConsumedIntakeProjectionOutcome.APPLIED);
+        assertThat(result.readyEventId()).isEqualTo(readyEventId(43));
+        assertThat(result.readyEventSequence()).isEqualTo(43);
         verify(wakeupPublisher)
                 .publish(
                         new CaseEventWakeup(
@@ -236,11 +245,16 @@ class ProcessProjectionActivitiesImplTest {
     private static void stubDurableEvent(
             CaseEventService caseEventService, long sequence) {
         CaseTimelineEventEntity event = mock(CaseTimelineEventEntity.class);
+        when(event.getId()).thenReturn(readyEventId(sequence));
         when(event.getSequenceNo()).thenReturn(sequence);
         when(
                         caseEventService.recordLifecycleEvent(
                                 any(), any(), any(), any(), any(), any()))
                 .thenReturn(event);
+    }
+
+    private static String readyEventId(long sequence) {
+        return "EVENT_INTAKE_PROJECTION_READY_" + sequence;
     }
 
     private static CompletionResult completion(CompletionOutcome outcome) {

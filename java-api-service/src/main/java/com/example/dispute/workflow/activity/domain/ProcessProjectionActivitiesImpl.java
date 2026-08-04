@@ -68,8 +68,8 @@ public class ProcessProjectionActivitiesImpl implements ProcessProjectionActivit
             IntakeProcessProjectionCompletionService.CompletionResult completed =
                     intakeCompletionService.completeConsumedEvent(command);
             // The REQUIRES_NEW projection transaction has committed before this independent,
-            // replayable notification is recorded. A notification failure therefore retries the
-            // activity against an idempotent projection and the same deterministic event key.
+            // replayable notification is recorded. Its durable cursor is returned so the Workflow
+            // can recover from PostgreSQL even if the best-effort wakeup below is lost.
             var event =
                     caseEventService.recordLifecycleEvent(
                             command.caseId(),
@@ -109,7 +109,9 @@ public class ProcessProjectionActivitiesImpl implements ProcessProjectionActivit
                     command.activeChildRunId(),
                     completed.resultRef(),
                     completed.resultSha256(),
-                    completed.completedAt());
+                    completed.completedAt(),
+                    event.getId(),
+                    event.getSequenceNo());
         } catch (ProjectionWriteRejectedException failure) {
             throw ApplicationFailure.newNonRetryableFailure(
                     failure.getMessage(), failure.reasonCode());

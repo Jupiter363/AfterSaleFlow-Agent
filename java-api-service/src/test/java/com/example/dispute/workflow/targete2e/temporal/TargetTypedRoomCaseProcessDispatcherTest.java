@@ -4,12 +4,37 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.example.dispute.workflow.activity.domain.ProcessProjectionActivities;
+import com.example.dispute.workflow.contract.v1.CaseCommandRef;
 import com.example.dispute.workflow.contract.v1.CaseProcessWorkflowProtocol;
-import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
+import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRef;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
-import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
+import com.example.dispute.workflow.contract.v1.ContractTypes.CommandType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.PayloadRef;
+import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
+import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
+import com.example.dispute.workflow.contract.v1.ProcessProjectionContract.ApplyProjectionCommand;
+import com.example.dispute.workflow.contract.v1.ProcessProjectionContract.ApplyProjectionResult;
+import com.example.dispute.workflow.contract.v1.ProcessProjectionContract.CompleteConsumedIntakeProjectionCommand;
+import com.example.dispute.workflow.contract.v1.ProcessProjectionContract.CompleteConsumedIntakeProjectionOutcome;
+import com.example.dispute.workflow.contract.v1.ProcessProjectionContract.CompleteConsumedIntakeProjectionResult;
 import com.example.dispute.workflow.contract.v1.ProvisionRoomEpoch;
+import com.example.dispute.workflow.contract.v1.ProvisionRoomEpochReceipt;
+import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities;
+import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.CommandLifecycleOutcome;
+import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.ExpireCaseCommand;
+import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.ExpireCaseCommandResult;
+import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.RecordCaseCommandRouted;
+import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.RecordCaseCommandRoutedResult;
+import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState;
+import com.example.dispute.workflow.temporal.caseprocess.CaseProcessCarryState.ActiveChildDescriptor;
+import com.example.dispute.workflow.temporal.caseprocess.CaseProcessLedgerActivities;
+import com.example.dispute.workflow.temporal.caseprocess.CaseProcessLedgerActivities.CaseCommandLedgerEntry;
+import com.example.dispute.workflow.temporal.caseprocess.CaseProcessLedgerActivities.CaseCommandLedgerState;
+import com.example.dispute.workflow.temporal.caseprocess.CaseProcessLedgerActivities.LoadSequenceRange;
+import com.example.dispute.workflow.temporal.caseprocess.CaseProcessLedgerActivities.SequenceGapReport;
+import com.example.dispute.workflow.temporal.caseprocess.CaseProcessSnapshot;
+import com.example.dispute.workflow.temporal.caseprocess.CaseProcessWorkflow;
 import com.example.dispute.workflow.temporal.caseprocess.CaseDomainEventRef;
 import com.example.dispute.workflow.temporal.room.intake.IntakeDomainEventType;
 import com.example.dispute.workflow.temporal.room.intake.IntakeRoomStart;
@@ -19,10 +44,26 @@ import com.example.dispute.workflow.temporal.room.evidence.EvidenceRoomStart.Exe
 import com.example.dispute.workflow.targete2e.rooms.evidence.TargetEvidenceParticipantBindingActivities;
 import com.example.dispute.workflow.targete2e.temporal.intake.TargetIntakeActorScopes;
 import com.example.dispute.workflow.targete2e.temporal.intake.TargetIntakePartyScopeSource;
+import io.temporal.api.common.v1.WorkflowExecution;
+import io.temporal.client.UpdateOptions;
+import io.temporal.client.WorkflowClient;
+import io.temporal.client.WorkflowOptions;
+import io.temporal.client.WorkflowStub;
+import io.temporal.client.WorkflowUpdateStage;
+import io.temporal.testing.TestEnvironmentOptions;
 import io.temporal.testing.TestWorkflowEnvironment;
+import io.temporal.worker.Worker;
 import java.lang.reflect.Modifier;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Arrays;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Predicate;
 import org.junit.jupiter.api.Test;
 
 class TargetTypedRoomCaseProcessDispatcherTest {
@@ -237,6 +278,256 @@ class TargetTypedRoomCaseProcessDispatcherTest {
         .isInstanceOf(IllegalArgumentException.class);
   }
 
+  @Test
+  void projectionReadyReceiptHighWaterLoadsUnsignaledGapBeforeRoutingConfirmation() {
+    Instant now = Instant.parse("2026-07-30T03:00:00Z");
+    ProjectionHighWaterLedger ledger = new ProjectionHighWaterLedger();
+    ReadyHighWaterProjectionActivities projection =
+        new ReadyHighWaterProjectionActivities(ledger, now);
+    HighWaterTargetCaseProcessWorkflow.reset();
+
+    try (TestWorkflowEnvironment environment =
+        TestWorkflowEnvironment.newInstance(
+            TestEnvironmentOptions.newBuilder().setInitialTime(now).build())) {
+      Worker worker =
+          environment.newWorker(CaseProcessWorkflowProtocol.CASE_CONTROL_TASK_QUEUE);
+      worker.registerWorkflowImplementationTypes(HighWaterTargetCaseProcessWorkflow.class);
+      worker.registerActivitiesImplementations(ledger, projection);
+      environment.start();
+
+      ProvisionRoomEpoch provision = highWaterTargetIntakeProvision(now);
+      CaseProcessWorkflow workflow =
+          environment
+              .getWorkflowClient()
+              .newWorkflowStub(
+                  CaseProcessWorkflow.class,
+                  WorkflowOptions.newBuilder()
+                      .setWorkflowId(provision.caseWorkflowId())
+                      .setTaskQueue(CaseProcessWorkflowProtocol.CASE_CONTROL_TASK_QUEUE)
+                      .build());
+      WorkflowClient.start(workflow::run, (CaseProcessCarryState) null);
+      provision(workflow, provision);
+
+      CaseProcessSnapshot provisioned =
+          awaitProcess(environment, workflow, state -> state.activeChildKind() != null);
+      assertThat(provisioned.nextCommandSequence()).isEqualTo(1);
+      assertThat(provisioned.nextCaseEventSequence()).isEqualTo(1);
+      assertThat(provisioned.observedProcessRevision()).isZero();
+      assertThat(provisioned.activeRoomRevision()).isZero();
+
+      for (int round = 1; round <= 5; round++) {
+        CaseCommandRef message =
+            workflowCommand(round, CommandType.INTAKE_MESSAGE, round - 1L, now);
+        ledger.put(message);
+        workflow.acceptCommand(message);
+        int expectedRound = round;
+        awaitProcess(
+            environment,
+            workflow,
+            state -> state.nextCommandSequence() == expectedRound + 1L);
+
+        long formalSequence = 1L + (round - 1L) * 3L;
+        workflow.domainEventCommitted(
+            workflowEvent(
+                formalSequence,
+                "INTAKE_TURN_READY_TO_CONFIRM",
+                RoomType.INTAKE,
+                1));
+        if (round < 5) {
+          long roomSequence = formalSequence + 2L;
+          workflow.domainEventCommitted(
+              workflowEvent(roomSequence, "ROOM_MESSAGE_CREATED", RoomType.INTAKE, 1));
+          awaitProcess(
+              environment,
+              workflow,
+              state -> state.nextCaseEventSequence() == roomSequence + 1L);
+        }
+      }
+
+      CaseProcessSnapshot recovered =
+          awaitProcess(
+              environment,
+              workflow,
+              state ->
+                  projection.completionCalls.get() == 5
+                      && state.nextCaseEventSequence() == 16);
+
+      assertThat(recovered.highestObservedEventSequence()).isEqualTo(15);
+      assertThat(recovered.processedEventCount()).isEqualTo(15);
+      assertThat(recovered.activeRoomEpoch()).isEqualTo(1);
+      assertThat(recovered.activeFencingToken()).isEqualTo(11);
+      assertThat(recovered.observedProcessRevision()).isEqualTo(5);
+      assertThat(recovered.activeRoomRevision()).isEqualTo(5);
+      assertThat(recovered.protocolErrorCode()).isNull();
+      assertThat(ledger.eventLoads)
+          .anySatisfy(
+              range -> {
+                assertThat(range.fromSequenceInclusive()).isEqualTo(14);
+                assertThat(range.toSequenceInclusive()).isGreaterThanOrEqualTo(15);
+              });
+      assertThat(ledger.operations)
+          .containsSubsequence(
+              "projection:formal:13",
+              "durable:event:14",
+              "durable:ready:15",
+              "projection:receipt-high-water:15",
+              "ledger:load:14-15");
+      assertThat(HighWaterTargetCaseProcessWorkflow.domainEvents)
+          .extracting(CaseDomainEventRef::caseEventSequence)
+          .containsExactly(1L, 3L, 4L, 6L, 7L, 9L, 10L, 12L, 13L, 14L);
+      assertThat(HighWaterTargetCaseProcessWorkflow.globalReadyEvents)
+          .extracting(CaseDomainEventRef::caseEventSequence)
+          .containsExactly(2L, 5L, 8L, 11L, 15L);
+
+      CaseCommandRef confirmation = confirmationCommand(now);
+      ledger.put(confirmation);
+      workflow.acceptCommand(confirmation);
+
+      CaseProcessSnapshot confirmed =
+          awaitProcess(environment, workflow, state -> state.nextCommandSequence() == 7);
+      assertThat(confirmed.processedCommandCount()).isEqualTo(6);
+      assertThat(confirmed.nextCaseEventSequence()).isEqualTo(16);
+      assertThat(confirmed.observedProcessRevision()).isEqualTo(6);
+      assertThat(confirmed.activeRoomRevision()).isEqualTo(6);
+      assertThat(confirmed.activeRoomEpoch()).isEqualTo(1);
+      assertThat(confirmed.activeFencingToken()).isEqualTo(11);
+      assertThat(confirmed.protocolErrorCode()).isNull();
+      assertThat(HighWaterTargetCaseProcessWorkflow.commands)
+          .extracting(CaseCommandRef::commandId)
+          .containsExactly(
+              "command-message-1",
+              "command-message-2",
+              "command-message-3",
+              "command-message-4",
+              "command-message-5",
+              confirmation.commandId());
+      assertThat(ledger.completedRoutingCalls.get()).isEqualTo(6);
+    }
+  }
+
+  private static CaseProcessSnapshot awaitProcess(
+      TestWorkflowEnvironment environment,
+      CaseProcessWorkflow workflow,
+      Predicate<CaseProcessSnapshot> predicate) {
+    for (int attempt = 0; attempt < 200; attempt++) {
+      CaseProcessSnapshot state = workflow.state();
+      if (predicate.test(state)) {
+        return state;
+      }
+      environment.sleep(Duration.ofMillis(100));
+    }
+    throw new AssertionError("CaseProcess workflow did not reach the expected state");
+  }
+
+  private static ProvisionRoomEpochReceipt provision(
+      CaseProcessWorkflow workflow, ProvisionRoomEpoch request) {
+    return WorkflowStub.fromTyped(workflow)
+        .startUpdate(
+            UpdateOptions.newBuilder(ProvisionRoomEpochReceipt.class)
+                .setUpdateName(CaseProcessWorkflowProtocol.PROVISION_ROOM_EPOCH_UPDATE)
+                .setUpdateId(request.updateId())
+                .setWaitForStage(WorkflowUpdateStage.COMPLETED)
+                .build(),
+            request)
+        .getResult();
+  }
+
+  private static ProvisionRoomEpoch highWaterTargetIntakeProvision(Instant now) {
+    String tenant = "tenant-run001";
+    String caseId = "QA_TARGET_INTAKE_1";
+    long roomEpoch = 1;
+    return new ProvisionRoomEpoch(
+        ProvisionRoomEpoch.SCHEMA_VERSION,
+        "epoch-target-intake-high-water",
+        tenant,
+        caseId,
+        "room-target-intake-high-water",
+        RoomType.INTAKE,
+        roomEpoch,
+        0,
+        0,
+        11,
+        "ACTIVE",
+        "INTAKE",
+        "ACTIVE",
+        WriterMode.TEMPORAL,
+        CaseProcessWorkflowProtocol.caseWorkflowId(tenant, caseId),
+        CaseProcessWorkflowProtocol.roomWorkflowId(caseId, RoomType.INTAKE, roomEpoch),
+        TargetTypedRoomProtocol.SELECTION_SCHEMA_VERSION,
+        TargetTypedRoomProtocol.PROCESS_CONTRACT_VERSION,
+        TargetTypedRoomProtocol.CASE_WORKFLOW_TYPE,
+        "case-build-p9",
+        TargetTypedRoomProtocol.workflowType(RoomType.INTAKE),
+        "control-build-p9",
+        TargetTypedRoomProtocol.GRAPH_KEY,
+        TargetTypedRoomProtocol.GRAPH_VERSION,
+        TargetTypedRoomProtocol.CHECKPOINT_SCHEMA_VERSION,
+        TargetTypedRoomProtocol.STREAM_PROTOCOL,
+        0,
+        0,
+        1,
+        1,
+        now.plusSeconds(3_600),
+        null,
+        null,
+        now);
+  }
+
+  private static CaseCommandRef confirmationCommand(Instant now) {
+    return workflowCommand(6, CommandType.INTAKE_CONFIRM, 5, now);
+  }
+
+  private static CaseCommandRef workflowCommand(
+      int sequence, CommandType commandType, long expectedRevision, Instant now) {
+    String commandKind =
+        commandType == CommandType.INTAKE_CONFIRM ? "confirm" : "message";
+    String hash = Integer.toHexString(sequence % 16).repeat(64);
+    return new CaseCommandRef(
+        "case-command-ref.v1",
+        "command-" + commandKind + "-" + sequence,
+        "tenant-run001",
+        "QA_TARGET_INTAKE_1",
+        sequence,
+        commandType,
+        RoomType.INTAKE,
+        1,
+        new ActorRef(
+            "party-target",
+            ActorRole.USER,
+            List.of(
+                commandType == CommandType.INTAKE_CONFIRM
+                    ? "intake:confirm"
+                    : "intake:message")),
+        new PayloadRef(
+            "intake-command.v1",
+            "urn:test:command:" + commandKind + "-" + sequence,
+            hash,
+            32),
+        expectedRevision,
+        now.plusSeconds(sequence),
+        now.plusSeconds(3_600),
+        "00-11111111111111111111111111111111-2222222222222222-01",
+        hash);
+  }
+
+  private static CaseDomainEventRef workflowEvent(
+      long sequence, String eventType, RoomType roomType, long roomEpoch) {
+    String hash = Long.toHexString(sequence % 16).repeat(64);
+    return new CaseDomainEventRef(
+        "case-domain-event-ref.v1",
+        "EVENT_HIGH_WATER_" + sequence,
+        "tenant-run001",
+        "QA_TARGET_INTAKE_1",
+        sequence,
+        eventType,
+        roomType,
+        roomEpoch,
+        new PayloadRef(
+            "payload-ref.v1", "urn:after-sale-flow:high-water-event:" + sequence, hash, 0),
+        Instant.parse("2026-07-30T03:00:00Z").plusSeconds(sequence),
+        "00-" + "a".repeat(32) + "-" + "b".repeat(16) + "-01");
+  }
+
   private static TargetIntakePartyScopeSource.ResolvedPartyScopes partyScopes(
       ProvisionRoomEpoch request, ActorRole initiatorRole) {
     TargetIntakePartyScopeSource.Request route =
@@ -366,6 +657,278 @@ class TargetTypedRoomCaseProcessDispatcherTest {
             0),
         Instant.parse("2026-07-30T01:00:00Z").plusSeconds(sequence),
         "00-" + "a".repeat(32) + "-" + "b".repeat(16) + "-01");
+  }
+
+  public static final class HighWaterTargetCaseProcessWorkflow
+      extends TargetTypedRoomCaseProcessWorkflow {
+    private static final List<CaseCommandRef> commands = new CopyOnWriteArrayList<>();
+    private static final List<CaseDomainEventRef> domainEvents = new CopyOnWriteArrayList<>();
+    private static final List<CaseDomainEventRef> globalReadyEvents =
+        new CopyOnWriteArrayList<>();
+
+    static void reset() {
+      commands.clear();
+      domainEvents.clear();
+      globalReadyEvents.clear();
+    }
+
+    @Override
+    protected TargetTypedRoomChildHandle startTargetTypedRoomChild(
+        ProvisionRoomEpoch request, String provisioningHash) {
+      WorkflowExecution execution =
+          WorkflowExecution.newBuilder()
+              .setWorkflowId(request.roomWorkflowId())
+              .setRunId("target-intake-high-water-child-run")
+              .build();
+      return new RecordingTargetHandle(
+          execution,
+          request.roomEpoch(),
+          request.fencingToken(),
+          request.initialProcessRevision(),
+          request.initialRoomRevision());
+    }
+
+    @Override
+    protected TargetTypedRoomChildHandle restoreTargetTypedRoomChild(
+        ActiveChildDescriptor descriptor) {
+      WorkflowExecution execution =
+          WorkflowExecution.newBuilder()
+              .setWorkflowId(descriptor.workflowId())
+              .setRunId(descriptor.startedRunId())
+              .build();
+      return new RecordingTargetHandle(
+          execution,
+          descriptor.roomEpoch(),
+          descriptor.fencingToken(),
+          descriptor.currentProcessRevision(),
+          descriptor.currentRoomRevision());
+    }
+
+    private static final class RecordingTargetHandle implements TargetTypedRoomChildHandle {
+      private final WorkflowExecution execution;
+      private final long roomEpoch;
+      private final long fencingToken;
+      private long processRevision;
+      private long roomRevision;
+
+      private RecordingTargetHandle(
+          WorkflowExecution execution,
+          long roomEpoch,
+          long fencingToken,
+          long processRevision,
+          long roomRevision) {
+        this.execution = execution;
+        this.roomEpoch = roomEpoch;
+        this.fencingToken = fencingToken;
+        this.processRevision = processRevision;
+        this.roomRevision = roomRevision;
+      }
+
+      @Override
+      public WorkflowExecution execution() {
+        return execution;
+      }
+
+      @Override
+      public TargetTypedRoomDispatchReceipt commandAccepted(CaseCommandRef command) {
+        requireCurrentRoom(command.roomType(), command.roomEpoch());
+        commands.add(command);
+        processRevision = Math.max(processRevision, command.expectedProcessRevision() + 1);
+        roomRevision++;
+        return receipt();
+      }
+
+      @Override
+      public TargetTypedRoomDispatchReceipt domainEventCommitted(CaseDomainEventRef event) {
+        requireCurrentRoom(event.roomType(), event.roomEpoch());
+        domainEvents.add(event);
+        return receipt();
+      }
+
+      @Override
+      public TargetTypedRoomDispatchReceipt globalIntakeProjectionReady(
+          CaseDomainEventRef event) {
+        if (event.roomType() != null
+            || event.roomEpoch() != 0
+            || !"INTAKE_PROJECTION_READY".equals(event.eventType())) {
+          throw new IllegalArgumentException("global ready event is not canonical");
+        }
+        globalReadyEvents.add(event);
+        return receipt();
+      }
+
+      @Override
+      public String initiatorActorScopeHash() {
+        return "a".repeat(64);
+      }
+
+      @Override
+      public String respondentActorScopeHash() {
+        return "b".repeat(64);
+      }
+
+      @Override
+      public void close(String reason) {}
+
+      private TargetTypedRoomDispatchReceipt receipt() {
+        return new TargetTypedRoomDispatchReceipt(
+            RoomType.INTAKE, roomEpoch, fencingToken, processRevision, roomRevision);
+      }
+
+      private void requireCurrentRoom(RoomType actualType, long actualEpoch) {
+        if (actualType != RoomType.INTAKE || actualEpoch != roomEpoch) {
+          throw new IllegalArgumentException("target handle crossed its room authority");
+        }
+      }
+    }
+  }
+
+  private static final class ProjectionHighWaterLedger
+      implements CaseProcessLedgerActivities, CaseCommandLifecycleActivities {
+    private final Map<Long, CaseCommandRef> commands = new ConcurrentHashMap<>();
+    private final Map<Long, CaseCommandLedgerState> states = new ConcurrentHashMap<>();
+    private final List<CaseDomainEventRef> events = new CopyOnWriteArrayList<>();
+    private final List<LoadSequenceRange> eventLoads = new CopyOnWriteArrayList<>();
+    private final List<String> operations = new CopyOnWriteArrayList<>();
+    private final AtomicInteger completedRoutingCalls = new AtomicInteger();
+
+    void put(CaseCommandRef command) {
+      commands.put(command.caseCommandSequence(), command);
+      states.put(command.caseCommandSequence(), CaseCommandLedgerState.PENDING_ORCHESTRATION);
+    }
+
+    void put(CaseDomainEventRef event, String operation) {
+      events.add(event);
+      operations.add(operation);
+    }
+
+    @Override
+    public List<CaseCommandRef> loadCaseCommands(LoadSequenceRange request) {
+      return commands.values().stream()
+          .filter(
+              command ->
+                  command.caseCommandSequence() >= request.fromSequenceInclusive()
+                      && command.caseCommandSequence() <= request.toSequenceInclusive())
+          .sorted(Comparator.comparingLong(CaseCommandRef::caseCommandSequence))
+          .toList();
+    }
+
+    @Override
+    public List<CaseCommandLedgerEntry> loadCaseCommandLedgerEntries(
+        LoadSequenceRange request) {
+      return loadCaseCommands(request).stream()
+          .map(
+              command ->
+                  new CaseCommandLedgerEntry(
+                      "case-command-ledger-entry.v1",
+                      command,
+                      states.get(command.caseCommandSequence())))
+          .toList();
+    }
+
+    @Override
+    public List<CaseDomainEventRef> loadDomainEvents(LoadSequenceRange request) {
+      eventLoads.add(request);
+      operations.add(
+          "ledger:load:"
+              + request.fromSequenceInclusive()
+              + "-"
+              + request.toSequenceInclusive());
+      return events.stream()
+          .filter(
+              event ->
+                  event.caseEventSequence() >= request.fromSequenceInclusive()
+                      && event.caseEventSequence() <= request.toSequenceInclusive())
+          .sorted(Comparator.comparingLong(CaseDomainEventRef::caseEventSequence))
+          .toList();
+    }
+
+    @Override
+    public void reportSequenceGap(SequenceGapReport report) {}
+
+    @Override
+    public ExpireCaseCommandResult expireCaseCommand(ExpireCaseCommand request) {
+      return new ExpireCaseCommandResult(
+          "expire-case-command-result.v1", CommandLifecycleOutcome.EXPIRED);
+    }
+
+    @Override
+    public RecordCaseCommandRoutedResult recordCaseCommandRouted(
+        RecordCaseCommandRouted request) {
+      states.put(request.caseCommandSequence(), CaseCommandLedgerState.ORCHESTRATION_ACCEPTED);
+      return new RecordCaseCommandRoutedResult(
+          "record-case-command-routed-result.v1",
+          CommandLifecycleOutcome.ORCHESTRATION_ACCEPTED);
+    }
+
+    @Override
+    public RecordCaseCommandRoutedResult completeCaseCommandRouting(
+        RecordCaseCommandRouted request) {
+      completedRoutingCalls.incrementAndGet();
+      return new RecordCaseCommandRoutedResult(
+          "record-case-command-routed-result.v1",
+          CommandLifecycleOutcome.ORCHESTRATION_ACCEPTED);
+    }
+  }
+
+  private static final class ReadyHighWaterProjectionActivities
+      implements ProcessProjectionActivities {
+    private final ProjectionHighWaterLedger ledger;
+    private final Instant completedAt;
+    private final AtomicInteger completionCalls = new AtomicInteger();
+
+    private ReadyHighWaterProjectionActivities(
+        ProjectionHighWaterLedger ledger, Instant completedAt) {
+      this.ledger = ledger;
+      this.completedAt = completedAt;
+    }
+
+    @Override
+    public ApplyProjectionResult apply(ApplyProjectionCommand command) {
+      throw new UnsupportedOperationException("fenced projection is not used by this fixture");
+    }
+
+    @Override
+    public CompleteConsumedIntakeProjectionResult completeConsumedIntakeProjection(
+        CompleteConsumedIntakeProjectionCommand command) {
+      completionCalls.incrementAndGet();
+      ledger.operations.add("projection:formal:" + command.caseEventSequence());
+      long readySequence = command.caseEventSequence() + 1L;
+      CaseDomainEventRef ready;
+      String readyEventId = null;
+      Long readyEventSequence = null;
+      if (command.caseEventSequence() == 13) {
+        CaseDomainEventRef intervening =
+            workflowEvent(14, "CASE_STATUS_CHANGED", RoomType.INTAKE, command.roomEpoch());
+        ready = workflowEvent(15, "INTAKE_PROJECTION_READY", null, 0);
+        ledger.put(intervening, "durable:event:14");
+        ledger.put(ready, "durable:ready:15");
+        ledger.operations.add("projection:receipt-high-water:15");
+        readyEventId = ready.eventId();
+        readyEventSequence = ready.caseEventSequence();
+      } else {
+        ready = workflowEvent(readySequence, "INTAKE_PROJECTION_READY", null, 0);
+        ledger.put(ready, "durable:ready:" + readySequence);
+      }
+      return new CompleteConsumedIntakeProjectionResult(
+          "complete-consumed-intake-projection-result.v1",
+          command.eventId(),
+          command.caseEventSequence(),
+          CompleteConsumedIntakeProjectionOutcome.APPLIED,
+          command.lastCommandSequence(),
+          command.processRevision(),
+          command.roomRevision(),
+          command.roomEpoch(),
+          command.fencingToken(),
+          command.temporalWorkflowId(),
+          command.firstExecutionRunId(),
+          command.activeChildRunId(),
+          "urn:test:intake:projection-high-water",
+          "c".repeat(64),
+          completedAt,
+          readyEventId,
+          readyEventSequence);
+    }
   }
 
   public static final class ConcreteTargetCaseProcessWorkflow

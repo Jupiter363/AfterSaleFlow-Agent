@@ -82,7 +82,45 @@ public final class ProcessProjectionContract {
             String activeChildRunId,
             String resultRef,
             String resultSha256,
-            Instant completedAt) {
+            Instant completedAt,
+            String readyEventId,
+            Long readyEventSequence) {
+
+        public CompleteConsumedIntakeProjectionResult(
+                String schemaVersion,
+                String eventId,
+                long caseEventSequence,
+                CompleteConsumedIntakeProjectionOutcome outcome,
+                long lastCommandSequence,
+                long processRevision,
+                long roomRevision,
+                long roomEpoch,
+                long fencingToken,
+                String temporalWorkflowId,
+                String firstExecutionRunId,
+                String activeChildRunId,
+                String resultRef,
+                String resultSha256,
+                Instant completedAt) {
+            this(
+                    schemaVersion,
+                    eventId,
+                    caseEventSequence,
+                    outcome,
+                    lastCommandSequence,
+                    processRevision,
+                    roomRevision,
+                    roomEpoch,
+                    fencingToken,
+                    temporalWorkflowId,
+                    firstExecutionRunId,
+                    activeChildRunId,
+                    resultRef,
+                    resultSha256,
+                    completedAt,
+                    null,
+                    null);
+        }
 
         public CompleteConsumedIntakeProjectionResult {
             if (!"complete-consumed-intake-projection-result.v1".equals(schemaVersion)) {
@@ -109,6 +147,17 @@ public final class ProcessProjectionContract {
             requireReference(resultRef, resultSha256);
             Objects.requireNonNull(completedAt, "completedAt must not be null");
             completedAt = completedAt.truncatedTo(ChronoUnit.MICROS);
+            if ((readyEventId == null) != (readyEventSequence == null)) {
+                throw new IllegalArgumentException(
+                        "ready event id and sequence must both be absent or present");
+            }
+            if (readyEventId != null) {
+                requireKey(readyEventId, "readyEventId");
+                if (readyEventSequence <= caseEventSequence) {
+                    throw new IllegalArgumentException(
+                            "ready event sequence must follow the consumed Intake event");
+                }
+            }
         }
     }
 
