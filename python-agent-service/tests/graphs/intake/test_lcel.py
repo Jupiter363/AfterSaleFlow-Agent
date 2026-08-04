@@ -954,11 +954,13 @@ def test_source_bound_attitude_carry_survives_twenty_turn_checkpoint_reloads(
     assert prior_matrix is not None and prior_matrix["matrix_version"] == 20
 
 
-def test_fifth_initiator_full_snapshot_carries_verified_prior_after_checkpoint_reload(
+def _run_fifth_initiator_full_snapshot_checkpoint(
     bindings,
     version_pins,
     snapshot,
     event,
+    *,
+    historical_mutation: tuple[str, Any] | None = None,
 ) -> None:
     imported = copy.deepcopy(snapshot)
     imported["own_messages"] = []
@@ -972,6 +974,9 @@ def test_fifth_initiator_full_snapshot_carries_verified_prior_after_checkpoint_r
     round_four_attitude: dict[str, Any] | None = None
     round_four_claim: dict[str, Any] | None = None
     round_four_matrix: dict[str, Any] | None = None
+    round_four_historical_row: dict[str, Any] | None = None
+    canonical_historical_delta_row: dict[str, Any] | None = None
+    round_five_current_fact_target: str | None = None
     round_five_message_id: str | None = None
 
     for round_no in range(1, 6):
@@ -1028,6 +1033,48 @@ def test_fifth_initiator_full_snapshot_carries_verified_prior_after_checkpoint_r
             assert prior["public_dossier_hash"] == canonical_sha256(
                 state["dossier_draft"]
             )
+            raw_matrix_patch = copy.deepcopy(document["matrix_patch"])
+            historical_rows = [
+                row
+                for row in raw_matrix_patch["fact_rows"]
+                if row["source_scope"] == "PREVIOUS_MATRIX"
+            ]
+            assert historical_rows
+            historical_row = historical_rows[0]
+            canonical_historical_delta_row = copy.deepcopy(historical_row)
+            selected_fact_id = historical_row["fact_key"]
+            round_four_historical_row = copy.deepcopy(
+                next(
+                    row
+                    for row in round_four_matrix["fact_rows"]
+                    if row["fact_id"] == selected_fact_id
+                )
+            )
+            round_five_current_fact_target = next(
+                row["fact_target"]
+                for row in raw_matrix_patch["fact_rows"]
+                if row["source_scope"] == "CURRENT_SOURCE"
+            )
+            if historical_mutation is not None:
+                field, value = historical_mutation
+                historical_row[field] = value
+                assert historical_row["fact_key"] == selected_fact_id
+                assert historical_row["category"] == round_four_historical_row["category"]
+                assert (
+                    historical_row["fact_target"]
+                    == round_four_historical_row["fact_target"]
+                )
+                assert (
+                    historical_row["materiality"]
+                    == round_four_historical_row["materiality"]
+                )
+                assert historical_row["source_scope"] == "PREVIOUS_MATRIX"
+                with pytest.raises(
+                    IntakeGraphContractError,
+                    match="INTAKE_MATRIX_PREVIOUS_FACT_MUTATED",
+                ):
+                    validate_matrix_patch(state, raw_matrix_patch)
+
             raw_document = {
                 "room_utterance": document["room_utterance"],
                 "case_detail": copy.deepcopy(state["dossier_draft"]),
@@ -1036,7 +1083,7 @@ def test_fifth_initiator_full_snapshot_carries_verified_prior_after_checkpoint_r
                 "knowledge_query_intent": False,
                 "knowledge_answer_mode": document["knowledge_answer_mode"],
                 "confidence": document["confidence"],
-                "case_matrix_delta": copy.deepcopy(document["matrix_patch"]),
+                "case_matrix_delta": raw_matrix_patch,
             }
             transport: IntakeTransport = RawBaselineIntakeTransport(raw_document)
         else:
@@ -1109,6 +1156,9 @@ def test_fifth_initiator_full_snapshot_carries_verified_prior_after_checkpoint_r
     assert round_four_attitude is not None
     assert round_four_claim is not None
     assert round_four_matrix is not None
+    assert round_four_historical_row is not None
+    assert canonical_historical_delta_row is not None
+    assert round_five_current_fact_target is not None
     assert round_five_message_id is not None
     assert state["cognitive_revision"] == 5
     assert state["result_json"]["cognitive_revision"] == 5
@@ -1122,10 +1172,74 @@ def test_fifth_initiator_full_snapshot_carries_verified_prior_after_checkpoint_r
         "content_hash": round_four_matrix["content_hash"],
     }
     assert final_matrix["claims"]["respondent_reported_by_initiator"] == round_four_claim
+    normalized_historical_row = next(
+        row
+        for row in state["terminal_draft"]["matrix_patch"]["fact_rows"]
+        if row["fact_key"] == canonical_historical_delta_row["fact_key"]
+    )
+    assert normalized_historical_row == canonical_historical_delta_row
+    final_historical_row = next(
+        row
+        for row in final_matrix["fact_rows"]
+        if row["fact_id"] == round_four_historical_row["fact_id"]
+    )
+    assert final_historical_row == round_four_historical_row
+    assert any(
+        row["fact_id"] != round_four_historical_row["fact_id"]
+        and row["fact_target"] == round_five_current_fact_target
+        for row in final_matrix["fact_rows"]
+    )
     assert round_five_message_id not in round_four_claim["source_refs"]
     assert (
         state["dossier_draft"]["respondent_attitude"]["grounding"]["message_id"]
         != round_five_message_id
+    )
+
+
+def test_fifth_initiator_full_snapshot_carries_verified_prior_after_checkpoint_reload(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+) -> None:
+    _run_fifth_initiator_full_snapshot_checkpoint(
+        bindings,
+        version_pins,
+        snapshot,
+        event,
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        pytest.param("stance", "DENY", id="stance"),
+        pytest.param(
+            "position_summary",
+            "Provider surface wording for an unchanged historical position.",
+            id="position-summary",
+        ),
+        pytest.param(
+            "asserted_value",
+            "provider-surface-historical-value",
+            id="asserted-value",
+        ),
+    ],
+)
+def test_fifth_initiator_raw_historical_matrix_surface_variants_carry_canonically(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+    field: str,
+    value: str,
+) -> None:
+    _run_fifth_initiator_full_snapshot_checkpoint(
+        bindings,
+        version_pins,
+        snapshot,
+        event,
+        historical_mutation=(field, value),
     )
 
 

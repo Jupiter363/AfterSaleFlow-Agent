@@ -268,8 +268,12 @@ def adapt_intake_baseline_output_with_scroll_snapshot(
     raw model matrix payload.
     """
 
-    output = _normalize_intake_baseline_matrix_fact_keys(state, output)
     request = build_intake_baseline_request(state, agent_context=agent_context)
+    output = _normalize_intake_baseline_matrix_fact_keys(state, output)
+    output = _canonicalize_intake_baseline_historical_matrix_carry(
+        request=request,
+        output=output,
+    )
     source_text = _baseline_source_text(request)
     projected = finalize_intake_projected_output(
         project_intake_case_detail_output(
@@ -413,6 +417,70 @@ def _normalize_intake_baseline_matrix_fact_keys(
 
     normalized_output = output.model_dump(mode="json", exclude_none=True)
     normalized_output[matrix_field] = normalized_matrix
+    try:
+        return IntakeCaseDetailLlmOutput.model_validate(normalized_output)
+    except ValueError as error:
+        raise IntakeGraphContractError("INTAKE_BASELINE_MATRIX_PATCH_INVALID") from error
+
+
+def _canonicalize_intake_baseline_historical_matrix_carry(
+    *,
+    request: IntakeTurnRequest,
+    output: IntakeCaseDetailLlmOutput,
+) -> IntakeCaseDetailLlmOutput:
+    """Restore prior actor semantics for an exact previous-matrix carry row."""
+
+    matrix = output.case_matrix_delta
+    previous_detail = request.previous_case_detail
+    if matrix is None or not isinstance(previous_detail, Mapping):
+        return output
+    previous_matrix = previous_detail.get("case_fact_matrix")
+    if not isinstance(previous_matrix, Mapping):
+        return output
+    previous_rows = previous_matrix.get("fact_rows")
+    if not isinstance(previous_rows, list):
+        return output
+
+    previous_by_id: dict[str, Mapping[str, Any]] = {}
+    for previous_row in previous_rows:
+        if not isinstance(previous_row, Mapping):
+            return output
+        fact_id = previous_row.get("fact_id")
+        if not isinstance(fact_id, str) or fact_id in previous_by_id:
+            return output
+        previous_by_id[fact_id] = previous_row
+
+    matrix_payload = matrix.model_dump(mode="json", exclude_none=True)
+    rows = matrix_payload.get("fact_rows")
+    if not isinstance(rows, list):
+        return output
+    actor_role = request.agent_context.actor_role
+    changed = False
+    for row in rows:
+        if not isinstance(row, dict) or row.get("source_scope") != "PREVIOUS_MATRIX":
+            continue
+        previous_row = previous_by_id.get(row.get("fact_key"))
+        if previous_row is None or any(
+            row.get(field) != previous_row.get(field)
+            for field in ("category", "fact_target", "materiality")
+        ):
+            continue
+        positions = previous_row.get("positions")
+        previous_position = (
+            positions.get(actor_role) if isinstance(positions, Mapping) else None
+        )
+        if not isinstance(previous_position, Mapping):
+            continue
+        for field in ("stance", "position_summary", "asserted_value"):
+            authoritative_value = deepcopy(previous_position.get(field))
+            if row.get(field) != authoritative_value:
+                row[field] = authoritative_value
+                changed = True
+
+    if not changed:
+        return output
+    normalized_output = output.model_dump(mode="json", exclude_none=True)
+    normalized_output["case_matrix_delta"] = matrix_payload
     try:
         return IntakeCaseDetailLlmOutput.model_validate(normalized_output)
     except ValueError as error:
