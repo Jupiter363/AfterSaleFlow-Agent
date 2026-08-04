@@ -51,10 +51,19 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
   private static final String AGENT_RUN_CHILD_CHANGE_ID = "intake-room-agent-run-v2-child-v1";
   private static final String AGENT_RUN_WINNING_ATTEMPT_CHANGE_ID =
       "intake-room-agent-run-winning-attempt-v1";
+  private static final String AGENT_RUN_POST_COMMIT_RECONCILIATION_CHANGE_ID =
+      "intake-room-agent-run-post-commit-reconciliation-v1";
+  private static final String AGENT_RUN_LATE_COMMIT_RECONCILIATION_CHANGE_ID =
+      "intake-room-agent-run-late-commit-reconciliation-v1";
   private static final String TARGET_BRANCH_OUTPUT_SCHEMA_VERSION =
       "target-e2e-room-proposal-source.v1";
   private static final long HISTORY_EVENT_LIMIT = 2_000;
   private static final Duration RUN_MAX_AGE = Duration.ofHours(24);
+  private static final int POST_COMMIT_RECONCILIATION_ATTEMPTS = 5;
+  private static final Duration POST_COMMIT_RECONCILIATION_INITIAL_DELAY =
+      Duration.ofMillis(200);
+  private static final Duration FINALIZATION_RECONCILIATION_READ_TIMEOUT =
+      Duration.ofSeconds(5);
 
   private final ArrayDeque<InboxItem> inbox = new ArrayDeque<>();
   private final Map<String, CommandObservation> commandObservations = new LinkedHashMap<>();
@@ -406,6 +415,9 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
         rejectCommand(command, "COMMAND_THREAD_BINDING_MISMATCH", true);
         return;
       }
+    }
+    reconcileLateCommittedTargetAgentRun(command);
+    if (command.executionContext() != null) {
       if (!matchesTargetAgentRunAuthority(command)) {
         rejectCommand(command, "COMMAND_TARGET_AGENT_RUN_AUTHORITY_MISMATCH", true);
         return;
@@ -667,6 +679,12 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
     } catch (IntakeActivityReconciliationMiss failure) {
       protocolErrorCode = IntakeActivityFailureTypes.RETRY_BUDGET_EXHAUSTED;
     } catch (RuntimeException failure) {
+      if (command.executionContext() != null
+          && command.executionContext().isTargetAgentRun()
+          && postCommitTargetReconciliationEnabled()
+          && reconcileCommittedTargetAgentRunWithBackoff(command)) {
+        return;
+      }
       // Receipt validation failures are fail-closed and leave the command pending for recovery.
       protocolErrorCode = "INTAKE_ACTIVITY_RECEIPT_INVALID";
     }
@@ -728,6 +746,11 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
               command,
               IntakeAgentRunFinalizationReadRequest.Mode.AFTER_CHILD_COMPLETION);
       if (!settleTargetFinalization(command, finalization)) {
+        if (finalization.resolution() == IntakeAgentRunFinalizationReadResult.Resolution.PENDING
+            && postCommitTargetReconciliationEnabled()
+            && reconcileCommittedTargetAgentRunWithBackoff(command)) {
+          return;
+        }
         protocolErrorCode = "TARGET_AGENT_RUN_FINALIZATION_UNRESOLVED";
       }
     }
@@ -735,6 +758,13 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
 
   private IntakeAgentRunFinalizationReadResult readTargetFinalization(
       IntakeWorkflowCommand command, IntakeAgentRunFinalizationReadRequest.Mode mode) {
+    return readTargetFinalization(command, mode, remainingTargetDeadline(command.executionContext()));
+  }
+
+  private IntakeAgentRunFinalizationReadResult readTargetFinalization(
+      IntakeWorkflowCommand command,
+      IntakeAgentRunFinalizationReadRequest.Mode mode,
+      Duration readWindow) {
     IntakeAgentRunFinalizationReadRequest request =
         new IntakeAgentRunFinalizationReadRequest(
             "intake-agent-run-finalization-read-request.v1",
@@ -744,14 +774,94 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
     IntakeAgentRunFinalizationReadResult result =
         Workflow.newActivityStub(
                 IntakeAgentRunFinalizationReadActivities.class,
-                IntakeAgentRunFinalizationReadPolicy.options(
-                    remainingTargetDeadline(command.executionContext())))
+                IntakeAgentRunFinalizationReadPolicy.options(readWindow))
             .readFinalization(request);
     if (result == null) {
       throw new IllegalArgumentException("target finalization lookup returned no resolution");
     }
     result.requireMatches(request, winningAttemptEnabled);
     return result;
+  }
+
+  private void reconcileLateCommittedTargetAgentRun(IntakeWorkflowCommand incoming) {
+    if (pendingCommand == null
+        || pendingCommand.commandId().equals(incoming.commandId())
+        || targetAgentRunChild == null
+        || !targetAgentRunChild.unresolved()
+        || !lateCommitTargetReconciliationEnabled()) {
+      return;
+    }
+    reconcileCommittedTargetAgentRun(
+        pendingWorkflowCommand(), FINALIZATION_RECONCILIATION_READ_TIMEOUT);
+  }
+
+  private boolean reconcileCommittedTargetAgentRun(
+      IntakeWorkflowCommand command, Duration readWindow) {
+    return reconcileCommittedTargetAgentRunOnce(command, readWindow)
+        == TargetFinalizationReconciliation.SETTLED;
+  }
+
+  private boolean reconcileCommittedTargetAgentRunWithBackoff(IntakeWorkflowCommand command) {
+    Duration delay = POST_COMMIT_RECONCILIATION_INITIAL_DELAY;
+    for (int attempt = 1; attempt <= POST_COMMIT_RECONCILIATION_ATTEMPTS; attempt++) {
+      TargetFinalizationReconciliation reconciliation =
+          reconcileCommittedTargetAgentRunOnce(
+              command, FINALIZATION_RECONCILIATION_READ_TIMEOUT);
+      if (reconciliation == TargetFinalizationReconciliation.SETTLED) {
+        return true;
+      }
+      if (reconciliation != TargetFinalizationReconciliation.PENDING
+          || attempt == POST_COMMIT_RECONCILIATION_ATTEMPTS) {
+        return false;
+      }
+      Workflow.sleep(delay);
+      delay = delay.multipliedBy(2);
+    }
+    return false;
+  }
+
+  private TargetFinalizationReconciliation reconcileCommittedTargetAgentRunOnce(
+      IntakeWorkflowCommand command, Duration readWindow) {
+    if (command == null
+        || command.executionContext() == null
+        || !command.executionContext().isTargetAgentRun()
+        || targetAgentRunChild == null
+        || !targetAgentRunChild.unresolved()
+        || !targetAgentRunChild.commandId().equals(command.commandId())) {
+      return TargetFinalizationReconciliation.UNRESOLVED;
+    }
+    try {
+      IntakeAgentRunFinalizationReadResult result =
+          readTargetFinalization(
+              command,
+              IntakeAgentRunFinalizationReadRequest.Mode.CANCELLATION_RECONCILIATION,
+              readWindow);
+      if (result.resolution() == IntakeAgentRunFinalizationReadResult.Resolution.PENDING) {
+        return TargetFinalizationReconciliation.PENDING;
+      }
+      if (!settleTargetFinalization(command, result)) {
+        return TargetFinalizationReconciliation.UNRESOLVED;
+      }
+      return pendingCommand == null || !pendingCommand.commandId().equals(command.commandId())
+          ? TargetFinalizationReconciliation.SETTLED
+          : TargetFinalizationReconciliation.UNRESOLVED;
+    } catch (CanceledFailure failure) {
+      throw failure;
+    } catch (RuntimeException unresolved) {
+      return TargetFinalizationReconciliation.UNRESOLVED;
+    }
+  }
+
+  private static boolean postCommitTargetReconciliationEnabled() {
+    return Workflow.getVersion(
+            AGENT_RUN_POST_COMMIT_RECONCILIATION_CHANGE_ID, Workflow.DEFAULT_VERSION, 1)
+        == 1;
+  }
+
+  private static boolean lateCommitTargetReconciliationEnabled() {
+    return Workflow.getVersion(
+            AGENT_RUN_LATE_COMMIT_RECONCILIATION_CHANGE_ID, Workflow.DEFAULT_VERSION, 1)
+        == 1;
   }
 
   private boolean settleTargetFinalization(
@@ -2104,6 +2214,12 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
       IntakeWorkflowCommand command, IntakeCommandDecision decision) {}
 
   private record EventObservation(IntakeDomainEventRef event, boolean applied) {}
+
+  private enum TargetFinalizationReconciliation {
+    SETTLED,
+    PENDING,
+    UNRESOLVED
+  }
 
   private enum CancellationReconciliationStatus {
     COMMITTED,

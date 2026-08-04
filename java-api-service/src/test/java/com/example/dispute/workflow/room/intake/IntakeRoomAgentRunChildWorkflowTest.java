@@ -53,6 +53,7 @@ import com.example.dispute.workflow.temporal.room.intake.IntakeTargetAgentRunCon
 import com.example.dispute.workflow.temporal.room.intake.IntakeWorkflowCommand;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowOptions;
+import io.temporal.failure.ApplicationFailure;
 import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.worker.Worker;
 import io.temporal.workflow.Workflow;
@@ -60,6 +61,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 
 class IntakeRoomAgentRunChildWorkflowTest {
@@ -81,6 +83,7 @@ class IntakeRoomAgentRunChildWorkflowTest {
   private static final String RESPONDENT_SCOPE = "2".repeat(64);
   private static final String RESULT_HASH = "7".repeat(64);
   private static final String PROPOSAL_HASH = "8".repeat(64);
+  private static final int POST_COMMIT_RECONCILIATION_ATTEMPTS = 5;
 
   @Test
   void targetMessageRunsNativeAgentRunChildThenReadsCommittedReceipt() {
@@ -89,6 +92,7 @@ class IntakeRoomAgentRunChildWorkflowTest {
       SnapshotOnlyActivities snapshotActivities = new SnapshotOnlyActivities();
       RecordingAgentRunWorkflow.requests.clear();
       RecordingFinalizationReads.requests.clear();
+      RecordingFinalizationReads.pendingResponses.set(0);
 
       Worker roomWorker = environment.newWorker(roomQueue);
       roomWorker.registerWorkflowImplementationTypes(IntakeRoomWorkflowImpl.class);
@@ -144,6 +148,225 @@ class IntakeRoomAgentRunChildWorkflowTest {
       assertThat(snapshotActivities.snapshotRequests).isEmpty();
       assertThat(snapshotActivities.graphRequests).isEmpty();
       assertThat(snapshotActivities.finalizationRequests).isEmpty();
+    }
+  }
+
+  @Test
+  void reconcilesAnAlreadyCommittedReceiptAfterTheAgentRunChildAcknowledgementIsLost() {
+    try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+      String roomQueue = "phase9-intake-child-post-commit-immediate-recovery";
+      FailsFirstAgentRunWorkflow.requests.clear();
+      FailsFirstAgentRunWorkflow.invocations.set(0);
+      RecordingFinalizationReads.requests.clear();
+      RecordingFinalizationReads.pendingResponses.set(0);
+
+      Worker roomWorker = environment.newWorker(roomQueue);
+      roomWorker.registerWorkflowImplementationTypes(IntakeRoomWorkflowImpl.class);
+      Worker agentWorker = environment.newWorker(AGENT_EXECUTION);
+      agentWorker.registerWorkflowImplementationTypes(FailsFirstAgentRunWorkflow.class);
+      Worker controlWorker = environment.newWorker(CASE_CONTROL);
+      controlWorker.registerActivitiesImplementations(new RecordingFinalizationReads());
+      environment.start();
+
+      IntakeRoomWorkflow workflow =
+          environment
+              .getWorkflowClient()
+              .newWorkflowStub(
+                  IntakeRoomWorkflow.class,
+                  WorkflowOptions.newBuilder()
+                      .setWorkflowId("intake-room:immediate-recovery:" + CASE_ID + ":" + EPOCH)
+                      .setTaskQueue(roomQueue)
+                      .build());
+      WorkflowClient.start(workflow::run, start());
+      IntakeWorkflowCommand command = targetCommand();
+      workflow.commandAccepted(command);
+
+      IntakeRoomSnapshot recovered =
+          awaitState(
+              workflow,
+              snapshot -> snapshot.roomPhase() == IntakeRoomPhase.READY_TO_CONFIRM);
+      assertThat(recovered.pendingCommand()).isNull();
+      assertThat(recovered.protocolErrorCode()).isNull();
+      assertThat(FailsFirstAgentRunWorkflow.requests).containsExactly(targetRequest(command));
+      assertThat(RecordingFinalizationReads.requests)
+          .extracting(IntakeAgentRunFinalizationReadRequest::mode)
+          .containsExactly(
+              IntakeAgentRunFinalizationReadRequest.Mode.CANCELLATION_RECONCILIATION);
+    }
+  }
+
+  @Test
+  void retriesAPendingReceiptAfterTheAgentRunChildCompletes() {
+    try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+      String roomQueue = "phase9-intake-child-pending-finalization-recovery";
+      RecordingAgentRunWorkflow.requests.clear();
+      RecordingFinalizationReads.requests.clear();
+      RecordingFinalizationReads.pendingResponses.set(1);
+
+      Worker roomWorker = environment.newWorker(roomQueue);
+      roomWorker.registerWorkflowImplementationTypes(IntakeRoomWorkflowImpl.class);
+      Worker agentWorker = environment.newWorker(AGENT_EXECUTION);
+      agentWorker.registerWorkflowImplementationTypes(RecordingAgentRunWorkflow.class);
+      Worker controlWorker = environment.newWorker(CASE_CONTROL);
+      controlWorker.registerActivitiesImplementations(new RecordingFinalizationReads());
+      environment.start();
+
+      IntakeRoomWorkflow workflow =
+          environment
+              .getWorkflowClient()
+              .newWorkflowStub(
+                  IntakeRoomWorkflow.class,
+                  WorkflowOptions.newBuilder()
+                      .setWorkflowId("intake-room:pending-finalization:" + CASE_ID + ":" + EPOCH)
+                      .setTaskQueue(roomQueue)
+                      .build());
+      WorkflowClient.start(workflow::run, start());
+      IntakeWorkflowCommand command = targetCommand();
+      workflow.commandAccepted(command);
+
+      IntakeRoomSnapshot recovered =
+          awaitState(
+              workflow,
+              snapshot -> snapshot.roomPhase() == IntakeRoomPhase.READY_TO_CONFIRM);
+      assertThat(recovered.pendingCommand()).isNull();
+      assertThat(recovered.protocolErrorCode()).isNull();
+      assertThat(RecordingFinalizationReads.requests)
+          .extracting(IntakeAgentRunFinalizationReadRequest::mode)
+          .containsExactly(
+              IntakeAgentRunFinalizationReadRequest.Mode.AFTER_CHILD_COMPLETION,
+              IntakeAgentRunFinalizationReadRequest.Mode.CANCELLATION_RECONCILIATION);
+    }
+  }
+
+  @Test
+  void reconcilesALateCommittedReceiptBeforeAcceptingTheNextTargetCommand() {
+    try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+      String roomQueue = "phase9-intake-child-post-commit-recovery";
+      FailsFirstAgentRunWorkflow.requests.clear();
+      FailsFirstAgentRunWorkflow.invocations.set(0);
+      RecordingFinalizationReads.requests.clear();
+      RecordingFinalizationReads.pendingResponses.set(POST_COMMIT_RECONCILIATION_ATTEMPTS);
+
+      Worker roomWorker = environment.newWorker(roomQueue);
+      roomWorker.registerWorkflowImplementationTypes(IntakeRoomWorkflowImpl.class);
+      Worker agentWorker = environment.newWorker(AGENT_EXECUTION);
+      agentWorker.registerWorkflowImplementationTypes(FailsFirstAgentRunWorkflow.class);
+      Worker controlWorker = environment.newWorker(CASE_CONTROL);
+      controlWorker.registerActivitiesImplementations(new RecordingFinalizationReads());
+      environment.start();
+
+      IntakeRoomWorkflow workflow =
+          environment
+              .getWorkflowClient()
+              .newWorkflowStub(
+                  IntakeRoomWorkflow.class,
+                  WorkflowOptions.newBuilder()
+                      .setWorkflowId("intake-room:post-commit-recovery:" + CASE_ID + ":" + EPOCH)
+                      .setTaskQueue(roomQueue)
+                      .build());
+      WorkflowClient.start(workflow::run, start());
+      IntakeWorkflowCommand first = targetCommand();
+      workflow.commandAccepted(first);
+      environment.sleep(Duration.ofSeconds(4));
+
+      IntakeRoomSnapshot unresolved =
+          awaitState(
+              workflow,
+              snapshot ->
+                  "INTAKE_ACTIVITY_RECEIPT_INVALID".equals(snapshot.protocolErrorCode()));
+      assertThat(unresolved.pendingCommandId()).isEqualTo(first.commandId());
+      assertThat(unresolved.roomPhase()).isEqualTo(IntakeRoomPhase.AGENT_RUNNING);
+
+      IntakeWorkflowCommand second = targetCommand("CMD:P9:RECOVERED:2", 2, 1);
+      workflow.commandAccepted(second);
+
+      IntakeRoomSnapshot recovered =
+          awaitState(
+              workflow,
+              snapshot ->
+                  snapshot.processedCommandCount() == 2
+                      && snapshot.pendingCommand() == null
+                      && snapshot.lastGraphExecutionRef() != null
+                      && second.commandId().equals(snapshot.lastGraphExecutionRef().graphCommandId()));
+      assertThat(recovered.protocolErrorCode()).isNull();
+      assertThat(FailsFirstAgentRunWorkflow.requests)
+          .containsExactly(targetRequest(first), targetRequest(second));
+      assertThat(RecordingFinalizationReads.requests)
+          .extracting(IntakeAgentRunFinalizationReadRequest::mode)
+          .containsOnly(
+              IntakeAgentRunFinalizationReadRequest.Mode.CANCELLATION_RECONCILIATION,
+              IntakeAgentRunFinalizationReadRequest.Mode.AFTER_CHILD_COMPLETION);
+      assertThat(RecordingFinalizationReads.requests)
+          .filteredOn(
+              request ->
+                  request.mode()
+                      == IntakeAgentRunFinalizationReadRequest.Mode.CANCELLATION_RECONCILIATION)
+          .hasSize(POST_COMMIT_RECONCILIATION_ATTEMPTS + 1);
+      assertThat(RecordingFinalizationReads.requests.getLast().mode())
+          .isEqualTo(IntakeAgentRunFinalizationReadRequest.Mode.AFTER_CHILD_COMPLETION);
+    }
+  }
+
+  @Test
+  void reconcilesALateCommittedReceiptBeforeAcceptingConfirmation() {
+    try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+      String roomQueue = "phase9-intake-child-post-commit-confirmation-recovery";
+      FailsFirstAgentRunWorkflow.requests.clear();
+      FailsFirstAgentRunWorkflow.invocations.set(0);
+      RecordingFinalizationReads.requests.clear();
+      RecordingFinalizationReads.pendingResponses.set(POST_COMMIT_RECONCILIATION_ATTEMPTS);
+
+      Worker roomWorker = environment.newWorker(roomQueue);
+      roomWorker.registerWorkflowImplementationTypes(IntakeRoomWorkflowImpl.class);
+      Worker agentWorker = environment.newWorker(AGENT_EXECUTION);
+      agentWorker.registerWorkflowImplementationTypes(FailsFirstAgentRunWorkflow.class);
+      Worker controlWorker = environment.newWorker(CASE_CONTROL);
+      controlWorker.registerActivitiesImplementations(new RecordingFinalizationReads());
+      environment.start();
+
+      IntakeRoomWorkflow workflow =
+          environment
+              .getWorkflowClient()
+              .newWorkflowStub(
+                  IntakeRoomWorkflow.class,
+                  WorkflowOptions.newBuilder()
+                      .setWorkflowId(
+                          "intake-room:post-commit-confirmation-recovery:"
+                              + CASE_ID
+                              + ":"
+                              + EPOCH)
+                      .setTaskQueue(roomQueue)
+                      .build());
+      WorkflowClient.start(workflow::run, start());
+      IntakeWorkflowCommand first = targetCommand();
+      workflow.commandAccepted(first);
+      environment.sleep(Duration.ofSeconds(4));
+
+      IntakeRoomSnapshot unresolved =
+          awaitState(
+              workflow,
+              snapshot ->
+                  "INTAKE_ACTIVITY_RECEIPT_INVALID".equals(snapshot.protocolErrorCode()));
+      assertThat(unresolved.pendingCommandId()).isEqualTo(first.commandId());
+
+      IntakeWorkflowCommand confirmation = initiatorConfirmation("CMD:P9:CONFIRM:2", 2);
+      workflow.commandAccepted(confirmation);
+
+      IntakeRoomSnapshot accepted =
+          awaitState(
+              workflow,
+              snapshot ->
+                  confirmation.commandId().equals(snapshot.pendingCommandId())
+                      && snapshot.processedCommandCount() == 2);
+      assertThat(accepted.roomPhase()).isEqualTo(IntakeRoomPhase.READY_TO_CONFIRM);
+      assertThat(accepted.protocolErrorCode()).isNull();
+      assertThat(workflow.lastCommandDecision().status()).isEqualTo("ACCEPTED");
+      assertThat(FailsFirstAgentRunWorkflow.requests).containsExactly(targetRequest(first));
+      assertThat(RecordingFinalizationReads.requests)
+          .extracting(IntakeAgentRunFinalizationReadRequest::mode)
+          .containsOnly(IntakeAgentRunFinalizationReadRequest.Mode.CANCELLATION_RECONCILIATION);
+      assertThat(RecordingFinalizationReads.requests)
+          .hasSize(POST_COMMIT_RECONCILIATION_ATTEMPTS + 1);
     }
   }
 
@@ -277,6 +500,24 @@ class IntakeRoomAgentRunChildWorkflowTest {
             new RetryBudget("intake-retry-budget.v1", 2, 2, 1),
             null,
             target));
+  }
+
+  private static IntakeWorkflowCommand initiatorConfirmation(String commandId, long sequence) {
+    return new IntakeWorkflowCommand(
+        "intake-workflow-command.v1",
+        commandId,
+        TENANT,
+        CASE_ID,
+        EPOCH,
+        FENCE,
+        sequence,
+        IntakeCommandType.INTAKE_CONFIRM,
+        IntakeParty.INITIATOR,
+        INITIATOR_SCOPE,
+        "urn:after-sale-flow:intake-command:" + commandId,
+        hash(3),
+        "intake.operation:" + CASE_ID + ":" + commandId,
+        hash(4));
   }
 
   private static ExecuteAgentRunRequest targetRequest(IntakeWorkflowCommand command) {
@@ -449,15 +690,61 @@ class IntakeRoomAgentRunChildWorkflowTest {
     }
   }
 
+  public static final class FailsFirstAgentRunWorkflow implements AgentRunWorkflow {
+    private static final List<ExecuteAgentRunRequest> requests = new CopyOnWriteArrayList<>();
+    private static final AtomicInteger invocations = new AtomicInteger();
+
+    @Override
+    public ExecuteAgentRunResult run(ExecuteAgentRunRequest request) {
+      requests.add(request);
+      if (invocations.incrementAndGet() == 1) {
+        throw ApplicationFailure.newNonRetryableFailure(
+            "synthetic post-commit acknowledgement loss", "SyntheticPostCommitLoss");
+      }
+      RoomGraphResult graph = RecordingAgentRunWorkflow.graphResult(request);
+      return new ExecuteAgentRunResult(
+          ExecuteAgentRunResult.SCHEMA_VERSION,
+          request.agentRunId(),
+          request.logicalRunId(),
+          request.attemptId(),
+          request.attemptNo(),
+          ExecuteAgentRunResult.Outcome.COMPLETED,
+          graph,
+          RESULT_HASH,
+          1,
+          true,
+          null,
+          false,
+          null,
+          Instant.ofEpochMilli(Workflow.currentTimeMillis()));
+    }
+
+    @Override
+    public ExecuteAgentRunResult executeAttempt(ExecuteAgentRunRequest request) {
+      return run(request);
+    }
+
+    @Override
+    public void validateAttempt(ExecuteAgentRunRequest request) {}
+  }
+
   private static final class RecordingFinalizationReads
       implements IntakeAgentRunFinalizationReadActivities {
     private static final List<IntakeAgentRunFinalizationReadRequest> requests =
         new CopyOnWriteArrayList<>();
+    private static final AtomicInteger pendingResponses = new AtomicInteger();
 
     @Override
     public IntakeAgentRunFinalizationReadResult readFinalization(
         IntakeAgentRunFinalizationReadRequest request) {
       requests.add(request);
+      if (pendingResponses.getAndUpdate(remaining -> Math.max(0, remaining - 1)) > 0) {
+        return new IntakeAgentRunFinalizationReadResult(
+            "intake-agent-run-finalization-read-result.v1",
+            IntakeAgentRunFinalizationReadResult.Resolution.PENDING,
+            null,
+            null);
+      }
       IntakeWorkflowCommand command = request.command();
       IntakeTargetAgentRunContext target = command.executionContext().targetAgentRun();
       ExecuteAgentRunRequest agentRequest = target.request();
