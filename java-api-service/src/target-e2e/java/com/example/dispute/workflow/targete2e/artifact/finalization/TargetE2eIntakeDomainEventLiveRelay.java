@@ -5,6 +5,7 @@ import com.example.dispute.workflow.application.intake.IntakeFinalizationReceipt
 import com.example.dispute.workflow.application.intake.IntakeFinalizationRejectedException;
 import com.example.dispute.workflow.contract.v1.AgentRunFinalizationReceipt;
 import com.example.dispute.workflow.contract.v1.CaseProcessWorkflowProtocol;
+import com.example.dispute.workflow.contract.v1.ContractTypes.ArtifactOperationType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
@@ -232,11 +233,23 @@ public final class TargetE2eIntakeDomainEventLiveRelay {
                 || !receipt.logicalRunId().equals(request.logicalRunId())
                 || !receipt.attemptId().equals(request.attemptId())
                 || !receipt.resultHash().equals(result.resultHash())
-                || !receipt.proposalHash().equals(targetReceipt.proposalHash())) {
+                || !receipt.proposalHash().equals(formalProposalHash(result))) {
             throw rejected(
                     "TARGET_E2E_INTAKE_FORMAL_RECEIPT_MISMATCH",
                     "formal Intake receipt conflicts with the committed execution identity");
         }
+    }
+
+    private static String formalProposalHash(ExecuteAgentRunResult result) {
+        if (result.graphResult() == null
+                || result.graphResult().artifactOperations().size() != 1
+                || result.graphResult().artifactOperations().getFirst().operation()
+                        != ArtifactOperationType.PROPOSE_PATCH) {
+            throw rejected(
+                    "TARGET_E2E_INTAKE_FORMAL_RECEIPT_MISMATCH",
+                    "committed execution does not identify one formal Intake proposal");
+        }
+        return result.graphResult().artifactOperations().getFirst().artifact().sha256();
     }
 
     private static void requireCanonicalEvent(

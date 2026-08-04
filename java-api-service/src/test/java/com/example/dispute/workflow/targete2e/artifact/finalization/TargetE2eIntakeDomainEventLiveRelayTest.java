@@ -18,6 +18,8 @@ import com.example.dispute.workflow.activity.agent.AgentRunFinalizationFailureCl
 import com.example.dispute.workflow.contract.v1.AgentRunFinalizationReceipt;
 import com.example.dispute.workflow.contract.v1.AgentRunFinalizationReceipt.CommitStatus;
 import com.example.dispute.workflow.contract.v1.CaseProcessWorkflowProtocol;
+import com.example.dispute.workflow.contract.v1.ContractTypes.ArtifactOperationType;
+import com.example.dispute.workflow.contract.v1.ContractTypes.ArtifactPointer;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
 import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
 import com.example.dispute.workflow.contract.v1.ContractTypes.PayloadRef;
@@ -25,6 +27,7 @@ import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
+import com.example.dispute.workflow.contract.v1.RoomGraphResult;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationReceipt;
 import com.example.dispute.workflow.targete2e.finalization.TargetE2eFinalizationRejectedException;
 import com.example.dispute.workflow.temporal.caseprocess.CaseDomainEventRef;
@@ -265,7 +268,7 @@ class TargetE2eIntakeDomainEventLiveRelayTest {
     }
 
     @Test
-    void rejectsAReceiptWhoseProposalDoesNotMatchTheTargetReceipt() throws Exception {
+    void rejectsAReceiptWhoseProposalDoesNotMatchTheGraphArtifact() throws Exception {
         NamedParameterJdbcTemplate jdbc = jdbcWith(intakeReceipt(
                 RUN_ID, FENCING_TOKEN, "COMMAND_LIVE_RELAY", hash('e')));
         CaseProcessLedgerActivities ledger = mock(CaseProcessLedgerActivities.class);
@@ -470,9 +473,18 @@ class TargetE2eIntakeDomainEventLiveRelayTest {
 
     private static ExecuteAgentRunResult result() {
         ExecuteAgentRunResult result = mock(ExecuteAgentRunResult.class);
+        RoomGraphResult graphResult = mock(RoomGraphResult.class);
+        ArtifactPointer proposal = new ArtifactPointer(
+                "intake.proposal." + hash('7').substring(0, 32),
+                "intake-turn-proposal.v2",
+                "urn:target-e2e:proposal:intake:" + hash('7'),
+                hash('7'));
+        when(graphResult.artifactOperations()).thenReturn(List.of(
+                new RoomGraphResult.ArtifactOperation(ArtifactOperationType.PROPOSE_PATCH, proposal)));
         when(result.logicalRunId()).thenReturn(RUN_ID);
         when(result.attemptId()).thenReturn(ATTEMPT_ID);
         when(result.resultHash()).thenReturn(RESULT_HASH);
+        when(result.graphResult()).thenReturn(graphResult);
         return result;
     }
 
@@ -496,7 +508,7 @@ class TargetE2eIntakeDomainEventLiveRelayTest {
                         "target-e2e-checkpoint.v1",
                         "CHECKPOINT_LIVE_RELAY",
                         RESULT_HASH,
-                        hash('7'),
+                        hash('f'),
                         hash('8'),
                         "MANIFEST_LIVE_RELAY",
                         hash('9'),
