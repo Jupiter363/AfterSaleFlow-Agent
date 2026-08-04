@@ -2676,7 +2676,7 @@ async function startEventStream(snapshot = currentWorkspaceSnapshot()) {
 
 // 业务位置：【前端接待室】postMessage：执行 房间消息和对话记录 对应的业务动作，并将结果交给 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
 async function postMessage(command) {
-  if (historyMode.value || !projectionAllowsMessages.value) return;
+  if (historyMode.value || !partyCanChat.value) return;
   const snapshot = currentWorkspaceSnapshot();
   if (!modelConnected.value) {
     await checkModelConnection();
@@ -2686,7 +2686,7 @@ async function postMessage(command) {
       return;
     }
   }
-  if (!isCurrentWorkspace(snapshot) || !projectionAllowsMessages.value) return;
+  if (!isCurrentWorkspace(snapshot) || !partyCanChat.value) return;
   agentState.value = "THINKING";
   submitting.value = true;
   error.value = "";

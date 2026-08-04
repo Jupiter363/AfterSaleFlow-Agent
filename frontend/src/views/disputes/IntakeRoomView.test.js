@@ -4812,6 +4812,38 @@ describe("IntakeRoomView", () => {
     expect(wrapper.find("[data-enter-evidence-room]").exists()).toBe(false);
   });
 
+  it("keeps a locked respondent mutation-gated even when projection is ready", async () => {
+    actor.id = "merchant-local";
+    actor.role = "MERCHANT";
+    const postMessageAction = vi.fn();
+    const wrapper = await mountInteractiveView({
+      initialAnalysis: { ...analysis, initiator_role: "USER" },
+      initialIntakeStatus: intakeStatusWithProjection(
+        currentProcessProjection({
+          writer_mode: "TEMPORAL",
+          room_phase: "OPEN",
+          command_admission_state: "READY",
+        }),
+        {
+          can_use_intake: false,
+          current_actor_completed: false,
+          initiator_status: "OPEN",
+          respondent_status: "LOCKED",
+        },
+      ),
+      postMessageAction,
+    });
+
+    await wrapper.vm.$.setupState.postMessage({
+      message_text: "程序化提交不应绕过接待权限。",
+    });
+    await flushPromises();
+
+    expect(postMessageAction).not.toHaveBeenCalled();
+    expect(wrapper.find("[data-intake-locked-chat]").exists()).toBe(true);
+    wrapper.unmount();
+  });
+
   // 业务位置：【前端接待室】it：围绕 当前阶段业务数据 计算本模块需要的派生信息，使其能够从 房间消息、初始表单和接待 Agent 流 正确进入 案件卷宗展示、确认受理或进入证据室。上游：房间消息、初始表单和接待 Agent 流。下游：案件卷宗展示、确认受理或进入证据室。边界：前端仅展示建议，不能自行确认责任。
   it("clears intake messages and latest memory immediately when actor changes in-place", async () => {
     const wrapper = await mountInteractiveView({
