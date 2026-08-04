@@ -55,6 +55,8 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
       "intake-room-agent-run-post-commit-reconciliation-v1";
   private static final String AGENT_RUN_LATE_COMMIT_RECONCILIATION_CHANGE_ID =
       "intake-room-agent-run-late-commit-reconciliation-v1";
+  private static final String FORMAL_EVENT_REJECTION_RECOVERY_CHANGE_ID =
+      "intake-room-formal-event-rejection-recovery-v1";
   private static final String TARGET_BRANCH_OUTPUT_SCHEMA_VERSION =
       "target-e2e-room-proposal-source.v1";
   private static final long HISTORY_EVENT_LIMIT = 2_000;
@@ -103,6 +105,7 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
   private io.temporal.workflow.Promise<Void> runMaxAgeTimer;
   private boolean rolloverEnabled;
   private boolean winningAttemptEnabled;
+  private boolean formalEventRejectionRecoveryEnabled;
   private boolean continueAsNewRequested;
   private Promise<Void> activeOrchestration;
   private CancellationScope activeCancellationScope;
@@ -119,6 +122,10 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
     winningAttemptEnabled =
         Workflow.getVersion(
                 AGENT_RUN_WINNING_ATTEMPT_CHANGE_ID, Workflow.DEFAULT_VERSION, 1)
+            == 1;
+    formalEventRejectionRecoveryEnabled =
+        Workflow.getVersion(
+                FORMAL_EVENT_REJECTION_RECOVERY_CHANGE_ID, Workflow.DEFAULT_VERSION, 1)
             == 1;
     if (rolloverEnabled) {
       runMaxAgeTimer = Workflow.newTimer(RUN_MAX_AGE);
@@ -354,11 +361,18 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
 
   private boolean hasFormalEventSequenceConflict(long eventSequence, String eventId) {
     return eventObservations.values().stream()
+        .filter(this::reservesFormalEventSequence)
         .map(EventObservation::event)
         .anyMatch(
             observed ->
                 observed.eventSequence() == eventSequence
                     && !observed.eventId().equals(eventId));
+  }
+
+  private boolean reservesFormalEventSequence(EventObservation observation) {
+    return !formalEventRejectionRecoveryEnabled
+        || observation.applied()
+        || observation.event().eventSequence() > nextEventSequence;
   }
 
   private void processCommand(IntakeWorkflowCommand command) {
@@ -1362,6 +1376,7 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
         .anyMatch(
             observation ->
                 !observation.applied()
+                    && reservesFormalEventSequence(observation)
                     && observation.event().commandId().equals(commandId)
                     && observation.event().operationKey().equals(operationKey));
   }

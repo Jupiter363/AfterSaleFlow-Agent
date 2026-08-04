@@ -282,6 +282,16 @@ class IntakeRoomWorkflowTest {
     assertEventUnadvanced("CMD_EVENT_BIND");
 
     workflow.domainEventCommitted(
+        event(
+            1,
+            "EVENT_ILLEGAL_TYPE",
+            message,
+            IntakeDomainEventType.TURN_READY_TO_CONFIRM));
+    tick();
+    assertThat(workflow.state().protocolErrorCode()).isEqualTo("EVENT_ID_REUSE_CONFLICT");
+    assertEventUnadvanced("CMD_EVENT_BIND");
+
+    workflow.domainEventCommitted(
         eventForParty(
             1,
             "EVENT_WRONG_PARTY",
