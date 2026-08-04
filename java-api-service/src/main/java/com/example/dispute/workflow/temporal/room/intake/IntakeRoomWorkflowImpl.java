@@ -69,6 +69,8 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
       "intake-room-target-branch-confirmation-event-gap-recovery-v1";
   private static final String TARGET_SOURCE_CURSOR_ONLY_EVENT_CHANGE_ID =
       "intake-room-target-source-cursor-only-event-v1";
+  private static final String TARGET_SOURCE_FUTURE_CURSOR_BUFFER_CHANGE_ID =
+      "intake-room-target-source-future-cursor-buffer-v1";
   private static final String FORMAL_EVENT_REJECTION_RECOVERY_CHANGE_ID =
       "intake-room-formal-event-rejection-recovery-v1";
   private static final String TARGET_BRANCH_OUTPUT_SCHEMA_VERSION =
@@ -123,6 +125,7 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
   private boolean rolloverEnabled;
   private boolean winningAttemptEnabled;
   private boolean formalEventRejectionRecoveryEnabled;
+  private boolean futureTargetSourceCursorBufferingEnabled;
   private boolean continueAsNewRequested;
   private boolean continueAsNewBlockedByTargetState;
   private Promise<Void> activeOrchestration;
@@ -322,7 +325,11 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
         protocolErrorCode = "TARGET_SOURCE_EVENT_ID_REUSE_CONFLICT";
         return;
       }
-      retryBufferedFormalEventAtCursor();
+      if (futureTargetSourceCursorBufferingEnabled) {
+        drainBufferedTargetEvents();
+      } else {
+        retryBufferedFormalEventAtCursor();
+      }
       return;
     }
     if (!TargetIntakeSourceEventRef.isCursorOnlyEventType(event.eventType())) {
@@ -350,7 +357,29 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
       return;
     }
     if (event.eventSequence() > nextEventSequence) {
+      if (Workflow.getVersion(
+              TARGET_SOURCE_FUTURE_CURSOR_BUFFER_CHANGE_ID, Workflow.DEFAULT_VERSION, 1)
+          != 1) {
+        protocolErrorCode = "TARGET_SOURCE_EVENT_SEQUENCE_GAP";
+        return;
+      }
+      if (!canStoreTargetSourceObservation(true)) {
+        protocolErrorCode = "TARGET_SOURCE_EVENT_BUFFER_CAPACITY_EXCEEDED";
+        return;
+      }
+      futureTargetSourceCursorBufferingEnabled = true;
+      storeTargetSourceObservation(event, true);
       protocolErrorCode = "TARGET_SOURCE_EVENT_SEQUENCE_GAP";
+      return;
+    }
+
+    if (futureTargetSourceCursorBufferingEnabled) {
+      if (!canStoreTargetSourceObservation(false)) {
+        protocolErrorCode = "TARGET_SOURCE_EVENT_BUFFER_CAPACITY_EXCEEDED";
+        return;
+      }
+      storeTargetSourceObservation(event, false);
+      drainBufferedTargetEvents();
       return;
     }
 
@@ -382,6 +411,106 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
     if (nextEventSequence != cursor) {
       return;
     }
+  }
+
+  private void drainBufferedTargetEvents() {
+    while (true) {
+      var sourceCandidates =
+          targetSourceEventObservations.values().stream()
+              .filter(event -> event.eventSequence() == nextEventSequence)
+              .toList();
+      var formalCandidates =
+          eventObservations.values().stream()
+              .filter(
+                  observation ->
+                      !observation.applied()
+                          && observation.event().eventSequence() == nextEventSequence)
+              .map(EventObservation::event)
+              .toList();
+      if (sourceCandidates.size() > 1
+          || formalCandidates.size() > 1
+          || (!sourceCandidates.isEmpty()
+              && !formalCandidates.isEmpty()
+              && !formalEventRejectionRecoveryEnabled)) {
+        protocolErrorCode = "EVENT_SEQUENCE_ID_CONFLICT";
+        return;
+      }
+      if (!sourceCandidates.isEmpty()) {
+        nextEventSequence++;
+        protocolErrorCode = null;
+        continue;
+      }
+      if (!formalCandidates.isEmpty()) {
+        long cursor = nextEventSequence;
+        processEvent(formalCandidates.get(0), null, false);
+        if (nextEventSequence == cursor) {
+          return;
+        }
+        continue;
+      }
+      refreshBufferedTargetEventGap();
+      return;
+    }
+  }
+
+  private void refreshBufferedTargetEventGap() {
+    long nextSourceSequence =
+        targetSourceEventObservations.values().stream()
+            .mapToLong(TargetIntakeSourceEventRef::eventSequence)
+            .filter(sequence -> sequence > nextEventSequence)
+            .min()
+            .orElse(Long.MAX_VALUE);
+    long nextFormalSequence =
+        eventObservations.values().stream()
+            .filter(
+                observation ->
+                    !observation.applied() && reservesFormalEventSequence(observation))
+            .map(EventObservation::event)
+            .mapToLong(IntakeDomainEventRef::eventSequence)
+            .filter(sequence -> sequence > nextEventSequence)
+            .min()
+            .orElse(Long.MAX_VALUE);
+    if (nextSourceSequence == Long.MAX_VALUE && nextFormalSequence == Long.MAX_VALUE) {
+      return;
+    }
+    if (nextSourceSequence == nextFormalSequence) {
+      protocolErrorCode = "EVENT_SEQUENCE_ID_CONFLICT";
+      return;
+    }
+    protocolErrorCode =
+        nextSourceSequence < nextFormalSequence
+            ? "TARGET_SOURCE_EVENT_SEQUENCE_GAP"
+            : "EVENT_SEQUENCE_GAP";
+  }
+
+  private boolean canStoreTargetSourceObservation(boolean future) {
+    long unapplied =
+        targetSourceEventObservations.values().stream()
+            .filter(observed -> observed.eventSequence() >= nextEventSequence)
+            .count();
+    int retainedLimit = future ? RECENT_CAPACITY - 1 : RECENT_CAPACITY;
+    return unapplied < retainedLimit;
+  }
+
+  private void storeTargetSourceObservation(
+      TargetIntakeSourceEventRef event, boolean future) {
+    int retainedLimit = future ? RECENT_CAPACITY - 1 : RECENT_CAPACITY;
+    while (targetSourceEventObservations.size() >= retainedLimit) {
+      Iterator<Map.Entry<String, TargetIntakeSourceEventRef>> iterator =
+          targetSourceEventObservations.entrySet().iterator();
+      boolean removed = false;
+      while (iterator.hasNext()) {
+        if (iterator.next().getValue().eventSequence() < nextEventSequence) {
+          iterator.remove();
+          removed = true;
+          break;
+        }
+      }
+      if (!removed) {
+        throw new IllegalStateException("target source event capacity preflight was inconsistent");
+      }
+    }
+    targetSourceEventObservations.put(event.eventId(), event);
   }
 
   private boolean hasSourceEventSequenceConflict(TargetIntakeSourceEventRef event) {
@@ -522,11 +651,18 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
   }
 
   private void processEvent(IntakeDomainEventRef event) {
-    processEvent(event, null);
+    processEvent(event, null, true);
   }
 
   private void processEvent(
       IntakeDomainEventRef event, String expectedActivityOperationKey) {
+    processEvent(event, expectedActivityOperationKey, true);
+  }
+
+  private void processEvent(
+      IntakeDomainEventRef event,
+      String expectedActivityOperationKey,
+      boolean drainBufferedEventsAfterApply) {
     if (targetSourceEventObservations.containsKey(event.eventId())) {
       protocolErrorCode = "EVENT_ID_REUSE_CONFLICT";
       return;
@@ -698,6 +834,9 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
     sharedActivityRetriesRemaining = 0;
     activityExecutionAuthorized = false;
     protocolErrorCode = null;
+    if (drainBufferedEventsAfterApply && futureTargetSourceCursorBufferingEnabled) {
+      drainBufferedTargetEvents();
+    }
   }
 
   private void replayCommand(CommandObservation observed) {
@@ -2524,6 +2663,9 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
             observed ->
                 targetSourceEventObservations.put(
                     observed.event().eventId(), observed.event()));
+    futureTargetSourceCursorBufferingEnabled =
+        targetSourceEventObservations.values().stream()
+            .anyMatch(event -> event.eventSequence() >= nextEventSequence);
     carry.threadInitializations()
         .forEach(initialization -> threadInitializations.put(initialization.party(), initialization));
   }
@@ -2545,8 +2687,14 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
         && activeOrchestration == null
         && deferredCancellation == null
         && deferredTargetCommands.isEmpty()
+        && !hasBufferedFutureTargetSourceCursor()
         && !continueAsNewBlockedByTargetState
         && Workflow.isEveryHandlerFinished();
+  }
+
+  private boolean hasBufferedFutureTargetSourceCursor() {
+    return targetSourceEventObservations.values().stream()
+        .anyMatch(event -> event.eventSequence() >= nextEventSequence);
   }
 
   private boolean continueAsNew() {

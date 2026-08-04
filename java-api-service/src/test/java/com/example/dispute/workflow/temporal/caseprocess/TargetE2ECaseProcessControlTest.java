@@ -49,6 +49,53 @@ class TargetE2ECaseProcessControlTest {
   }
 
   @Test
+  void routesOnlyCanonicalGlobalProjectionReadyToTheCurrentTargetIntakeChild() {
+    ActiveChildDescriptor intake = intakeCompletionDescriptor();
+    CaseDomainEventRef readiness = globalEvent("INTAKE_PROJECTION_READY");
+
+    assertThat(
+            CaseProcessWorkflowImpl.routesGlobalTargetIntakeProjectionReady(
+                1, intake, RoomType.INTAKE, 3, readiness))
+        .isTrue();
+    assertThat(
+            CaseProcessWorkflowImpl.routesGlobalTargetIntakeProjectionReady(
+                io.temporal.workflow.Workflow.DEFAULT_VERSION,
+                intake,
+                RoomType.INTAKE,
+                3,
+                readiness))
+        .isFalse();
+    assertThat(
+            CaseProcessWorkflowImpl.routesGlobalTargetIntakeProjectionReady(
+                0, intake, RoomType.INTAKE, 3, readiness))
+        .isFalse();
+    assertThat(
+            CaseProcessWorkflowImpl.routesGlobalTargetIntakeProjectionReady(
+                1, intake, RoomType.INTAKE, 3, globalEvent("CASE_STATUS_CHANGED")))
+        .isFalse();
+    assertThat(
+            CaseProcessWorkflowImpl.routesGlobalTargetIntakeProjectionReady(
+                1, intake, RoomType.INTAKE, 3, globalEvent("INTAKE_TURN_NEEDS_INPUT")))
+        .isFalse();
+    assertThat(
+            CaseProcessWorkflowImpl.routesGlobalTargetIntakeProjectionReady(
+                1, intake, RoomType.INTAKE, 3, intakeEvent("INTAKE_PROJECTION_READY", 3)))
+        .isFalse();
+    assertThat(
+            CaseProcessWorkflowImpl.routesGlobalTargetIntakeProjectionReady(
+                1, intake, RoomType.INTAKE, 4, readiness))
+        .isFalse();
+    assertThat(
+            CaseProcessWorkflowImpl.routesGlobalTargetIntakeProjectionReady(
+                1,
+                targetDescriptor(RoomType.EVIDENCE, null, evidenceBinding()),
+                RoomType.EVIDENCE,
+                3,
+                readiness))
+        .isFalse();
+  }
+
+  @Test
   void consumedIntakeProjectionReceiptMustEchoEveryAuthorityPin() {
     CompleteConsumedIntakeProjectionCommand command = completionCommand();
     CompleteConsumedIntakeProjectionResult matching = completionResult(command, command.eventId());
@@ -307,6 +354,21 @@ class TargetE2ECaseProcessControlTest {
         roomEpoch,
         new PayloadRef("intake-event.v1", "urn:test:event:primary", "a".repeat(64), 16),
         Instant.parse("2026-08-02T12:00:00Z"),
+        "00-11111111111111111111111111111111-2222222222222222-01");
+  }
+
+  private static CaseDomainEventRef globalEvent(String eventType) {
+    return new CaseDomainEventRef(
+        "case-domain-event-ref.v1",
+        "event.global." + eventType,
+        "tenant-primary",
+        "CASE_Primary",
+        2,
+        eventType,
+        null,
+        0,
+        new PayloadRef("case-event.v1", "urn:test:event:global", "c".repeat(64), 16),
+        Instant.parse("2026-08-02T12:00:01Z"),
         "00-11111111111111111111111111111111-2222222222222222-01");
   }
 

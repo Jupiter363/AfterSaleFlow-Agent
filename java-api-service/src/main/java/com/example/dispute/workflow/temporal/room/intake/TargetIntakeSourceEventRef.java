@@ -24,6 +24,7 @@ public record TargetIntakeSourceEventRef(
 
   public static final String SCHEMA_VERSION = "target-intake-source-event-ref.v1";
   public static final String ROOM_MESSAGE_CREATED = "ROOM_MESSAGE_CREATED";
+  public static final String INTAKE_PROJECTION_READY = "INTAKE_PROJECTION_READY";
 
   public TargetIntakeSourceEventRef {
     if (!SCHEMA_VERSION.equals(schemaVersion)) {
@@ -55,6 +56,28 @@ public record TargetIntakeSourceEventRef(
         event.caseId(),
         event.roomType(),
         event.roomEpoch(),
+        fencingToken,
+        event.payloadRef().sha256());
+  }
+
+  public static TargetIntakeSourceEventRef fromGlobalIntakeProjectionReady(
+      CaseDomainEventRef event, long roomEpoch, long fencingToken) {
+    Objects.requireNonNull(event, "event must not be null");
+    if (!INTAKE_PROJECTION_READY.equals(event.eventType())
+        || event.roomType() != null
+        || event.roomEpoch() != 0) {
+      throw new IllegalArgumentException(
+          "global Intake projection cursor requires the canonical unscoped event");
+    }
+    return new TargetIntakeSourceEventRef(
+        SCHEMA_VERSION,
+        event.eventId(),
+        event.caseEventSequence(),
+        event.eventType(),
+        event.tenantSurrogate(),
+        event.caseId(),
+        RoomType.INTAKE,
+        roomEpoch,
         fencingToken,
         event.payloadRef().sha256());
   }

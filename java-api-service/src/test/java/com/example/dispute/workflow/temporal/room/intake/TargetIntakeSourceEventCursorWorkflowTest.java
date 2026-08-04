@@ -154,6 +154,80 @@ class TargetIntakeSourceEventCursorWorkflowTest {
   }
 
   @Test
+  void futureSourceCursorsDrainInOrderAndExactDuplicateIsIdempotent() {
+    TargetIntakeSourceEventRef readiness =
+        cursor(2, "EVENT_FUTURE_READY_2", "INTAKE_PROJECTION_READY");
+    TargetIntakeSourceEventRef roomMessage = source(3, "EVENT_FUTURE_ROOM_3");
+
+    workflow.targetSourceEventObserved(readiness);
+    workflow.targetSourceEventObserved(readiness);
+    workflow.targetSourceEventObserved(roomMessage);
+    tick();
+
+    assertThat(workflow.state().nextEventSequence()).isEqualTo(1);
+    assertThat(workflow.state().processedEventCount()).isZero();
+    assertThat(workflow.state().protocolErrorCode())
+        .isEqualTo("TARGET_SOURCE_EVENT_SEQUENCE_GAP");
+
+    workflow.targetSourceEventObserved(source(1, "EVENT_FUTURE_SOURCE_1"));
+    tick();
+
+    assertThat(workflow.state().nextEventSequence()).isEqualTo(4);
+    assertThat(workflow.state().processedEventCount()).isZero();
+    assertThat(workflow.state().protocolErrorCode()).isNull();
+  }
+
+  @Test
+  void futureSourceCursorIdentityAndSequenceConflictsFailClosed() {
+    IntakeRoomWorkflow sequenceConflict = newWorkflow("future-sequence-conflict", start());
+    sequenceConflict.targetSourceEventObserved(
+        cursor(2, "EVENT_FUTURE_SEQUENCE_A", "INTAKE_PROJECTION_READY"));
+    tick();
+    sequenceConflict.targetSourceEventObserved(
+        source(2, "EVENT_FUTURE_SEQUENCE_B"));
+    tick();
+
+    assertThat(sequenceConflict.state().nextEventSequence()).isEqualTo(1);
+    assertThat(sequenceConflict.state().protocolErrorCode())
+        .isEqualTo("TARGET_SOURCE_EVENT_SEQUENCE_ID_CONFLICT");
+
+    IntakeRoomWorkflow idConflict = newWorkflow("future-id-conflict", start());
+    idConflict.targetSourceEventObserved(
+        cursor(2, "EVENT_FUTURE_REUSED_ID", "INTAKE_PROJECTION_READY"));
+    tick();
+    idConflict.targetSourceEventObserved(
+        cursor(
+            2,
+            "EVENT_FUTURE_REUSED_ID",
+            "INTAKE_PROJECTION_READY",
+            hash(9)));
+    tick();
+
+    assertThat(idConflict.state().nextEventSequence()).isEqualTo(1);
+    assertThat(idConflict.state().protocolErrorCode())
+        .isEqualTo("TARGET_SOURCE_EVENT_ID_REUSE_CONFLICT");
+  }
+
+  @Test
+  void formalEventTypeIsRejectedBeforeFutureCursorBuffering() {
+    workflow.targetSourceEventObserved(
+        cursor(2, "EVENT_FUTURE_FORMAL_AS_CURSOR", IntakeDomainEventType.TURN_NEEDS_INPUT.name()));
+    tick();
+
+    assertThat(workflow.state().nextEventSequence()).isEqualTo(1);
+    assertThat(workflow.state().protocolErrorCode())
+        .isEqualTo("TARGET_SOURCE_EVENT_TYPE_NOT_ALLOWED");
+
+    workflow.targetSourceEventObserved(source(1, "EVENT_AFTER_REJECTED_FORMAL_1"));
+    workflow.targetSourceEventObserved(
+        cursor(2, "EVENT_AFTER_REJECTED_FORMAL_READY_2", "INTAKE_PROJECTION_READY"));
+    tick();
+
+    assertThat(workflow.state().nextEventSequence()).isEqualTo(3);
+    assertThat(workflow.state().protocolErrorCode()).isNull();
+  }
+
+  @Test
   void formalTypeGapAndScopeMismatchFailClosedWithoutClearingPendingCommand() {
     IntakeWorkflowCommand pending = message(1, "CMD_FAIL_CLOSED");
     workflow.commandAccepted(pending);
@@ -197,13 +271,13 @@ class TargetIntakeSourceEventCursorWorkflowTest {
         cursor(1, "EVENT_READY_1", "INTAKE_PROJECTION_READY"));
     tick();
     assertThat(workflow.state().protocolErrorCode()).isNull();
-    assertThat(workflow.state().nextEventSequence()).isEqualTo(2);
+    assertThat(workflow.state().nextEventSequence()).isEqualTo(3);
     assertThat(workflow.state().pendingCommandId()).isEqualTo(pending.commandId());
 
     workflow.targetSourceEventObserved(source(1, "EVENT_UNKNOWN_REPLAY"));
     tick();
     assertFailClosed(
-        "TARGET_SOURCE_EVENT_SEQUENCE_ID_CONFLICT", pending.commandId(), 2);
+        "TARGET_SOURCE_EVENT_SEQUENCE_ID_CONFLICT", pending.commandId(), 3);
   }
 
   @Test
@@ -472,6 +546,11 @@ class TargetIntakeSourceEventCursorWorkflowTest {
 
   private static TargetIntakeSourceEventRef cursor(
       long sequence, String eventId, String eventType) {
+    return cursor(sequence, eventId, eventType, hash(sequence));
+  }
+
+  private static TargetIntakeSourceEventRef cursor(
+      long sequence, String eventId, String eventType, String payloadHash) {
     return new TargetIntakeSourceEventRef(
         TargetIntakeSourceEventRef.SCHEMA_VERSION,
         eventId,
@@ -482,7 +561,7 @@ class TargetIntakeSourceEventCursorWorkflowTest {
         RoomType.INTAKE,
         ROOM_EPOCH,
         FENCE,
-        hash(sequence));
+        payloadHash);
   }
 
   private static String hash(long value) {

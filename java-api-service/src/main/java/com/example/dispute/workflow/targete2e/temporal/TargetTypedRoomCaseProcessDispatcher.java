@@ -707,6 +707,19 @@ public abstract class TargetTypedRoomCaseProcessDispatcher
       if (cursor == null) {
         return;
       }
+      observeSourceCursor(cursor);
+    }
+
+    @Override
+    public TargetTypedRoomDispatchReceipt globalIntakeProjectionReady(
+        CaseDomainEventRef event) {
+      observeSourceCursor(
+          TargetIntakeSourceEventRef.fromGlobalIntakeProjectionReady(
+              event, roomEpoch, fencingToken));
+      return targetReceipt();
+    }
+
+    private void observeSourceCursor(TargetIntakeSourceEventRef cursor) {
       if (Workflow.getVersion(
               targetIntakeSourceCursorChangeId(cursor), Workflow.DEFAULT_VERSION, 1)
           == Workflow.DEFAULT_VERSION) {

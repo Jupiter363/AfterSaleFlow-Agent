@@ -2,6 +2,7 @@ package com.example.dispute.workflow.targete2e.temporal;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.dispute.workflow.contract.v1.CaseProcessWorkflowProtocol;
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
@@ -209,6 +210,33 @@ class TargetTypedRoomCaseProcessDispatcherTest {
         .isEqualTo("target-intake-complete-timeline-cursor-v1");
   }
 
+  @Test
+  void globalIntakeProjectionReadyBindsToTheActiveIntakeEpochAndFenceOnly() {
+    CaseDomainEventRef readiness = globalCaseEvent(2, "INTAKE_PROJECTION_READY");
+
+    TargetIntakeSourceEventRef cursor =
+        TargetIntakeSourceEventRef.fromGlobalIntakeProjectionReady(readiness, 7, 11);
+
+    assertThat(cursor.eventId()).isEqualTo(readiness.eventId());
+    assertThat(cursor.eventSequence()).isEqualTo(2);
+    assertThat(cursor.eventType()).isEqualTo("INTAKE_PROJECTION_READY");
+    assertThat(cursor.roomType()).isEqualTo(RoomType.INTAKE);
+    assertThat(cursor.roomEpoch()).isEqualTo(7);
+    assertThat(cursor.fencingToken()).isEqualTo(11);
+    assertThat(cursor.payloadHash()).isEqualTo(readiness.payloadRef().sha256());
+
+    assertThatThrownBy(
+            () ->
+                TargetIntakeSourceEventRef.fromGlobalIntakeProjectionReady(
+                    globalCaseEvent(3, "CASE_STATUS_CHANGED"), 7, 11))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(
+            () ->
+                TargetIntakeSourceEventRef.fromGlobalIntakeProjectionReady(
+                    caseEvent(4, "INTAKE_PROJECTION_READY"), 7, 11))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
   private static TargetIntakePartyScopeSource.ResolvedPartyScopes partyScopes(
       ProvisionRoomEpoch request, ActorRole initiatorRole) {
     TargetIntakePartyScopeSource.Request route =
@@ -313,6 +341,15 @@ class TargetTypedRoomCaseProcessDispatcherTest {
   }
 
   private static CaseDomainEventRef caseEvent(long sequence, String eventType) {
+    return caseEvent(sequence, eventType, RoomType.INTAKE, 1);
+  }
+
+  private static CaseDomainEventRef globalCaseEvent(long sequence, String eventType) {
+    return caseEvent(sequence, eventType, null, 0);
+  }
+
+  private static CaseDomainEventRef caseEvent(
+      long sequence, String eventType, RoomType roomType, long roomEpoch) {
     return new CaseDomainEventRef(
         "case-domain-event-ref.v1",
         "EVENT_TARGET_SOURCE_" + sequence,
@@ -320,8 +357,8 @@ class TargetTypedRoomCaseProcessDispatcherTest {
         "QA_TARGET_INTAKE_1",
         sequence,
         eventType,
-        RoomType.INTAKE,
-        1,
+        roomType,
+        roomEpoch,
         new PayloadRef(
             "payload-ref.v1",
             "urn:after-sale-flow:case-event:" + sequence,

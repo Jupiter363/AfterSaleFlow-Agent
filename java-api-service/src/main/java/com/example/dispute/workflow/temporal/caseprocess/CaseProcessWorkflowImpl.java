@@ -103,6 +103,8 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
       "case-process-child-compensation-invariant-v1";
   private static final String TARGET_INTAKE_PROJECTION_COMPLETION_CHANGE_ID =
       "case-process-target-intake-projection-completion-v1";
+  private static final String TARGET_INTAKE_GLOBAL_PROJECTION_CURSOR_CHANGE_ID =
+      "case-process-target-intake-global-projection-cursor-v1";
   private static final String AUTHORITY_CHECKPOINT_MEMO_KEY =
       "case_process_authority_checkpoint_v1";
   private static final String SELECTION_V1 = "room-epoch-selection.v1";
@@ -2284,11 +2286,33 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
     if (event == null || waitsForFutureRoom(event)) {
       return false;
     }
-    if (hasActiveChild()
-        && activeRoomType == event.roomType()
-        && activeRoomEpoch == event.roomEpoch()) {
+    boolean globalTargetIntakeProjectionCandidate =
+        isGlobalTargetIntakeProjectionReadyCandidate(
+            activeChildDescriptor, activeRoomType, activeRoomEpoch, event);
+    int globalTargetIntakeProjectionVersion =
+        globalTargetIntakeProjectionCandidate
+            ? Workflow.getVersion(
+                TARGET_INTAKE_GLOBAL_PROJECTION_CURSOR_CHANGE_ID,
+                Workflow.DEFAULT_VERSION,
+                1)
+            : Workflow.DEFAULT_VERSION;
+    boolean globalTargetIntakeProjection =
+        routesGlobalTargetIntakeProjectionReady(
+            globalTargetIntakeProjectionVersion,
+            activeChildDescriptor,
+            activeRoomType,
+            activeRoomEpoch,
+            event);
+    if (globalTargetIntakeProjection
+        || (hasActiveChild()
+            && activeRoomType == event.roomType()
+            && activeRoomEpoch == event.roomEpoch())) {
       try {
-        routeEventToActiveChild(event);
+        if (globalTargetIntakeProjection) {
+          routeGlobalTargetIntakeProjectionReady(event);
+        } else {
+          routeEventToActiveChild(event);
+        }
         completeTargetIntakeProjection(event);
       } catch (TypedChildOperationFailure failure) {
         recordProtocolError(
@@ -2373,6 +2397,33 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
         && event.roomType() == RoomType.INTAKE
         && event.roomEpoch() == roomEpoch
         && isFormalIntakeProjectionEvent(event.eventType());
+  }
+
+  static boolean routesGlobalTargetIntakeProjectionReady(
+      int version,
+      ActiveChildDescriptor descriptor,
+      RoomType activeRoomType,
+      long activeRoomEpoch,
+      CaseDomainEventRef event) {
+    return version == 1
+        && isGlobalTargetIntakeProjectionReadyCandidate(
+            descriptor, activeRoomType, activeRoomEpoch, event);
+  }
+
+  private static boolean isGlobalTargetIntakeProjectionReadyCandidate(
+      ActiveChildDescriptor descriptor,
+      RoomType activeRoomType,
+      long activeRoomEpoch,
+      CaseDomainEventRef event) {
+    return descriptor != null
+        && descriptor.kind() == ActiveChildKind.TARGET_TYPED_ROOM
+        && activeRoomType == RoomType.INTAKE
+        && descriptor.roomType() == RoomType.INTAKE
+        && descriptor.roomEpoch() == activeRoomEpoch
+        && event != null
+        && event.roomType() == null
+        && event.roomEpoch() == 0
+        && "INTAKE_PROJECTION_READY".equals(event.eventType());
   }
 
   static boolean consumedIntakeProjectionResultMatches(
@@ -2462,6 +2513,30 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
       throw new TypedChildOperationFailure(
           "INTAKE_CHILD_EVENT_SIGNAL_FAILED",
           "typed Intake child could not accept the domain event",
+          failure);
+    }
+  }
+
+  private void routeGlobalTargetIntakeProjectionReady(CaseDomainEventRef event) {
+    validateTargetTypedDescriptor(activeChildDescriptor);
+    validateTargetTypedActiveRevisions();
+    if (activeTargetTypedChild == null) {
+      throw new TypedChildOperationFailure(
+          "TARGET_TYPED_ROOM_ACTIVE_BINDING_INVALID",
+          "target typed active child handle is missing",
+          null);
+    }
+    try {
+      applyTargetTypedRoomReceipt(
+          activeTargetTypedChild.globalIntakeProjectionReady(event));
+    } catch (TypedChildOperationFailure failure) {
+      throw failure;
+    } catch (CanceledFailure failure) {
+      throw failure;
+    } catch (RuntimeException failure) {
+      throw new TypedChildOperationFailure(
+          "TARGET_TYPED_ROOM_EVENT_DISPATCH_FAILED",
+          "target Intake child could not accept the global projection cursor",
           failure);
     }
   }
@@ -3439,6 +3514,12 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
     TargetTypedRoomDispatchReceipt commandAccepted(CaseCommandRef command);
 
     TargetTypedRoomDispatchReceipt domainEventCommitted(CaseDomainEventRef event);
+
+    default TargetTypedRoomDispatchReceipt globalIntakeProjectionReady(
+        CaseDomainEventRef event) {
+      throw new IllegalArgumentException(
+          "target typed-room handle does not accept a global Intake projection cursor");
+    }
 
     /** Runs only after the parent has durably completed command routing. */
     default TargetTypedRoomDispatchReceipt postRouting(CaseCommandRef command) {

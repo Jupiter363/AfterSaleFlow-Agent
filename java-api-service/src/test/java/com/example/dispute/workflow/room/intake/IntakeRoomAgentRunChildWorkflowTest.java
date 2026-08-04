@@ -63,7 +63,9 @@ import io.temporal.workflow.Workflow;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 
@@ -105,6 +107,11 @@ class IntakeRoomAgentRunChildWorkflowTest {
   private static final String WINNING_PROPOSAL_HASH = "6".repeat(64);
   private static final String LIFECYCLE_FIRST_COMMAND_ID = "CMD:P9:LIFECYCLE:1";
   private static final String LIFECYCLE_SECOND_COMMAND_ID = "CMD:P9:LIFECYCLE:2";
+  private static final String THREE_ROUND_FIRST_COMMAND_ID = "CMD:P9:THREE_ROUND:1";
+  private static final String THREE_ROUND_SECOND_COMMAND_ID = "CMD:P9:THREE_ROUND:2";
+  private static final String THREE_ROUND_THIRD_COMMAND_ID = "CMD:P9:THREE_ROUND:3";
+  private static final String FUTURE_CURSOR_FIRST_COMMAND_ID = "CMD:P9:FUTURE_CURSOR:1";
+  private static final String FUTURE_CURSOR_SECOND_COMMAND_ID = "CMD:P9:FUTURE_CURSOR:2";
 
   @Test
   void targetMessageRunsNativeAgentRunChildThenReadsCommittedReceipt() {
@@ -169,6 +176,170 @@ class IntakeRoomAgentRunChildWorkflowTest {
       assertThat(snapshotActivities.snapshotRequests).isEmpty();
       assertThat(snapshotActivities.graphRequests).isEmpty();
       assertThat(snapshotActivities.finalizationRequests).isEmpty();
+    }
+  }
+
+  @Test
+  void threeTargetTurnsConsumeProjectionAndRoomCursorsBeforeStartingTheThirdChild() {
+    try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+      String roomQueue = "phase9-intake-child-three-round-global-cursor";
+      RecordingAgentRunWorkflow.requests.clear();
+      RecordingFinalizationReads.requests.clear();
+      RecordingFinalizationReads.pendingResponses.set(0);
+
+      Worker roomWorker = environment.newWorker(roomQueue);
+      roomWorker.registerWorkflowImplementationTypes(IntakeRoomWorkflowImpl.class);
+      Worker agentWorker = environment.newWorker(AGENT_EXECUTION);
+      agentWorker.registerWorkflowImplementationTypes(RecordingAgentRunWorkflow.class);
+      Worker controlWorker = environment.newWorker(CASE_CONTROL);
+      controlWorker.registerActivitiesImplementations(new RecordingFinalizationReads());
+      environment.start();
+
+      IntakeRoomWorkflow workflow =
+          environment
+              .getWorkflowClient()
+              .newWorkflowStub(
+                  IntakeRoomWorkflow.class,
+                  WorkflowOptions.newBuilder()
+                      .setWorkflowId("intake-room:three-round-cursor:" + CASE_ID + ":" + EPOCH)
+                      .setTaskQueue(roomQueue)
+                      .build());
+      WorkflowClient.start(workflow::run, targetStart());
+
+      IntakeWorkflowCommand first = targetCommand(THREE_ROUND_FIRST_COMMAND_ID, 1, 0);
+      workflow.commandAccepted(first);
+      IntakeRoomSnapshot afterFirst =
+          awaitState(
+              workflow,
+              snapshot ->
+                  snapshot.processedCommandCount() == 1
+                      && snapshot.processedEventCount() == 1
+                      && snapshot.pendingCommand() == null);
+      assertThat(afterFirst.nextEventSequence()).isEqualTo(2);
+
+      workflow.targetSourceEventObserved(
+          cursor(2, "EVENT_P9_THREE_ROUND_READY_2", "INTAKE_PROJECTION_READY"));
+      workflow.targetSourceEventObserved(
+          cursor(3, "EVENT_P9_THREE_ROUND_ROOM_3", "ROOM_MESSAGE_CREATED"));
+      awaitState(workflow, snapshot -> snapshot.nextEventSequence() == 4);
+
+      IntakeWorkflowCommand second = targetCommand(THREE_ROUND_SECOND_COMMAND_ID, 2, 1);
+      workflow.commandAccepted(second);
+      IntakeRoomSnapshot afterSecond =
+          awaitState(
+              workflow,
+              snapshot ->
+                  snapshot.processedCommandCount() == 2
+                      && snapshot.processedEventCount() == 2
+                      && snapshot.pendingCommand() == null);
+      assertThat(afterSecond.nextEventSequence()).isEqualTo(5);
+
+      workflow.targetSourceEventObserved(
+          cursor(5, "EVENT_P9_THREE_ROUND_READY_5", "INTAKE_PROJECTION_READY"));
+      workflow.targetSourceEventObserved(
+          cursor(6, "EVENT_P9_THREE_ROUND_ROOM_6", "ROOM_MESSAGE_CREATED"));
+      awaitState(workflow, snapshot -> snapshot.nextEventSequence() == 7);
+
+      IntakeWorkflowCommand third = targetCommand(THREE_ROUND_THIRD_COMMAND_ID, 3, 2);
+      workflow.commandAccepted(third);
+      IntakeRoomSnapshot completed =
+          awaitState(
+              workflow,
+              snapshot ->
+                  snapshot.processedCommandCount() == 3
+                      && snapshot.processedEventCount() == 3
+                      && snapshot.pendingCommand() == null
+                      && snapshot.lastGraphExecutionRef() != null
+                      && third.commandId().equals(snapshot.lastGraphExecutionRef().graphCommandId()));
+
+      assertThat(completed.nextCommandSequence()).isEqualTo(4);
+      assertThat(completed.nextEventSequence()).isEqualTo(8);
+      assertThat(completed.processRevision()).isEqualTo(3);
+      assertThat(completed.roomRevision()).isEqualTo(3);
+      assertThat(completed.protocolErrorCode()).isNull();
+      assertThat(workflow.lastCommandDecision().commandId()).isEqualTo(third.commandId());
+      assertThat(workflow.lastCommandDecision().status()).isEqualTo("ACCEPTED");
+      assertThat(RecordingAgentRunWorkflow.requests)
+          .containsExactly(targetRequest(first), targetRequest(second), targetRequest(third));
+      assertThat(RecordingFinalizationReads.requests).hasSize(3);
+    }
+  }
+
+  @Test
+  void retainsParentCursorsThatArriveBeforeTheChildFormalReceipt() {
+    try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+      String roomQueue = "phase9-intake-child-future-source-cursor";
+      RecordingAgentRunWorkflow.requests.clear();
+      RecordingFinalizationReads.requests.clear();
+      RecordingFinalizationReads.pendingResponses.set(0);
+      BlockingFinalizationReads.reset();
+
+      Worker roomWorker = environment.newWorker(roomQueue);
+      roomWorker.registerWorkflowImplementationTypes(IntakeRoomWorkflowImpl.class);
+      Worker agentWorker = environment.newWorker(AGENT_EXECUTION);
+      agentWorker.registerWorkflowImplementationTypes(RecordingAgentRunWorkflow.class);
+      Worker controlWorker = environment.newWorker(CASE_CONTROL);
+      controlWorker.registerActivitiesImplementations(new BlockingFinalizationReads());
+      environment.start();
+
+      IntakeRoomWorkflow workflow =
+          environment
+              .getWorkflowClient()
+              .newWorkflowStub(
+                  IntakeRoomWorkflow.class,
+                  WorkflowOptions.newBuilder()
+                      .setWorkflowId("intake-room:future-source-cursor:" + CASE_ID + ":" + EPOCH)
+                      .setTaskQueue(roomQueue)
+                      .build());
+      WorkflowClient.start(workflow::run, targetStart());
+
+      IntakeWorkflowCommand first = targetCommand(FUTURE_CURSOR_FIRST_COMMAND_ID, 1, 0);
+      workflow.commandAccepted(first);
+      assertThat(BlockingFinalizationReads.awaitStarted()).isTrue();
+      assertThat(RecordingAgentRunWorkflow.requests).containsExactly(targetRequest(first));
+
+      workflow.targetSourceEventObserved(
+          cursor(2, "EVENT_P9_FUTURE_CURSOR_READY_2", "INTAKE_PROJECTION_READY"));
+      workflow.targetSourceEventObserved(
+          cursor(3, "EVENT_P9_FUTURE_CURSOR_ROOM_3", "ROOM_MESSAGE_CREATED"));
+      environment.sleep(Duration.ofSeconds(1));
+
+      IntakeRoomSnapshot held = workflow.state();
+      assertThat(held.nextEventSequence()).isEqualTo(1);
+      assertThat(held.processedEventCount()).isZero();
+      assertThat(held.pendingCommandId()).isEqualTo(first.commandId());
+      assertThat(held.protocolErrorCode()).isEqualTo("TARGET_SOURCE_EVENT_SEQUENCE_GAP");
+      assertThat(RecordingFinalizationReads.requests).isEmpty();
+
+      BlockingFinalizationReads.release();
+      IntakeRoomSnapshot drained =
+          awaitState(
+              workflow,
+              snapshot ->
+                  snapshot.nextEventSequence() == 4
+                      && snapshot.processedEventCount() == 1
+                      && snapshot.pendingCommand() == null);
+      assertThat(drained.protocolErrorCode()).isNull();
+      assertThat(drained.processRevision()).isEqualTo(1);
+      assertThat(drained.roomRevision()).isEqualTo(1);
+
+      IntakeWorkflowCommand second = targetCommand(FUTURE_CURSOR_SECOND_COMMAND_ID, 2, 1);
+      workflow.commandAccepted(second);
+      IntakeRoomSnapshot completed =
+          awaitState(
+              workflow,
+              snapshot ->
+                  snapshot.processedCommandCount() == 2
+                      && snapshot.processedEventCount() == 2
+                      && snapshot.pendingCommand() == null
+                      && snapshot.lastGraphExecutionRef() != null
+                      && second.commandId().equals(snapshot.lastGraphExecutionRef().graphCommandId()));
+
+      assertThat(completed.nextEventSequence()).isEqualTo(5);
+      assertThat(completed.protocolErrorCode()).isNull();
+      assertThat(RecordingAgentRunWorkflow.requests)
+          .containsExactly(targetRequest(first), targetRequest(second));
+      assertThat(RecordingFinalizationReads.requests).hasSize(2);
     }
   }
 
@@ -914,9 +1085,13 @@ class IntakeRoomAgentRunChildWorkflowTest {
 
       IntakeWorkflowCommand first = targetCommand(LIFECYCLE_FIRST_COMMAND_ID, 1, 0);
       workflow.commandAccepted(first);
-      environment.sleep(Duration.ofSeconds(1));
-
-      IntakeRoomSnapshot released = workflow.state();
+      IntakeRoomSnapshot released =
+          awaitState(
+              workflow,
+              snapshot ->
+                  snapshot.processedCommandCount() == 1
+                      && snapshot.pendingCommand() == null
+                      && "TARGET_AGENT_RUN_FAILED".equals(snapshot.protocolErrorCode()));
       assertThat(released.pendingCommand()).isNull();
       assertThat(released.roomPhase()).isEqualTo(IntakeRoomPhase.OPEN);
       assertThat(released.initiatorComplete()).isFalse();
@@ -932,9 +1107,16 @@ class IntakeRoomAgentRunChildWorkflowTest {
 
       IntakeWorkflowCommand second = targetCommand(LIFECYCLE_SECOND_COMMAND_ID, 2, 0);
       workflow.commandAccepted(second);
-      environment.sleep(Duration.ofSeconds(1));
-
-      IntakeRoomSnapshot continued = workflow.state();
+      IntakeRoomSnapshot continued =
+          awaitState(
+              workflow,
+              snapshot ->
+                  snapshot.processedCommandCount() == 2
+                      && snapshot.pendingCommand() == null
+                      && snapshot.roomPhase() == IntakeRoomPhase.READY_TO_CONFIRM
+                      && snapshot.lastGraphExecutionRef() != null
+                      && second.commandId().equals(
+                          snapshot.lastGraphExecutionRef().graphCommandId()));
       assertThat(continued.pendingCommand()).isNull();
       assertThat(continued.roomPhase()).isEqualTo(IntakeRoomPhase.READY_TO_CONFIRM);
       assertThat(continued.processedCommandCount()).isEqualTo(2);
@@ -2080,6 +2262,46 @@ class IntakeRoomAgentRunChildWorkflowTest {
     }
   }
 
+  private static final class BlockingFinalizationReads
+      implements IntakeAgentRunFinalizationReadActivities {
+    private static volatile CountDownLatch started = new CountDownLatch(1);
+    private static volatile CountDownLatch released = new CountDownLatch(1);
+    private final RecordingFinalizationReads delegate = new RecordingFinalizationReads();
+
+    private static void reset() {
+      started = new CountDownLatch(1);
+      released = new CountDownLatch(1);
+    }
+
+    private static boolean awaitStarted() {
+      try {
+        return started.await(5, TimeUnit.SECONDS);
+      } catch (InterruptedException interrupted) {
+        Thread.currentThread().interrupt();
+        throw new AssertionError("interrupted while awaiting finalization read", interrupted);
+      }
+    }
+
+    private static void release() {
+      released.countDown();
+    }
+
+    @Override
+    public IntakeAgentRunFinalizationReadResult readFinalization(
+        IntakeAgentRunFinalizationReadRequest request) {
+      started.countDown();
+      try {
+        if (!released.await(30, TimeUnit.SECONDS)) {
+          throw new AssertionError("timed out awaiting finalization release");
+        }
+      } catch (InterruptedException interrupted) {
+        Thread.currentThread().interrupt();
+        throw new AssertionError("interrupted while blocking finalization read", interrupted);
+      }
+      return delegate.readFinalization(request);
+    }
+  }
+
   private static final class RecordingFinalizationReads
       implements IntakeAgentRunFinalizationReadActivities {
     private static final List<IntakeAgentRunFinalizationReadRequest> requests =
@@ -2185,6 +2407,11 @@ class IntakeRoomAgentRunChildWorkflowTest {
                  case GAP_FIRST_COMMAND_ID -> 2;
                  case GAP_SECOND_COMMAND_ID -> 3;
                  case LIFECYCLE_SECOND_COMMAND_ID -> 1;
+                 case THREE_ROUND_FIRST_COMMAND_ID -> 1;
+                 case THREE_ROUND_SECOND_COMMAND_ID -> 4;
+                 case THREE_ROUND_THIRD_COMMAND_ID -> 7;
+                 case FUTURE_CURSOR_FIRST_COMMAND_ID -> 1;
+                 case FUTURE_CURSOR_SECOND_COMMAND_ID -> 4;
                  default -> command.sequence();
                },
               formalEventType,
