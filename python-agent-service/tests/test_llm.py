@@ -360,6 +360,9 @@ def test_litellm_proxy_repairs_empty_structured_content_with_plain_json_retry() 
 async def test_governed_async_schema_invalid_strict_response_retries_plain_once() -> None:
     calls: list[dict] = []
     invalid_sentinel = "INVALID_FIRST_STRUCTURED_RESPONSE"
+    repair_begin = "<<<SERVER_OWNED_JSON_SCHEMA_REPAIR_V1>>>"
+    schema_marker = "SCHEMA_JSON_COMPACT:"
+    repair_end = "<<<END_SERVER_OWNED_JSON_SCHEMA_REPAIR_V1>>>"
 
     async def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
@@ -454,6 +457,32 @@ async def test_governed_async_schema_invalid_strict_response_retries_plain_once(
         )
 
     assert len(calls) == 2
+    assert "response_format" not in calls[1]
+    assert len(calls[1]["messages"]) == 2
+    assert calls[1]["messages"][1] == calls[0]["messages"][1]
+    first_system = calls[0]["messages"][0]
+    repaired_system = calls[1]["messages"][0]
+    assert repaired_system["role"] == first_system["role"] == "system"
+    assert repaired_system["content"].startswith(
+        first_system["content"] + "\n\n" + repair_begin + "\n"
+    )
+    assert repaired_system["content"].count(repair_begin) == 1
+    assert repaired_system["content"].count(schema_marker) == 1
+    assert repaired_system["content"].count(repair_end) == 1
+    schema_section = repaired_system["content"].split(schema_marker, 1)[1].split(
+        repair_end,
+        1,
+    )[0]
+    assert schema_section.endswith("\n")
+    schema_text = schema_section.removesuffix("\n")
+    assert schema_text == json.dumps(
+        SimpleStructuredOutput.model_json_schema(),
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    assert json.loads(schema_text) == SimpleStructuredOutput.model_json_schema()
+    assert invalid_sentinel not in json.dumps(calls[1], ensure_ascii=False)
     assert result.provider_attempts_used == 2
     assert result.repairs_used == 1
     assert result.model == "governed-model"

@@ -54,6 +54,14 @@ _MAX_STREAM_EVENT_BYTES = 128 * 1024
 _MAX_STREAM_DELTA_BYTES = 64 * 1024
 _MODEL_HEALTH_SUCCESS_TTL_SECONDS = 60.0
 _MODEL_HEALTH_FAILURE_TTL_SECONDS = 10.0
+_SCHEMA_REPAIR_BEGIN = "<<<SERVER_OWNED_JSON_SCHEMA_REPAIR_V1>>>"
+_SCHEMA_REPAIR_SCHEMA_MARKER = "SCHEMA_JSON_COMPACT:"
+_SCHEMA_REPAIR_END = "<<<END_SERVER_OWNED_JSON_SCHEMA_REPAIR_V1>>>"
+_SCHEMA_REPAIR_INSTRUCTION = (
+    "Return exactly one JSON object that validates against the server-owned "
+    "JSON Schema below. Do not include Markdown, prose, comments, or fields "
+    "not permitted by the schema."
+)
 
 
 @dataclass(frozen=True)
@@ -641,6 +649,7 @@ class LiteLlmProxyClient:
                         user_prompt=user_prompt,
                         user_content_parts=user_content_parts,
                         json_mode=False,
+                        schema_repair=True,
                         governed_request=governed_request,
                     )
                     allow_json_extraction = True
@@ -673,6 +682,7 @@ class LiteLlmProxyClient:
                             user_prompt=user_prompt,
                             user_content_parts=user_content_parts,
                             json_mode=False,
+                            schema_repair=True,
                             governed_request=governed_request,
                         )
                         value = self._parse_structured_payload(
@@ -711,7 +721,13 @@ class LiteLlmProxyClient:
             raise
         except (KeyError, IndexError, TypeError, ValidationError, ValueError) as exception:
             raise AgentOutputSchemaError(
-                node_name, f"{node_name} returned invalid structured output"
+                node_name,
+                f"{node_name} returned invalid structured output",
+                safe_code=(
+                    "AGENT_OUTPUT_SCHEMA_REPAIR_EXHAUSTED"
+                    if provider_attempts_used == 2 and repairs_used == 1
+                    else "AGENT_OUTPUT_SCHEMA_INVALID"
+                ),
             ) from exception
         latency_ms = int((time.perf_counter() - started) * 1000)
         generation = StructuredGeneration(
@@ -784,6 +800,7 @@ class LiteLlmProxyClient:
                         user_prompt=user_prompt,
                         user_content_parts=user_content_parts,
                         json_mode=False,
+                        schema_repair=True,
                         governed_request=governed_request,
                     )
                     allow_json_extraction = True
@@ -815,6 +832,7 @@ class LiteLlmProxyClient:
                             user_prompt=user_prompt,
                             user_content_parts=user_content_parts,
                             json_mode=False,
+                            schema_repair=True,
                             governed_request=governed_request,
                         )
                         value = self._parse_structured_payload(
@@ -852,7 +870,13 @@ class LiteLlmProxyClient:
             raise
         except (KeyError, IndexError, TypeError, ValidationError, ValueError) as exception:
             raise AgentOutputSchemaError(
-                node_name, f"{node_name} returned invalid structured output"
+                node_name,
+                f"{node_name} returned invalid structured output",
+                safe_code=(
+                    "AGENT_OUTPUT_SCHEMA_REPAIR_EXHAUSTED"
+                    if provider_attempts_used == 2 and repairs_used == 1
+                    else "AGENT_OUTPUT_SCHEMA_INVALID"
+                ),
             ) from exception
         return StructuredGeneration(
             value=value,
@@ -1202,6 +1226,7 @@ class LiteLlmProxyClient:
         user_content_parts: list[dict[str, Any]] | None,
         json_mode: bool,
         governed_request: GovernedProviderRequest | None,
+        schema_repair: bool = False,
     ) -> dict[str, Any]:
         request_body = self._completion_request_body(
             node_name=node_name,
@@ -1210,6 +1235,7 @@ class LiteLlmProxyClient:
             user_prompt=user_prompt,
             user_content_parts=user_content_parts,
             json_mode=json_mode,
+            schema_repair=schema_repair,
             governed_request=governed_request,
         )
         request_timeout = self._request_timeout_seconds(governed_request)
@@ -1240,6 +1266,7 @@ class LiteLlmProxyClient:
         user_content_parts: list[dict[str, Any]] | None,
         json_mode: bool,
         governed_request: GovernedProviderRequest | None,
+        schema_repair: bool = False,
     ) -> dict[str, Any]:
         request_body = self._completion_request_body(
             node_name=node_name,
@@ -1248,6 +1275,7 @@ class LiteLlmProxyClient:
             user_prompt=user_prompt,
             user_content_parts=user_content_parts,
             json_mode=json_mode,
+            schema_repair=schema_repair,
             governed_request=governed_request,
         )
         request_timeout = self._request_timeout_seconds(governed_request)
@@ -1324,10 +1352,13 @@ class LiteLlmProxyClient:
         user_prompt: str,
         user_content_parts: list[dict[str, Any]] | None,
         json_mode: bool,
+        schema_repair: bool = False,
         governed_request: GovernedProviderRequest | None = None,
     ) -> dict[str, Any]:
         """组装 OpenAI-compatible chat/completions 请求体。"""
 
+        if json_mode and schema_repair:
+            raise ValueError("schema repair guidance requires plain compatibility mode")
         user_content: str | list[dict[str, Any]] = user_prompt
         if user_content_parts:
             user_content = [
@@ -1342,10 +1373,24 @@ class LiteLlmProxyClient:
             if governed_request is not None
             else budget.max_completion_tokens
         )
+        system_content = system_prompt
+        if schema_repair:
+            compact_schema = json.dumps(
+                output_type.model_json_schema(),
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            system_content = (
+                f"{system_prompt}\n\n{_SCHEMA_REPAIR_BEGIN}\n"
+                f"{_SCHEMA_REPAIR_INSTRUCTION}\n"
+                f"{_SCHEMA_REPAIR_SCHEMA_MARKER}{compact_schema}\n"
+                f"{_SCHEMA_REPAIR_END}"
+            )
         request_body: dict[str, Any] = {
             "model": model,
             "messages": [
-                {"role": "system", "content": system_prompt},
+                {"role": "system", "content": system_content},
                 {"role": "user", "content": user_content},
             ],
             "temperature": temperature,

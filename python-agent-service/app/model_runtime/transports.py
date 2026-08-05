@@ -34,7 +34,16 @@ class TransientModelTransportError(ModelTransportError):
 
 
 class ModelTransportOutputError(ModelTransportError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        safe_code: str | None = None,
+        node_name: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.safe_code = safe_code
+        self.node_name = node_name
 
 
 class NativeAsyncTransportRequired(ModelTransportError):
@@ -137,7 +146,9 @@ class StructuredClientTransport:
             generation = self._client.generate(**generation_args)
         except AgentProviderContractError as error:
             raise ModelTransportOutputError(
-                "structured provider contract invalid"
+                "structured provider contract invalid",
+                safe_code="AGENT_PROVIDER_CONTRACT_INVALID",
+                node_name=request.node_name,
             ) from error
         except AgentServiceUnavailable as error:
             raise TransientModelTransportError(
@@ -145,8 +156,12 @@ class StructuredClientTransport:
                 provider_attempts_used=error.provider_attempts_used,
             ) from error
         except AgentOutputSchemaError as error:
-            raise ModelTransportOutputError("structured provider output invalid") from error
-        return _transport_result(generation)
+            raise ModelTransportOutputError(
+                "structured provider output invalid",
+                safe_code=error.safe_code,
+                node_name=error.node_name,
+            ) from error
+        return _transport_result(generation, node_name=request.node_name)
 
     async def agenerate(self, request: ModelTransportRequest) -> ModelTransportResult:
         self._validate_request_binding(request)
@@ -162,7 +177,9 @@ class StructuredClientTransport:
             generation = await client.agenerate(**generation_args)
         except AgentProviderContractError as error:
             raise ModelTransportOutputError(
-                "structured provider contract invalid"
+                "structured provider contract invalid",
+                safe_code="AGENT_PROVIDER_CONTRACT_INVALID",
+                node_name=request.node_name,
             ) from error
         except AgentServiceUnavailable as error:
             raise TransientModelTransportError(
@@ -170,8 +187,12 @@ class StructuredClientTransport:
                 provider_attempts_used=error.provider_attempts_used,
             ) from error
         except AgentOutputSchemaError as error:
-            raise ModelTransportOutputError("structured provider output invalid") from error
-        return _transport_result(generation)
+            raise ModelTransportOutputError(
+                "structured provider output invalid",
+                safe_code=error.safe_code,
+                node_name=error.node_name,
+            ) from error
+        return _transport_result(generation, node_name=request.node_name)
 
     def stream(self, request: ModelTransportRequest) -> Iterator[ModelTransportStreamUpdate]:
         self._validate_request_binding(request)
@@ -201,10 +222,17 @@ class StructuredClientTransport:
                 if not isinstance(update, StructuredStreamCompleted):
                     raise ModelTransportOutputError("stream emitted an unknown update")
                 completed = True
-                yield ModelTransportCompleted(result=_transport_result(update.generation))
+                yield ModelTransportCompleted(
+                    result=_transport_result(
+                        update.generation,
+                        node_name=request.node_name,
+                    )
+                )
         except AgentProviderContractError as error:
             raise ModelTransportOutputError(
-                "structured provider stream contract invalid"
+                "structured provider stream contract invalid",
+                safe_code="AGENT_PROVIDER_CONTRACT_INVALID",
+                node_name=request.node_name,
             ) from error
         except AgentServiceUnavailable as error:
             raise TransientModelTransportError(
@@ -212,7 +240,11 @@ class StructuredClientTransport:
                 provider_attempts_used=error.provider_attempts_used,
             ) from error
         except AgentOutputSchemaError as error:
-            raise ModelTransportOutputError("structured provider stream output invalid") from error
+            raise ModelTransportOutputError(
+                "structured provider stream output invalid",
+                safe_code=error.safe_code,
+                node_name=error.node_name,
+            ) from error
         if not completed:
             raise TransientModelTransportError("structured provider stream ended without result")
 
@@ -246,10 +278,17 @@ class StructuredClientTransport:
                 if not isinstance(update, StructuredStreamCompleted):
                     raise ModelTransportOutputError("stream emitted an unknown update")
                 completed = True
-                yield ModelTransportCompleted(result=_transport_result(update.generation))
+                yield ModelTransportCompleted(
+                    result=_transport_result(
+                        update.generation,
+                        node_name=request.node_name,
+                    )
+                )
         except AgentProviderContractError as error:
             raise ModelTransportOutputError(
-                "structured provider stream contract invalid"
+                "structured provider stream contract invalid",
+                safe_code="AGENT_PROVIDER_CONTRACT_INVALID",
+                node_name=request.node_name,
             ) from error
         except AgentServiceUnavailable as error:
             raise TransientModelTransportError(
@@ -257,7 +296,11 @@ class StructuredClientTransport:
                 provider_attempts_used=error.provider_attempts_used,
             ) from error
         except AgentOutputSchemaError as error:
-            raise ModelTransportOutputError("structured provider stream output invalid") from error
+            raise ModelTransportOutputError(
+                "structured provider stream output invalid",
+                safe_code=error.safe_code,
+                node_name=error.node_name,
+            ) from error
         if not completed:
             raise TransientModelTransportError("structured provider stream ended without result")
 
@@ -321,7 +364,24 @@ def _generation_args(
     return arguments
 
 
-def _transport_result(generation: StructuredGeneration) -> ModelTransportResult:
+def _transport_result(
+    generation: StructuredGeneration,
+    *,
+    node_name: str,
+) -> ModelTransportResult:
+    try:
+        return _unclassified_transport_result(generation)
+    except ModelTransportOutputError as error:
+        raise ModelTransportOutputError(
+            "structured provider contract invalid",
+            safe_code="AGENT_PROVIDER_CONTRACT_INVALID",
+            node_name=node_name,
+        ) from error
+
+
+def _unclassified_transport_result(
+    generation: StructuredGeneration,
+) -> ModelTransportResult:
     if not isinstance(generation.model, str) or not generation.model:
         raise ModelTransportOutputError("structured provider returned an invalid model")
     latency_ms = _nonnegative_integer(generation.latency_ms, "latency_ms")

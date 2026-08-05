@@ -4,21 +4,28 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timedelta, timezone
 from threading import Event, Lock
 
 import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, ConfigDict
 
 from app.llm import (
     AgentOutputSchemaError,
+    GovernedProviderRequest,
     LiteLlmProxyClient,
     StructuredStreamCompleted,
     StructuredStreamDelta,
 )
-from app.model_runtime.transports import ModelTransportOutputError
+from app.model_runtime.transports import (
+    ModelTransportOutputError,
+    ModelTransportRequest,
+    StructuredClientTransport,
+)
 from app.streaming import (
     AgentStreamLimitExceeded,
     AgentStreamObserver,
@@ -41,6 +48,65 @@ class _Reply(BaseModel):
 
     room_utterance: str
     internal_note: str = ""
+
+
+def _governed_transport_ndjson(
+    provider_documents: list[dict[str, object]],
+    *,
+    attempts: int,
+    repairs: int,
+) -> tuple[list[dict[str, object]], list[dict[str, object]], str]:
+    calls: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(json.loads(request.content))
+        return httpx.Response(200, json=provider_documents[len(calls) - 1])
+
+    mock = httpx.MockTransport(handler)
+    client = LiteLlmProxyClient(
+        "http://litellm.test",
+        "governed-model",
+        "secret",
+        transport=mock,
+        async_transport=mock,
+    )
+    transport = StructuredClientTransport(client)
+    request = ModelTransportRequest(
+        node_name="intake_turn_case_detail",
+        messages=(SystemMessage("system"), HumanMessage("user")),
+        output_type=_Reply,
+        governed_request=GovernedProviderRequest(
+            provider="litellm",
+            model="governed-model",
+            temperature=0.2,
+            max_output_tokens=1_024,
+            response_format="STRICT_JSON_SCHEMA",
+            tool_allowlist=(),
+            deadline_at=datetime.now(timezone.utc) + timedelta(minutes=1),
+            provider_attempts_remaining=attempts,
+            repairs_remaining=repairs,
+            traceparent=(
+                "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"
+            ),
+        ),
+    )
+    app = FastAPI()
+
+    def invoke() -> None:
+        asyncio.run(transport.agenerate(request))
+
+    @app.post("/stream")
+    async def stream():
+        return workflow_ndjson_response(
+            operation="intake_turn_case_detail",
+            run_id="AGENT_RUN_transport_classification",
+            invoke=invoke,
+        )
+
+    with TestClient(app) as test_client:
+        response = test_client.post("/stream")
+    events = [json.loads(line) for line in response.text.splitlines() if line]
+    return calls, events, response.text
 
 
 # 所属模块：Python 支撑模块 > test_streaming；函数角色：模块私有业务函数。
@@ -414,6 +480,128 @@ def test_ndjson_maps_transport_output_error_to_public_schema_contract() -> None:
     assert "private schema validation details" not in response.text
     assert "private transport details" not in response.text
     assert "INTERNAL_ERROR" not in response.text
+
+
+def test_ndjson_preserves_exhausted_schema_repair_classification() -> None:
+    first_sentinel = "PRIVATE_INVALID_FIRST_OUTPUT"
+    second_sentinel = "PRIVATE_INVALID_SECOND_OUTPUT"
+    provider_documents = [
+        {
+            "model": "governed-model",
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps({"unexpected": first_sentinel})
+                    }
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 7,
+                "completion_tokens": 3,
+                "total_tokens": 10,
+            },
+        },
+        {
+            "model": "governed-model",
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps({"unexpected": second_sentinel})
+                    }
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 9,
+                "completion_tokens": 4,
+                "total_tokens": 13,
+            },
+        },
+    ]
+
+    calls, events, response_text = _governed_transport_ndjson(
+        provider_documents,
+        attempts=2,
+        repairs=1,
+    )
+
+    assert len(calls) == 2
+    assert [event["type"] for event in events] == ["start", "error"]
+    assert events[-1]["code"] == "AGENT_OUTPUT_SCHEMA_REPAIR_EXHAUSTED"
+    assert events[-1]["message"] == "agent returned invalid structured output"
+    assert events[-1]["retryable"] is False
+    assert events[-1]["visible_output_emitted"] is False
+    assert events[-1]["node_name"] == "intake_turn_case_detail"
+    assert not {"visible_delta", "usage", "final"} & {
+        event["type"] for event in events
+    }
+    assert first_sentinel not in response_text
+    assert second_sentinel not in response_text
+
+
+def test_ndjson_preserves_governed_provider_contract_classification() -> None:
+    private_sentinel = "PRIVATE_PROVIDER_CONTRACT_DETAILS"
+    provider_document = {
+        "model": "governed-model",
+        "choices": [
+            {
+                "message": {
+                    "content": json.dumps(
+                        {
+                            "room_utterance": "validated public reply",
+                            "internal_note": private_sentinel,
+                        }
+                    )
+                }
+            }
+        ],
+    }
+
+    calls, events, response_text = _governed_transport_ndjson(
+        [provider_document],
+        attempts=2,
+        repairs=1,
+    )
+
+    assert len(calls) == 1
+    assert [event["type"] for event in events] == ["start", "error"]
+    assert events[-1]["code"] == "AGENT_PROVIDER_CONTRACT_INVALID"
+    assert events[-1]["message"] == (
+        "agent provider returned an invalid governed response"
+    )
+    assert events[-1]["retryable"] is False
+    assert events[-1]["visible_output_emitted"] is False
+    assert events[-1]["node_name"] == "intake_turn_case_detail"
+    assert private_sentinel not in response_text
+
+
+def test_ndjson_keeps_initial_schema_failure_generic_without_repair_budget() -> None:
+    private_sentinel = "PRIVATE_INITIAL_INVALID_OUTPUT"
+    provider_document = {
+        "model": "governed-model",
+        "choices": [
+            {"message": {"content": json.dumps({"unexpected": private_sentinel})}}
+        ],
+        "usage": {
+            "prompt_tokens": 7,
+            "completion_tokens": 3,
+            "total_tokens": 10,
+        },
+    }
+
+    calls, events, response_text = _governed_transport_ndjson(
+        [provider_document],
+        attempts=1,
+        repairs=0,
+    )
+
+    assert len(calls) == 1
+    assert [event["type"] for event in events] == ["start", "error"]
+    assert events[-1]["code"] == "AGENT_OUTPUT_SCHEMA_INVALID"
+    assert events[-1]["message"] == "agent returned invalid structured output"
+    assert events[-1]["retryable"] is False
+    assert events[-1]["visible_output_emitted"] is False
+    assert events[-1]["node_name"] == "intake_turn_case_detail"
+    assert private_sentinel not in response_text
 
 
 # 所属模块：Python 支撑模块 > test_streaming；函数角色：回归测试用例。

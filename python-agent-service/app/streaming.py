@@ -1128,19 +1128,30 @@ def _public_stream_error(
     from app.model_runtime.transports import ModelTransportOutputError
 
     if isinstance(exception, (AgentOutputSchemaError, ModelTransportOutputError)):
-        schema_error = (
-            exception
-            if isinstance(exception, AgentOutputSchemaError)
-            else exception.__cause__
-        )
-        node_name = (
-            schema_error.node_name
-            if isinstance(schema_error, AgentOutputSchemaError)
-            else None
-        )
+        cause = exception.__cause__
+        if isinstance(exception, AgentOutputSchemaError):
+            safe_code = exception.safe_code
+            node_name = exception.node_name
+        else:
+            safe_code = exception.safe_code
+            node_name = exception.node_name
+            if isinstance(cause, AgentOutputSchemaError):
+                safe_code = safe_code or cause.safe_code
+                node_name = node_name or cause.node_name
+        public_messages = {
+            "AGENT_OUTPUT_SCHEMA_INVALID": "agent returned invalid structured output",
+            "AGENT_OUTPUT_SCHEMA_REPAIR_EXHAUSTED": (
+                "agent returned invalid structured output"
+            ),
+            "AGENT_PROVIDER_CONTRACT_INVALID": (
+                "agent provider returned an invalid governed response"
+            ),
+        }
+        if safe_code not in public_messages:
+            safe_code = "AGENT_OUTPUT_SCHEMA_INVALID"
         return (
-            "AGENT_OUTPUT_SCHEMA_INVALID",
-            "agent returned invalid structured output",
+            safe_code,
+            public_messages[safe_code],
             False,
             node_name,
         )
