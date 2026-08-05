@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
@@ -11,6 +12,7 @@ import app.llm as llm_module
 from app.llm import (
     AgentOutputSchemaError,
     AgentServiceUnavailable,
+    GovernedProviderRequest,
     LiteLlmProxyClient,
 )
 from app.schemas.final_agents import EvidenceTurnLlmOutput
@@ -352,6 +354,119 @@ def test_litellm_proxy_repairs_empty_structured_content_with_plain_json_retry() 
     assert len(calls) == 2
     assert result.value.requires_supplemental_evidence is False
     assert result.token_usage["total"] == 20
+
+
+@pytest.mark.asyncio
+async def test_governed_async_schema_invalid_strict_response_retries_plain_once() -> None:
+    calls: list[dict] = []
+    invalid_sentinel = "INVALID_FIRST_STRUCTURED_RESPONSE"
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        calls.append(body)
+        if len(calls) == 1:
+            assert body["response_format"]["type"] == "json_schema"
+            return httpx.Response(
+                200,
+                json={
+                    "model": "governed-model",
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(
+                                    {
+                                        "gaps": [],
+                                        "invalid_marker": invalid_sentinel,
+                                    }
+                                )
+                            }
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 7,
+                        "completion_tokens": 3,
+                        "total_tokens": 10,
+                    },
+                },
+            )
+        assert "response_format" not in body
+        return httpx.Response(
+            200,
+            json={
+                "model": "governed-model",
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                "validated: "
+                                + json.dumps(
+                                    {
+                                        "requires_supplemental_evidence": False,
+                                        "gaps": [],
+                                    }
+                                )
+                            )
+                        }
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 11,
+                    "completion_tokens": 5,
+                    "total_tokens": 16,
+                },
+            },
+        )
+
+    mock = httpx.MockTransport(handler)
+    client = LiteLlmProxyClient(
+        "http://litellm:4000",
+        "configured-model-must-not-win",
+        "test-master-key",
+        transport=mock,
+        async_transport=mock,
+    )
+    governed_request = GovernedProviderRequest(
+        provider="litellm",
+        model="governed-model",
+        temperature=0.2,
+        max_output_tokens=1_024,
+        response_format="STRICT_JSON_SCHEMA",
+        tool_allowlist=(),
+        deadline_at=datetime.now(timezone.utc) + timedelta(minutes=1),
+        provider_attempts_remaining=2,
+        repairs_remaining=1,
+        traceparent="00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
+    )
+
+    published = []
+    observer = AgentStreamObserver(
+        operation="test_governed_schema_retry",
+        run_id="AGENT_RUN_GOVERNED_SCHEMA_RETRY",
+        publish=published.append,
+    )
+    with bind_stream_observer(observer):
+        result = await client.agenerate(
+            node_name="test_governed_schema_retry",
+            system_prompt="system",
+            user_prompt="user",
+            output_type=SimpleStructuredOutput,
+            governed_request=governed_request,
+        )
+
+    assert len(calls) == 2
+    assert result.provider_attempts_used == 2
+    assert result.repairs_used == 1
+    assert result.model == "governed-model"
+    assert result.token_usage == {"input": 11, "output": 5, "total": 16}
+    assert result.value.model_dump(mode="json") == {
+        "requires_supplemental_evidence": False,
+        "gaps": [],
+    }
+    assert invalid_sentinel not in result.value.model_dump_json()
+    assert all(
+        invalid_sentinel not in str(getattr(event, "delta", ""))
+        for event in published
+    )
 
 
 def test_hearing_judge_v2_buffers_until_valid_and_repairs_a_truncated_response() -> None:

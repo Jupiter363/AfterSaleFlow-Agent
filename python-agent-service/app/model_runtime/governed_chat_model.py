@@ -6,11 +6,12 @@ import json
 import time
 from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from contextlib import contextmanager
 from contextvars import copy_context
 from dataclasses import replace
 from datetime import datetime, timezone
 from threading import BoundedSemaphore
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 from langchain_core.callbacks import AsyncCallbackManagerForLLMRun, CallbackManagerForLLMRun
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -36,7 +37,12 @@ from app.model_runtime.transports import (
     ModelTransportVisibleDelta,
     TransientModelTransportError,
 )
-from app.streaming import VisibleFieldSpec
+from app.streaming import (
+    AgentStreamObserver,
+    VisibleFieldSpec,
+    bind_stream_observer,
+    current_stream_observer,
+)
 
 
 class ModelPolicyViolation(ValueError):
@@ -69,7 +75,71 @@ _MAX_MODEL_DOCUMENT_BYTES = 2 * 1024 * 1024
 _MAX_VISIBLE_DELTA_BYTES = 64 * 1024
 _MAX_PROVIDER_LATENCY_MS = 24 * 60 * 60 * 1_000
 _MAX_TOKEN_USAGE = 2_147_483_647
+_BUFFERED_VALIDATED_STREAM_NODE = "intake_turn_case_detail"
 SyncResultT = TypeVar("SyncResultT")
+
+
+class _BufferedIntakeObserver:
+    """Withhold exact Intake observer side effects until governed policy accepts."""
+
+    def __init__(self, delegate: AgentStreamObserver) -> None:
+        self._delegate = delegate
+        self._events: list[tuple[str, dict[str, Any]]] = []
+
+    def raise_if_cancelled(self) -> None:
+        self._delegate.raise_if_cancelled()
+
+    def visible_fields_for(self, node_name: str) -> tuple[VisibleFieldSpec, ...]:
+        return self._delegate.visible_fields_for(node_name)
+
+    def visible_delta(self, node_name: str, field: str, delta: str) -> None:
+        self._events.append(
+            (
+                "visible_delta",
+                {"node_name": node_name, "field": field, "delta": delta},
+            )
+        )
+
+    def usage(
+        self,
+        *,
+        node_name: str,
+        model: str,
+        latency_ms: int,
+        token_usage: dict[str, int],
+    ) -> None:
+        self._events.append(
+            (
+                "usage",
+                {
+                    "node_name": node_name,
+                    "model": model,
+                    "latency_ms": latency_ms,
+                    "token_usage": dict(token_usage),
+                },
+            )
+        )
+
+    def release(self) -> None:
+        events, self._events = self._events, []
+        for event_type, payload in events:
+            if event_type == "visible_delta":
+                self._delegate.visible_delta(**payload)
+                continue
+            self._delegate.usage(**payload)
+
+
+@contextmanager
+def _buffer_intake_observer(
+    node_name: str,
+) -> Iterator[_BufferedIntakeObserver | None]:
+    observer = current_stream_observer()
+    if node_name != _BUFFERED_VALIDATED_STREAM_NODE or observer is None:
+        yield None
+        return
+    buffered = _BufferedIntakeObserver(observer)
+    with bind_stream_observer(cast(AgentStreamObserver, buffered)):
+        yield buffered
 
 
 class GovernedChatModel(BaseChatModel):
@@ -170,6 +240,9 @@ class GovernedChatModel(BaseChatModel):
         del run_manager
         request = self._request(messages, stop=stop, overrides=kwargs)
         prompt_hash = _prompt_hash(request.messages, request.user_content_parts)
+        buffer_visible_until_completion = (
+            self.policy.node_name == _BUFFERED_VALIDATED_STREAM_NODE
+        )
         attempts_allowed = self._attempts_allowed()
         if attempts_allowed == 0:
             raise ModelRetryBudgetExhausted("provider attempt budget is exhausted")
@@ -178,21 +251,30 @@ class GovernedChatModel(BaseChatModel):
             remaining = attempts_allowed - attempts_used
             bounded_request = _request_with_attempt_budget(request, remaining)
             visible = False
+            buffered_visible: list[ModelTransportVisibleDelta] = []
             completed_result: ModelTransportResult | None = None
             try:
                 self._guard()
-                for update in self._sync_stream(bounded_request):
-                    self._guard()
-                    if completed_result is not None:
-                        raise ModelStreamInterrupted("model transport emitted data after completion")
-                    if isinstance(update, ModelTransportVisibleDelta):
-                        update = self._validated_visible_delta(update)
-                        visible = True
-                        yield self._visible_chunk(update)
-                        continue
-                    if not isinstance(update, ModelTransportCompleted):
-                        raise ModelStreamInterrupted("model transport emitted an unknown update")
-                    completed_result = self._validated_result(update.result)
+                with _buffer_intake_observer(self.policy.node_name) as buffered_observer:
+                    for update in self._sync_stream(bounded_request):
+                        self._guard()
+                        if completed_result is not None:
+                            raise ModelStreamInterrupted(
+                                "model transport emitted data after completion"
+                            )
+                        if isinstance(update, ModelTransportVisibleDelta):
+                            update = self._validated_visible_delta(update)
+                            if buffer_visible_until_completion:
+                                buffered_visible.append(update)
+                                continue
+                            visible = True
+                            yield self._visible_chunk(update)
+                            continue
+                        if not isinstance(update, ModelTransportCompleted):
+                            raise ModelStreamInterrupted(
+                                "model transport emitted an unknown update"
+                            )
+                        completed_result = self._validated_result(update.result)
                 if completed_result is None:
                     raise TransientModelTransportError(
                         "model transport stream ended without a completed result"
@@ -201,6 +283,20 @@ class GovernedChatModel(BaseChatModel):
                     completed_result.provider_attempts_used,
                     remaining,
                 )
+                if buffer_visible_until_completion:
+                    buffered_chunks = tuple(
+                        self._visible_chunk(update) for update in buffered_visible
+                    )
+                    final_chunk = self._final_chunk(
+                        completed_result,
+                        attempts_used,
+                        prompt_hash,
+                    )
+                    if buffered_observer is not None:
+                        buffered_observer.release()
+                    yield from buffered_chunks
+                    yield final_chunk
+                    return
                 yield self._final_chunk(completed_result, attempts_used, prompt_hash)
                 return
             except TransientModelTransportError as error:
@@ -228,6 +324,9 @@ class GovernedChatModel(BaseChatModel):
         del run_manager
         request = self._request(messages, stop=stop, overrides=kwargs)
         prompt_hash = _prompt_hash(request.messages, request.user_content_parts)
+        buffer_visible_until_completion = (
+            self.policy.node_name == _BUFFERED_VALIDATED_STREAM_NODE
+        )
         attempts_allowed = self._attempts_allowed()
         if attempts_allowed == 0:
             raise ModelRetryBudgetExhausted("provider attempt budget is exhausted")
@@ -236,26 +335,31 @@ class GovernedChatModel(BaseChatModel):
             remaining = attempts_allowed - attempts_used
             bounded_request = _request_with_attempt_budget(request, remaining)
             visible = False
+            buffered_visible: list[ModelTransportVisibleDelta] = []
             completed_result: ModelTransportResult | None = None
             try:
                 self._guard()
-                async with asyncio.timeout(self._remaining_seconds()):
-                    async for update in self._transport.astream(bounded_request):
-                        self._guard()
-                        if completed_result is not None:
-                            raise ModelStreamInterrupted(
-                                "model transport emitted data after completion"
-                            )
-                        if isinstance(update, ModelTransportVisibleDelta):
-                            update = self._validated_visible_delta(update)
-                            visible = True
-                            yield self._visible_chunk(update)
-                            continue
-                        if not isinstance(update, ModelTransportCompleted):
-                            raise ModelStreamInterrupted(
-                                "model transport emitted an unknown update"
-                            )
-                        completed_result = self._validated_result(update.result)
+                with _buffer_intake_observer(self.policy.node_name) as buffered_observer:
+                    async with asyncio.timeout(self._remaining_seconds()):
+                        async for update in self._transport.astream(bounded_request):
+                            self._guard()
+                            if completed_result is not None:
+                                raise ModelStreamInterrupted(
+                                    "model transport emitted data after completion"
+                                )
+                            if isinstance(update, ModelTransportVisibleDelta):
+                                update = self._validated_visible_delta(update)
+                                if buffer_visible_until_completion:
+                                    buffered_visible.append(update)
+                                    continue
+                                visible = True
+                                yield self._visible_chunk(update)
+                                continue
+                            if not isinstance(update, ModelTransportCompleted):
+                                raise ModelStreamInterrupted(
+                                    "model transport emitted an unknown update"
+                                )
+                            completed_result = self._validated_result(update.result)
                 if completed_result is None:
                     raise TransientModelTransportError(
                         "model transport stream ended without a completed result"
@@ -264,6 +368,21 @@ class GovernedChatModel(BaseChatModel):
                     completed_result.provider_attempts_used,
                     remaining,
                 )
+                if buffer_visible_until_completion:
+                    buffered_chunks = tuple(
+                        self._visible_chunk(update) for update in buffered_visible
+                    )
+                    final_chunk = self._final_chunk(
+                        completed_result,
+                        attempts_used,
+                        prompt_hash,
+                    )
+                    if buffered_observer is not None:
+                        buffered_observer.release()
+                    for chunk in buffered_chunks:
+                        yield chunk
+                    yield final_chunk
+                    return
                 yield self._final_chunk(completed_result, attempts_used, prompt_hash)
                 return
             except TimeoutError as error:
@@ -295,13 +414,16 @@ class GovernedChatModel(BaseChatModel):
             bounded_request = _request_with_attempt_budget(request, remaining)
             try:
                 self._guard()
-                result = self._sync_generate(bounded_request)
+                with _buffer_intake_observer(self.policy.node_name) as buffered_observer:
+                    result = self._sync_generate(bounded_request)
                 self._guard()
                 validated = self._validated_result(result)
                 attempts_used += _attempts_consumed(
                     validated.provider_attempts_used,
                     remaining,
                 )
+                if buffered_observer is not None:
+                    buffered_observer.release()
                 return validated, attempts_used
             except TransientModelTransportError as error:
                 attempts_used += _attempts_consumed(
@@ -325,14 +447,17 @@ class GovernedChatModel(BaseChatModel):
             bounded_request = _request_with_attempt_budget(request, remaining)
             try:
                 self._guard()
-                async with asyncio.timeout(self._remaining_seconds()):
-                    result = await self._transport.agenerate(bounded_request)
+                with _buffer_intake_observer(self.policy.node_name) as buffered_observer:
+                    async with asyncio.timeout(self._remaining_seconds()):
+                        result = await self._transport.agenerate(bounded_request)
                 self._guard()
                 validated = self._validated_result(result)
                 attempts_used += _attempts_consumed(
                     validated.provider_attempts_used,
                     remaining,
                 )
+                if buffered_observer is not None:
+                    buffered_observer.release()
                 return validated, attempts_used
             except TimeoutError as error:
                 raise ModelDeadlineExceeded("model invocation deadline exceeded") from error

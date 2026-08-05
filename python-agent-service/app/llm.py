@@ -95,7 +95,9 @@ _NODE_GENERATION_BUDGETS: dict[str, ModelGenerationBudget] = {
 # Buffering keeps the validated non-streaming repair path available without
 # exposing a partial evidence assessment or final judgment from a truncated
 # provider response.
-_BUFFERED_STRUCTURED_NODES = frozenset({"evidence_turn", "hearing_judge_v2"})
+_BUFFERED_STRUCTURED_NODES = frozenset(
+    {"evidence_turn", "hearing_judge_v2", "intake_turn_case_detail"}
+)
 # Evidence output still has deterministic reference/authenticity guardrails after
 # Pydantic validation. Its user-visible text therefore travels only in the
 # workflow's final response, after those guardrails have succeeded.
@@ -653,7 +655,15 @@ class LiteLlmProxyClient:
                     if allow_json_extraction or not self._repair_allowed(governed_request):
                         raise
                     repairs_used = 1
-                    if governed_request is None:
+                    try:
+                        value = self._parse_structured_payload(
+                            payload,
+                            output_type,
+                            allow_json_extraction=True,
+                        )
+                    except (KeyError, IndexError, TypeError, ValidationError, ValueError):
+                        if not self._second_repair_call_allowed(governed_request):
+                            raise
                         provider_attempts_used += 1
                         payload = self._request_completion(
                             client,
@@ -663,13 +673,13 @@ class LiteLlmProxyClient:
                             user_prompt=user_prompt,
                             user_content_parts=user_content_parts,
                             json_mode=False,
-                            governed_request=None,
+                            governed_request=governed_request,
                         )
-                    value = self._parse_structured_payload(
-                        payload,
-                        output_type,
-                        allow_json_extraction=True,
-                    )
+                        value = self._parse_structured_payload(
+                            payload,
+                            output_type,
+                            allow_json_extraction=True,
+                        )
                 provider_model = _provider_model(
                     payload,
                     self._effective_model(governed_request),
@@ -787,7 +797,15 @@ class LiteLlmProxyClient:
                     if allow_json_extraction or not self._repair_allowed(governed_request):
                         raise
                     repairs_used = 1
-                    if governed_request is None:
+                    try:
+                        value = self._parse_structured_payload(
+                            payload,
+                            output_type,
+                            allow_json_extraction=True,
+                        )
+                    except (KeyError, IndexError, TypeError, ValidationError, ValueError):
+                        if not self._second_repair_call_allowed(governed_request):
+                            raise
                         provider_attempts_used += 1
                         payload = await self._arequest_completion(
                             client,
@@ -797,13 +815,13 @@ class LiteLlmProxyClient:
                             user_prompt=user_prompt,
                             user_content_parts=user_content_parts,
                             json_mode=False,
-                            governed_request=None,
+                            governed_request=governed_request,
                         )
-                    value = self._parse_structured_payload(
-                        payload,
-                        output_type,
-                        allow_json_extraction=True,
-                    )
+                        value = self._parse_structured_payload(
+                            payload,
+                            output_type,
+                            allow_json_extraction=True,
+                        )
                 provider_model = _provider_model(
                     payload,
                     self._effective_model(governed_request),
@@ -1383,6 +1401,15 @@ class LiteLlmProxyClient:
     @staticmethod
     def _repair_allowed(governed_request: GovernedProviderRequest | None) -> bool:
         return governed_request is None or governed_request.repairs_remaining > 0
+
+    @staticmethod
+    def _second_repair_call_allowed(
+        governed_request: GovernedProviderRequest | None,
+    ) -> bool:
+        return (
+            governed_request is None
+            or governed_request.provider_attempts_remaining >= 2
+        )
 
     def _fallback_allowed(
         self,

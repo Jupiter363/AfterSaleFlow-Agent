@@ -3,14 +3,17 @@ from __future__ import annotations
 from contextvars import ContextVar
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+import json
 from threading import BoundedSemaphore, Event
 import time
 
+import httpx
 import pytest
 from langchain_core.messages import HumanMessage, SystemMessage
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 import app.model_runtime.governed_chat_model as governed_module
+from app.llm import LiteLlmProxyClient
 from app.model_runtime.callbacks import InvocationMetadataCapture
 from app.model_runtime.governed_chat_model import (
     GovernedChatModel,
@@ -19,7 +22,13 @@ from app.model_runtime.governed_chat_model import (
     ModelPolicyViolation,
     ModelRetryBudgetExhausted,
 )
-from app.model_runtime.transports import TransientModelTransportError
+from app.model_runtime.transports import (
+    ModelTransportCompleted,
+    ModelTransportVisibleDelta,
+    StructuredClientTransport,
+    TransientModelTransportError,
+)
+from app.streaming import AgentStreamObserver, VisibleFieldSpec, bind_stream_observer
 from tests.model_runtime.helpers import (
     Answer,
     RecordingTransport,
@@ -32,28 +41,99 @@ from tests.model_runtime.helpers import (
 SYSTEM_PROMPT = "Trusted system policy."
 
 
+class IntakeVisibleOutput(BaseModel):
+    one_sentence_summary: str
+
+
 def _model(
     transport: RecordingTransport,
     *,
     attempts: int = 1,
     deadline_delta: timedelta = timedelta(minutes=1),
     cancelled=lambda: False,
+    node_name: str = "test_node",
     repairs: int = 0,
     user_content_parts=(),
+    visible: bool = False,
 ) -> GovernedChatModel:
+    policy = invocation_policy(
+        SYSTEM_PROMPT,
+        attempts=attempts,
+        repairs=repairs,
+        deadline_delta=deadline_delta,
+    ).model_copy(update={"node_name": node_name})
     return GovernedChatModel(
         transport=transport,
         output_type=Answer,
         profile=model_profile(attempts=max(1, attempts)),
-        policy=invocation_policy(
-            SYSTEM_PROMPT,
-            attempts=attempts,
-            repairs=repairs,
-            deadline_delta=deadline_delta,
-        ),
+        policy=policy,
         cancellation_probe=cancelled,
         user_content_parts=user_content_parts,
+        visible_fields=(VisibleFieldSpec("answer", "answer"),) if visible else (),
     )
+
+
+def _observer_backed_intake_model(
+    *,
+    provider_model: str = "test-model",
+    token_usage: dict[str, int] | None = None,
+) -> tuple[GovernedChatModel, AgentStreamObserver, list, list[dict]]:
+    calls: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "model": provider_model,
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {"one_sentence_summary": "validated observer output"}
+                            )
+                        }
+                    }
+                ],
+                "usage": token_usage
+                or {
+                    "prompt_tokens": 3,
+                    "completion_tokens": 2,
+                    "total_tokens": 5,
+                },
+            },
+        )
+
+    mock = httpx.MockTransport(handler)
+    client = LiteLlmProxyClient(
+        "http://litellm:4000",
+        "test-model",
+        "test-master-key",
+        transport=mock,
+        async_transport=mock,
+    )
+    policy = invocation_policy(SYSTEM_PROMPT).model_copy(
+        update={"node_name": "intake_turn_case_detail"}
+    )
+    model = GovernedChatModel(
+        transport=StructuredClientTransport(client),
+        output_type=IntakeVisibleOutput,
+        profile=model_profile(provider="litellm", model="test-model"),
+        policy=policy,
+        visible_fields=(
+            VisibleFieldSpec(
+                "one_sentence_summary",
+                "case_detail.case_story.one_sentence_summary",
+            ),
+        ),
+    )
+    published = []
+    observer = AgentStreamObserver(
+        operation="intake_turn",
+        run_id="AGENT_RUN_INTAKE_OBSERVER_POLICY",
+        publish=published.append,
+    )
+    return model, observer, published, calls
 
 
 def _messages() -> list[SystemMessage | HumanMessage]:
@@ -335,6 +415,201 @@ async def test_ainvoke_uses_native_async_transport_only() -> None:
     assert Answer.model_validate_json(str(result.content)).answer == "accepted"
     assert transport.agenerate_calls == 1
     assert transport.generate_calls == 0
+
+
+@pytest.mark.parametrize(
+    "invalid_result",
+    [
+        pytest.param(
+            transport_result(model="unexpected-model"),
+            id="wrong-pinned-model",
+        ),
+        pytest.param(
+            transport_result(
+                token_usage={"input": 3, "output": 1_025, "total": 1_028}
+            ),
+            id="output-usage-over-profile-budget",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_intake_async_stream_withholds_visible_until_completed_policy_validation(
+    invalid_result,
+) -> None:
+    transport = RecordingTransport()
+    transport.stream_attempts = [
+        [
+            ModelTransportVisibleDelta(field="answer", delta="must stay buffered"),
+            ModelTransportCompleted(result=invalid_result),
+        ]
+    ]
+    model = _model(
+        transport,
+        node_name="intake_turn_case_detail",
+        visible=True,
+    )
+    chunks = []
+
+    with pytest.raises(ModelPolicyViolation):
+        async for chunk in model._astream(_messages()):
+            chunks.append(chunk)
+
+    assert chunks == []
+
+
+@pytest.mark.asyncio
+async def test_intake_async_stream_releases_visible_then_final_after_policy_validation() -> None:
+    transport = RecordingTransport()
+    transport.stream_attempts = [
+        [
+            ModelTransportVisibleDelta(field="answer", delta="validated answer"),
+            ModelTransportCompleted(result=transport_result(answer="validated answer")),
+        ]
+    ]
+    model = _model(
+        transport,
+        node_name="intake_turn_case_detail",
+        visible=True,
+    )
+
+    chunks = [chunk async for chunk in model._astream(_messages())]
+
+    assert [chunk.generation_info for chunk in chunks] == [
+        {"governed_event": "visible_delta"},
+        {"governed_event": "completed"},
+    ]
+    assert Answer.model_validate_json(str(chunks[-1].message.content)).answer == (
+        "validated answer"
+    )
+
+
+def test_intake_sync_stream_withholds_visible_until_completed_policy_validation() -> None:
+    transport = RecordingTransport()
+    transport.stream_attempts = [
+        [
+            ModelTransportVisibleDelta(field="answer", delta="must stay buffered"),
+            ModelTransportCompleted(
+                result=transport_result(model="unexpected-model")
+            ),
+        ]
+    ]
+    model = _model(
+        transport,
+        node_name="intake_turn_case_detail",
+        visible=True,
+    )
+    chunks = []
+
+    with pytest.raises(ModelPolicyViolation):
+        for chunk in model._stream(_messages()):
+            chunks.append(chunk)
+
+    assert chunks == []
+
+
+@pytest.mark.asyncio
+async def test_non_intake_async_stream_retains_live_visible_behavior() -> None:
+    transport = RecordingTransport()
+    transport.stream_attempts = [
+        [
+            ModelTransportVisibleDelta(field="answer", delta="live non-intake"),
+            ModelTransportCompleted(
+                result=transport_result(model="unexpected-model")
+            ),
+        ]
+    ]
+    model = _model(transport, visible=True)
+    chunks = []
+
+    with pytest.raises(ModelPolicyViolation):
+        async for chunk in model._astream(_messages()):
+            chunks.append(chunk)
+
+    assert [chunk.generation_info for chunk in chunks] == [
+        {"governed_event": "visible_delta"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_intake_retry_discards_the_failed_attempt_buffer() -> None:
+    class RetryTransport(RecordingTransport):
+        async def astream(self, request):
+            self.astream_calls += 1
+            self.requests.append(request)
+            if self.astream_calls == 1:
+                yield ModelTransportVisibleDelta(
+                    field="answer",
+                    delta="stale failed attempt",
+                )
+                raise TransientModelTransportError(
+                    "retryable before public release",
+                    provider_attempts_used=1,
+                )
+            yield ModelTransportVisibleDelta(field="answer", delta="fresh retry")
+            yield ModelTransportCompleted(result=transport_result(answer="fresh retry"))
+
+    transport = RetryTransport()
+    model = _model(
+        transport,
+        attempts=2,
+        node_name="intake_turn_case_detail",
+        visible=True,
+    )
+
+    chunks = [chunk async for chunk in model._astream(_messages())]
+
+    assert transport.astream_calls == 2
+    assert [chunk.generation_info for chunk in chunks] == [
+        {"governed_event": "visible_delta"},
+        {"governed_event": "completed"},
+    ]
+    assert "stale failed attempt" not in str(chunks)
+    assert "fresh retry" in str(chunks)
+
+
+@pytest.mark.parametrize(
+    ("provider_model", "token_usage"),
+    [
+        pytest.param("unexpected-model", None, id="wrong-pinned-model"),
+        pytest.param(
+            "test-model",
+            {"prompt_tokens": 3, "completion_tokens": 1_025, "total_tokens": 1_028},
+            id="output-usage-over-profile-budget",
+        ),
+    ],
+)
+def test_intake_invoke_withholds_observer_events_until_provider_policy_validation(
+    provider_model,
+    token_usage,
+) -> None:
+    model, observer, published, calls = _observer_backed_intake_model(
+        provider_model=provider_model,
+        token_usage=token_usage,
+    )
+
+    with bind_stream_observer(observer), pytest.raises(ModelPolicyViolation):
+        model.invoke(_messages())
+
+    assert len(calls) == 1
+    assert published == []
+    assert observer.visible_output_emitted is False
+
+
+def test_intake_invoke_publishes_validated_observer_events_in_order() -> None:
+    model, observer, published, calls = _observer_backed_intake_model()
+
+    with bind_stream_observer(observer):
+        result = model.invoke(_messages())
+
+    assert len(calls) == 1
+    assert (
+        IntakeVisibleOutput.model_validate_json(
+            str(result.content)
+        ).one_sentence_summary
+        == "validated observer output"
+    )
+    assert [event.type for event in published] == ["visible_delta", "usage"]
+    assert observer.visible_output_emitted is True
 
 
 @pytest.mark.asyncio

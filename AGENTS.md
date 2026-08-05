@@ -1,3 +1,10 @@
+# A2A delegation and direct coordination
+
+- Provisioned Codex tasks and spawned sub-agents may communicate directly with one another for dependency handoffs, status updates, reviews, and conflict resolution. Prefer direct peer-to-peer messaging when it avoids routing routine coordination through the primary agent.
+- The primary agent should provide peer task/thread IDs when direct coordination is useful, together with exact owned paths, forbidden paths, acceptance criteria, and the required handoff format.
+- Direct communication does not transfer or expand authorization: each agent must keep its assigned write ownership and forbidden scope unless the primary or user explicitly changes them.
+- The primary agent remains responsible for integration, final verification, external mutations, and the user-facing result, even when peer agents coordinate directly.
+
 # Local development workflow
 
 - Use an agile implementation loop. Do not run the full regression suite or an end-to-end browser flow after every individual task.

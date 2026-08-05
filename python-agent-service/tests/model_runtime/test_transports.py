@@ -48,12 +48,13 @@ class _ProviderCallRecorder:
 def _request(
     *,
     visible: bool = False,
+    node_name: str = "test_node",
     model: str = "legacy-model",
     repairs: int = 0,
     attempts: int = 1,
 ) -> ModelTransportRequest:
     return ModelTransportRequest(
-        node_name="test_node",
+        node_name=node_name,
         messages=(SystemMessage("system"), HumanMessage("human")),
         output_type=Answer,
         governed_request=GovernedProviderRequest(
@@ -131,6 +132,55 @@ async def test_legacy_adapter_refuses_thread_pool_async_fallback() -> None:
 
     with pytest.raises(NativeAsyncTransportRequired):
         await transport.agenerate(_request())
+
+
+@pytest.mark.asyncio
+async def test_intake_async_stream_buffers_validated_generation_before_visible_projection() -> None:
+    class BufferedIntakeClient:
+        def __init__(self) -> None:
+            self.agenerate_calls = 0
+            self.agenerate_stream_calls = 0
+
+        async def agenerate(self, **kwargs) -> StructuredGeneration:
+            self.agenerate_calls += 1
+            return StructuredGeneration(
+                value=kwargs["output_type"](answer="validated intake"),
+                model="buffered-intake-model",
+                latency_ms=5,
+                token_usage={"input": 3, "output": 2, "total": 5},
+            )
+
+        async def agenerate_stream(self, **_kwargs):
+            self.agenerate_stream_calls += 1
+            raise AssertionError("intake must not consume the raw provider stream")
+            yield  # pragma: no cover - keeps this an async iterator
+
+    client = BufferedIntakeClient()
+    transport = StructuredClientTransport(client)
+
+    updates = [
+        update
+        async for update in transport.astream(
+            _request(
+                visible=True,
+                node_name="intake_turn_case_detail",
+                model="buffered-intake-model",
+            )
+        )
+    ]
+
+    assert client.agenerate_calls == 1
+    assert client.agenerate_stream_calls == 0
+    assert [type(update) for update in updates] == [
+        ModelTransportVisibleDelta,
+        ModelTransportCompleted,
+    ]
+    assert (updates[0].field, updates[0].delta) == ("answer", "validated intake")
+    completed = updates[1]
+    assert isinstance(completed, ModelTransportCompleted)
+    assert json.loads(completed.result.json_document) == {"answer": "validated intake"}
+    assert completed.result.model == "buffered-intake-model"
+    assert completed.result.token_usage == {"input": 3, "output": 2, "total": 5}
 
 
 @pytest.mark.asyncio
