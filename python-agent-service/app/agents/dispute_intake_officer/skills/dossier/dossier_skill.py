@@ -1284,9 +1284,7 @@ def _enforce_respondent_attitude_source(
         grounding_source = ""
         grounding_message_id = ""
     elif current_reported_attitude is not None:
-        candidate = _reported_attitude(llm_attitude) or current_reported_attitude
-        candidate = dict(candidate)
-        candidate["position"] = current_reported_attitude["position"]
+        candidate = copy.deepcopy(current_reported_attitude)
         grounding_source = "PARTICIPANT_MESSAGE"
         grounding_message_id = current.message_id if current is not None else ""
     elif form_description and _has_explicit_respondent_report(

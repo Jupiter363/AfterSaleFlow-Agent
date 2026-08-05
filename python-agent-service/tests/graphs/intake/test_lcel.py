@@ -27,6 +27,9 @@ from app.agents.dispute_intake_officer.case_fact_matrix import (
     finalize_case_fact_matrix,
 )
 from app.agents.dispute_intake_officer.schemas import IntakeCaseDetailLlmOutput
+from app.agents.dispute_intake_officer.skills.dossier.dossier_skill import (
+    attributed_reported_respondent_attitude,
+)
 from app.graph_runtime.state_lens import StateLens
 from app.graph_runtime.state import VersionPinsState
 from app.graphs.intake.baseline import (
@@ -546,6 +549,7 @@ def _bounded_turn_event(
     round_no: int,
     first_sequence: int,
     first_domain_revision: int,
+    text: str | None = None,
 ) -> dict[str, Any]:
     message_id = f"MESSAGE_CAPACITY_USER_{round_no:02d}"
     value = copy.deepcopy(template)
@@ -554,7 +558,11 @@ def _bounded_turn_event(
         message_id=message_id,
         sequence_no=first_sequence + round_no - 1,
         domain_revision=first_domain_revision + round_no - 1,
-        text=f"Capacity-bound intake update {round_no}.",
+        text=(
+            text
+            if text is not None
+            else f"Capacity-bound intake update {round_no}."
+        ),
         source_refs=[message_id],
         occurred_at=(
             datetime(2026, 7, 20, 8, tzinfo=timezone.utc) + timedelta(days=round_no)
@@ -962,6 +970,9 @@ def _run_fifth_initiator_full_snapshot_checkpoint(
     *,
     historical_mutation: tuple[str, Any] | None = None,
     baseline_schema_mutation: tuple[str, Any] | None = None,
+    round_four_provider_attitude: dict[str, Any] | None = None,
+    round_four_source_text: str | None = None,
+    round_four_expected_position: str | None = None,
 ) -> None:
     imported = copy.deepcopy(snapshot)
     imported["own_messages"] = []
@@ -986,10 +997,26 @@ def _run_fifth_initiator_full_snapshot_checkpoint(
             round_no=round_no,
             first_sequence=1,
             first_domain_revision=event["domain_revision"],
+            text=(
+                round_four_source_text or "商家明确拒绝退款。"
+                if round_no == 4
+                else None
+            ),
         )
-        if round_no == 4:
-            current_event["text"] = "商家明确拒绝退款。"
-        elif round_no == 5:
+        if round_no == 4 and round_four_source_text is not None:
+            assert round_four_expected_position is not None
+            attributed = attributed_reported_respondent_attitude(
+                current_event["text"],
+                "USER",
+            )
+            assert attributed == {
+                "attitude": "DISAGREE",
+                "position": round_four_expected_position,
+                "confidence": 0.65,
+            }
+            assert attributed["position"] in current_event["text"]
+            assert attributed["position"] != current_event["text"]
+        if round_no == 5:
             current_event["text"] = (
                 "订单确认页对应承诺期限，物流轨迹对应交付时间线，"
                 "沟通记录对应商家回复，购买记录对应270元计算；"
@@ -1017,10 +1044,13 @@ def _run_fifth_initiator_full_snapshot_checkpoint(
         )
         document = _bounded_turn_document(state, current_event, round_no=round_no)
         if round_no == 4:
-            document["dossier_patch"]["respondent_attitude"] = {
-                "attitude": "DISAGREE",
-                "position": "This model wording must be pinned to the source.",
-            }
+            document["dossier_patch"]["respondent_attitude"] = copy.deepcopy(
+                round_four_provider_attitude
+                or {
+                    "attitude": "DISAGREE",
+                    "position": "This model wording must be pinned to the source.",
+                }
+            )
 
         if round_no == 5:
             assert round_four_attitude is not None
@@ -1138,24 +1168,53 @@ def _run_fifth_initiator_full_snapshot_checkpoint(
             round_four_attitude = copy.deepcopy(
                 state["dossier_draft"]["respondent_attitude"]
             )
-            assert {
-                "respondent_role",
-                "attitude",
-                "position",
-                "source",
-                "confidence",
-                "confidence_note",
-                "grounding",
-            } <= set(round_four_attitude)
-            assert round_four_attitude["grounding"] == {
-                "source": "PARTICIPANT_MESSAGE",
-                "message_id": current_event["message_id"],
-            }
+            if round_four_provider_attitude is None:
+                assert {
+                    "respondent_role",
+                    "attitude",
+                    "position",
+                    "source",
+                    "confidence",
+                    "confidence_note",
+                    "grounding",
+                } <= set(round_four_attitude)
+                assert round_four_attitude["grounding"] == {
+                    "source": "PARTICIPANT_MESSAGE",
+                    "message_id": current_event["message_id"],
+                }
+            else:
+                assert round_four_expected_position is not None
+                assert round_four_attitude == {
+                    "respondent_role": "MERCHANT",
+                    "attitude": "DISAGREE",
+                    "position": round_four_expected_position,
+                    "source": "发起方单方陈述（主观）",
+                    "confidence": 0.65,
+                    "confidence_note": (
+                        "仅表示从发起方单方陈述中提取态度的明确度，"
+                        "不代表事实真实性。"
+                    ),
+                    "grounding": {
+                        "source": "PARTICIPANT_MESSAGE",
+                        "message_id": current_event["message_id"],
+                    },
+                }
             round_four_matrix = copy.deepcopy(matrix)
             round_four_claim = copy.deepcopy(
                 matrix["claims"]["respondent_reported_by_initiator"]
             )
-            assert round_four_claim["source_refs"] == [current_event["message_id"]]
+            if round_four_provider_attitude is None:
+                assert round_four_claim["source_refs"] == [
+                    current_event["message_id"]
+                ]
+            else:
+                assert round_four_claim == {
+                    "respondent_role": "MERCHANT",
+                    "attitude": round_four_attitude["attitude"],
+                    "position_summary": round_four_attitude["position"],
+                    "source_type": "INITIATOR_SUBJECTIVE_REPORT",
+                    "source_refs": [current_event["message_id"]],
+                }
 
     assert round_four_attitude is not None
     assert round_four_claim is not None
@@ -1211,6 +1270,30 @@ def test_fifth_initiator_full_snapshot_carries_verified_prior_after_checkpoint_r
         version_pins,
         snapshot,
         event,
+    )
+
+
+def test_full_graph_canonicalizes_current_attributed_attitude_over_provider_code(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+) -> None:
+    _run_fifth_initiator_full_snapshot_checkpoint(
+        bindings,
+        version_pins,
+        snapshot,
+        event,
+        round_four_provider_attitude={
+            "attitude": "AGREE",
+            "position": "Provider inverted the attributed stance.",
+            "confidence": 0.97,
+            "extensions": {"provider_only": "must-not-survive"},
+        },
+        round_four_source_text=(
+            "订单编号已核对。商家明确拒绝退款。其余信息仍待补充。"
+        ),
+        round_four_expected_position="商家明确拒绝退款。",
     )
 
 

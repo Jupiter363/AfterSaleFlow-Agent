@@ -576,6 +576,132 @@ def test_prior_attitude_grounding_carries_exactly_and_factual_only_response_stay
 
 
 @pytest.mark.parametrize(
+    "provider_attitude",
+    [
+        pytest.param(
+            {
+                "attitude": "AGREE",
+                "position": "Provider inverted the attributed stance.",
+                "confidence": 0.97,
+                "extensions": {"provider_only": "must-not-survive"},
+            },
+            id="wrong-substantive",
+        ),
+        pytest.param(
+            {
+                "attitude": "ALTERNATIVE_PROPOSED",
+                "position": "Provider invented an alternative response.",
+                "confidence": 0.96,
+                "extensions": {"provider_only": "must-not-survive"},
+            },
+            id="wrong-alternative",
+        ),
+        pytest.param(
+            {
+                "attitude": "DISAGREE",
+                "position": "Provider wording is not source authority.",
+                "confidence": 0.95,
+                "extensions": {"provider_only": "must-not-survive"},
+            },
+            id="correct-code-wrong-position-confidence",
+        ),
+        pytest.param(
+            {
+                "attitude": "NOT_RESPONDED",
+                "position": "Provider emitted an absence placeholder.",
+                "confidence": 0.94,
+                "extensions": {"provider_only": "must-not-survive"},
+            },
+            id="not-responded-alias",
+        ),
+        pytest.param(
+            {
+                "status": "UNKNOWN",
+                "description": "Provider emitted a legacy absence placeholder.",
+                "extensions": {"provider_only": "must-not-survive"},
+            },
+            id="legacy-unknown-alias",
+        ),
+    ],
+)
+def test_initiator_attributed_attitude_canonicalizes_the_entire_provider_branch(
+    provider_attitude: dict[str, object],
+) -> None:
+    message_id = "MESSAGE_USER_CURRENT_REPORTED_ATTITUDE"
+    current_text = "The merchant explicitly rejected the requested refund."
+    prior_attitude = {
+        "respondent_role": "MERCHANT",
+        "attitude": "AGREE",
+        "position": "The prior report must be superseded by the fresh source.",
+        "source": SUBJECTIVE_RESPONDENT_SOURCE,
+        "confidence": 0.8,
+        "confidence_note": SUBJECTIVE_RESPONDENT_CONFIDENCE_NOTE,
+        "grounding": {
+            "source": "PARTICIPANT_MESSAGE",
+            "message_id": "MESSAGE_USER_PRIOR_REPORTED_ATTITUDE",
+        },
+    }
+    previous = {
+        "schema_version": "intake_case_detail.v1",
+        "claim_resolution": {
+            "initiator_role": "USER",
+            "requested_resolution": "REFUND",
+        },
+        "respondent_attitude": prior_attitude,
+        "case_fact_matrix": {
+            "party_map": {
+                "initiator_role": "USER",
+                "respondent_role": "MERCHANT",
+            },
+        },
+    }
+    request = _request(
+        current_user_message={
+            "message_id": message_id,
+            "sequence_no": 6,
+            "role": "USER",
+            "source": "ROOM_MESSAGE",
+            "text": current_text,
+        },
+        previous_case_detail=previous,
+        initiator_statement_transcript=[
+            {
+                "message_id": "MESSAGE_USER_PRIOR_REPORTED_ATTITUDE",
+                "role": "USER",
+                "text": prior_attitude["position"],
+            },
+            {
+                "message_id": message_id,
+                "role": "USER",
+                "text": current_text,
+            },
+        ],
+    )
+    detail = {"respondent_attitude": dict(provider_attitude)}
+    llm_case_detail = {"respondent_attitude": dict(provider_attitude)}
+
+    _enforce_respondent_attitude_source(
+        detail,
+        request,
+        previous,
+        llm_case_detail,
+    )
+
+    assert detail["respondent_attitude"] == {
+        "respondent_role": "MERCHANT",
+        "attitude": "DISAGREE",
+        "position": current_text,
+        "source": SUBJECTIVE_RESPONDENT_SOURCE,
+        "confidence": 0.65,
+        "confidence_note": SUBJECTIVE_RESPONDENT_CONFIDENCE_NOTE,
+        "grounding": {
+            "source": "PARTICIPANT_MESSAGE",
+            "message_id": message_id,
+        },
+    }
+
+
+@pytest.mark.parametrize(
     ("text", "expected", "provide_candidate"),
     [
         ("We did not cause X, but we accept Y.", "AGREE", False),
