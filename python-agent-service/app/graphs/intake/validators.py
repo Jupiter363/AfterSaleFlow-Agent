@@ -966,6 +966,7 @@ def matrix_authority_record(
             case_id=private["case_id"],
             initiator_role=initiator_role,
             respondent_role=respondent_role,
+            allow_bilateral_successor=True,
         )
         if actor_role == initiator_role:
             proposal_mode = _MATRIX_PROPOSAL_INITIATOR_DELTA

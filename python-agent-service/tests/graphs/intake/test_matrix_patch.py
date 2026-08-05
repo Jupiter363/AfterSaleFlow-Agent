@@ -25,6 +25,7 @@ from app.graphs.intake.validators import (
     MATRIX_AUTHORITY_RECORD_KEY,
     _validate_baseline_formal_matrix,
     _validate_baseline_scroll_snapshot,
+    matrix_authority_record,
     validate_matrix_patch,
 )
 
@@ -196,6 +197,28 @@ def _formal_initiator_matrix(
         matrix["claims"]["initiator_claim"]["requested_amount"] = requested_amount
     matrix["content_hash"] = canonical_sha256_omitting(matrix, "content_hash")
     return matrix
+
+
+def _formal_respondent_opening_successor(case_id: str) -> dict:
+    previous = _formal_initiator_matrix(case_id, matrix_version=5)
+    successor = copy.deepcopy(previous)
+    successor.update(
+        matrix_id="CASE_MATRIX_2345678901ABCDEF0123",
+        matrix_version=6,
+        matrix_kind="BILATERAL_FROZEN",
+        parent_ref={
+            "matrix_id": previous["matrix_id"],
+            "matrix_version": previous["matrix_version"],
+            "content_hash": previous["content_hash"],
+        },
+    )
+    successor["generation_ref"].update(
+        actor_role="MERCHANT",
+        source_stage="RESPONDENT_INTAKE",
+        source_context_hash="c" * 64,
+    )
+    successor["content_hash"] = canonical_sha256_omitting(successor, "content_hash")
+    return successor
 
 
 def _historic_matrix_content_hash(matrix: dict) -> str:
@@ -1000,6 +1023,82 @@ def test_respondent_unlock_rejects_stale_embedded_matrix_hash(
 
     with pytest.raises(IntakeGraphContractError, match="INTAKE_MATRIX_CURRENT_INVALID"):
         _import_state(respondent_bindings, version_pins, respondent_snapshot)
+
+
+def test_respondent_ingress_binds_canonical_opening_bilateral_successor(
+    bindings,
+    version_pins,
+    snapshot,
+) -> None:
+    respondent_bindings = copy.deepcopy(bindings)
+    respondent_bindings["private"]["audience"] = "MERCHANT"
+    respondent_snapshot = _initiator_snapshot(
+        snapshot,
+        initiator_role="USER",
+        audience="MERCHANT",
+    )
+    bilateral = _formal_respondent_opening_successor(respondent_snapshot["case_id"])
+    respondent_snapshot["current_dossier"]["case_fact_matrix"] = bilateral
+    respondent_snapshot["snapshot_hash"] = canonical_sha256_omitting(
+        respondent_snapshot,
+        "snapshot_hash",
+    )
+    state = new_intake_graph_state(
+        bindings=respondent_bindings,
+        version_pins=version_pins,
+    )
+
+    authority = matrix_authority_record(state, respondent_snapshot)
+
+    assert authority["proposal_mode"] == "RESPONDENT_DELTA"
+    assert authority["formal_matrix_hash"] == bilateral["content_hash"]
+
+
+@pytest.mark.parametrize(
+    ("mutation", "rehash"),
+    [
+        (lambda matrix: matrix["fact_rows"][0].update(fact_target="A stale mutation."), False),
+        (lambda matrix: matrix["parent_ref"].update(matrix_version=4), True),
+        (lambda matrix: matrix["party_map"].update(respondent_role="USER"), True),
+        (
+            lambda matrix: matrix["generation_ref"].update(
+                latest_source_ref="MESSAGE_UNKNOWN"
+            ),
+            True,
+        ),
+        (lambda matrix: matrix["fact_indexes"].update(core_fact_ids=[]), True),
+    ],
+)
+def test_respondent_ingress_rejects_invalid_opening_bilateral_authority(
+    bindings,
+    version_pins,
+    snapshot,
+    mutation,
+    rehash: bool,
+) -> None:
+    respondent_bindings = copy.deepcopy(bindings)
+    respondent_bindings["private"]["audience"] = "MERCHANT"
+    respondent_snapshot = _initiator_snapshot(
+        snapshot,
+        initiator_role="USER",
+        audience="MERCHANT",
+    )
+    bilateral = _formal_respondent_opening_successor(respondent_snapshot["case_id"])
+    mutation(bilateral)
+    if rehash:
+        bilateral["content_hash"] = canonical_sha256_omitting(bilateral, "content_hash")
+    respondent_snapshot["current_dossier"]["case_fact_matrix"] = bilateral
+    respondent_snapshot["snapshot_hash"] = canonical_sha256_omitting(
+        respondent_snapshot,
+        "snapshot_hash",
+    )
+    state = new_intake_graph_state(
+        bindings=respondent_bindings,
+        version_pins=version_pins,
+    )
+
+    with pytest.raises(IntakeGraphContractError, match="INTAKE_MATRIX_CURRENT_INVALID"):
+        matrix_authority_record(state, respondent_snapshot)
 
 
 @pytest.mark.parametrize(
