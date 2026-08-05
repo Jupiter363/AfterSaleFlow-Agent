@@ -20,7 +20,7 @@ from app.agents.dispute_intake_officer.workflow import (
     project_intake_case_detail_output,
 )
 from app.contracts.v1.codec import canonical_sha256, canonicalize
-from app.graphs.intake.contracts import IntakeCognitionDraft
+from app.graphs.intake.contracts import IntakeCognitionDraft, RESPONDENT_OPENING_MARKER
 from app.graphs.intake.errors import IntakeGraphContractError
 from app.harness.context_window import ContextWindowManager
 from app.harness.invocation_context import AgentInvocationContext
@@ -172,7 +172,31 @@ def build_intake_baseline_request(
     initial_facts, transcript = read_intake_baseline_memory_summary(state.get("memory_summary", ""))
     messages = _ordered_messages(state)
     current = _current_party_message(state, messages)
-    if current is None:
+    if state.get("route") == "respondent_opening":
+        # Import lazily to keep the validators/baseline module boundary acyclic.
+        # The returned context is the exact snapshot-bound M0, not public or
+        # command-supplied replacement data.
+        from app.graphs.intake.validators import (
+            validated_respondent_opening_frozen_context,
+        )
+
+        previous_context = validated_respondent_opening_frozen_context(state)
+        source_ref = state.get("last_event_ref")
+        if transcript or not isinstance(source_ref, str):
+            raise IntakeGraphContractError("INTAKE_RESPONDENT_OPENING_CONTEXT_INVALID")
+        request = {
+            "case_id": agent_context.case_id,
+            "room_type": "INTAKE",
+            "turn_source": RESPONDENT_OPENING_MARKER,
+            "initial_case_facts": None,
+            "current_user_message": None,
+            "recent_dialogue_messages": [],
+            "previous_case_detail": previous_context,
+            "respondent_opening_source_ref": source_ref,
+            "initiator_statement_transcript": [],
+            "agent_context": agent_context,
+        }
+    elif current is None:
         turn_source = str(initial_facts.get("form_source") or "")
         if turn_source not in {"EXTERNAL_IMPORT", "FORM_SUBMISSION"}:
             raise IntakeGraphContractError("INTAKE_BASELINE_FORM_SOURCE_MISSING")

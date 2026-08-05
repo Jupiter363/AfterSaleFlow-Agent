@@ -136,6 +136,7 @@ def build_intake_v2_graph(
                 # placeholder is allowed at the model-facing boundary.
                 "initialize": "intake_lcel",
                 "message": "intake_lcel",
+                "respondent_opening": "intake_lcel",
                 "replay": "cached_terminal_projection",
             }
         ),

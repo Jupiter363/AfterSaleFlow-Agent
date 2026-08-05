@@ -178,7 +178,7 @@ class IntakeGraphStateV2(TypedDict):
     last_event_ref: NotRequired[str]
     last_event_hash: NotRequired[str]
     last_event_sequence: NotRequired[int]
-    route: NotRequired[Literal["initialize", "message", "replay"]]
+    route: NotRequired[Literal["initialize", "message", "respondent_opening", "replay"]]
     # Private deterministic baseline context.  It intentionally remains outside
     # the public dossier and terminal proposal, which do not carry formal matrix
     # authority between turns.

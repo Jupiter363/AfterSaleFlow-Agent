@@ -7,11 +7,13 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.never;
 
 import com.example.dispute.agentstream.application.AgentRunCommandBindingFactory;
 import com.example.dispute.agentstream.application.AgentRunLedger;
 import com.example.dispute.agentstream.application.AgentRunLedger.CreateLogicalRun;
 import com.example.dispute.agentstream.application.AgentRunLedger.LogicalRun;
+import com.example.dispute.casecore.domain.CasePartyAssignment;
 import com.example.dispute.casecore.domain.CaseSourceType;
 import com.example.dispute.config.AuthenticatedActor;
 import com.example.dispute.config.ActorRole;
@@ -128,10 +130,82 @@ class CanonicalTargetIntakeMaterializerTest {
 
     @Test
     void replaysTheInitialFormAcrossActivationRotationWithTheOriginalRunAndDeadline() {
+        assertOpeningMaterialization(
+                false, "OPEN", 0L, 1L, true);
+    }
+
+    @Test
+    void materializesRespondentOpeningOnlyFromWaitingPartyAndReplaysWithoutNewAllocation() {
+        assertThat(TargetIntakeMessageRequest.SourceType.values())
+                .extracting(Enum::name)
+                .contains("RESPONDENT_OPENING");
+        assertOpeningMaterialization(
+                true, "WAITING_PARTY", 1L, 1L, true);
+    }
+
+    @Test
+    void rejectsRespondentOpeningPhaseAndSequenceBeforeLedgerOrMaterialAdmission() {
+        assertThat(TargetIntakeMessageRequest.SourceType.values())
+                .extracting(Enum::name)
+                .contains("RESPONDENT_OPENING");
+        assertOpeningMaterialization(
+                true, "READY_TO_CONFIRM", 1L, 1L, false);
+        assertOpeningMaterialization(
+                true, "WAITING_PARTY", 1L, 2L, false);
+    }
+
+    @Test
+    void rejectsRespondentOpeningForWrongCaseActorOrRoleBeforeLedgerOrMaterialAdmission() {
+        assertOpeningMaterialization(
+                true,
+                "WAITING_PARTY",
+                1L,
+                1L,
+                false,
+                new AuthenticatedActor("merchant-other", ActorRole.MERCHANT));
+        assertOpeningMaterialization(
+                true,
+                "WAITING_PARTY",
+                1L,
+                1L,
+                false,
+                new AuthenticatedActor(ACTOR_ID, ActorRole.USER));
+    }
+
+    private void assertOpeningMaterialization(
+            boolean respondentOpening,
+            String projectionPhase,
+            long projectionSequence,
+            long eventSequence,
+            boolean expectedSuccess) {
+        assertOpeningMaterialization(
+                respondentOpening,
+                projectionPhase,
+                projectionSequence,
+                eventSequence,
+                expectedSuccess,
+                respondentOpening
+                        ? new AuthenticatedActor("merchant-local", ActorRole.MERCHANT)
+                        : new AuthenticatedActor(ACTOR_ID, ActorRole.USER));
+    }
+
+    private void assertOpeningMaterialization(
+            boolean respondentOpening,
+            String projectionPhase,
+            long projectionSequence,
+            long eventSequence,
+            boolean expectedSuccess,
+            AuthenticatedActor openingActor) {
         TargetIntakeActivationGrant activation = activation();
-        TargetIntakeMessageRequest request = initialFormRequest(activation);
+        TargetIntakeMessageRequest request =
+                respondentOpening
+                        ? respondentOpeningRequest(activation, openingActor)
+                        : initialFormRequest(activation);
         TargetIntakeActivationGrant rotatedActivation = rotatedActivation();
-        TargetIntakeMessageRequest rotatedRequest = initialFormRequest(rotatedActivation);
+        TargetIntakeMessageRequest rotatedRequest =
+                respondentOpening
+                        ? respondentOpeningRequest(rotatedActivation, openingActor)
+                        : initialFormRequest(rotatedActivation);
         CaseRoomEpochEntity epoch = matchingEpoch();
         AccessSessionResolver accessSessions = Mockito.mock(AccessSessionResolver.class);
         AgentSessionResolver agentSessions = Mockito.mock(AgentSessionResolver.class);
@@ -149,7 +223,8 @@ class CanonicalTargetIntakeMaterializerTest {
         CaseIntakeDossierRepository dossiers = Mockito.mock(CaseIntakeDossierRepository.class);
         CaseRoomEpochRepository epochs = Mockito.mock(CaseRoomEpochRepository.class);
         CaseProcessProjectionRepository projections = Mockito.mock(CaseProcessProjectionRepository.class);
-        CaseProcessProjectionEntity projection = matchingProjection("OPEN", 0L);
+        CaseProcessProjectionEntity projection =
+                matchingProjection(projectionPhase, projectionSequence);
         TargetIntakeRuntimePins pins = pins();
         String requestHash = "c".repeat(64);
         String logicalInputHash = "d".repeat(64);
@@ -167,6 +242,13 @@ class CanonicalTargetIntakeMaterializerTest {
         when(dispute.getLogisticsId()).thenReturn("LOGISTICS_1");
         when(dispute.getInitiatorRole()).thenReturn(ActorRole.USER);
         when(dispute.getRespondentRole()).thenReturn(ActorRole.MERCHANT);
+        when(dispute.partyAssignment())
+                .thenReturn(
+                        new CasePartyAssignment(
+                                ACTOR_ID,
+                                ActorRole.USER,
+                                "merchant-local",
+                                ActorRole.MERCHANT));
         when(dispute.getDisputeType()).thenReturn("PRODUCT_QUALITY");
         when(dispute.getSourceType()).thenReturn(CaseSourceType.EXTERNAL_IMPORT);
         when(dispute.getMetadataJson())
@@ -185,7 +267,12 @@ class CanonicalTargetIntakeMaterializerTest {
         when(dossiers.findByCaseIdAndRoomType(CASE_ID, com.example.dispute.room.domain.RoomType.INTAKE))
                 .thenReturn(Optional.empty());
         when(accessSessions.resolve(activation.tenantSurrogate(), CASE_ID, request.actor()))
-                .thenReturn(access(TARGET_TENANT_SURROGATE, CASE_ID, ACTOR_ID, ActorRole.USER));
+                .thenReturn(
+                        access(
+                                TARGET_TENANT_SURROGATE,
+                                CASE_ID,
+                                request.actor().actorId(),
+                                request.actor().role()));
         AgentConversationSessionEntity session = Mockito.mock(AgentConversationSessionEntity.class);
         when(session.getId()).thenReturn("SESSION_1");
         when(agentSessions.resolve(any(), any(), any(), any(), any())).thenReturn(session);
@@ -202,9 +289,11 @@ class CanonicalTargetIntakeMaterializerTest {
                 "EVENT_1", "event.v1", "memory://event", "e".repeat(64), 1);
         var event = Mockito.mock(com.example.dispute.workflow.application.intake.IntakeEventReference.class);
         when(event.payloadRef()).thenReturn(eventPayload);
-        when(event.sequenceNo()).thenReturn(1L);
-        var newEventAllocation = new IntakeGraphBindingStore.EventAllocation(1, Optional.empty());
-        var replayEventAllocation = new IntakeGraphBindingStore.EventAllocation(1, Optional.of(event));
+        when(event.sequenceNo()).thenReturn(eventSequence);
+        var newEventAllocation =
+                new IntakeGraphBindingStore.EventAllocation(eventSequence, Optional.empty());
+        var replayEventAllocation =
+                new IntakeGraphBindingStore.EventAllocation(eventSequence, Optional.of(event));
         when(events.allocate(any(), any(), any()))
                 .thenReturn(newEventAllocation, replayEventAllocation);
         when(events.publish(any())).thenReturn(IntakeGraphBindingStore.WriteReceipt.created(event));
@@ -256,6 +345,15 @@ class CanonicalTargetIntakeMaterializerTest {
                 bindings, ledger, envelopes, materialStore, activationAuthority, cases, dossiers, epochs,
                 projections, pins, new ObjectMapper(), Clock.fixed(request.createdAt(), ZoneOffset.UTC));
 
+        if (!expectedSuccess) {
+            assertThatThrownBy(() -> materializer.materialize(request))
+                    .isInstanceOf(IllegalStateException.class);
+            verify(ledger, never()).createOrLoad(any());
+            verify(ledger, never()).startNextAttempt(any(), any(), any());
+            verify(materialStore, never()).append(any(), any());
+            return;
+        }
+
         TargetIntakeMaterializer.MaterializedIntake first = materializer.materialize(request);
         ArgumentCaptor<CommandAdmission> admission = ArgumentCaptor.forClass(CommandAdmission.class);
         ArgumentCaptor<IntakeCommandExecutionContext> context =
@@ -275,7 +373,7 @@ class CanonicalTargetIntakeMaterializerTest {
         assertThat(replay.runId()).isEqualTo(first.runId());
         assertThat(replay.commandId()).isEqualTo(first.commandId());
         assertThat(replay.deadlineAt()).isEqualTo(first.deadlineAt());
-        assertThat(first.deadlineAt()).isEqualTo(activation.expiresAt());
+        assertThat(first.deadlineAt()).isEqualTo(request.commandDeadlineAt());
         assertThat(CanonicalTargetIntakeMaterializer.durableMessageIdentity(
                         rotatedActivation, rotatedRequest))
                 .isEqualTo(messageIdentity);
@@ -288,8 +386,8 @@ class CanonicalTargetIntakeMaterializerTest {
         ArgumentCaptor<IntakeGraphCommandFactory.CommandRequest> graphRequest =
                 ArgumentCaptor.forClass(IntakeGraphCommandFactory.CommandRequest.class);
         verify(commands).create(graphRequest.capture());
-        assertThat(graphRequest.getValue().stageCode()).isEqualTo("OPEN");
-        assertThat(graphRequest.getValue().stageSequence()).isZero();
+        assertThat(graphRequest.getValue().stageCode()).isEqualTo(projectionPhase);
+        assertThat(graphRequest.getValue().stageSequence()).isEqualTo(projectionSequence);
         ArgumentCaptor<IntakeDomainSnapshotPublisher.SnapshotRequest> snapshotRequest =
                 ArgumentCaptor.forClass(IntakeDomainSnapshotPublisher.SnapshotRequest.class);
         verify(snapshots).publishOrLoad(snapshotRequest.capture());
@@ -315,8 +413,9 @@ class CanonicalTargetIntakeMaterializerTest {
         ArgumentCaptor<IntakeTurnEventPublisher.EventRequest> eventRequest =
                 ArgumentCaptor.forClass(IntakeTurnEventPublisher.EventRequest.class);
         verify(events).publish(eventRequest.capture());
-        assertThat(eventRequest.getValue().sourceType())
-                .isEqualTo(IntakeTurnEventPublisher.SourceType.INITIAL_FORM);
+        assertThat(eventRequest.getValue().sourceType().name())
+                .isEqualTo(respondentOpening ? "RESPONDENT_OPENING" : "INITIAL_FORM");
+        assertThat(eventRequest.getValue().sequenceNo()).isEqualTo(1L);
         assertThat(eventRequest.getValue().messageId()).isEqualTo(request.messageId());
         assertThat(eventRequest.getValue().sourceRefs()).containsExactly(request.messageId());
         assertThat(eventRequest.getValue().text()).isEqualTo(request.text());
@@ -334,15 +433,17 @@ class CanonicalTargetIntakeMaterializerTest {
         verify(agentSessions).resolve(
                 any(), eq(com.example.dispute.room.domain.RoomType.INTAKE), any(),
                 agentPromptProfile.capture(), eq(pins.memoryPolicyVersion()));
-        assertThat(agentPromptProfile.getValue()).isEqualTo("DISPUTE_INTAKE_OFFICER:USER:v1");
+        String expectedPromptProfile =
+                "DISPUTE_INTAKE_OFFICER:" + request.actor().role().name() + ":v1";
+        assertThat(agentPromptProfile.getValue()).isEqualTo(expectedPromptProfile);
         ArgumentCaptor<IntakePrivateThreadRegistrationFactory.IssueRequest> registrationRequest =
                 ArgumentCaptor.forClass(IntakePrivateThreadRegistrationFactory.IssueRequest.class);
         verify(threadRegistrar).register(registrationRequest.capture());
         assertThat(registrationRequest.getValue().versionPins().promptVersion())
-                .isEqualTo("DISPUTE_INTAKE_OFFICER:USER:v1");
+                .isEqualTo(expectedPromptProfile);
         assertThat(registrationRequest.getValue().versionPins().modelProfileId())
                 .isEqualTo(pins.modelProfileId());
-        verify(events).allocate(any(), any(), any());
+        verify(events, times(1)).allocate(any(), any(), any());
         verify(materialStore, times(2)).readByRoute(any());
     }
 
@@ -447,6 +548,16 @@ class CanonicalTargetIntakeMaterializerTest {
                 new AuthenticatedActor(ACTOR_ID, ActorRole.USER),
                 "target-intake-opening:" + CASE_ID,
                 "TRACE_ae3fa9df57c76361ca14af2948ddba85",
+                Instant.parse("2026-07-29T00:00:00Z"),
+                activation);
+    }
+
+    private static TargetIntakeMessageRequest respondentOpeningRequest(
+            TargetIntakeActivationGrant activation, AuthenticatedActor actor) {
+        return TargetIntakeMessageRequest.respondentOpening(
+                CASE_ID,
+                "ROOM_1",
+                actor,
                 Instant.parse("2026-07-29T00:00:00Z"),
                 activation);
     }

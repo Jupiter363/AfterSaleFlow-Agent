@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Mapping
 from copy import deepcopy
@@ -36,6 +37,7 @@ from app.graphs.intake.contracts import (
     IntakeDomainSnapshot,
     IntakeTurnEvent,
     IntakeTurnProposal,
+    RESPONDENT_OPENING_MARKER,
     UnilateralCaseMatrixDraftV1,
 )
 from app.graphs.intake.errors import IntakeGraphContractError
@@ -1419,6 +1421,133 @@ def _locked_initiator_matrix_authority(
     )
 
 
+def require_respondent_opening_matrix_authority(
+    state: IntakeGraphStateV2 | Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return the exact fresh M0 context authorized for respondent opening.
+
+    Unlike ordinary matrix-delta authorization, this gate deliberately does not
+    accept a later capsule as authority.  The control opening can exist only on
+    a fresh bootstrap whose immutable ingress record binds the respondent's
+    private scope to the imported initiator-frozen matrix.
+    """
+
+    typed_state = cast(IntakeGraphStateV2, state)
+    record = _validated_ingress_matrix_authority_record(typed_state)
+    bindings = typed_state.get("bindings")
+    private = bindings.get("private") if isinstance(bindings, Mapping) else None
+    if not isinstance(private, Mapping):
+        raise IntakeGraphContractError("INTAKE_RESPONDENT_OPENING_AUTHORITY_INVALID")
+    actor_role = record.get("actor_role")
+    initiator_role = record.get("initiator_role")
+    respondent_role = (
+        _respondent_role(initiator_role)
+        if initiator_role in {"USER", "MERCHANT"}
+        else None
+    )
+    context = typed_state.get("dossier_draft")
+    if (
+        actor_role != respondent_role
+        or actor_role != private.get("audience")
+        or initiator_role != _trusted_initiator_role(typed_state)
+        or record.get("proposal_mode") != _MATRIX_PROPOSAL_RESPONDENT_DELTA
+        or not isinstance(context, Mapping)
+        or any(
+            typed_state.get(field) is not None
+            for field in (
+                "baseline_previous_case_detail",
+                "result_json",
+            )
+        )
+    ):
+        raise IntakeGraphContractError("INTAKE_RESPONDENT_OPENING_AUTHORITY_INVALID")
+    frozen = _locked_initiator_matrix_authority(
+        context,
+        case_id=cast(str, private.get("case_id")),
+        initiator_role=cast(str, initiator_role),
+        respondent_role=cast(str, actor_role),
+    )
+    authoritative_context = context
+    if frozen is None:
+        pending = typed_state.get("baseline_pending_case_detail")
+        if (
+            not isinstance(pending, Mapping)
+            or pending.get("normalized_matrix_patch") is not None
+        ):
+            raise IntakeGraphContractError("INTAKE_RESPONDENT_OPENING_AUTHORITY_INVALID")
+        _validate_baseline_context_envelope(
+            pending,
+            require_bound=None,
+            state=typed_state,
+        )
+        authority_input = pending.get("authority_input_matrix")
+        if not isinstance(authority_input, Mapping):
+            raise IntakeGraphContractError("INTAKE_RESPONDENT_OPENING_AUTHORITY_INVALID")
+        authoritative_context = {"case_fact_matrix": deepcopy(dict(authority_input))}
+        frozen = _locked_initiator_matrix_authority(
+            authoritative_context,
+            case_id=cast(str, private.get("case_id")),
+            initiator_role=cast(str, initiator_role),
+            respondent_role=cast(str, actor_role),
+        )
+    if frozen is None or record.get("formal_matrix_hash") != frozen.content_hash:
+        raise IntakeGraphContractError("INTAKE_RESPONDENT_OPENING_AUTHORITY_INVALID")
+    return deepcopy(dict(authoritative_context))
+
+
+def validated_respondent_opening_frozen_context(
+    state: IntakeGraphStateV2 | Mapping[str, Any],
+) -> dict[str, Any]:
+    """Verify the reducer-owned opening receipts and return their frozen M0."""
+
+    typed_state = cast(IntakeGraphStateV2, state)
+    event_ref = typed_state.get("last_event_ref")
+    event_hash = typed_state.get("last_event_hash")
+    sequence = typed_state.get("last_event_sequence")
+    records = typed_state.get("node_results")
+    messages = typed_state.get("messages")
+    if (
+        typed_state.get("route") != "respondent_opening"
+        or not isinstance(event_ref, str)
+        or not _IDENTIFIER.fullmatch(event_ref)
+        or not isinstance(event_hash, str)
+        or not _SHA256.fullmatch(event_hash)
+        or sequence != 1
+        or not isinstance(records, Mapping)
+        or not isinstance(messages, Mapping)
+        or bool(messages)
+    ):
+        raise IntakeGraphContractError("INTAKE_RESPONDENT_OPENING_RECEIPT_INVALID")
+    event_key = "event:" + hashlib.sha256(event_ref.encode("utf-8")).hexdigest()
+    event = records.get(event_key)
+    message_id = event.get("message_id") if isinstance(event, Mapping) else None
+    if not isinstance(message_id, str) or not _IDENTIFIER.fullmatch(message_id):
+        raise IntakeGraphContractError("INTAKE_RESPONDENT_OPENING_RECEIPT_INVALID")
+    source_key = "message:" + hashlib.sha256(message_id.encode("utf-8")).hexdigest()
+    source = records.get(source_key)
+    source_refs = event.get("source_refs") if isinstance(event, Mapping) else None
+    if (
+        not isinstance(event, Mapping)
+        or event.get("kind") != "EVENT"
+        or event.get("stable_id") != event_ref
+        or event.get("content_hash") != event_hash
+        or event.get("sequence") != 1
+        or event.get("source_type") != RESPONDENT_OPENING_MARKER
+        or event.get("control_marker") != RESPONDENT_OPENING_MARKER
+        or not isinstance(source_refs, (list, tuple))
+        or message_id not in source_refs
+        or not isinstance(source, Mapping)
+        or source.get("kind") != "RESPONDENT_OPENING_SOURCE"
+        or source.get("stable_id") != message_id
+        or source.get("content_hash") != event_hash
+        or source.get("sequence") != 1
+        or source.get("source_type") != RESPONDENT_OPENING_MARKER
+        or source.get("control_marker") != RESPONDENT_OPENING_MARKER
+    ):
+        raise IntakeGraphContractError("INTAKE_RESPONDENT_OPENING_RECEIPT_INVALID")
+    return require_respondent_opening_matrix_authority(typed_state)
+
+
 def _validate_frozen_parent_ref(value: Any, *, matrix_version: int) -> None:
     if matrix_version == 1:
         if value is not None:
@@ -2159,7 +2288,12 @@ def _validate_state_payloads(state: IntakeGraphStateV2) -> None:
     if state.get("recommendation") not in {"ACCEPTED", "NEED_MORE_INFO", "NOT_ADMISSIBLE"}:
         raise IntakeGraphContractError("INTAKE_RECOMMENDATION_INVALID")
     route = state.get("route")
-    if route is not None and route not in {"initialize", "message", "replay"}:
+    if route is not None and route not in {
+        "initialize",
+        "message",
+        "respondent_opening",
+        "replay",
+    }:
         raise IntakeGraphContractError("INTAKE_ROUTE_INVALID")
     for field in ("node_results", "execution_receipts", "usage_by_invocation"):
         value = state.get(field)
@@ -2911,13 +3045,27 @@ def _matrix_derivation_request_base(
         or canonical_sha256(base) != expected_hash
     ):
         raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_DERIVATION_REQUEST_HASH_INVALID")
+    validation_base = deepcopy(dict(base))
+    respondent_opening = base.get("turn_source") == RESPONDENT_OPENING_MARKER
+    if respondent_opening:
+        authority_input = envelope.get("authority_input_matrix")
+        if not isinstance(authority_input, Mapping):
+            raise IntakeGraphContractError(
+                "INTAKE_BASELINE_CONTEXT_DERIVATION_REQUEST_INVALID"
+            )
+        validation_base["previous_case_detail"] = {
+            "case_fact_matrix": deepcopy(dict(authority_input))
+        }
     try:
-        request = IntakeTurnRequest.model_validate(deepcopy(dict(base)))
+        request = IntakeTurnRequest.model_validate(validation_base)
     except (TypeError, ValueError) as error:
         raise IntakeGraphContractError(
             "INTAKE_BASELINE_CONTEXT_DERIVATION_REQUEST_INVALID"
         ) from error
-    if request.model_dump(mode="json") != dict(base):
+    serialized = request.model_dump(mode="json")
+    if respondent_opening:
+        serialized["previous_case_detail"] = None
+    if serialized != dict(base):
         raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_DERIVATION_REQUEST_INVALID")
     context = request.agent_context
     if (

@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from typing import Any, NoReturn
 
 from app.contracts.v1.codec import canonical_sha256_omitting
+from app.graphs.intake.contracts import RESPONDENT_OPENING_MARKER
 from app.llm import AgentOutputSchemaError
 from app.schemas.intake_case_matrix import (
     FactStance,
@@ -43,18 +44,35 @@ def finalize_case_fact_matrix(
     initiator_role = _initiator_role(request, case_detail, previous)
     respondent_role = "MERCHANT" if initiator_role == "USER" else "USER"
     actor_role = _matrix_actor_role(request, initiator_role)
+    respondent_opening = request.turn_source == RESPONDENT_OPENING_MARKER
     if actor_role == respondent_role and previous is None:
         _schema_error(
             "respondent intake requires an initiator matrix",
             safe_code="INTAKE_MATRIX_INITIATOR_MATRIX_MISSING",
         )
 
-    resolved_delta = _as_v2_delta(
-        delta,
-        _case_summary(case_detail, request),
-        previous=previous,
-        actor_role=actor_role,
-    )
+    if respondent_opening:
+        if (
+            delta is not None
+            or previous is None
+            or actor_role != respondent_role
+            or previous.matrix_kind != CaseMatrixKind.INITIATOR_FROZEN
+        ):
+            _schema_error(
+                "respondent opening requires an unchanged initiator matrix",
+                safe_code="INTAKE_MATRIX_MISSING_DELTA_CARRY_INVALID",
+            )
+        resolved_delta = _respondent_opening_carry_delta(
+            previous,
+            actor_role=actor_role,
+        )
+    else:
+        resolved_delta = _as_v2_delta(
+            delta,
+            _case_summary(case_detail, request),
+            previous=previous,
+            actor_role=actor_role,
+        )
     previous_rows = {
         row.fact_id: row for row in (previous.fact_rows if previous is not None else [])
     }
@@ -152,18 +170,28 @@ def finalize_case_fact_matrix(
             safe_code="INTAKE_MATRIX_OVERVIEW_FACTS_MISSING",
         )
 
-    claims = _claims(
-        request=request,
-        case_detail=case_detail,
-        previous=previous,
-        delta=resolved_delta,
-        initiator_role=initiator_role,
-        respondent_role=respondent_role,
-        actor_role=actor_role,
-        current_ref=current_ref,
-    )
-    summary = _case_summary(case_detail, request)
-    core_conflict = _core_conflict(case_detail, summary)
+    if respondent_opening:
+        if previous is None:  # Kept explicit for static narrowing and fail-closed safety.
+            _schema_error(
+                "respondent opening requires an initiator matrix",
+                safe_code="INTAKE_MATRIX_INITIATOR_MATRIX_MISSING",
+            )
+        claims = previous.claims.model_dump(mode="json")
+        summary = previous.case_overview.neutral_summary
+        core_conflict = previous.case_overview.core_conflict
+    else:
+        claims = _claims(
+            request=request,
+            case_detail=case_detail,
+            previous=previous,
+            delta=resolved_delta,
+            initiator_role=initiator_role,
+            respondent_role=respondent_role,
+            actor_role=actor_role,
+            current_ref=current_ref,
+        )
+        summary = _case_summary(case_detail, request)
+        core_conflict = _core_conflict(case_detail, summary)
     relationships = (
         [item.model_dump(mode="json") for item in previous.fact_relationships]
         if previous is not None
@@ -938,6 +966,44 @@ def _as_v2_delta(
     )
 
 
+def _respondent_opening_carry_delta(
+    previous: CaseFactMatrixV2,
+    *,
+    actor_role: str,
+) -> CaseFactMatrixDeltaV2:
+    """Carry M0 without treating the room-opening control event as testimony."""
+
+    carry_rows: list[dict[str, Any]] = []
+    for row in previous.fact_rows:
+        position = row.positions.for_role(actor_role)
+        if position.model_dump(mode="json") != _not_addressed_position():
+            _schema_error(
+                "respondent opening cannot carry a substantive respondent position",
+                safe_code="INTAKE_MATRIX_MISSING_DELTA_CARRY_INVALID",
+            )
+        carry_rows.append(
+            {
+                "fact_key": row.fact_id,
+                "category": row.category,
+                "fact_target": row.fact_target,
+                "materiality": row.materiality,
+                "stance": "NOT_ADDRESSED",
+                "position_summary": position.position_summary,
+                "asserted_value": None,
+                "source_scope": "PREVIOUS_MATRIX",
+                "agreed_statement": row.party_alignment.agreed_statement,
+                "conflict_summary": row.party_alignment.conflict_summary,
+            }
+        )
+    return CaseFactMatrixDeltaV2.model_validate(
+        {
+            "fact_rows": carry_rows,
+            "summary_source_fact_keys": previous.case_overview.summary_source_fact_ids,
+            "respondent_claim": None,
+        }
+    )
+
+
 def _fact_indexes(rows: list[dict[str, Any]]) -> dict[str, list[str]]:
     indexes = {
         "not_computed_fact_ids": [],
@@ -1010,6 +1076,14 @@ def validate_case_fact_matrix_content_hash(value: Mapping[str, Any]) -> bool:
 
 
 def _current_source(request: IntakeTurnRequest) -> tuple[str, str]:
+    if request.turn_source == RESPONDENT_OPENING_MARKER:
+        source_ref = request.respondent_opening_source_ref
+        if source_ref is None:
+            _schema_error(
+                "respondent opening source is missing",
+                safe_code="INTAKE_MATRIX_CURRENT_SOURCE_MISSING",
+            )
+        return source_ref, RESPONDENT_OPENING_MARKER
     if request.current_user_message is not None:
         return request.current_user_message.message_id, request.current_user_message.text
     initial = request.initial_case_facts

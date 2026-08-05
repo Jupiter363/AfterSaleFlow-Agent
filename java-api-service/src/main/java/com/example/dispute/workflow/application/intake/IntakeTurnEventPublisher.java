@@ -158,6 +158,7 @@ public final class IntakeTurnEventPublisher {
     public enum SourceType {
         INITIAL_FORM,
         ROOM_MESSAGE,
-        FORMAL_EVENT
+        FORMAL_EVENT,
+        RESPONDENT_OPENING
     }
 }

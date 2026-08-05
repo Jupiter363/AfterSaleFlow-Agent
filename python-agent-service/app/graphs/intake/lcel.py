@@ -55,6 +55,7 @@ from app.graphs.intake.validators import (
     build_baseline_pending_case_detail,
     next_intake_cognitive_revision,
     unwrap_verified_baseline_previous_case_detail,
+    validated_respondent_opening_frozen_context,
     validate_cognition_patch,
     validate_dossier_transition,
     validate_matrix_patch,
@@ -697,14 +698,24 @@ class IntakeModelPreflightRunnable(Runnable[IntakeGraphStateV2, IntakeGraphState
         # to a participant event.
         if not (
             has_snapshot
-            and ((route == "initialize" and not has_event) or (route == "message" and has_event))
+            and (
+                (route == "initialize" and not has_event)
+                or (route in {"message", "respondent_opening"} and has_event)
+            )
         ):
             raise IntakeGraphContractError("INTAKE_LCEL_ROUTE_INVALID")
         # An imported formal M0 can authorize only an actual participant room
         # statement.  The SNAPSHOT and BOOTSTRAP INITIAL_FORM openings have no
         # current HUMAN message, so fail before the lens/prompt/model boundary
         # rather than silently deriving a successor from form-only context.
-        if _opening_imported_formal_matrix_without_current_party_message(state):
+        formal_without_current_human = (
+            _opening_imported_formal_matrix_without_current_party_message(state)
+        )
+        if route == "respondent_opening":
+            validated_respondent_opening_frozen_context(state)
+            if not formal_without_current_human:
+                raise IntakeGraphContractError("INTAKE_RESPONDENT_OPENING_AUTHORITY_INVALID")
+        elif formal_without_current_human:
             raise IntakeGraphContractError("INTAKE_BASELINE_OPENING_FORMAL_MATRIX_UNSUPPORTED")
         pins = state["version_pins"]
         expected = {
@@ -1237,6 +1248,7 @@ def build_intake_model_node(
             "memory_summary",
             "dossier_draft",
             "baseline_previous_case_detail",
+            "route",
             "initial_snapshot_ref",
             "initial_snapshot_hash",
             "initial_domain_revision",
@@ -1430,6 +1442,23 @@ def _adapt_and_normalize_generation_parts(
     ):
         raise IntakeGraphContractError("INTAKE_LCEL_GENERATION_INVALID")
     typed_state = cast(IntakeGraphStateV2, state)
+    if typed_state.get("route") == "respondent_opening":
+        validated_respondent_opening_frozen_context(typed_state)
+        adapted = IntakeCognitionDraft.model_validate(
+            {
+                "room_utterance": draft.room_utterance,
+                "dossier_patch": {},
+                "matrix_patch": None,
+                "readiness": "INCOMPLETE",
+                "missing_fields": [],
+                "recommendation": "NEED_MORE_INFO",
+                "knowledge_answer_mode": "NONE",
+                "confidence": draft.confidence,
+            }
+        )
+        # Every model-authored dossier/matrix field is intentionally discarded.
+        # The formal M0 successor is derived later from the internal event ref.
+        return typed_state, message, adapted, adapted
     try:
         adapted = adapt_intake_baseline_output(
             typed_state,

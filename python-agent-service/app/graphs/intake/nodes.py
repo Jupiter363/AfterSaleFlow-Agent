@@ -13,6 +13,7 @@ from app.graphs.intake.baseline import (
     append_intake_baseline_statement,
     build_intake_baseline_memory_summary,
 )
+from app.graphs.intake.contracts import RESPONDENT_OPENING_MARKER
 from app.graphs.intake.errors import IntakeGraphContractError
 from app.graphs.intake.state import (
     IntakeGraphStateV2,
@@ -28,6 +29,7 @@ from app.graphs.intake.validators import (
     ingress,
     bootstrap_event_ingress,
     matrix_authority_record,
+    require_respondent_opening_matrix_authority,
     validate_cognition_patch,
     validate_dossier_transition,
     validate_event,
@@ -125,7 +127,7 @@ def import_snapshot_once_or_apply_event(
 
 def route_turn(state: IntakeGraphStateV2) -> dict[str, Any]:
     route = state.get("route")
-    if route not in {"initialize", "message", "replay"}:
+    if route not in {"initialize", "message", "respondent_opening", "replay"}:
         raise IntakeGraphContractError("INTAKE_ROUTE_INVALID")
     return {}
 
@@ -417,6 +419,17 @@ def _apply_event(
         not allow_initial_form or sequence != 1 or previous_sequence != 0 or bool(state["messages"])
     ):
         raise IntakeGraphContractError("INTAKE_INITIAL_FORM_EVENT_INVALID")
+    respondent_opening = source_type == RESPONDENT_OPENING_MARKER
+    if respondent_opening:
+        if (
+            not allow_initial_form
+            or sequence != 1
+            or previous_sequence != 0
+            or bool(state["messages"])
+            or event.get("text") != RESPONDENT_OPENING_MARKER
+        ):
+            raise IntakeGraphContractError("INTAKE_RESPONDENT_OPENING_EVENT_INVALID")
+        require_respondent_opening_matrix_authority(state)
 
     event_record: JsonObject = {
         "kind": "EVENT",
@@ -428,7 +441,13 @@ def _apply_event(
         "source_refs": deepcopy(cast(list[str], event["source_refs"])),
     }
     source_record: JsonObject = {
-        "kind": "INITIAL_FORM_SOURCE" if initial_form else "MESSAGE",
+        "kind": (
+            "INITIAL_FORM_SOURCE"
+            if initial_form
+            else "RESPONDENT_OPENING_SOURCE"
+            if respondent_opening
+            else "MESSAGE"
+        ),
         "stable_id": message_id,
         "content_hash": event_hash,
         "sequence": sequence,
@@ -442,12 +461,19 @@ def _apply_event(
             _stable_record_key("event", event_id): event_record,
             _stable_record_key("message", message_id): source_record,
         },
-        "route": "message",
+        "route": "respondent_opening" if respondent_opening else "message",
     }
+    if respondent_opening:
+        event_record["control_marker"] = RESPONDENT_OPENING_MARKER
+        source_record["control_marker"] = RESPONDENT_OPENING_MARKER
     if initial_form:
         # The form is already represented by the bounded authorized_initial_case_facts
         # summary.  Keeping its cursor/source receipts without inserting a HUMAN message
         # preserves replay and provenance while matching the baseline first-turn contract.
+        return patch
+    if respondent_opening:
+        # This server-owned control event opens the respondent's private room; it
+        # is provenance for the deterministic M0 carry, never a party statement.
         return patch
 
     # Match the legacy RoomTurnMemory query: participant answers are retained

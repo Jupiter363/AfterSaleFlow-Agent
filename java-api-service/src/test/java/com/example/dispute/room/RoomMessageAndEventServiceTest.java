@@ -210,10 +210,118 @@ class RoomMessageAndEventServiceTest {
     }
 
     @Test
-    void targetIntakeOpeningDoesNotInvokeTheLegacyWriterOrAgentTurn() {
+    void targetIntakeRespondentOpeningReturnsTargetIngressReceiptWithoutLegacyWriterOrAgentTurn() {
         FulfillmentCaseEntity dispute = intakeCase();
+        CaseRoomEntity room =
+                CaseRoomEntity.open(
+                        "ROOM_INTAKE",
+                        dispute.getId(),
+                        RoomType.INTAKE,
+                        OffsetDateTime.parse("2026-07-03T00:00:00Z"),
+                        "system");
         AuthenticatedActor respondent =
                 new AuthenticatedActor("merchant-local", ActorRole.MERCHANT);
+        TargetIntakeActivationGrant grant =
+                new TargetIntakeActivationGrant(
+                        TargetIntakeActivationGrant.TARGET_LANE,
+                        "p9act.v1." + "a".repeat(32),
+                        "b".repeat(64),
+                        "tenant-target",
+                        dispute.getId(),
+                        3L,
+                        5L,
+                        7L,
+                        "case/tenant-target/" + dispute.getId(),
+                        "target-control-build",
+                        Instant.parse("2026-07-03T01:00:00Z"));
+        IntakeIngressSelection selection = IntakeIngressSelection.target(grant);
+        TargetIntakeIngressReceipt expected =
+                new TargetIntakeIngressReceipt(
+                        "intake-message:respondent-opening",
+                        "target-intake-run:respondent-opening",
+                        "c".repeat(64),
+                        "PENDING_ORCHESTRATION",
+                        false,
+                        Instant.parse("2026-07-03T00:00:01Z"));
+        TargetIntakeIngressReceipt replayExpected =
+                new TargetIntakeIngressReceipt(
+                        expected.commandId(),
+                        expected.runId(),
+                        expected.payloadSha256(),
+                        expected.commandStatus(),
+                        true,
+                        expected.admittedAt());
+        when(caseRepository.findById(dispute.getId())).thenReturn(Optional.of(dispute));
+        when(intakeMessageIngressRouter.select(dispute.getId())).thenReturn(selection);
+        when(roomRepository.findByCaseIdAndRoomType(dispute.getId(), RoomType.INTAKE))
+                .thenReturn(Optional.of(room));
+        when(participantRepository.existsByCaseIdAndActorIdAndParticipantRole(
+                        dispute.getId(), respondent.actorId(), respondent.role()))
+                .thenReturn(true);
+        when(intakeMessageIngressRouter.dispatchTarget(eq(selection), any()))
+                .thenReturn(expected, replayExpected);
+
+        Object first =
+                messageService.ensureOpening(
+                        dispute.getId(),
+                        RoomType.INTAKE,
+                        respondent,
+                        "TRACE_TARGET_OPENING",
+                        "REQ_TARGET_OPENING");
+        Object replay =
+                messageService.ensureOpening(
+                        dispute.getId(),
+                        RoomType.INTAKE,
+                        respondent,
+                        "TRACE_TARGET_OPENING_REPLAY",
+                        "REQ_TARGET_OPENING_REPLAY");
+
+        assertThat(first).isSameAs(expected);
+        assertThat(replay).isSameAs(replayExpected);
+        verify(intakeProgressService, times(2)).assertIntakePost(dispute, respondent);
+        verify(intakeMessageIngressRouter, times(2)).select(dispute.getId());
+        ArgumentCaptor<TargetIntakeMessageRequest> targetRequest =
+                ArgumentCaptor.forClass(TargetIntakeMessageRequest.class);
+        verify(intakeMessageIngressRouter, times(2))
+                .dispatchTarget(eq(selection), targetRequest.capture());
+        assertThat(targetRequest.getAllValues())
+                .allSatisfy(
+                        request -> {
+                            assertThat(request.sourceType().name())
+                                    .isEqualTo("RESPONDENT_OPENING");
+                            assertThat(request.messageType()).isNull();
+                            assertThat(request.attachmentRefs()).isEmpty();
+                            assertThat(request.text()).isEqualTo("RESPONDENT_OPENING");
+                            assertThat(request.messageId())
+                                    .matches("RESPONDENT_OPENING_[0-9a-f]{32}");
+                            String authorityToken =
+                                    request.messageId()
+                                            .substring("RESPONDENT_OPENING_".length());
+                            assertThat(request.idempotencyKey())
+                                    .isEqualTo(
+                                            "target-intake-respondent-opening:"
+                                                    + authorityToken);
+                            assertThat(request.traceId())
+                                    .isEqualTo("TRACE_" + authorityToken);
+                            assertThat(request.messageId())
+                                    .isNotEqualTo("INTAKE_FORM_" + dispute.getId());
+                            assertThat(request.createdAt())
+                                    .isEqualTo(dispute.getCreatedAt().toInstant());
+                            assertThat(request.commandDeadlineAt()).isEqualTo(grant.expiresAt());
+                            assertThat(request.actor()).isEqualTo(respondent);
+                            assertThat(request.activation()).isSameAs(grant);
+                        });
+        assertThat(targetRequest.getAllValues().get(1))
+                .usingRecursiveComparison()
+                .isEqualTo(targetRequest.getAllValues().get(0));
+        verifyNoInteractions(legacyIntakeWriterGuard, intakeAgentTurnService);
+        verify(evidenceAgentTurnService, never())
+                .ensureOpeningOrStart(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void targetIntakeRespondentOpeningRejectsPrivilegedAndWronglyAssignedActors() {
+        FulfillmentCaseEntity dispute = intakeCase();
         TargetIntakeActivationGrant grant =
                 new TargetIntakeActivationGrant(
                         TargetIntakeActivationGrant.TARGET_LANE,
@@ -231,20 +339,24 @@ class RoomMessageAndEventServiceTest {
         when(intakeMessageIngressRouter.select(dispute.getId()))
                 .thenReturn(IntakeIngressSelection.target(grant));
 
-        Object opening =
-                messageService.ensureOpening(
-                        dispute.getId(),
-                        RoomType.INTAKE,
-                        respondent,
-                        "TRACE_TARGET_OPENING",
-                        "REQ_TARGET_OPENING");
+        for (AuthenticatedActor actor :
+                List.of(
+                        new AuthenticatedActor("reviewer-local", ActorRole.PLATFORM_REVIEWER),
+                        new AuthenticatedActor("merchant-other", ActorRole.MERCHANT))) {
+            assertThatThrownBy(
+                            () ->
+                                    messageService.ensureOpening(
+                                            dispute.getId(),
+                                            RoomType.INTAKE,
+                                            actor,
+                                            "TRACE_TARGET_OPENING_REJECTED",
+                                            "REQ_TARGET_OPENING_REJECTED"))
+                    .isInstanceOf(
+                            com.example.dispute.common.exception.ForbiddenException.class);
+        }
 
-        assertThat(opening).isNull();
-        verify(intakeProgressService).assertIntakePost(dispute, respondent);
-        verify(intakeMessageIngressRouter).select(dispute.getId());
+        verify(intakeMessageIngressRouter, never()).dispatchTarget(any(), any());
         verifyNoInteractions(legacyIntakeWriterGuard, intakeAgentTurnService);
-        verify(evidenceAgentTurnService, never())
-                .ensureOpeningOrStart(any(), any(), any(), any(), any());
     }
 
     @Test

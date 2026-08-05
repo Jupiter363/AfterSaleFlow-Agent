@@ -7,6 +7,7 @@
 package com.example.dispute.room.application;
 
 import com.example.dispute.agentstream.application.AgentRunAcceptedView;
+import com.example.dispute.casecore.domain.CasePartyPosition;
 import com.example.dispute.common.exception.IdempotencyConflictException;
 import com.example.dispute.common.exception.ForbiddenException;
 import com.example.dispute.config.ActorRole;
@@ -294,10 +295,21 @@ public class RoomMessageService {
                             intakeMessageIngressRouter.select(caseId),
                             "Intake opening writer was not selected");
             if (selection.isTarget()) {
-                if (actor.role() != dispute.getInitiatorRole()) {
-                    return null;
-                }
-                return dispatchTargetIntakeOpening(dispute, actor, selection);
+                CasePartyPosition position =
+                        dispute.partyAssignment()
+                                .resolve(actor.actorId(), actor.role())
+                                .orElseThrow(
+                                        () ->
+                                                new ForbiddenException(
+                                                        "actor is not assigned to the target Intake opening"));
+                return switch (position) {
+                    case INITIATOR -> dispatchTargetIntakeOpening(dispute, actor, selection);
+                    case RESPONDENT ->
+                            dispatchTargetIntakeRespondentOpening(dispute, actor, selection);
+                    case OBSERVER ->
+                            throw new ForbiddenException(
+                                    "observer cannot open a target Intake private thread");
+                };
             }
             legacyIntakeWriterGuard.assertLegacyWriteAllowed(caseId);
             return intakeAgentTurnService.ensureRespondentOpening(
@@ -350,6 +362,34 @@ public class RoomMessageService {
                         actor,
                         "target-intake-opening:" + dispute.getId(),
                         stableTraceId,
+                        Objects.requireNonNull(
+                                        dispute.getCreatedAt(),
+                                        "target Intake case createdAt must not be null")
+                                .toInstant(),
+                        selection.targetGrant()));
+    }
+
+    private Object dispatchTargetIntakeRespondentOpening(
+            FulfillmentCaseEntity dispute,
+            AuthenticatedActor actor,
+            IntakeIngressSelection selection) {
+        CaseAccessSessionEntity accessSession = accessSessionResolver.resolve(dispute.getId(), actor);
+        permissionService.requireRoomRead(accessSession, RoomType.INTAKE);
+        permissionService.require(accessSession, PermissionScope.ROOM_MESSAGE_WRITE);
+        assertCanRead(dispute, actor);
+        CaseRoomEntity room =
+                roomRepository
+                        .findByCaseIdAndRoomType(dispute.getId(), RoomType.INTAKE)
+                        .orElseThrow(() -> new IllegalArgumentException("room not found"));
+        if (room.getRoomStatus() != RoomStatus.OPEN) {
+            throw new IllegalStateException("room is not open");
+        }
+        return intakeMessageIngressRouter.dispatchTarget(
+                selection,
+                TargetIntakeMessageRequest.respondentOpening(
+                        dispute.getId(),
+                        room.getId(),
+                        actor,
                         Objects.requireNonNull(
                                         dispute.getCreatedAt(),
                                         "target Intake case createdAt must not be null")

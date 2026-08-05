@@ -6,6 +6,7 @@ import com.example.dispute.agentstream.application.AgentRunLedger.Attempt;
 import com.example.dispute.agentstream.application.AgentRunLedger.AttemptAllocation;
 import com.example.dispute.agentstream.application.AgentRunLedger.CreateLogicalRun;
 import com.example.dispute.agentstream.application.AgentRunLedger.LogicalRun;
+import com.example.dispute.casecore.domain.CasePartyPosition;
 import com.example.dispute.casecore.domain.CaseSourceType;
 import com.example.dispute.infrastructure.persistence.entity.FulfillmentCaseEntity;
 import com.example.dispute.infrastructure.persistence.repository.FulfillmentCaseRepository;
@@ -159,6 +160,7 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
         ProjectionStage stage = requireProjectionAuthority(projection, request, activation);
         FulfillmentCaseEntity dispute = cases.findByIdForUpdate(request.caseId())
                 .orElseThrow(() -> new IllegalStateException("target Intake case is missing"));
+        requireRespondentOpeningActor(dispute, request);
         CaseAccessSessionEntity access = accessSessions.resolve(
                 activation.tenantSurrogate(), request.caseId(), request.actor());
         requireActor(
@@ -171,10 +173,11 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
         String commandId = TargetIntakeCommandIdentity.messageCommandId(activation, request);
         String logicalRunId = "target-intake-run:" + messageIdentity;
         MaterializedIntake replay =
-                replayInitialForm(request, activation, commandId, logicalRunId);
+                replayOpening(request, activation, commandId, logicalRunId);
         if (replay != null) {
             return replay;
         }
+        requireRespondentOpeningPhase(stage, request);
         participants.activateExistingParty(
                 request.caseId(), request.actor(), OffsetDateTime.ofInstant(now, ZoneOffset.UTC));
         AgentConversationSessionEntity session = agentSessions.resolve(
@@ -201,6 +204,10 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
                 request.createdAt())).value();
         String eventId = "target-intake-event:" + messageIdentity;
         var allocation = events.allocate(thread, eventId, request.messageId());
+        if (isRespondentOpening(request) && allocation.sequenceNo() != 1) {
+            throw new IllegalStateException(
+                    "target Intake respondent opening must be the first private-thread event");
+        }
         var event = allocation.existing().orElseGet(() -> events.publish(
                 new IntakeTurnEventPublisher.EventRequest(
                         eventId, request.messageId(), thread, allocation.sequenceNo(),
@@ -257,12 +264,13 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
                 commandId, logicalRunId, event.payloadRef(), appended.admittedAt(), deadline);
     }
 
-    private MaterializedIntake replayInitialForm(
+    private MaterializedIntake replayOpening(
             TargetIntakeMessageRequest request,
             TargetIntakeActivationGrant activation,
             String commandId,
             String logicalRunId) {
-        if (request.sourceType() != TargetIntakeMessageRequest.SourceType.INITIAL_FORM) {
+        if (request.sourceType() != TargetIntakeMessageRequest.SourceType.INITIAL_FORM
+                && !isRespondentOpening(request)) {
             return null;
         }
         MaterialSnapshot material =
@@ -302,6 +310,35 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
                 || actorRole != access.getActorRole()) {
             throw new IllegalStateException("target Intake access session does not match the active authority");
         }
+    }
+
+    private static void requireRespondentOpeningActor(
+            FulfillmentCaseEntity dispute, TargetIntakeMessageRequest request) {
+        if (!isRespondentOpening(request)) {
+            return;
+        }
+        CasePartyPosition position =
+                Objects.requireNonNull(
+                                dispute.partyAssignment(),
+                                "target Intake case party assignment must not be null")
+                        .resolve(request.actor().actorId(), request.actor().role())
+                        .orElse(null);
+        if (position != CasePartyPosition.RESPONDENT) {
+            throw new IllegalStateException(
+                    "target Intake respondent opening actor does not match case authority");
+        }
+    }
+
+    private static void requireRespondentOpeningPhase(
+            ProjectionStage stage, TargetIntakeMessageRequest request) {
+        if (isRespondentOpening(request) && !"WAITING_PARTY".equals(stage.code())) {
+            throw new IllegalStateException(
+                    "target Intake respondent opening requires WAITING_PARTY phase");
+        }
+    }
+
+    private static boolean isRespondentOpening(TargetIntakeMessageRequest request) {
+        return request.sourceType() == TargetIntakeMessageRequest.SourceType.RESPONDENT_OPENING;
     }
 
     static String requireEpochAuthority(
@@ -444,6 +481,8 @@ public final class CanonicalTargetIntakeMaterializer implements TargetIntakeMate
         return switch (request.sourceType()) {
             case INITIAL_FORM -> IntakeTurnEventPublisher.SourceType.INITIAL_FORM;
             case ROOM_MESSAGE -> IntakeTurnEventPublisher.SourceType.ROOM_MESSAGE;
+            case RESPONDENT_OPENING ->
+                    IntakeTurnEventPublisher.SourceType.RESPONDENT_OPENING;
         };
     }
 

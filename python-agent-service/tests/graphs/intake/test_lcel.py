@@ -1946,6 +1946,128 @@ def test_imported_formal_m0_form_only_opening_fails_before_model(
     assert transport.generate_calls == 0
 
 
+def test_imported_formal_m0_respondent_opening_projects_authority_neutral_bilateral_state(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+) -> None:
+    respondent_bindings = copy.deepcopy(bindings)
+    respondent_bindings["private"]["audience"] = "MERCHANT"
+    imported = _snapshot_with_imported_formal_m0(snapshot)
+    imported["own_messages"] = []
+    imported["snapshot_hash"] = canonical_sha256_omitting(imported, "snapshot_hash")
+    imported_m0 = copy.deepcopy(imported["current_dossier"]["case_fact_matrix"])
+    imported_row = imported_m0["fact_rows"][0]
+
+    opening = copy.deepcopy(event)
+    opening_message_id = "RESPONDENT_OPENING_" + "a" * 32
+    opening.update(
+        event_id="EVENT_RESPONDENT_OPENING_1",
+        message_id=opening_message_id,
+        sequence_no=1,
+        domain_revision=imported["domain_revision"] + 1,
+        audience="MERCHANT",
+        source_type="RESPONDENT_OPENING",
+        text="RESPONDENT_OPENING",
+        source_refs=[opening_message_id],
+    )
+    opening["event_hash"] = canonical_sha256_omitting(opening, "event_hash")
+
+    model_only_position = "The model must not turn an opening marker into party authority."
+    model_document = _draft(
+        dossier_patch={
+            "respondent_attitude": {
+                "attitude": "DISAGREE",
+                "position": model_only_position,
+            }
+        },
+        matrix_patch={
+            "schema_version": "case_fact_matrix.delta.v2",
+            "fact_rows": [
+                {
+                    "fact_key": imported_row["fact_id"],
+                    "category": imported_row["category"],
+                    "fact_target": imported_row["fact_target"],
+                    "materiality": imported_row["materiality"],
+                    "stance": "DENY",
+                    "position_summary": model_only_position,
+                    "asserted_value": "model-only-opening-value",
+                    "source_scope": "CURRENT_SOURCE",
+                }
+            ],
+            "summary_source_fact_keys": [imported_row["fact_id"]],
+            "respondent_claim": {
+                "attitude": "DISAGREE",
+                "position_summary": model_only_position,
+            },
+        },
+        readiness="INCOMPLETE",
+        missing_fields=["RESPONDENT_POSITION"],
+        recommendation="NEED_MORE_INFO",
+    )
+    transport = IntakeTransport(model_document)
+    merchant_context = _agent_context(
+        role="MERCHANT",
+        case_id=imported["case_id"],
+        agent_session_id=imported["agent_session_id"],
+        invocation_id="ATTEMPT_RESPONDENT_OPENING_1_1",
+    )
+    graph = compile_intake_v2_graph(
+        intake_lcel=build_intake_model_node(
+            transport=transport,
+            profile=_profile(),
+            policy=_policy().model_copy(
+                update={
+                    "invocation_id": "ATTEMPT_RESPONDENT_OPENING_1_1",
+                    "trusted_system_sha256": system_prompt_sha256(
+                        _trusted_system_prompt(merchant_context)
+                    ),
+                }
+            ),
+            agent_context=merchant_context,
+        ).runnable
+    )
+    state = new_intake_graph_state(
+        bindings=respondent_bindings,
+        version_pins=version_pins,
+    )
+    state["bindings"]["command"].update(
+        command_id="COMMAND_RESPONDENT_OPENING_1",
+        logical_run_id="RUN_RESPONDENT_OPENING_1",
+        attempt_id="ATTEMPT_RESPONDENT_OPENING_1_1",
+    )
+
+    result = graph.invoke(state, context=_bootstrap_event_context(imported, opening))
+
+    assert transport.generate_calls == 1
+    assert not any(message["role"] == "HUMAN" for message in result["messages"].values())
+    assert result["last_event_sequence"] == 1
+    assert result["last_event_hash"] == opening["event_hash"]
+    assert result["terminal_draft"]["dossier_patch"] == {}
+    assert result["terminal_draft"]["matrix_patch"] is None
+    assert "respondent_attitude" not in result["dossier_draft"]
+    assert model_only_position not in json.dumps(result["dossier_draft"], sort_keys=True)
+    assert result["baseline_pending_case_detail"] is None
+    assert result["cognitive_revision"] == 1
+
+    formal = result["baseline_previous_case_detail"]["formal_matrix"]
+    assert formal["matrix_kind"] == "BILATERAL_FROZEN"
+    assert formal["matrix_version"] == imported_m0["matrix_version"] + 1
+    assert formal["parent_ref"] == {
+        "matrix_id": imported_m0["matrix_id"],
+        "matrix_version": imported_m0["matrix_version"],
+        "content_hash": imported_m0["content_hash"],
+    }
+    assert formal["claims"]["respondent_direct"] is None
+    for row in formal["fact_rows"]:
+        respondent = row["positions"]["MERCHANT"]
+        assert respondent["stance"] == "NOT_ADDRESSED"
+        assert respondent["source_type"] == "NO_DIRECT_POSITION"
+        assert respondent["source_refs"] == []
+    assert opening_message_id not in json.dumps(formal, sort_keys=True)
+
+
 def test_real_intake_lcel_is_governed_object_flow_with_human_text_isolation(
     bindings,
     version_pins,

@@ -7,7 +7,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Annotated, Any, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 
 from app.harness.invocation_context import AgentInvocationContext
 from app.schemas.models import (
@@ -339,17 +339,32 @@ class IntakeTurnRequest(StrictModel):
         str, Field(pattern=r"^CASE_[A-Za-z0-9_]{1,59}$")
     ]
     room_type: Literal["INTAKE"]
-    turn_source: Literal["EXTERNAL_IMPORT", "FORM_SUBMISSION", "ROOM_MESSAGE"]
+    turn_source: Literal[
+        "EXTERNAL_IMPORT",
+        "FORM_SUBMISSION",
+        "ROOM_MESSAGE",
+        "RESPONDENT_OPENING",
+    ]
     initial_case_facts: IntakeInitialCaseFacts | None = None
     current_user_message: IntakeDialogueMessage | None = None
     recent_dialogue_messages: Annotated[
         list[IntakeDialogueMessage], Field(max_length=5)
     ] = Field(default_factory=list)
     previous_case_detail: dict[str, object] | None = None
+    respondent_opening_source_ref: Identifier | None = None
     initiator_statement_transcript: Annotated[
         list[IntakeTurnMessage], Field(max_length=100)
     ] = Field(default_factory=list)
     agent_context: AgentInvocationContext
+
+    @model_serializer(mode="wrap")
+    def omit_inactive_respondent_opening_source_ref(self, handler):
+        """Keep legacy form/message serialized shapes field-compatible."""
+
+        serialized = handler(self)
+        if self.respondent_opening_source_ref is None:
+            serialized.pop("respondent_opening_source_ref", None)
+        return serialized
 
     # 所属模块：Python Agent 数据契约 > final_agents；函数角色：类/闭包内部方法。
     # 具体功能：`enforce_context_resource_limits` 校验案件与会话上下文的 Schema、权限和阶段约束，拒绝越权或不一致数据；关键协作调用：`model_validator`、`raw.get`、`ValueError`。
@@ -411,6 +426,37 @@ class IntakeTurnRequest(StrictModel):
         }:
             raise ValueError("agent_context.scope_type must be intake party private")
         current = self.current_user_message
+        opening_source_ref = self.respondent_opening_source_ref
+        if self.turn_source == "RESPONDENT_OPENING":
+            if self.initial_case_facts is not None:
+                raise ValueError(
+                    "RESPONDENT_OPENING turns cannot contain initial_case_facts"
+                )
+            if current is not None:
+                raise ValueError(
+                    "RESPONDENT_OPENING turns cannot contain current_user_message"
+                )
+            if self.recent_dialogue_messages:
+                raise ValueError(
+                    "RESPONDENT_OPENING turns cannot have dialogue history"
+                )
+            if self.initiator_statement_transcript:
+                raise ValueError(
+                    "RESPONDENT_OPENING turns cannot have participant transcript"
+                )
+            if not self.previous_case_detail:
+                raise ValueError(
+                    "RESPONDENT_OPENING turns require previous_case_detail"
+                )
+            if opening_source_ref is None:
+                raise ValueError(
+                    "RESPONDENT_OPENING turns require respondent_opening_source_ref"
+                )
+            return self
+        if opening_source_ref is not None:
+            raise ValueError(
+                "respondent_opening_source_ref is exclusive to RESPONDENT_OPENING"
+            )
         if self.turn_source in {"EXTERNAL_IMPORT", "FORM_SUBMISSION"}:
             if self.initial_case_facts is None:
                 raise ValueError("form-opening turns require initial_case_facts")

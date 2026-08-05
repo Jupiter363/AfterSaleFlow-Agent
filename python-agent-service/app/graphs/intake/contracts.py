@@ -34,6 +34,7 @@ ThreadId = Annotated[
 Audience = Literal["USER", "MERCHANT"]
 NonNegativeInt = Annotated[int, Field(strict=True, ge=0)]
 PositiveInt = Annotated[int, Field(strict=True, ge=1)]
+RESPONDENT_OPENING_MARKER = "RESPONDENT_OPENING"
 
 
 MODEL_CONTROLLED_FORBIDDEN_FIELDS = frozenset(
@@ -176,7 +177,12 @@ class IntakeTurnEvent(StrictIntakeModel):
     sequence_no: PositiveInt
     domain_revision: NonNegativeInt
     audience: Audience
-    source_type: Literal["INITIAL_FORM", "ROOM_MESSAGE", "FORMAL_EVENT"]
+    source_type: Literal[
+        "INITIAL_FORM",
+        "ROOM_MESSAGE",
+        "FORMAL_EVENT",
+        "RESPONDENT_OPENING",
+    ]
     text: str = Field(min_length=1, max_length=8192)
     source_refs: tuple[Identifier, ...] = Field(min_length=1, max_length=32)
     occurred_at: AwareDatetime
