@@ -1946,15 +1946,22 @@ def test_imported_formal_m0_form_only_opening_fails_before_model(
     assert transport.generate_calls == 0
 
 
+@pytest.mark.parametrize(
+    "dossier_schema_version",
+    ["intake_case_detail.v1", "intake-dossier.v2"],
+    ids=["legacy-v1", "canonical-v2"],
+)
 def test_imported_formal_m0_respondent_opening_projects_authority_neutral_bilateral_state(
     bindings,
     version_pins,
     snapshot,
     event,
+    dossier_schema_version: str,
 ) -> None:
     respondent_bindings = copy.deepcopy(bindings)
     respondent_bindings["private"]["audience"] = "MERCHANT"
     imported = _snapshot_with_imported_formal_m0(snapshot)
+    imported["current_dossier"]["schema_version"] = dossier_schema_version
     imported["own_messages"] = []
     imported["snapshot_hash"] = canonical_sha256_omitting(imported, "snapshot_hash")
     imported_m0 = copy.deepcopy(imported["current_dossier"]["case_fact_matrix"])
@@ -2051,7 +2058,31 @@ def test_imported_formal_m0_respondent_opening_projects_authority_neutral_bilate
     assert result["baseline_pending_case_detail"] is None
     assert result["cognitive_revision"] == 1
 
-    formal = result["baseline_previous_case_detail"]["formal_matrix"]
+    terminal = result["result_json"]
+    baseline_context = result["baseline_previous_case_detail"]
+    assert terminal["cognitive_revision"] == 1
+    assert baseline_context["proposal_hash"] == terminal["proposal_hash"]
+    assert (
+        baseline_context["committed_proposal_identity"]["command_id"]
+        == terminal["command_id"]
+    )
+    snapshot_context = baseline_context["snapshot"]
+    snapshot_public = copy.deepcopy(snapshot_context)
+    snapshot_public.pop("case_fact_matrix")
+    assert snapshot_context["schema_version"] == dossier_schema_version
+    assert baseline_context["snapshot_hash"] == canonical_sha256(snapshot_context)
+    assert snapshot_public == result["dossier_draft"]
+    assert baseline_context["public_dossier_hash"] == canonical_sha256(
+        result["dossier_draft"]
+    )
+
+    formal = baseline_context["formal_matrix"]
+    assert formal == snapshot_context["case_fact_matrix"]
+    assert baseline_context["formal_matrix_hash"] == canonical_sha256(formal)
+    assert baseline_context["envelope_hash"] == canonical_sha256_omitting(
+        baseline_context,
+        "envelope_hash",
+    )
     assert formal["matrix_kind"] == "BILATERAL_FROZEN"
     assert formal["matrix_version"] == imported_m0["matrix_version"] + 1
     assert formal["parent_ref"] == {

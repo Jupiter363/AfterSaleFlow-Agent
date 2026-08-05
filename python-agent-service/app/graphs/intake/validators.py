@@ -380,6 +380,9 @@ _BASELINE_CONTEXT_PROPOSAL_IDENTITY_FIELDS = frozenset(
 _BASELINE_SCROLL_SNAPSHOT_FIELDS = CASE_DETAIL_TOP_LEVEL_FIELDS - frozenset(
     {"unilateral_case_matrix"}
 )
+_BASELINE_SCROLL_SNAPSHOT_SCHEMA_VERSIONS = frozenset(
+    {"intake_case_detail.v1", "intake-dossier.v2"}
+)
 _BASELINE_SCROLL_SNAPSHOT_MAX_BYTES = 524_288
 _MATRIX_DERIVATION_REQUEST_BASE_MAX_BYTES = 65_536
 _NORMALIZED_MATRIX_PATCH_MAX_BYTES = 65_536
@@ -2884,7 +2887,7 @@ def _validate_baseline_scroll_snapshot(
         <= _BASELINE_SCROLL_SNAPSHOT_FIELDS
     ):
         raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_SNAPSHOT_INVALID")
-    if snapshot.get("schema_version") != "intake_case_detail.v1":
+    if snapshot.get("schema_version") not in _BASELINE_SCROLL_SNAPSHOT_SCHEMA_VERSIONS:
         raise IntakeGraphContractError("INTAKE_BASELINE_CONTEXT_SNAPSHOT_INVALID")
     case_story = snapshot.get("case_story")
     if not isinstance(case_story, Mapping) or not case_story:
