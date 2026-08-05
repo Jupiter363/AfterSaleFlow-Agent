@@ -1947,18 +1947,13 @@ def test_imported_formal_m0_form_only_opening_fails_before_model(
     assert transport.generate_calls == 0
 
 
-@pytest.mark.parametrize(
-    "dossier_schema_version",
-    ["intake_case_detail.v1", "intake-dossier.v2"],
-    ids=["legacy-v1", "canonical-v2"],
-)
-def test_imported_formal_m0_respondent_opening_projects_authority_neutral_bilateral_state(
+def _project_imported_formal_m0_respondent_opening(
     bindings,
     version_pins,
     snapshot,
     event,
     dossier_schema_version: str,
-) -> None:
+) -> tuple[dict, dict, dict, str, str, IntakeTransport]:
     respondent_bindings = copy.deepcopy(bindings)
     respondent_bindings["private"]["audience"] = "MERCHANT"
     imported = _snapshot_with_imported_formal_m0(snapshot)
@@ -2050,6 +2045,42 @@ def test_imported_formal_m0_respondent_opening_projects_authority_neutral_bilate
         state,
         context=_bootstrap_event_context(imported, opening),
         interrupt_before=["checkpoint_terminal"],
+    )
+    return (
+        projected,
+        imported_m0,
+        opening,
+        opening_message_id,
+        model_only_position,
+        transport,
+    )
+
+
+@pytest.mark.parametrize(
+    "dossier_schema_version",
+    ["intake_case_detail.v1", "intake-dossier.v2"],
+    ids=["legacy-v1", "canonical-v2"],
+)
+def test_imported_formal_m0_respondent_opening_projects_authority_neutral_bilateral_state(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+    dossier_schema_version: str,
+) -> None:
+    (
+        projected,
+        imported_m0,
+        opening,
+        opening_message_id,
+        model_only_position,
+        transport,
+    ) = _project_imported_formal_m0_respondent_opening(
+        bindings,
+        version_pins,
+        snapshot,
+        event,
+        dossier_schema_version,
     )
 
     if dossier_schema_version == "intake-dossier.v2":
@@ -2165,6 +2196,155 @@ def test_imported_formal_m0_respondent_opening_projects_authority_neutral_bilate
     assert opening_message_id not in json.dumps(formal, sort_keys=True)
     assert opening_message_id not in json.dumps(opening_matrix_patch, sort_keys=True)
     assert model_only_position not in json.dumps(opening_matrix_patch, sort_keys=True)
+
+
+def test_respondent_room_message_advances_from_opening_bilateral_terminal(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+) -> None:
+    (
+        projected,
+        _,
+        opening,
+        _,
+        model_only_position,
+        opening_transport,
+    ) = _project_imported_formal_m0_respondent_opening(
+        bindings,
+        version_pins,
+        snapshot,
+        event,
+        "intake-dossier.v2",
+    )
+    opening_result = copy.deepcopy(projected)
+    opening_result.update(checkpoint_terminal(projected))
+    opening_context = opening_result["baseline_previous_case_detail"]
+    opening_formal = opening_context["formal_matrix"]
+    opening_row = opening_formal["fact_rows"][0]
+    assert opening_row["truth_status"] == "NOT_EVALUATED"
+    assert opening_row["evidence_coverage_status"] is None
+
+    next_event = copy.deepcopy(event)
+    next_event.update(
+        event_id="EVENT_P4_MERCHANT_2",
+        message_id="MESSAGE_P4_MERCHANT_2",
+        sequence_no=opening_result["last_event_sequence"] + 1,
+        domain_revision=opening["domain_revision"] + 1,
+        audience="MERCHANT",
+        source_type="ROOM_MESSAGE",
+        text="We reject the requested refund because the item was undamaged at dispatch.",
+        source_refs=["MESSAGE_P4_MERCHANT_2"],
+        occurred_at="2026-07-20T08:03:00Z",
+    )
+    next_event["event_hash"] = canonical_sha256_omitting(next_event, "event_hash")
+    respondent_position = next_event["text"]
+    second_document = _draft(
+        dossier_patch={
+            "case_story": {
+                "one_sentence_summary": "The merchant disputes the reported damage."
+            },
+            "respondent_attitude": {
+                "attitude": "DISAGREE",
+                "position": respondent_position,
+            },
+        },
+        matrix_patch={
+            "schema_version": "case_fact_matrix.delta.v2",
+            "fact_rows": [
+                {
+                    "fact_key": opening_row["fact_id"],
+                    "category": opening_row["category"],
+                    "fact_target": opening_row["fact_target"],
+                    "materiality": opening_row["materiality"],
+                    "stance": "DENY",
+                    "position_summary": respondent_position,
+                    "asserted_value": "undamaged at dispatch",
+                    "source_scope": "CURRENT_SOURCE",
+                    "conflict_summary": "The parties disagree about the item condition.",
+                }
+            ],
+            "summary_source_fact_keys": [opening_row["fact_id"]],
+            "respondent_claim": {
+                "attitude": "DISAGREE",
+                "position_summary": respondent_position,
+            },
+        },
+        readiness="INCOMPLETE",
+        missing_fields=["delivery_time"],
+        recommendation="NEED_MORE_INFO",
+    )
+    second_transport = IntakeTransport(second_document)
+    respondent_bindings = copy.deepcopy(bindings)
+    respondent_bindings["private"]["audience"] = "MERCHANT"
+    fresh_snapshot = copy.deepcopy(snapshot)
+    fresh_snapshot["own_messages"][0]["audience"] = "MERCHANT"
+    materialized_dossier = copy.deepcopy(opening_context["snapshot"])
+    materialized_formal = materialized_dossier["case_fact_matrix"]
+    for row in materialized_formal["fact_rows"]:
+        row["evidence_coverage_status"] = "PENDING_EVIDENCE_REVIEW"
+    materialized_formal["content_hash"] = case_fact_matrix_content_hash(
+        materialized_formal
+    )
+    fresh_snapshot["current_dossier"] = materialized_dossier
+    fresh_snapshot["domain_revision"] = opening["domain_revision"]
+    fresh_snapshot["snapshot_hash"] = canonical_sha256_omitting(
+        fresh_snapshot,
+        "snapshot_hash",
+    )
+    fresh_state = new_intake_graph_state(
+        bindings=respondent_bindings,
+        version_pins=version_pins,
+    )
+    fresh_state["bindings"]["command"].update(
+        command_id="COMMAND_P4_MERCHANT_2",
+        logical_run_id="RUN_P4_MERCHANT_2",
+        attempt_id="ATTEMPT_P4_MERCHANT_2_1",
+    )
+    second_context = _agent_context(
+        role="MERCHANT",
+        case_id=snapshot["case_id"],
+        agent_session_id=snapshot["agent_session_id"],
+        invocation_id="ATTEMPT_P4_MERCHANT_2_1",
+    )
+    second_graph = compile_intake_v2_graph(
+        intake_lcel=build_intake_model_node(
+            transport=second_transport,
+            profile=_profile(),
+            policy=_policy().model_copy(
+                update={
+                    "invocation_id": "ATTEMPT_P4_MERCHANT_2_1",
+                    "trusted_system_sha256": system_prompt_sha256(
+                        _trusted_system_prompt(second_context)
+                    ),
+                }
+            ),
+            agent_context=second_context,
+        ).runnable
+    )
+
+    result = second_graph.invoke(
+        fresh_state,
+        context=_bootstrap_event_context(fresh_snapshot, next_event),
+    )
+
+    assert opening_transport.generate_calls == 1
+    assert second_transport.generate_calls == 1
+    assert model_only_position not in json.dumps(opening_context, sort_keys=True)
+    assert result["cognitive_revision"] == 1
+    assert result["result_json"]["cognitive_revision"] == 1
+    assert "case_fact_matrix" not in result["dossier_draft"]
+    successor = result["baseline_previous_case_detail"]["formal_matrix"]
+    assert successor["matrix_kind"] == "BILATERAL_FROZEN"
+    assert successor["matrix_version"] == materialized_formal["matrix_version"] + 1
+    assert successor["parent_ref"] == {
+        "matrix_id": materialized_formal["matrix_id"],
+        "matrix_version": materialized_formal["matrix_version"],
+        "content_hash": materialized_formal["content_hash"],
+    }
+    assert successor["claims"]["respondent_direct"] is not None
+    assert next_event["message_id"] in successor["source_refs"]
 
 
 def test_real_intake_lcel_is_governed_object_flow_with_human_text_isolation(

@@ -1261,7 +1261,7 @@ def _require_matrix_authority(
             initiator_role=initiator_role,
             respondent_role=actor_role,
             allow_unassessed_evidence_coverage=uses_baseline_context,
-            allow_bilateral_successor=uses_baseline_context,
+            allow_bilateral_successor=True,
             allow_legacy_content_hash=uses_baseline_context,
         )
         if (
