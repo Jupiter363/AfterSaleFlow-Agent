@@ -156,10 +156,12 @@ public final class IntakeRespondentMatrixFreezer {
                     authority.caseId(),
                     authority.initiatorRole(),
                     authority.respondentRole());
+            requiredNextVersion(parent);
             return;
         }
         if ("BILATERAL_FROZEN".equals(kind)) {
             validateBilateralParent(parent, authority);
+            requiredNextVersion(parent);
             return;
         }
         throw rejected(
@@ -235,7 +237,8 @@ public final class IntakeRespondentMatrixFreezer {
                         .equals(requiredText(generation, "actor_role", 32))
                 || !"RESPONDENT_INTAKE".equals(
                         requiredText(generation, "source_stage", 64))
-                || !declaredSources.contains(latestSource)) {
+                || !declaredSources.contains(latestSource)
+                || !latestSource.equals(sourceRefs.get(sourceRefs.size() - 1))) {
             throw rejected(
                     "INTAKE_RESPONDENT_MATRIX_SOURCE_SCOPE_INVALID",
                     "bilateral matrix generation is outside respondent source authority");
@@ -254,7 +257,7 @@ public final class IntakeRespondentMatrixFreezer {
         requiredText(overview, "neutral_summary", 20_000);
         String coreConflict = requiredText(overview, "core_conflict", 20_000);
         validateBilateralClaims(
-                matrix, authority, declaredSources, coreConflict);
+                matrix, authority, declaredSources, latestSource, coreConflict);
 
         JsonNode rowsNode = matrix.path("fact_rows");
         if (!rowsNode.isArray() || rowsNode.isEmpty() || rowsNode.size() > 200) {
@@ -388,7 +391,7 @@ public final class IntakeRespondentMatrixFreezer {
         ObjectNode matrix = JsonNodeFactory.instance.objectNode();
         matrix.put("schema_version", "case_fact_matrix.v2");
         matrix.put("case_id", authority.caseId());
-        matrix.put("matrix_version", requiredPositiveLong(parent, "matrix_version") + 1);
+        matrix.put("matrix_version", requiredNextVersion(parent));
         matrix.put("matrix_kind", "BILATERAL_FROZEN");
         matrix.set("parent_ref", parentRef(parent));
         matrix.set("party_map", parent.required("party_map").deepCopy());
@@ -730,7 +733,7 @@ public final class IntakeRespondentMatrixFreezer {
                 || !authority.caseId().equals(matrix.path("case_id").asText())
                 || !"BILATERAL_FROZEN".equals(matrix.path("matrix_kind").asText())
                 || matrix.path("matrix_version").asLong()
-                        != parent.path("matrix_version").asLong() + 1
+                        != requiredNextVersion(parent)
                 || !parent.path("matrix_id").equals(matrix.at("/parent_ref/matrix_id"))
                 || !parent.path("matrix_version").equals(matrix.at("/parent_ref/matrix_version"))
                 || !parent.path("content_hash").equals(matrix.at("/parent_ref/content_hash"))
@@ -753,6 +756,7 @@ public final class IntakeRespondentMatrixFreezer {
             ObjectNode matrix,
             MatrixAuthority authority,
             Set<String> declaredSources,
+            String latestSource,
             String coreConflict) {
         ObjectNode claims = requiredObject(matrix, "claims", "bilateral claims");
         requireExactFields(claims, CLAIM_FIELDS, "bilateral claims");
@@ -859,16 +863,20 @@ public final class IntakeRespondentMatrixFreezer {
         if (!respondentDirect.path("alternative_proposal").isNull()) {
             requiredText(respondentDirect, "alternative_proposal", 20_000);
         }
-        requireDeclaredSources(
-                requiredTextArray(
-                        respondentDirect,
-                        "source_refs",
-                        1,
-                        50,
-                        128,
-                        "direct respondent source refs"),
-                declaredSources,
+        List<String> directSources = requiredTextArray(
+                respondentDirect,
+                "source_refs",
+                1,
+                50,
+                128,
                 "direct respondent source refs");
+        requireDeclaredSources(
+                directSources, declaredSources, "direct respondent source refs");
+        if (!directSources.equals(List.of(latestSource))) {
+            throw rejected(
+                    "INTAKE_RESPONDENT_MATRIX_SOURCE_SCOPE_INVALID",
+                    "direct respondent claim must bind the latest respondent source");
+        }
         if (!claimConflict.isTextual()
                 || claimConflict.asText().isBlank()
                 || !coreConflict.equals(claimConflict.asText())) {
@@ -937,18 +945,20 @@ public final class IntakeRespondentMatrixFreezer {
                 positions,
                 Set.of(authority.initiatorRole().name(), authority.respondentRole().name()),
                 "bilateral fact positions");
+        ObjectNode initiatorPosition = requiredObject(
+                positions,
+                authority.initiatorRole().name(),
+                "bilateral initiator position");
+        ObjectNode respondentPosition = requiredObject(
+                positions,
+                authority.respondentRole().name(),
+                "bilateral respondent position");
         validateBilateralPosition(
-                requiredObject(
-                        positions,
-                        authority.initiatorRole().name(),
-                        "bilateral initiator position"),
+                initiatorPosition,
                 declaredSources,
                 "bilateral initiator position");
         validateBilateralPosition(
-                requiredObject(
-                        positions,
-                        authority.respondentRole().name(),
-                        "bilateral respondent position"),
+                respondentPosition,
                 declaredSources,
                 "bilateral respondent position");
 
@@ -959,6 +969,21 @@ public final class IntakeRespondentMatrixFreezer {
             throw rejected(
                     "INTAKE_RESPONDENT_MATRIX_ALIGNMENT_INVALID",
                     "bilateral alignment status is invalid");
+        }
+        ObjectNode userPosition = (ObjectNode) positions.required("USER");
+        ObjectNode merchantPosition = (ObjectNode) positions.required("MERCHANT");
+        boolean hasSharedScope = !alignment.path("agreed_statement").isNull()
+                && !alignment.path("conflict_summary").isNull();
+        String expectedStatus = alignmentStatus(
+                userPosition.path("stance").asText(),
+                merchantPosition.path("stance").asText(),
+                nullableText(userPosition.get("asserted_value")),
+                nullableText(merchantPosition.get("asserted_value")),
+                hasSharedScope);
+        if (!status.equals(expectedStatus)) {
+            throw rejected(
+                    "INTAKE_RESPONDENT_MATRIX_ALIGNMENT_INVALID",
+                    "bilateral alignment conflicts with the two party positions");
         }
         boolean requiresResolution = row.path("requires_resolution").booleanValue();
         if (requiresResolution == "AGREED".equals(status)) {
@@ -1211,6 +1236,16 @@ public final class IntakeRespondentMatrixFreezer {
                     "INTAKE_RESPONDENT_MATRIX_PARENT_INVALID", field + " is invalid");
         }
         return value.longValue();
+    }
+
+    private static long requiredNextVersion(JsonNode parent) {
+        long current = requiredPositiveLong(parent, "matrix_version");
+        if (current == Long.MAX_VALUE) {
+            throw rejected(
+                    "INTAKE_RESPONDENT_MATRIX_PARENT_INVALID",
+                    "respondent matrix parent version cannot advance safely");
+        }
+        return current + 1;
     }
 
     private static boolean usesCurrentSource(String scope) {

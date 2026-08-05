@@ -137,7 +137,7 @@ class IntakeRespondentMatrixFreezerTest {
                         .put("matrix_version", parent.path("matrix_version").asLong()), true);
         assertInvalidOpeningParent(parent ->
                 ((ObjectNode) parent.path("parent_ref"))
-                        .put("content_hash", "f".repeat(64)), true);
+                        .put("content_hash", "f".repeat(63)), true);
         assertInvalidOpeningParent(parent ->
                 ((ObjectNode) parent.path("party_map"))
                         .put("respondent_role", "USER"), true);
@@ -180,6 +180,108 @@ class IntakeRespondentMatrixFreezerTest {
                         ordinaryRespondentDelta(openingBilateralMatrix()),
                         initiatorAuthority()))
                 .isInstanceOf(IntakeFinalizationRejectedException.class);
+    }
+
+    @Test
+    void openingBilateralParentRejectsCanonicalLatestSourceRebinding() throws Exception {
+        ObjectNode parent = openingBilateralMatrix();
+        assertThat(parent.path("source_refs"))
+                .anySatisfy(source -> assertThat(source.asText())
+                        .isEqualTo("MESSAGE_INITIATOR_1"));
+        ((ObjectNode) parent.path("generation_ref"))
+                .put("latest_source_ref", "MESSAGE_INITIATOR_1");
+        rehashBilateral(parent);
+
+        assertRejected(
+                "INTAKE_RESPONDENT_MATRIX_SOURCE_SCOPE_INVALID",
+                () -> freezer.deriveCandidate(
+                        parent, ordinaryRespondentDelta(parent), respondentAuthority()));
+    }
+
+    @Test
+    void bilateralDirectClaimRejectsCanonicalOlderSourceRebinding() throws Exception {
+        ObjectNode parent = respondentBilateralMatrixWithDirectClaim();
+        assertThat(parent.at("/generation_ref/latest_source_ref").asText())
+                .isEqualTo("MESSAGE_RESPONDENT_2");
+        ArrayNode directSources =
+                (ArrayNode) parent.at("/claims/respondent_direct/source_refs");
+        directSources.removeAll();
+        directSources.add("MESSAGE_INITIATOR_1");
+        rehashBilateral(parent);
+
+        assertRejected(
+                "INTAKE_RESPONDENT_MATRIX_SOURCE_SCOPE_INVALID",
+                () -> freezer.deriveCandidate(
+                        parent,
+                        carryRespondentDelta(parent),
+                        nextRespondentAuthority()));
+    }
+
+    @Test
+    void bilateralParentRejectsCanonicalAlignmentDriftFromUnchangedPositions()
+            throws Exception {
+        ObjectNode parent = respondentBilateralMatrixWithDirectClaim();
+        ObjectNode row = (ObjectNode) parent.at("/fact_rows/0");
+        JsonNode positions = row.path("positions").deepCopy();
+        String factId = row.path("fact_id").asText();
+        assertThat(row.at("/party_alignment/status").asText()).isEqualTo("CONTESTED");
+        ((ObjectNode) row.path("party_alignment")).put("status", "ONE_SIDED");
+        ArrayNode contested =
+                (ArrayNode) parent.at("/fact_indexes/contested_fact_ids");
+        for (int index = 0; index < contested.size(); index++) {
+            if (factId.equals(contested.get(index).asText())) {
+                contested.remove(index);
+                break;
+            }
+        }
+        ((ArrayNode) parent.at("/fact_indexes/one_sided_fact_ids")).add(factId);
+        rehashBilateral(parent);
+        assertThat(row.path("positions")).isEqualTo(positions);
+
+        assertRejected(
+                "INTAKE_RESPONDENT_MATRIX_ALIGNMENT_INVALID",
+                () -> freezer.deriveCandidate(
+                        parent,
+                        carryRespondentDelta(parent),
+                        nextRespondentAuthority()));
+    }
+
+    @Test
+    void bilateralParentRejectsCanonicalMaximumVersionBeforeSuccessorOverflow()
+            throws Exception {
+        ObjectNode bilateral = openingBilateralMatrix();
+        bilateral.put("matrix_version", Long.MAX_VALUE);
+        ((ObjectNode) bilateral.path("parent_ref"))
+                .put("matrix_version", Long.MAX_VALUE - 1);
+        rehashBilateral(bilateral);
+        assertRejected(
+                "INTAKE_RESPONDENT_MATRIX_PARENT_INVALID",
+                () -> freezer.deriveCandidate(
+                        bilateral,
+                        ordinaryRespondentDelta(bilateral),
+                        respondentAuthority()));
+    }
+
+    @Test
+    void initiatorParentRejectsMaximumVersionBeforeSuccessorOverflow()
+            throws Exception {
+        ObjectNode initiator = initiatorMatrixWithLineage();
+        assertThat(initiator.path("parent_ref").isObject()).isTrue();
+        initiator.put("matrix_version", Long.MAX_VALUE);
+        ((ObjectNode) initiator.path("parent_ref"))
+                .put("matrix_version", Long.MAX_VALUE - 1);
+        rehash(initiator);
+        new IntakeInitiatorMatrixFreezer().validateFrozen(
+                initiator,
+                CASE_ID,
+                ActorRole.USER,
+                ActorRole.MERCHANT);
+        assertRejected(
+                "INTAKE_RESPONDENT_MATRIX_PARENT_INVALID",
+                () -> freezer.deriveCandidate(
+                        initiator,
+                        ordinaryRespondentDelta(initiator),
+                        respondentAuthority()));
     }
 
     @Test
@@ -361,6 +463,16 @@ class IntakeRespondentMatrixFreezerTest {
     }
 
     private ObjectNode openingBilateralMatrix() throws Exception {
+        ObjectNode parent = initiatorMatrixWithLineage();
+        ObjectNode opening = freezer.deriveCandidate(
+                parent, respondentOpeningCarry(parent), respondentOpeningAuthority());
+        assertThat(opening.path("matrix_version").asLong()).isEqualTo(6);
+        assertThat(opening.path("matrix_kind").asText()).isEqualTo("BILATERAL_FROZEN");
+        assertThat(opening.at("/claims/respondent_direct").isNull()).isTrue();
+        return opening;
+    }
+
+    private static ObjectNode initiatorMatrixWithLineage() {
         ObjectNode unilateral = unilateralWithTwoFacts();
         IntakeInitiatorMatrixFreezer initiatorFreezer =
                 new IntakeInitiatorMatrixFreezer();
@@ -375,12 +487,7 @@ class IntakeRespondentMatrixFreezerTest {
                     unilateral,
                     parent);
         }
-        ObjectNode opening = freezer.deriveCandidate(
-                parent, respondentOpeningCarry(parent), respondentOpeningAuthority());
-        assertThat(opening.path("matrix_version").asLong()).isEqualTo(6);
-        assertThat(opening.path("matrix_kind").asText()).isEqualTo("BILATERAL_FROZEN");
-        assertThat(opening.at("/claims/respondent_direct").isNull()).isTrue();
-        return opening;
+        return parent;
     }
 
     private static ObjectNode unilateralWithTwoFacts() {
@@ -461,6 +568,51 @@ class IntakeRespondentMatrixFreezerTest {
         return delta;
     }
 
+    private ObjectNode respondentBilateralMatrixWithDirectClaim() throws Exception {
+        ObjectNode opening = openingBilateralMatrix();
+        return freezer.deriveCandidate(
+                opening, ordinaryRespondentDelta(opening), respondentAuthority());
+    }
+
+    private static ObjectNode carryRespondentDelta(ObjectNode parent) {
+        ObjectNode delta = JSON.createObjectNode();
+        delta.put("schema_version", "case_fact_matrix.delta.v2");
+        ArrayNode rows = delta.putArray("fact_rows");
+        ArrayNode summary = delta.putArray("summary_source_fact_keys");
+        for (JsonNode prior : parent.withArray("fact_rows")) {
+            String factId = prior.path("fact_id").asText();
+            JsonNode respondent = prior.at("/positions/MERCHANT");
+            ObjectNode row = rows.addObject();
+            row.put("fact_key", factId);
+            row.set("category", prior.required("category").deepCopy());
+            row.set("fact_target", prior.required("fact_target").deepCopy());
+            row.set("materiality", prior.required("materiality").deepCopy());
+            row.set("stance", respondent.required("stance").deepCopy());
+            row.set(
+                    "position_summary",
+                    respondent.required("position_summary").deepCopy());
+            row.set("asserted_value", respondent.required("asserted_value").deepCopy());
+            row.put("source_scope", "PREVIOUS_MATRIX");
+            JsonNode conflict = prior.at("/party_alignment/conflict_summary");
+            if (!conflict.isNull()) {
+                row.set("conflict_summary", conflict.deepCopy());
+            }
+            summary.add(factId);
+        }
+        JsonNode priorClaim = parent.at("/claims/respondent_direct");
+        ObjectNode claim = delta.putObject("respondent_claim");
+        claim.set("attitude", priorClaim.required("attitude").deepCopy());
+        claim.set(
+                "position_summary",
+                priorClaim.required("position_summary").deepCopy());
+        if (!priorClaim.path("alternative_proposal").isNull()) {
+            claim.set(
+                    "alternative_proposal",
+                    priorClaim.required("alternative_proposal").deepCopy());
+        }
+        return delta;
+    }
+
     private static ObjectNode parentRef(ObjectNode parent) {
         ObjectNode reference = JSON.createObjectNode();
         reference.set("matrix_id", parent.required("matrix_id").deepCopy());
@@ -474,7 +626,7 @@ class IntakeRespondentMatrixFreezerTest {
         ObjectNode parent = openingBilateralMatrix();
         mutation.accept(parent);
         if (refreshHash) {
-            rehash(parent);
+            rehashBilateral(parent);
         }
         assertThatThrownBy(() -> freezer.deriveCandidate(
                         parent, ordinaryRespondentDelta(parent), respondentAuthority()))
@@ -584,6 +736,16 @@ class IntakeRespondentMatrixFreezerTest {
                 "e".repeat(64));
     }
 
+    private static MatrixAuthority nextRespondentAuthority() {
+        return new MatrixAuthority(
+                CASE_ID,
+                ActorRole.MERCHANT,
+                ActorRole.USER,
+                ActorRole.MERCHANT,
+                "MESSAGE_RESPONDENT_3",
+                "f".repeat(64));
+    }
+
     private static MatrixAuthority initiatorAuthority() {
         return new MatrixAuthority(
                 CASE_ID,
@@ -597,6 +759,29 @@ class IntakeRespondentMatrixFreezerTest {
     private static void rehash(ObjectNode matrix) {
         matrix.remove("content_hash");
         matrix.put("content_hash", ContractJson.sha256Hex(matrix));
+    }
+
+    private static void rehashBilateral(ObjectNode matrix) {
+        matrix.remove("content_hash");
+        matrix.remove("matrix_id");
+        String matrixId = "CASE_MATRIX_"
+                + ContractJson.sha256Hex(matrix)
+                        .substring(0, 20)
+                        .toUpperCase(java.util.Locale.ROOT);
+        matrix.put("matrix_id", matrixId);
+        matrix.put("content_hash", ContractJson.sha256Hex(matrix));
+
+        ObjectNode idInput = matrix.deepCopy();
+        idInput.remove("content_hash");
+        idInput.remove("matrix_id");
+        assertThat(matrix.path("matrix_id").asText())
+                .isEqualTo("CASE_MATRIX_"
+                        + ContractJson.sha256Hex(idInput)
+                                .substring(0, 20)
+                                .toUpperCase(java.util.Locale.ROOT));
+        ObjectNode hashInput = matrix.deepCopy();
+        String contentHash = hashInput.remove("content_hash").asText();
+        assertThat(contentHash).isEqualTo(ContractJson.sha256Hex(hashInput));
     }
 
     private static void assertRejected(
