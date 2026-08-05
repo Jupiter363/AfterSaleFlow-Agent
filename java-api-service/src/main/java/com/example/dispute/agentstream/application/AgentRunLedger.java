@@ -10,6 +10,7 @@ import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
+import com.example.dispute.workflow.activity.agent.AgentRunFinalizationFailureRecorder;
 import java.time.Instant;
 import java.util.Optional;
 
@@ -44,6 +45,10 @@ public interface AgentRunLedger {
     void recordHeartbeat(AgentRunAttemptHeartbeat heartbeat);
 
     void recordResultReady(ExecuteAgentRunResult result);
+
+    /** Atomically replaces one uncommitted hidden FINAL with a sanitized public ERROR. */
+    AgentRunFinalizationFailureRecorder.Receipt recordFinalizationFailure(
+            AgentRunFinalizationFailureRecorder.Command command);
 
     void recordAttemptFailure(
             String agentRunId,

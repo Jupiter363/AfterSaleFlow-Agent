@@ -552,6 +552,51 @@ public class AgentRunEntity extends AbstractEntity {
         }
     }
 
+    /** Records a fixed, nonretryable formal-finalization rejection without committing the FINAL. */
+    public boolean recordV2FinalizationFailure(
+            String attemptId,
+            String resultHash,
+            AgentRunAttemptStatus terminalStatus,
+            String safeErrorCode,
+            Instant completedAt) {
+        requireV2Mutable();
+        if (terminalStatus != AgentRunAttemptStatus.FAILED
+                && terminalStatus != AgentRunAttemptStatus.ABORTED) {
+            throw new IllegalArgumentException(
+                    "finalization failure status must be FAILED or ABORTED");
+        }
+        requireEqual(finalizationStatus, "UNCOMMITTED", "finalizationStatus");
+        requireEqual(resultReadyAttemptId, attemptId, "resultReadyAttemptId");
+        requireEqual(finalResultHash, resultHash, "finalResultHash");
+        if (committedAttemptId != null
+                || committedManifestId != null
+                || committedManifestHash != null
+                || finalStreamSequenceNo != null
+                || finalizedAt != null) {
+            throw new IllegalStateException(
+                    "uncommitted finalization failure conflicts with committed authority");
+        }
+        if (terminalStatus.name().equals(runStatus)) {
+            requireEqual(errorCode, safeErrorCode, "errorCode");
+            requireEqual(errorRetryable, false, "errorRetryable");
+            requireEqual(errorMessage, "Agent run finalization was rejected.", "errorMessage");
+            requireEqual(stopReason, "FINALIZATION_REJECTED", "stopReason");
+            return true;
+        }
+        if (!"RESULT_READY".equals(runStatus)) {
+            throw new IllegalStateException(
+                    "finalization failure requires a result-ready logical AgentRun");
+        }
+        runStatus = terminalStatus.name();
+        errorCode = required(safeErrorCode, "safeErrorCode");
+        errorRetryable = false;
+        errorMessage = "Agent run finalization was rejected.";
+        stopReason = "FINALIZATION_REJECTED";
+        this.completedAt = at(completedAt, "completedAt");
+        updatedAt = this.completedAt;
+        return false;
+    }
+
     public void commitV2Final(
             String attemptId,
             String resultHash,

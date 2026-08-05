@@ -331,6 +331,34 @@ public class PostgresAgentRunV2EventStore {
                 appended.inserted().getFirst(), appended.durableHighWatermark());
     }
 
+    /**
+     * Appends the sanitized terminal error that supersedes an uncommitted hidden FINAL.
+     * Authorization is deliberately isolated from generic and recovery appends.
+     */
+    public AgentRunV2StreamStore.AppendReceipt appendFinalizationErrorInCurrentTransaction(
+            AgentStreamEvent event) {
+        if (!TransactionSynchronizationManager.isActualTransactionActive()) {
+            throw new IllegalStateException(
+                    "finalization error append requires an actual caller transaction");
+        }
+        AgentStreamEvent required = requireEvent(event);
+        requireSanitizedFinalizationError(required);
+        if (compatibilityMode.writer() == StreamCompatibilityMode.Writer.TARGET_ONLY) {
+            throw new IllegalStateException(
+                    "target-only stream writes require a separately authorized release switch");
+        }
+        AgentRunAttemptStatus attemptStatus = lockAttempt(required.runId(), required.attemptId());
+        if (attemptStatus != AgentRunAttemptStatus.FAILED
+                && attemptStatus != AgentRunAttemptStatus.ABORTED) {
+            throw new NonRunningAttemptException(attemptStatus);
+        }
+        List<PersistedEvent> batch = prepareBatch(List.of(required));
+        requireFinalizationErrorPosition(batch.getFirst());
+        BatchAppendReceipt appended = appendLocked(batch, true);
+        return new AgentRunV2StreamStore.AppendReceipt(
+                appended.inserted().getFirst(), appended.durableHighWatermark());
+    }
+
     public AgentRunReconciledFinalStore.Receipt appendOrLoadReconciledFinal(
             AgentRunReconciledFinalStore.Request request) {
         Objects.requireNonNull(request, "request");
@@ -584,8 +612,13 @@ public class PostgresAgentRunV2EventStore {
     }
 
     private BatchAppendReceipt appendLocked(List<PersistedEvent> batch) {
+        return appendLocked(batch, false);
+    }
+
+    private BatchAppendReceipt appendLocked(
+            List<PersistedEvent> batch, boolean allowFinalizationErrorAfterFinal) {
         AgentStreamEvent first = batch.getFirst().event();
-        requireAppendPosition(batch);
+        requireAppendPosition(batch, allowFinalizationErrorAfterFinal);
         int[] updateCounts =
                 jdbc.batchUpdate(
                         INSERT_SQL,
@@ -818,7 +851,163 @@ public class PostgresAgentRunV2EventStore {
         return timestamp.toInstant();
     }
 
+    private void requireSanitizedFinalizationError(AgentStreamEvent event) {
+        if (event.eventType() != StreamEventType.ERROR) {
+            throw new IllegalArgumentException(
+                    "finalization error append accepts exactly one ERROR event");
+        }
+        String safeCode = event.payload().errorCode();
+        if (safeCode == null || !safeCode.matches("[A-Z][A-Z0-9_]{0,127}")) {
+            throw new IllegalArgumentException(
+                    "finalization error requires an uppercase bounded fixed code");
+        }
+        AgentStreamEvent.Payload expected = new AgentStreamEvent.Payload(
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                safeCode,
+                false);
+        if (!objectMapper.valueToTree(expected).equals(objectMapper.valueToTree(event.payload()))) {
+            throw new IllegalArgumentException(
+                    "finalization error payload must contain only a nonretryable fixed code");
+        }
+    }
+
+    private void requireFinalizationErrorPosition(PersistedEvent candidate) {
+        AgentStreamEvent requested = candidate.event();
+        FinalizationAuthority authority = loadFinalizationAuthority(
+                requested.runId(), requested.attemptId());
+        List<AgentStreamEvent> events = loadAttemptEvents(
+                requested.runId(), requested.attemptId());
+        if (events.isEmpty()) {
+            throw new IllegalStateException(
+                    "finalization error requires an adjacent hidden FINAL");
+        }
+        AgentStreamEvent last = events.getLast();
+        AgentStreamEvent precedingFinal;
+        if (last.eventType() == StreamEventType.FINAL) {
+            precedingFinal = last;
+            if (last.sequenceNo() == Long.MAX_VALUE
+                    || requested.sequenceNo() != last.sequenceNo() + 1) {
+                throw new IllegalStateException(
+                        "finalization error must be exactly adjacent to FINAL");
+            }
+        } else if (last.eventType() == StreamEventType.ERROR) {
+            if (events.size() < 2) {
+                throw new IllegalStateException(
+                        "replayed finalization error is missing its FINAL predecessor");
+            }
+            precedingFinal = events.get(events.size() - 2);
+            if (precedingFinal.eventType() != StreamEventType.FINAL
+                    || precedingFinal.sequenceNo() == Long.MAX_VALUE
+                    || last.sequenceNo() != precedingFinal.sequenceNo() + 1
+                    || requested.sequenceNo() != last.sequenceNo()
+                    || !candidate.payloadHash().equals(
+                            ContractJson.sha256Hex(objectMapper.valueToTree(last)))) {
+                throw new IllegalStateException(
+                        "finalization error replay conflicts with the durable terminal event");
+            }
+        } else {
+            throw new IllegalStateException(
+                    "finalization error requires an adjacent hidden FINAL");
+        }
+        if (requested.audience() != precedingFinal.audience()) {
+            throw new IllegalStateException(
+                    "finalization error audience conflicts with the hidden FINAL");
+        }
+        requireFinalizationAuthority(requested, precedingFinal, authority);
+    }
+
+    private FinalizationAuthority loadFinalizationAuthority(String runId, String attemptId) {
+        List<FinalizationAuthority> rows = jdbc.query(
+                """
+                select attempt.attempt_status, attempt.result_hash,
+                       attempt.last_sequence_no, attempt.public_output_emitted,
+                       attempt.final_frame_observed, attempt.error_code as attempt_error_code,
+                       attempt.error_retryable as attempt_error_retryable,
+                       attempt.termination_code,
+                       run.run_status, run.finalization_status,
+                       run.result_ready_attempt_id, run.final_result_hash,
+                       run.committed_attempt_id, run.final_stream_sequence_no,
+                       run.error_code as run_error_code,
+                       run.error_retryable as run_error_retryable,
+                       run.stream_audience_json::text
+                  from agent_run_attempt attempt
+                  join agent_run run on run.id = attempt.agent_run_id
+                 where run.id = ? and attempt.id = ?
+                """,
+                (resultSet, rowNumber) -> new FinalizationAuthority(
+                        resultSet.getString("attempt_status"),
+                        resultSet.getString("result_hash"),
+                        resultSet.getLong("last_sequence_no"),
+                        resultSet.getBoolean("public_output_emitted"),
+                        resultSet.getBoolean("final_frame_observed"),
+                        resultSet.getString("attempt_error_code"),
+                        (Boolean) resultSet.getObject("attempt_error_retryable"),
+                        resultSet.getString("termination_code"),
+                        resultSet.getString("run_status"),
+                        resultSet.getString("finalization_status"),
+                        resultSet.getString("result_ready_attempt_id"),
+                        resultSet.getString("final_result_hash"),
+                        resultSet.getString("committed_attempt_id"),
+                        (Long) resultSet.getObject("final_stream_sequence_no"),
+                        resultSet.getString("run_error_code"),
+                        (Boolean) resultSet.getObject("run_error_retryable"),
+                        resultSet.getString("stream_audience_json")),
+                runId,
+                attemptId);
+        if (rows.size() != 1) {
+            throw new IllegalStateException(
+                    "finalization error authority is missing or ambiguous");
+        }
+        return rows.getFirst();
+    }
+
+    private void requireFinalizationAuthority(
+            AgentStreamEvent requested,
+            AgentStreamEvent precedingFinal,
+            FinalizationAuthority authority) {
+        AgentRunAttemptStatus expectedStatus = authority.publicOutputEmitted()
+                ? AgentRunAttemptStatus.ABORTED
+                : AgentRunAttemptStatus.FAILED;
+        JsonNode audiences = readJson(authority.streamAudienceJson());
+        if (!audiences.isArray()
+                || audiences.size() != 1
+                || !audiences.get(0).isTextual()
+                || !requested.audience().name().equals(audiences.get(0).textValue())
+                || !expectedStatus.name().equals(authority.attemptStatus())
+                || !expectedStatus.name().equals(authority.runStatus())
+                || !authority.finalFrameObserved()
+                || authority.lastSequenceNo() != requested.sequenceNo()
+                || !Objects.equals(
+                        authority.resultHash(), precedingFinal.payload().finalResultHash())
+                || !Objects.equals(authority.resultHash(), authority.finalResultHash())
+                || !Objects.equals(authority.resultReadyAttemptId(), requested.attemptId())
+                || !"UNCOMMITTED".equals(authority.finalizationStatus())
+                || authority.committedAttemptId() != null
+                || authority.finalStreamSequenceNo() != null
+                || !Objects.equals(
+                        authority.attemptErrorCode(), requested.payload().errorCode())
+                || !Objects.equals(authority.runErrorCode(), requested.payload().errorCode())
+                || !Boolean.FALSE.equals(authority.attemptErrorRetryable())
+                || !Boolean.FALSE.equals(authority.runErrorRetryable())
+                || !"FAIL_LOGICAL_RUN".equals(authority.terminationCode())) {
+            throw new IllegalStateException(
+                    "finalization error conflicts with durable ledger authority");
+        }
+    }
+
     private void requireAppendPosition(List<PersistedEvent> batch) {
+        requireAppendPosition(batch, false);
+    }
+
+    private void requireAppendPosition(
+            List<PersistedEvent> batch, boolean allowFinalizationErrorAfterFinal) {
         AgentStreamEvent first = batch.getFirst().event();
         long highWatermark = durableHighWatermark(first.runId(), first.attemptId());
         List<PersistedEvent> newEvents = batch.stream()
@@ -846,7 +1035,10 @@ public class PostgresAgentRunV2EventStore {
                 throw new IllegalStateException(
                         "durable stream append is not contiguous");
             }
-            if (isGlobalTerminal(previousType)
+            boolean authorizedFinalizationError = allowFinalizationErrorAfterFinal
+                    && "final".equals(previousType)
+                    && event.eventType() == StreamEventType.ERROR;
+            if ((isGlobalTerminal(previousType) && !authorizedFinalizationError)
                     || ("attempt_aborted".equals(previousType)
                             && event.eventType() != StreamEventType.ERROR)) {
                 throw new IllegalStateException("durable stream append follows a terminal event");
@@ -1149,7 +1341,8 @@ public class PostgresAgentRunV2EventStore {
                         || !previous.attemptId().equals(row.attemptId())
                         || previous.sequenceNo() == Long.MAX_VALUE
                         || row.sequenceNo() != previous.sequenceNo() + 1
-                        || previous.globalTerminal()
+                        || (previous.globalTerminal()
+                                && !(previous.finalEvent() && row.error()))
                         || (previous.attemptAborted() && !row.error())) {
                     return false;
                 }
@@ -1294,6 +1487,25 @@ public class PostgresAgentRunV2EventStore {
     private record PersistedEvent(
             String id, AgentStreamEvent event, String canonicalJson, String payloadHash) {}
 
+    private record FinalizationAuthority(
+            String attemptStatus,
+            String resultHash,
+            long lastSequenceNo,
+            boolean publicOutputEmitted,
+            boolean finalFrameObserved,
+            String attemptErrorCode,
+            Boolean attemptErrorRetryable,
+            String terminationCode,
+            String runStatus,
+            String finalizationStatus,
+            String resultReadyAttemptId,
+            String finalResultHash,
+            String committedAttemptId,
+            Long finalStreamSequenceNo,
+            String runErrorCode,
+            Boolean runErrorRetryable,
+            String streamAudienceJson) {}
+
     private record OldDelivery(
             String eventId,
             long sequenceNo,
@@ -1328,6 +1540,10 @@ public class PostgresAgentRunV2EventStore {
 
         private boolean globalTerminal() {
             return isGlobalTerminal(eventType);
+        }
+
+        private boolean finalEvent() {
+            return "final".equals(eventType);
         }
 
         private boolean attemptAborted() {

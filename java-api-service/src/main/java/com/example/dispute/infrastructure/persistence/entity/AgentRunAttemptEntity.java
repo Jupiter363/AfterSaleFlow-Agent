@@ -417,6 +417,61 @@ public class AgentRunAttemptEntity extends AbstractEntity {
     }
 
     /**
+     * Terminalizes a result-ready attempt after its formal finalizer rejects the immutable result.
+     * The graph result and FINAL audit fields remain intact; only the public terminal cursor and
+     * fixed failure authority advance.
+     */
+    public boolean recordFinalizationFailure(
+            String agentRunId,
+            long attemptNo,
+            String commandId,
+            String commandRequestHash,
+            String resultHash,
+            long finalSequenceNo,
+            boolean publicOutputEmitted,
+            AgentRunAttemptStatus terminalStatus,
+            String safeErrorCode) {
+        requireIdentity(agentRunId, getId(), attemptNo);
+        requireEqual(this.commandId, commandId, "commandId");
+        requireEqual(this.commandRequestHash, commandRequestHash, "commandRequestHash");
+        requireEqual(this.resultHash, resultHash, "resultHash");
+        requireEqual(this.publicOutputEmitted, publicOutputEmitted, "publicOutputEmitted");
+        requireEqual(this.finalFrameObserved, true, "finalFrameObserved");
+        AgentRunAttemptStatus expectedStatus = publicOutputEmitted
+                ? AgentRunAttemptStatus.ABORTED
+                : AgentRunAttemptStatus.FAILED;
+        requireEqual(terminalStatus, expectedStatus, "terminalStatus");
+        long terminalSequenceNo = Math.addExact(finalSequenceNo, 1L);
+
+        if (attemptStatus == terminalStatus) {
+            requireEqual(lastSequenceNo, terminalSequenceNo, "lastSequenceNo");
+            requireEqual(errorCode, safeErrorCode, "errorCode");
+            requireEqual(errorRetryable, false, "errorRetryable");
+            requireEqual(
+                    terminationCode,
+                    AgentRunRecoveryAction.FAIL_LOGICAL_RUN.name(),
+                    "terminationCode");
+            return true;
+        }
+        if (attemptStatus != AgentRunAttemptStatus.RESULT_READY) {
+            throw new IllegalStateException(
+                    "finalization failure requires a result-ready attempt");
+        }
+        requireEqual(lastSequenceNo, finalSequenceNo, "lastSequenceNo");
+        if (completedAt == null || resultJson == null) {
+            throw new IllegalStateException(
+                    "finalization failure requires the durable graph result audit");
+        }
+        attemptStatus = terminalStatus;
+        errorCode = required(safeErrorCode, "safeErrorCode");
+        errorRetryable = false;
+        terminationCode = AgentRunRecoveryAction.FAIL_LOGICAL_RUN.name();
+        lastSequenceNo = terminalSequenceNo;
+        updatedAt = completedAt;
+        return false;
+    }
+
+    /**
      * Advances only the durable public cursor for Java's global recovery error.
      *
      * <p>The preceding Activity failure remains the attempt authority: this transition must not

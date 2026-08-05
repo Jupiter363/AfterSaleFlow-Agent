@@ -1,6 +1,7 @@
 package com.example.dispute.agentstream.infrastructure.persistence;
 
 import com.example.dispute.agentstream.application.AgentRunLedger;
+import com.example.dispute.agentstream.application.AgentRunV2StreamStore;
 import com.example.dispute.agentstream.application.AgentRunLedger.AttemptAllocation;
 import com.example.dispute.agentstream.application.AgentRunLedger.RecoveryState;
 import com.example.dispute.agentstream.application.AgentRunCommandBindingFactory;
@@ -24,6 +25,7 @@ import com.example.dispute.workflow.contract.v1.ContractTypes.StreamEventType;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunRequest;
 import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
+import com.example.dispute.workflow.activity.agent.AgentRunFinalizationFailureRecorder;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -361,6 +363,83 @@ public class JpaAgentRunLedger implements AgentRunLedger {
             return;
         }
         run.markV2ResultReady(result.attemptId(), result.resultHash(), result.completedAt());
+    }
+
+    @Override
+    @Transactional
+    public AgentRunFinalizationFailureRecorder.Receipt recordFinalizationFailure(
+            AgentRunFinalizationFailureRecorder.Command command) {
+        if (command == null) {
+            throw new IllegalArgumentException("command must not be null");
+        }
+        AgentRunEntity run = lockRun(command.agentRunId());
+        AgentRunAttemptEntity attempt = attemptRepository
+                .findByIdForUpdate(command.attemptId())
+                .orElseThrow(() -> new IllegalStateException("AgentRun attempt was not found"));
+        requireEqual(run.getId(), command.logicalRunId(), "logicalRunId");
+        requireEqual(attempt.getAgentRunId(), command.agentRunId(), "agentRunId");
+        requireEqual(attempt.getAttemptNo(), command.attemptNo(), "attemptNo");
+        AgentRunAttemptStatus terminalStatus = command.publicOutputEmitted()
+                ? AgentRunAttemptStatus.ABORTED
+                : AgentRunAttemptStatus.FAILED;
+        boolean attemptReplayed = attempt.recordFinalizationFailure(
+                command.agentRunId(),
+                command.attemptNo(),
+                command.commandId(),
+                command.commandRequestHash(),
+                command.resultHash(),
+                command.finalSequenceNo(),
+                command.publicOutputEmitted(),
+                terminalStatus,
+                command.safeErrorCode());
+        boolean runReplayed = run.recordV2FinalizationFailure(
+                command.attemptId(),
+                command.resultHash(),
+                terminalStatus,
+                command.safeErrorCode(),
+                attempt.getCompletedAt().toInstant());
+        if (attemptReplayed != runReplayed) {
+            throw new IllegalStateException(
+                    "finalization failure replay state is not atomic");
+        }
+
+        entityManager.flush();
+        long terminalSequenceNo = Math.addExact(command.finalSequenceNo(), 1L);
+        AgentStreamEvent terminalError = new AgentStreamEvent(
+                "agent-stream.v2",
+                command.agentRunId(),
+                command.attemptId(),
+                terminalSequenceNo,
+                StreamEventType.ERROR,
+                requireV2Audience(run),
+                attempt.getCompletedAt().toInstant(),
+                new AgentStreamEvent.Payload(
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        command.safeErrorCode(),
+                        false));
+        AgentRunV2StreamStore.AppendReceipt eventReceipt =
+                recoveryEventStore.appendFinalizationErrorInCurrentTransaction(terminalError);
+        requireEqual(eventReceipt.durableHighWatermark(), terminalSequenceNo,
+                "finalizationErrorHighWatermark");
+        if (attemptReplayed == eventReceipt.inserted()) {
+            throw new IllegalStateException(
+                    "finalization failure ledger and stream replay state conflict");
+        }
+        return new AgentRunFinalizationFailureRecorder.Receipt(
+                command.agentRunId(),
+                command.attemptId(),
+                command.resultHash(),
+                terminalSequenceNo,
+                terminalStatus,
+                command.safeErrorCode(),
+                attemptReplayed);
     }
 
     @Override

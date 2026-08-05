@@ -13,6 +13,7 @@ import static org.mockito.Mockito.when;
 import com.example.dispute.config.AppProperties;
 import com.example.dispute.agentstream.application.AgentRunLedger;
 import com.example.dispute.workflow.activity.agent.AgentRunExecutionGateway;
+import com.example.dispute.workflow.activity.agent.AgentRunFinalizationFailureRecorder;
 import com.example.dispute.workflow.activity.agent.AgentRunFinalizationGateway;
 import com.example.dispute.workflow.activity.domain.CaseProcessLedgerActivitiesImpl;
 import com.example.dispute.workflow.activity.domain.IntakeChildBridgeReadPort;
@@ -37,6 +38,7 @@ import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.worker.WorkerFactory;
 import java.net.URI;
 import java.time.Duration;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
@@ -190,6 +192,7 @@ class TemporalWorkerConfigurationTest {
                              ledgerProvider,
                              executionGatewayProvider,
                              finalizationGatewayProvider,
+                             mockProvider(AgentRunFinalizationFailureRecorder.class),
                              mockProvider(TargetE2eAgentDeploymentBinding.class)))
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining(
@@ -221,6 +224,7 @@ class TemporalWorkerConfigurationTest {
                      provider(mock(AgentRunLedger.class)),
                      provider(mock(AgentRunExecutionGateway.class)),
                      provider(mock(AgentRunFinalizationGateway.class)),
+                     provider(mock(AgentRunFinalizationFailureRecorder.class)),
                      mockProvider(TargetE2eAgentDeploymentBinding.class));
             try {
                 assertThat(factory.isStarted()).isTrue();
@@ -253,9 +257,10 @@ class TemporalWorkerConfigurationTest {
                                             disabledIntakeSelection(),
                                             mockProvider(IntakeSyntheticWorkerRegistration.class),
                                             provider(mock(AgentRunLedger.class)),
-                                            provider(mock(AgentRunExecutionGateway.class)),
-                                            provider(mock(AgentRunFinalizationGateway.class)),
-                                            mockProvider(
+                                             provider(mock(AgentRunExecutionGateway.class)),
+                                             provider(mock(AgentRunFinalizationGateway.class)),
+                                             provider(mock(AgentRunFinalizationFailureRecorder.class)),
+                                             mockProvider(
                                                     TargetE2eAgentDeploymentBinding.class)))
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining("target AGENT deployment binding");
@@ -271,9 +276,10 @@ class TemporalWorkerConfigurationTest {
                                             disabledIntakeSelection(),
                                             mockProvider(IntakeSyntheticWorkerRegistration.class),
                                             provider(mock(AgentRunLedger.class)),
-                                            provider(mock(AgentRunExecutionGateway.class)),
-                                            provider(mock(AgentRunFinalizationGateway.class)),
-                                            provider(targetBinding("wrong-agent-build"))))
+                                             provider(mock(AgentRunExecutionGateway.class)),
+                                             provider(mock(AgentRunFinalizationGateway.class)),
+                                             provider(mock(AgentRunFinalizationFailureRecorder.class)),
+                                             provider(targetBinding("wrong-agent-build"))))
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining("worker configuration");
         }
@@ -298,9 +304,46 @@ class TemporalWorkerConfigurationTest {
                              provider(mock(AgentRunLedger.class)),
                              mockProvider(AgentRunExecutionGateway.class),
                              provider(mock(AgentRunFinalizationGateway.class)),
+                             provider(mock(AgentRunFinalizationFailureRecorder.class)),
                              mockProvider(TargetE2eAgentDeploymentBinding.class)))
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining("exactly one AgentRunExecutionGateway");
+        }
+    }
+
+    @Test
+    void v2AgentWorkerFailsClosedWhenFinalizationFailureRecorderIsMissingOrAmbiguous() {
+        TemporalWorkerProperties properties =
+                properties(WorkerRole.AGENT, VersioningMode.BUILD_ID);
+        List<org.springframework.beans.factory.ObjectProvider<AgentRunFinalizationFailureRecorder>>
+                invalidRecorders = List.of(
+                        mockProvider(AgentRunFinalizationFailureRecorder.class),
+                        streamProvider(
+                                mock(AgentRunFinalizationFailureRecorder.class),
+                                mock(AgentRunFinalizationFailureRecorder.class)));
+
+        for (org.springframework.beans.factory.ObjectProvider<AgentRunFinalizationFailureRecorder>
+                recorderProvider : invalidRecorders) {
+            try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+                TemporalWorkerConfiguration configuration = new TemporalWorkerConfiguration();
+                assertThatThrownBy(() -> configuration.temporalAgentWorkerFactory(
+                                environment.getWorkflowClient(),
+                                properties,
+                                new TemporalWorkerOptionsFactory(properties),
+                                enabledAgentRunProperties(),
+                                disabledGraphClientProperties(),
+                                disabledIntakeSelection(),
+                                mockProvider(IntakeSyntheticWorkerRegistration.class),
+                                provider(mock(AgentRunLedger.class)),
+                                provider(mock(AgentRunExecutionGateway.class)),
+                                provider(mock(AgentRunFinalizationGateway.class)),
+                                recorderProvider,
+                                mockProvider(TargetE2eAgentDeploymentBinding.class)))
+                        .as("recorder provider %s", recorderProvider)
+                        .isInstanceOf(IllegalStateException.class)
+                        .hasMessageContaining(
+                                "exactly one AgentRunFinalizationFailureRecorder");
+            }
         }
     }
 
@@ -328,6 +371,7 @@ class TemporalWorkerConfigurationTest {
                          mockProvider(AgentRunLedger.class),
                          mockProvider(AgentRunExecutionGateway.class),
                          mockProvider(AgentRunFinalizationGateway.class),
+                         mockProvider(AgentRunFinalizationFailureRecorder.class),
                          mockProvider(TargetE2eAgentDeploymentBinding.class));
                 try {
                     assertThat(factory.isStarted()).isTrue();
@@ -366,6 +410,7 @@ class TemporalWorkerConfigurationTest {
                              mockProvider(AgentRunLedger.class),
                              mockProvider(AgentRunExecutionGateway.class),
                              mockProvider(AgentRunFinalizationGateway.class),
+                             mockProvider(AgentRunFinalizationFailureRecorder.class),
                              mockProvider(TargetE2eAgentDeploymentBinding.class)))
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining(
@@ -393,6 +438,7 @@ class TemporalWorkerConfigurationTest {
                      mockProvider(AgentRunLedger.class),
                      mockProvider(AgentRunExecutionGateway.class),
                      mockProvider(AgentRunFinalizationGateway.class),
+                     mockProvider(AgentRunFinalizationFailureRecorder.class),
                      mockProvider(TargetE2eAgentDeploymentBinding.class));
             try {
                 assertThat(factory.isStarted()).isTrue();
@@ -438,6 +484,7 @@ class TemporalWorkerConfigurationTest {
                              ledgerProvider,
                              executionGatewayProvider,
                              finalizationGatewayProvider,
+                             mockProvider(AgentRunFinalizationFailureRecorder.class),
                              mockProvider(TargetE2eAgentDeploymentBinding.class)))
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining(
@@ -469,6 +516,7 @@ class TemporalWorkerConfigurationTest {
                              mockProvider(AgentRunLedger.class),
                              mockProvider(AgentRunExecutionGateway.class),
                              mockProvider(AgentRunFinalizationGateway.class),
+                             mockProvider(AgentRunFinalizationFailureRecorder.class),
                              mockProvider(TargetE2eAgentDeploymentBinding.class)))
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining(
@@ -505,6 +553,7 @@ class TemporalWorkerConfigurationTest {
                      mockProvider(AgentRunLedger.class),
                      mockProvider(AgentRunExecutionGateway.class),
                      mockProvider(AgentRunFinalizationGateway.class),
+                     mockProvider(AgentRunFinalizationFailureRecorder.class),
                      mockProvider(TargetE2eAgentDeploymentBinding.class));
         }
         return configuration.temporalControlWorkerFactory(

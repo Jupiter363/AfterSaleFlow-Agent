@@ -23,6 +23,8 @@ import com.example.dispute.agentstream.infrastructure.delivery.AgentRunStreamWak
 import com.example.dispute.workflow.contract.v1.AgentStreamEvent;
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunProtocol;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
+import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunRecoveryAction;
 import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
 import com.example.dispute.workflow.contract.v1.ContractTypes.StreamEventType;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -376,11 +378,15 @@ public class AgentRunStreamEventService {
                     .stream()
                     .map(entity -> viewV2(entity, attempt.getAttemptNo(), runAudience))
                     .toList();
-            if (globalTerminal && !attemptEvents.isEmpty()) {
+            AgentRunEventView attemptCursor = index == cursorIndex ? cursorEvent : null;
+            if (globalTerminal
+                    && !attemptEvents.isEmpty()
+                    && !isFinalizationTerminalError(
+                            run, attempt, attemptCursor, attemptEvents.getFirst())) {
                 throw new IllegalStateException("V2 stream contains events after a global terminal");
             }
-            AgentRunEventView attemptCursor = index == cursorIndex ? cursorEvent : null;
             validateAttemptPage(
+                    run,
                     attempts,
                     index,
                     afterSequence,
@@ -424,6 +430,7 @@ public class AgentRunStreamEventService {
     }
 
     private void validateAttemptPage(
+            AgentRunEntity run,
             List<AgentRunAttemptEntity> attempts,
             int attemptIndex,
             long afterSequence,
@@ -432,6 +439,7 @@ public class AgentRunStreamEventService {
         String previousAttemptId = attemptIndex == 0
                 ? null
                 : attempts.get(attemptIndex - 1).getId();
+        AgentRunAttemptEntity attempt = attempts.get(attemptIndex);
         boolean started = afterSequence > 0;
         AgentRunEventView terminalEvent =
                 isAttemptTerminal(cursorEvent) ? cursorEvent : null;
@@ -447,7 +455,8 @@ public class AgentRunStreamEventService {
         for (int index = 0; index < events.size(); index++) {
             AgentRunEventView event = events.get(index);
             if (terminalEvent != null
-                    && !isRecoveryTerminalError(terminalEvent, event)) {
+                    && !isRecoveryTerminalError(terminalEvent, event)
+                    && !isFinalizationTerminalError(run, attempt, terminalEvent, event)) {
                 throw new IllegalStateException("V2 stream contains events after an attempt terminal");
             }
             if (afterSequence == -1 && index == 0
@@ -510,6 +519,48 @@ public class AgentRunStreamEventService {
                 && Objects.equals(previous.attemptId(), current.attemptId())
                 && previous.sequence() != Long.MAX_VALUE
                 && current.sequence() == previous.sequence() + 1;
+    }
+
+    private static boolean isFinalizationTerminalError(
+            AgentRunEntity run,
+            AgentRunAttemptEntity attempt,
+            AgentRunEventView previous,
+            AgentRunEventView current) {
+        if (previous == null
+                || current == null
+                || !"final".equals(previous.type())
+                || !"error".equals(current.type())
+                || !Objects.equals(previous.attemptId(), current.attemptId())
+                || !Objects.equals(attempt.getId(), current.attemptId())
+                || previous.sequence() == Long.MAX_VALUE
+                || current.sequence() != previous.sequence() + 1) {
+            return false;
+        }
+        AgentRunAttemptStatus expectedStatus = attempt.isPublicOutputEmitted()
+                ? AgentRunAttemptStatus.ABORTED
+                : AgentRunAttemptStatus.FAILED;
+        String resultHash = run.getFinalResultHash();
+        JsonNode finalResponse = previous.response();
+        return "UNCOMMITTED".equals(run.getFinalizationStatus())
+                && expectedStatus.name().equals(run.getRunStatus())
+                && Objects.equals(run.getResultReadyAttemptId(), attempt.getId())
+                && run.getCommittedAttemptId() == null
+                && run.getFinalStreamSequenceNo() == null
+                && resultHash != null
+                && finalResponse != null
+                && Objects.equals(
+                        resultHash, textOrNull(finalResponse.get("final_result_hash")))
+                && Objects.equals(run.getErrorCode(), current.code())
+                && Boolean.FALSE.equals(run.getErrorRetryable())
+                && attempt.getAttemptStatus() == expectedStatus
+                && Objects.equals(attempt.getResultHash(), resultHash)
+                && attempt.isFinalFrameObserved()
+                && attempt.getLastSequenceNo() == current.sequence()
+                && Objects.equals(attempt.getErrorCode(), current.code())
+                && Boolean.FALSE.equals(attempt.getErrorRetryable())
+                && AgentRunRecoveryAction.FAIL_LOGICAL_RUN.name()
+                        .equals(attempt.getTerminationCode())
+                && Boolean.FALSE.equals(current.retryable());
     }
 
     // 所属模块：【Agent 流式运行 / 应用编排层】「AgentRunStreamEventService.visibleTo(AgentRunEntity,CaseAccessSessionEntity)」。

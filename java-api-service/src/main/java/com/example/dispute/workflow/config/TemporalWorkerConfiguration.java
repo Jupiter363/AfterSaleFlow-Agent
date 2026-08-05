@@ -9,6 +9,7 @@ import com.example.dispute.config.AppProperties;
 import com.example.dispute.agentstream.application.AgentRunLedger;
 import com.example.dispute.workflow.activity.agent.AgentRunExecutionGateway;
 import com.example.dispute.workflow.activity.agent.AgentRunFinalizationGateway;
+import com.example.dispute.workflow.activity.agent.AgentRunFinalizationFailureRecorder;
 import com.example.dispute.workflow.activity.agent.ExecuteAgentRunActivityImpl;
 import com.example.dispute.workflow.activity.agent.FinalizeAgentRunActivityImpl;
 import com.example.dispute.workflow.activity.domain.CaseProcessLedgerActivitiesImpl;
@@ -110,6 +111,7 @@ public class TemporalWorkerConfiguration {
             ObjectProvider<AgentRunLedger> ledgerProvider,
             ObjectProvider<AgentRunExecutionGateway> executionGatewayProvider,
             ObjectProvider<AgentRunFinalizationGateway> finalizationGatewayProvider,
+            ObjectProvider<AgentRunFinalizationFailureRecorder> failureRecorderProvider,
             ObjectProvider<TargetE2eAgentDeploymentBinding> targetBindingProvider) {
         requireVersionedAgentWorker(
                 properties, agentRunV2Properties, intakeEpochSelectionProperties);
@@ -129,7 +131,8 @@ public class TemporalWorkerConfiguration {
                                 syntheticRegistrationProvider,
                                 ledgerProvider,
                                 executionGatewayProvider,
-                                finalizationGatewayProvider));
+                                finalizationGatewayProvider,
+                                failureRecorderProvider));
     }
 
     private static void registerControlWorkers(
@@ -225,7 +228,8 @@ public class TemporalWorkerConfiguration {
             ObjectProvider<IntakeSyntheticWorkerRegistration> syntheticRegistrationProvider,
             ObjectProvider<AgentRunLedger> ledgerProvider,
             ObjectProvider<AgentRunExecutionGateway> executionGatewayProvider,
-            ObjectProvider<AgentRunFinalizationGateway> finalizationGatewayProvider) {
+            ObjectProvider<AgentRunFinalizationGateway> finalizationGatewayProvider,
+            ObjectProvider<AgentRunFinalizationFailureRecorder> failureRecorderProvider) {
         Worker agentExecution =
                 factory.newWorker(
                         AGENT_EXECUTION, optionsFactory.workerOptions(AGENT_EXECUTION));
@@ -241,10 +245,15 @@ public class TemporalWorkerConfiguration {
                     requireUnique(executionGatewayProvider, "AgentRunExecutionGateway");
             AgentRunFinalizationGateway finalizationGateway =
                     requireUnique(finalizationGatewayProvider, "AgentRunFinalizationGateway");
+            AgentRunFinalizationFailureRecorder failureRecorder =
+                    requireUnique(
+                            failureRecorderProvider,
+                            "AgentRunFinalizationFailureRecorder");
             workflowTypes.add(AgentRunWorkflowImpl.class);
             workflowTypes.add(TemporalWorkerProbeWorkflowImpl.class);
             activityImplementations.add(new ExecuteAgentRunActivityImpl(ledger, executionGateway));
-            activityImplementations.add(new FinalizeAgentRunActivityImpl(finalizationGateway));
+            activityImplementations.add(
+                    new FinalizeAgentRunActivityImpl(finalizationGateway, failureRecorder));
             activityImplementations.add(
                     new TemporalWorkerProbeActivitiesImpl(properties, AGENT_EXECUTION));
         }

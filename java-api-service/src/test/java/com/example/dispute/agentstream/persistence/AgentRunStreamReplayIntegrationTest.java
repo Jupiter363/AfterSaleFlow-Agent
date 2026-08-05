@@ -2,9 +2,13 @@ package com.example.dispute.agentstream.persistence;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
+import com.example.dispute.agentstream.application.AgentRunCommandBindingFactory;
 import com.example.dispute.agentstream.application.AgentRunLedger;
 import com.example.dispute.agentstream.application.AgentRunReconciledFinalStore;
+import com.example.dispute.agentstream.application.AgentRunStreamEventService;
 import com.example.dispute.agentstream.application.AgentRunV2StreamStore.AppendReceipt;
 import com.example.dispute.agentstream.application.AgentRunV2StreamStore.BatchAppendReceipt;
 import com.example.dispute.agentstream.application.AgentRunV2StreamStore.CompatibilityMismatchException;
@@ -13,6 +17,16 @@ import com.example.dispute.agentstream.infrastructure.persistence.PostgresAgentR
 import com.example.dispute.agentstream.infrastructure.persistence.StreamBackfillCoordinator;
 import com.example.dispute.agentstream.infrastructure.persistence.StreamBackfillCoordinator.CursorStatus;
 import com.example.dispute.agentstream.infrastructure.persistence.StreamCompatibilityMode;
+import com.example.dispute.agentstream.infrastructure.persistence.AgentRunStreamEventRepository;
+import com.example.dispute.agentstream.infrastructure.delivery.AgentRunStreamWakeupPublisher;
+import com.example.dispute.config.ActorRole;
+import com.example.dispute.config.AuthenticatedActor;
+import com.example.dispute.infrastructure.persistence.repository.AgentRunAttemptRepository;
+import com.example.dispute.infrastructure.persistence.repository.AgentRunRepository;
+import com.example.dispute.room.application.AccessSessionResolver;
+import com.example.dispute.room.application.SessionPermissionService;
+import com.example.dispute.room.domain.PermissionLevel;
+import com.example.dispute.room.infrastructure.persistence.entity.CaseAccessSessionEntity;
 import com.example.dispute.workflow.contract.v1.AgentStreamEvent;
 import com.example.dispute.workflow.contract.v1.AgentStreamEvent.Payload;
 import com.example.dispute.workflow.contract.v1.ContractJson;
@@ -20,7 +34,13 @@ import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptSta
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunRecoveryAction;
 import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
 import com.example.dispute.workflow.contract.v1.ContractTypes.StreamEventType;
+import com.example.dispute.workflow.contract.v1.ExecuteAgentRunResult;
+import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.time.Instant;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
@@ -74,6 +94,450 @@ class AgentRunStreamReplayIntegrationTest {
     @Autowired private PostgresAgentRunV2EventStore eventStore;
     @Autowired private PlatformTransactionManager transactionManager;
     @Autowired private ObjectMapper objectMapper;
+    @Autowired private AgentRunRepository runRepository;
+    @Autowired private AgentRunAttemptRepository attemptRepository;
+    @Autowired private AgentRunStreamEventRepository eventRepository;
+
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void genericAppendStillRejectsEventsAfterFinal() {
+        ReadyRun ready = readyRun("ATTEMPT_FINALIZATION_APPEND_GUARD");
+        AgentStreamEvent terminalError = finalizationError(
+                ready.agentRunId(), ready.attemptId(), 4, Audience.USER, false);
+
+        jdbc.update(
+                "update agent_run_attempt set attempt_status = 'RUNNING' where id = ?",
+                ready.attemptId());
+        assertThatThrownBy(() -> eventStore.append(terminalError))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("terminal event");
+
+        jdbc.update(
+                "update agent_run_attempt set attempt_status = 'ABORTED' where id = ?",
+                ready.attemptId());
+        TransactionTemplate transaction = new TransactionTemplate(transactionManager);
+        transaction.executeWithoutResult(status -> {
+            assertThatThrownBy(() ->
+                            eventStore.appendRecoveryErrorInCurrentTransaction(terminalError))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("terminal event");
+            status.setRollbackOnly();
+        });
+
+        assertThat(eventStore.replay(ready.agentRunId(), ready.attemptId(), -1, 100))
+                .extracting(AgentStreamEvent::eventType, AgentStreamEvent::sequenceNo)
+                .containsExactly(
+                        org.assertj.core.groups.Tuple.tuple(
+                                StreamEventType.ATTEMPT_STARTED, 0L),
+                        org.assertj.core.groups.Tuple.tuple(
+                                StreamEventType.VISIBLE_DELTA, 1L),
+                        org.assertj.core.groups.Tuple.tuple(
+                                StreamEventType.VISIBLE_DELTA, 2L),
+                        org.assertj.core.groups.Tuple.tuple(StreamEventType.FINAL, 3L));
+    }
+
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void nonRetryableFinalizationFailureReplacesHiddenFinalWithDurableError() {
+        ReadyRun ready = readyRun("ATTEMPT_FINALIZATION_REJECTED");
+        Object command = finalizationFailureCommand(ready);
+
+        Object receipt = recordFinalizationFailure(command);
+
+        assertThat(receipt).isNotNull();
+        assertThat(recordAccessor(receipt, "agentRunId")).isEqualTo(ready.agentRunId());
+        assertThat(recordAccessor(receipt, "attemptId")).isEqualTo(ready.attemptId());
+        assertThat(recordAccessor(receipt, "resultHash")).isEqualTo(ready.resultHash());
+        assertThat(recordAccessor(receipt, "terminalSequenceNo")).isEqualTo(4L);
+        assertThat(recordAccessor(receipt, "attemptStatus")).isEqualTo(AgentRunAttemptStatus.ABORTED);
+        assertThat(recordAccessor(receipt, "safeErrorCode"))
+                .isEqualTo("INTAKE_INITIATOR_MATRIX_AUTHORITY_INVALID");
+        assertThat(recordAccessor(receipt, "replayed")).isEqualTo(false);
+
+        assertThat(jdbc.queryForMap(
+                        """
+                        select run_status, finalization_status, result_ready_attempt_id,
+                               committed_attempt_id, final_result_hash, error_code,
+                               error_retryable, error_message, stop_reason,
+                               final_stream_sequence_no, committed_manifest_id,
+                               committed_manifest_hash
+                          from agent_run where id = ?
+                        """,
+                        ready.agentRunId()))
+                .satisfies(state -> {
+                    assertThat(state.get("run_status")).isEqualTo("ABORTED");
+                    assertThat(state.get("finalization_status")).isEqualTo("UNCOMMITTED");
+                    assertThat(state.get("result_ready_attempt_id"))
+                            .isEqualTo(ready.attemptId());
+                    assertThat(state.get("committed_attempt_id")).isNull();
+                    assertThat(state.get("final_result_hash")).isEqualTo(ready.resultHash());
+                    assertThat(state.get("error_code"))
+                            .isEqualTo("INTAKE_INITIATOR_MATRIX_AUTHORITY_INVALID");
+                    assertThat(state.get("error_retryable")).isEqualTo(false);
+                    assertThat(state.get("error_message"))
+                            .isEqualTo("Agent run finalization was rejected.");
+                    assertThat(state.get("stop_reason")).isEqualTo("FINALIZATION_REJECTED");
+                    assertThat(state.get("final_stream_sequence_no")).isNull();
+                    assertThat(state.get("committed_manifest_id")).isNull();
+                    assertThat(state.get("committed_manifest_hash")).isNull();
+                });
+        assertThat(jdbc.queryForMap(
+                        """
+                        select attempt_status, result_hash, last_sequence_no,
+                               public_output_emitted, final_frame_observed,
+                               error_code, error_retryable, termination_code
+                          from agent_run_attempt where id = ?
+                        """,
+                        ready.attemptId()))
+                .satisfies(state -> {
+                    assertThat(state.get("attempt_status")).isEqualTo("ABORTED");
+                    assertThat(state.get("result_hash")).isEqualTo(ready.resultHash());
+                    assertThat(state.get("last_sequence_no")).isEqualTo(4L);
+                    assertThat(state.get("public_output_emitted")).isEqualTo(true);
+                    assertThat(state.get("final_frame_observed")).isEqualTo(true);
+                    assertThat(state.get("error_code"))
+                            .isEqualTo("INTAKE_INITIATOR_MATRIX_AUTHORITY_INVALID");
+                    assertThat(state.get("error_retryable")).isEqualTo(false);
+                    assertThat(state.get("termination_code")).isEqualTo("FAIL_LOGICAL_RUN");
+                });
+
+        List<AgentStreamEvent> persisted =
+                eventStore.replay(ready.agentRunId(), ready.attemptId(), -1, 100);
+        assertThat(persisted)
+                .extracting(AgentStreamEvent::eventType, AgentStreamEvent::sequenceNo)
+                .containsExactly(
+                        org.assertj.core.groups.Tuple.tuple(
+                                StreamEventType.ATTEMPT_STARTED, 0L),
+                        org.assertj.core.groups.Tuple.tuple(
+                                StreamEventType.VISIBLE_DELTA, 1L),
+                        org.assertj.core.groups.Tuple.tuple(
+                                StreamEventType.VISIBLE_DELTA, 2L),
+                        org.assertj.core.groups.Tuple.tuple(StreamEventType.FINAL, 3L),
+                        org.assertj.core.groups.Tuple.tuple(StreamEventType.ERROR, 4L));
+        AgentStreamEvent error = persisted.getLast();
+        assertThat(error.audience()).isEqualTo(Audience.USER);
+        assertThat(error.payload().errorCode())
+                .isEqualTo("INTAKE_INITIATOR_MATRIX_AUTHORITY_INVALID");
+        assertThat(error.payload().retryable()).isFalse();
+        assertThat(jdbc.queryForObject(
+                        "select count(*) from agent_execution_manifest where case_id = ?",
+                        Long.class,
+                        ready.caseId()))
+                .isZero();
+
+        AccessSessionResolver resolver = mock(AccessSessionResolver.class);
+        AuthenticatedActor actor = new AuthenticatedActor("user-persistence", ActorRole.USER);
+        when(resolver.resolve(ready.caseId(), actor))
+                .thenReturn(CaseAccessSessionEntity.create(
+                        "CAS_" + ready.attemptId(),
+                        "tenant-persistence",
+                        ready.caseId(),
+                        actor.actorId(),
+                        ActorRole.USER,
+                        PermissionLevel.PARTY_USER,
+                        "test"));
+        AgentRunStreamEventService publicStream = new AgentRunStreamEventService(
+                runRepository,
+                attemptRepository,
+                eventRepository,
+                mock(AgentRunStreamWakeupPublisher.class),
+                resolver,
+                new SessionPermissionService(),
+                objectMapper);
+        assertThat(publicStream.replay(ready.agentRunId(), -1L, actor))
+                .extracting(view -> view.type())
+                .containsExactly(
+                        "attempt_started", "visible_delta", "visible_delta", "error");
+        assertThat(publicStream.replay(
+                        ready.agentRunId(),
+                        "v2:" + ready.attemptId() + ":2",
+                        actor))
+                .singleElement()
+                .satisfies(view -> {
+                    assertThat(view.type()).isEqualTo("error");
+                    assertThat(view.sequence()).isEqualTo(4L);
+                    assertThat(view.code())
+                            .isEqualTo("INTAKE_INITIATOR_MATRIX_AUTHORITY_INVALID");
+                    assertThat(view.retryable()).isFalse();
+                    assertThat(view.message()).isEqualTo("数字人生成失败，请稍后重试。");
+                });
+    }
+
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void finalizationFailureReplayIsExactAndIdempotent() {
+        ReadyRun ready = readyRun("ATTEMPT_FINALIZATION_REPLAY");
+        Object command = finalizationFailureCommand(ready);
+
+        Object inserted = recordFinalizationFailure(command);
+        Object replayed = recordFinalizationFailure(command);
+
+        assertThat(recordAccessor(inserted, "replayed")).isEqualTo(false);
+        assertThat(recordAccessor(replayed, "replayed")).isEqualTo(true);
+        for (String accessor : List.of(
+                "agentRunId",
+                "attemptId",
+                "resultHash",
+                "terminalSequenceNo",
+                "attemptStatus",
+                "safeErrorCode")) {
+            assertThat(recordAccessor(replayed, accessor))
+                    .as(accessor)
+                    .isEqualTo(recordAccessor(inserted, accessor));
+        }
+        assertThat(jdbc.queryForObject(
+                        """
+                        select count(*) from agent_run_stream_event
+                         where agent_run_id = ? and agent_run_attempt_id = ?
+                           and sequence_no = 4 and event_type = 'error'
+                        """,
+                        Long.class,
+                        ready.agentRunId(),
+                        ready.attemptId()))
+                .isEqualTo(1L);
+
+        TransactionTemplate transaction = new TransactionTemplate(transactionManager);
+        assertThatThrownBy(() -> transaction.executeWithoutResult(status ->
+                        appendFinalizationErrorInCurrentTransaction(finalizationError(
+                                ready.agentRunId(),
+                                ready.attemptId(),
+                                5,
+                                Audience.USER,
+                                false))))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("terminal");
+    }
+
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void finalizationFailureRejectsStaleCommittedCrossAttemptAndTamperedBindings() {
+        ReadyRun ready = readyRun("ATTEMPT_FINALIZATION_TAMPER");
+        Object exact = finalizationFailureCommand(ready);
+        recordFinalizationFailure(exact);
+
+        for (Object stale : List.of(
+                finalizationFailureCommand(
+                        ready,
+                        ready.agentRunId(),
+                        ready.attemptId(),
+                        "command-stale",
+                        ready.commandRequestHash(),
+                        ready.resultHash(),
+                        ready.finalSequenceNo(),
+                        ready.publicOutputEmitted(),
+                        "INTAKE_INITIATOR_MATRIX_AUTHORITY_INVALID"),
+                finalizationFailureCommand(
+                        ready,
+                        ready.agentRunId(),
+                        ready.attemptId(),
+                        ready.commandId(),
+                        "d".repeat(64),
+                        ready.resultHash(),
+                        ready.finalSequenceNo(),
+                        ready.publicOutputEmitted(),
+                        "INTAKE_INITIATOR_MATRIX_AUTHORITY_INVALID"),
+                finalizationFailureCommand(
+                        ready,
+                        ready.agentRunId(),
+                        ready.attemptId(),
+                        ready.commandId(),
+                        ready.commandRequestHash(),
+                        "e".repeat(64),
+                        ready.finalSequenceNo(),
+                        ready.publicOutputEmitted(),
+                        "INTAKE_INITIATOR_MATRIX_AUTHORITY_INVALID"),
+                finalizationFailureCommand(
+                        ready,
+                        ready.agentRunId(),
+                        ready.attemptId(),
+                        ready.commandId(),
+                        ready.commandRequestHash(),
+                        ready.resultHash(),
+                        ready.finalSequenceNo() - 1,
+                        ready.publicOutputEmitted(),
+                        "INTAKE_INITIATOR_MATRIX_AUTHORITY_INVALID"),
+                finalizationFailureCommand(
+                        ready,
+                        ready.agentRunId(),
+                        "ATTEMPT_CROSS_BOUNDARY",
+                        ready.commandId(),
+                        ready.commandRequestHash(),
+                        ready.resultHash(),
+                        ready.finalSequenceNo(),
+                        ready.publicOutputEmitted(),
+                        "INTAKE_INITIATOR_MATRIX_AUTHORITY_INVALID"),
+                finalizationFailureCommand(
+                        ready,
+                        ready.agentRunId(),
+                        ready.attemptId(),
+                        ready.commandId(),
+                        ready.commandRequestHash(),
+                        ready.resultHash(),
+                        ready.finalSequenceNo(),
+                        false,
+                        "INTAKE_INITIATOR_MATRIX_AUTHORITY_INVALID"),
+                finalizationFailureCommand(
+                        ready,
+                        ready.agentRunId(),
+                        ready.attemptId(),
+                        ready.commandId(),
+                        ready.commandRequestHash(),
+                        ready.resultHash(),
+                        ready.finalSequenceNo(),
+                        ready.publicOutputEmitted(),
+                        "AGENT_RUN_FINALIZATION_REJECTED"))) {
+            assertRecorderRejected(stale);
+        }
+
+        jdbc.update(
+                """
+                update agent_run_stream_event set audience = 'MERCHANT'
+                 where agent_run_id = ? and agent_run_attempt_id = ? and sequence_no = 4
+                """,
+                ready.agentRunId(),
+                ready.attemptId());
+        assertRecorderRejected(exact);
+        jdbc.update(
+                """
+                update agent_run_stream_event set audience = 'USER'
+                 where agent_run_id = ? and agent_run_attempt_id = ? and sequence_no = 4
+                """,
+                ready.agentRunId(),
+                ready.attemptId());
+
+        String originalPayload = jdbc.queryForObject(
+                """
+                select payload_json::text from agent_run_stream_event
+                 where agent_run_id = ? and agent_run_attempt_id = ? and sequence_no = 4
+                """,
+                String.class,
+                ready.agentRunId(),
+                ready.attemptId());
+        String originalHash = jdbc.queryForObject(
+                """
+                select payload_hash from agent_run_stream_event
+                 where agent_run_id = ? and agent_run_attempt_id = ? and sequence_no = 4
+                """,
+                String.class,
+                ready.agentRunId(),
+                ready.attemptId());
+        jdbc.update(
+                """
+                update agent_run_stream_event
+                   set payload_json = jsonb_set(
+                       payload_json, '{payload,error_code}', '"TAMPERED_CODE"'::jsonb)
+                 where agent_run_id = ? and agent_run_attempt_id = ? and sequence_no = 4
+                """,
+                ready.agentRunId(),
+                ready.attemptId());
+        assertRecorderRejected(exact);
+        jdbc.update(
+                """
+                update agent_run_stream_event
+                   set payload_json = cast(? as jsonb), payload_hash = ?
+                 where agent_run_id = ? and agent_run_attempt_id = ? and sequence_no = 4
+                """,
+                originalPayload,
+                originalHash,
+                ready.agentRunId(),
+                ready.attemptId());
+
+        jdbc.update(
+                """
+                update agent_run
+                   set finalization_status = 'COMMITTED', committed_attempt_id = ?,
+                       committed_manifest_id = 'MANIFEST_COMMITTED_TAMPER',
+                       committed_manifest_hash = ?, final_stream_sequence_no = 3,
+                       finalized_at = clock_timestamp()
+                 where id = ?
+                """,
+                ready.attemptId(),
+                "a".repeat(64),
+                ready.agentRunId());
+        assertRecorderRejected(exact);
+    }
+
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void dedicatedFinalizationAppendRejectsUnauthorizedPostFinalShapes() {
+        ReadyRun ready = readyRun("ATTEMPT_FINALIZATION_DEDICATED_APPEND");
+        jdbc.update(
+                "update agent_run_attempt set attempt_status = 'ABORTED' where id = ?",
+                ready.attemptId());
+        TransactionTemplate transaction = new TransactionTemplate(transactionManager);
+
+        assertDedicatedAppendRejected(transaction, finalizationError(
+                ready.agentRunId(), ready.attemptId(), 4, Audience.USER, true));
+        assertDedicatedAppendRejected(
+                transaction,
+                event(
+                        ready.agentRunId(),
+                        ready.attemptId(),
+                        4,
+                        StreamEventType.VISIBLE_DELTA,
+                        "not an error"));
+        assertDedicatedAppendRejected(transaction, finalizationError(
+                ready.agentRunId(), ready.attemptId(), 5, Audience.USER, false));
+        assertDedicatedAppendRejected(transaction, finalizationError(
+                ready.agentRunId(), ready.attemptId(), 4, Audience.MERCHANT, false));
+        assertDedicatedAppendRejected(transaction, finalizationError(
+                ready.agentRunId(), "ATTEMPT_NOT_OWNED", 4, Audience.USER, false));
+        assertThat(eventStore.replay(ready.agentRunId(), ready.attemptId(), -1, 100))
+                .extracting(AgentStreamEvent::eventType)
+                .containsExactly(
+                        StreamEventType.ATTEMPT_STARTED,
+                        StreamEventType.VISIBLE_DELTA,
+                        StreamEventType.VISIBLE_DELTA,
+                        StreamEventType.FINAL);
+    }
+
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void dualWriteParityAllowsOnlyFinalizationFinalThenError() {
+        ReadyRun ready = readyRun("ATTEMPT_FINALIZATION_PARITY");
+        recordFinalizationFailure(finalizationFailureCommand(ready));
+        for (long sequence = 0; sequence <= 4; sequence++) {
+            TestSource source = source(ready.agentRunId(), ready.attemptId(), sequence);
+            assertThat(recordTarget(source, source.payloadHash())).isTrue();
+        }
+        assertThat(eventStore
+                        .validateCompatibility(
+                                "agent-stream.v2", ready.agentRunId(), ready.attemptId())
+                        .requireCompatible()
+                        .terminalParity())
+                .isTrue();
+
+        AgentStreamEvent late = event(
+                ready.agentRunId(),
+                ready.attemptId(),
+                5,
+                StreamEventType.VISIBLE_DELTA,
+                "post-error events remain forbidden");
+        String lateJson = ContractJson.canonicalString(objectMapper.valueToTree(late));
+        String lateHash = ContractJson.sha256Hex(objectMapper.valueToTree(late));
+        TestSource basis = source(ready.agentRunId(), ready.attemptId(), 4);
+        TestSource lateSource = new TestSource(
+                "P8_POST_FINALIZATION_ERROR_" + ready.attemptId(),
+                "agent-stream.v2",
+                ready.agentRunId(),
+                ready.attemptId(),
+                5,
+                "visible_delta",
+                lateJson,
+                lateHash,
+                "USER",
+                late.occurredAt(),
+                basis.actorId(),
+                basis.audienceActorIdsJson());
+        insertV2Source(lateSource);
+        assertThat(recordTarget(lateSource, lateHash)).isTrue();
+        var incompatible = eventStore.validateCompatibility(
+                "agent-stream.v2", ready.agentRunId(), ready.attemptId());
+        assertThat(incompatible.countParity()).isTrue();
+        assertThat(incompatible.sequenceParity()).isTrue();
+        assertThat(incompatible.terminalParity()).isFalse();
+        assertThat(incompatible.reconnectParity()).isFalse();
+    }
 
     @Test
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
@@ -875,9 +1339,23 @@ class AgentRunStreamReplayIntegrationTest {
 
     private AgentStreamEvent event(
             String attemptId, long sequence, StreamEventType eventType, String delta) {
+        return event(
+                AgentRunPersistenceFixtures.RUN_ID,
+                attemptId,
+                sequence,
+                eventType,
+                delta);
+    }
+
+    private AgentStreamEvent event(
+            String runId,
+            String attemptId,
+            long sequence,
+            StreamEventType eventType,
+            String delta) {
         return new AgentStreamEvent(
                 "agent-stream.v2",
-                AgentRunPersistenceFixtures.RUN_ID,
+                runId,
                 attemptId,
                 sequence,
                 eventType,
@@ -896,7 +1374,283 @@ class AgentRunStreamReplayIntegrationTest {
                         null));
     }
 
+    private ReadyRun readyRun(String attemptId) {
+        String runId = "RUN_" + attemptId;
+        String caseId = "CASE_" + attemptId;
+        String logicalKey = "logical-" + attemptId;
+        String commandId = "command-" + attemptId;
+        insertCase(caseId);
+        RoomGraphCommand command = reboundCommand(
+                runId, caseId, attemptId, commandId);
+        AgentRunCommandBindingFactory.Context context =
+                new AgentRunCommandBindingFactory.Context(
+                        "ROOM_V2_PERSISTENCE",
+                        "EPOCH_V2_PERSISTENCE",
+                        "EVIDENCE_ANALYZE",
+                        logicalKey);
+        AgentRunCommandBindingFactory.Binding binding =
+                new AgentRunCommandBindingFactory(objectMapper).bind(context, command);
+        AgentRunLedger.CreateLogicalRun basis =
+                AgentRunPersistenceFixtures.logicalRun(attemptId);
+        AgentRunLedger.CreateLogicalRun create = new AgentRunLedger.CreateLogicalRun(
+                runId,
+                basis.tenantSurrogate(),
+                caseId,
+                basis.roomId(),
+                basis.operation(),
+                logicalKey,
+                basis.protocol(),
+                basis.executorKind(),
+                basis.roomEpochId(),
+                basis.roomType(),
+                basis.roomEpoch(),
+                basis.processRevision(),
+                basis.fencingToken(),
+                command.requestHash(),
+                binding.logicalInputHash(),
+                basis.attemptLimit(),
+                basis.deadlineAt(),
+                basis.createdAt());
+        AgentRunLedger.LogicalRun logical = ledger.createOrLoad(create);
+        AgentRunLedger.Attempt attempt = ledger.startNextAttempt(
+                logical.agentRunId(),
+                new AgentRunLedger.AttemptAllocation(1, command, binding),
+                AgentRunPersistenceFixtures.STARTED_AT);
+        eventStore.append(event(
+                runId, attempt.attemptId(), 1, StreamEventType.VISIBLE_DELTA, "visible"));
+        eventStore.append(event(
+                runId, attempt.attemptId(), 2, StreamEventType.VISIBLE_DELTA, " output"));
+        ExecuteAgentRunResult result = reboundResult(
+                runId, attempt.attemptId(), command.commandId());
+        AgentRunReconciledFinalStore.Receipt finalReceipt =
+                eventStore.appendOrLoadReconciledFinal(
+                        new AgentRunReconciledFinalStore.Request(
+                                logical.agentRunId(),
+                                attempt.attemptId(),
+                                Audience.USER,
+                                "urn:after-sale-flow:graph-result:" + result.resultHash(),
+                                result.resultHash()));
+        assertThat(finalReceipt.finalEvent().sequenceNo()).isEqualTo(result.lastSequenceNo());
+        assertThat(finalReceipt.publicOutputEmitted()).isTrue();
+        ledger.recordResultReady(result);
+        assertThat(attemptProgress(attempt.attemptId()))
+                .isEqualTo(new AttemptProgress(3, true, true));
+        return new ReadyRun(
+                logical.agentRunId(),
+                caseId,
+                command.logicalRunId(),
+                attempt.attemptId(),
+                attempt.attemptNo(),
+                command.commandId(),
+                command.requestHash(),
+                result.resultHash(),
+                result.lastSequenceNo(),
+                result.publicOutputEmitted());
+    }
+
+    private RoomGraphCommand reboundCommand(
+            String runId, String caseId, String attemptId, String commandId) {
+        ObjectMapper commandMapper = objectMapper.copy();
+        commandMapper.setSerializationInclusion(
+                com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL);
+        commandMapper.disable(
+                com.fasterxml.jackson.databind.SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+        ObjectNode json = commandMapper.valueToTree(
+                AgentRunPersistenceFixtures.request(1, attemptId).command());
+        json.put("command_id", commandId);
+        json.put("logical_run_id", runId);
+        json.put("attempt_id", attemptId);
+        json.put("case_id", caseId);
+        json.remove("request_hash");
+        json.put("request_hash", ContractJson.sha256Hex(json));
+        try {
+            return commandMapper.treeToValue(json, RoomGraphCommand.class);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException failure) {
+            throw new AssertionError("rebound command fixture is invalid", failure);
+        }
+    }
+
+    private ExecuteAgentRunResult reboundResult(
+            String runId, String attemptId, String commandId) {
+        ObjectNode json = objectMapper.valueToTree(
+                AgentRunPersistenceFixtures.result(1, attemptId));
+        json.put("agent_run_id", runId);
+        json.put("logical_run_id", runId);
+        json.put("attempt_id", attemptId);
+        ObjectNode graphResult = (ObjectNode) json.required("graph_result");
+        graphResult.put("command_id", commandId);
+        graphResult.put("logical_run_id", runId);
+        graphResult.put("attempt_id", attemptId);
+        try {
+            return objectMapper.treeToValue(json, ExecuteAgentRunResult.class);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException failure) {
+            throw new AssertionError("rebound result fixture is invalid", failure);
+        }
+    }
+
+    private Object finalizationFailureCommand(ReadyRun ready) {
+        return finalizationFailureCommand(
+                ready,
+                ready.agentRunId(),
+                ready.attemptId(),
+                ready.commandId(),
+                ready.commandRequestHash(),
+                ready.resultHash(),
+                ready.finalSequenceNo(),
+                ready.publicOutputEmitted(),
+                "INTAKE_INITIATOR_MATRIX_AUTHORITY_INVALID");
+    }
+
+    private Object finalizationFailureCommand(
+            ReadyRun ready,
+            String agentRunId,
+            String attemptId,
+            String commandId,
+            String commandRequestHash,
+            String resultHash,
+            long finalSequenceNo,
+            boolean publicOutputEmitted,
+            String safeErrorCode) {
+        try {
+            Class<?> commandType = Class.forName(
+                    "com.example.dispute.workflow.activity.agent."
+                            + "AgentRunFinalizationFailureRecorder$Command");
+            Constructor<?> constructor = commandType.getConstructor(
+                    String.class,
+                    String.class,
+                    String.class,
+                    long.class,
+                    String.class,
+                    String.class,
+                    String.class,
+                    long.class,
+                    boolean.class,
+                    String.class);
+            return constructor.newInstance(
+                    agentRunId,
+                    ready.logicalRunId(),
+                    attemptId,
+                    ready.attemptNo(),
+                    commandId,
+                    commandRequestHash,
+                    resultHash,
+                    finalSequenceNo,
+                    publicOutputEmitted,
+                    safeErrorCode);
+        } catch (ReflectiveOperationException failure) {
+            throw new AssertionError(
+                    "expected AgentRunFinalizationFailureRecorder.Command API is missing",
+                    failure);
+        }
+    }
+
+    private Object recordFinalizationFailure(Object command) {
+        try {
+            Method method = AgentRunLedger.class.getMethod(
+                    "recordFinalizationFailure", command.getClass());
+            return method.invoke(ledger, command);
+        } catch (InvocationTargetException failure) {
+            Throwable cause = failure.getCause();
+            if (cause instanceof RuntimeException runtime) {
+                throw runtime;
+            }
+            if (cause instanceof Error error) {
+                throw error;
+            }
+            throw new AssertionError("ledger recorder failed with a checked exception", cause);
+        } catch (ReflectiveOperationException failure) {
+            throw new AssertionError(
+                    "expected AgentRunLedger.recordFinalizationFailure API is missing",
+                    failure);
+        }
+    }
+
+    private void assertRecorderRejected(Object command) {
+        assertThatThrownBy(() -> recordFinalizationFailure(command))
+                .isInstanceOf(RuntimeException.class);
+    }
+
+    private Object appendFinalizationErrorInCurrentTransaction(AgentStreamEvent event) {
+        try {
+            Method method = PostgresAgentRunV2EventStore.class.getMethod(
+                    "appendFinalizationErrorInCurrentTransaction", AgentStreamEvent.class);
+            return method.invoke(eventStore, event);
+        } catch (InvocationTargetException failure) {
+            Throwable cause = failure.getCause();
+            if (cause instanceof RuntimeException runtime) {
+                throw runtime;
+            }
+            if (cause instanceof Error error) {
+                throw error;
+            }
+            throw new AssertionError(
+                    "dedicated finalization error append failed with a checked exception", cause);
+        } catch (ReflectiveOperationException failure) {
+            throw new AssertionError(
+                    "expected appendFinalizationErrorInCurrentTransaction API is missing",
+                    failure);
+        }
+    }
+
+    private void assertDedicatedAppendRejected(
+            TransactionTemplate transaction, AgentStreamEvent event) {
+        assertThatThrownBy(() -> transaction.executeWithoutResult(status ->
+                        appendFinalizationErrorInCurrentTransaction(event)))
+                .isInstanceOf(RuntimeException.class);
+    }
+
+    private static Object recordAccessor(Object record, String accessor) {
+        try {
+            return record.getClass().getMethod(accessor).invoke(record);
+        } catch (ReflectiveOperationException failure) {
+            throw new AssertionError("recorder receipt is missing accessor " + accessor, failure);
+        }
+    }
+
+    private AgentStreamEvent finalizationError(
+            String runId,
+            String attemptId,
+            long sequence,
+            Audience audience,
+            boolean retryable) {
+        return new AgentStreamEvent(
+                "agent-stream.v2",
+                runId,
+                attemptId,
+                sequence,
+                StreamEventType.ERROR,
+                audience,
+                AgentRunPersistenceFixtures.COMPLETED_AT.plusSeconds(1),
+                new Payload(
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        "INTAKE_INITIATOR_MATRIX_AUTHORITY_INVALID",
+                        retryable));
+    }
+
+    private record ReadyRun(
+            String agentRunId,
+            String caseId,
+            String logicalRunId,
+            String attemptId,
+            long attemptNo,
+            String commandId,
+            String commandRequestHash,
+            String resultHash,
+            long finalSequenceNo,
+            boolean publicOutputEmitted) {}
+
     private void insertCase() {
+        insertCase(AgentRunPersistenceFixtures.CASE_ID);
+    }
+
+    private void insertCase(String caseId) {
         jdbc.update(
                 """
                 insert into fulfillment_dispute_case (
@@ -910,8 +1664,8 @@ class AgentRunStreamReplayIntegrationTest {
                           'AgentRun stream replay', 'AgentRun stream replay fixture',
                           'EVIDENCE', 'test', 'test')
                 """,
-                AgentRunPersistenceFixtures.CASE_ID,
-                "idem-stream-replay");
+                caseId,
+                "idem-stream-replay-" + caseId);
     }
 
     private static String jdbcUrl() {
