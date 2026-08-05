@@ -23,7 +23,10 @@ from langchain_core.runnables import (
 from typing_extensions import TypedDict
 
 from app.contracts.v1.codec import canonical_sha256, canonicalize
-from app.agents.dispute_intake_officer.case_fact_matrix import finalize_case_fact_matrix
+from app.agents.dispute_intake_officer.case_fact_matrix import (
+    finalize_case_fact_matrix,
+    respondent_opening_carry_delta,
+)
 from app.graph_runtime.state_lens import StateLens
 from app.agents.dispute_intake_officer.schemas import IntakeCaseDetailLlmOutput
 from app.agents.dispute_intake_officer.skills.dossier.dossier_skill import (
@@ -1408,6 +1411,22 @@ def _generation_parts_with_baseline_context(
         agent_context=agent_context,
         draft=normalized,
     )
+    if typed_state.get("route") == "respondent_opening":
+        opening_request = build_intake_baseline_request(
+            typed_state,
+            agent_context=agent_context,
+        )
+        opening_patch = respondent_opening_carry_delta(
+            request=opening_request,
+        ).model_dump(mode="json", exclude_none=True)
+        validate_matrix_patch(typed_state, opening_patch)
+        normalized_payload = normalized.model_dump(
+            mode="json",
+            exclude_none=True,
+            exclude_unset=True,
+        )
+        normalized_payload["matrix_patch"] = opening_patch
+        normalized = IntakeCognitionDraft.model_validate(normalized_payload)
     return (
         typed_state,
         message,

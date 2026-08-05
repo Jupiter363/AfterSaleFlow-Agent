@@ -2,6 +2,7 @@ package com.example.dispute.workflow.application.intake;
 
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
+import com.example.dispute.workflow.application.intake.IntakeTurnEventPublisher.SourceType;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -168,6 +169,17 @@ public final class IntakeDossierProjectionMerger {
         boolean formalAuthorityValidated = false;
 
         JsonNode matrixPatch = proposal.matrixPatch();
+        boolean respondentOpening = matrixAuthority != null
+                && matrixAuthority.sourceType() == SourceType.RESPONDENT_OPENING;
+        if (respondentOpening
+                && (matrixPatch == null
+                        || matrixAuthority.actorRole() != matrixAuthority.respondentRole()
+                        || !"case_fact_matrix.delta.v2"
+                                .equals(matrixPatch.path("schema_version").asText()))) {
+            throw rejected(
+                    "INTAKE_RESPONDENT_OPENING_MATRIX_INVALID",
+                    "respondent opening requires its exact respondent carry delta");
+        }
         if (matrixPatch != null) {
             if (matrixAuthority == null) {
                 throw rejected(
@@ -225,7 +237,16 @@ public final class IntakeDossierProjectionMerger {
                     ObjectNode bilateralCandidate = respondentMatrixFreezer.deriveCandidate(
                             (ObjectNode) currentFormalMatrix, matrixPatch, matrixAuthority);
                     formalAuthorityValidated = true;
-                    if (proposal.readiness() == IntakeTurnProposal.Readiness.READY_TO_CONFIRM
+                    if (respondentOpening) {
+                        requireRespondentOpeningCarry(
+                                (ObjectNode) currentFormalMatrix,
+                                matrixPatch,
+                                matrixAuthority,
+                                proposal);
+                        merged.set("case_fact_matrix", bilateralCandidate);
+                        matrixChanged = true;
+                    } else if (proposal.readiness()
+                                    == IntakeTurnProposal.Readiness.READY_TO_CONFIRM
                             && proposal.missingFields().isEmpty()) {
                         respondentMatrixFreezer.requireCompleteForFreeze(
                                 bilateralCandidate, matrixAuthority);
@@ -311,6 +332,96 @@ public final class IntakeDossierProjectionMerger {
                 target.set(field.getKey(), incoming.deepCopy());
             }
         }
+    }
+
+    private static void requireRespondentOpeningCarry(
+            ObjectNode parent,
+            JsonNode delta,
+            MatrixAuthority authority,
+            IntakeTurnProposal proposal) {
+        if (authority.sourceType() != SourceType.RESPONDENT_OPENING
+                || authority.actorRole() != authority.respondentRole()
+                || proposal.readiness() != IntakeTurnProposal.Readiness.INCOMPLETE
+                || proposal.recommendation() != IntakeTurnProposal.Recommendation.NEED_MORE_INFO
+                || !proposal.missingFields().isEmpty()) {
+            throw rejected(
+                    "INTAKE_RESPONDENT_OPENING_MATRIX_INVALID",
+                    "respondent opening matrix outcome or authority is invalid");
+        }
+        JsonNode respondentClaim = delta.get("respondent_claim");
+        if (respondentClaim != null && !respondentClaim.isNull()) {
+            throw rejected(
+                    "INTAKE_RESPONDENT_OPENING_MATRIX_INVALID",
+                    "respondent opening cannot create a respondent claim");
+        }
+
+        JsonNode parentRows = parent.path("fact_rows");
+        JsonNode deltaRows = delta.path("fact_rows");
+        Map<String, JsonNode> parentById = new HashMap<>();
+        for (JsonNode parentRow : parentRows) {
+            parentById.put(parentRow.path("fact_id").asText(), parentRow);
+        }
+        if (!deltaRows.isArray() || deltaRows.size() != parentById.size()) {
+            throw rejected(
+                    "INTAKE_RESPONDENT_OPENING_MATRIX_INVALID",
+                    "respondent opening must carry every prior fact exactly once");
+        }
+
+        Set<String> carried = new HashSet<>();
+        int rowIndex = 0;
+        for (JsonNode row : deltaRows) {
+            String factId = row.path("fact_key").asText();
+            JsonNode orderedPrior = parentRows.get(rowIndex++);
+            JsonNode prior = parentById.get(factId);
+            JsonNode priorRespondent = prior == null
+                    ? null
+                    : prior.path("positions").path(authority.respondentRole().name());
+            if (prior == null
+                    || orderedPrior == null
+                    || !factId.equals(orderedPrior.path("fact_id").asText())
+                    || !carried.add(factId)
+                    || !prior.path("category").equals(row.path("category"))
+                    || !prior.path("fact_target").equals(row.path("fact_target"))
+                    || !prior.path("materiality").equals(row.path("materiality"))
+                    || priorRespondent == null
+                    || !"NOT_ADDRESSED".equals(priorRespondent.path("stance").asText())
+                    || !"NOT_ADDRESSED".equals(row.path("stance").asText())
+                    || !"PREVIOUS_MATRIX".equals(row.path("source_scope").asText())
+                    || !priorRespondent
+                            .path("position_summary")
+                            .equals(row.path("position_summary"))
+                    || !absentOrNull(row.get("asserted_value"))
+                    || !sameOptionalText(
+                            prior.path("party_alignment").get("agreed_statement"),
+                            row.get("agreed_statement"))
+                    || !sameOptionalText(
+                            prior.path("party_alignment").get("conflict_summary"),
+                            row.get("conflict_summary"))) {
+                throw rejected(
+                        "INTAKE_RESPONDENT_OPENING_MATRIX_INVALID",
+                        "respondent opening carry diverges from prior matrix authority");
+            }
+        }
+        if (!carried.equals(parentById.keySet())
+                || !parent.path("case_overview")
+                        .path("summary_source_fact_ids")
+                        .equals(delta.path("summary_source_fact_keys"))) {
+            throw rejected(
+                    "INTAKE_RESPONDENT_OPENING_MATRIX_INVALID",
+                    "respondent opening carry changes fact membership or summary authority");
+        }
+    }
+
+    private static boolean absentOrNull(JsonNode value) {
+        return value == null || value.isNull();
+    }
+
+    private static boolean sameOptionalText(JsonNode left, JsonNode right) {
+        return Objects.equals(optionalText(left), optionalText(right));
+    }
+
+    private static String optionalText(JsonNode value) {
+        return value == null || value.isNull() ? null : value.textValue();
     }
 
     private static void requireStableTransition(JsonNode previous, JsonNode current) {
@@ -658,7 +769,27 @@ public final class IntakeDossierProjectionMerger {
             ActorRole respondentRole,
             String sourceRef,
             String sourceContextHash,
-            ClaimResolutionAuthority claimResolutionAuthority) {
+            ClaimResolutionAuthority claimResolutionAuthority,
+            SourceType sourceType) {
+
+        public MatrixAuthority(
+                String caseId,
+                ActorRole actorRole,
+                ActorRole initiatorRole,
+                ActorRole respondentRole,
+                String sourceRef,
+                String sourceContextHash,
+                ClaimResolutionAuthority claimResolutionAuthority) {
+            this(
+                    caseId,
+                    actorRole,
+                    initiatorRole,
+                    respondentRole,
+                    sourceRef,
+                    sourceContextHash,
+                    claimResolutionAuthority,
+                    null);
+        }
 
         public MatrixAuthority(
                 String caseId,
@@ -674,6 +805,7 @@ public final class IntakeDossierProjectionMerger {
                     respondentRole,
                     sourceRef,
                     sourceContextHash,
+                    null,
                     null);
         }
 

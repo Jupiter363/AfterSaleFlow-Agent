@@ -7,6 +7,7 @@ import com.example.dispute.workflow.application.intake.IntakeDossierProjectionMe
 import com.example.dispute.workflow.application.intake.IntakeDossierProjectionMerger.ClaimResolutionAuthority;
 import com.example.dispute.workflow.application.intake.IntakeDossierProjectionMerger.MatrixAuthority;
 import com.example.dispute.workflow.application.intake.IntakeFinalizationRejectedException;
+import com.example.dispute.workflow.application.intake.IntakeTurnEventPublisher.SourceType;
 import com.example.dispute.workflow.application.intake.IntakeTurnProposal;
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
@@ -791,6 +792,167 @@ class IntakeDossierProjectionMergerTest {
     }
 
     @Test
+    void authoritativeRespondentOpeningPersistsTheExactIncompleteBilateralSuccessor()
+            throws Exception {
+        ObjectNode current = dossierWithInitiatorMatrixVersion(5);
+        ObjectNode parent = ((ObjectNode) current.path("case_fact_matrix")).deepCopy();
+        JsonNode carry = respondentOpeningCarry(parent);
+
+        var result = merger.merge(
+                current,
+                proposal(
+                        JSON.createObjectNode(),
+                        carry,
+                        IntakeTurnProposal.Readiness.INCOMPLETE,
+                        List.of()),
+                matrixAuthority(ActorRole.MERCHANT, SourceType.RESPONDENT_OPENING));
+
+        JsonNode successor = result.dossier().path("case_fact_matrix");
+        assertThat(result.matrixVersion()).isEqualTo(6);
+        assertThat(successor.path("matrix_kind").asText()).isEqualTo("BILATERAL_FROZEN");
+        assertThat(successor.at("/parent_ref/matrix_id")).isEqualTo(parent.path("matrix_id"));
+        assertThat(successor.at("/parent_ref/matrix_version").asLong()).isEqualTo(5);
+        assertThat(successor.at("/parent_ref/content_hash")).isEqualTo(parent.path("content_hash"));
+        assertThat(successor.at("/claims/respondent_direct").isNull()).isTrue();
+    }
+
+    @Test
+    void ordinaryOrLegacyIncompleteRespondentCarryCannotGainOpeningPrivilege() throws Exception {
+        ObjectNode current = dossierWithInitiatorMatrixVersion(5);
+        ObjectNode parent = ((ObjectNode) current.path("case_fact_matrix")).deepCopy();
+        JsonNode carry = respondentOpeningCarry(parent);
+        IntakeTurnProposal incomplete = proposal(
+                JSON.createObjectNode(),
+                carry,
+                IntakeTurnProposal.Readiness.INCOMPLETE,
+                List.of("respondent_supporting_evidence"));
+
+        for (MatrixAuthority authority : List.of(
+                matrixAuthority(ActorRole.MERCHANT),
+                matrixAuthority(ActorRole.MERCHANT, SourceType.ROOM_MESSAGE))) {
+            var result = merger.merge(current, incomplete, authority);
+            assertThat(result.dossier().path("case_fact_matrix")).isEqualTo(parent);
+            assertThat(result.matrixVersion()).isNull();
+        }
+
+        assertThatThrownBy(() -> merger.merge(
+                        current,
+                        proposal(
+                                JSON.createObjectNode(),
+                                null,
+                                IntakeTurnProposal.Readiness.INCOMPLETE,
+                                List.of()),
+                        matrixAuthority(ActorRole.MERCHANT, SourceType.RESPONDENT_OPENING)))
+                .isInstanceOf(IntakeFinalizationRejectedException.class);
+    }
+
+    @Test
+    void forgedRespondentOpeningCarryFailsClosed() throws Exception {
+        ObjectNode current = dossierWithInitiatorMatrixVersion(5);
+        ObjectNode parent = ((ObjectNode) current.path("case_fact_matrix")).deepCopy();
+        ObjectNode exact = respondentOpeningCarry(parent);
+
+        ObjectNode newRow = exact.deepCopy();
+        ((ObjectNode) newRow.withArray("fact_rows").get(0)).put("fact_key", "NEW_FORGED");
+        newRow.withArray("summary_source_fact_keys").removeAll().add("NEW_FORGED");
+
+        ObjectNode currentSource = exact.deepCopy();
+        ObjectNode currentSourceRow = (ObjectNode) currentSource.withArray("fact_rows").get(0);
+        currentSourceRow.put("stance", "CONFIRM");
+        currentSourceRow.put("position_summary", "Forged current-source position.");
+        currentSourceRow.put("asserted_value", "forged");
+        currentSourceRow.put("source_scope", "CURRENT_SOURCE");
+
+        ObjectNode respondentClaim = exact.deepCopy();
+        respondentClaim.putObject("respondent_claim")
+                .put("attitude", "DISAGREE")
+                .put("position_summary", "Forged opening claim.");
+
+        ObjectNode missingPrior = exact.deepCopy();
+        missingPrior.withArray("fact_rows").removeAll();
+
+        ObjectNode driftedPrior = exact.deepCopy();
+        ((ObjectNode) driftedPrior.withArray("fact_rows").get(0))
+                .put("fact_target", "Forged prior binding.");
+
+        ObjectNode wrongSummary = exact.deepCopy();
+        wrongSummary.withArray("summary_source_fact_keys").removeAll().add("FACT_FORGED");
+
+        MatrixAuthority opening =
+                matrixAuthority(ActorRole.MERCHANT, SourceType.RESPONDENT_OPENING);
+        assertThatThrownBy(() -> merger.merge(
+                        current,
+                        proposal(
+                                JSON.createObjectNode(),
+                                exact,
+                                IntakeTurnProposal.Readiness.INCOMPLETE,
+                                List.of("respondent_supporting_evidence")),
+                        opening))
+                .isInstanceOf(IntakeFinalizationRejectedException.class);
+        for (JsonNode forged : List.of(
+                newRow,
+                currentSource,
+                respondentClaim,
+                missingPrior,
+                driftedPrior,
+                wrongSummary)) {
+            assertThatThrownBy(() -> merger.merge(
+                            current,
+                            proposal(
+                                    JSON.createObjectNode(),
+                                    forged,
+                                    IntakeTurnProposal.Readiness.INCOMPLETE,
+                                    List.of()),
+                            opening))
+                    .isInstanceOf(IntakeFinalizationRejectedException.class);
+        }
+
+        assertThatThrownBy(() -> merger.merge(
+                        current,
+                        proposal(
+                                JSON.createObjectNode(),
+                                exact,
+                                IntakeTurnProposal.Readiness.INCOMPLETE,
+                                List.of()),
+                        matrixAuthority(ActorRole.USER, SourceType.RESPONDENT_OPENING)))
+                .isInstanceOf(IntakeFinalizationRejectedException.class);
+
+        assertThatThrownBy(() -> merger.merge(
+                        current,
+                        proposal(
+                                JSON.createObjectNode(),
+                                unilateralDraft(),
+                                IntakeTurnProposal.Readiness.INCOMPLETE,
+                                List.of()),
+                        matrixAuthority(ActorRole.USER, SourceType.RESPONDENT_OPENING)))
+                .isInstanceOf(IntakeFinalizationRejectedException.class);
+    }
+
+    @Test
+    void reorderedRespondentOpeningCarryFailsClosedBeforeChangingTheFormalHash()
+            throws Exception {
+        ObjectNode current = dossierWithTwoFactInitiatorMatrixVersion(5);
+        ObjectNode parent = ((ObjectNode) current.path("case_fact_matrix")).deepCopy();
+        ObjectNode reordered = respondentOpeningCarry(parent);
+        ArrayNode rows = reordered.withArray("fact_rows");
+        assertThat(rows).hasSizeGreaterThanOrEqualTo(2);
+        JsonNode first = rows.get(0).deepCopy();
+        JsonNode second = rows.get(1).deepCopy();
+        rows.set(0, second);
+        rows.set(1, first);
+
+        assertThatThrownBy(() -> merger.merge(
+                        current,
+                        proposal(
+                                JSON.createObjectNode(),
+                                reordered,
+                                IntakeTurnProposal.Readiness.INCOMPLETE,
+                                List.of()),
+                        matrixAuthority(ActorRole.MERCHANT, SourceType.RESPONDENT_OPENING)))
+                .isInstanceOf(IntakeFinalizationRejectedException.class);
+    }
+
+    @Test
     void rejectsInconsistentTypedReadinessAndRecommendation() {
         assertRejected(
                 "INTAKE_PROPOSAL_OUTCOME_CONFLICT",
@@ -1033,6 +1195,109 @@ class IntakeDossierProjectionMergerTest {
                 .dossier();
     }
 
+    private ObjectNode dossierWithInitiatorMatrixVersion(int targetVersion) throws Exception {
+        ObjectNode current = dossierWithInitiatorMatrix();
+        for (int version = 2; version <= targetVersion; version++) {
+            String factId = current.at("/case_fact_matrix/fact_rows/0/fact_id").asText();
+            MatrixAuthority authority = new MatrixAuthority(
+                    "CASE_P4_SYNTHETIC_1",
+                    ActorRole.USER,
+                    ActorRole.USER,
+                    ActorRole.MERCHANT,
+                    "MESSAGE_P4_USER_" + (version + 1),
+                    Integer.toHexString(version).repeat(64));
+            current = merger.merge(
+                            current,
+                            proposal(completeDossierPatch(), carryForwardDraft(factId)),
+                            authority)
+                    .dossier();
+        }
+        assertThat(current.at("/case_fact_matrix/matrix_version").asInt())
+                .isEqualTo(targetVersion);
+        return current;
+    }
+
+    private ObjectNode dossierWithTwoFactInitiatorMatrixVersion(int targetVersion)
+            throws Exception {
+        ObjectNode current = dossierWithInitiatorMatrix();
+        for (int version = 2; version <= targetVersion; version++) {
+            ObjectNode parent = (ObjectNode) current.path("case_fact_matrix");
+            MatrixAuthority authority = new MatrixAuthority(
+                    "CASE_P4_SYNTHETIC_1",
+                    ActorRole.USER,
+                    ActorRole.USER,
+                    ActorRole.MERCHANT,
+                    "MESSAGE_P4_TWO_FACT_USER_" + version,
+                    Integer.toHexString(version + 5).repeat(64));
+            current = merger.merge(
+                            current,
+                            proposal(
+                                    completeDossierPatch(),
+                                    initiatorCarry(parent, version == 2)),
+                            authority)
+                    .dossier();
+        }
+        assertThat(current.at("/case_fact_matrix/matrix_version").asInt())
+                .isEqualTo(targetVersion);
+        assertThat(current.with("case_fact_matrix").withArray("fact_rows")).hasSize(2);
+        return current;
+    }
+
+    private static ObjectNode initiatorCarry(ObjectNode parent, boolean addSecondFact) {
+        ObjectNode delta = JSON.createObjectNode();
+        delta.put("schema_version", "case_fact_matrix.delta.v2");
+        ArrayNode rows = delta.putArray("fact_rows");
+        ArrayNode summary = delta.putArray("summary_source_fact_keys");
+        for (JsonNode prior : parent.withArray("fact_rows")) {
+            ObjectNode row = rows.addObject();
+            row.set("fact_key", prior.required("fact_id").deepCopy());
+            for (String field : List.of("category", "fact_target", "materiality")) {
+                row.set(field, prior.required(field).deepCopy());
+            }
+            JsonNode position = prior.required("positions").required("USER");
+            for (String field : List.of("stance", "position_summary", "asserted_value")) {
+                row.set(field, position.required(field).deepCopy());
+            }
+            row.put("source_scope", "PREVIOUS_MATRIX");
+            summary.add(prior.required("fact_id").asText());
+        }
+        if (addSecondFact) {
+            rows.addObject()
+                    .put("fact_key", "NEW_DELIVERY_WINDOW")
+                    .put("category", "LOGISTICS")
+                    .put("fact_target", "Whether the delivery window was met.")
+                    .put("materiality", "SUPPORTING")
+                    .put("stance", "CONFIRM")
+                    .put("position_summary", "The initiator reports a delayed delivery.")
+                    .put("asserted_value", "delayed")
+                    .put("source_scope", "CURRENT_SOURCE");
+            summary.add("NEW_DELIVERY_WINDOW");
+        }
+        return delta;
+    }
+
+    private static ObjectNode respondentOpeningCarry(ObjectNode parent) {
+        ObjectNode delta = JSON.createObjectNode();
+        delta.put("schema_version", "case_fact_matrix.delta.v2");
+        ArrayNode rows = delta.putArray("fact_rows");
+        for (JsonNode prior : parent.withArray("fact_rows")) {
+            ObjectNode row = rows.addObject();
+            for (String field : List.of("category", "fact_target", "materiality")) {
+                row.set(field, prior.required(field).deepCopy());
+            }
+            row.set("fact_key", prior.required("fact_id").deepCopy());
+            JsonNode respondent = prior.required("positions").required("MERCHANT");
+            row.put("stance", "NOT_ADDRESSED");
+            row.set("position_summary", respondent.required("position_summary").deepCopy());
+            row.putNull("asserted_value");
+            row.put("source_scope", "PREVIOUS_MATRIX");
+        }
+        delta.set(
+                "summary_source_fact_keys",
+                parent.required("case_overview").required("summary_source_fact_ids").deepCopy());
+        return delta;
+    }
+
     private static JsonNode respondentDelta(String factId) {
         ObjectNode delta = JSON.createObjectNode();
         delta.put("schema_version", "case_fact_matrix.delta.v2");
@@ -1079,6 +1344,19 @@ class IntakeDossierProjectionMergerTest {
                 ActorRole.MERCHANT,
                 respondent ? "MESSAGE_P4_MERCHANT_2" : "MESSAGE_P4_USER_2",
                 (respondent ? "e" : "c").repeat(64));
+    }
+
+    private static MatrixAuthority matrixAuthority(ActorRole actorRole, SourceType sourceType) {
+        boolean respondent = actorRole == ActorRole.MERCHANT;
+        return new MatrixAuthority(
+                "CASE_P4_SYNTHETIC_1",
+                actorRole,
+                ActorRole.USER,
+                ActorRole.MERCHANT,
+                respondent ? "MESSAGE_P4_MERCHANT_2" : "MESSAGE_P4_USER_2",
+                (respondent ? "e" : "c").repeat(64),
+                null,
+                sourceType);
     }
 
     private static IntakeTurnProposal proposal(JsonNode patch, JsonNode matrixPatch) {

@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.dispute.workflow.application.intake.IntakeContractHashes;
+import com.example.dispute.workflow.application.intake.IntakeFinalizationRejectedException;
 import com.example.dispute.workflow.application.intake.IntakeFinalizationOperationKey;
 import com.example.dispute.workflow.application.intake.IntakeFinalizationReceipt;
 import com.example.dispute.workflow.application.intake.IntakeFormalCommitPort;
@@ -16,6 +17,7 @@ import com.example.dispute.workflow.application.intake.IntakePrivateThreadRegist
 import com.example.dispute.workflow.application.intake.IntakeProposalReference;
 import com.example.dispute.workflow.application.intake.IntakeSnapshotReference;
 import com.example.dispute.workflow.application.intake.IntakeEventReference;
+import com.example.dispute.workflow.application.intake.IntakeTurnEventPublisher.SourceType;
 import com.example.dispute.workflow.application.intake.IntakeTurnProposal;
 import com.example.dispute.workflow.application.intake.IntakeTurnProposalLoader;
 import com.example.dispute.room.infrastructure.persistence.JdbcIntakeFormalCommitPort;
@@ -491,6 +493,40 @@ class JdbcIntakeFormalCommitPortTest {
         assertCounts(fixture.caseId(), 0, 0, 0, 0, 0, 0);
     }
 
+    @Test
+    void requestCannotEscalatePersistedRoomMessageToRespondentOpeningAuthority() {
+        Fixture base = fixture("EVENT_SOURCE_MUTATION_" + SEQUENCE.incrementAndGet());
+        IntakeEventReference roomMessage = withSourceType(base.event(), SourceType.ROOM_MESSAGE);
+        IntakeGraphFinalizationRequest roomRequest =
+                requestWith(base, base.snapshot(), roomMessage);
+        Fixture persisted = new Fixture(
+                base.caseId(),
+                base.tenant(),
+                base.binding(),
+                base.snapshot(),
+                roomMessage,
+                base.command(),
+                base.result(),
+                roomRequest,
+                base.authority(),
+                base.loadedProposal(),
+                base.storedProposal());
+        insertFixture(persisted);
+
+        IntakeEventReference claimedOpening =
+                withSourceType(roomMessage, SourceType.RESPONDENT_OPENING);
+        IntakeGraphFinalizationRequest claimedRequest =
+                requestWith(persisted, persisted.snapshot(), claimedOpening);
+
+        assertThatThrownBy(() -> port.commit(commitCommand(claimedRequest, persisted)))
+                .isInstanceOf(IntakeFinalizationRejectedException.class)
+                .satisfies(failure -> assertThat(
+                                ((IntakeFinalizationRejectedException) failure).code())
+                        .isEqualTo("INTAKE_EVENT_BINDING_STALE"))
+                .hasMessageContaining("turn event");
+        assertCounts(persisted.caseId(), 0, 0, 0, 0, 0, 0);
+    }
+
     private static void assertCounts(
             String caseId,
             int messages,
@@ -857,6 +893,30 @@ class JdbcIntakeFormalCommitPortTest {
                 unsigned.initialSnapshot(),
                 unsigned.event(),
                 unsigned.proposalReference());
+    }
+
+    private static IntakeEventReference withSourceType(
+            IntakeEventReference source, SourceType sourceType) {
+        return new IntakeEventReference(
+                source.bindingId(),
+                source.threadRegistrationId(),
+                source.eventId(),
+                source.messageId(),
+                source.tenantSurrogate(),
+                source.caseId(),
+                source.roomEpoch(),
+                source.fencingToken(),
+                source.threadId(),
+                source.actorScopeHash(),
+                source.agentSessionId(),
+                source.payloadRef(),
+                source.objectVersion(),
+                source.sequenceNo(),
+                source.domainRevision(),
+                source.audience(),
+                source.occurredAt(),
+                source.createdAt(),
+                sourceType);
     }
 
     private static IntakeGraphFinalizationRequest requestWithExecutionOutputSchema(

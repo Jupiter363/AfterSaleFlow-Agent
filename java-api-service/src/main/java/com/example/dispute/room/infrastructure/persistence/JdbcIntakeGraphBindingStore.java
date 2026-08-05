@@ -6,6 +6,7 @@ import com.example.dispute.workflow.application.intake.IntakeGraphBindingStore;
 import com.example.dispute.workflow.application.intake.IntakeGraphThreadBinding;
 import com.example.dispute.workflow.application.intake.IntakePrivateThreadRegistration;
 import com.example.dispute.workflow.application.intake.IntakeSnapshotReference;
+import com.example.dispute.workflow.application.intake.IntakeTurnEventPublisher.SourceType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
 import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
 import com.example.dispute.workflow.contract.v1.ContractTypes.WriterMode;
@@ -60,7 +61,7 @@ public class JdbcIntakeGraphBindingStore implements IntakeGraphBindingStore {
             case_id, room_epoch, fencing_token, thread_id, actor_scope_hash,
             agent_session_id, artifact_id, schema_version, object_uri, object_version,
             content_sha256, size_bytes, event_sequence, domain_revision, audience,
-            occurred_at, created_at
+            occurred_at, created_at, event_source_type
             """;
 
     private final NamedParameterJdbcTemplate jdbc;
@@ -176,13 +177,13 @@ public class JdbcIntakeGraphBindingStore implements IntakeGraphBindingStore {
                     actor_audience, binding_type, schema_version, artifact_id, object_uri,
                     object_version, content_sha256, size_bytes, visibility, domain_revision,
                     room_revision, projection_revision, initial_last_sequence,
-                    initialization_marker, created_at
+                    initialization_marker, created_at, event_source_type
                 ) values (
                     :bindingId, :threadRegistrationId, :tenantSurrogate, :caseId, 'INTAKE',
                     :roomEpoch, :fencingToken, :threadId, :actorScopeHash, :agentSessionId,
                     :actorAudience, 'INITIAL', :schemaVersion, :artifactId, :objectUri,
                     :objectVersion, :contentSha256, :sizeBytes, 'PRIVATE', :domainRevision,
-                    :roomRevision, :projectionRevision, :initialLastSequence, true, :createdAt
+                    :roomRevision, :projectionRevision, :initialLastSequence, true, :createdAt, null
                 )
                 on conflict do nothing
                 """,
@@ -224,13 +225,14 @@ public class JdbcIntakeGraphBindingStore implements IntakeGraphBindingStore {
                     actor_audience, binding_type, schema_version, artifact_id, object_uri,
                     object_version, content_sha256, size_bytes, visibility, domain_revision,
                     event_id, message_id, event_sequence, audience, occurred_at,
-                    initialization_marker, created_at
+                    initialization_marker, created_at, event_source_type
                 ) values (
                     :bindingId, :threadRegistrationId, :tenantSurrogate, :caseId, 'INTAKE',
                     :roomEpoch, :fencingToken, :threadId, :actorScopeHash, :agentSessionId,
                     :audience, 'EVENT', :schemaVersion, :artifactId, :objectUri,
                     :objectVersion, :contentSha256, :sizeBytes, 'PRIVATE', :domainRevision,
-                    :eventId, :messageId, :eventSequence, :audience, :occurredAt, false, :createdAt
+                    :eventId, :messageId, :eventSequence, :audience, :occurredAt, false, :createdAt,
+                    :eventSourceType
                 )
                 on conflict do nothing
                 """,
@@ -573,7 +575,10 @@ public class JdbcIntakeGraphBindingStore implements IntakeGraphBindingStore {
                 .addValue("messageId", reference.messageId())
                 .addValue("eventSequence", reference.sequenceNo())
                 .addValue("audience", reference.audience().name())
-                .addValue("occurredAt", atOffset(reference.occurredAt()));
+                .addValue("occurredAt", atOffset(reference.occurredAt()))
+                .addValue(
+                        "eventSourceType",
+                        reference.sourceType() == null ? null : reference.sourceType().name());
     }
 
     private static MapSqlParameterSource baseReferenceParameters(
@@ -686,7 +691,13 @@ public class JdbcIntakeGraphBindingStore implements IntakeGraphBindingStore {
                 row.getLong("domain_revision"),
                 Audience.valueOf(row.getString("audience")),
                 row.getObject("occurred_at", OffsetDateTime.class).toInstant(),
-                row.getObject("created_at", OffsetDateTime.class).toInstant());
+                row.getObject("created_at", OffsetDateTime.class).toInstant(),
+                eventSourceType(row));
+    }
+
+    private static SourceType eventSourceType(ResultSet row) throws SQLException {
+        String value = row.getString("event_source_type");
+        return value == null ? null : SourceType.valueOf(value);
     }
 
     private static RoomGraphCommand.SnapshotRef snapshotRef(ResultSet row) throws SQLException {

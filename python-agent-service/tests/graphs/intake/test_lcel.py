@@ -67,6 +67,7 @@ from app.graphs.intake.validators import (
     MATRIX_AUTHORITY_RECORD_KEY,
     next_intake_cognitive_revision,
     validate_matrix_patch,
+    validated_respondent_opening_frozen_context,
 )
 from app.harness.invocation_context import AgentInvocationContext
 from app.harness.model_runner import prepare_baseline_prompt_authority
@@ -2045,14 +2046,56 @@ def test_imported_formal_m0_respondent_opening_projects_authority_neutral_bilate
         attempt_id="ATTEMPT_RESPONDENT_OPENING_1_1",
     )
 
-    result = graph.invoke(state, context=_bootstrap_event_context(imported, opening))
+    projected = graph.invoke(
+        state,
+        context=_bootstrap_event_context(imported, opening),
+        interrupt_before=["checkpoint_terminal"],
+    )
+
+    if dossier_schema_version == "intake-dossier.v2":
+        tampered = copy.deepcopy(projected)
+        envelope = tampered["baseline_pending_case_detail"]
+        request_base = envelope["matrix_derivation_request_base"]
+        request_base["respondent_opening_source_ref"] = "EVENT_RESPONDENT_OPENING_STALE"
+        envelope["matrix_derivation_request_base_hash"] = canonical_sha256(request_base)
+        replay_request = copy.deepcopy(request_base)
+        replay_request["previous_case_detail"] = {
+            "case_fact_matrix": copy.deepcopy(envelope["authority_input_matrix"])
+        }
+        forged_formal = finalize_case_fact_matrix(
+            request=IntakeTurnRequest.model_validate(replay_request),
+            case_detail=copy.deepcopy(tampered["dossier_draft"]),
+            delta=CaseFactMatrixDeltaV2.model_validate(
+                envelope["normalized_matrix_patch"]
+            ),
+        ).model_dump(mode="json")
+        envelope["formal_matrix"] = forged_formal
+        envelope["formal_matrix_hash"] = canonical_sha256(forged_formal)
+        envelope["snapshot"]["case_fact_matrix"] = copy.deepcopy(forged_formal)
+        envelope["snapshot_hash"] = canonical_sha256(envelope["snapshot"])
+        envelope["envelope_hash"] = canonical_sha256_omitting(
+            envelope,
+            "envelope_hash",
+        )
+        tampered["messages"] = {}
+        tampered["result_json"] = None
+        with pytest.raises(
+            IntakeGraphContractError,
+            match="INTAKE_RESPONDENT_OPENING_AUTHORITY_INVALID",
+        ):
+            validated_respondent_opening_frozen_context(tampered)
+
+    result = copy.deepcopy(projected)
+    result.update(checkpoint_terminal(projected))
 
     assert transport.generate_calls == 1
     assert not any(message["role"] == "HUMAN" for message in result["messages"].values())
     assert result["last_event_sequence"] == 1
     assert result["last_event_hash"] == opening["event_hash"]
     assert result["terminal_draft"]["dossier_patch"] == {}
-    assert result["terminal_draft"]["matrix_patch"] is None
+    opening_matrix_patch = result["terminal_draft"]["matrix_patch"]
+    assert opening_matrix_patch is not None
+    assert result["result_json"]["matrix_patch"] == opening_matrix_patch
     assert "respondent_attitude" not in result["dossier_draft"]
     assert model_only_position not in json.dumps(result["dossier_draft"], sort_keys=True)
     assert result["baseline_pending_case_detail"] is None
@@ -2091,12 +2134,37 @@ def test_imported_formal_m0_respondent_opening_projects_authority_neutral_bilate
         "content_hash": imported_m0["content_hash"],
     }
     assert formal["claims"]["respondent_direct"] is None
+    prior_fact_ids = [row["fact_id"] for row in imported_m0["fact_rows"]]
+    assert opening_matrix_patch["schema_version"] == "case_fact_matrix.delta.v2"
+    assert opening_matrix_patch["summary_source_fact_keys"] == prior_fact_ids
+    assert opening_matrix_patch.get("respondent_claim") is None
+    assert [row["fact_key"] for row in opening_matrix_patch["fact_rows"]] == prior_fact_ids
+    assert len({row["fact_key"] for row in opening_matrix_patch["fact_rows"]}) == len(
+        prior_fact_ids
+    )
+    formal_by_id = {row["fact_id"]: row for row in formal["fact_rows"]}
+    prior_by_id = {row["fact_id"]: row for row in imported_m0["fact_rows"]}
+    for delta_row in opening_matrix_patch["fact_rows"]:
+        prior_row = prior_by_id[delta_row["fact_key"]]
+        formal_row = formal_by_id[delta_row["fact_key"]]
+        respondent = formal_row["positions"]["MERCHANT"]
+        assert delta_row == {
+            "fact_key": prior_row["fact_id"],
+            "category": prior_row["category"],
+            "fact_target": prior_row["fact_target"],
+            "materiality": prior_row["materiality"],
+            "stance": "NOT_ADDRESSED",
+            "position_summary": respondent["position_summary"],
+            "source_scope": "PREVIOUS_MATRIX",
+        }
     for row in formal["fact_rows"]:
         respondent = row["positions"]["MERCHANT"]
         assert respondent["stance"] == "NOT_ADDRESSED"
         assert respondent["source_type"] == "NO_DIRECT_POSITION"
         assert respondent["source_refs"] == []
     assert opening_message_id not in json.dumps(formal, sort_keys=True)
+    assert opening_message_id not in json.dumps(opening_matrix_patch, sort_keys=True)
+    assert model_only_position not in json.dumps(opening_matrix_patch, sort_keys=True)
 
 
 def test_real_intake_lcel_is_governed_object_flow_with_human_text_isolation(

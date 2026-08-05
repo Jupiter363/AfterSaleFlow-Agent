@@ -4,6 +4,9 @@
 - The primary agent should provide peer task/thread IDs when direct coordination is useful, together with exact owned paths, forbidden paths, acceptance criteria, and the required handoff format.
 - Direct communication does not transfer or expand authorization: each agent must keep its assigned write ownership and forbidden scope unless the primary or user explicitly changes them.
 - The primary agent remains responsible for integration, final verification, external mutations, and the user-facing result, even when peer agents coordinate directly.
+- Bug fixes must repair the responsible mechanism and restore its end-to-end invariants across every affected producer, persistence boundary, replay path, and consumer. Do not solve a failure with case-specific IDs, magic prefixes, payload-shape guesses, environment-only values, or a narrow hardcoded bypass.
+- A protocol-specific branch is allowed only when it is driven by an explicit authoritative discriminator in the domain contract. It must fail closed for legacy or missing authority and include positive, negative, replay/idempotency, and adjacent-regression tests proving that unrelated flows are unchanged.
+- Every fix handoff must state the root mechanism, the violated invariant, why the repair generalizes beyond the observed case, and which regression tests prevent the symptom from being reintroduced elsewhere.
 
 # Local development workflow
 

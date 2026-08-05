@@ -622,6 +622,9 @@ public final class JdbcIntakeFormalCommitPort
                 .addValue("eventSequence", event.sequenceNo())
                 .addValue("eventDomainRevision", event.domainRevision())
                 .addValue("eventAudience", event.audience().name())
+                .addValue(
+                        "eventSourceType",
+                        event.sourceType() == null ? null : event.sourceType().name())
                 .addValue("eventOccurredAt", event.occurredAt().atOffset(ZoneOffset.UTC))
                 .addValue("eventCreatedAt", event.createdAt().atOffset(ZoneOffset.UTC));
         List<String> persistedEvent = jdbc.queryForList(
@@ -653,6 +656,7 @@ public final class JdbcIntakeFormalCommitPort
                     and event_sequence = :eventSequence
                     and domain_revision = :eventDomainRevision
                     and audience = :eventAudience
+                    and event_source_type is not distinct from :eventSourceType
                     and occurred_at = :eventOccurredAt
                     and created_at = :eventCreatedAt
                 """ + (lockRows ? " for share" : ""),
@@ -789,7 +793,8 @@ public final class JdbcIntakeFormalCommitPort
                         ActorRole.valueOf(currentAuthority.respondentRole()),
                         sourceRef,
                         sourceContextHash,
-                        claimResolutionAuthority(currentAuthority)));
+                        claimResolutionAuthority(currentAuthority),
+                        request.event() == null ? null : request.event().sourceType()));
         long version = current.version() + 1;
         int sourceTurn = sourceTurn(command.request());
         MapSqlParameterSource parameters = authorityParameters(command.request())

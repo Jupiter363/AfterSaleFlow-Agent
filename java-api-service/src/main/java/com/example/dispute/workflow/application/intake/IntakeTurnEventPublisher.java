@@ -78,7 +78,8 @@ public final class IntakeTurnEventPublisher {
                         request.domainRevision(),
                         request.audience(),
                         request.occurredAt(),
-                        request.publishedAt());
+                        request.publishedAt(),
+                        request.sourceType());
         var receipt =
                 Objects.requireNonNull(bindingStore.bindEvent(reference), "event binding receipt");
         if (!reference.equals(receipt.value())) {

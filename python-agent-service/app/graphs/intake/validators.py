@@ -1473,16 +1473,37 @@ def require_respondent_opening_matrix_authority(
     authoritative_context = context
     if frozen is None:
         pending = typed_state.get("baseline_pending_case_detail")
-        if (
-            not isinstance(pending, Mapping)
-            or pending.get("normalized_matrix_patch") is not None
-        ):
+        if not isinstance(pending, Mapping):
             raise IntakeGraphContractError("INTAKE_RESPONDENT_OPENING_AUTHORITY_INVALID")
         _validate_baseline_context_envelope(
             pending,
             require_bound=None,
             state=typed_state,
         )
+        pending_patch = pending.get("normalized_matrix_patch")
+        if pending_patch is not None:
+            terminal = typed_state.get("terminal_draft")
+            if not isinstance(terminal, Mapping):
+                terminal = typed_state.get("result_json")
+            response_content = (
+                terminal.get("room_utterance") if isinstance(terminal, Mapping) else None
+            )
+            if not isinstance(response_content, str):
+                raise IntakeGraphContractError(
+                    "INTAKE_RESPONDENT_OPENING_AUTHORITY_INVALID"
+                )
+            try:
+                _require_pending_formal_matrix_derivation(
+                    typed_state,
+                    pending,
+                    matrix_patch=pending_patch,
+                    response_content=response_content,
+                    allow_response_absent=True,
+                )
+            except IntakeGraphContractError as error:
+                raise IntakeGraphContractError(
+                    "INTAKE_RESPONDENT_OPENING_AUTHORITY_INVALID"
+                ) from error
         authority_input = pending.get("authority_input_matrix")
         if not isinstance(authority_input, Mapping):
             raise IntakeGraphContractError("INTAKE_RESPONDENT_OPENING_AUTHORITY_INVALID")
@@ -3197,6 +3218,22 @@ def _require_pending_derivation_request_matches_pre_model_state(
         response_content=response_content,
         allow_response_absent=allow_response_absent,
     )
+    if request.turn_source == RESPONDENT_OPENING_MARKER:
+        authority_input = envelope.get("authority_input_matrix")
+        dossier = pre_model_state.get("dossier_draft")
+        if not isinstance(authority_input, Mapping) or not isinstance(dossier, Mapping):
+            raise IntakeGraphContractError(
+                "INTAKE_BASELINE_CONTEXT_DERIVATION_REQUEST_BINDING_INVALID"
+            )
+        existing_matrix = dossier.get("case_fact_matrix")
+        if existing_matrix is not None and existing_matrix != authority_input:
+            raise IntakeGraphContractError(
+                "INTAKE_BASELINE_CONTEXT_DERIVATION_REQUEST_BINDING_INVALID"
+            )
+        pre_model_state["dossier_draft"] = {
+            **deepcopy(dict(dossier)),
+            "case_fact_matrix": deepcopy(dict(authority_input)),
+        }
     try:
         expected = build_intake_baseline_request(
             pre_model_state,
@@ -3280,6 +3317,7 @@ def _require_pending_formal_matrix_derivation(
     *,
     matrix_patch: Any,
     response_content: Any,
+    allow_response_absent: bool = False,
 ) -> None:
     """Re-run the canonical finalizer from the retained input, patch and public dossier."""
 
@@ -3288,6 +3326,7 @@ def _require_pending_formal_matrix_derivation(
         state,
         envelope,
         response_content=response_content,
+        allow_response_absent=allow_response_absent,
     )
     _require_pending_public_dossier_matches_state(state, envelope)
     dossier = state.get("dossier_draft")

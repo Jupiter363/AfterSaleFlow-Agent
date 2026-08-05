@@ -24,7 +24,49 @@ public record IntakeEventReference(
         long domainRevision,
         Audience audience,
         Instant occurredAt,
-        Instant createdAt) {
+        Instant createdAt,
+        IntakeTurnEventPublisher.SourceType sourceType) {
+
+    public IntakeEventReference(
+            String bindingId,
+            String threadRegistrationId,
+            String eventId,
+            String messageId,
+            String tenantSurrogate,
+            String caseId,
+            long roomEpoch,
+            long fencingToken,
+            String threadId,
+            String actorScopeHash,
+            String agentSessionId,
+            RoomGraphCommand.SnapshotRef payloadRef,
+            String objectVersion,
+            long sequenceNo,
+            long domainRevision,
+            Audience audience,
+            Instant occurredAt,
+            Instant createdAt) {
+        this(
+                bindingId,
+                threadRegistrationId,
+                eventId,
+                messageId,
+                tenantSurrogate,
+                caseId,
+                roomEpoch,
+                fencingToken,
+                threadId,
+                actorScopeHash,
+                agentSessionId,
+                payloadRef,
+                objectVersion,
+                sequenceNo,
+                domainRevision,
+                audience,
+                occurredAt,
+                createdAt,
+                null);
+    }
 
     public IntakeEventReference {
         bindingId = IntakeContractSupport.identifier(bindingId, "bindingId");

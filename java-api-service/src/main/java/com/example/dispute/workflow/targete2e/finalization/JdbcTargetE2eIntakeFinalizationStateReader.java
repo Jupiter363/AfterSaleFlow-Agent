@@ -4,6 +4,7 @@ import com.example.dispute.workflow.application.intake.IntakeEventReference;
 import com.example.dispute.workflow.application.intake.IntakeGraphThreadBinding;
 import com.example.dispute.workflow.application.intake.IntakePrivateThreadRegistration;
 import com.example.dispute.workflow.application.intake.IntakeSnapshotReference;
+import com.example.dispute.workflow.application.intake.IntakeTurnEventPublisher.SourceType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ActorRole;
 import com.example.dispute.workflow.contract.v1.ContractTypes.ArtifactPointer;
 import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
@@ -156,7 +157,8 @@ public final class JdbcTargetE2eIntakeFinalizationStateReader
                    tenant_surrogate, case_id, room_epoch, fencing_token, thread_id,
                    actor_scope_hash, agent_session_id, schema_version, artifact_id,
                    object_uri, object_version, content_sha256, size_bytes,
-                   event_sequence, domain_revision, audience, occurred_at, created_at
+                   event_sequence, domain_revision, audience, occurred_at, created_at,
+                   event_source_type
               from case_intake_snapshot_binding
              where thread_registration_id = :registrationId
                and binding_type = 'EVENT'
@@ -445,7 +447,13 @@ public final class JdbcTargetE2eIntakeFinalizationStateReader
                 rs.getLong("domain_revision"),
                 Audience.valueOf(rs.getString("audience")),
                 instant(rs, "occurred_at"),
-                instant(rs, "created_at"));
+                instant(rs, "created_at"),
+                eventSourceType(rs));
+    }
+
+    private static SourceType eventSourceType(ResultSet rs) throws SQLException {
+        String value = rs.getString("event_source_type");
+        return value == null ? null : SourceType.valueOf(value);
     }
 
     private static RoomGraphCommand.SnapshotRef snapshotRef(ResultSet rs) throws SQLException {

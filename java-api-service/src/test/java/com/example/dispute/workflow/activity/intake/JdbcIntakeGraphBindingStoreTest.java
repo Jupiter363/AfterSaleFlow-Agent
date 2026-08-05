@@ -17,6 +17,7 @@ import com.example.dispute.workflow.application.intake.IntakeEventReference;
 import com.example.dispute.workflow.application.intake.IntakeGraphBindingConflictException;
 import com.example.dispute.workflow.application.intake.IntakeGraphThreadBinding;
 import com.example.dispute.workflow.application.intake.IntakeSnapshotReference;
+import com.example.dispute.workflow.application.intake.IntakeTurnEventPublisher.SourceType;
 import com.example.dispute.workflow.contract.v1.ContractTypes.Audience;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import java.util.List;
@@ -227,6 +228,77 @@ class JdbcIntakeGraphBindingStoreTest {
     }
 
     @Test
+    void respondentOpeningSourceTypeIsWrittenSelectedAndReplayedExactly() {
+        IntakeGraphThreadBinding binding = IntakeTestFixtures.binding();
+        IntakeEventReference event =
+                eventAtSequence(binding, 2, SourceType.RESPONDENT_OPENING);
+        stubLockedThread(binding);
+        stubInitialSequence(1);
+        when(jdbc.query(
+                        contains("binding_type = 'EVENT'"),
+                        any(SqlParameterSource.class),
+                        org.mockito.ArgumentMatchers.<RowMapper<IntakeEventReference>>any()))
+                .thenReturn(List.of())
+                .thenReturn(List.of(event));
+        when(jdbc.update(
+                        contains("insert into case_intake_snapshot_binding"),
+                        any(MapSqlParameterSource.class)))
+                .thenReturn(1);
+
+        var created = store.bindEvent(event);
+        var replayed = store.bindEvent(event);
+
+        assertThat(created.created()).isTrue();
+        assertThat(replayed.created()).isFalse();
+        assertThat(replayed.value()).isEqualTo(event);
+        assertThat(sourceTypeOf(replayed.value())).isEqualTo(SourceType.RESPONDENT_OPENING);
+
+        ArgumentCaptor<String> insertSql = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<MapSqlParameterSource> insertParameters =
+                ArgumentCaptor.forClass(MapSqlParameterSource.class);
+        verify(jdbc)
+                .update(
+                        insertSql.capture(),
+                        insertParameters.capture());
+        assertThat(insertSql.getValue()).contains("event_source_type");
+        assertThat(insertParameters.getValue().getValue("eventSourceType"))
+                .isEqualTo(SourceType.RESPONDENT_OPENING.name());
+
+        ArgumentCaptor<String> selectSql = ArgumentCaptor.forClass(String.class);
+        verify(jdbc, times(2))
+                .query(
+                        selectSql.capture(),
+                        any(SqlParameterSource.class),
+                        org.mockito.ArgumentMatchers.<RowMapper<IntakeEventReference>>any());
+        assertThat(selectSql.getAllValues())
+                .allSatisfy(sql -> assertThat(sql).contains("event_source_type"));
+    }
+
+    @Test
+    void legacyEventAndInitialSnapshotPersistNoOpeningAuthority() {
+        IntakeGraphThreadBinding binding = IntakeTestFixtures.binding();
+        assertThat(sourceTypeOf(eventAtSequence(binding, 2))).isNull();
+
+        IntakeSnapshotReference snapshot = IntakeTestFixtures.snapshot(binding);
+        stubLockedThread(binding);
+        when(jdbc.update(
+                        contains("insert into case_intake_snapshot_binding"),
+                        any(MapSqlParameterSource.class)))
+                .thenReturn(1);
+
+        assertThat(store.bindInitialSnapshot(snapshot).created()).isTrue();
+
+        ArgumentCaptor<String> insertSql = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<MapSqlParameterSource> insertParameters =
+                ArgumentCaptor.forClass(MapSqlParameterSource.class);
+        verify(jdbc).update(insertSql.capture(), insertParameters.capture());
+        assertThat(insertSql.getValue()).doesNotContain(SourceType.RESPONDENT_OPENING.name());
+        if (insertParameters.getValue().hasValue("eventSourceType")) {
+            assertThat(insertParameters.getValue().getValue("eventSourceType")).isNull();
+        }
+    }
+
+    @Test
     void existingEventLedgerRejectsALaterGap() {
         IntakeGraphThreadBinding binding = IntakeTestFixtures.binding();
         IntakeEventReference gap = eventAtSequence(binding, 4);
@@ -347,5 +419,38 @@ class JdbcIntakeGraphBindingStoreTest {
                 Audience.USER,
                 IntakeTestFixtures.ISSUED_AT.plusSeconds(sequence * 60),
                 IntakeTestFixtures.ISSUED_AT.plusSeconds(sequence * 60 + 1));
+    }
+
+    private static IntakeEventReference eventAtSequence(
+            IntakeGraphThreadBinding binding, long sequence, SourceType sourceType) {
+        return withSourceType(eventAtSequence(binding, sequence), sourceType);
+    }
+
+    private static IntakeEventReference withSourceType(
+            IntakeEventReference legacy, SourceType sourceType) {
+        return new IntakeEventReference(
+                legacy.bindingId(),
+                legacy.threadRegistrationId(),
+                legacy.eventId(),
+                legacy.messageId(),
+                legacy.tenantSurrogate(),
+                legacy.caseId(),
+                legacy.roomEpoch(),
+                legacy.fencingToken(),
+                legacy.threadId(),
+                legacy.actorScopeHash(),
+                legacy.agentSessionId(),
+                legacy.payloadRef(),
+                legacy.objectVersion(),
+                legacy.sequenceNo(),
+                legacy.domainRevision(),
+                legacy.audience(),
+                legacy.occurredAt(),
+                legacy.createdAt(),
+                sourceType);
+    }
+
+    private static SourceType sourceTypeOf(IntakeEventReference reference) {
+        return reference.sourceType();
     }
 }

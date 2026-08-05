@@ -33,6 +33,38 @@ _SUBSTANTIVE = {FactStance.CONFIRM, FactStance.DENY, FactStance.PARTIAL}
 _CONTENT_HASH = re.compile(r"^[0-9a-f]{64}$")
 
 
+def respondent_opening_carry_delta(
+    *,
+    request: IntakeTurnRequest,
+) -> CaseFactMatrixDeltaV2:
+    """Derive the only authority-neutral delta allowed for respondent opening."""
+
+    if request.turn_source != RESPONDENT_OPENING_MARKER:
+        _schema_error(
+            "respondent opening carry requires the opening control source",
+            safe_code="INTAKE_MATRIX_MISSING_DELTA_CARRY_INVALID",
+        )
+    _current_source(request)
+    previous = _previous_matrix(request)
+    if previous is None:
+        _schema_error(
+            "respondent opening requires an initiator matrix",
+            safe_code="INTAKE_MATRIX_INITIATOR_MATRIX_MISSING",
+        )
+    initiator_role = previous.party_map.initiator_role
+    respondent_role = "MERCHANT" if initiator_role == "USER" else "USER"
+    actor_role = _matrix_actor_role(request, initiator_role)
+    if (
+        actor_role != respondent_role
+        or previous.matrix_kind != CaseMatrixKind.INITIATOR_FROZEN
+    ):
+        _schema_error(
+            "respondent opening requires an unchanged initiator matrix",
+            safe_code="INTAKE_MATRIX_MISSING_DELTA_CARRY_INVALID",
+        )
+    return _respondent_opening_carry_delta(previous, actor_role=actor_role)
+
+
 def finalize_case_fact_matrix(
     *,
     request: IntakeTurnRequest,
@@ -52,20 +84,15 @@ def finalize_case_fact_matrix(
         )
 
     if respondent_opening:
-        if (
-            delta is not None
-            or previous is None
-            or actor_role != respondent_role
-            or previous.matrix_kind != CaseMatrixKind.INITIATOR_FROZEN
-        ):
+        expected_opening_delta = respondent_opening_carry_delta(request=request)
+        if delta is not None and delta.model_dump(
+            mode="json"
+        ) != expected_opening_delta.model_dump(mode="json"):
             _schema_error(
-                "respondent opening requires an unchanged initiator matrix",
+                "respondent opening delta conflicts with the authoritative carry",
                 safe_code="INTAKE_MATRIX_MISSING_DELTA_CARRY_INVALID",
             )
-        resolved_delta = _respondent_opening_carry_delta(
-            previous,
-            actor_role=actor_role,
-        )
+        resolved_delta = expected_opening_delta
     else:
         resolved_delta = _as_v2_delta(
             delta,
