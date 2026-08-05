@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.dispute.workflow.application.intake.IntakeContractHashes;
+import com.example.dispute.workflow.application.intake.IntakeDossierProjectionMerger.MatrixAuthority;
 import com.example.dispute.workflow.application.intake.IntakeFinalizationRejectedException;
 import com.example.dispute.workflow.application.intake.IntakeFinalizationOperationKey;
 import com.example.dispute.workflow.application.intake.IntakeFinalizationReceipt;
@@ -15,6 +16,8 @@ import com.example.dispute.workflow.application.intake.IntakeImmutableProposalRe
 import com.example.dispute.workflow.application.intake.IntakePrivateThreadRegistration;
 import com.example.dispute.workflow.application.intake.IntakePrivateThreadRegistrationFactory;
 import com.example.dispute.workflow.application.intake.IntakeProposalReference;
+import com.example.dispute.workflow.application.intake.IntakeInitiatorMatrixFreezer;
+import com.example.dispute.workflow.application.intake.IntakeRespondentMatrixFreezer;
 import com.example.dispute.workflow.application.intake.IntakeSnapshotReference;
 import com.example.dispute.workflow.application.intake.IntakeEventReference;
 import com.example.dispute.workflow.application.intake.IntakeTurnEventPublisher.SourceType;
@@ -34,6 +37,7 @@ import com.example.dispute.workflow.contract.v1.RoomGraphResult;
 import com.example.dispute.workflow.contract.v1.RoomGraphResult.ExecutionMetadata;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import java.nio.charset.StandardCharsets;
@@ -427,6 +431,46 @@ class JdbcIntakeFormalCommitPortTest {
         port.preflight(fixture.request());
         assertThat(port.commit(fixture.commitCommand()).caseId()).isEqualTo(fixture.caseId());
         assertCounts(fixture.caseId(), 1, 1, 1, 1, 1, 1);
+    }
+
+    @Test
+    void respondentRoomMessageFromOpeningBilateralCommitsAndReplaysExactlyOnce()
+            throws Exception {
+        Fixture base = fixture(
+                "RESPONDENT_BILATERAL_" + SEQUENCE.incrementAndGet(),
+                ActorRole.MERCHANT);
+        ObjectNode opening = openingBilateralMatrix(base.caseId());
+        Fixture fixture = withRespondentBilateralProposal(base, opening);
+        insertFixture(fixture);
+        String initiatorId = scalar(
+                "select initiator_id from fulfillment_dispute_case where id = ?",
+                fixture.caseId());
+        insertPartyCompletion(fixture, ActorRole.USER, initiatorId);
+        jdbc.update(
+                "update fulfillment_dispute_case set case_status = 'INTAKE_COMPLETED' where id = ?",
+                fixture.caseId());
+        insertOpeningDossier(fixture, opening);
+
+        IntakeFinalizationReceipt committed = port.commit(fixture.commitCommand());
+        IntakeFinalizationReceipt replayed = port.commit(fixture.commitCommand());
+
+        assertThat(replayed).isEqualTo(committed);
+        assertThat(committed.matrixVersion()).isNull();
+        assertCounts(fixture.caseId(), 1, 1, 1, 1, 1, 1);
+        assertThat(scalar(
+                        "select dossier_version::text from case_intake_dossier where case_id = ?",
+                        fixture.caseId()))
+                .isEqualTo("7");
+        JsonNode persisted = objectMapper.readTree(scalar(
+                "select dossier_json::text from case_intake_dossier where case_id = ?",
+                fixture.caseId()));
+        JsonNode canonicalOpening = objectMapper.readTree(
+                ContractJson.canonicalString(opening));
+        assertThat(persisted.path("case_fact_matrix")).isEqualTo(canonicalOpening);
+        assertThat(scalar(
+                        "select operation_status from domain_operation where operation_key = ?",
+                        fixture.request().operationKey()))
+                .isEqualTo("COMPLETED");
     }
 
     @Test
@@ -895,6 +939,145 @@ class JdbcIntakeFormalCommitPortTest {
                 unsigned.proposalReference());
     }
 
+    private static Fixture withRespondentBilateralProposal(
+            Fixture base, ObjectNode opening) {
+        IntakeEventReference event = withSourceType(base.event(), SourceType.ROOM_MESSAGE);
+        IntakeTurnProposal source = base.loadedProposal().proposal();
+        ObjectNode dossierPatch = objectMapper.createObjectNode();
+        dossierPatch.put("schema_version", "intake-dossier.v2");
+        dossierPatch.putObject("case_story")
+                .put("summary", "The merchant provides its current position.");
+        ObjectNode unsignedMatrixPatch = ordinaryRespondentDelta(opening);
+        IntakeTurnProposal unsignedProposal = new IntakeTurnProposal(
+                source.schemaVersion(),
+                source.commandId(),
+                source.logicalRunId(),
+                source.attemptId(),
+                source.caseId(),
+                source.roomEpoch(),
+                source.threadId(),
+                source.actorScopeHash(),
+                source.agentSessionId(),
+                source.cognitiveRevision(),
+                source.sourceSnapshotHash(),
+                event.payloadRef().sha256(),
+                "The merchant provides its current response.",
+                dossierPatch,
+                unsignedMatrixPatch,
+                IntakeTurnProposal.Readiness.INCOMPLETE,
+                List.of("respondent_supporting_evidence"),
+                IntakeTurnProposal.Recommendation.NEED_MORE_INFO,
+                source.knowledgeAnswerMode(),
+                source.confidence(),
+                source.profileVersions(),
+                "0".repeat(64));
+        String proposalHash = IntakeContractHashes.canonicalHashExcluding(
+                objectMapper.valueToTree(unsignedProposal), "proposal_hash");
+        IntakeTurnProposal proposal = new IntakeTurnProposal(
+                unsignedProposal.schemaVersion(),
+                unsignedProposal.commandId(),
+                unsignedProposal.logicalRunId(),
+                unsignedProposal.attemptId(),
+                unsignedProposal.caseId(),
+                unsignedProposal.roomEpoch(),
+                unsignedProposal.threadId(),
+                unsignedProposal.actorScopeHash(),
+                unsignedProposal.agentSessionId(),
+                unsignedProposal.cognitiveRevision(),
+                unsignedProposal.sourceSnapshotHash(),
+                unsignedProposal.sourceEventHash(),
+                unsignedProposal.roomUtterance(),
+                unsignedProposal.dossierPatch(),
+                unsignedProposal.matrixPatch(),
+                unsignedProposal.readiness(),
+                unsignedProposal.missingFields(),
+                unsignedProposal.recommendation(),
+                unsignedProposal.knowledgeAnswerMode(),
+                unsignedProposal.confidence(),
+                unsignedProposal.profileVersions(),
+                proposalHash);
+        byte[] proposalBytes = ContractJson.canonicalize(objectMapper.valueToTree(proposal));
+        IntakeImmutableProposalReader.StoredProposal stored =
+                new IntakeImmutableProposalReader.StoredProposal(
+                        base.storedProposal().artifactId(),
+                        base.storedProposal().schemaVersion(),
+                        base.storedProposal().uri(),
+                        base.storedProposal().objectVersion(),
+                        proposalHash,
+                        proposalBytes.length,
+                        proposalBytes);
+        RoomGraphResult result = result(
+                base.command(), stored, base.authority().checkpointId());
+        IntakeGraphFinalizationRequest.Authority sourceAuthority = base.authority();
+        IntakeGraphFinalizationRequest.Authority authority =
+                new IntakeGraphFinalizationRequest.Authority(
+                        sourceAuthority.tenantSurrogate(),
+                        sourceAuthority.caseId(),
+                        sourceAuthority.roomEpoch(),
+                        sourceAuthority.fencingToken(),
+                        sourceAuthority.threadId(),
+                        sourceAuthority.actorScopeHash(),
+                        sourceAuthority.agentSessionId(),
+                        sourceAuthority.commandId(),
+                        sourceAuthority.logicalRunId(),
+                        sourceAuthority.attemptId(),
+                        result.outputHash(),
+                        proposalHash,
+                        result.checkpointId(),
+                        result.cognitiveRevision(),
+                        sourceAuthority.processRevision(),
+                        sourceAuthority.roomRevision(),
+                        sourceAuthority.stageCode(),
+                        sourceAuthority.stageSequence(),
+                        sourceAuthority.profileVersions());
+        IntakeProposalReference proposalReference = new IntakeProposalReference(
+                stored.artifactId(),
+                stored.schemaVersion(),
+                stored.uri(),
+                stored.objectVersion(),
+                stored.contentSha256(),
+                stored.sizeBytes());
+        String operationKey = IntakeFinalizationOperationKey.create(
+                authority.caseId(),
+                authority.roomEpoch(),
+                authority.threadId(),
+                authority.commandId(),
+                authority.resultHash());
+        IntakeGraphFinalizationRequest unsignedRequest =
+                new IntakeGraphFinalizationRequest(
+                        operationKey,
+                        "0".repeat(64),
+                        authority,
+                        base.command(),
+                        result,
+                        base.binding(),
+                        base.snapshot(),
+                        event,
+                        proposalReference);
+        IntakeGraphFinalizationRequest request = new IntakeGraphFinalizationRequest(
+                operationKey,
+                unsignedRequest.canonicalRequestHash(),
+                authority,
+                unsignedRequest.command(),
+                unsignedRequest.result(),
+                unsignedRequest.threadBinding(),
+                unsignedRequest.initialSnapshot(),
+                unsignedRequest.event(),
+                unsignedRequest.proposalReference());
+        return new Fixture(
+                base.caseId(),
+                base.tenant(),
+                base.binding(),
+                base.snapshot(),
+                event,
+                base.command(),
+                result,
+                request,
+                authority,
+                new IntakeTurnProposalLoader.LoadedProposal(proposalReference, proposal),
+                stored);
+    }
+
     private static IntakeEventReference withSourceType(
             IntakeEventReference source, SourceType sourceType) {
         return new IntakeEventReference(
@@ -992,6 +1175,142 @@ class JdbcIntakeFormalCommitPortTest {
                 participantId,
                 NOW.atOffset(ZoneOffset.UTC),
                 NOW.atOffset(ZoneOffset.UTC));
+    }
+
+    private static void insertOpeningDossier(Fixture fixture, ObjectNode opening) {
+        ObjectNode dossier = objectMapper.createObjectNode();
+        dossier.put("schema_version", "intake-dossier.v2");
+        dossier.putObject("case_story")
+                .put("one_sentence_summary", "The parties dispute the requested refund.");
+        dossier.putObject("claim_resolution")
+                .put("initiator_role", "USER")
+                .put("requested_resolution", "REFUND")
+                .put("request_reason", "The promised installation was not delivered.");
+        dossier.set("case_fact_matrix", opening.deepCopy());
+        jdbc.update(
+                """
+                insert into case_intake_dossier (
+                    id, case_id, room_type, dossier_version, dossier_json,
+                    quality_score, ready_for_next_step, admission_recommendation,
+                    source_turn_no, source_agent_session_id, source_actor_id,
+                    source_actor_role, created_at, updated_at, created_by, updated_by
+                ) values (?, ?, 'INTAKE', 6, cast(? as jsonb), 0, false, 'NEED_MORE_INFO',
+                    1, ?, ?, 'MERCHANT', ?, ?, 'test', 'test')
+                """,
+                "DOSSIER_" + fixture.caseId(),
+                fixture.caseId(),
+                ContractJson.canonicalString(dossier),
+                fixture.binding().registration().agentSessionId(),
+                fixture.binding().registration().actorScope().actorId(),
+                NOW.atOffset(ZoneOffset.UTC),
+                NOW.atOffset(ZoneOffset.UTC));
+    }
+
+    private static ObjectNode openingBilateralMatrix(String caseId) throws Exception {
+        ObjectNode unilateral = objectMapper.createObjectNode();
+        unilateral.put("schema_version", "unilateral_case_matrix.v1");
+        unilateral.put("matrix_version", 1);
+        unilateral.putObject("source_binding")
+                .put("case_id", caseId)
+                .put("source_stage", "INTAKE")
+                .putArray("source_refs")
+                .add("MESSAGE_INITIATOR_1");
+        unilateral.withObjectProperty("source_binding")
+                .put("latest_source_ref", "MESSAGE_INITIATOR_1")
+                .put("source_context_hash", "a".repeat(64));
+        unilateral.putObject("party_map")
+                .put("initiator_role", "USER")
+                .put("respondent_role", "MERCHANT");
+        unilateral.put("case_summary", "The user requests a refund for an undelivered installation.");
+        unilateral.putArray("summary_source_fact_ids").add("FACT_DELIVERY_SCOPE");
+        unilateral.putObject("claim_resolution")
+                .put("initiator_role", "USER")
+                .put("requested_resolution", "REFUND")
+                .put("reason_summary", "The promised installation was not delivered.")
+                .put("position_summary", "The user seeks a refund.")
+                .putArray("source_refs")
+                .add("MESSAGE_INITIATOR_1");
+        ObjectNode core = unilateral.putObject("dispute_core_state");
+        core.put("core_conflict", "Whether the promised installation was delivered.");
+        core.putArray("facts_in_dispute").add("delivery scope");
+        core.putArray("next_verification_focus").add("installation record");
+        ObjectNode row = unilateral.putArray("fact_rows").addObject();
+        row.put("fact_id", "FACT_DELIVERY_SCOPE");
+        row.put("category", "FULFILLMENT");
+        row.put("fact_target", "Whether the promised installation was delivered.");
+        row.put("materiality", "CORE");
+        row.putObject("origin")
+                .put("source_stage", "INTAKE")
+                .putArray("source_refs")
+                .add("MESSAGE_INITIATOR_1");
+        row.putObject("initiator_position")
+                .put("stance", "CONFIRM")
+                .put("position_summary", "The user states the service was not delivered.")
+                .put("asserted_value", "installation missing")
+                .putArray("source_refs")
+                .add("MESSAGE_INITIATOR_1");
+        row.put("truth_status", "NOT_EVALUATED");
+        unilateral.put("content_hash", ContractJson.sha256Hex(unilateral));
+
+        IntakeInitiatorMatrixFreezer initiator = new IntakeInitiatorMatrixFreezer();
+        ObjectNode parent = null;
+        for (int version = 1; version <= 5; version++) {
+            unilateral.put("matrix_version", version);
+            unilateral.remove("content_hash");
+            unilateral.put("content_hash", ContractJson.sha256Hex(unilateral));
+            parent = initiator.freeze(
+                    caseId, ActorRole.USER, ActorRole.MERCHANT, unilateral, parent);
+        }
+        ObjectNode carry = objectMapper.createObjectNode();
+        carry.put("schema_version", "case_fact_matrix.delta.v2");
+        JsonNode prior = parent.at("/fact_rows/0");
+        carry.putArray("fact_rows")
+                .addObject()
+                .put("fact_key", prior.path("fact_id").asText())
+                .set("category", prior.required("category").deepCopy());
+        ObjectNode carryRow = (ObjectNode) carry.at("/fact_rows/0");
+        carryRow.set("fact_target", prior.required("fact_target").deepCopy());
+        carryRow.set("materiality", prior.required("materiality").deepCopy());
+        carryRow.put("stance", "NOT_ADDRESSED");
+        carryRow.set(
+                "position_summary",
+                prior.at("/positions/MERCHANT/position_summary").deepCopy());
+        carryRow.putNull("asserted_value");
+        carryRow.put("source_scope", "PREVIOUS_MATRIX");
+        carry.putArray("summary_source_fact_keys").add(prior.path("fact_id").asText());
+        return new IntakeRespondentMatrixFreezer().deriveCandidate(
+                parent,
+                carry,
+                new MatrixAuthority(
+                        caseId,
+                        ActorRole.MERCHANT,
+                        ActorRole.USER,
+                        ActorRole.MERCHANT,
+                        "MESSAGE_RESPONDENT_OPENING",
+                        "b".repeat(64)));
+    }
+
+    private static ObjectNode ordinaryRespondentDelta(ObjectNode parent) {
+        JsonNode prior = parent.at("/fact_rows/0");
+        ObjectNode delta = objectMapper.createObjectNode();
+        delta.put("schema_version", "case_fact_matrix.delta.v2");
+        delta.putArray("fact_rows")
+                .addObject()
+                .put("fact_key", prior.path("fact_id").asText())
+                .set("category", prior.required("category").deepCopy());
+        ObjectNode row = (ObjectNode) delta.at("/fact_rows/0");
+        row.set("fact_target", prior.required("fact_target").deepCopy());
+        row.set("materiality", prior.required("materiality").deepCopy());
+        row.put("stance", "DENY");
+        row.put("position_summary", "The merchant denies the initiator position.");
+        row.put("asserted_value", "installation delivered");
+        row.put("source_scope", "CURRENT_SOURCE");
+        row.put("conflict_summary", "The parties disagree about delivery.");
+        delta.putArray("summary_source_fact_keys").add(prior.path("fact_id").asText());
+        delta.putObject("respondent_claim")
+                .put("attitude", "DISAGREE")
+                .put("position_summary", "The merchant disputes the requested refund.");
+        return delta;
     }
 
     private static String resultHash(RoomGraphCommand command, String proposalHash) {

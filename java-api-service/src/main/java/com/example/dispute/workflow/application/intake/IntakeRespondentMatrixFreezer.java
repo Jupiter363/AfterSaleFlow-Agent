@@ -25,6 +25,104 @@ import java.util.regex.Pattern;
 /** Derives a Java-owned bilateral candidate from one canonical initiator matrix and delta. */
 public final class IntakeRespondentMatrixFreezer {
 
+    private static final Set<String> MATRIX_FIELDS = Set.of(
+            "schema_version",
+            "case_id",
+            "matrix_id",
+            "matrix_version",
+            "matrix_kind",
+            "parent_ref",
+            "content_hash",
+            "party_map",
+            "source_refs",
+            "case_overview",
+            "claims",
+            "fact_rows",
+            "fact_relationships",
+            "generation_ref",
+            "fact_indexes");
+    private static final Set<String> PARTY_MAP_FIELDS =
+            Set.of("initiator_role", "respondent_role");
+    private static final Set<String> PARENT_FIELDS =
+            Set.of("matrix_id", "matrix_version", "content_hash");
+    private static final Set<String> OVERVIEW_FIELDS =
+            Set.of("neutral_summary", "core_conflict", "summary_source_fact_ids");
+    private static final Set<String> CLAIM_FIELDS = Set.of(
+            "initiator_claim",
+            "respondent_reported_by_initiator",
+            "respondent_direct",
+            "claim_conflict");
+    private static final Set<String> INITIATOR_CLAIM_REQUIRED_FIELDS = Set.of(
+            "initiator_role",
+            "requested_resolution",
+            "reason_summary",
+            "position_summary",
+            "source_refs");
+    private static final Set<String> INITIATOR_CLAIM_ALLOWED_FIELDS = Set.of(
+            "initiator_role",
+            "requested_resolution",
+            "requested_amount",
+            "requested_items",
+            "reason_summary",
+            "position_summary",
+            "source_refs");
+    private static final Set<String> REPORTED_RESPONDENT_FIELDS = Set.of(
+            "respondent_role", "attitude", "position_summary", "source_type", "source_refs");
+    private static final Set<String> RESPONDENT_DIRECT_FIELDS = Set.of(
+            "respondent_role",
+            "attitude",
+            "position_summary",
+            "alternative_proposal",
+            "source_type",
+            "source_refs");
+    private static final Set<String> ROW_FIELDS = Set.of(
+            "fact_id",
+            "category",
+            "fact_target",
+            "materiality",
+            "origin",
+            "positions",
+            "party_alignment",
+            "requires_resolution",
+            "truth_status",
+            "evidence_coverage_status");
+    private static final Set<String> ORIGIN_FIELDS = Set.of("introduced_stage", "source_refs");
+    private static final Set<String> POSITION_FIELDS = Set.of(
+            "stance", "position_summary", "asserted_value", "source_type", "source_refs");
+    private static final Set<String> ALIGNMENT_FIELDS =
+            Set.of("status", "agreed_statement", "conflict_summary");
+    private static final Set<String> GENERATION_FIELDS =
+            Set.of("actor_role", "source_stage", "latest_source_ref", "source_context_hash");
+    private static final Set<String> INDEX_FIELDS = Set.of(
+            "not_computed_fact_ids",
+            "agreed_fact_ids",
+            "partially_agreed_fact_ids",
+            "contested_fact_ids",
+            "one_sided_fact_ids",
+            "unresolved_fact_ids",
+            "core_fact_ids",
+            "requires_resolution_fact_ids");
+    private static final Set<String> CATEGORIES = Set.of(
+            "ORDER",
+            "PRODUCT_PAGE",
+            "PAYMENT",
+            "FULFILLMENT",
+            "LOGISTICS",
+            "PRODUCT_STATE",
+            "COMMUNICATION",
+            "AFTER_SALES",
+            "TIME",
+            "OTHER");
+    private static final Set<String> MATERIALITIES = Set.of("CORE", "SUPPORTING", "CONTEXT");
+    private static final Set<String> CLAIM_ATTITUDES = Set.of(
+            "AGREE",
+            "PARTIALLY_AGREE",
+            "DISAGREE",
+            "ALTERNATIVE_PROPOSED",
+            "NEED_MORE_INFO",
+            "NOT_ADDRESSED");
+    private static final Set<String> BILATERAL_ALIGNMENT_STATUSES = Set.of(
+            "AGREED", "PARTIALLY_AGREED", "CONTESTED", "ONE_SIDED", "UNRESOLVED");
     private static final Set<String> SUBSTANTIVE_STANCES = Set.of("CONFIRM", "DENY", "PARTIAL");
     private static final Set<String> AGREEMENT_STANCES = Set.of("CONFIRM", "DENY");
     private static final Set<ActorRole> PARTY_ROLES = Set.of(ActorRole.USER, ActorRole.MERCHANT);
@@ -45,13 +143,144 @@ public final class IntakeRespondentMatrixFreezer {
         Objects.requireNonNull(initiatorMatrix, "initiatorMatrix");
         Objects.requireNonNull(authority, "authority");
         requireRespondentAuthority(authority);
-        initiatorFreezer.validateFrozen(
-                initiatorMatrix,
-                authority.caseId(),
-                authority.initiatorRole(),
-                authority.respondentRole());
+        validateParent(initiatorMatrix, authority);
         ValidatedDelta delta = deltaPolicy.validate(deltaCandidate);
         return derive(initiatorMatrix, delta, authority);
+    }
+
+    private void validateParent(ObjectNode parent, MatrixAuthority authority) {
+        String kind = parent.path("matrix_kind").asText("");
+        if ("INITIATOR_FROZEN".equals(kind)) {
+            initiatorFreezer.validateFrozen(
+                    parent,
+                    authority.caseId(),
+                    authority.initiatorRole(),
+                    authority.respondentRole());
+            return;
+        }
+        if ("BILATERAL_FROZEN".equals(kind)) {
+            validateBilateralParent(parent, authority);
+            return;
+        }
+        throw rejected(
+                "INTAKE_RESPONDENT_MATRIX_PARENT_INVALID",
+                "respondent matrix delta requires exact Java-owned frozen authority");
+    }
+
+    private static void validateBilateralParent(
+            ObjectNode matrix, MatrixAuthority authority) {
+        requireExactFields(matrix, MATRIX_FIELDS, "bilateral matrix");
+        long version = requiredPositiveLong(matrix, "matrix_version");
+        String matrixId = requiredIdentifier(matrix, "matrix_id");
+        if (!"case_fact_matrix.v2".equals(requiredText(matrix, "schema_version", 64))
+                || !authority.caseId().equals(requiredIdentifier(matrix, "case_id"))
+                || !"BILATERAL_FROZEN".equals(requiredText(matrix, "matrix_kind", 64))
+                || version < 2
+                || !matrixId.matches("CASE_MATRIX_[A-F0-9]{20}")) {
+            throw rejected(
+                    "INTAKE_RESPONDENT_MATRIX_PARENT_INVALID",
+                    "bilateral matrix does not match current Java case authority");
+        }
+
+        ObjectNode hashInput = matrix.deepCopy();
+        String storedHash = requiredHash(hashInput, "content_hash");
+        hashInput.remove("content_hash");
+        if (!storedHash.equals(ContractJson.sha256Hex(hashInput))) {
+            throw rejected(
+                    "INTAKE_RESPONDENT_MATRIX_HASH_INVALID",
+                    "bilateral matrix content hash is not canonical");
+        }
+        ObjectNode idInput = hashInput.deepCopy();
+        idInput.remove("matrix_id");
+        String expectedMatrixId = "CASE_MATRIX_"
+                + ContractJson.sha256Hex(idInput).substring(0, 20).toUpperCase(Locale.ROOT);
+        if (!matrixId.equals(expectedMatrixId)) {
+            throw rejected(
+                    "INTAKE_RESPONDENT_MATRIX_PARENT_INVALID",
+                    "bilateral matrix id does not bind its canonical authority");
+        }
+
+        ObjectNode parentRef = requiredObject(matrix, "parent_ref", "bilateral parent ref");
+        requireExactFields(parentRef, PARENT_FIELDS, "bilateral parent ref");
+        long parentVersion = requiredPositiveLong(parentRef, "matrix_version");
+        if (parentVersion == Long.MAX_VALUE
+                || parentVersion + 1 != version
+                || !requiredIdentifier(parentRef, "matrix_id")
+                        .matches("CASE_MATRIX_[A-F0-9]{20}")) {
+            throw rejected(
+                    "INTAKE_RESPONDENT_MATRIX_PARENT_INVALID",
+                    "bilateral matrix parent lineage is invalid");
+        }
+        requiredHash(parentRef, "content_hash");
+
+        ObjectNode partyMap = requiredObject(matrix, "party_map", "bilateral party map");
+        requireExactFields(partyMap, PARTY_MAP_FIELDS, "bilateral party map");
+        if (!authority.initiatorRole().name().equals(requiredText(partyMap, "initiator_role", 32))
+                || !authority.respondentRole().name()
+                        .equals(requiredText(partyMap, "respondent_role", 32))
+                || authority.initiatorRole() == authority.respondentRole()) {
+            throw rejected(
+                    "INTAKE_RESPONDENT_MATRIX_AUTHORITY_INVALID",
+                    "bilateral matrix party map conflicts with Java authority");
+        }
+
+        List<String> sourceRefs = requiredTextArray(
+                matrix, "source_refs", 1, 256, 128, "bilateral source refs");
+        Set<String> declaredSources = new LinkedHashSet<>(sourceRefs);
+        ObjectNode generation =
+                requiredObject(matrix, "generation_ref", "bilateral generation ref");
+        requireExactFields(generation, GENERATION_FIELDS, "bilateral generation ref");
+        String latestSource = requiredIdentifier(generation, "latest_source_ref");
+        if (!authority.respondentRole().name()
+                        .equals(requiredText(generation, "actor_role", 32))
+                || !"RESPONDENT_INTAKE".equals(
+                        requiredText(generation, "source_stage", 64))
+                || !declaredSources.contains(latestSource)) {
+            throw rejected(
+                    "INTAKE_RESPONDENT_MATRIX_SOURCE_SCOPE_INVALID",
+                    "bilateral matrix generation is outside respondent source authority");
+        }
+        requiredHash(generation, "source_context_hash");
+
+        JsonNode relationships = matrix.path("fact_relationships");
+        if (!relationships.isArray() || !relationships.isEmpty()) {
+            throw rejected(
+                    "INTAKE_RESPONDENT_MATRIX_PARENT_INVALID",
+                    "bilateral matrix fact relationships are invalid");
+        }
+
+        ObjectNode overview = requiredObject(matrix, "case_overview", "bilateral overview");
+        requireExactFields(overview, OVERVIEW_FIELDS, "bilateral overview");
+        requiredText(overview, "neutral_summary", 20_000);
+        String coreConflict = requiredText(overview, "core_conflict", 20_000);
+        validateBilateralClaims(
+                matrix, authority, declaredSources, coreConflict);
+
+        JsonNode rowsNode = matrix.path("fact_rows");
+        if (!rowsNode.isArray() || rowsNode.isEmpty() || rowsNode.size() > 200) {
+            throw rejected(
+                    "INTAKE_RESPONDENT_MATRIX_PARENT_INVALID",
+                    "bilateral matrix fact rows are invalid");
+        }
+        List<String> ids = new ArrayList<>();
+        Map<String, List<String>> byStatus = new LinkedHashMap<>();
+        for (String status : BILATERAL_ALIGNMENT_STATUSES) {
+            byStatus.put(status, new ArrayList<>());
+        }
+        List<String> coreIds = new ArrayList<>();
+        List<String> requiresResolutionIds = new ArrayList<>();
+        for (JsonNode row : rowsNode) {
+            validateBilateralRow(
+                    row,
+                    authority,
+                    declaredSources,
+                    ids,
+                    byStatus,
+                    coreIds,
+                    requiresResolutionIds);
+        }
+        validateSummaryIds(overview, ids);
+        validateBilateralIndexes(matrix, byStatus, coreIds, requiresResolutionIds);
     }
 
     public void requireCompleteForFreeze(ObjectNode bilateralCandidate, MatrixAuthority authority) {
@@ -517,6 +746,461 @@ public final class IntakeRespondentMatrixFreezer {
             throw rejected(
                     "INTAKE_RESPONDENT_MATRIX_DERIVATION_INVALID",
                     "bilateral matrix does not match Java parent or source authority");
+        }
+    }
+
+    private static void validateBilateralClaims(
+            ObjectNode matrix,
+            MatrixAuthority authority,
+            Set<String> declaredSources,
+            String coreConflict) {
+        ObjectNode claims = requiredObject(matrix, "claims", "bilateral claims");
+        requireExactFields(claims, CLAIM_FIELDS, "bilateral claims");
+
+        ObjectNode initiatorClaim =
+                requiredObject(claims, "initiator_claim", "bilateral initiator claim");
+        requireFields(
+                initiatorClaim,
+                INITIATOR_CLAIM_REQUIRED_FIELDS,
+                INITIATOR_CLAIM_ALLOWED_FIELDS,
+                "bilateral initiator claim");
+        if (!authority.initiatorRole().name()
+                        .equals(requiredText(initiatorClaim, "initiator_role", 32))
+                || !requiredIdentifier(initiatorClaim, "requested_resolution")
+                        .matches("[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")) {
+            throw rejected(
+                    "INTAKE_RESPONDENT_MATRIX_PARENT_INVALID",
+                    "bilateral initiator claim conflicts with Java authority");
+        }
+        JsonNode requestedAmount = initiatorClaim.path("requested_amount");
+        if (!requestedAmount.isMissingNode()
+                && !requestedAmount.isNull()
+                && (!requestedAmount.isNumber() || requestedAmount.decimalValue().signum() < 0)) {
+            throw rejected(
+                    "INTAKE_RESPONDENT_MATRIX_PARENT_INVALID",
+                    "bilateral initiator requested amount is invalid");
+        }
+        if (initiatorClaim.hasNonNull("requested_items")) {
+            requiredText(initiatorClaim, "requested_items", 2_000);
+        }
+        requiredText(initiatorClaim, "reason_summary", 20_000);
+        requiredText(initiatorClaim, "position_summary", 20_000);
+        requireDeclaredSources(
+                requiredTextArray(
+                        initiatorClaim,
+                        "source_refs",
+                        1,
+                        50,
+                        128,
+                        "bilateral initiator claim source refs"),
+                declaredSources,
+                "bilateral initiator claim source refs");
+
+        JsonNode reported = claims.path("respondent_reported_by_initiator");
+        if (!reported.isNull()) {
+            if (!reported.isObject()) {
+                throw rejected(
+                        "INTAKE_RESPONDENT_MATRIX_PARENT_INVALID",
+                        "reported respondent claim must be an object or null");
+            }
+            ObjectNode attitude = (ObjectNode) reported;
+            requireExactFields(attitude, REPORTED_RESPONDENT_FIELDS, "reported respondent claim");
+            if (!authority.respondentRole().name()
+                            .equals(requiredText(attitude, "respondent_role", 32))
+                    || !CLAIM_ATTITUDES.contains(requiredIdentifier(attitude, "attitude"))
+                    || !"INITIATOR_SUBJECTIVE_REPORT".equals(
+                            requiredText(attitude, "source_type", 64))) {
+                throw rejected(
+                        "INTAKE_RESPONDENT_MATRIX_PARENT_INVALID",
+                        "reported respondent claim is outside initiator authority");
+            }
+            requiredText(attitude, "position_summary", 20_000);
+            requireDeclaredSources(
+                    requiredTextArray(
+                            attitude,
+                            "source_refs",
+                            1,
+                            50,
+                            128,
+                            "reported respondent source refs"),
+                    declaredSources,
+                    "reported respondent source refs");
+        }
+
+        JsonNode direct = claims.path("respondent_direct");
+        JsonNode claimConflict = claims.path("claim_conflict");
+        if (direct.isNull()) {
+            if (!claimConflict.isNull()) {
+                throw rejected(
+                        "INTAKE_RESPONDENT_MATRIX_PARENT_INVALID",
+                        "bilateral claim conflict requires a direct respondent claim");
+            }
+            return;
+        }
+        if (!direct.isObject()) {
+            throw rejected(
+                    "INTAKE_RESPONDENT_MATRIX_PARENT_INVALID",
+                    "direct respondent claim must be an object or null");
+        }
+        ObjectNode respondentDirect = (ObjectNode) direct;
+        requireExactFields(
+                respondentDirect, RESPONDENT_DIRECT_FIELDS, "direct respondent claim");
+        if (!authority.respondentRole().name()
+                        .equals(requiredText(respondentDirect, "respondent_role", 32))
+                || !CLAIM_ATTITUDES.contains(
+                        requiredIdentifier(respondentDirect, "attitude"))
+                || !"RESPONDENT_DIRECT_INTAKE".equals(
+                        requiredText(respondentDirect, "source_type", 64))) {
+            throw rejected(
+                    "INTAKE_RESPONDENT_MATRIX_PARENT_INVALID",
+                    "direct respondent claim conflicts with Java authority");
+        }
+        requiredText(respondentDirect, "position_summary", 20_000);
+        if (!respondentDirect.path("alternative_proposal").isNull()) {
+            requiredText(respondentDirect, "alternative_proposal", 20_000);
+        }
+        requireDeclaredSources(
+                requiredTextArray(
+                        respondentDirect,
+                        "source_refs",
+                        1,
+                        50,
+                        128,
+                        "direct respondent source refs"),
+                declaredSources,
+                "direct respondent source refs");
+        if (!claimConflict.isTextual()
+                || claimConflict.asText().isBlank()
+                || !coreConflict.equals(claimConflict.asText())) {
+            throw rejected(
+                    "INTAKE_RESPONDENT_MATRIX_PARENT_INVALID",
+                    "bilateral claim conflict is not bound to the formal overview");
+        }
+    }
+
+    private static void validateBilateralRow(
+            JsonNode candidate,
+            MatrixAuthority authority,
+            Set<String> declaredSources,
+            List<String> ids,
+            Map<String, List<String>> byStatus,
+            List<String> coreIds,
+            List<String> requiresResolutionIds) {
+        if (!candidate.isObject()) {
+            throw rejected(
+                    "INTAKE_RESPONDENT_MATRIX_PARENT_INVALID",
+                    "bilateral matrix fact row must be an object");
+        }
+        ObjectNode row = (ObjectNode) candidate;
+        requireExactFields(row, ROW_FIELDS, "bilateral matrix fact row");
+        String factId = requiredText(row, "fact_id", 128);
+        String materiality = requiredText(row, "materiality", 32);
+        if (!factId.matches("FACT_[A-Za-z0-9_:-]{1,123}")
+                || ids.contains(factId)
+                || !CATEGORIES.contains(requiredText(row, "category", 64))
+                || !MATERIALITIES.contains(materiality)) {
+            throw rejected(
+                    "INTAKE_RESPONDENT_MATRIX_PARENT_INVALID",
+                    "bilateral matrix fact identifiers or enums are invalid");
+        }
+        ids.add(factId);
+        if ("CORE".equals(materiality)) {
+            coreIds.add(factId);
+        }
+        requiredText(row, "fact_target", 20_000);
+        if (!"NOT_EVALUATED".equals(requiredText(row, "truth_status", 64))
+                || !"PENDING_EVIDENCE_REVIEW".equals(
+                        requiredText(row, "evidence_coverage_status", 64))
+                || !row.path("requires_resolution").isBoolean()) {
+            throw rejected(
+                    "INTAKE_RESPONDENT_MATRIX_PARENT_INVALID",
+                    "bilateral matrix derived fact fields are invalid");
+        }
+
+        ObjectNode origin = requiredObject(row, "origin", "bilateral fact origin");
+        requireExactFields(origin, ORIGIN_FIELDS, "bilateral fact origin");
+        String introducedStage = requiredText(origin, "introduced_stage", 64);
+        if (!"INITIATOR_INTAKE".equals(introducedStage)
+                && !"RESPONDENT_INTAKE".equals(introducedStage)) {
+            throw rejected(
+                    "INTAKE_RESPONDENT_MATRIX_PARENT_INVALID",
+                    "bilateral fact origin has no party authority");
+        }
+        requireDeclaredSources(
+                requiredTextArray(
+                        origin, "source_refs", 1, 50, 128, "bilateral fact origin source refs"),
+                declaredSources,
+                "bilateral fact origin source refs");
+
+        ObjectNode positions = requiredObject(row, "positions", "bilateral fact positions");
+        requireExactFields(
+                positions,
+                Set.of(authority.initiatorRole().name(), authority.respondentRole().name()),
+                "bilateral fact positions");
+        validateBilateralPosition(
+                requiredObject(
+                        positions,
+                        authority.initiatorRole().name(),
+                        "bilateral initiator position"),
+                declaredSources,
+                "bilateral initiator position");
+        validateBilateralPosition(
+                requiredObject(
+                        positions,
+                        authority.respondentRole().name(),
+                        "bilateral respondent position"),
+                declaredSources,
+                "bilateral respondent position");
+
+        ObjectNode alignment = requiredObject(row, "party_alignment", "bilateral alignment");
+        requireExactFields(alignment, ALIGNMENT_FIELDS, "bilateral alignment");
+        String status = requiredText(alignment, "status", 64);
+        if (!BILATERAL_ALIGNMENT_STATUSES.contains(status)) {
+            throw rejected(
+                    "INTAKE_RESPONDENT_MATRIX_ALIGNMENT_INVALID",
+                    "bilateral alignment status is invalid");
+        }
+        boolean requiresResolution = row.path("requires_resolution").booleanValue();
+        if (requiresResolution == "AGREED".equals(status)) {
+            throw rejected(
+                    "INTAKE_RESPONDENT_MATRIX_ALIGNMENT_INVALID",
+                    "bilateral resolution index conflicts with alignment");
+        }
+        if ("AGREED".equals(status)) {
+            requiredText(alignment, "agreed_statement", 20_000);
+            requireNull(alignment, "conflict_summary", "agreed bilateral conflict summary");
+        } else if ("PARTIALLY_AGREED".equals(status)) {
+            requiredText(alignment, "agreed_statement", 20_000);
+            requiredText(alignment, "conflict_summary", 20_000);
+        } else {
+            requireNull(alignment, "agreed_statement", "unresolved bilateral agreed statement");
+            requiredText(alignment, "conflict_summary", 20_000);
+        }
+        byStatus.get(status).add(factId);
+        if (requiresResolution) {
+            requiresResolutionIds.add(factId);
+        }
+    }
+
+    private static void validateBilateralPosition(
+            ObjectNode position, Set<String> declaredSources, String label) {
+        requireExactFields(position, POSITION_FIELDS, label);
+        String stance = requiredText(position, "stance", 64);
+        requiredText(position, "position_summary", 20_000);
+        if (!Set.of("CONFIRM", "DENY", "PARTIAL", "UNKNOWN", "NOT_ADDRESSED")
+                .contains(stance)) {
+            throw rejected(
+                    "INTAKE_RESPONDENT_MATRIX_PARENT_INVALID",
+                    label + " stance is invalid");
+        }
+        JsonNode assertedValue = position.path("asserted_value");
+        if (!assertedValue.isNull()) {
+            requiredText(position, "asserted_value", 2_000);
+        }
+        JsonNode sourceRefs = position.path("source_refs");
+        if ("NOT_ADDRESSED".equals(stance)) {
+            if (!"NO_DIRECT_POSITION".equals(requiredText(position, "source_type", 64))
+                    || !assertedValue.isNull()
+                    || !sourceRefs.isArray()
+                    || !sourceRefs.isEmpty()) {
+                throw rejected(
+                        "INTAKE_RESPONDENT_MATRIX_PARENT_INVALID",
+                        label + " fabricates an absent party position");
+            }
+            return;
+        }
+        if (!"DIRECT_PARTY_STATEMENT".equals(requiredText(position, "source_type", 64))) {
+            throw rejected(
+                    "INTAKE_RESPONDENT_MATRIX_PARENT_INVALID",
+                    label + " is not a direct party statement");
+        }
+        requireDeclaredSources(
+                requiredTextArray(
+                        position, "source_refs", 1, 50, 128, label + " source refs"),
+                declaredSources,
+                label + " source refs");
+    }
+
+    private static void validateSummaryIds(ObjectNode overview, List<String> rowIds) {
+        List<String> summaryIds = requiredTextArray(
+                overview,
+                "summary_source_fact_ids",
+                1,
+                200,
+                128,
+                "bilateral summary source facts");
+        int previousIndex = -1;
+        for (String summaryId : summaryIds) {
+            int rowIndex = rowIds.indexOf(summaryId);
+            if (rowIndex <= previousIndex) {
+                throw rejected(
+                        "INTAKE_RESPONDENT_MATRIX_PARENT_INVALID",
+                        "bilateral summary facts are unknown or out of formal row order");
+            }
+            previousIndex = rowIndex;
+        }
+    }
+
+    private static void validateBilateralIndexes(
+            ObjectNode matrix,
+            Map<String, List<String>> byStatus,
+            List<String> coreIds,
+            List<String> requiresResolutionIds) {
+        ObjectNode indexes = requiredObject(matrix, "fact_indexes", "bilateral fact indexes");
+        requireExactFields(indexes, INDEX_FIELDS, "bilateral fact indexes");
+        requireExactIndex(indexes.path("not_computed_fact_ids"), List.of(), "not computed facts");
+        requireExactIndex(indexes.path("agreed_fact_ids"), byStatus.get("AGREED"), "agreed facts");
+        requireExactIndex(
+                indexes.path("partially_agreed_fact_ids"),
+                byStatus.get("PARTIALLY_AGREED"),
+                "partially agreed facts");
+        requireExactIndex(
+                indexes.path("contested_fact_ids"), byStatus.get("CONTESTED"), "contested facts");
+        requireExactIndex(
+                indexes.path("one_sided_fact_ids"), byStatus.get("ONE_SIDED"), "one-sided facts");
+        requireExactIndex(
+                indexes.path("unresolved_fact_ids"),
+                byStatus.get("UNRESOLVED"),
+                "unresolved facts");
+        requireExactIndex(indexes.path("core_fact_ids"), coreIds, "core facts");
+        requireExactIndex(
+                indexes.path("requires_resolution_fact_ids"),
+                requiresResolutionIds,
+                "resolution-required facts");
+    }
+
+    private static ObjectNode requiredObject(JsonNode owner, String field, String label) {
+        JsonNode value = owner.path(field);
+        if (!value.isObject()) {
+            throw rejected(
+                    "INTAKE_RESPONDENT_MATRIX_PARENT_INVALID",
+                    label + " must be an object");
+        }
+        return (ObjectNode) value;
+    }
+
+    private static void requireExactFields(ObjectNode value, Set<String> expected, String label) {
+        Set<String> actual = new HashSet<>();
+        value.fieldNames().forEachRemaining(actual::add);
+        if (!actual.equals(expected)) {
+            throw rejected(
+                    "INTAKE_RESPONDENT_MATRIX_PARENT_INVALID",
+                    label + " has unexpected or missing fields");
+        }
+    }
+
+    private static void requireFields(
+            ObjectNode value, Set<String> required, Set<String> allowed, String label) {
+        Set<String> actual = new HashSet<>();
+        value.fieldNames().forEachRemaining(actual::add);
+        if (!actual.containsAll(required) || !allowed.containsAll(actual)) {
+            throw rejected(
+                    "INTAKE_RESPONDENT_MATRIX_PARENT_INVALID",
+                    label + " has unexpected or missing fields");
+        }
+    }
+
+    private static List<String> requiredTextArray(
+            ObjectNode owner,
+            String field,
+            int minimum,
+            int maximum,
+            int itemMaximum,
+            String label) {
+        JsonNode values = owner.path(field);
+        if (!values.isArray() || values.size() < minimum || values.size() > maximum) {
+            throw rejected(
+                    "INTAKE_RESPONDENT_MATRIX_PARENT_INVALID",
+                    label + " has an invalid length");
+        }
+        List<String> result = new ArrayList<>();
+        Set<String> unique = new HashSet<>();
+        for (JsonNode value : values) {
+            if (!value.isTextual()
+                    || value.asText().isBlank()
+                    || value.asText().length() > itemMaximum
+                    || !value.asText().matches("[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
+                    || !unique.add(value.asText())) {
+                throw rejected(
+                        "INTAKE_RESPONDENT_MATRIX_PARENT_INVALID",
+                        label + " contains an invalid or duplicate identifier");
+            }
+            result.add(value.asText());
+        }
+        return result;
+    }
+
+    private static void requireDeclaredSources(
+            List<String> references, Set<String> declaredSources, String label) {
+        if (!declaredSources.containsAll(references)) {
+            throw rejected(
+                    "INTAKE_RESPONDENT_MATRIX_SOURCE_SCOPE_INVALID",
+                    label + " is not bound to a declared source");
+        }
+    }
+
+    private static void requireNull(ObjectNode owner, String field, String label) {
+        if (!owner.path(field).isNull()) {
+            throw rejected(
+                    "INTAKE_RESPONDENT_MATRIX_PARENT_INVALID",
+                    label + " must be null");
+        }
+    }
+
+    private static String requiredIdentifier(JsonNode owner, String field) {
+        String value = requiredText(owner, field, 128);
+        if (!value.matches("[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")) {
+            throw rejected(
+                    "INTAKE_RESPONDENT_MATRIX_PARENT_INVALID",
+                    field + " is invalid");
+        }
+        return value;
+    }
+
+    private static String requiredHash(JsonNode owner, String field) {
+        String value = requiredText(owner, field, 64);
+        if (!value.matches("[0-9a-f]{64}")) {
+            throw rejected(
+                    "INTAKE_RESPONDENT_MATRIX_HASH_INVALID",
+                    field + " is invalid");
+        }
+        return value;
+    }
+
+    private static String requiredText(JsonNode owner, String field, int maximum) {
+        JsonNode value = owner.path(field);
+        if (!value.isTextual()
+                || value.asText().isBlank()
+                || value.asText().length() > maximum) {
+            throw rejected(
+                    "INTAKE_RESPONDENT_MATRIX_PARENT_INVALID",
+                    field + " is invalid");
+        }
+        return value.asText();
+    }
+
+    private static void requireExactIndex(
+            JsonNode index, List<String> expected, String label) {
+        if (!index.isArray() || index.size() != expected.size()) {
+            throw rejected(
+                    "INTAKE_RESPONDENT_MATRIX_PARENT_INVALID",
+                    "bilateral " + label + " do not match fact rows");
+        }
+        List<String> actual = new ArrayList<>();
+        Set<String> unique = new HashSet<>();
+        for (JsonNode value : index) {
+            String factId = value.isTextual() ? value.asText() : "";
+            if (!factId.matches("FACT_[A-Za-z0-9_:-]{1,123}") || !unique.add(factId)) {
+                throw rejected(
+                        "INTAKE_RESPONDENT_MATRIX_PARENT_INVALID",
+                        "bilateral " + label + " contain invalid fact ids");
+            }
+            actual.add(factId);
+        }
+        if (!expected.equals(actual)) {
+            throw rejected(
+                    "INTAKE_RESPONDENT_MATRIX_PARENT_INVALID",
+                    "bilateral " + label + " do not match fact rows");
         }
     }
 
