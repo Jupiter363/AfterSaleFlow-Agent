@@ -146,6 +146,101 @@ class IntakeRoomWorkflowActivityTest {
   }
 
   @Test
+  void targetV5BranchActivityUsesActorPrivatePinsInsteadOfGenericTargetStartProfile() {
+    try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+      String workflowQueue = "target-intake-v5-private-branch-pins";
+      FakeActivities activities = new FakeActivities();
+      Worker workflowWorker = environment.newWorker(workflowQueue);
+      workflowWorker.registerWorkflowImplementationTypes(IntakeRoomWorkflowImpl.class);
+      Worker activityWorker = environment.newWorker(CASE_CONTROL);
+      activityWorker.registerActivitiesImplementations(activities);
+      environment.start();
+
+      IntakeRoomStart targetStart = genericTargetStart();
+      PinnedVersions actorPrivatePins = actorPrivateBranchPins(targetStart);
+      IntakeRoomWorkflow workflow = workflow(environment, workflowQueue, "v5-private-branch-pins");
+      WorkflowClient.start(workflow::run, targetStart);
+      IntakeWorkflowCommand message = rootCommand(1, "CMD_V5_PRIVATE_PINS_MESSAGE");
+      workflow.commandAccepted(message);
+      workflow.domainEventCommitted(
+          rootTurnEvent(message, "EVENT_V5_PRIVATE_PINS_READY", 1, 0, 0));
+      awaitState(workflow, state -> state.roomPhase() == IntakeRoomPhase.READY_TO_CONFIRM);
+
+      IntakeWorkflowCommand accept =
+          pinnedV5BranchCommand(
+              2,
+              "CMD_V5_PRIVATE_PINS_ACCEPT",
+              BranchOperation.INITIATOR_ACCEPT,
+              1,
+              1,
+              actorPrivatePins);
+      workflow.commandAccepted(accept);
+
+      IntakeRoomSnapshot applied =
+          awaitState(workflow, state -> state.roomPhase() == IntakeRoomPhase.WAITING_PARTY);
+      assertThat(applied.protocolErrorCode()).isNull();
+      assertThat(applied.respondentUnlocked()).isTrue();
+      assertThat(activities.acceptRequests).hasSize(1);
+      BranchCommitRequest request = activities.acceptRequests.getFirst();
+      ActivityEnvelope envelope = request.envelope();
+      assertThat(envelope.pinnedVersions())
+          .usingRecursiveComparison()
+          .isEqualTo(actorPrivatePins);
+      assertThat(envelope.pinnedVersions().promptVersion())
+          .isNotEqualTo(targetStart.promptVersion());
+      assertThat(envelope.pinnedVersions().modelProfileId())
+          .isNotEqualTo(targetStart.modelProfileId());
+      assertThat(envelope.actorScopeHash()).isEqualTo(INITIATOR_SCOPE);
+      assertThat(envelope.fencingToken()).isEqualTo(FENCE);
+      assertThat(envelope.processRevision()).isEqualTo(1);
+      assertThat(envelope.roomRevision()).isEqualTo(1);
+      assertThat(request.operation()).isEqualTo(BranchOperation.INITIATOR_ACCEPT);
+      assertThat(request.operationKey())
+          .isEqualTo(IntakeOperationKeys.initiatorAccept(CASE_ID, EPOCH, accept.commandId()));
+    }
+  }
+
+  @Test
+  void targetV4BranchReplayKeepsGenericStartDerivedPins() {
+    try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+      String workflowQueue = "target-intake-v4-generic-branch-pins";
+      FakeActivities activities = new FakeActivities();
+      Worker workflowWorker = environment.newWorker(workflowQueue);
+      workflowWorker.registerWorkflowImplementationTypes(IntakeRoomWorkflowImpl.class);
+      Worker activityWorker = environment.newWorker(CASE_CONTROL);
+      activityWorker.registerActivitiesImplementations(activities);
+      environment.start();
+
+      IntakeRoomStart targetStart = genericTargetStart();
+      IntakeRoomWorkflow workflow = workflow(environment, workflowQueue, "v4-generic-branch-pins");
+      WorkflowClient.start(workflow::run, targetStart);
+      IntakeWorkflowCommand message = rootCommand(1, "CMD_V4_GENERIC_PINS_MESSAGE");
+      workflow.commandAccepted(message);
+      workflow.domainEventCommitted(
+          rootTurnEvent(message, "EVENT_V4_GENERIC_PINS_READY", 1, 0, 0));
+      awaitState(workflow, state -> state.roomPhase() == IntakeRoomPhase.READY_TO_CONFIRM);
+
+      workflow.commandAccepted(
+          pinnedBranchCommand(
+              2,
+              "CMD_V4_GENERIC_PINS_ACCEPT",
+              BranchOperation.INITIATOR_ACCEPT,
+              1,
+              1));
+      awaitState(workflow, state -> state.roomPhase() == IntakeRoomPhase.WAITING_PARTY);
+
+      assertThat(activities.acceptRequests).hasSize(1);
+      assertThat(activities.acceptRequests.getFirst().envelope().pinnedVersions())
+          .usingRecursiveComparison()
+          .isEqualTo(genericTargetBranchPins(targetStart));
+      assertThat(activities.acceptRequests.getFirst().envelope().pinnedVersions().promptVersion())
+          .isEqualTo(targetStart.promptVersion());
+      assertThat(activities.acceptRequests.getFirst().envelope().pinnedVersions().modelProfileId())
+          .isEqualTo(targetStart.modelProfileId());
+    }
+  }
+
+  @Test
   void targetBranchUsesPinnedAuthorityAheadOfTheLocalWorkflowRevisions() {
     try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
       String workflowQueue = "target-intake-branch-pinned-authority";
@@ -1197,6 +1292,59 @@ class IntakeRoomWorkflowActivityTest {
         RESPONDENT_SCOPE);
   }
 
+  private static IntakeRoomStart genericTargetStart() {
+    return new IntakeRoomStart(
+        "intake-room-start.v1",
+        TENANT,
+        CASE_ID,
+        EPOCH,
+        FENCE,
+        0,
+        0,
+        1,
+        1,
+        "control-build-p9",
+        "2.0.0",
+        "intake-checkpoint.v2",
+        "all-rooms-prompt.target-e2e.v1",
+        "target-e2e.contract-blocked",
+        "target-e2e-intake-output.v1",
+        "all-rooms-policy.target-e2e.v1",
+        "all-rooms-guardrail.target-e2e.v1",
+        "tools.none.v1",
+        INITIATOR_SCOPE,
+        RESPONDENT_SCOPE);
+  }
+
+  private static PinnedVersions genericTargetBranchPins(IntakeRoomStart start) {
+    return new PinnedVersions(
+        "intake-pinned-versions.v2",
+        start.workflowBuildId(),
+        start.graphVersion(),
+        start.checkpointSchemaVersion(),
+        start.promptVersion(),
+        start.modelProfileId(),
+        "target-e2e-room-proposal-source.v1",
+        start.policyVersion(),
+        start.guardrailVersion(),
+        start.toolPolicyVersion());
+  }
+
+  private static PinnedVersions actorPrivateBranchPins(IntakeRoomStart start) {
+    PinnedVersions generic = genericTargetBranchPins(start);
+    return new PinnedVersions(
+        generic.schemaVersion(),
+        generic.workflowBuildId(),
+        generic.graphVersion(),
+        generic.checkpointSchemaVersion(),
+        "intake-private-prompt.synthetic.v1",
+        "intake-private-model.synthetic.v1",
+        generic.outputSchemaVersion(),
+        generic.policyVersion(),
+        generic.guardrailVersion(),
+        generic.toolPolicyVersion());
+  }
+
   private static IntakeWorkflowCommand command(
       long sequence, String commandId, IntakeCommandType type, BranchOperation branchOperation) {
     return command(sequence, commandId, type, branchOperation, 2);
@@ -1252,6 +1400,42 @@ class IntakeRoomWorkflowActivityTest {
             null,
             expectedProcessRevision,
             expectedRoomRevision));
+  }
+
+  private static IntakeWorkflowCommand pinnedV5BranchCommand(
+      long sequence,
+      String commandId,
+      BranchOperation operation,
+      long expectedProcessRevision,
+      long expectedRoomRevision,
+      PinnedVersions branchPinnedVersions) {
+    return new IntakeWorkflowCommand(
+        "intake-workflow-command.v1",
+        commandId,
+        TENANT,
+        CASE_ID,
+        EPOCH,
+        FENCE,
+        sequence,
+        IntakeCommandType.INTAKE_CONFIRM,
+        IntakeParty.INITIATOR,
+        INITIATOR_SCOPE,
+        "urn:after-sale-flow:intake-command:" + commandId,
+        hash(sequence),
+        "intake.operation:" + CASE_ID + ":" + commandId,
+        hash(sequence + 1),
+        new IntakeCommandExecutionContext(
+            "intake-command-execution-context.v5",
+            THREAD_ID,
+            AGENT_SESSION,
+            Long.MAX_VALUE,
+            new com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.RetryBudget(
+                "intake-retry-budget.v1", 0, 2, 0),
+            operation,
+            null,
+            expectedProcessRevision,
+            expectedRoomRevision,
+            branchPinnedVersions));
   }
 
   private static IntakeDomainEventRef rootTurnEvent(

@@ -2,6 +2,7 @@ package com.example.dispute.workflow.targete2e.temporal.intake;
 
 import com.example.dispute.workflow.contract.v1.CaseCommandRef;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.BranchOperation;
+import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.PinnedVersions;
 import com.example.dispute.workflow.temporal.room.intake.IntakeParty;
 import java.util.Objects;
 
@@ -36,7 +37,18 @@ public interface TargetIntakeBranchContextSource {
     }
   }
 
-  record ResolvedBranchContext(String threadId, String agentSessionId, BranchOperation operation) {
+  record ResolvedBranchContext(
+      String threadId,
+      String agentSessionId,
+      BranchOperation operation,
+      PinnedVersions branchPinnedVersions) {
+
+    /** Source-compatible constructor for legacy callers; the target bridge rejects missing pins. */
+    public ResolvedBranchContext(
+        String threadId, String agentSessionId, BranchOperation operation) {
+      this(threadId, agentSessionId, operation, null);
+    }
+
     public ResolvedBranchContext {
       if (threadId == null || !threadId.matches("[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")) {
         throw new IllegalArgumentException("threadId is invalid");
@@ -46,6 +58,11 @@ public interface TargetIntakeBranchContextSource {
         throw new IllegalArgumentException("agentSessionId is invalid");
       }
       Objects.requireNonNull(operation, "operation must not be null");
+      if (branchPinnedVersions != null
+          && !"intake-pinned-versions.v2".equals(branchPinnedVersions.schemaVersion())) {
+        throw new IllegalArgumentException(
+            "target branch private-thread pins must use intake-pinned-versions.v2");
+      }
     }
   }
 }

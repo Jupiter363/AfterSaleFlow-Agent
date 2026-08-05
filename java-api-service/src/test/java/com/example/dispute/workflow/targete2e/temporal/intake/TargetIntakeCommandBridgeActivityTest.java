@@ -17,6 +17,7 @@ import com.example.dispute.workflow.targete2e.persistence.TargetE2EActivationLed
 import com.example.dispute.workflow.targete2e.persistence.material.TargetIntakeCommandMaterialStore;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.RetryBudget;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.BranchOperation;
+import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.PinnedVersions;
 import com.example.dispute.workflow.temporal.room.intake.IntakeCommandExecutionContext;
 import com.example.dispute.workflow.temporal.room.intake.IntakeTargetAgentRunContext;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -37,6 +38,8 @@ class TargetIntakeCommandBridgeActivityTest {
   private static final String INITIATOR_THREAD_ID = "grt.v1." + HASH_A.substring(0, 32);
   private static final String RESPONDENT_THREAD_ID = "grt.v1." + HASH_B.substring(0, 32);
   private static final Instant DEADLINE = Instant.parse("2026-07-28T10:00:00Z");
+  private static final PinnedVersions INITIATOR_BRANCH_PINS = branchPins("initiator");
+  private static final PinnedVersions RESPONDENT_BRANCH_PINS = branchPins("respondent");
 
   @Test
   void returnsOnlyThePersistedV2ContextAfterExactAuthorityValidation() {
@@ -131,7 +134,7 @@ class TargetIntakeCommandBridgeActivityTest {
   }
 
   @Test
-  void bindsInitiatorRejectWithExactV4BranchAuthority() {
+  void bindsInitiatorRejectWithExactV5BranchAuthorityAndPrivatePins() {
     Fixture fixture = fixture();
     CaseCommandRef command = branchCommand(CommandType.INTAKE_CONFIRM, ActorRole.USER);
     TargetIntakeCommandBridgeActivity activity =
@@ -143,17 +146,21 @@ class TargetIntakeCommandBridgeActivityTest {
                 new TargetIntakeBranchContextSource.ResolvedBranchContext(
                     INITIATOR_THREAD_ID,
                     "session-initiator",
-                    BranchOperation.INITIATOR_REJECT));
+                    BranchOperation.INITIATOR_REJECT,
+                    INITIATOR_BRANCH_PINS));
 
     var bound =
         activity.bindCommand(new TargetIntakeCommandBridgeActivities.BindRequest(command, 17, 1));
 
     assertThat(bound.executionContext()).isNotNull();
-    assertThat(bound.executionContext().schemaVersion()).isEqualTo("intake-command-execution-context.v4");
+    assertThat(bound.executionContext().schemaVersion()).isEqualTo("intake-command-execution-context.v5");
     assertThat(bound.executionContext().branchOperation()).isEqualTo(BranchOperation.INITIATOR_REJECT);
     assertThat(bound.executionContext().threadId()).isEqualTo(INITIATOR_THREAD_ID);
     assertThat(bound.executionContext().expectedProcessRevision()).isEqualTo(1);
     assertThat(bound.executionContext().expectedRoomRevision()).isEqualTo(1);
+    assertThat(bound.executionContext().branchPinnedVersions())
+        .usingRecursiveComparison()
+        .isEqualTo(INITIATOR_BRANCH_PINS);
     assertThat(bound.operationKey()).contains("initiator.reject");
   }
 
@@ -169,12 +176,24 @@ class TargetIntakeCommandBridgeActivityTest {
             DEADLINE.toEpochMilli(),
             new RetryBudget("intake-retry-budget.v1", 0, 3, 0),
             BranchOperation.INITIATOR_ACCEPT);
+    IntakeCommandExecutionContext v4 =
+        new IntakeCommandExecutionContext(
+            "intake-command-execution-context.v4",
+            INITIATOR_THREAD_ID,
+            "session-initiator",
+            DEADLINE.toEpochMilli(),
+            new RetryBudget("intake-retry-budget.v1", 0, 3, 0),
+            BranchOperation.INITIATOR_ACCEPT,
+            null,
+            1L,
+            1L);
 
     assertThat(mapper.valueToTree(v2).has("expectedProcessRevision")).isFalse();
     assertThat(mapper.valueToTree(v2).has("expectedRoomRevision")).isFalse();
     assertThat(mapper.valueToTree(v3).has("expectedProcessRevision")).isFalse();
     assertThat(mapper.valueToTree(v3).has("expectedRoomRevision")).isFalse();
     assertThat(mapper.valueToTree(v3).has("targetAgentRun")).isTrue();
+    assertThat(mapper.valueToTree(v4).has("branchPinnedVersions")).isFalse();
   }
 
   @Test
@@ -196,7 +215,8 @@ class TargetIntakeCommandBridgeActivityTest {
               return new TargetIntakeBranchContextSource.ResolvedBranchContext(
                   RESPONDENT_THREAD_ID,
                   "session-respondent",
-                  BranchOperation.RESPONDENT_CONFIRM);
+                  BranchOperation.RESPONDENT_CONFIRM,
+                  RESPONDENT_BRANCH_PINS);
             });
 
     var bound =
@@ -205,6 +225,10 @@ class TargetIntakeCommandBridgeActivityTest {
     assertThat(bound.party()).isEqualTo(com.example.dispute.workflow.temporal.room.intake.IntakeParty.RESPONDENT);
     assertThat(bound.executionContext().threadId()).isEqualTo(RESPONDENT_THREAD_ID);
     assertThat(bound.executionContext().agentSessionId()).isEqualTo("session-respondent");
+    assertThat(bound.executionContext().schemaVersion()).isEqualTo("intake-command-execution-context.v5");
+    assertThat(bound.executionContext().branchPinnedVersions())
+        .usingRecursiveComparison()
+        .isEqualTo(RESPONDENT_BRANCH_PINS);
   }
 
   @Test
@@ -220,11 +244,13 @@ class TargetIntakeCommandBridgeActivityTest {
                     ? new TargetIntakeBranchContextSource.ResolvedBranchContext(
                         INITIATOR_THREAD_ID,
                         "session-merchant-initiator",
-                        BranchOperation.INITIATOR_REJECT)
+                        BranchOperation.INITIATOR_REJECT,
+                        INITIATOR_BRANCH_PINS)
                     : new TargetIntakeBranchContextSource.ResolvedBranchContext(
                         RESPONDENT_THREAD_ID,
                         "session-user-respondent",
-                        BranchOperation.RESPONDENT_CONFIRM));
+                        BranchOperation.RESPONDENT_CONFIRM,
+                        RESPONDENT_BRANCH_PINS));
 
     var merchant =
         activity.bindCommand(
@@ -238,9 +264,44 @@ class TargetIntakeCommandBridgeActivityTest {
     assertThat(merchant.party())
         .isEqualTo(com.example.dispute.workflow.temporal.room.intake.IntakeParty.INITIATOR);
     assertThat(merchant.executionContext().threadId()).isEqualTo(INITIATOR_THREAD_ID);
+    assertThat(merchant.executionContext().schemaVersion()).isEqualTo("intake-command-execution-context.v5");
+    assertThat(merchant.executionContext().branchPinnedVersions())
+        .usingRecursiveComparison()
+        .isEqualTo(INITIATOR_BRANCH_PINS);
     assertThat(user.party())
         .isEqualTo(com.example.dispute.workflow.temporal.room.intake.IntakeParty.RESPONDENT);
     assertThat(user.executionContext().threadId()).isEqualTo(RESPONDENT_THREAD_ID);
+    assertThat(user.executionContext().schemaVersion()).isEqualTo("intake-command-execution-context.v5");
+    assertThat(user.executionContext().branchPinnedVersions())
+        .usingRecursiveComparison()
+        .isEqualTo(RESPONDENT_BRANCH_PINS);
+  }
+
+  @Test
+  void branchBindingFailsClosedWhenLegacySourceOmitsRegisteredPins() {
+    CaseCommandRef command = branchCommand(CommandType.INTAKE_CONFIRM, ActorRole.USER);
+    TargetIntakeCommandBridgeActivity activity =
+        new TargetIntakeCommandBridgeActivity(
+            new FixedMaterialStore(null),
+            new ObjectMapper(),
+            partySource(false),
+            request ->
+                new TargetIntakeBranchContextSource.ResolvedBranchContext(
+                    INITIATOR_THREAD_ID,
+                    "session-initiator",
+                    BranchOperation.INITIATOR_ACCEPT));
+
+    assertThatThrownBy(
+            () ->
+                activity.bindCommand(
+                    new TargetIntakeCommandBridgeActivities.BindRequest(command, 17, 1)))
+        .isInstanceOfSatisfying(
+            ApplicationFailure.class,
+            failure -> {
+              assertThat(failure.getType())
+                  .isEqualTo(TargetIntakeCommandBridgeActivity.BINDING_INVALID);
+              assertThat(failure.isNonRetryable()).isTrue();
+            });
   }
 
   @Test
@@ -293,6 +354,20 @@ class TargetIntakeCommandBridgeActivityTest {
         DEADLINE,
         "00-" + HASH_A.substring(0, 32) + "-" + HASH_B.substring(0, 16) + "-01",
         HASH_A);
+  }
+
+  private static PinnedVersions branchPins(String party) {
+    return new PinnedVersions(
+        "intake-pinned-versions.v2",
+        "control-build-p9",
+        "target-e2e-graph.2026-07-27.1",
+        "target-e2e-checkpoint.v1",
+        "intake-private-" + party + "-prompt.v1",
+        "intake-private-" + party + "-model.v1",
+        "target-e2e-room-proposal-source.v1",
+        "intake-private-policy.v1",
+        "intake-private-guardrail.v1",
+        "tools.none.v1");
   }
 
   private static Fixture fixture() {

@@ -6,6 +6,7 @@ import com.example.dispute.workflow.contract.v1.CaseCommandRef;
 import com.example.dispute.workflow.contract.v1.ContractJson;
 import com.example.dispute.workflow.contract.v1.ContractTypes.CommandType;
 import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.BranchOperation;
+import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.PinnedVersions;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.minio.GetObjectArgs;
@@ -26,7 +27,12 @@ public final class JdbcTargetIntakeBranchContextSource implements TargetIntakeBr
   public static final String TARGET_INTAKE_PREFIX = "browser-messages";
   private static final int MAX_BYTES = 16 * 1024;
   private static final String BINDING_SQL = """
-      select thread.thread_id, thread.agent_session_id
+      select thread.thread_id, thread.agent_session_id,
+             activation.control_build_id as workflow_build_id,
+             thread.graph_version, thread.checkpoint_schema_version,
+             thread.prompt_version, thread.model_profile_id,
+             thread.output_schema_version, thread.policy_version,
+             thread.guardrail_version, thread.tool_policy_version
         from case_intake_graph_thread_binding thread
         join target_e2e_room_epoch_binding binding
           on binding.tenant_surrogate = thread.tenant_surrogate
@@ -49,6 +55,15 @@ public final class JdbcTargetIntakeBranchContextSource implements TargetIntakeBr
          and thread.actor_role = :actorRole
          and thread.actor_scope_hash = :actorScopeHash
          and thread.registration_status = 'REGISTERED'
+         and thread.writer_mode = 'TEMPORAL'
+         and thread.graph_key = 'all-rooms.target-e2e.v1'
+         and thread.graph_key = activation.graph_key
+         and thread.graph_version = activation.graph_version
+         and thread.checkpoint_schema_version = activation.graph_checkpoint_schema_version
+         and thread.state_schema_version = 'intake-graph-state.v2'
+         and thread.output_schema_version = 'target-e2e-room-proposal-source.v1'
+         and activation.tenant_surrogate = thread.tenant_surrogate
+         and activation.graph_key = 'all-rooms.target-e2e.v1'
          and binding.activation_id = :activationId
          and binding.activation_manifest_hash = :activationManifestHash
          and binding.execution_lane = 'TARGET_E2E_CANDIDATE'
@@ -94,12 +109,24 @@ public final class JdbcTargetIntakeBranchContextSource implements TargetIntakeBr
     if (rows.size() != 1) {
       throw new IllegalArgumentException("target Intake branch has no exact registered private-thread binding");
     }
-    Object threadId = rows.getFirst().get("thread_id");
-    Object agentSessionId = rows.getFirst().get("agent_session_id");
-    if (!(threadId instanceof String thread) || !(agentSessionId instanceof String session)) {
-      throw new IllegalArgumentException("target Intake branch binding is malformed");
-    }
-    return new ResolvedBranchContext(thread, session, operation);
+    Map<String, Object> row = rows.getFirst();
+    PinnedVersions branchPinnedVersions =
+        new PinnedVersions(
+            "intake-pinned-versions.v2",
+            text(row, "workflow_build_id"),
+            text(row, "graph_version"),
+            text(row, "checkpoint_schema_version"),
+            text(row, "prompt_version"),
+            text(row, "model_profile_id"),
+            text(row, "output_schema_version"),
+            text(row, "policy_version"),
+            text(row, "guardrail_version"),
+            text(row, "tool_policy_version"));
+    return new ResolvedBranchContext(
+        text(row, "thread_id"),
+        text(row, "agent_session_id"),
+        operation,
+        branchPinnedVersions);
   }
 
   private String exactObjectKey(CaseCommandRef command) {
@@ -176,6 +203,14 @@ public final class JdbcTargetIntakeBranchContextSource implements TargetIntakeBr
         .addValue("actorScopeHash", request.actorScopeHash())
         .addValue("activationId", request.activationId())
         .addValue("activationManifestHash", request.activationManifestHash());
+  }
+
+  private static String text(Map<String, Object> row, String column) {
+    Object value = row.get(column);
+    if (!(value instanceof String text) || text.isBlank() || text.length() > 128) {
+      throw new IllegalArgumentException("target Intake branch binding column is invalid: " + column);
+    }
+    return text;
   }
 
   private static String sha256(byte[] value) {

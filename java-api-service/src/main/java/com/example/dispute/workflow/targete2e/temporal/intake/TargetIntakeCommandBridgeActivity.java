@@ -7,9 +7,10 @@ import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
 import com.example.dispute.workflow.contract.v1.RoomGraphCommand;
 import com.example.dispute.workflow.targete2e.persistence.material.TargetIntakeCommandMaterialStore;
 import com.example.dispute.workflow.targete2e.persistence.material.TargetIntakeCommandMaterialStore.MaterialSnapshot;
+import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.PinnedVersions;
+import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.RetryBudget;
 import com.example.dispute.workflow.temporal.room.intake.IntakeCommandExecutionContext;
 import com.example.dispute.workflow.temporal.room.intake.IntakeCommandType;
-import com.example.dispute.workflow.temporal.room.intake.IntakeActivityProtocol.RetryBudget;
 import com.example.dispute.workflow.temporal.room.intake.IntakeOperationKeys;
 import com.example.dispute.workflow.temporal.room.intake.IntakeParty;
 import com.example.dispute.workflow.temporal.room.intake.IntakeTargetAgentRunContext;
@@ -21,8 +22,9 @@ import io.temporal.failure.ApplicationFailure;
 import java.util.Objects;
 
 /**
- * CONTROL-side authority bridge for target Intake. The persisted material is the only source for
- * the v2 execution context, making the Activity result the replay-stable workflow input.
+ * CONTROL-side authority bridge for target Intake. Persisted message material supplies the v2
+ * execution context, while exact registered private-thread authority supplies branch v5; the
+ * Activity result is the replay-stable workflow input.
  */
 public final class TargetIntakeCommandBridgeActivity implements TargetIntakeCommandBridgeActivities {
 
@@ -106,9 +108,13 @@ public final class TargetIntakeCommandBridgeActivity implements TargetIntakeComm
         command.commandType() == CommandType.INTAKE_CONFIRM
             ? IntakeCommandType.INTAKE_CONFIRM
             : IntakeCommandType.INTAKE_CANCEL;
+    PinnedVersions branchPinnedVersions = resolved.branchPinnedVersions();
+    require(
+        branchPinnedVersions != null,
+        "target Intake branch private-thread pins are absent");
     IntakeCommandExecutionContext context =
         new IntakeCommandExecutionContext(
-            "intake-command-execution-context.v4",
+            "intake-command-execution-context.v5",
             resolved.threadId(),
             resolved.agentSessionId(),
             command.deadlineAt().toEpochMilli(),
@@ -116,7 +122,8 @@ public final class TargetIntakeCommandBridgeActivity implements TargetIntakeComm
             resolved.operation(),
             null,
             command.expectedProcessRevision(),
-            request.expectedRoomRevision());
+            request.expectedRoomRevision(),
+            branchPinnedVersions);
     return new IntakeWorkflowCommand(
         "intake-workflow-command.v1",
         command.commandId(),

@@ -2163,22 +2163,35 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
       IntakeWorkflowCommand command,
       IntakeCommandExecutionContext context,
       ActivityInvocation invocation) {
-    PinnedVersions versions =
-        new PinnedVersions(
-            context.isTargetBranch()
-                ? "intake-pinned-versions.v2"
-                : "intake-pinned-versions.v1",
-            start.workflowBuildId(),
-            start.graphVersion(),
-            start.checkpointSchemaVersion(),
-            start.promptVersion(),
-            start.modelProfileId(),
-            context.isTargetBranch()
-                ? TARGET_BRANCH_OUTPUT_SCHEMA_VERSION
-                : start.outputSchemaVersion(),
-            start.policyVersion(),
-            start.guardrailVersion(),
-            start.toolPolicyVersion());
+    PinnedVersions versions;
+    if (context.hasRegisteredTargetBranchPins()) {
+      versions = Objects.requireNonNull(
+          context.branchPinnedVersions(), "target branch private-thread pins are absent");
+      if (!versions.workflowBuildId().equals(start.workflowBuildId())
+          || !versions.graphVersion().equals(start.graphVersion())
+          || !versions.checkpointSchemaVersion().equals(start.checkpointSchemaVersion())) {
+        throw new IllegalArgumentException(
+            "target branch private-thread pins differ from the active room authority");
+      }
+    } else {
+      // v1-v4 histories retain their original start-derived Activity command shape.
+      versions =
+          new PinnedVersions(
+              context.isTargetBranch()
+                  ? "intake-pinned-versions.v2"
+                  : "intake-pinned-versions.v1",
+              start.workflowBuildId(),
+              start.graphVersion(),
+              start.checkpointSchemaVersion(),
+              start.promptVersion(),
+              start.modelProfileId(),
+              context.isTargetBranch()
+                  ? TARGET_BRANCH_OUTPUT_SCHEMA_VERSION
+                  : start.outputSchemaVersion(),
+              start.policyVersion(),
+              start.guardrailVersion(),
+              start.toolPolicyVersion());
+    }
     RetryBudget invocationBudget =
         new RetryBudget(
             "intake-retry-budget.v1",
