@@ -44,7 +44,10 @@ def finalize_case_fact_matrix(
     respondent_role = "MERCHANT" if initiator_role == "USER" else "USER"
     actor_role = _matrix_actor_role(request, initiator_role)
     if actor_role == respondent_role and previous is None:
-        _schema_error("respondent intake requires an initiator matrix")
+        _schema_error(
+            "respondent intake requires an initiator matrix",
+            safe_code="INTAKE_MATRIX_INITIATOR_MATRIX_MISSING",
+        )
 
     resolved_delta = _as_v2_delta(
         delta,
@@ -88,10 +91,12 @@ def finalize_case_fact_matrix(
                     if matches:
                         _schema_error(
                             "case matrix delta cannot uniquely resolve unknown fact "
-                            f"{item.fact_key}"
+                            f"{item.fact_key}",
+                            safe_code="INTAKE_MATRIX_FACT_AMBIGUOUS",
                         )
                     _schema_error(
-                        f"case matrix delta references unknown fact {item.fact_key}"
+                        f"case matrix delta references unknown fact {item.fact_key}",
+                        safe_code="INTAKE_MATRIX_FACT_UNKNOWN",
                     )
                 fact_id = matches[0]
                 previous_row = previous_rows[fact_id]
@@ -101,7 +106,8 @@ def finalize_case_fact_matrix(
                 item.category, item.fact_target
             ):
                 _schema_error(
-                    f"existing fact {item.fact_key} cannot change category or fact_target"
+                    f"existing fact {item.fact_key} cannot change category or fact_target",
+                    safe_code="INTAKE_MATRIX_FACT_BINDING_MUTATED",
                 )
         else:
             fingerprint = _fact_fingerprint(item.category, item.fact_target)
@@ -113,7 +119,10 @@ def finalize_case_fact_matrix(
             else:
                 fact_id = _stable_fact_id(request.case_id, item.category, item.fact_target)
         if fact_id in seen:
-            _schema_error(f"case matrix delta resolves duplicate fact {fact_id}")
+            _schema_error(
+                f"case matrix delta resolves duplicate fact {fact_id}",
+                safe_code="INTAKE_MATRIX_FACT_DUPLICATE",
+            )
         seen.add(fact_id)
         resolved_ids[item.fact_key] = fact_id
         rows.append(
@@ -131,13 +140,17 @@ def finalize_case_fact_matrix(
     if missing_previous:
         _schema_error(
             "case matrix delta must carry every prior fact; missing="
-            + str(sorted(missing_previous))
+            + str(sorted(missing_previous)),
+            safe_code="INTAKE_MATRIX_PRIOR_FACT_MISSING",
         )
     summary_ids = _deduplicate(
         [resolved_ids[key] for key in resolved_delta.summary_source_fact_keys]
     )
     if not summary_ids:
-        _schema_error("case overview requires at least one fact reference")
+        _schema_error(
+            "case overview requires at least one fact reference",
+            safe_code="INTAKE_MATRIX_OVERVIEW_FACTS_MISSING",
+        )
 
     claims = _claims(
         request=request,
@@ -251,9 +264,15 @@ def _reduce_fact_row(
     matrix_kind: CaseMatrixKind,
 ) -> dict[str, Any]:
     if previous_row is None and item.source_scope == CaseMatrixSourceScope.PREVIOUS_MATRIX:
-        _schema_error(f"new fact {item.fact_key} cannot cite PREVIOUS_MATRIX")
+        _schema_error(
+            f"new fact {item.fact_key} cannot cite PREVIOUS_MATRIX",
+            safe_code="INTAKE_MATRIX_NEW_FACT_PREVIOUS_SCOPE_INVALID",
+        )
     if previous_row is not None and item.materiality != previous_row.materiality:
-        _schema_error(f"existing fact {fact_id} cannot change materiality")
+        _schema_error(
+            f"existing fact {fact_id} cannot change materiality",
+            safe_code="INTAKE_MATRIX_FACT_MATERIALITY_MUTATED",
+        )
     positions = (
         previous_row.positions.model_dump(mode="json")
         if previous_row is not None
@@ -265,9 +284,15 @@ def _reduce_fact_row(
     previous_position = positions[actor_role]
     if item.stance == FactStance.NOT_ADDRESSED:
         if previous_row is None:
-            _schema_error("a new fact cannot be NOT_ADDRESSED by its source party")
+            _schema_error(
+                "a new fact cannot be NOT_ADDRESSED by its source party",
+                safe_code="INTAKE_MATRIX_NEW_FACT_NOT_ADDRESSED",
+            )
         if item.source_scope != CaseMatrixSourceScope.PREVIOUS_MATRIX:
-            _schema_error("NOT_ADDRESSED delta must preserve the previous position")
+            _schema_error(
+                "NOT_ADDRESSED delta must preserve the previous position",
+                safe_code="INTAKE_MATRIX_NOT_ADDRESSED_SCOPE_INVALID",
+            )
     else:
         prior_refs = list(previous_position.get("source_refs") or [])
         refs = list(prior_refs)
@@ -277,7 +302,10 @@ def _reduce_fact_row(
         }:
             refs.append(current_ref)
         if not refs:
-            _schema_error(f"fact {fact_id} current position has no source")
+            _schema_error(
+                f"fact {fact_id} current position has no source",
+                safe_code="INTAKE_MATRIX_POSITION_SOURCE_MISSING",
+            )
         positions[actor_role] = {
             "stance": item.stance,
             "position_summary": item.position_summary,
@@ -296,7 +324,10 @@ def _reduce_fact_row(
     }:
         origin_refs.append(current_ref)
     if not origin_refs:
-        _schema_error(f"fact {fact_id} has no origin source")
+        _schema_error(
+            f"fact {fact_id} has no origin source",
+            safe_code="INTAKE_MATRIX_ORIGIN_SOURCE_MISSING",
+        )
     introduced_stage = (
         previous_row.origin.introduced_stage
         if previous_row is not None
@@ -488,7 +519,10 @@ def _claims(
                 expected_dossier_source=DIRECT_RESPONDENT_SOURCE,
                 expected_message_source="RESPONDENT_PARTICIPANT_MESSAGE",
             ):
-                _schema_error("changed respondent direct claim is not bound to the current source")
+                _schema_error(
+                    "changed respondent direct claim is not bound to the current source",
+                    safe_code="INTAKE_MATRIX_DIRECT_CLAIM_SOURCE_MISSING",
+                )
             direct = {
                 **direct_candidate,
                 "source_refs": _deduplicate(
@@ -613,7 +647,10 @@ def _reported_position(
         expected_message_source="PARTICIPANT_MESSAGE",
         allow_initial_form=True,
     ):
-        _schema_error("changed reported respondent position is not bound to the current source")
+        _schema_error(
+            "changed reported respondent position is not bound to the current source",
+            safe_code="INTAKE_MATRIX_REPORTED_CLAIM_SOURCE_MISSING",
+        )
     refs = list(prior.source_refs) if prior is not None else []
     if current_is_initiator:
         refs.append(current_ref)
@@ -729,16 +766,25 @@ def _previous_matrix(request: IntakeTurnRequest) -> CaseFactMatrixV2 | None:
         try:
             matrix = CaseFactMatrixV2.model_validate(candidate)
         except ValueError as failure:
-            _schema_error(f"previous case_fact_matrix.v2 is invalid: {failure}")
+            _schema_error(
+                f"previous case_fact_matrix.v2 is invalid: {failure}",
+                safe_code="INTAKE_MATRIX_PREVIOUS_SCHEMA_INVALID",
+            )
         if not validate_case_fact_matrix_content_hash(candidate):
-            _schema_error("previous case_fact_matrix.v2 content hash is invalid")
+            _schema_error(
+                "previous case_fact_matrix.v2 content hash is invalid",
+                safe_code="INTAKE_MATRIX_PREVIOUS_HASH_INVALID",
+            )
         return matrix
     legacy = detail.get("unilateral_case_matrix")
     if isinstance(legacy, dict):
         try:
             return _upgrade_unilateral(UnilateralCaseMatrixV1.model_validate(legacy))
         except ValueError as failure:
-            _schema_error(f"previous unilateral_case_matrix.v1 is invalid: {failure}")
+            _schema_error(
+                f"previous unilateral_case_matrix.v1 is invalid: {failure}",
+                safe_code="INTAKE_MATRIX_PREVIOUS_LEGACY_SCHEMA_INVALID",
+            )
     return None
 
 
@@ -841,7 +887,8 @@ def _as_v2_delta(
             if position.stance == FactStance.NOT_ADDRESSED:
                 _schema_error(
                     "a missing matrix delta cannot invent the current party's position for "
-                    + row.fact_id
+                    + row.fact_id,
+                    safe_code="INTAKE_MATRIX_MISSING_DELTA_CARRY_INVALID",
                 )
             carry_rows.append(
                 {
@@ -967,7 +1014,10 @@ def _current_source(request: IntakeTurnRequest) -> tuple[str, str]:
         return request.current_user_message.message_id, request.current_user_message.text
     initial = request.initial_case_facts
     if initial is None:
-        _schema_error("intake matrix requires a current source")
+        _schema_error(
+            "intake matrix requires a current source",
+            safe_code="INTAKE_MATRIX_CURRENT_SOURCE_MISSING",
+        )
     return f"INTAKE_FORM_{request.case_id}", initial.form_description
 
 
@@ -991,7 +1041,10 @@ def _initiator_role(
         or request.agent_context.actor_role
     ).upper()
     if role not in {"USER", "MERCHANT"}:
-        _schema_error("matrix initiator_role must be USER or MERCHANT")
+        _schema_error(
+            "matrix initiator_role must be USER or MERCHANT",
+            safe_code="INTAKE_MATRIX_INITIATOR_ROLE_INVALID",
+        )
     return role
 
 
@@ -1004,7 +1057,10 @@ def _case_summary(case_detail: dict[str, Any], request: IntakeTurnRequest) -> st
         return request.current_user_message.text
     if request.initial_case_facts is not None:
         return request.initial_case_facts.form_description
-    _schema_error("case matrix requires a case summary")
+    _schema_error(
+        "case matrix requires a case summary",
+        safe_code="INTAKE_MATRIX_CASE_SUMMARY_MISSING",
+    )
 
 
 def _core_conflict(case_detail: dict[str, Any], fallback: str) -> str:
@@ -1088,5 +1144,9 @@ def _hash_json(value: Any) -> str:
     ).hexdigest()
 
 
-def _schema_error(message: str) -> NoReturn:
-    raise AgentOutputSchemaError("intake_turn_case_detail", message)
+def _schema_error(message: str, *, safe_code: str) -> NoReturn:
+    raise AgentOutputSchemaError(
+        "intake_turn_case_detail",
+        message,
+        safe_code=safe_code,
+    )

@@ -1237,6 +1237,7 @@ def _enforce_respondent_attitude_source(
             raise AgentOutputSchemaError(
                 "intake_turn_case_detail",
                 "respondent attitude signal unresolved",
+                safe_code="INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED",
             )
         if detection.state == "NONE":
             detail["respondent_attitude"] = (
@@ -1253,6 +1254,7 @@ def _enforce_respondent_attitude_source(
             raise AgentOutputSchemaError(
                 "intake_turn_case_detail",
                 "respondent attitude signal unresolved",
+                safe_code="INTAKE_RESPONDENT_ATTITUDE_SOURCE_UNRESOLVED",
             )
         detail["respondent_attitude"] = {
             "respondent_role": actor_role,

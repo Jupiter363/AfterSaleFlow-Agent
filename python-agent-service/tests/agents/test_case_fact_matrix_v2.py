@@ -24,6 +24,32 @@ from app.harness.evidence_context_assembler import (
 )
 
 
+@pytest.mark.parametrize(
+    ("kwargs", "expected"),
+    [
+        pytest.param({}, "AGENT_OUTPUT_SCHEMA_INVALID", id="default"),
+        pytest.param(
+            {"safe_code": "INTAKE_MATRIX_FACT_UNKNOWN"},
+            "INTAKE_MATRIX_FACT_UNKNOWN",
+            id="supplied",
+        ),
+    ],
+)
+def test_agent_output_schema_error_exposes_stable_safe_code(
+    kwargs: dict[str, str],
+    expected: str,
+) -> None:
+    error = AgentOutputSchemaError(
+        "intake_turn_case_detail",
+        "internal schema detail",
+        **kwargs,
+    )
+
+    assert error.node_name == "intake_turn_case_detail"
+    assert error.safe_code == expected
+    assert str(error) == "internal schema detail"
+
+
 def test_delta_requires_explicit_stance() -> None:
     with pytest.raises(ValueError, match="stance"):
         CaseFactMatrixDeltaV2.model_validate(
@@ -242,6 +268,29 @@ def _respondent_request(case_id: str, previous_matrix: dict[str, object]):
     )
 
 
+def _initiator_follow_up_request(
+    case_id: str,
+    previous_matrix: dict[str, object],
+) -> IntakeTurnRequest:
+    return IntakeTurnRequest.model_validate(
+        {
+            "case_id": case_id,
+            "room_type": "INTAKE",
+            "turn_source": "ROOM_MESSAGE",
+            "current_user_message": {
+                "message_id": "MESSAGE_USER_SAFE_CODE_FOLLOW_UP",
+                "sequence_no": 3,
+                "role": "USER",
+                "source": "ROOM_MESSAGE",
+                "text": "A bounded synthetic follow-up for schema-code coverage.",
+            },
+            "recent_dialogue_messages": [],
+            "previous_case_detail": {"case_fact_matrix": previous_matrix},
+            "agent_context": _context(case_id, "USER", "user-local"),
+        }
+    )
+
+
 def _existing_fact_delta(
     fact_key: str,
     *,
@@ -320,12 +369,17 @@ def test_previous_java_jcs_matrix_rejects_raw_content_tampering() -> None:
     previous = _java_jcs_previous_matrix(case_id, requested_amount=2399)
     previous["claims"]["initiator_claim"]["requested_resolution"] = "EXCHANGE"
 
-    with pytest.raises(AgentOutputSchemaError, match="content hash is invalid"):
+    with pytest.raises(
+        AgentOutputSchemaError,
+        match="content hash is invalid",
+    ) as failure:
         finalize_case_fact_matrix(
             request=_respondent_request(case_id, previous),
             case_detail=_detail("The respondent confirms the prior fact."),
             delta=_existing_fact_delta(previous["fact_rows"][0]["fact_id"]),
         )
+
+    assert failure.value.safe_code == "INTAKE_MATRIX_PREVIOUS_HASH_INVALID"
 
 
 def test_reducer_allows_new_fact_with_mixed_scope_using_only_current_source() -> None:
@@ -422,12 +476,17 @@ def test_reducer_preserves_existing_fact_materiality_for_every_source_scope(
         }
     )
 
-    with pytest.raises(AgentOutputSchemaError, match="cannot change materiality"):
+    with pytest.raises(
+        AgentOutputSchemaError,
+        match="cannot change materiality",
+    ) as failure:
         finalize_case_fact_matrix(
             request=_respondent_request(case_id, previous.model_dump(mode="json")),
             case_detail=_detail("The respondent addressed the frozen fact."),
             delta=delta,
         )
+
+    assert failure.value.safe_code == "INTAKE_MATRIX_FACT_MATERIALITY_MUTATED"
 
 
 def _mistyped_fact_id(fact_id: str) -> str:
@@ -486,7 +545,10 @@ def test_unknown_fact_id_without_a_matching_fingerprint_still_fails_closed() -> 
     previous = _single_fact_initiator_matrix(case_id)
     mistyped_fact_id = _mistyped_fact_id(previous.fact_rows[0].fact_id)
 
-    with pytest.raises(AgentOutputSchemaError, match="references unknown fact"):
+    with pytest.raises(
+        AgentOutputSchemaError,
+        match="references unknown fact",
+    ) as failure:
         finalize_case_fact_matrix(
             request=_respondent_request(case_id, previous.model_dump(mode="json")),
             case_detail=_detail("商家补充了另一项事实。"),
@@ -495,6 +557,8 @@ def test_unknown_fact_id_without_a_matching_fingerprint_still_fails_closed() -> 
                 fact_target="现场是否实施额外墙体加固服务",
             ),
         )
+
+    assert failure.value.safe_code == "INTAKE_MATRIX_FACT_UNKNOWN"
 
 
 def test_unknown_fact_id_with_an_ambiguous_fingerprint_still_fails_closed() -> None:
@@ -518,12 +582,121 @@ def test_unknown_fact_id_with_an_ambiguous_fingerprint_still_fails_closed() -> N
     ).hexdigest()
     mistyped_fact_id = _mistyped_fact_id(previous.fact_rows[0].fact_id)
 
-    with pytest.raises(AgentOutputSchemaError, match="cannot uniquely resolve"):
+    with pytest.raises(
+        AgentOutputSchemaError,
+        match="cannot uniquely resolve",
+    ) as failure:
         finalize_case_fact_matrix(
             request=_respondent_request(case_id, payload),
             case_detail=_detail("商家确认商品页面标注包含基础安装。"),
             delta=_existing_fact_delta(mistyped_fact_id),
         )
+
+    assert failure.value.safe_code == "INTAKE_MATRIX_FACT_AMBIGUOUS"
+
+
+@pytest.mark.parametrize(
+    ("variant", "expected_code"),
+    [
+        pytest.param(
+            "binding",
+            "INTAKE_MATRIX_FACT_BINDING_MUTATED",
+            id="binding",
+        ),
+        pytest.param(
+            "duplicate",
+            "INTAKE_MATRIX_FACT_DUPLICATE",
+            id="duplicate",
+        ),
+        pytest.param(
+            "membership",
+            "INTAKE_MATRIX_PRIOR_FACT_MISSING",
+            id="membership",
+        ),
+    ],
+)
+def test_round_three_reachable_matrix_rejections_expose_safe_codes(
+    variant: str,
+    expected_code: str,
+) -> None:
+    case_id = f"CASE_safe_code_{variant}"
+    previous = _single_fact_initiator_matrix(case_id)
+    previous_row = previous.fact_rows[0]
+    if variant == "binding":
+        delta = _existing_fact_delta(
+            previous_row.fact_id,
+            fact_target="A different bounded synthetic fact target.",
+        )
+    elif variant == "duplicate":
+        payload = _existing_fact_delta(previous_row.fact_id).model_dump(mode="json")
+        duplicate = deepcopy(payload["fact_rows"][0])
+        duplicate["fact_key"] = _mistyped_fact_id(previous_row.fact_id)
+        payload["fact_rows"].append(duplicate)
+        payload["summary_source_fact_keys"].append(duplicate["fact_key"])
+        delta = CaseFactMatrixDeltaV2.model_validate(payload)
+    else:
+        delta = _existing_fact_delta(
+            "NEW_SAFE_CODE_CURRENT_FACT",
+            fact_target="A distinct bounded synthetic current fact.",
+        )
+
+    with pytest.raises(AgentOutputSchemaError) as failure:
+        finalize_case_fact_matrix(
+            request=_respondent_request(case_id, previous.model_dump(mode="json")),
+            case_detail=_detail("A bounded synthetic matrix transition."),
+            delta=delta,
+        )
+
+    assert failure.value.safe_code == expected_code
+
+
+def test_changed_reported_claim_without_current_grounding_exposes_safe_code() -> None:
+    case_id = "CASE_safe_code_reported_claim"
+    previous = _single_fact_initiator_matrix(case_id)
+    previous_row = previous.fact_rows[0]
+    previous_position = previous_row.positions.USER
+    detail = _detail("A bounded synthetic reported-claim transition.")
+    detail["respondent_attitude"] = {
+        "respondent_role": "MERCHANT",
+        "attitude": "DISAGREE",
+        "position": "A bounded synthetic historical respondent position.",
+        "source": SUBJECTIVE_RESPONDENT_SOURCE,
+        "confidence": 0.8,
+        "confidence_note": SUBJECTIVE_RESPONDENT_CONFIDENCE_NOTE,
+        "grounding": {"source": "INITIAL_FORM", "message_id": ""},
+    }
+    delta = CaseFactMatrixDeltaV2.model_validate(
+        {
+            "fact_rows": [
+                {
+                    "fact_key": previous_row.fact_id,
+                    "category": previous_row.category,
+                    "fact_target": previous_row.fact_target,
+                    "materiality": previous_row.materiality,
+                    "stance": previous_position.stance,
+                    "position_summary": previous_position.position_summary,
+                    "asserted_value": previous_position.asserted_value,
+                    "source_scope": "PREVIOUS_MATRIX",
+                }
+            ],
+            "summary_source_fact_keys": [previous_row.fact_id],
+        }
+    )
+
+    with pytest.raises(AgentOutputSchemaError) as failure:
+        finalize_case_fact_matrix(
+            request=_initiator_follow_up_request(
+                case_id,
+                previous.model_dump(mode="json"),
+            ),
+            case_detail=detail,
+            delta=delta,
+        )
+
+    assert (
+        failure.value.safe_code
+        == "INTAKE_MATRIX_REPORTED_CLAIM_SOURCE_MISSING"
+    )
 
 
 def test_unified_matrix_evolves_from_initiator_to_bilateral_without_changing_fact_ids() -> None:
@@ -702,7 +875,7 @@ def test_changed_direct_claim_requires_exact_current_grounding(
     with pytest.raises(
         AgentOutputSchemaError,
         match="changed respondent direct claim is not bound to the current source",
-    ):
+    ) as failure:
         finalize_case_fact_matrix(
             request=_respondent_request(
                 case_id,
@@ -711,6 +884,8 @@ def test_changed_direct_claim_requires_exact_current_grounding(
             case_detail=detail,
             delta=CaseFactMatrixDeltaV2.model_validate(delta_payload),
         )
+
+    assert failure.value.safe_code == "INTAKE_MATRIX_DIRECT_CLAIM_SOURCE_MISSING"
 
 
 def test_respondent_fact_only_turn_does_not_invent_or_erase_a_claim() -> None:

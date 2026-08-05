@@ -961,6 +961,7 @@ def _run_fifth_initiator_full_snapshot_checkpoint(
     event,
     *,
     historical_mutation: tuple[str, Any] | None = None,
+    baseline_schema_mutation: tuple[str, Any] | None = None,
 ) -> None:
     imported = copy.deepcopy(snapshot)
     imported["own_messages"] = []
@@ -1074,6 +1075,9 @@ def _run_fifth_initiator_full_snapshot_checkpoint(
                     match="INTAKE_MATRIX_PREVIOUS_FACT_MUTATED",
                 ):
                     validate_matrix_patch(state, raw_matrix_patch)
+            if baseline_schema_mutation is not None:
+                field, value = baseline_schema_mutation
+                historical_row[field] = value
 
             raw_document = {
                 "room_utterance": document["room_utterance"],
@@ -1241,6 +1245,30 @@ def test_fifth_initiator_raw_historical_matrix_surface_variants_carry_canonicall
         event,
         historical_mutation=(field, value),
     )
+
+
+def test_baseline_adapter_exposes_safe_matrix_code_without_internal_details(
+    bindings,
+    version_pins,
+    snapshot,
+    event,
+) -> None:
+    internal_sentinel = "INTERNAL_PROVIDER_FACT_TARGET_SENTINEL"
+
+    with pytest.raises(IntakeGraphContractError) as failure:
+        _run_fifth_initiator_full_snapshot_checkpoint(
+            bindings,
+            version_pins,
+            snapshot,
+            event,
+            baseline_schema_mutation=("fact_target", internal_sentinel),
+        )
+
+    public_error = str(failure.value)
+    assert public_error == "INTAKE_MATRIX_FACT_BINDING_MUTATED"
+    assert internal_sentinel not in public_error
+    assert "cannot change category or fact_target" not in public_error
+    assert "FACT_INTAKE_" not in public_error
 
 
 def test_bounded_derivation_rejects_under_capacity_message_loss(

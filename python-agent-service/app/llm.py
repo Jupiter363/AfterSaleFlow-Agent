@@ -132,9 +132,16 @@ class AgentOutputSchemaError(RuntimeError):
     # 具体功能：`__init__` 在标准异常消息之外保存 node_name，使 API、工作流和人工兜底能定位哪一个 Agent 节点违反输出 Schema。
     # 上下游：上游是非流式/流式 Pydantic 校验、矩阵引用护栏等；下游是稳定错误映射、trace 与 MANUAL_REVIEW_REQUIRED 原因。
     # 系统意义：模型服务“可达”与模型结果“业务不可接受”必须分型，后者不能被当网络错误无脑重试或提交自由文本。
-    def __init__(self, node_name: str, message: str) -> None:
+    def __init__(
+        self,
+        node_name: str,
+        message: str,
+        *,
+        safe_code: str = "AGENT_OUTPUT_SCHEMA_INVALID",
+    ) -> None:
         super().__init__(message)
         self.node_name = node_name
+        self.safe_code = safe_code
 
 
 class AgentServiceUnavailable(RuntimeError):

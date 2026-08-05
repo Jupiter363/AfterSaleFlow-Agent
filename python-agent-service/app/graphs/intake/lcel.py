@@ -1430,11 +1430,14 @@ def _adapt_and_normalize_generation_parts(
     ):
         raise IntakeGraphContractError("INTAKE_LCEL_GENERATION_INVALID")
     typed_state = cast(IntakeGraphStateV2, state)
-    adapted = adapt_intake_baseline_output(
-        typed_state,
-        agent_context=agent_context,
-        output=draft,
-    )
+    try:
+        adapted = adapt_intake_baseline_output(
+            typed_state,
+            agent_context=agent_context,
+            output=draft,
+        )
+    except AgentOutputSchemaError as error:
+        raise IntakeGraphContractError(error.safe_code) from None
     normalized = _normalize_model_matrix_fact_keys(typed_state, adapted)
     normalized = _normalize_model_respondent_attitude(typed_state, normalized)
     return (
@@ -1483,7 +1486,9 @@ def _post_normalizer_formal_matrix(
             case_detail=deepcopy(materialized),
             delta=delta,
         )
-    except (AgentOutputSchemaError, ValueError) as error:
+    except AgentOutputSchemaError as error:
+        raise IntakeGraphContractError(error.safe_code) from None
+    except ValueError as error:
         raise IntakeGraphContractError("INTAKE_BASELINE_FORMAL_MATRIX_INVALID") from error
     request_base = request.model_dump(mode="json")
     # The only retained previous authority is the separate, hash-bound M0/Mn
