@@ -128,6 +128,75 @@ class IntakeRespondentMatrixFreezerTest {
     }
 
     @Test
+    void respondentRoundsCanonicalizeSelectedSummaryFactsToFinalRowOrder()
+            throws Exception {
+        ObjectNode initiator = initiatorMatrixWithFiveOrderedFormalFacts();
+        ArrayNode initiatorSummary =
+                (ArrayNode) initiator.at("/case_overview/summary_source_fact_ids");
+        assertThat(initiator.path("matrix_kind").asText()).isEqualTo("INITIATOR_FROZEN");
+        assertThat(initiator.path("matrix_version").asLong()).isEqualTo(5);
+        assertThat(initiatorSummary.size()).isEqualTo(5);
+        for (int index = 0; index < initiatorSummary.size(); index++) {
+            assertThat(initiatorSummary.get(index))
+                    .isEqualTo(initiator.at("/fact_rows/" + index + "/fact_id"));
+        }
+
+        String firstFactKey = "NEW_RESPONDENT_ROUND_ONE";
+        ObjectNode firstDelta = respondentDeltaAppendingFormalFact(
+                initiator,
+                firstFactKey,
+                "Whether the first respondent update adds a formal fact.");
+        assertThat(firstDelta.at("/fact_rows/0/fact_key").asText())
+                .isEqualTo(firstFactKey);
+        assertThat(firstDelta.at("/summary_source_fact_keys/0"))
+                .isEqualTo(initiatorSummary.get(0));
+        assertThat(firstDelta.at("/summary_source_fact_keys/5").asText())
+                .isEqualTo(firstFactKey);
+
+        ObjectNode first = freezer.deriveCandidate(
+                initiator, firstDelta, respondentAuthority());
+        ArrayNode firstSummary =
+                (ArrayNode) first.at("/case_overview/summary_source_fact_ids");
+        String firstAppendedFactId = first.at("/fact_rows/0/fact_id").asText();
+        ArrayNode firstFactIdsInRowOrder = JSON.createArrayNode();
+        first.path("fact_rows").forEach(row ->
+                firstFactIdsInRowOrder.add(row.path("fact_id").asText()));
+        assertThat(first.path("matrix_kind").asText()).isEqualTo("BILATERAL_FROZEN");
+        assertThat(first.path("matrix_version").asLong()).isEqualTo(6);
+        assertThat(first.path("parent_ref")).isEqualTo(parentRef(initiator));
+        assertThat(firstSummary.size()).isEqualTo(6);
+        assertThat(firstSummary).isEqualTo(firstFactIdsInRowOrder);
+        assertThat(firstSummary.get(0).asText()).isEqualTo(firstAppendedFactId);
+        freezer.requireCompleteForFreeze(first, respondentAuthority());
+
+        String secondFactKey = "NEW_RESPONDENT_ROUND_TWO";
+        ObjectNode secondDelta = respondentDeltaAppendingFormalFact(
+                first,
+                secondFactKey,
+                "Whether the second respondent update adds a formal fact.");
+        assertThat(secondDelta.at("/fact_rows/0/fact_key").asText())
+                .isEqualTo(secondFactKey);
+        assertThat(secondDelta.at("/summary_source_fact_keys/0"))
+                .isEqualTo(firstSummary.get(0));
+        assertThat(secondDelta.at("/summary_source_fact_keys/6").asText())
+                .isEqualTo(secondFactKey);
+
+        ObjectNode second = freezer.deriveCandidate(
+                first, secondDelta, nextRespondentAuthority());
+        ArrayNode secondSummary =
+                (ArrayNode) second.at("/case_overview/summary_source_fact_ids");
+        String secondAppendedFactId = second.at("/fact_rows/0/fact_id").asText();
+        ArrayNode secondFactIdsInRowOrder = JSON.createArrayNode();
+        second.path("fact_rows").forEach(row ->
+                secondFactIdsInRowOrder.add(row.path("fact_id").asText()));
+        assertThat(second.path("matrix_version").asLong()).isEqualTo(7);
+        assertThat(second.path("parent_ref")).isEqualTo(parentRef(first));
+        assertThat(secondSummary.size()).isEqualTo(7);
+        assertThat(secondSummary).isEqualTo(secondFactIdsInRowOrder);
+        assertThat(secondSummary.get(0).asText()).isEqualTo(secondAppendedFactId);
+    }
+
+    @Test
     void openingBilateralParentFailsClosedForRecursiveAuthorityDrift() throws Exception {
         assertInvalidOpeningParent(parent ->
                 ((ObjectNode) parent.at("/fact_rows/0"))
@@ -470,6 +539,85 @@ class IntakeRespondentMatrixFreezerTest {
         assertThat(opening.path("matrix_kind").asText()).isEqualTo("BILATERAL_FROZEN");
         assertThat(opening.at("/claims/respondent_direct").isNull()).isTrue();
         return opening;
+    }
+
+    private static ObjectNode initiatorMatrixWithFiveOrderedFormalFacts() {
+        ObjectNode unilateral = unilateral();
+        IntakeInitiatorMatrixFreezer initiatorFreezer =
+                new IntakeInitiatorMatrixFreezer();
+        ObjectNode parent = null;
+        for (int round = 1; round <= 5; round++) {
+            if (round > 1) {
+                appendInitiatorFormalFact(unilateral, round);
+            }
+            unilateral.put("matrix_version", round);
+            rehash(unilateral);
+            parent = initiatorFreezer.freeze(
+                    CASE_ID,
+                    ActorRole.USER,
+                    ActorRole.MERCHANT,
+                    unilateral,
+                    parent);
+        }
+        if (parent == null) {
+            throw new AssertionError("five-round initiator authority was not frozen");
+        }
+        return parent;
+    }
+
+    private static void appendInitiatorFormalFact(ObjectNode unilateral, int round) {
+        String factId = "FACT_INITIATOR_ROUND_" + round;
+        String sourceRef = "MESSAGE_INITIATOR_" + round;
+        String factTarget = "Whether initiator round " + round + " adds a formal fact.";
+        ObjectNode sourceBinding = (ObjectNode) unilateral.path("source_binding");
+        sourceBinding.withArray("source_refs").add(sourceRef);
+        sourceBinding.put("latest_source_ref", sourceRef);
+        unilateral.withArray("summary_source_fact_ids").add(factId);
+        unilateral.withObjectProperty("dispute_core_state")
+                .withArray("facts_in_dispute")
+                .add("initiator round " + round + " fact");
+        unilateral.withObjectProperty("dispute_core_state")
+                .withArray("next_verification_focus")
+                .add("initiator round " + round + " verification");
+        ObjectNode row = unilateral.withArray("fact_rows").addObject();
+        row.put("fact_id", factId);
+        row.put("category", "AFTER_SALES");
+        row.put("fact_target", factTarget);
+        row.put("materiality", "CORE");
+        row.putObject("origin")
+                .put("source_stage", "INTAKE")
+                .putArray("source_refs")
+                .add(sourceRef);
+        row.putObject("initiator_position")
+                .put("stance", "CONFIRM")
+                .put("position_summary", "The initiator states the next formal fact.")
+                .put("asserted_value", "initiator round " + round)
+                .putArray("source_refs")
+                .add(sourceRef);
+        row.put("truth_status", "NOT_EVALUATED");
+    }
+
+    private static ObjectNode respondentDeltaAppendingFormalFact(
+            ObjectNode parent, String factKey, String factTarget) {
+        ObjectNode delta = ordinaryRespondentDelta(parent);
+        ArrayNode priorRows = (ArrayNode) delta.path("fact_rows");
+        ArrayNode rows = JSON.createArrayNode();
+        rows.addObject()
+                .put("fact_key", factKey)
+                .put("category", "AFTER_SALES")
+                .put("fact_target", factTarget)
+                .put("materiality", "CORE")
+                .put("stance", "CONFIRM")
+                .put("position_summary", "The respondent adds the next formal fact.")
+                .put("asserted_value", "respondent formal value")
+                .put("source_scope", "CURRENT_SOURCE");
+        priorRows.forEach(row -> rows.add(row.deepCopy()));
+        delta.set("fact_rows", rows);
+        ArrayNode summary = delta.putArray("summary_source_fact_keys");
+        parent.at("/case_overview/summary_source_fact_ids")
+                .forEach(factId -> summary.add(factId.asText()));
+        summary.add(factKey);
+        return delta;
     }
 
     private static ObjectNode initiatorMatrixWithLineage() {

@@ -376,7 +376,7 @@ public final class IntakeRespondentMatrixFreezer {
                     "respondent matrix delta must carry every prior fact exactly once: " + missing);
         }
 
-        ArrayNode summaryFactIds = JsonNodeFactory.instance.arrayNode();
+        Set<String> selectedSummaryIds = new LinkedHashSet<>();
         for (String key : delta.summaryKeys()) {
             String factId = resolvedKeys.get(key);
             if (factId == null) {
@@ -384,7 +384,23 @@ public final class IntakeRespondentMatrixFreezer {
                         "INTAKE_RESPONDENT_MATRIX_DELTA_SUMMARY_INVALID",
                         "respondent matrix summary references an unresolved fact");
             }
-            summaryFactIds.add(factId);
+            if (!selectedSummaryIds.add(factId)) {
+                throw rejected(
+                        "INTAKE_RESPONDENT_MATRIX_DELTA_SUMMARY_INVALID",
+                        "respondent matrix summary references a fact more than once");
+            }
+        }
+        ArrayNode summaryFactIds = JsonNodeFactory.instance.arrayNode();
+        for (JsonNode row : rows) {
+            String factId = row.path("fact_id").asText("");
+            if (selectedSummaryIds.remove(factId)) {
+                summaryFactIds.add(factId);
+            }
+        }
+        if (!selectedSummaryIds.isEmpty()) {
+            throw rejected(
+                    "INTAKE_RESPONDENT_MATRIX_DELTA_SUMMARY_INVALID",
+                    "respondent matrix summary cannot bind the final formal row order");
         }
 
         List<String> sourceRefs = sourceRefs(parent, authority.sourceRef());
@@ -750,6 +766,7 @@ public final class IntakeRespondentMatrixFreezer {
                     "INTAKE_RESPONDENT_MATRIX_DERIVATION_INVALID",
                     "bilateral matrix does not match Java parent or source authority");
         }
+        validateBilateralParent(matrix, authority);
     }
 
     private static void validateBilateralClaims(
