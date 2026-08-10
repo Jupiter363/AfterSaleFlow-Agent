@@ -344,6 +344,52 @@ class IntakeExchangeP0Test {
     }
 
     @Test
+    void canonicalProposalAcceptsExactIndependentPartyStateAndRejectsStructuralDrift()
+            throws Exception {
+        ObjectNode proposal = (ObjectNode) MAPPER.readTree(Path.of(
+                        "../contracts/agent-platform/intake/v2/fixtures/valid/"
+                                + "intake-turn-proposal-valid.json")
+                .toFile());
+        ObjectNode dossier = (ObjectNode) proposal.required("dossier_patch");
+        dossier.set("party_intake_state", partyIntakeState());
+        byte[] acceptedPayload = canonicalProposal(proposal);
+        var validator = new IntakeExchangeCanonicalPayloadValidator();
+
+        assertThat(validator.requireValid(
+                                "intake-turn-proposal.v2",
+                                proposal.required("proposal_hash").textValue(),
+                                acceptedPayload.length,
+                                acceptedPayload)
+                        .at("/dossier_patch/party_intake_state/schema_version")
+                        .textValue())
+                .isEqualTo("party-intake-state.v1");
+
+        ObjectNode oneSided = proposal.deepCopy();
+        ((ObjectNode) oneSided.at("/dossier_patch/party_intake_state"))
+                .remove("MERCHANT");
+        byte[] oneSidedPayload = canonicalProposal(oneSided);
+        assertThatThrownBy(() -> validator.requireValid(
+                        "intake-turn-proposal.v2",
+                        oneSided.required("proposal_hash").textValue(),
+                        oneSidedPayload.length,
+                        oneSidedPayload))
+                .isInstanceOf(IntakeExchangeAuthorityValidationPort.Rejected.class)
+                .hasMessageContaining("violates intake-turn-proposal.v2");
+
+        ObjectNode unknownBranch = proposal.deepCopy();
+        ((ObjectNode) unknownBranch.at("/dossier_patch/party_intake_state/MERCHANT"))
+                .putObject("shared_readiness");
+        byte[] unknownBranchPayload = canonicalProposal(unknownBranch);
+        assertThatThrownBy(() -> validator.requireValid(
+                        "intake-turn-proposal.v2",
+                        unknownBranch.required("proposal_hash").textValue(),
+                        unknownBranchPayload.length,
+                        unknownBranchPayload))
+                .isInstanceOf(IntakeExchangeAuthorityValidationPort.Rejected.class)
+                .hasMessageContaining("violates intake-turn-proposal.v2");
+    }
+
+    @Test
     void rejectedLoadAuthorityNeverTouchesStore() throws Exception {
         CapturingAuthority authority = new CapturingAuthority();
         authority.rejectPayload = true;
@@ -676,6 +722,55 @@ class IntakeExchangeP0Test {
     private static ProposalPutRequest putRequest(byte[] payload) throws Exception {
         JsonNode document = MAPPER.readTree(payload);
         return putRequest(payload, document.get("proposal_hash").textValue());
+    }
+
+    private static byte[] canonicalProposal(ObjectNode proposal) {
+        proposal.put(
+                "proposal_hash",
+                IntakeContractHashes.canonicalHashExcluding(proposal, "proposal_hash"));
+        return ContractJson.canonicalize(proposal);
+    }
+
+    private static ObjectNode partyIntakeState() {
+        ObjectNode state = MAPPER.createObjectNode();
+        state.put("schema_version", "party-intake-state.v1");
+        state.set("USER", partyIntakeEntry());
+        state.set("MERCHANT", partyIntakeEntry());
+        return state;
+    }
+
+    private static ObjectNode partyIntakeEntry() {
+        ObjectNode entry = MAPPER.createObjectNode();
+        ObjectNode quality = entry.putObject("intake_quality");
+        quality.put("score", 0);
+        quality.put("threshold", 85);
+        quality.put("ready_for_next_step", false);
+        ObjectNode breakdown = quality.putObject("score_breakdown");
+        for (String component : List.of(
+                "references",
+                "event_story",
+                "party_positions",
+                "requested_resolution",
+                "risk_and_conflicts",
+                "next_action_clarity")) {
+            breakdown.put(component, 0);
+        }
+        quality.put("improvement_reason", "Waiting for this party's Intake statement.");
+        ObjectNode missing = entry.putObject("missing_information");
+        missing.putArray("blocking_gaps");
+        missing.putArray("nice_to_have_gaps");
+        missing.putArray("next_questions");
+        ObjectNode handoff = entry.putObject("handoff_notes");
+        handoff.put("remark_status", "NOT_READY");
+        handoff.put("phase_source_message_id", "");
+        handoff.put("latest_remark", "");
+        handoff.putArray("remarks");
+        handoff.put("instruction", "Continue current-party Intake.");
+        ObjectNode admission = entry.putObject("admission");
+        admission.put("recommendation", "NEED_MORE_INFO");
+        admission.put("reasoning", "");
+        admission.put("confidence", 0.0d);
+        return entry;
     }
 
     private static ProposalPutRequest putRequest(byte[] payload, String sha256) {

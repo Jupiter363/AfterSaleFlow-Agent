@@ -110,7 +110,154 @@
         "missing_information": {"$ref": "#/$defs/bounded_branch"},
         "intake_quality": {"$ref": "#/$defs/bounded_branch"},
         "admission": {"$ref": "#/$defs/bounded_branch"},
-        "handoff_notes": {"$ref": "#/$defs/bounded_branch"}
+        "handoff_notes": {"$ref": "#/$defs/bounded_branch"},
+        "party_intake_state": {"$ref": "#/$defs/party_intake_state"}
+      }
+    },
+    "party_intake_state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "USER", "MERCHANT"],
+      "properties": {
+        "schema_version": {"const": "party-intake-state.v1"},
+        "USER": {"$ref": "#/$defs/party_intake_user_entry"},
+        "MERCHANT": {"$ref": "#/$defs/party_intake_merchant_entry"}
+      }
+    },
+    "party_intake_user_entry": {
+      "allOf": [
+        {"$ref": "#/$defs/party_intake_entry"},
+        {
+          "properties": {
+            "handoff_notes": {
+              "properties": {
+                "remarks": {
+                  "items": {
+                    "properties": {"role": {"const": "USER"}}
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "party_intake_merchant_entry": {
+      "allOf": [
+        {"$ref": "#/$defs/party_intake_entry"},
+        {
+          "properties": {
+            "handoff_notes": {
+              "properties": {
+                "remarks": {
+                  "items": {
+                    "properties": {"role": {"const": "MERCHANT"}}
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "party_intake_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["intake_quality", "missing_information", "handoff_notes", "admission"],
+      "properties": {
+        "intake_quality": {"$ref": "#/$defs/party_intake_quality"},
+        "missing_information": {"$ref": "#/$defs/party_missing_information"},
+        "handoff_notes": {"$ref": "#/$defs/party_handoff_notes"},
+        "admission": {"$ref": "#/$defs/party_admission"}
+      }
+    },
+    "party_intake_quality": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "score", "threshold", "ready_for_next_step", "score_breakdown", "improvement_reason"
+      ],
+      "properties": {
+        "score": {"type": "integer", "minimum": 0, "maximum": 100},
+        "threshold": {"const": 85},
+        "ready_for_next_step": {"type": "boolean"},
+        "score_breakdown": {"$ref": "#/$defs/party_intake_score_breakdown"},
+        "improvement_reason": {"type": "string", "maxLength": 20000}
+      }
+    },
+    "party_intake_score_breakdown": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "references", "event_story", "party_positions", "requested_resolution",
+        "risk_and_conflicts", "next_action_clarity"
+      ],
+      "properties": {
+        "references": {"type": "integer", "minimum": 0, "maximum": 15},
+        "event_story": {"type": "integer", "minimum": 0, "maximum": 20},
+        "party_positions": {"type": "integer", "minimum": 0, "maximum": 20},
+        "requested_resolution": {"type": "integer", "minimum": 0, "maximum": 15},
+        "risk_and_conflicts": {"type": "integer", "minimum": 0, "maximum": 15},
+        "next_action_clarity": {"type": "integer", "minimum": 0, "maximum": 15}
+      }
+    },
+    "party_missing_information": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["blocking_gaps", "nice_to_have_gaps", "next_questions"],
+      "properties": {
+        "blocking_gaps": {"$ref": "#/$defs/party_string_list"},
+        "nice_to_have_gaps": {"$ref": "#/$defs/party_string_list"},
+        "next_questions": {"$ref": "#/$defs/party_string_list"}
+      }
+    },
+    "party_string_list": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {"type": "string", "maxLength": 20000}
+    },
+    "party_handoff_notes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "remark_status", "phase_source_message_id", "latest_remark", "remarks", "instruction"
+      ],
+      "properties": {
+        "remark_status": {
+          "enum": [
+            "NOT_READY", "READY_PENDING_REMARK_INVITE", "WAITING_FOR_REMARK",
+            "HAS_REMARKS", "NO_EXTRA_REMARKS"
+          ]
+        },
+        "phase_source_message_id": {"type": "string", "maxLength": 20000},
+        "latest_remark": {"type": "string", "maxLength": 20000},
+        "remarks": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {"$ref": "#/$defs/party_remark"}
+        },
+        "instruction": {"type": "string", "maxLength": 20000}
+      }
+    },
+    "party_remark": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "text", "source_message_id", "turn_source"],
+      "properties": {
+        "role": {"enum": ["USER", "MERCHANT"]},
+        "text": {"type": "string", "maxLength": 20000},
+        "source_message_id": {"type": "string", "maxLength": 20000},
+        "turn_source": {"type": "string", "maxLength": 20000}
+      }
+    },
+    "party_admission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["recommendation", "reasoning", "confidence"],
+      "properties": {
+        "recommendation": {"enum": ["NEED_MORE_INFO", "ACCEPTED", "NOT_ADMISSIBLE"]},
+        "reasoning": {"type": "string", "maxLength": 20000},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1}
       }
     },
     "unilateral_matrix_draft": {
