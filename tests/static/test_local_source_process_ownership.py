@@ -8366,6 +8366,21 @@ $output = [pscustomobject]@{
     assert re.fullmatch(r"[0-9a-f]{64}", result["sha256"])
 
 
+def test_clean_worktree_accepts_empty_dirty_source_authority(tmp_path: Path) -> None:
+    result = _run_launcher_helper_harness(
+        tmp_path,
+        helper_names={"Assert-TargetE2eDirtySourceAuthorityUnchanged"},
+        body=r"""
+Assert-TargetE2eDirtySourceAuthorityUnchanged `
+    -Entries @() `
+    -ProjectRoot $SandboxRoot
+$output = [pscustomobject]@{ accepted = $true }
+""".strip(),
+    )
+
+    assert result == {"accepted": True}
+
+
 def test_terminal_no_commit_uat_paths_have_exact_reviewed_status_authority() -> None:
     launcher = LAUNCHER.read_text(encoding="utf-8-sig")
 
