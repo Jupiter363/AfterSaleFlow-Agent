@@ -774,7 +774,7 @@ public final class IntakeDossierProjectionMerger {
         ObjectNode admission = entry.putObject("admission");
         admission.put("recommendation", "NEED_MORE_INFO");
         admission.put("reasoning", "");
-        admission.put("confidence", 0.0d);
+        admission.put("confidence", 0);
         return entry;
     }
 

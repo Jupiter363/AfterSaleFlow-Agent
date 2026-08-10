@@ -1122,6 +1122,32 @@ class IntakeDossierProjectionMergerTest {
     }
 
     @Test
+    void firstPartyProjectionAcceptsTheCanonicalJsonNumberShapeForTheDefaultOtherParty()
+            throws Exception {
+        ObjectNode patch = partyIntakePatch(
+                "USER", partyIntakeEntry(60), partyIntakeEntry(0));
+        ObjectNode canonicalRoundTrip =
+                (ObjectNode) JSON.readTree(ContractJson.canonicalize(patch));
+
+        assertThat(canonicalRoundTrip
+                        .at("/party_intake_state/MERCHANT/admission/confidence")
+                        .isIntegralNumber())
+                .isTrue();
+
+        MergeResult result = merger.merge(
+                JSON.createObjectNode(),
+                proposal(canonicalRoundTrip, null),
+                matrixAuthority(ActorRole.USER));
+
+        assertThat(result.dossier()
+                        .at("/party_intake_state/MERCHANT/admission/confidence")
+                        .decimalValue())
+                .isEqualByComparingTo(BigDecimal.ZERO);
+        assertThat(result.dossier().at("/party_intake_state/USER/intake_quality/score").asInt())
+                .isEqualTo(60);
+    }
+
+    @Test
     void rejectsMalformedForeignAndNonCurrentPartyStateDrift() {
         ObjectNode userEntry = partyIntakeEntry(60);
         ObjectNode merchantEntry = partyIntakeEntry(0);
@@ -1326,7 +1352,7 @@ class IntakeDossierProjectionMergerTest {
         ObjectNode admission = entry.putObject("admission");
         admission.put("recommendation", "NEED_MORE_INFO");
         admission.put("reasoning", "");
-        admission.put("confidence", 0.0d);
+        admission.put("confidence", 0);
         return entry;
     }
 
