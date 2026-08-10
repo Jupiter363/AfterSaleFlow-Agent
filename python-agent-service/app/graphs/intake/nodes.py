@@ -63,8 +63,16 @@ _DOSSIER_BRANCHES = frozenset(
         "intake_quality",
         "admission",
         "handoff_notes",
+        "party_intake_state",
     }
 )
+_PARTY_INTAKE_MIRROR_BRANCHES = (
+    "intake_quality",
+    "missing_information",
+    "handoff_notes",
+    "admission",
+)
+_PARTY_INTAKE_ROLES = frozenset({"USER", "MERCHANT"})
 
 _AUTHORIZED_INITIAL_CONTEXT_FIELDS = (
     "form_source",
@@ -196,10 +204,44 @@ def apply_dossier_patch(state: IntakeGraphStateV2) -> dict[str, Any]:
     patch = draft.get("dossier_patch", {})
     if not isinstance(patch, dict) or not set(patch) <= _DOSSIER_BRANCHES:
         raise IntakeGraphContractError("INTAKE_DOSSIER_PATCH_INVALID")
+    _validate_party_intake_patch_authority(state, patch)
     dossier = merge_intake_dossier(state["dossier_draft"], patch)
     previous_public = merge_intake_dossier(state["dossier_draft"], {})
     validate_dossier_transition(previous_public, dossier)
     return validate_node_patch(state, {"dossier_draft": dossier})
+
+
+def _validate_party_intake_patch_authority(
+    state: IntakeGraphStateV2,
+    patch: Mapping[str, Any],
+) -> None:
+    party_state = patch.get("party_intake_state")
+    if party_state is None:
+        return
+    actor = state["bindings"]["private"]["audience"]
+    if (
+        actor not in _PARTY_INTAKE_ROLES
+        or not isinstance(party_state, Mapping)
+        or set(party_state) != {"schema_version", "USER", "MERCHANT"}
+        or any(branch not in patch for branch in _PARTY_INTAKE_MIRROR_BRANCHES)
+    ):
+        raise IntakeGraphContractError("INTAKE_DOSSIER_PARTY_STATE_UNAUTHORIZED")
+    shared_mirror = {
+        branch: patch[branch] for branch in _PARTY_INTAKE_MIRROR_BRANCHES
+    }
+    if shared_mirror != party_state.get(actor):
+        raise IntakeGraphContractError("INTAKE_DOSSIER_PARTY_STATE_UNAUTHORIZED")
+
+    previous = state["dossier_draft"].get("party_intake_state")
+    if previous is None:
+        return
+    other = "MERCHANT" if actor == "USER" else "USER"
+    if (
+        not isinstance(previous, Mapping)
+        or set(previous) != {"schema_version", "USER", "MERCHANT"}
+        or party_state.get(other) != previous.get(other)
+    ):
+        raise IntakeGraphContractError("INTAKE_DOSSIER_PARTY_STATE_UNAUTHORIZED")
 
 
 def validate_readiness(state: IntakeGraphStateV2) -> dict[str, Any]:

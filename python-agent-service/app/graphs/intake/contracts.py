@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Annotated, Any, Literal
 
 from pydantic import (
@@ -120,9 +121,209 @@ _DOSSIER_MATRIX_SCHEMA_VERSIONS = frozenset(
     }
 )
 
+_PARTY_INTAKE_ROLES = ("USER", "MERCHANT")
+_PARTY_INTAKE_STATE_FIELDS = frozenset({"schema_version", *_PARTY_INTAKE_ROLES})
+_PARTY_INTAKE_ENTRY_FIELDS = frozenset(
+    {"intake_quality", "missing_information", "handoff_notes", "admission"}
+)
+_PARTY_INTAKE_REMARK_STATUSES = frozenset(
+    {
+        "NOT_READY",
+        "READY_PENDING_REMARK_INVITE",
+        "WAITING_FOR_REMARK",
+        "HAS_REMARKS",
+        "NO_EXTRA_REMARKS",
+    }
+)
+_PARTY_INTAKE_READY_REMARK_STATUSES = _PARTY_INTAKE_REMARK_STATUSES - {
+    "NOT_READY"
+}
+_PARTY_INTAKE_RECOMMENDATIONS = frozenset(
+    {"NEED_MORE_INFO", "ACCEPTED", "NOT_ADMISSIBLE"}
+)
+_PARTY_INTAKE_QUALITY_COMPONENT_MAXIMA = {
+    "references": 15,
+    "event_story": 20,
+    "party_positions": 20,
+    "requested_resolution": 15,
+    "risk_and_conflicts": 15,
+    "next_action_clarity": 15,
+}
+
+
+def _validate_party_intake_state(value: Any) -> None:
+    if not isinstance(value, dict) or set(value) != _PARTY_INTAKE_STATE_FIELDS:
+        raise ValueError(
+            "party_intake_state must contain exactly schema_version, USER, and MERCHANT"
+        )
+    if value.get("schema_version") != "party-intake-state.v1":
+        raise ValueError("party_intake_state has an unsupported schema_version")
+
+    for role in _PARTY_INTAKE_ROLES:
+        entry = value.get(role)
+        if not isinstance(entry, dict) or set(entry) != _PARTY_INTAKE_ENTRY_FIELDS:
+            raise ValueError(
+                f"party_intake_state.{role} must contain exactly the four Intake state branches"
+            )
+
+        quality = entry.get("intake_quality")
+        quality_fields = {
+            "score",
+            "threshold",
+            "ready_for_next_step",
+            "score_breakdown",
+            "improvement_reason",
+        }
+        if not isinstance(quality, dict) or set(quality) != quality_fields:
+            raise ValueError(f"party_intake_state.{role}.intake_quality is malformed")
+        score = quality.get("score")
+        threshold = quality.get("threshold")
+        ready = quality.get("ready_for_next_step")
+        breakdown = quality.get("score_breakdown")
+        if (
+            type(score) is not int
+            or not 0 <= score <= 100
+            or type(threshold) is not int
+            or threshold != 85
+            or type(ready) is not bool
+            or not isinstance(quality.get("improvement_reason"), str)
+            or not isinstance(breakdown, dict)
+            or set(breakdown) != set(_PARTY_INTAKE_QUALITY_COMPONENT_MAXIMA)
+            or any(
+                type(breakdown.get(component)) is not int
+                or not 0 <= breakdown[component] <= maximum
+                for component, maximum in _PARTY_INTAKE_QUALITY_COMPONENT_MAXIMA.items()
+            )
+            or sum(breakdown.values()) != score
+        ):
+            raise ValueError(
+                f"party_intake_state.{role}.intake_quality violates the canonical score contract"
+            )
+
+        missing = entry.get("missing_information")
+        missing_fields = {"blocking_gaps", "nice_to_have_gaps", "next_questions"}
+        if (
+            not isinstance(missing, dict)
+            or set(missing) != missing_fields
+            or any(
+                not isinstance(missing.get(field), list)
+                or any(not isinstance(item, str) for item in missing[field])
+                for field in missing_fields
+            )
+        ):
+            raise ValueError(
+                f"party_intake_state.{role}.missing_information is malformed"
+            )
+
+        notes = entry.get("handoff_notes")
+        notes_fields = {
+            "remark_status",
+            "phase_source_message_id",
+            "latest_remark",
+            "remarks",
+            "instruction",
+        }
+        if (
+            not isinstance(notes, dict)
+            or set(notes) != notes_fields
+            or notes.get("remark_status") not in _PARTY_INTAKE_REMARK_STATUSES
+            or not isinstance(notes.get("phase_source_message_id"), str)
+            or not isinstance(notes.get("latest_remark"), str)
+            or not isinstance(notes.get("instruction"), str)
+            or not isinstance(notes.get("remarks"), list)
+        ):
+            raise ValueError(f"party_intake_state.{role}.handoff_notes is malformed")
+        remark_source_ids: set[str] = set()
+        for remark in notes["remarks"]:
+            if (
+                not isinstance(remark, dict)
+                or set(remark)
+                != {"role", "text", "source_message_id", "turn_source"}
+                or remark.get("role") != role
+                or any(
+                    not isinstance(remark.get(field), str)
+                    for field in ("text", "source_message_id", "turn_source")
+                )
+            ):
+                raise ValueError(
+                    f"party_intake_state.{role}.handoff_notes contains a foreign or malformed remark"
+                )
+            source_message_id = remark["source_message_id"]
+            if source_message_id in remark_source_ids:
+                raise ValueError(
+                    f"party_intake_state.{role}.handoff_notes repeats a remark source message"
+                )
+            remark_source_ids.add(source_message_id)
+
+        remark_status = notes["remark_status"]
+        latest_remark = notes["latest_remark"]
+        remarks = notes["remarks"]
+        if remark_status in {
+            "NOT_READY",
+            "READY_PENDING_REMARK_INVITE",
+            "WAITING_FOR_REMARK",
+        }:
+            canonical_remark_state = not latest_remark and not remarks
+        elif remark_status == "HAS_REMARKS":
+            canonical_remark_state = (
+                bool(latest_remark)
+                and bool(remarks)
+                and remarks[-1]["text"] == latest_remark
+            )
+        else:
+            canonical_remark_state = (
+                latest_remark == "\u65e0\u989d\u5916\u5907\u6ce8\u3002" and not remarks
+            )
+        if not canonical_remark_state:
+            raise ValueError(
+                f"party_intake_state.{role}.handoff_notes status and payload disagree"
+            )
+
+        admission = entry.get("admission")
+        admission_fields = {"recommendation", "reasoning", "confidence"}
+        confidence = admission.get("confidence") if isinstance(admission, dict) else None
+        if (
+            not isinstance(admission, dict)
+            or set(admission) != admission_fields
+            or admission.get("recommendation") not in _PARTY_INTAKE_RECOMMENDATIONS
+            or not isinstance(admission.get("reasoning"), str)
+            or type(confidence) not in {int, float}
+            or not math.isfinite(float(confidence))
+            or not 0.0 <= float(confidence) <= 1.0
+        ):
+            raise ValueError(f"party_intake_state.{role}.admission is malformed")
+
+        if ready:
+            valid_cross_state = (
+                score >= 85
+                and not missing["blocking_gaps"]
+                and admission["recommendation"] == "ACCEPTED"
+                and notes["remark_status"] in _PARTY_INTAKE_READY_REMARK_STATUSES
+            )
+        else:
+            valid_cross_state = (
+                admission["recommendation"] != "ACCEPTED"
+                and notes["remark_status"] == "NOT_READY"
+            )
+        if not valid_cross_state:
+            raise ValueError(
+                f"party_intake_state.{role} readiness, handoff, and admission disagree"
+            )
+
 
 class StrictIntakeModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class PartyIntakeState(StrictIntakeModel):
+    schema_version: Literal["party-intake-state.v1"]
+    USER: dict[str, Any] = Field(max_length=4)
+    MERCHANT: dict[str, Any] = Field(max_length=4)
+
+    @model_validator(mode="after")
+    def require_exact_independent_party_contract(self) -> PartyIntakeState:
+        _validate_party_intake_state(self.model_dump(mode="python"))
+        return self
 
 
 class SnapshotMessage(StrictIntakeModel):
@@ -210,6 +411,7 @@ class DossierPatch(StrictIntakeModel):
     intake_quality: dict[str, Any] | None = Field(default=None, max_length=64)
     admission: dict[str, Any] | None = Field(default=None, max_length=64)
     handoff_notes: dict[str, Any] | None = Field(default=None, max_length=64)
+    party_intake_state: PartyIntakeState | None = None
 
     @model_validator(mode="after")
     def reject_explicit_null_branches(self) -> DossierPatch:
@@ -218,6 +420,12 @@ class DossierPatch(StrictIntakeModel):
         _reject_dossier_matrix_authority(
             self.model_dump(mode="python", exclude_none=True, exclude_unset=True)
         )
+        if self.party_intake_state is not None:
+            missing_mirrors = _PARTY_INTAKE_ENTRY_FIELDS - self.model_fields_set
+            if missing_mirrors:
+                raise ValueError(
+                    "party_intake_state requires all four shared Intake state mirrors"
+                )
         return self
 
 
@@ -426,6 +634,7 @@ class IntakeCognitionDraft(StrictIntakeModel):
             "intake_quality",
             "admission",
             "handoff_notes",
+            "party_intake_state",
         ):
             if field_name in canonical_dossier and canonical_dossier[field_name] is None:
                 canonical_dossier.pop(field_name)

@@ -47,6 +47,7 @@ from app.graphs.intake.graph import (
     compile_intake_v2_graph,
 )
 from app.graphs.intake.nodes import (
+    apply_dossier_patch,
     checkpoint_terminal,
     import_snapshot_once_or_apply_event,
     project_intake_proposal,
@@ -457,6 +458,66 @@ def _opening_document() -> dict[str, Any]:
         missing_fields=["ORDER_REFERENCE", "LOGISTICS_REFERENCE"],
         recommendation="NEED_MORE_INFO",
     )
+
+
+def _party_intake_entry(*, ready: bool) -> dict[str, Any]:
+    score = 90 if ready else 0
+    return {
+        "intake_quality": {
+            "score": score,
+            "threshold": 85,
+            "ready_for_next_step": ready,
+            "score_breakdown": (
+                {
+                    "references": 15,
+                    "event_story": 20,
+                    "party_positions": 20,
+                    "requested_resolution": 15,
+                    "risk_and_conflicts": 15,
+                    "next_action_clarity": 5,
+                }
+                if ready
+                else {
+                    "references": 0,
+                    "event_story": 0,
+                    "party_positions": 0,
+                    "requested_resolution": 0,
+                    "risk_and_conflicts": 0,
+                    "next_action_clarity": 0,
+                }
+            ),
+            "improvement_reason": "" if ready else "等待当前参与方补充案情。",
+        },
+        "missing_information": {
+            "blocking_gaps": [],
+            "nice_to_have_gaps": [],
+            "next_questions": [],
+        },
+        "handoff_notes": {
+            "remark_status": "WAITING_FOR_REMARK" if ready else "NOT_READY",
+            "phase_source_message_id": "MESSAGE_USER_READY" if ready else "",
+            "latest_remark": "",
+            "remarks": [],
+            "instruction": (
+                "Provide an optional handoff remark."
+                if ready
+                else "当前参与方案情达到阈值后，接待官会询问交接备注。"
+            ),
+        },
+        "admission": {
+            "recommendation": "ACCEPTED" if ready else "NEED_MORE_INFO",
+            "reasoning": "",
+            "confidence": 0.9 if ready else 0.0,
+        },
+    }
+
+
+def _independent_party_intake_state() -> dict[str, Any]:
+    return {
+        "schema_version": "party-intake-state.v1",
+        "USER": _party_intake_entry(ready=True),
+        "MERCHANT": _party_intake_entry(ready=False),
+    }
 
 
 def _event_document(event: dict[str, Any]) -> dict[str, Any]:
@@ -1813,6 +1874,82 @@ def test_snapshot_opening_invokes_the_real_model_without_a_participant_message(
         for message_id, message in result["messages"].items()
         if message["role"] == "HUMAN"
     } == {message["message_id"] for message in snapshot["own_messages"]}
+
+
+@pytest.mark.asyncio
+async def test_target_opening_stream_preserves_independent_party_intake_state(
+    bindings,
+    version_pins,
+    snapshot,
+) -> None:
+    party_state = _independent_party_intake_state()
+    snapshot["current_dossier"].update(
+        copy.deepcopy(party_state["USER"]),
+        party_intake_state=copy.deepcopy(party_state),
+    )
+    snapshot["snapshot_hash"] = canonical_sha256_omitting(snapshot, "snapshot_hash")
+    transport = GovernedStreamingIntakeTransport(_opening_document())
+    opening_context = _agent_context(invocation_id="ATTEMPT_P4_USER_1_1")
+    built = build_intake_model_node(
+        transport=transport,
+        profile=_profile(),
+        policy=_policy().model_copy(
+            update={
+                "invocation_id": "ATTEMPT_P4_USER_1_1",
+                "trusted_system_sha256": system_prompt_sha256(
+                    _trusted_system_prompt(opening_context)
+                ),
+            }
+        ),
+        agent_context=opening_context,
+    )
+    graph = compile_intake_v2_graph(intake_lcel=built.runnable)
+
+    candidates = [
+        candidate
+        async for candidate in graph.astream(
+            new_intake_graph_state(bindings=bindings, version_pins=version_pins),
+            {"configurable": {"thread_id": snapshot["thread_id"]}},
+            context=IntakeTurnContext("SNAPSHOT", snapshot),
+            stream_mode=["messages", "custom", "updates"],
+        )
+    ]
+
+    visible = [
+        event
+        for mode, payload in candidates
+        if mode == "messages"
+        and isinstance(payload, tuple)
+        and isinstance(payload[0], AIMessageChunk)
+        for event in governed_events_from_chunk(payload[0])
+    ]
+    terminal_update = next(
+        payload["checkpoint_terminal"]
+        for mode, payload in candidates
+        if mode == "updates"
+        and isinstance(payload, dict)
+        and "checkpoint_terminal" in payload
+    )
+    proposal = terminal_update["result_json"]
+    final_state = proposal["dossier_patch"]["party_intake_state"]
+    private_snapshot = terminal_update["baseline_previous_case_detail"]["snapshot"]
+
+    assert visible
+    assert proposal["schema_version"] == "intake-turn-proposal.v2"
+    assert final_state["schema_version"] == "party-intake-state.v1"
+    assert final_state["MERCHANT"] == party_state["MERCHANT"]
+    assert final_state["USER"] == {
+        branch: proposal["dossier_patch"][branch]
+        for branch in (
+            "intake_quality",
+            "missing_information",
+            "handoff_notes",
+            "admission",
+        )
+    }
+    assert final_state["USER"] != final_state["MERCHANT"]
+    assert private_snapshot["party_intake_state"] == final_state
+    assert transport.generate_calls == 1
 
 
 def _state_with_matrix_roles(bindings, version_pins, *, actor: str, initiator: str):
@@ -6516,6 +6653,68 @@ def test_strict_parser_rejects_unknown_and_formal_action_fields(mutation) -> Non
     )
     with pytest.raises(OutputParserException):
         built.parser.invoke(json.dumps(document))
+
+
+def test_target_dossier_contract_rejects_missing_party_intake_role() -> None:
+    party_state = _independent_party_intake_state()
+    shared = copy.deepcopy(party_state["USER"])
+    party_state.pop("MERCHANT")
+    payload = _draft(
+        dossier_patch={
+            **shared,
+            "party_intake_state": party_state,
+        }
+    )
+
+    with pytest.raises(ValueError, match="party_intake_state|shared Intake state"):
+        IntakeCognitionDraft.model_validate(payload)
+
+
+def test_provider_null_party_intake_state_is_canonical_omission() -> None:
+    payload = _draft()
+    payload["dossier_patch"]["party_intake_state"] = None
+
+    parsed = IntakeCognitionDraft.model_validate(payload)
+
+    assert "party_intake_state" not in parsed.dossier_patch.model_dump(
+        mode="json",
+        exclude_none=True,
+        exclude_unset=True,
+    )
+
+
+@pytest.mark.parametrize("mutation", ["current_actor_mismatch", "foreign_party_drift"])
+def test_target_dossier_node_binds_party_state_to_actor_and_preserves_other_party(
+    bindings,
+    version_pins,
+    mutation: str,
+) -> None:
+    previous_state = _independent_party_intake_state()
+    incoming_state = copy.deepcopy(previous_state)
+    shared = copy.deepcopy(previous_state["USER"])
+    if mutation == "current_actor_mismatch":
+        shared = copy.deepcopy(previous_state["MERCHANT"])
+    else:
+        incoming_state["MERCHANT"]["handoff_notes"]["instruction"] = (
+            "Unauthorized foreign-party rewrite."
+        )
+    state = new_intake_graph_state(bindings=bindings, version_pins=version_pins)
+    state["dossier_draft"] = {
+        **copy.deepcopy(previous_state["USER"]),
+        "party_intake_state": copy.deepcopy(previous_state),
+    }
+    state["terminal_draft"] = {
+        "dossier_patch": {
+            **shared,
+            "party_intake_state": incoming_state,
+        }
+    }
+
+    with pytest.raises(
+        IntakeGraphContractError,
+        match="INTAKE_DOSSIER_PARTY_STATE_UNAUTHORIZED",
+    ):
+        apply_dossier_patch(state)
 
 
 @pytest.mark.parametrize(
