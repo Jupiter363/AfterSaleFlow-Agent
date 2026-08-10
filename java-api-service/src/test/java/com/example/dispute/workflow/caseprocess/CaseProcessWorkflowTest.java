@@ -199,6 +199,68 @@ class CaseProcessWorkflowTest {
   }
 
   @Test
+  void acknowledgedV3SignalRecoversExactRejectedV2WithoutClearingForForeignAuthority() {
+    CaseProcessWorkflow targetWorkflow =
+        client.newWorkflowStub(
+            CaseProcessWorkflow.class,
+            WorkflowOptions.newBuilder()
+                .setWorkflowId(WORKFLOW_ID)
+                .setTaskQueue(RECOVERY_TASK_QUEUE)
+                .build());
+    WorkflowClient.start(targetWorkflow::run, (CaseProcessCarryState) null);
+    provision(targetWorkflow, projectionRecoveryProvisioning());
+    CaseCommandRef command = projectionRecoveryCommand();
+    ledger.put(command);
+    targetWorkflow.acceptCommand(command);
+    CaseProcessSnapshot before =
+        awaitProcess(
+            targetWorkflow,
+            snapshot ->
+                snapshot.nextCommandSequence() == 2
+                    && snapshot.observedProcessRevision() == 1
+                    && Long.valueOf(1).equals(snapshot.activeRoomRevision()));
+    TargetIntakeCommandTerminalNoCommit observedV2 =
+        terminalNoCommitAuthority(command, before);
+    ledger.rejectNextTerminalNoCommit = true;
+
+    targetWorkflow.targetIntakeCommandTerminalNoCommit(observedV2);
+    CaseProcessSnapshot rejected =
+        awaitProcess(
+            targetWorkflow,
+            snapshot ->
+                "TARGET_INTAKE_TERMINAL_NO_COMMIT_REJECTED".equals(
+                    snapshot.protocolErrorCode()));
+    assertThat(ledger.terminalNoCommitConvergences).hasSize(1);
+    assertThat(ledger.terminalNoCommitOutcomes).isEmpty();
+
+    CaseCommandRef foreignCommand = command(2, RoomType.INTAKE, before.activeRoomEpoch());
+    TargetIntakeCommandTerminalNoCommit foreignV3 =
+        terminalNoCommitAuthority(foreignCommand, before)
+            .withProjectionLineage(0, 0, List.of());
+    targetWorkflow.targetIntakeCommandTerminalNoCommit(foreignV3);
+    environment.sleep(Duration.ofSeconds(1));
+    assertThat(ledger.terminalNoCommitConvergences).hasSize(1);
+    assertThat(targetWorkflow.state().protocolErrorCode())
+        .isEqualTo(rejected.protocolErrorCode());
+
+    TargetIntakeCommandTerminalNoCommit acknowledgedV3 =
+        observedV2.withProjectionLineage(0, 0, List.of());
+    targetWorkflow.targetIntakeCommandTerminalNoCommit(acknowledgedV3);
+    awaitTerminalNoCommitConvergences(2);
+
+    assertThat(ledger.terminalNoCommitConvergences)
+        .extracting(convergence -> convergence.authority().schemaVersion())
+        .containsExactly(
+            TargetIntakeCommandTerminalNoCommit.SCHEMA_VERSION,
+            TargetIntakeCommandTerminalNoCommit.V3_SCHEMA_VERSION);
+    assertThat(ledger.terminalNoCommitOutcomes)
+        .containsExactly(TerminalNoCommitOutcome.IDEMPOTENT_REPLAY);
+    assertTerminalNoCommitAccountingUnchanged(before, targetWorkflow.state());
+    assertThat(RecoveryTargetCaseProcessWorkflow.commandDispatches.get()).isEqualTo(1);
+    assertThat(RecoveryTargetCaseProcessWorkflow.eventDispatches.get()).isZero();
+  }
+
+  @Test
   void acknowledgedIntakeProjectionRecoveryConsumesBufferedFormalEventExactlyOnceWithoutRoomRedispatch() {
     PreparedProjectionRecovery prepared = prepareProjectionRecovery();
     int projectionCallsBeforeRecovery = recoveryProjection.completionCalls.get();
@@ -1714,6 +1776,7 @@ class CaseProcessWorkflowTest {
         new CopyOnWriteArrayList<>();
     private volatile boolean invalidCommandResponse;
     private volatile boolean invalidEventResponse;
+    private volatile boolean rejectNextTerminalNoCommit;
 
     void put(CaseCommandRef command) {
       commands.put(command.caseCommandSequence(), command);
@@ -1811,10 +1874,30 @@ class CaseProcessWorkflowTest {
     @Override
     public ConvergeTargetIntakeTerminalNoCommitResult convergeTargetIntakeTerminalNoCommit(
         ConvergeTargetIntakeTerminalNoCommit request) {
-      if (!terminalNoCommitConvergences.isEmpty()
-          && !terminalNoCommitConvergences.getFirst().authority().equals(request.authority())) {
+      TargetIntakeCommandTerminalNoCommit authority = request.authority();
+      TargetIntakeCommandTerminalNoCommit firstAuthority =
+          terminalNoCommitConvergences.isEmpty()
+              ? null
+              : terminalNoCommitConvergences.getFirst().authority();
+      boolean acknowledgedUpgrade =
+          firstAuthority != null
+              && TargetIntakeCommandTerminalNoCommit.SCHEMA_VERSION.equals(
+                  firstAuthority.schemaVersion())
+              && TargetIntakeCommandTerminalNoCommit.V3_SCHEMA_VERSION.equals(
+                  authority.schemaVersion())
+              && firstAuthority.equals(authority.asObservedV2Authority());
+      if (firstAuthority != null
+          && !firstAuthority.equals(authority)
+          && !acknowledgedUpgrade) {
         throw ApplicationFailure.newNonRetryableFailure(
             "terminal-no-commit authority changed", "TerminalNoCommitAuthorityConflict");
+      }
+      if (rejectNextTerminalNoCommit) {
+        rejectNextTerminalNoCommit = false;
+        terminalNoCommitConvergences.add(request);
+        throw ApplicationFailure.newNonRetryableFailure(
+            "projection source cursor is stale",
+            "TARGET_INTAKE_TERMINAL_NO_COMMIT_SOURCE_STALE");
       }
       TerminalNoCommitOutcome outcome =
           terminalNoCommitConvergences.isEmpty()
@@ -1822,7 +1905,6 @@ class CaseProcessWorkflowTest {
               : TerminalNoCommitOutcome.IDEMPOTENT_REPLAY;
       terminalNoCommitConvergences.add(request);
       terminalNoCommitOutcomes.add(outcome);
-      TargetIntakeCommandTerminalNoCommit authority = request.authority();
       return new ConvergeTargetIntakeTerminalNoCommitResult(
           "converge-target-intake-terminal-no-commit-result.v1",
           outcome,

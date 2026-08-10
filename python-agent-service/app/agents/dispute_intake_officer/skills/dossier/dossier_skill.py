@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import math
 import re
 from difflib import SequenceMatcher
 from dataclasses import dataclass
@@ -76,12 +77,22 @@ _DIRECT_ATTITUDE_SELF_EN = re.compile(
     r"^\s*(?:i|we|our\s+(?:company|side|firm|business|organization))\b(?P<body>.*)$",
     re.IGNORECASE,
 )
+_DIRECT_ATTITUDE_THIRD_PARTY_EN = (
+    r"(?:buyer|customer|consumer|merchant|seller|store|counterparty)"
+)
+_DIRECT_ATTITUDE_THIRD_PARTY_PROPOSAL_OBJECT_EN = re.compile(
+    rf"\b(?:the\s+)?{_DIRECT_ATTITUDE_THIRD_PARTY_EN}(?:['’]s)\s*"
+    r"(?:proposed|suggested|offered)\b"
+    rf"|\b(?:proposed|suggested|offered)\s+by\s+(?:the\s+)?"
+    rf"{_DIRECT_ATTITUDE_THIRD_PARTY_EN}\b",
+    re.IGNORECASE,
+)
 _DIRECT_ATTITUDE_SIGNAL_ZH = re.compile(
     r"部分(?:同意|接受)|同意|接受|拒绝|不同意|不支持|不接受|愿意|"
     r"提出|建议|替代方案|要求补充|需要更多信息|未表态|没有表态"
 )
 _DIRECT_ATTITUDE_SELF_ZH = re.compile(
-    r"^\s*(?:我|本人|我方|我们|本方|本公司|我司)(?P<body>.*)$"
+    r"^\s*(?:本公司|本人|我方|我们|本方|我司|我)(?P<body>.*)$"
 )
 _DIRECT_ATTITUDE_THIRD_PARTY_ZH = (
     r"(?:用户|买家|客户|消费者|对方|商家|卖家|店铺|商户|客服|平台|第三方)"
@@ -179,6 +190,7 @@ CASE_DETAIL_TOP_LEVEL_FIELDS = frozenset(
         "intake_quality",
         "admission",
         "handoff_notes",
+        "party_intake_state",
         "case_fact_matrix",
         "unilateral_case_matrix",
     }
@@ -198,6 +210,29 @@ _QUALITY_SCORE_COMPONENT_MAXIMA = {
     "risk_and_conflicts": 15,
     "next_action_clarity": 15,
 }
+PARTY_INTAKE_STATE_SCHEMA_VERSION = "party-intake-state.v1"
+_PARTY_INTAKE_ROLES = ("USER", "MERCHANT")
+_PARTY_INTAKE_ENTRY_FIELDS = frozenset(
+    {"intake_quality", "missing_information", "handoff_notes", "admission"}
+)
+_PARTY_INTAKE_REMARK_STATUSES = frozenset(
+    {
+        "NOT_READY",
+        "READY_PENDING_REMARK_INVITE",
+        "WAITING_FOR_REMARK",
+        "HAS_REMARKS",
+        "NO_EXTRA_REMARKS",
+    }
+)
+_PARTY_INTAKE_READY_REMARK_STATUSES = _PARTY_INTAKE_REMARK_STATUSES - {
+    "NOT_READY"
+}
+_PARTY_INTAKE_RECOMMENDATIONS = frozenset(
+    {"NEED_MORE_INFO", "ACCEPTED", "NOT_ADMISSIBLE"}
+)
+_PARTY_INTAKE_STATE_FIELDS = frozenset(
+    {"schema_version", *_PARTY_INTAKE_ROLES}
+)
 _QUALITY_UNKNOWN_CODES = frozenset(
     {
         "",
@@ -225,6 +260,7 @@ _QUALITY_CONFLICT_TYPES = frozenset(
 )
 
 FIELD_DISPLAY_LABELS = {
+    "CURRENT_PARTY_STATEMENT": "当前参与方对案情的直接说明",
     "ORDER_REFERENCE": "订单号",
     "AFTER_SALES_REFERENCE": "售后单号",
     "LOGISTICS_REFERENCE": "物流单号",
@@ -303,14 +339,54 @@ class CaseDetailDossierSkill:
             llm_case_detail = llm_scroll_snapshot
 
         previous = _case_detail_fields_only(request.previous_case_detail or {})
+        actor_role = _require_party_actor_role(request.agent_context.actor_role)
+        current_message = request.current_user_message
+        if (
+            current_message is not None
+            and str(current_message.role or "").upper() != actor_role
+        ):
+            raise _party_intake_state_error(
+                "INTAKE_PARTY_STATE_CURRENT_MESSAGE_ACTOR_MISMATCH",
+                "current Intake message role does not match the authenticated actor",
+            )
+        has_current_actor_answer = (
+            current_message is not None and _quality_text(current_message.text)
+        )
+        current_message_id = (
+            str(current_message.message_id or "").strip()
+            if has_current_actor_answer
+            else ""
+        )
+        initiator_role = _proven_initiator_role(request, previous)
+        party_intake_state = _party_intake_state_for_turn(
+            previous,
+            actor_role=actor_role,
+            initiator_role=initiator_role,
+            current_message_id=current_message_id,
+        )
         bounded_llm_case_detail = _case_detail_fields_only(llm_case_detail or {})
-        previous_remark_status = (
-            _handoff_remark_status(previous) if isinstance(previous, dict) else ""
+        proposed_party_state = bounded_llm_case_detail.pop("party_intake_state", None)
+        if proposed_party_state is not None:
+            validated_proposal = _validated_party_intake_state(
+                proposed_party_state,
+                source="model party_intake_state",
+            )
+            if validated_proposal != party_intake_state:
+                raise _party_intake_state_error(
+                    "INTAKE_PARTY_STATE_MODEL_AUTHORITY_FORBIDDEN",
+                    "model output cannot create or advance party-scoped Intake authority",
+                )
+        previous_actor_entry = copy.deepcopy(party_intake_state[actor_role])
+        previous_remark_status = _handoff_remark_status(previous_actor_entry)
+        previous_phase_source_message_id = str(
+            previous_actor_entry["handoff_notes"].get("phase_source_message_id") or ""
         )
         previous_waiting_for_remark = previous_remark_status == "WAITING_FOR_REMARK"
         detail = self._default_case_detail(request)
         detail = _deep_merge(detail, previous if _is_case_detail(previous) else {})
+        _set_party_intake_mirror(detail, previous_actor_entry)
         detail = _deep_merge(detail, bounded_llm_case_detail)
+        _restore_party_handoff_authority(detail, previous_actor_entry)
         detail["schema_version"] = self.schema_version
         _enforce_claim_resolution(detail, request, previous)
         _enforce_party_position_voice(detail)
@@ -336,7 +412,6 @@ class CaseDetailDossierSkill:
         }
 
         missing_info = _ensure_dict(detail, "missing_information")
-        actor_role = str(request.agent_context.actor_role or "").upper()
         for field_name in ("blocking_gaps", "nice_to_have_gaps", "next_questions"):
             values = [
                 value
@@ -368,11 +443,27 @@ class CaseDetailDossierSkill:
             if field not in missing and not _is_evidence_material_request(field)
         )
         missing.extend(field for field in llm_missing_from_detail if field not in missing)
+        actor_source_records = _authoritative_intake_source_records(
+            request,
+            initiator_role=initiator_role,
+        )
+        if not actor_source_records and "CURRENT_PARTY_STATEMENT" not in missing:
+            missing.append("CURRENT_PARTY_STATEMENT")
         claim = _quality_mapping(detail.get("claim_resolution"))
-        if (
-            _known_resolution_code(claim.get("requested_resolution")) is None
-            and "REQUESTED_RESOLUTION" not in missing
-        ):
+        actor_is_initiator = (
+            initiator_role is not None and actor_role == initiator_role
+        )
+        if actor_is_initiator:
+            resolution_authorized = (
+                _known_resolution_code(claim.get("requested_resolution")) is not None
+            )
+        else:
+            resolution_authorized = _respondent_resolution_authorized(
+                detail,
+                actor_role=actor_role,
+                initiator_role=initiator_role,
+            )
+        if not resolution_authorized and "REQUESTED_RESOLUTION" not in missing:
             missing.append("REQUESTED_RESOLUTION")
         missing_info["blocking_gaps"] = _human_missing_fields(missing)
         _normalize_next_verification_focus(detail)
@@ -380,13 +471,19 @@ class CaseDetailDossierSkill:
             detail,
             request=request,
             missing=missing,
+            initiator_role=initiator_role,
+            actor_source_records=actor_source_records,
         )
         score = sum(score_breakdown.values())
         quality = _ensure_dict(detail, "intake_quality")
         quality["score_breakdown"] = score_breakdown
         quality["score"] = score
         quality["threshold"] = self.readiness_threshold
-        quality["ready_for_next_step"] = score >= self.readiness_threshold and not missing
+        threshold_reached = score >= self.readiness_threshold and not missing
+        phase_has_authority = (
+            previous_remark_status != "NOT_READY" or has_current_actor_answer
+        )
+        quality["ready_for_next_step"] = threshold_reached and phase_has_authority
         if quality["ready_for_next_step"]:
             missing = []
             quality["improvement_reason"] = "信息完整度已达到提交阈值。"
@@ -400,20 +497,50 @@ class CaseDetailDossierSkill:
             )
 
         if quality["ready_for_next_step"]:
-            missing_info["next_questions"] = []
-            if previous_remark_status == "READY_PENDING_REMARK_INVITE":
+            if (
+                previous_remark_status == "READY_PENDING_REMARK_INVITE"
+                and has_current_actor_answer
+                and current_message_id != previous_phase_source_message_id
+            ):
+                missing_info["next_questions"] = []
                 next_remark_status = "WAITING_FOR_REMARK"
             elif previous_remark_status in {
                 "WAITING_FOR_REMARK",
                 "HAS_REMARKS",
                 "NO_EXTRA_REMARKS",
             }:
+                missing_info["next_questions"] = []
                 next_remark_status = previous_remark_status
             else:
                 next_remark_status = "READY_PENDING_REMARK_INVITE"
-            _ensure_handoff_notes(detail, remark_status=next_remark_status)
+                substantive_questions = [
+                    question
+                    for question in _list_values(missing_info.get("next_questions"))
+                    if _is_substantive_case_question(question)
+                ]
+                missing_info["next_questions"] = (
+                    substantive_questions[:1]
+                    or [_question_for_quality_gap(score_breakdown)]
+                )
+            phase_source_message_id = previous_phase_source_message_id
+            if next_remark_status != previous_remark_status:
+                phase_source_message_id = current_message_id
+            _ensure_handoff_notes(
+                detail,
+                remark_status=next_remark_status,
+                phase_source_message_id=phase_source_message_id,
+            )
         else:
-            _ensure_handoff_notes(detail, remark_status="NOT_READY")
+            phase_source_message_id = previous_phase_source_message_id
+            if previous_remark_status != "NOT_READY" and current_message_id:
+                phase_source_message_id = current_message_id
+            notes = _ensure_handoff_notes(
+                detail,
+                remark_status="NOT_READY",
+                phase_source_message_id=phase_source_message_id,
+            )
+            notes["latest_remark"] = ""
+            notes["remarks"] = []
             if not missing_info.get("next_questions"):
                 question = _question_for_missing(missing) or _question_for_quality_gap(
                     score_breakdown
@@ -423,6 +550,7 @@ class CaseDetailDossierSkill:
             detail,
             request,
             previous_waiting_for_remark=previous_waiting_for_remark,
+            previous_phase_source_message_id=previous_phase_source_message_id,
         )
 
         admission = _ensure_dict(detail, "admission")
@@ -435,6 +563,15 @@ class CaseDetailDossierSkill:
         admission["confidence"] = _clamp_confidence(
             admission.get("confidence", llm_confidence)
         )
+        admission["reasoning"] = str(admission.get("reasoning") or "")
+
+        current_actor_entry = _canonical_party_intake_entry(
+            detail,
+            role=actor_role,
+        )
+        party_intake_state[actor_role] = current_actor_entry
+        detail["party_intake_state"] = copy.deepcopy(party_intake_state)
+        _set_party_intake_mirror(detail, current_actor_entry)
 
         detail["case_fact_matrix"] = finalize_case_fact_matrix(
             request=request,
@@ -670,6 +807,576 @@ def _case_detail_fields_only(value: dict[str, Any]) -> dict[str, Any]:
         for key, item in value.items()
         if key in CASE_DETAIL_TOP_LEVEL_FIELDS
     }
+
+
+def _party_intake_state_error(code: str, message: str) -> AgentOutputSchemaError:
+    return AgentOutputSchemaError(
+        "intake_turn_case_detail",
+        message,
+        safe_code=code,
+    )
+
+
+def _require_party_actor_role(value: Any) -> str:
+    actor_role = str(value or "").upper()
+    if actor_role not in _PARTY_INTAKE_ROLES:
+        raise _party_intake_state_error(
+            "INTAKE_PARTY_STATE_ACTOR_INVALID",
+            "party-scoped Intake authority requires an exact USER or MERCHANT actor",
+        )
+    return actor_role
+
+
+def _proven_initiator_role(
+    request: IntakeTurnRequest,
+    previous: dict[str, Any],
+) -> str | None:
+    candidates: list[str] = []
+
+    initial_role = str(
+        getattr(request.initial_case_facts, "initiator_role", None) or ""
+    ).upper()
+    if initial_role in _PARTY_INTAKE_ROLES:
+        candidates.append(initial_role)
+
+    matrix = previous.get("case_fact_matrix") if isinstance(previous, dict) else None
+    party_map = matrix.get("party_map") if isinstance(matrix, dict) else None
+    if isinstance(party_map, dict):
+        matrix_initiator = str(party_map.get("initiator_role") or "").upper()
+        matrix_respondent = str(party_map.get("respondent_role") or "").upper()
+        if (
+            matrix_initiator not in _PARTY_INTAKE_ROLES
+            or matrix_respondent not in _PARTY_INTAKE_ROLES
+            or matrix_initiator == matrix_respondent
+        ):
+            raise _party_intake_state_error(
+                "INTAKE_PARTY_STATE_ROLE_AUTHORITY_INVALID",
+                "formal matrix party authority is malformed",
+            )
+        candidates.append(matrix_initiator)
+
+    claim = previous.get("claim_resolution") if isinstance(previous, dict) else None
+    if isinstance(claim, dict):
+        claim_initiator = str(claim.get("initiator_role") or "").upper()
+        if claim_initiator in _PARTY_INTAKE_ROLES:
+            candidates.append(claim_initiator)
+
+    if not candidates:
+        return None
+    if any(candidate != candidates[0] for candidate in candidates[1:]):
+        raise _party_intake_state_error(
+            "INTAKE_PARTY_STATE_ROLE_AUTHORITY_DRIFT",
+            "initiator role authorities disagree",
+        )
+    return candidates[0]
+
+
+def _default_party_intake_entry() -> dict[str, Any]:
+    return {
+        "intake_quality": {
+            "score": 0,
+            "threshold": CaseDetailDossierSkill.readiness_threshold,
+            "ready_for_next_step": False,
+            "score_breakdown": {
+                component: 0 for component in _QUALITY_SCORE_COMPONENT_MAXIMA
+            },
+            "improvement_reason": "等待当前参与方补充案情。",
+        },
+        "missing_information": {
+            "blocking_gaps": [],
+            "nice_to_have_gaps": [],
+            "next_questions": [],
+        },
+        "handoff_notes": {
+            "remark_status": "NOT_READY",
+            "phase_source_message_id": "",
+            "latest_remark": "",
+            "remarks": [],
+            "instruction": "当前参与方案情达到阈值后，接待官会询问交接备注。",
+        },
+        "admission": {
+            "recommendation": "NEED_MORE_INFO",
+            "reasoning": "",
+            "confidence": 0.0,
+        },
+    }
+
+
+def _default_party_intake_state() -> dict[str, Any]:
+    return {
+        "schema_version": PARTY_INTAKE_STATE_SCHEMA_VERSION,
+        "USER": _default_party_intake_entry(),
+        "MERCHANT": _default_party_intake_entry(),
+    }
+
+
+def _score_breakdown_for_total(score: int) -> dict[str, int]:
+    remaining = max(0, min(100, score))
+    result: dict[str, int] = {}
+    for component, maximum in _QUALITY_SCORE_COMPONENT_MAXIMA.items():
+        value = min(maximum, remaining)
+        result[component] = value
+        remaining -= value
+    return result
+
+
+def _legacy_party_intake_entry(
+    previous: dict[str, Any],
+    *,
+    phase_source_message_id: str = "",
+) -> dict[str, Any]:
+    entry = _default_party_intake_entry()
+    quality = previous.get("intake_quality")
+    if isinstance(quality, dict):
+        raw_score = quality.get("score")
+        score = (
+            max(0, min(100, raw_score))
+            if type(raw_score) is int
+            else 0
+        )
+        raw_breakdown = quality.get("score_breakdown")
+        if (
+            isinstance(raw_breakdown, dict)
+            and set(raw_breakdown) == set(_QUALITY_SCORE_COMPONENT_MAXIMA)
+            and all(
+                type(raw_breakdown.get(component)) is int
+                and 0 <= raw_breakdown[component] <= maximum
+                for component, maximum in _QUALITY_SCORE_COMPONENT_MAXIMA.items()
+            )
+            and sum(raw_breakdown.values()) == score
+        ):
+            breakdown = copy.deepcopy(raw_breakdown)
+        else:
+            breakdown = _score_breakdown_for_total(score)
+        ready = quality.get("ready_for_next_step") is True and score >= 85
+        entry["intake_quality"] = {
+            "score": score,
+            "threshold": 85,
+            "ready_for_next_step": ready,
+            "score_breakdown": breakdown,
+            "improvement_reason": str(quality.get("improvement_reason") or ""),
+        }
+
+    missing = previous.get("missing_information")
+    if isinstance(missing, dict):
+        entry["missing_information"] = {
+            field: [
+                item for item in missing.get(field, []) if isinstance(item, str)
+            ]
+            if isinstance(missing.get(field, []), list)
+            else []
+            for field in ("blocking_gaps", "nice_to_have_gaps", "next_questions")
+        }
+
+    notes = previous.get("handoff_notes")
+    if isinstance(notes, dict):
+        status = str(notes.get("remark_status") or "NOT_READY")
+        if status not in _PARTY_INTAKE_REMARK_STATUSES:
+            status = "NOT_READY"
+        remarks = [
+            copy.deepcopy(item)
+            for item in notes.get("remarks", [])
+            if isinstance(item, dict)
+            and set(item) == {"role", "text", "source_message_id", "turn_source"}
+            and item.get("role") in _PARTY_INTAKE_ROLES
+            and all(
+                isinstance(item.get(field), str)
+                for field in ("text", "source_message_id", "turn_source")
+            )
+        ] if isinstance(notes.get("remarks", []), list) else []
+        entry["handoff_notes"] = {
+            "remark_status": status,
+            "phase_source_message_id": str(
+                notes.get("phase_source_message_id") or ""
+            ),
+            "latest_remark": str(notes.get("latest_remark") or ""),
+            "remarks": remarks,
+            "instruction": str(notes.get("instruction") or ""),
+        }
+
+    admission = previous.get("admission")
+    if isinstance(admission, dict):
+        recommendation = str(admission.get("recommendation") or "NEED_MORE_INFO")
+        if recommendation not in _PARTY_INTAKE_RECOMMENDATIONS:
+            recommendation = "NEED_MORE_INFO"
+        confidence = admission.get("confidence")
+        confidence_value = (
+            float(confidence)
+            if type(confidence) in {int, float} and math.isfinite(float(confidence))
+            else 0.0
+        )
+        entry["admission"] = {
+            "recommendation": recommendation,
+            "reasoning": str(admission.get("reasoning") or ""),
+            "confidence": max(0.0, min(1.0, confidence_value)),
+        }
+
+    ready = entry["intake_quality"]["ready_for_next_step"]
+    if ready:
+        entry["admission"]["recommendation"] = "ACCEPTED"
+        if entry["handoff_notes"]["remark_status"] == "NOT_READY":
+            entry["handoff_notes"]["remark_status"] = (
+                "READY_PENDING_REMARK_INVITE"
+            )
+            if phase_source_message_id:
+                entry["handoff_notes"]["phase_source_message_id"] = (
+                    phase_source_message_id
+                )
+    else:
+        if entry["admission"]["recommendation"] == "ACCEPTED":
+            entry["admission"]["recommendation"] = "NEED_MORE_INFO"
+        entry["handoff_notes"]["remark_status"] = "NOT_READY"
+        entry["handoff_notes"]["latest_remark"] = ""
+        entry["handoff_notes"]["remarks"] = []
+    return entry
+
+
+def _party_intake_state_for_turn(
+    previous: dict[str, Any],
+    *,
+    actor_role: str,
+    initiator_role: str | None,
+    current_message_id: str,
+) -> dict[str, Any]:
+    persisted = previous.get("party_intake_state")
+    if persisted is not None:
+        return _validated_party_intake_state(
+            persisted,
+            source="persisted party_intake_state",
+        )
+
+    state = _default_party_intake_state()
+    if initiator_role is not None and actor_role == initiator_role:
+        state[actor_role] = _legacy_party_intake_entry(
+            previous,
+            phase_source_message_id=current_message_id,
+        )
+    return state
+
+
+def party_intake_prompt_mirror(
+    snapshot: dict[str, Any],
+    *,
+    actor_role: str,
+) -> dict[str, Any]:
+    """Return only the trusted current actor's four compatibility branches."""
+
+    actor = _require_party_actor_role(actor_role)
+    persisted = snapshot.get("party_intake_state")
+    if persisted is not None:
+        state = _validated_party_intake_state(
+            persisted,
+            source="prompt party_intake_state",
+        )
+        return copy.deepcopy(state[actor])
+
+    candidates: list[str] = []
+    matrix = snapshot.get("case_fact_matrix")
+    party_map = matrix.get("party_map") if isinstance(matrix, dict) else None
+    if isinstance(party_map, dict):
+        initiator = str(party_map.get("initiator_role") or "").upper()
+        respondent = str(party_map.get("respondent_role") or "").upper()
+        if (
+            initiator not in _PARTY_INTAKE_ROLES
+            or respondent not in _PARTY_INTAKE_ROLES
+            or initiator == respondent
+        ):
+            raise _party_intake_state_error(
+                "INTAKE_PARTY_STATE_ROLE_AUTHORITY_INVALID",
+                "prompt matrix party authority is malformed",
+            )
+        candidates.append(initiator)
+    claim = snapshot.get("claim_resolution")
+    if isinstance(claim, dict):
+        initiator = str(claim.get("initiator_role") or "").upper()
+        if initiator in _PARTY_INTAKE_ROLES:
+            candidates.append(initiator)
+    if candidates and any(candidate != candidates[0] for candidate in candidates[1:]):
+        raise _party_intake_state_error(
+            "INTAKE_PARTY_STATE_ROLE_AUTHORITY_DRIFT",
+            "prompt initiator role authorities disagree",
+        )
+    if candidates and actor == candidates[0]:
+        return _legacy_party_intake_entry(snapshot)
+    return _default_party_intake_entry()
+
+
+def _validated_party_intake_state(value: Any, *, source: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != _PARTY_INTAKE_STATE_FIELDS:
+        raise _party_intake_state_error(
+            "INTAKE_PARTY_STATE_SCHEMA_INVALID",
+            f"{source} must contain exactly schema_version, USER, and MERCHANT",
+        )
+    if value.get("schema_version") != PARTY_INTAKE_STATE_SCHEMA_VERSION:
+        raise _party_intake_state_error(
+            "INTAKE_PARTY_STATE_SCHEMA_INVALID",
+            f"{source} has an unsupported schema_version",
+        )
+    return {
+        "schema_version": PARTY_INTAKE_STATE_SCHEMA_VERSION,
+        **{
+            role: _validated_party_intake_entry(value.get(role), role=role, source=source)
+            for role in _PARTY_INTAKE_ROLES
+        },
+    }
+
+
+def _validated_party_intake_entry(
+    value: Any,
+    *,
+    role: str,
+    source: str,
+) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != _PARTY_INTAKE_ENTRY_FIELDS:
+        raise _party_intake_state_error(
+            "INTAKE_PARTY_STATE_ENTRY_INVALID",
+            f"{source}.{role} must contain exactly the four Intake state branches",
+        )
+
+    quality = value.get("intake_quality")
+    quality_fields = {
+        "score",
+        "threshold",
+        "ready_for_next_step",
+        "score_breakdown",
+        "improvement_reason",
+    }
+    if not isinstance(quality, dict) or set(quality) != quality_fields:
+        raise _party_intake_state_error(
+            "INTAKE_PARTY_STATE_QUALITY_INVALID",
+            f"{source}.{role}.intake_quality is malformed",
+        )
+    score = quality.get("score")
+    threshold = quality.get("threshold")
+    ready = quality.get("ready_for_next_step")
+    breakdown = quality.get("score_breakdown")
+    if (
+        type(score) is not int
+        or not 0 <= score <= 100
+        or type(threshold) is not int
+        or threshold != 85
+        or type(ready) is not bool
+        or not isinstance(quality.get("improvement_reason"), str)
+        or not isinstance(breakdown, dict)
+        or set(breakdown) != set(_QUALITY_SCORE_COMPONENT_MAXIMA)
+        or any(
+            type(breakdown.get(component)) is not int
+            or not 0 <= breakdown[component] <= maximum
+            for component, maximum in _QUALITY_SCORE_COMPONENT_MAXIMA.items()
+        )
+        or sum(breakdown.values()) != score
+    ):
+        raise _party_intake_state_error(
+            "INTAKE_PARTY_STATE_QUALITY_INVALID",
+            f"{source}.{role}.intake_quality violates the canonical score contract",
+        )
+
+    missing = value.get("missing_information")
+    missing_fields = {"blocking_gaps", "nice_to_have_gaps", "next_questions"}
+    if (
+        not isinstance(missing, dict)
+        or set(missing) != missing_fields
+        or any(
+            not isinstance(missing.get(field), list)
+            or any(not isinstance(item, str) for item in missing[field])
+            for field in missing_fields
+        )
+    ):
+        raise _party_intake_state_error(
+            "INTAKE_PARTY_STATE_MISSING_INVALID",
+            f"{source}.{role}.missing_information is malformed",
+        )
+
+    notes = value.get("handoff_notes")
+    notes_fields = {
+        "remark_status",
+        "phase_source_message_id",
+        "latest_remark",
+        "remarks",
+        "instruction",
+    }
+    if (
+        not isinstance(notes, dict)
+        or set(notes) != notes_fields
+        or notes.get("remark_status") not in _PARTY_INTAKE_REMARK_STATUSES
+        or not isinstance(notes.get("phase_source_message_id"), str)
+        or not isinstance(notes.get("latest_remark"), str)
+        or not isinstance(notes.get("instruction"), str)
+        or not isinstance(notes.get("remarks"), list)
+    ):
+        raise _party_intake_state_error(
+            "INTAKE_PARTY_STATE_HANDOFF_INVALID",
+            f"{source}.{role}.handoff_notes is malformed",
+        )
+    remark_source_ids: set[str] = set()
+    for remark in notes["remarks"]:
+        if (
+            not isinstance(remark, dict)
+            or set(remark) != {"role", "text", "source_message_id", "turn_source"}
+            or remark.get("role") != role
+            or any(
+                not isinstance(remark.get(field), str)
+                for field in ("text", "source_message_id", "turn_source")
+            )
+        ):
+            raise _party_intake_state_error(
+                "INTAKE_PARTY_STATE_HANDOFF_INVALID",
+                f"{source}.{role}.handoff_notes contains a foreign or malformed remark",
+            )
+        source_message_id = remark["source_message_id"]
+        if source_message_id in remark_source_ids:
+            raise _party_intake_state_error(
+                "INTAKE_PARTY_STATE_HANDOFF_INVALID",
+                f"{source}.{role}.handoff_notes repeats a remark source message",
+            )
+        remark_source_ids.add(source_message_id)
+
+    remark_status = notes["remark_status"]
+    latest_remark = notes["latest_remark"]
+    remarks = notes["remarks"]
+    if remark_status in {"NOT_READY", "READY_PENDING_REMARK_INVITE", "WAITING_FOR_REMARK"}:
+        canonical_remark_state = not latest_remark and not remarks
+    elif remark_status == "HAS_REMARKS":
+        canonical_remark_state = (
+            bool(latest_remark)
+            and bool(remarks)
+            and remarks[-1]["text"] == latest_remark
+        )
+    else:
+        canonical_remark_state = latest_remark == "无额外备注。" and not remarks
+    if not canonical_remark_state:
+        raise _party_intake_state_error(
+            "INTAKE_PARTY_STATE_HANDOFF_INVALID",
+            f"{source}.{role}.handoff_notes status and payload disagree",
+        )
+
+    admission = value.get("admission")
+    admission_fields = {"recommendation", "reasoning", "confidence"}
+    confidence = admission.get("confidence") if isinstance(admission, dict) else None
+    if (
+        not isinstance(admission, dict)
+        or set(admission) != admission_fields
+        or admission.get("recommendation") not in _PARTY_INTAKE_RECOMMENDATIONS
+        or not isinstance(admission.get("reasoning"), str)
+        or type(confidence) not in {int, float}
+        or not math.isfinite(float(confidence))
+        or not 0.0 <= float(confidence) <= 1.0
+    ):
+        raise _party_intake_state_error(
+            "INTAKE_PARTY_STATE_ADMISSION_INVALID",
+            f"{source}.{role}.admission is malformed",
+        )
+
+    if ready:
+        valid_cross_state = (
+            score >= 85
+            and not missing["blocking_gaps"]
+            and admission["recommendation"] == "ACCEPTED"
+            and notes["remark_status"] in _PARTY_INTAKE_READY_REMARK_STATUSES
+        )
+    else:
+        valid_cross_state = (
+            admission["recommendation"] != "ACCEPTED"
+            and notes["remark_status"] == "NOT_READY"
+        )
+    if not valid_cross_state:
+        raise _party_intake_state_error(
+            "INTAKE_PARTY_STATE_OUTCOME_CONFLICT",
+            f"{source}.{role} readiness, handoff, and admission disagree",
+        )
+    return copy.deepcopy(value)
+
+
+def _set_party_intake_mirror(
+    detail: dict[str, Any],
+    entry: dict[str, Any],
+) -> None:
+    for field in _PARTY_INTAKE_ENTRY_FIELDS:
+        detail[field] = copy.deepcopy(entry[field])
+
+
+def _restore_party_handoff_authority(
+    detail: dict[str, Any],
+    previous_actor_entry: dict[str, Any],
+) -> None:
+    detail["handoff_notes"] = copy.deepcopy(previous_actor_entry["handoff_notes"])
+
+
+def _canonical_party_intake_entry(
+    detail: dict[str, Any],
+    *,
+    role: str,
+) -> dict[str, Any]:
+    quality = _quality_mapping(detail.get("intake_quality"))
+    breakdown = quality.get("score_breakdown")
+    if not isinstance(breakdown, dict):
+        breakdown = {component: 0 for component in _QUALITY_SCORE_COMPONENT_MAXIMA}
+    score = quality.get("score")
+    canonical_quality = {
+        "score": score if type(score) is int else 0,
+        "threshold": 85,
+        "ready_for_next_step": quality.get("ready_for_next_step") is True,
+        "score_breakdown": {
+            component: (
+                breakdown.get(component)
+                if type(breakdown.get(component)) is int
+                else 0
+            )
+            for component in _QUALITY_SCORE_COMPONENT_MAXIMA
+        },
+        "improvement_reason": str(quality.get("improvement_reason") or ""),
+    }
+    missing = _quality_mapping(detail.get("missing_information"))
+    canonical_missing = {
+        field: [item for item in missing.get(field, []) if isinstance(item, str)]
+        if isinstance(missing.get(field), list)
+        else []
+        for field in ("blocking_gaps", "nice_to_have_gaps", "next_questions")
+    }
+    notes = _quality_mapping(detail.get("handoff_notes"))
+    canonical_notes = {
+        "remark_status": str(notes.get("remark_status") or "NOT_READY"),
+        "phase_source_message_id": str(notes.get("phase_source_message_id") or ""),
+        "latest_remark": str(notes.get("latest_remark") or ""),
+        "remarks": copy.deepcopy(notes.get("remarks"))
+        if isinstance(notes.get("remarks"), list)
+        else [],
+        "instruction": str(notes.get("instruction") or ""),
+    }
+    admission = _quality_mapping(detail.get("admission"))
+    confidence = admission.get("confidence")
+    canonical_admission = {
+        "recommendation": str(admission.get("recommendation") or "NEED_MORE_INFO"),
+        "reasoning": str(admission.get("reasoning") or ""),
+        "confidence": _clamp_confidence(confidence),
+    }
+    entry = {
+        "intake_quality": canonical_quality,
+        "missing_information": canonical_missing,
+        "handoff_notes": canonical_notes,
+        "admission": canonical_admission,
+    }
+    return _validated_party_intake_entry(
+        entry,
+        role=_require_party_actor_role(role),
+        source="derived current actor entry",
+    )
+
+
+def _is_substantive_case_question(value: Any) -> bool:
+    text = str(value or "").strip()
+    if not text or _is_evidence_material_request(text):
+        return False
+    process_markers = (
+        "备注",
+        "提交",
+        "下一步",
+        "证据书记官",
+        "handoff",
+        "submit",
+        "next step",
+    )
+    return not any(marker in text.casefold() for marker in process_markers)
 
 
 # 所属模块：接待室 Agent > 接待卷宗确定性整理；函数角色：模块私有业务函数。
@@ -1500,6 +2207,13 @@ def _direct_attitude_semantic_clause_zh(clause: str) -> str:
     )
 
 
+def _direct_attitude_semantic_clause_en(clause: str) -> str:
+    return _DIRECT_ATTITUDE_THIRD_PARTY_PROPOSAL_OBJECT_EN.sub(
+        "third-party proposal",
+        clause,
+    )
+
+
 def detect_direct_respondent_attitude(
     text: str,
     *,
@@ -1520,6 +2234,7 @@ def detect_direct_respondent_attitude(
         return DirectRespondentAttitudeDetection("UNRESOLVED")
     resolved: list[str] = []
     unresolved_signal = False
+    third_party_signal = False
     carry_chinese_subject = False
     for clause, preceding_boundary in _direct_attitude_clauses(normalized):
         inherited_chinese_subject = (
@@ -1546,26 +2261,42 @@ def detect_direct_respondent_attitude(
         )
         carry_chinese_subject = _DIRECT_ATTITUDE_SELF_ZH.match(clause) is not None
         if _DIRECT_ATTITUDE_SIGNAL_ZH.search(clause):
-            code = _direct_respondent_attitude_clause_zh(
-                clause,
-                inherited_subject=(
-                    inherited_chinese_subject
-                    or authoritative_omitted_chinese_subject
-                ),
+            semantic_clause = _direct_attitude_semantic_clause_zh(clause)
+            explicit_third_party = (
+                _DIRECT_ATTITUDE_ATTRIBUTION_ZH.search(semantic_clause) is not None
             )
+            if explicit_third_party:
+                third_party_signal = True
+                code = "NONE"
+            else:
+                code = _direct_respondent_attitude_clause_zh(
+                    clause,
+                    inherited_subject=(
+                        inherited_chinese_subject
+                        or authoritative_omitted_chinese_subject
+                    ),
+                )
             if code is None:
                 unresolved_signal = True
             elif code != "NONE":
                 resolved.append(code)
             continue
         if _DIRECT_ATTITUDE_SIGNAL_EN.search(clause):
-            code = _direct_respondent_attitude_clause_en(clause)
+            semantic_clause = _direct_attitude_semantic_clause_en(clause)
+            explicit_third_party = (
+                _DIRECT_ATTITUDE_ATTRIBUTION_EN.search(semantic_clause) is not None
+            )
+            if explicit_third_party:
+                third_party_signal = True
+                code = "NONE"
+            else:
+                code = _direct_respondent_attitude_clause_en(semantic_clause)
             if code is None:
                 unresolved_signal = True
             elif code != "NONE":
                 resolved.append(code)
     codes = set(resolved)
-    if unresolved_signal:
+    if unresolved_signal or (third_party_signal and resolved):
         return DirectRespondentAttitudeDetection("UNRESOLVED")
     code = _reduce_direct_respondent_attitude_codes(codes)
     if code is not None:
@@ -1579,6 +2310,8 @@ def detect_direct_respondent_attitude(
         )
     if codes:
         return DirectRespondentAttitudeDetection("UNRESOLVED")
+    if third_party_signal:
+        return DirectRespondentAttitudeDetection("NONE")
     return DirectRespondentAttitudeDetection("NONE")
 
 
@@ -1605,6 +2338,8 @@ def _direct_respondent_attitude_clause_zh(
         body = semantic_clause.strip()
     else:
         body = subject.group("body").strip()
+    if re.fullmatch(r"(?:尚未|未|没有)\s*(?:明确)?表态", body):
+        return "NONE"
     if re.search(r"(?:并非|不是|没有|未)\s*(?:不同意|不接受|拒绝|不支持)", body):
         return None
     codes: set[str] = set()
@@ -1631,9 +2366,10 @@ def _direct_respondent_attitude_clause_zh(
 
 
 def _direct_respondent_attitude_clause_en(clause: str) -> str | None:
-    if _DIRECT_ATTITUDE_ATTRIBUTION_EN.search(clause) is not None:
+    semantic_clause = _direct_attitude_semantic_clause_en(clause)
+    if _DIRECT_ATTITUDE_ATTRIBUTION_EN.search(semantic_clause) is not None:
         return None
-    subject = _DIRECT_ATTITUDE_SELF_EN.match(clause)
+    subject = _DIRECT_ATTITUDE_SELF_EN.match(semantic_clause)
     if subject is None:
         return None
     body = subject.group("body").strip()
@@ -2584,12 +3320,17 @@ def _ensure_handoff_notes(
     detail: dict[str, Any],
     *,
     remark_status: str | None = None,
+    phase_source_message_id: str | None = None,
 ) -> dict[str, Any]:
     notes = _ensure_dict(detail, "handoff_notes")
     if remark_status is not None:
         notes["remark_status"] = remark_status
     elif not notes.get("remark_status") or notes.get("remark_status") == "NOT_READY":
         notes["remark_status"] = "WAITING_FOR_REMARK"
+    if phase_source_message_id is not None:
+        notes["phase_source_message_id"] = phase_source_message_id
+    else:
+        notes.setdefault("phase_source_message_id", "")
     notes.setdefault("latest_remark", "")
     remarks = notes.get("remarks")
     if not isinstance(remarks, list):
@@ -2607,12 +3348,14 @@ def _record_handoff_remark_if_needed(
     request: IntakeTurnRequest,
     *,
     previous_waiting_for_remark: bool,
+    previous_phase_source_message_id: str,
 ) -> None:
     current = request.current_user_message
     if (
         current is None
         or not previous_waiting_for_remark
         or not current.text.strip()
+        or current.message_id == previous_phase_source_message_id
     ):
         return
 
@@ -2620,10 +3363,12 @@ def _record_handoff_remark_if_needed(
     text = current.text.strip()
     if _is_no_extra_remark(text):
         notes["remark_status"] = "NO_EXTRA_REMARKS"
+        notes["phase_source_message_id"] = current.message_id
         notes["latest_remark"] = "无额外备注。"
         return
 
     notes["remark_status"] = "HAS_REMARKS"
+    notes["phase_source_message_id"] = current.message_id
     notes["latest_remark"] = text
     remarks = notes["remarks"]
     source_message_id = current.message_id
@@ -2736,25 +3481,64 @@ def _quality_focus_values(value: Any) -> list[str]:
     ]
 
 
+def _respondent_resolution_authorized(
+    detail: dict[str, Any],
+    *,
+    actor_role: str,
+    initiator_role: str | None,
+) -> bool:
+    if (
+        initiator_role not in _PARTY_INTAKE_ROLES
+        or actor_role != _opposite_party(initiator_role)
+    ):
+        return False
+    attitude = _quality_mapping(detail.get("respondent_attitude"))
+    return (
+        str(attitude.get("respondent_role") or "").upper() == actor_role
+        and str(attitude.get("source") or "") == DIRECT_RESPONDENT_SOURCE
+        and str(attitude.get("attitude") or "").upper()
+        in _SUBSTANTIVE_RESPONDENT_ATTITUDE_CODES
+        and _quality_text(attitude.get("position"))
+    )
+
+
 def _authoritative_intake_source_records(
     request: IntakeTurnRequest,
+    *,
+    initiator_role: str | None,
 ) -> tuple[tuple[str, str], ...]:
     records: list[tuple[str, str]] = []
-    initial = request.initial_case_facts
-    form_description = str(getattr(initial, "form_description", None) or "").strip()
-    if _quality_text(form_description):
-        form_source = str(getattr(initial, "form_source", None) or "INITIAL_FORM")
-        records.append((form_source, form_description))
-    for message in request.initiator_statement_transcript:
-        if _quality_text(message.text):
-            records.append((message.message_id, message.text))
+    seen: set[str] = set()
+    actor_role = _require_party_actor_role(request.agent_context.actor_role)
+
+    def append_record(identifier: Any, text: Any) -> None:
+        normalized_id = str(identifier or "").strip()
+        normalized_text = str(text or "").strip()
+        if (
+            not normalized_id
+            or normalized_id in seen
+            or not _quality_text(normalized_text)
+        ):
+            return
+        seen.add(normalized_id)
+        records.append((normalized_id, normalized_text))
+
+    if initiator_role is not None and actor_role == initiator_role:
+        initial = request.initial_case_facts
+        append_record(
+            getattr(initial, "form_source", None) or "INITIAL_FORM",
+            getattr(initial, "form_description", None),
+        )
+        for message in request.initiator_statement_transcript:
+            if str(message.role or "").upper() == actor_role:
+                append_record(message.message_id, message.text)
+
+    for message in request.recent_dialogue_messages:
+        if str(message.role or "").upper() == actor_role:
+            append_record(message.message_id, message.text)
     current = request.current_user_message
-    if (
-        current is not None
-        and not _transcript_contains_current(request)
-        and _quality_text(current.text)
-    ):
-        records.append((current.message_id, current.text))
+    if current is not None and str(current.role or "").upper() == actor_role:
+        append_record(current.message_id, current.text)
     return tuple(records)
 
 
@@ -2763,49 +3547,96 @@ def _build_intake_quality_authority(
     *,
     request: IntakeTurnRequest,
     missing: list[str],
+    initiator_role: str | None,
+    actor_source_records: tuple[tuple[str, str], ...],
 ) -> _IntakeQualityAuthority:
     references = _quality_mapping(detail.get("references"))
-    records = _authoritative_intake_source_records(request)
+    records = actor_source_records
     claim = _quality_mapping(detail.get("claim_resolution"))
-    initiator_role = str(claim.get("initiator_role") or "").upper()
-    initiator_position = initiator_role in {"USER", "MERCHANT"} and any(
-        _quality_text(claim.get(key))
-        for key in ("normalized_statement", "original_statement", "request_reason")
-    )
+    actor_role = _require_party_actor_role(request.agent_context.actor_role)
+    actor_is_initiator = initiator_role is not None and actor_role == initiator_role
+    source_text = "\n".join(text for _, text in records)
+    compact_source_length = len(re.sub(r"\s+", "", source_text))
     attitude = _quality_mapping(detail.get("respondent_attitude"))
-    respondent_state = (
-        initiator_role in {"USER", "MERCHANT"}
-        and str(attitude.get("respondent_role") or "").upper()
-        == _opposite_party(initiator_role)
-        and str(attitude.get("attitude") or "").upper() in RESPONDENT_ATTITUDE_CODES
-        and _quality_text(attitude.get("position"))
+    direct_respondent_state = _respondent_resolution_authorized(
+        detail,
+        actor_role=actor_role,
+        initiator_role=initiator_role,
     )
     resolution = _known_resolution_code(claim.get("requested_resolution"))
-    normalized_request = resolution is not None and _quality_text(
-        claim.get("normalized_statement")
-    )
     core = _quality_mapping(detail.get("dispute_core_state"))
     conflict_type = str(core.get("conflict_type") or "").upper()
     known_conflict = conflict_type in _QUALITY_CONFLICT_TYPES
     missing_question = _question_for_missing(missing)
-    return _IntakeQualityAuthority(
-        order_reference=_quality_text(references.get("order_reference")),
-        after_sales_reference=_quality_text(references.get("after_sales_reference")),
-        logistics_reference=_quality_text(references.get("logistics_reference")),
-        authoritative_story=bool(records),
-        authoritative_event=any(_quality_text(identifier) for identifier, _ in records),
-        initiator_position=initiator_position,
-        respondent_state=respondent_state,
-        requested_resolution=resolution is not None,
-        normalized_request=normalized_request,
-        conflict_type=known_conflict,
-        core_conflict=known_conflict and _quality_text(core.get("core_conflict")),
-        action_target=bool(missing) or (known_conflict and resolution is not None),
-        action_path=(
+
+    if not records:
+        return _IntakeQualityAuthority(*([False] * 13))
+
+    if actor_is_initiator:
+        initiator_position = any(
+            _quality_text(claim.get(key))
+            for key in ("normalized_statement", "original_statement", "request_reason")
+        )
+        respondent_state = (
+            str(attitude.get("respondent_role") or "").upper()
+            == _opposite_party(initiator_role)
+            and str(attitude.get("attitude") or "").upper()
+            in RESPONDENT_ATTITUDE_CODES
+            and _quality_text(attitude.get("position"))
+        )
+        requested_resolution = resolution is not None
+        normalized_request = requested_resolution and _quality_text(
+            claim.get("normalized_statement")
+        )
+        order_reference = _quality_text(references.get("order_reference"))
+        after_sales_reference = _quality_text(references.get("after_sales_reference"))
+        logistics_reference = _quality_text(references.get("logistics_reference"))
+        conflict_authority = known_conflict
+        core_conflict_authority = known_conflict and _quality_text(
+            core.get("core_conflict")
+        )
+        action_target = bool(missing) or (known_conflict and resolution is not None)
+        action_path = (
             bool(missing_question)
             if missing
             else known_conflict and resolution is not None
+        )
+    else:
+        folded_source = source_text.casefold()
+
+        def actor_stated_reference(field: str) -> bool:
+            value = str(references.get(field) or "").strip()
+            return bool(value) and value.casefold() in folded_source
+
+        order_reference = actor_stated_reference("order_reference")
+        after_sales_reference = actor_stated_reference("after_sales_reference")
+        logistics_reference = actor_stated_reference("logistics_reference")
+        initiator_position = compact_source_length >= 8
+        respondent_state = direct_respondent_state
+        requested_resolution = direct_respondent_state
+        normalized_request = direct_respondent_state and compact_source_length >= 16
+        conflict_authority = compact_source_length >= 12
+        core_conflict_authority = compact_source_length >= 16
+        action_target = compact_source_length >= 8
+        action_path = compact_source_length >= 16
+
+    return _IntakeQualityAuthority(
+        order_reference=order_reference,
+        after_sales_reference=after_sales_reference,
+        logistics_reference=logistics_reference,
+        authoritative_story=compact_source_length >= 8,
+        authoritative_event=(
+            compact_source_length >= 16
+            and any(_quality_text(identifier) for identifier, _ in records)
         ),
+        initiator_position=initiator_position,
+        respondent_state=respondent_state,
+        requested_resolution=requested_resolution,
+        normalized_request=normalized_request,
+        conflict_type=conflict_authority,
+        core_conflict=core_conflict_authority,
+        action_target=action_target,
+        action_path=action_path,
     )
 
 
@@ -2814,6 +3645,8 @@ def _derive_intake_quality_breakdown(
     *,
     request: IntakeTurnRequest,
     missing: list[str],
+    initiator_role: str | None,
+    actor_source_records: tuple[tuple[str, str], ...],
 ) -> dict[str, int]:
     """Score only request-bound authority using the six fixed prompt maxima."""
 
@@ -2821,6 +3654,8 @@ def _derive_intake_quality_breakdown(
         detail,
         request=request,
         missing=missing,
+        initiator_role=initiator_role,
+        actor_source_records=actor_source_records,
     )
     breakdown = {
         "references": (

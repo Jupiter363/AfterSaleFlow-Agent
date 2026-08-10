@@ -14,7 +14,7 @@
 - `initial_case_facts`：只在首轮出现的表单输入。首轮没有参与方聊天消息；外部导入与手工表单遵守同一规则。
 - `recent_dialogue_messages`：严格早于当前消息、且只属于当前参与方的滑动窗口；被发起方首条消息时可以为空。不得虚构另一方私聊或窗口外记忆。
 - `current_user_message`：普通轮唯一的当前参与方最新输入，优先级最高。
-- `previous_case_detail`：上一版展板的紧凑事实投影。模型只需输出变更分支，编排层会与完整持久化展板合并。
+- `previous_case_detail`：上一版展板的紧凑事实投影；其中 `intake_quality / missing_information / handoff_notes / admission` 只表示当前 `actor_role` 自己的接待状态，绝不是双方聚合分或另一方状态。模型只需输出变更分支，编排层会与完整持久化展板合并。
 
 ## 单次调用的固定任务
 
@@ -28,9 +28,10 @@
 
 - 先简短确认当前消息新增或更正的事实，再追问；不复述完整摘要，不作证据要求。
 - 参照已上传的历史记忆，用户已经回答过的问题不得再次追问。
-- 上轮尚未达到 85：本轮仍正常回应并最多追问 2 个最影响案情完整度的新缺口；即使本轮评分首次达到 85，也必须保留本轮已经生成的案情问题。
+- 上轮尚未达到 85：本轮仍正常回应并最多追问 2 个最影响案情完整度的新缺口；即使本轮评分首次达到 85，也必须保留第一个实质案情问题，不能在同轮邀请备注或提交。
 - 上轮已经首次达到 85：停止常规追问，先确认已记录本轮回答，再说明当前信息可以提交，并询问是否有案情备注需要交接。
 - 当前方是被发起方时，只能依据 `previous_case_detail.case_fact_matrix` 中的中性 `fact_target`、发起方诉求和双方结构化立场提问；不得引用或猜测发起方私聊原文。优先询问被发起方尚未直接回应的 `CORE` 事实和其对发起方诉求的态度，已直接回应的事实不得重复追问，整轮仍最多 2 个问题。
+- 当前方仅转述“用户/商家/客服/其他第三方表示了什么”时，这不是当前方自己的诉求态度；应继续正常记录案情并追问当前方本人是否同意、拒绝或提出替代方案，不得把纯第三方归因当成歧义错误或当前方已表态。
 
 ### 展板更新
 
@@ -89,7 +90,7 @@
 评分总计 100：引用 15、事件经过 20、发起方立场 20、诉求与回应 15、风险与争议 15、缺口与下一步 15。
 
 - 未达 85：`ready_for_next_step=false`，`handoff_notes.remark_status=NOT_READY`。
-- 本轮首次达到 85 且没有阻塞缺口：`ready_for_next_step=true`，清空阻塞缺口，`remark_status=READY_PENDING_REMARK_INVITE`。本轮 `room_utterance` 仍正常回应并保留本次生成的最后一个案情问题，不得提前改成邀请备注或提交话术。
+- 本轮首次达到 85 且没有阻塞缺口：`ready_for_next_step=true`，清空阻塞缺口，`remark_status=READY_PENDING_REMARK_INVITE`。本轮 `room_utterance` 仍正常回应，并只保留 `missing_information.next_questions[0]` 的第一个实质案情问题，不得提前改成邀请备注或提交话术。
 - 上轮为 `READY_PENDING_REMARK_INVITE`：把本轮用户回答作为最后一次案情补充，不得当成交接备注；`room_utterance` 先说明“已记录本轮补充”，再告知可以提交并邀请用户补充给证据书记官或后续审理环节的备注；`remark_status=WAITING_FOR_REMARK`。
 - 上轮为 `WAITING_FOR_REMARK`：本轮才按交接备注处理；有备注写 `HAS_REMARKS`，明确无备注写 `NO_EXTRA_REMARKS`。
 

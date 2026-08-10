@@ -710,6 +710,236 @@ function isCaseDetailObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
+const PARTY_INTAKE_STATE_SCHEMA_VERSION = "party-intake-state.v1";
+const PARTY_INTAKE_ROLES = ["USER", "MERCHANT"];
+const PARTY_INTAKE_ENTRY_KEYS = [
+  "intake_quality",
+  "missing_information",
+  "handoff_notes",
+  "admission",
+];
+const PARTY_INTAKE_SCORE_COMPONENTS = {
+  references: 15,
+  event_story: 20,
+  party_positions: 20,
+  requested_resolution: 15,
+  risk_and_conflicts: 15,
+  next_action_clarity: 15,
+};
+const PARTY_INTAKE_REMARK_STATUSES = new Set([
+  "NOT_READY",
+  "READY_PENDING_REMARK_INVITE",
+  "WAITING_FOR_REMARK",
+  "HAS_REMARKS",
+  "NO_EXTRA_REMARKS",
+]);
+const PARTY_INTAKE_READY_REMARK_STATUSES = new Set([
+  "READY_PENDING_REMARK_INVITE",
+  "WAITING_FOR_REMARK",
+  "HAS_REMARKS",
+  "NO_EXTRA_REMARKS",
+]);
+const PARTY_INTAKE_ADMISSION_RECOMMENDATIONS = new Set([
+  "NEED_MORE_INFO",
+  "ACCEPTED",
+  "NOT_ADMISSIBLE",
+]);
+
+function hasExactObjectKeys(value, expectedKeys) {
+  if (!isCaseDetailObject(value)) return false;
+  const actual = Object.keys(value).sort();
+  const expected = [...expectedKeys].sort();
+  return actual.length === expected.length &&
+    actual.every((key, index) => key === expected[index]);
+}
+
+function sameJsonContractValue(left, right) {
+  if (Object.is(left, right)) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) &&
+      Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((item, index) => sameJsonContractValue(item, right[index]));
+  }
+  if (!isCaseDetailObject(left) || !isCaseDetailObject(right)) return false;
+  const keys = Object.keys(left);
+  return hasExactObjectKeys(right, keys) &&
+    keys.every((key) => sameJsonContractValue(left[key], right[key]));
+}
+
+function isBoundedInteger(value, minimum, maximum) {
+  return Number.isInteger(value) && value >= minimum && value <= maximum;
+}
+
+function isStringArray(value) {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function validPartyIntakeQuality(value) {
+  if (!hasExactObjectKeys(value, [
+    "score",
+    "threshold",
+    "ready_for_next_step",
+    "score_breakdown",
+    "improvement_reason",
+  ])) return false;
+  if (
+    !isBoundedInteger(value.score, 0, 100) ||
+    value.threshold !== 85 ||
+    typeof value.ready_for_next_step !== "boolean" ||
+    typeof value.improvement_reason !== "string" ||
+    !hasExactObjectKeys(value.score_breakdown, Object.keys(PARTY_INTAKE_SCORE_COMPONENTS))
+  ) return false;
+  const score = Object.entries(PARTY_INTAKE_SCORE_COMPONENTS).reduce(
+    (sum, [component, maximum]) => {
+      const componentScore = value.score_breakdown[component];
+      return isBoundedInteger(componentScore, 0, maximum)
+        ? sum + componentScore
+        : Number.NaN;
+    },
+    0,
+  );
+  return score === value.score;
+}
+
+function validPartyIntakeMissingInformation(value) {
+  return hasExactObjectKeys(value, [
+    "blocking_gaps",
+    "nice_to_have_gaps",
+    "next_questions",
+  ]) &&
+    isStringArray(value.blocking_gaps) &&
+    isStringArray(value.nice_to_have_gaps) &&
+    isStringArray(value.next_questions);
+}
+
+function validPartyIntakeRemark(value, role) {
+  return hasExactObjectKeys(value, ["role", "text", "source_message_id", "turn_source"]) &&
+    value.role === role &&
+    typeof value.text === "string" &&
+    typeof value.source_message_id === "string" &&
+    typeof value.turn_source === "string";
+}
+
+function validPartyIntakeHandoffNotes(value, role) {
+  if (!hasExactObjectKeys(value, [
+    "remark_status",
+    "phase_source_message_id",
+    "latest_remark",
+    "remarks",
+    "instruction",
+  ]) ||
+    !PARTY_INTAKE_REMARK_STATUSES.has(value.remark_status) ||
+    typeof value.phase_source_message_id !== "string" ||
+    typeof value.latest_remark !== "string" ||
+    !Array.isArray(value.remarks) ||
+    !value.remarks.every((remark) => validPartyIntakeRemark(remark, role)) ||
+    typeof value.instruction !== "string") return false;
+  const sourceIds = value.remarks.map((remark) => remark.source_message_id);
+  if (new Set(sourceIds).size !== sourceIds.length) return false;
+  if (["NOT_READY", "READY_PENDING_REMARK_INVITE", "WAITING_FOR_REMARK"]
+    .includes(value.remark_status)) {
+    return value.latest_remark === "" && value.remarks.length === 0;
+  }
+  if (value.remark_status === "HAS_REMARKS") {
+    return value.latest_remark.length > 0 &&
+      value.remarks.length > 0 &&
+      value.remarks[value.remarks.length - 1].text === value.latest_remark;
+  }
+  return value.latest_remark === "无额外备注。" && value.remarks.length === 0;
+}
+
+function validPartyIntakeAdmission(value) {
+  return hasExactObjectKeys(value, ["recommendation", "reasoning", "confidence"]) &&
+    PARTY_INTAKE_ADMISSION_RECOMMENDATIONS.has(value.recommendation) &&
+    typeof value.reasoning === "string" &&
+    typeof value.confidence === "number" &&
+    Number.isFinite(value.confidence) &&
+    value.confidence >= 0 &&
+    value.confidence <= 1;
+}
+
+function validPartyIntakeEntry(value, role) {
+  if (!hasExactObjectKeys(value, PARTY_INTAKE_ENTRY_KEYS)) return false;
+  if (
+    !validPartyIntakeQuality(value.intake_quality) ||
+    !validPartyIntakeMissingInformation(value.missing_information) ||
+    !validPartyIntakeHandoffNotes(value.handoff_notes, role) ||
+    !validPartyIntakeAdmission(value.admission)
+  ) return false;
+  const ready = value.intake_quality.ready_for_next_step;
+  if (!ready) {
+    return value.admission.recommendation !== "ACCEPTED" &&
+      value.handoff_notes.remark_status === "NOT_READY";
+  }
+  return value.intake_quality.score >= value.intake_quality.threshold &&
+    value.missing_information.blocking_gaps.length === 0 &&
+    value.admission.recommendation === "ACCEPTED" &&
+    PARTY_INTAKE_READY_REMARK_STATUSES.has(value.handoff_notes.remark_status);
+}
+
+function exactPartyIntakeState(detail, role) {
+  if (!isCaseDetailObject(detail)) return { declared: false, state: null };
+  const declared = Object.hasOwn(detail, "party_intake_state") ||
+    Object.hasOwn(detail, "partyIntakeState");
+  if (!declared || Object.hasOwn(detail, "partyIntakeState")) {
+    return { declared, state: null };
+  }
+  const state = detail.party_intake_state;
+  if (
+    !hasExactObjectKeys(state, ["schema_version", ...PARTY_INTAKE_ROLES]) ||
+    state.schema_version !== PARTY_INTAKE_STATE_SCHEMA_VERSION ||
+    !PARTY_INTAKE_ROLES.every((role) => validPartyIntakeEntry(state[role], role))
+  ) {
+    return { declared: true, state: null };
+  }
+  if (!PARTY_INTAKE_ROLES.includes(role) ||
+    !PARTY_INTAKE_ENTRY_KEYS.every((branch) =>
+      sameJsonContractValue(detail[branch], state[role][branch]))) {
+    return { declared: true, state: null };
+  }
+  return { declared: true, state };
+}
+
+function exactAuthenticatedPartyRole() {
+  const role = String(actor.role || "").trim();
+  if (!PARTY_INTAKE_ROLES.includes(role)) return "";
+  const position = actorPartyPosition.value;
+  if (!["INITIATOR", "RESPONDENT"].includes(position)) return "";
+  const initiatorRole = normalizePartyRoleValue(
+    intakeStatus.value?.initiator_role ||
+      intakeStatus.value?.initiatorRole ||
+      dispute.value?.initiator_role ||
+      dispute.value?.initiatorRole ||
+      analysis.value?.initiator_role ||
+      analysis.value?.initiatorRole,
+  );
+  if (initiatorRole === "UNKNOWN") return "";
+  const expectedRole = position === "INITIATOR"
+    ? initiatorRole
+    : oppositePartyRole(initiatorRole);
+  return expectedRole === role ? role : "";
+}
+
+function emptyCaseDetailQuality() {
+  return {
+    score: 0,
+    threshold: 85,
+    ready: false,
+    reason: "",
+  };
+}
+
+function caseDetailQualityFromPartyEntry(entry) {
+  const quality = entry.intake_quality;
+  return {
+    score: quality.score,
+    threshold: quality.threshold,
+    ready: quality.ready_for_next_step,
+    reason: humanizeDossierText(quality.improvement_reason, { fallback: "" }),
+  };
+}
+
 function deepMergeCaseDetail(base, patch) {
   const merged = { ...(isCaseDetailObject(base) ? base : {}) };
   Object.entries(isCaseDetailObject(patch) ? patch : {}).forEach(([key, incoming]) => {
@@ -764,19 +994,16 @@ const intakeDossierSubmissionDisabled = computed(() =>
   !currentActorMatrixReady.value,
 );
 const caseDetailQuality = computed(() => {
-  const quality = caseDetailDossier.value?.intake_quality || {};
-  const respondentStartsIndependently =
-    !currentActorIsInitiator.value &&
-    partyCanChat.value &&
-    currentMatrixKind.value !== "BILATERAL_FROZEN";
-  if (respondentStartsIndependently) {
-    return {
-      score: 0,
-      threshold: quality.threshold ?? 85,
-      ready: false,
-      reason: "被发起方完善度从本方陈述开始独立统计",
-    };
+  const role = exactAuthenticatedPartyRole();
+  if (!role) return emptyCaseDetailQuality();
+  const partyState = exactPartyIntakeState(caseDetailDossier.value, role);
+  if (partyState.declared) {
+    return partyState.state
+      ? caseDetailQualityFromPartyEntry(partyState.state[role])
+      : emptyCaseDetailQuality();
   }
+  if (!currentActorIsInitiator.value) return emptyCaseDetailQuality();
+  const quality = caseDetailDossier.value?.intake_quality || {};
   return {
     score: currentCaseDossier.value?.quality_score ?? quality.score ?? 0,
     threshold: quality.threshold ?? 85,

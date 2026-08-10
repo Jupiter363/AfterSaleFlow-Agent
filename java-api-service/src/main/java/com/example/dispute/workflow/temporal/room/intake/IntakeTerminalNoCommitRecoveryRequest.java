@@ -12,12 +12,15 @@ public record IntakeTerminalNoCommitRecoveryRequest(
   public static final String LEGACY_SCHEMA_VERSION =
       "intake-terminal-no-commit-recovery-request.v1";
   public static final String SCHEMA_VERSION = "intake-terminal-no-commit-recovery-request.v2";
+  public static final String V3_SCHEMA_VERSION =
+      "intake-terminal-no-commit-recovery-request.v3";
 
   public IntakeTerminalNoCommitRecoveryRequest {
     boolean legacy = LEGACY_SCHEMA_VERSION.equals(schemaVersion);
-    if (!legacy && !SCHEMA_VERSION.equals(schemaVersion)) {
+    boolean v3 = V3_SCHEMA_VERSION.equals(schemaVersion);
+    if (!legacy && !SCHEMA_VERSION.equals(schemaVersion) && !v3) {
       throw new IllegalArgumentException(
-          "schemaVersion must be intake-terminal-no-commit-recovery-request.v1 or .v2");
+          "schemaVersion must be intake-terminal-no-commit-recovery-request.v1, .v2, or .v3");
     }
     requireText(workflowId, "workflowId");
     requireText(workflowRunId, "workflowRunId");

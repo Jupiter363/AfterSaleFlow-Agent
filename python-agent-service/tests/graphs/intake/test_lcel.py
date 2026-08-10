@@ -5254,6 +5254,18 @@ def _direct_respondent_adversarial_state(
     [
         ("We did not cause X, but we accept Y.", "AGREE", False),
         ("Our company accepts Y.", "AGREE", False),
+        pytest.param(
+            "We reject the customer's proposed refund.",
+            "DISAGREE",
+            False,
+            id="en-self-with-possessive-third-party-proposal-object",
+        ),
+        pytest.param(
+            "Our company rejects the refund proposed by the customer.",
+            "DISAGREE",
+            False,
+            id="en-self-with-passive-third-party-proposal-object",
+        ),
         ("我方并不同意Y。", "DISAGREE", False),
         ("我方没有同意Y。", "DISAGREE", False),
         pytest.param(
@@ -5488,9 +5500,6 @@ def test_direct_respondent_detector_confidence_survives_merge_and_next_turn(
 @pytest.mark.parametrize(
     "text",
     [
-        "建议Y的是对方，不是我方。",
-        "同意Y的是对方，我方未表态。",
-        "The buyer accepted Y; our company only recorded it.",
         pytest.param(
             "We do not disagree with Y.",
             id="unsupported-double-negation",
@@ -5500,16 +5509,20 @@ def test_direct_respondent_detector_confidence_survives_merge_and_next_turn(
         "We accept no Y.",
         "We do not propose Y.",
         pytest.param(
+            "We reject Y, but the customer proposed a refund.",
+            id="en-resolved-plus-third-party-attribution",
+        ),
+        pytest.param(
+            "We reject Y. The above is the customer's position.",
+            id="en-deferred-trailing-attribution",
+        ),
+        pytest.param(
             "本方同意方案A。不同意方案B。",
             id="zh-true-mixed-codes",
         ),
         pytest.param(
             "本方同意方案A。对方表示不同意方案B。",
             id="zh-resolved-plus-third-party-attribution",
-        ),
-        pytest.param(
-            "本方仅记录对方表示同意方案A。",
-            id="zh-first-person-reported-speech",
         ),
         pytest.param(
             "本方不接受该请求。（对方意见）",
@@ -5532,6 +5545,8 @@ def test_lcel_direct_respondent_adversarial_unresolved_signal_fails_closed(
         text=text,
         prior_attitude="DISAGREE",
     )
+    state["initial_snapshot_ref"] = "SNAPSHOT_P4_THIRD_PARTY_QA"
+    state["initial_snapshot_hash"] = "a" * 64
     draft = IntakeCognitionDraft.model_validate(
         _draft(
             dossier_patch={
@@ -5553,6 +5568,61 @@ def test_lcel_direct_respondent_adversarial_unresolved_signal_fails_closed(
                 },
             }
         )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "建议Y的是对方，不是我方。",
+        "同意Y的是对方，我方未表态。",
+        "本方仅记录对方表示同意方案A。",
+        "The buyer accepted Y; our company only recorded it.",
+        "The customer proposed a refund.",
+    ],
+)
+def test_lcel_pure_third_party_attribution_reaches_a_valid_qa_proposal(
+    bindings,
+    version_pins,
+    text: str,
+) -> None:
+    state, prior = _direct_respondent_adversarial_state(
+        bindings,
+        version_pins,
+        text=text,
+        prior_attitude="DISAGREE",
+    )
+    state["initial_snapshot_ref"] = "SNAPSHOT_P4_THIRD_PARTY_QA"
+    state["initial_snapshot_hash"] = "a" * 64
+    draft = IntakeCognitionDraft.model_validate(
+        _draft(
+            room_utterance="已记录第三方说法。请说明贵方本人是否同意该处理方案？",
+            dossier_patch={
+                "respondent_attitude": copy.deepcopy(prior),
+            },
+            readiness="INCOMPLETE",
+            missing_fields=["RESPONDENT_POSITION"],
+            recommendation="NEED_MORE_INFO",
+        )
+    )
+
+    selected_state, _, normalized = _generation_parts(
+        {
+            "state": state,
+            "generation": {"message": AIMessage(content="{}"), "draft": draft},
+        }
+    )
+    _validate_business_output(selected_state, normalized)
+    normalized_patch = normalized.dossier_patch.model_dump(
+        mode="json",
+        exclude_none=True,
+        exclude_unset=True,
+    )
+
+    assert detect_direct_respondent_attitude(text).state == "NONE"
+    assert "respondent_attitude" not in normalized_patch
+    assert normalized.room_utterance.endswith("？")
+    assert normalized.readiness == "INCOMPLETE"
+    assert normalized.recommendation == "NEED_MORE_INFO"
 
 
 def test_negated_english_direct_response_does_not_ground_agreement(

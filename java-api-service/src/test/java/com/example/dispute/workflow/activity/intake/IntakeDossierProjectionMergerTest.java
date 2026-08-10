@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.example.dispute.workflow.application.intake.IntakeDossierProjectionMerger;
 import com.example.dispute.workflow.application.intake.IntakeDossierProjectionMerger.ClaimResolutionAuthority;
 import com.example.dispute.workflow.application.intake.IntakeDossierProjectionMerger.MatrixAuthority;
+import com.example.dispute.workflow.application.intake.IntakeDossierProjectionMerger.MergeResult;
 import com.example.dispute.workflow.application.intake.IntakeFinalizationRejectedException;
 import com.example.dispute.workflow.application.intake.IntakeTurnEventPublisher.SourceType;
 import com.example.dispute.workflow.application.intake.IntakeTurnProposal;
@@ -17,6 +18,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.math.BigDecimal;
 import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 class IntakeDossierProjectionMergerTest {
@@ -1083,6 +1085,269 @@ class IntakeDossierProjectionMergerTest {
                 () -> merger.merge(unboundSource, proposal(JSON.createObjectNode(), null)));
     }
 
+    @Test
+    void persistsCurrentPartyMirrorAndPreservesTheOtherPartyAcrossRoleSwitch() {
+        ObjectNode userEntry = partyIntakeEntry(60);
+        ObjectNode merchantEntry = partyIntakeEntry(0);
+        ObjectNode firstPatch = partyIntakePatch("USER", userEntry, merchantEntry);
+
+        MergeResult first = merger.merge(
+                JSON.createObjectNode(),
+                proposal(firstPatch, null),
+                matrixAuthority(ActorRole.USER));
+
+        JsonNode persistedUser = first.dossier().at("/party_intake_state/USER");
+        assertThat(first.dossier().path("intake_quality"))
+                .isEqualTo(persistedUser.path("intake_quality"));
+        assertThat(first.dossier().path("admission"))
+                .isEqualTo(persistedUser.path("admission"));
+
+        ObjectNode secondState =
+                ((ObjectNode) first.dossier().path("party_intake_state")).deepCopy();
+        secondState.set("MERCHANT", partyIntakeEntry(55));
+        ObjectNode secondPatch = JSON.createObjectNode();
+        secondPatch.set("party_intake_state", secondState);
+        copyPartyMirror(secondPatch, secondState.path("MERCHANT"));
+
+        MergeResult second = merger.merge(
+                first.dossier(),
+                proposal(secondPatch, null),
+                matrixAuthority(ActorRole.MERCHANT));
+
+        assertThat(second.dossier().at("/party_intake_state/USER"))
+                .isEqualTo(persistedUser);
+        assertThat(second.dossier().path("intake_quality"))
+                .isEqualTo(second.dossier().at("/party_intake_state/MERCHANT/intake_quality"));
+        assertThat(second.dossier().at("/intake_quality/score").asInt()).isEqualTo(55);
+    }
+
+    @Test
+    void rejectsMalformedForeignAndNonCurrentPartyStateDrift() {
+        ObjectNode userEntry = partyIntakeEntry(60);
+        ObjectNode merchantEntry = partyIntakeEntry(0);
+
+        ObjectNode malformed = partyIntakePatch("USER", userEntry, merchantEntry);
+        ((ObjectNode) malformed.path("party_intake_state")).remove("MERCHANT");
+        assertRejected(
+                "INTAKE_PARTY_STATE_SCHEMA_INVALID",
+                () -> merger.merge(
+                        JSON.createObjectNode(),
+                        proposal(malformed, null),
+                        matrixAuthority(ActorRole.USER)));
+
+        ObjectNode currentPatch = partyIntakePatch("USER", userEntry, merchantEntry);
+        ObjectNode current = merger.merge(
+                        JSON.createObjectNode(),
+                        proposal(currentPatch, null),
+                        matrixAuthority(ActorRole.USER))
+                .dossier();
+        ObjectNode driftedState =
+                ((ObjectNode) current.path("party_intake_state")).deepCopy();
+        driftedState.set("USER", partyIntakeEntry(61));
+        ObjectNode driftedPatch = JSON.createObjectNode();
+        driftedPatch.set("party_intake_state", driftedState);
+        copyPartyMirror(driftedPatch, driftedState.path("MERCHANT"));
+        assertRejected(
+                "INTAKE_PARTY_STATE_OTHER_PARTY_DRIFT",
+                () -> merger.merge(
+                        current,
+                        proposal(driftedPatch, null),
+                        matrixAuthority(ActorRole.MERCHANT)));
+
+        ObjectNode wrongMirror = partyIntakePatch("USER", userEntry, merchantEntry);
+        wrongMirror.set("intake_quality", merchantEntry.path("intake_quality").deepCopy());
+        assertRejected(
+                "INTAKE_PARTY_STATE_MIRROR_CONFLICT",
+                () -> merger.merge(
+                        JSON.createObjectNode(),
+                        proposal(wrongMirror, null),
+                        matrixAuthority(ActorRole.USER)));
+    }
+
+    @Test
+    void legacyRespondentMigrationCannotBorrowThePriorInitiatorMirror() {
+        ObjectNode legacy = JSON.createObjectNode();
+        copyPartyMirror(legacy, partyIntakeEntry(100));
+        ObjectNode proposed = partyIntakePatch(
+                "MERCHANT", partyIntakeEntry(100), partyIntakeEntry(0));
+
+        assertRejected(
+                "INTAKE_PARTY_STATE_LEGACY_MIGRATION_INVALID",
+                () -> merger.merge(
+                        legacy,
+                        proposal(proposed, null),
+                        matrixAuthority(ActorRole.MERCHANT)));
+    }
+
+    @Test
+    void phaseSourceBindsTransitionsAndMakesExactMessageReplayIdempotent() {
+        ObjectNode merchantEntry = partyIntakeEntry(0);
+        ObjectNode pendingUser = readyPartyIntakeEntry(
+                "READY_PENDING_REMARK_INVITE", "MESSAGE_P4_USER_2");
+        ObjectNode pendingPatch = partyIntakePatch("USER", pendingUser, merchantEntry);
+        MatrixAuthority firstMessage = matrixAuthority(
+                ActorRole.USER, "MESSAGE_P4_USER_2", SourceType.ROOM_MESSAGE);
+
+        MergeResult pending = merger.merge(
+                JSON.createObjectNode(),
+                proposal(
+                        pendingPatch,
+                        null,
+                        IntakeTurnProposal.Readiness.READY_TO_CONFIRM,
+                        List.of()),
+                firstMessage);
+
+        ObjectNode pendingReplayPatch = JSON.createObjectNode();
+        pendingReplayPatch.set(
+                "party_intake_state", pending.dossier().path("party_intake_state").deepCopy());
+        copyPartyMirror(
+                pendingReplayPatch, pending.dossier().at("/party_intake_state/USER"));
+        MergeResult pendingReplay = merger.merge(
+                pending.dossier(),
+                proposal(
+                        pendingReplayPatch,
+                        null,
+                        IntakeTurnProposal.Readiness.READY_TO_CONFIRM,
+                        List.of()),
+                firstMessage);
+        assertThat(pendingReplay.dossier().path("handoff_notes"))
+                .isEqualTo(pending.dossier().path("handoff_notes"));
+
+        ObjectNode waitingState =
+                ((ObjectNode) pending.dossier().path("party_intake_state")).deepCopy();
+        waitingState.set(
+                "USER", readyPartyIntakeEntry("WAITING_FOR_REMARK", "MESSAGE_P4_USER_3"));
+        ObjectNode waitingPatch = JSON.createObjectNode();
+        waitingPatch.set("party_intake_state", waitingState);
+        copyPartyMirror(waitingPatch, waitingState.path("USER"));
+        MatrixAuthority secondMessage = matrixAuthority(
+                ActorRole.USER, "MESSAGE_P4_USER_3", SourceType.ROOM_MESSAGE);
+        MergeResult waiting = merger.merge(
+                pending.dossier(),
+                proposal(
+                        waitingPatch,
+                        null,
+                        IntakeTurnProposal.Readiness.READY_TO_CONFIRM,
+                        List.of()),
+                secondMessage);
+        assertThat(waiting.dossier().at("/handoff_notes/phase_source_message_id").asText())
+                .isEqualTo("MESSAGE_P4_USER_3");
+
+        MergeResult waitingReplay = merger.merge(
+                waiting.dossier(),
+                proposal(
+                        waitingPatch,
+                        null,
+                        IntakeTurnProposal.Readiness.READY_TO_CONFIRM,
+                        List.of()),
+                secondMessage);
+        assertThat(waitingReplay.dossier().path("handoff_notes"))
+                .isEqualTo(waiting.dossier().path("handoff_notes"));
+
+        ObjectNode driftedPending = pendingPatch.deepCopy();
+        driftedPending
+                .withObject("party_intake_state")
+                .withObject("USER")
+                .withObject("handoff_notes")
+                .put("phase_source_message_id", "MESSAGE_P4_USER_3");
+        driftedPending.set(
+                "handoff_notes",
+                driftedPending.at("/party_intake_state/USER/handoff_notes").deepCopy());
+        assertRejected(
+                "INTAKE_PARTY_STATE_PHASE_SOURCE_DRIFT",
+                () -> merger.merge(
+                        pending.dossier(),
+                        proposal(
+                                driftedPending,
+                                null,
+                                IntakeTurnProposal.Readiness.READY_TO_CONFIRM,
+                                List.of()),
+                        secondMessage));
+    }
+
+    @Test
+    void adjacentLegacyPatchRemainsPartyStateFree() throws Exception {
+        MergeResult result = merger.merge(
+                JSON.createObjectNode(),
+                proposal(completeDossierPatch(), null));
+
+        assertThat(result.dossier().has("party_intake_state")).isFalse();
+    }
+
+    private static ObjectNode partyIntakePatch(
+            String actorRole, ObjectNode userEntry, ObjectNode merchantEntry) {
+        ObjectNode state = JSON.createObjectNode();
+        state.put("schema_version", "party-intake-state.v1");
+        state.set("USER", userEntry.deepCopy());
+        state.set("MERCHANT", merchantEntry.deepCopy());
+        ObjectNode patch = JSON.createObjectNode();
+        patch.set("party_intake_state", state);
+        copyPartyMirror(patch, state.path(actorRole));
+        return patch;
+    }
+
+    private static ObjectNode partyIntakeEntry(int score) {
+        ObjectNode entry = JSON.createObjectNode();
+        ObjectNode quality = entry.putObject("intake_quality");
+        quality.put("score", score);
+        quality.put("threshold", 85);
+        quality.put("ready_for_next_step", false);
+        ObjectNode breakdown = quality.putObject("score_breakdown");
+        int remaining = score;
+        for (Map.Entry<String, Integer> component : Map.of(
+                        "references", 15,
+                        "event_story", 20,
+                        "party_positions", 20,
+                        "requested_resolution", 15,
+                        "risk_and_conflicts", 15,
+                        "next_action_clarity", 15)
+                .entrySet()) {
+            int value = Math.min(component.getValue(), remaining);
+            breakdown.put(component.getKey(), value);
+            remaining -= value;
+        }
+        quality.put(
+                "improvement_reason",
+                score == 0 ? "等待当前参与方补充案情。" : "Current party still has Intake questions.");
+        ObjectNode missing = entry.putObject("missing_information");
+        missing.putArray("blocking_gaps");
+        missing.putArray("nice_to_have_gaps");
+        missing.putArray("next_questions");
+        ObjectNode handoff = entry.putObject("handoff_notes");
+        handoff.put("remark_status", "NOT_READY");
+        handoff.put("phase_source_message_id", "");
+        handoff.put("latest_remark", "");
+        handoff.putArray("remarks");
+        handoff.put(
+                "instruction",
+                score == 0
+                        ? "当前参与方案情达到阈值后，接待官会询问交接备注。"
+                        : "Continue current-party Intake.");
+        ObjectNode admission = entry.putObject("admission");
+        admission.put("recommendation", "NEED_MORE_INFO");
+        admission.put("reasoning", "");
+        admission.put("confidence", 0.0d);
+        return entry;
+    }
+
+    private static ObjectNode readyPartyIntakeEntry(
+            String remarkStatus, String phaseSourceMessageId) {
+        ObjectNode entry = partyIntakeEntry(100);
+        entry.withObject("intake_quality").put("ready_for_next_step", true);
+        ObjectNode handoff = entry.withObject("handoff_notes");
+        handoff.put("remark_status", remarkStatus);
+        handoff.put("phase_source_message_id", phaseSourceMessageId);
+        entry.withObject("admission").put("recommendation", "ACCEPTED");
+        return entry;
+    }
+
+    private static void copyPartyMirror(ObjectNode target, JsonNode entry) {
+        for (String field :
+                List.of("intake_quality", "missing_information", "handoff_notes", "admission")) {
+            target.set(field, entry.path(field).deepCopy());
+        }
+    }
+
     private static JsonNode completeDossierPatch() throws Exception {
         return JSON.readTree(
                 """
@@ -1355,6 +1620,19 @@ class IntakeDossierProjectionMergerTest {
                 ActorRole.MERCHANT,
                 respondent ? "MESSAGE_P4_MERCHANT_2" : "MESSAGE_P4_USER_2",
                 (respondent ? "e" : "c").repeat(64),
+                null,
+                sourceType);
+    }
+
+    private static MatrixAuthority matrixAuthority(
+            ActorRole actorRole, String sourceRef, SourceType sourceType) {
+        return new MatrixAuthority(
+                "CASE_P4_SYNTHETIC_1",
+                actorRole,
+                ActorRole.USER,
+                ActorRole.MERCHANT,
+                sourceRef,
+                (actorRole == ActorRole.MERCHANT ? "e" : "c").repeat(64),
                 null,
                 sourceType);
     }

@@ -14,6 +14,8 @@ import static org.mockito.Mockito.when;
 
 import com.example.dispute.room.infrastructure.persistence.repository.CaseRoomRepository;
 import com.example.dispute.room.infrastructure.persistence.repository.CaseTimelineEventRepository;
+import com.example.dispute.room.infrastructure.persistence.entity.CaseRoomEntity;
+import com.example.dispute.room.infrastructure.persistence.entity.CaseTimelineEventEntity;
 import com.example.dispute.infrastructure.persistence.entity.AgentRunAttemptEntity;
 import com.example.dispute.infrastructure.persistence.entity.AgentRunEntity;
 import com.example.dispute.infrastructure.persistence.repository.AgentRunAttemptRepository;
@@ -53,6 +55,7 @@ import com.example.dispute.workflow.targete2e.persistence.TargetE2EActivationLed
 import com.example.dispute.workflow.targete2e.persistence.material.TargetIntakeCommandMaterialStore;
 import com.example.dispute.workflow.temporal.room.intake.IntakeCommandExecutionContext;
 import com.example.dispute.workflow.temporal.room.intake.IntakeTargetAgentRunContext;
+import com.example.dispute.workflow.temporal.room.intake.TargetIntakeSourceEventRef;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.databind.json.JsonMapper;
@@ -208,6 +211,8 @@ class CaseProcessLedgerActivitiesImplTest {
         OffsetDateTime terminalAt = OffsetDateTime.ofInstant(authority.terminalAt(), ZoneOffset.UTC);
 
         CaseCommandRepository commandRepository = mock(CaseCommandRepository.class);
+        CaseTimelineEventRepository eventRepository = mock(CaseTimelineEventRepository.class);
+        CaseRoomRepository roomRepository = mock(CaseRoomRepository.class);
         CaseRoomEpochRepository epochRepository = mock(CaseRoomEpochRepository.class);
         CaseProcessProjectionRepository projectionRepository = mock(CaseProcessProjectionRepository.class);
         AgentRunRepository runRepository = mock(AgentRunRepository.class);
@@ -494,8 +499,8 @@ class CaseProcessLedgerActivitiesImplTest {
         CaseProcessLedgerActivitiesImpl activities =
                 new CaseProcessLedgerActivitiesImpl(
                         commandRepository,
-                        mock(CaseTimelineEventRepository.class),
-                        mock(CaseRoomRepository.class),
+                        eventRepository,
+                        roomRepository,
                         epochRepository,
                         projectionRepository,
                         mock(ProcessReconciliationIssueRepository.class),
@@ -638,6 +643,145 @@ class CaseProcessLedgerActivitiesImplTest {
         verify(projectionRepository, times(1)).advanceFencedProjection(
                 TENANT, CASE_ID, 0L, 11L, 6L, 7L, "INTAKE", "INTAKE", "WAITING_PARTY",
                 7L, 15L, null, caseWorkflowId, caseWorkflowRunId, authority.caseBuildId(),
+                "urn:projection:6", "c".repeat(64), terminalAt);
+
+        clearInvocations(command, epochRepository, projectionRepository);
+        TargetIntakeCommandTerminalNoCommit liveObservedAuthority =
+                terminalAuthority(
+                        authority.errorCode(),
+                        authority.agentRunExecutionRequestHash(),
+                        11,
+                        12);
+        String emptyObjectHash =
+                "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a";
+        TargetIntakeSourceEventRef projectionReady =
+                new TargetIntakeSourceEventRef(
+                        TargetIntakeSourceEventRef.SCHEMA_VERSION,
+                        "EVENT_PROJECTION_READY_11",
+                        11,
+                        TargetIntakeSourceEventRef.INTAKE_PROJECTION_READY,
+                        TENANT,
+                        CASE_ID,
+                        RoomType.INTAKE,
+                        0,
+                        11,
+                        emptyObjectHash);
+        TargetIntakeSourceEventRef roomMessage =
+                new TargetIntakeSourceEventRef(
+                        TargetIntakeSourceEventRef.SCHEMA_VERSION,
+                        "EVENT_ROOM_MESSAGE_12",
+                        12,
+                        TargetIntakeSourceEventRef.ROOM_MESSAGE_CREATED,
+                        TENANT,
+                        CASE_ID,
+                        RoomType.INTAKE,
+                        0,
+                        11,
+                        emptyObjectHash);
+        CaseTimelineEventEntity projectionReadyRow = mock(CaseTimelineEventEntity.class);
+        CaseTimelineEventEntity roomMessageRow = mock(CaseTimelineEventEntity.class);
+        CaseRoomEntity room = mock(CaseRoomEntity.class);
+        when(projectionReadyRow.getId()).thenReturn(projectionReady.eventId());
+        when(projectionReadyRow.getSequenceNo()).thenReturn(11L);
+        when(projectionReadyRow.getEventType()).thenReturn(projectionReady.eventType());
+        when(projectionReadyRow.getEventJson()).thenReturn("{}");
+        when(projectionReadyRow.getRoomId()).thenReturn(null);
+        when(roomMessageRow.getId()).thenReturn(roomMessage.eventId());
+        when(roomMessageRow.getSequenceNo()).thenReturn(12L);
+        when(roomMessageRow.getEventType()).thenReturn(roomMessage.eventType());
+        when(roomMessageRow.getEventJson()).thenReturn("{}");
+        when(roomMessageRow.getRoomId()).thenReturn("ROOM_INTAKE_1");
+        when(roomMessageRow.getEventTime()).thenReturn(Instant.parse("2026-07-29T00:00:02Z"));
+        when(roomRepository.findById("ROOM_INTAKE_1")).thenReturn(Optional.of(room));
+        when(room.getCaseId()).thenReturn(CASE_ID);
+        when(room.getRoomType())
+                .thenReturn(com.example.dispute.room.domain.RoomType.INTAKE);
+        when(epochRepository.findEpochAt(
+                        eq(TENANT), eq(CASE_ID), eq(RoomType.INTAKE), any(), any()))
+                .thenReturn(List.of(epoch));
+        when(eventRepository.findByCaseIdAndSequenceNoBetweenOrderBySequenceNoAsc(
+                        CASE_ID, 11L, 12L))
+                .thenReturn(List.of(projectionReadyRow, roomMessageRow));
+        when(command.getCommandStatus()).thenReturn(CommandStatus.ORCHESTRATION_ACCEPTED);
+        when(epoch.getProcessRevision()).thenReturn(6L);
+        when(epoch.getRoomRevision()).thenReturn(6L);
+        when(projection.getProcessRevision()).thenReturn(6L);
+        when(projection.getLastCommandSequence()).thenReturn(6L);
+        when(projection.getLastCaseEventSequence()).thenReturn(10L);
+        when(projectionRepository.advanceFencedProjection(
+                        TENANT, CASE_ID, 0L, 11L, 6L, 7L, "INTAKE", "INTAKE", "WAITING_PARTY",
+                        7L, 12L, null, caseWorkflowId, caseWorkflowRunId,
+                        authority.caseBuildId(), "urn:projection:6", "c".repeat(64), terminalAt))
+                .thenReturn(1);
+
+        var liveResolved =
+                activities.resolveTargetIntakeTerminalNoCommit(
+                        new ResolveTargetIntakeTerminalNoCommit(
+                                ResolveTargetIntakeTerminalNoCommit.V2_SCHEMA_VERSION,
+                                liveObservedAuthority,
+                                List.of(projectionReady, roomMessage)));
+        TargetIntakeCommandTerminalNoCommit liveV3 = liveResolved.authority();
+        assertThat(liveV3.schemaVersion())
+                .isEqualTo(TargetIntakeCommandTerminalNoCommit.V3_SCHEMA_VERSION);
+        assertThat(liveV3.expectedProjectionLastCaseEventSequence()).isEqualTo(10);
+        assertThat(liveV3.expectedLastCaseEventSequence()).isEqualTo(11);
+        assertThat(liveV3.newProjectionLastCaseEventSequence()).isEqualTo(12);
+        assertThat(liveV3.lastCaseEventSequence()).isEqualTo(12);
+        assertThat(liveV3.interveningCaseEvents())
+                .containsExactly(projectionReady, roomMessage);
+
+        ConvergeTargetIntakeTerminalNoCommit liveConvergence =
+                new ConvergeTargetIntakeTerminalNoCommit(
+                        "converge-target-intake-terminal-no-commit.v1",
+                        liveV3,
+                        caseWorkflowId,
+                        caseWorkflowRunId,
+                        authority.caseBuildId());
+        when(eventRepository.findByCaseIdAndSequenceNoBetweenOrderBySequenceNoAsc(
+                        CASE_ID, 11L, 12L))
+                .thenReturn(List.of(projectionReadyRow));
+        assertThatThrownBy(
+                        () -> activities.convergeTargetIntakeTerminalNoCommit(liveConvergence))
+                .isInstanceOf(ApplicationFailure.class)
+                .satisfies(
+                        failure ->
+                                assertThat(((ApplicationFailure) failure).getType())
+                                        .isEqualTo(
+                                                "TARGET_INTAKE_TERMINAL_NO_COMMIT_EVENT_LINEAGE_INVALID"));
+        when(eventRepository.findByCaseIdAndSequenceNoBetweenOrderBySequenceNoAsc(
+                        CASE_ID, 11L, 12L))
+                .thenReturn(List.of(projectionReadyRow, roomMessageRow));
+        when(roomMessageRow.getId()).thenReturn("EVENT_FOREIGN_12");
+        assertThatThrownBy(
+                        () -> activities.convergeTargetIntakeTerminalNoCommit(liveConvergence))
+                .isInstanceOf(ApplicationFailure.class)
+                .satisfies(
+                        failure ->
+                                assertThat(((ApplicationFailure) failure).getType())
+                                        .isEqualTo(
+                                                "TARGET_INTAKE_TERMINAL_NO_COMMIT_EVENT_LINEAGE_INVALID"));
+        when(roomMessageRow.getId()).thenReturn(roomMessage.eventId());
+
+        var liveApplied = activities.convergeTargetIntakeTerminalNoCommit(liveConvergence);
+        assertThat(liveApplied.outcome()).isEqualTo(TerminalNoCommitOutcome.TERMINALIZED);
+        assertThat(liveApplied.lastCaseEventSequence()).isEqualTo(12);
+        when(command.getCommandStatus()).thenReturn(CommandStatus.FAILED);
+        when(command.getStatusReasonCode()).thenReturn(liveV3.errorCode());
+        when(command.getResultUri()).thenReturn(liveV3.receiptUri());
+        when(command.getResultSha256()).thenReturn(liveV3.receiptSha256());
+        when(epoch.getProcessRevision()).thenReturn(7L);
+        when(epoch.getRoomRevision()).thenReturn(7L);
+        when(projection.getProcessRevision()).thenReturn(7L);
+        when(projection.getLastCommandSequence()).thenReturn(7L);
+        when(projection.getLastCaseEventSequence()).thenReturn(12L);
+        assertThat(activities.convergeTargetIntakeTerminalNoCommit(liveConvergence).outcome())
+                .isEqualTo(TerminalNoCommitOutcome.IDEMPOTENT_REPLAY);
+        verify(epochRepository, times(1)).advanceFencedEpoch(
+                TENANT, CASE_ID, "INTAKE", 0L, 11L, 6L, 7L, 6L, 7L,
+                caseWorkflowId, caseWorkflowRunId, authority.caseBuildId(), terminalAt);
+        verify(projectionRepository, times(1)).advanceFencedProjection(
+                TENANT, CASE_ID, 0L, 11L, 6L, 7L, "INTAKE", "INTAKE", "WAITING_PARTY",
+                7L, 12L, null, caseWorkflowId, caseWorkflowRunId, authority.caseBuildId(),
                 "urn:projection:6", "c".repeat(64), terminalAt);
 
         when(command.getCommandStatus()).thenReturn(CommandStatus.APPLIED);

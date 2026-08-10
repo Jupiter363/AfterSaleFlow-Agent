@@ -25,6 +25,8 @@ import com.example.dispute.workflow.contract.v1.CaseProcessWorkflowProtocol;
 import com.example.dispute.workflow.contract.v1.ContractTypes.AgentRunAttemptStatus;
 import com.example.dispute.workflow.temporal.agentrun.AgentRunWorkflow;
 import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities;
+import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.ConvergeTargetIntakeTerminalNoCommit;
+import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.ConvergeTargetIntakeTerminalNoCommitResult;
 import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.ResolveTargetIntakeTerminalNoCommit;
 import com.example.dispute.workflow.temporal.caseprocess.CaseCommandLifecycleActivities.ResolveTargetIntakeTerminalNoCommitResult;
 import com.example.dispute.workflow.temporal.caseprocess.CaseProcessWorkflow;
@@ -44,9 +46,11 @@ import io.temporal.common.RetryOptions;
 import java.time.Duration;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.EnumMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.function.Function;
@@ -77,6 +81,10 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
       "intake-room-agent-run-terminal-no-commit-parent-convergence-v1";
   private static final String AGENT_RUN_TERMINAL_NO_COMMIT_PARENT_CONVERGENCE_V2_CHANGE_ID =
       "intake-room-agent-run-terminal-no-commit-parent-convergence-v2";
+  private static final String AGENT_RUN_TERMINAL_NO_COMMIT_PARENT_CONVERGENCE_V3_CHANGE_ID =
+      "intake-room-agent-run-terminal-no-commit-parent-convergence-v3";
+  private static final String AGENT_RUN_TERMINAL_NO_COMMIT_ACKNOWLEDGED_RECOVERY_CHANGE_ID =
+      "intake-room-agent-run-terminal-no-commit-acknowledged-recovery-v1";
   private static final String AGENT_RUN_CANCELLATION_CLEAR_GUARD_CHANGE_ID =
       "intake-room-agent-run-cancellation-clear-guard-v1";
   private static final String AGENT_RUN_RESOLVED_CHILD_CARRY_GUARD_CHANGE_ID =
@@ -352,17 +360,17 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
     if (!settleFinalizationRejectedTargetAgentRun(command, finalization)) {
       throw new IllegalStateException("pending terminal finalization recovery did not converge");
     }
-    TargetIntakeCommandTerminalNoCommit authority =
-        completedTerminalNoCommitRecoveryRequest == null
+    TargetIntakeCommandTerminalNoCommit acknowledgedAuthority =
+        completedTerminalNoCommitRecoveryResult == null
             ? null
-            : completedTerminalNoCommitRecoveryRequest.authority();
-    if (authority == null
-        || !command.commandId().equals(authority.commandId())
+            : completedTerminalNoCommitRecoveryResult.resolvedAuthority().authority();
+    if (acknowledgedAuthority == null
+        || !command.commandId().equals(acknowledgedAuthority.commandId())
         || pendingCommand != null
         || targetAgentRunChild != null
-        || processRevision != authority.newProcessRevision()
-        || roomRevision != authority.newRoomRevision()
-        || nextEventSequence - 1 != authority.lastCaseEventSequence()) {
+        || processRevision != acknowledgedAuthority.newProcessRevision()
+        || roomRevision != acknowledgedAuthority.newRoomRevision()
+        || nextEventSequence - 1 != acknowledgedAuthority.lastCaseEventSequence()) {
       throw new IllegalStateException("pending terminal finalization recovery changed authority");
     }
     IntakeAgentRunFinalizationRecoveryResult recovered =
@@ -372,7 +380,7 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
             terminalChild,
             finalization,
             IntakeAgentRunFinalizationRecoveryResult.Disposition.TERMINAL_NO_COMMIT_CONVERGED,
-            authority);
+            acknowledgedAuthority.asObservedV2Authority());
     completedTargetFinalizationRecoveryRequest = request;
     completedTargetFinalizationRecoveryResult = recovered;
     return recovered;
@@ -389,7 +397,17 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
       IntakeTerminalNoCommitRecoveryRequest request) {
     requireTerminalNoCommitRecovery(request);
     if (completedTerminalNoCommitRecoveryResult != null) {
-      return completedTerminalNoCommitRecoveryResult;
+      if (request.equals(completedTerminalNoCommitRecoveryRequest)) {
+        return completedTerminalNoCommitRecoveryResult;
+      }
+      if (!IntakeTerminalNoCommitRecoveryRequest.V3_SCHEMA_VERSION.equals(
+          request.schemaVersion())) {
+        throw new IllegalArgumentException("terminal-no-commit recovery replay conflicts");
+      }
+    }
+    if (IntakeTerminalNoCommitRecoveryRequest.V3_SCHEMA_VERSION.equals(
+        request.schemaVersion())) {
+      return recoverAcknowledgedTerminalNoCommit(request);
     }
     ResolveTargetIntakeTerminalNoCommitResult resolved =
         caseCommandLifecycleActivities.resolveTargetIntakeTerminalNoCommit(
@@ -417,6 +435,52 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
             IntakeTerminalNoCommitRecoveryResult.Disposition.EMITTED,
             request,
             resolved);
+    completedTerminalNoCommitRecoveryRequest = request;
+    completedTerminalNoCommitRecoveryResult = recovered;
+    return recovered;
+  }
+
+  private IntakeTerminalNoCommitRecoveryResult recoverAcknowledgedTerminalNoCommit(
+      IntakeTerminalNoCommitRecoveryRequest request) {
+    if (Workflow.getVersion(
+            AGENT_RUN_TERMINAL_NO_COMMIT_ACKNOWLEDGED_RECOVERY_CHANGE_ID,
+            Workflow.DEFAULT_VERSION,
+            1)
+        != 1) {
+      throw new IllegalStateException("acknowledged terminal-no-commit recovery is not enabled");
+    }
+    ResolveTargetIntakeTerminalNoCommitResult resolved =
+        resolveStrictV3TerminalNoCommit(request.authority());
+    requireTerminalNoCommitRecovery(request);
+    TargetIntakeCommandTerminalNoCommit authority = resolved.authority();
+    if (!TargetIntakeCommandTerminalNoCommit.V3_SCHEMA_VERSION.equals(
+            authority.schemaVersion())
+        || !request.authority().equals(authority.asObservedV2Authority())) {
+      throw new IllegalArgumentException(
+          "terminal-no-commit authority read returned conflicting v3 evidence");
+    }
+    ConvergeTargetIntakeTerminalNoCommitResult convergence =
+        convergeStrictV3TerminalNoCommit(resolved);
+    requireTerminalNoCommitRecovery(request);
+    requireAcknowledgedTerminalNoCommit(authority, resolved, convergence);
+    TargetIntakeCommandTerminalNoCommit observedAuthority = request.authority();
+    if (processRevision == observedAuthority.expectedProcessRevision()
+        && roomRevision == observedAuthority.expectedRoomRevision()) {
+      processRevision = observedAuthority.newProcessRevision();
+      roomRevision = observedAuthority.newRoomRevision();
+    } else if (processRevision != observedAuthority.newProcessRevision()
+        || roomRevision != observedAuthority.newRoomRevision()) {
+      throw new IllegalStateException("terminal-no-commit Room coordinates changed");
+    }
+    signalTerminalNoCommit(authority);
+    protocolErrorCode = null;
+    IntakeTerminalNoCommitRecoveryResult recovered =
+        new IntakeTerminalNoCommitRecoveryResult(
+            IntakeTerminalNoCommitRecoveryResult.V2_SCHEMA_VERSION,
+            IntakeTerminalNoCommitRecoveryResult.Disposition.PARENT_CONVERGED,
+            request,
+            resolved,
+            convergence);
     completedTerminalNoCommitRecoveryRequest = request;
     completedTerminalNoCommitRecoveryResult = recovered;
     return recovered;
@@ -1575,7 +1639,7 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
                 Workflow.DEFAULT_VERSION,
                 1)
             == 1;
-    TargetIntakeCommandTerminalNoCommit authority =
+    TargetIntakeCommandTerminalNoCommit observedAuthority =
         new TargetIntakeCommandTerminalNoCommit(
             useV2Authority
                 ? TargetIntakeCommandTerminalNoCommit.SCHEMA_VERSION
@@ -1625,6 +1689,22 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
             result.lastSequenceNo(),
             result.publicOutputEmitted(),
             result.completedAt());
+    boolean useV3Authority =
+        useV2Authority
+            && Workflow.getVersion(
+                    AGENT_RUN_TERMINAL_NO_COMMIT_PARENT_CONVERGENCE_V3_CHANGE_ID,
+                    Workflow.DEFAULT_VERSION,
+                    1)
+                == 1;
+    ResolveTargetIntakeTerminalNoCommitResult resolved = null;
+    ConvergeTargetIntakeTerminalNoCommitResult convergence = null;
+    TargetIntakeCommandTerminalNoCommit authority = observedAuthority;
+    if (useV3Authority) {
+      resolved = resolveStrictV3TerminalNoCommit(observedAuthority);
+      authority = resolved.authority();
+      convergence = convergeStrictV3TerminalNoCommit(resolved);
+      requireAcknowledgedTerminalNoCommit(authority, resolved, convergence);
+    }
     if (pendingCommand == null
         || !pendingCommand.commandId().equals(command.commandId())
         || targetAgentRunChild == null
@@ -1650,8 +1730,62 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
     recordTerminalTargetAgentRunDecision(command, result.errorCode());
     protocolErrorCode = result.errorCode();
     signalTerminalNoCommit(authority);
-    cacheTerminalNoCommitEmission(authority);
+    if (useV3Authority) {
+      cacheAcknowledgedTerminalNoCommit(observedAuthority, resolved, convergence);
+    } else {
+      cacheTerminalNoCommitEmission(authority);
+    }
     return true;
+  }
+
+  private ResolveTargetIntakeTerminalNoCommitResult resolveStrictV3TerminalNoCommit(
+      TargetIntakeCommandTerminalNoCommit observedAuthority) {
+    return caseCommandLifecycleActivities.resolveTargetIntakeTerminalNoCommit(
+        new ResolveTargetIntakeTerminalNoCommit(
+            ResolveTargetIntakeTerminalNoCommit.V2_SCHEMA_VERSION,
+            observedAuthority,
+            targetSourceEventObservations.values().stream()
+                .filter(
+                    event -> event.eventSequence() <= observedAuthority.lastCaseEventSequence())
+                .sorted(Comparator.comparingLong(TargetIntakeSourceEventRef::eventSequence))
+                .toList()));
+  }
+
+  private ConvergeTargetIntakeTerminalNoCommitResult convergeStrictV3TerminalNoCommit(
+      ResolveTargetIntakeTerminalNoCommitResult resolved) {
+    return caseCommandLifecycleActivities.convergeTargetIntakeTerminalNoCommit(
+        new ConvergeTargetIntakeTerminalNoCommit(
+            "converge-target-intake-terminal-no-commit.v1",
+            resolved.authority(),
+            resolved.caseWorkflowId(),
+            resolved.caseWorkflowRunId(),
+            resolved.caseWorkflowBuildId()));
+  }
+
+  private static void requireAcknowledgedTerminalNoCommit(
+      TargetIntakeCommandTerminalNoCommit authority,
+      ResolveTargetIntakeTerminalNoCommitResult resolved,
+      ConvergeTargetIntakeTerminalNoCommitResult convergence) {
+    if (resolved == null
+        || convergence == null
+        || !ResolveTargetIntakeTerminalNoCommitResult.V2_SCHEMA_VERSION.equals(
+            resolved.schemaVersion())
+        || !TargetIntakeCommandTerminalNoCommit.V3_SCHEMA_VERSION.equals(
+            authority.schemaVersion())
+        || !authority.equals(resolved.authority())
+        || !authority.equals(convergence.authority())
+        || !authority.receiptUri().equals(resolved.receiptUri())
+        || !authority.receiptSha256().equals(resolved.receiptSha256())
+        || !authority.receiptUri().equals(convergence.receiptUri())
+        || !authority.receiptSha256().equals(convergence.receiptSha256())
+        || convergence.processRevision() < authority.newProcessRevision()
+        || convergence.roomRevision() < authority.newRoomRevision()
+        || convergence.lastCommandSequence() < authority.caseCommandSequence()
+        || convergence.lastCaseEventSequence()
+            < authority.newProjectionLastCaseEventSequence()) {
+      throw new IllegalArgumentException(
+          "terminal-no-commit convergence returned conflicting acknowledgement");
+    }
   }
 
   private void signalTerminalNoCommit(TargetIntakeCommandTerminalNoCommit authority) {
@@ -1687,6 +1821,26 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
             IntakeTerminalNoCommitRecoveryResult.Disposition.ALREADY_EMITTED,
             request,
             resolved);
+  }
+
+  private void cacheAcknowledgedTerminalNoCommit(
+      TargetIntakeCommandTerminalNoCommit observedAuthority,
+      ResolveTargetIntakeTerminalNoCommitResult resolved,
+      ConvergeTargetIntakeTerminalNoCommitResult convergence) {
+    IntakeTerminalNoCommitRecoveryRequest request =
+        new IntakeTerminalNoCommitRecoveryRequest(
+            IntakeTerminalNoCommitRecoveryRequest.V3_SCHEMA_VERSION,
+            Workflow.getInfo().getWorkflowId(),
+            Workflow.getInfo().getRunId(),
+            observedAuthority);
+    completedTerminalNoCommitRecoveryRequest = request;
+    completedTerminalNoCommitRecoveryResult =
+        new IntakeTerminalNoCommitRecoveryResult(
+            IntakeTerminalNoCommitRecoveryResult.V2_SCHEMA_VERSION,
+            IntakeTerminalNoCommitRecoveryResult.Disposition.PARENT_CONVERGED,
+            request,
+            resolved,
+            convergence);
   }
 
   private boolean terminateTargetAgentRunWithoutCommit(
@@ -2270,21 +2424,36 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
       IntakeTerminalNoCommitRecoveryRequest request) {
     Objects.requireNonNull(request, "request must not be null");
     TargetIntakeCommandTerminalNoCommit authority = request.authority();
-    if (!IntakeTerminalNoCommitRecoveryRequest.SCHEMA_VERSION.equals(
-            request.schemaVersion())
+    boolean acknowledgedRecovery =
+        IntakeTerminalNoCommitRecoveryRequest.V3_SCHEMA_VERSION.equals(
+            request.schemaVersion());
+    if ((!IntakeTerminalNoCommitRecoveryRequest.SCHEMA_VERSION.equals(
+                request.schemaVersion())
+            && !acknowledgedRecovery)
         || authority == null
         || !TargetIntakeCommandTerminalNoCommit.SCHEMA_VERSION.equals(
             authority.schemaVersion())) {
       throw new IllegalArgumentException(
-          "terminal-no-commit recovery requires v2 request and authority");
+          "terminal-no-commit recovery requires a v2 authority and v2/v3 request");
     }
     if (completedTerminalNoCommitRecoveryRequest != null
         || completedTerminalNoCommitRecoveryResult != null) {
-      if (!request.equals(completedTerminalNoCommitRecoveryRequest)
-          || completedTerminalNoCommitRecoveryResult == null) {
+      if (request.equals(completedTerminalNoCommitRecoveryRequest)
+          && completedTerminalNoCommitRecoveryResult != null) {
+        return;
+      }
+      boolean upgradesUnacknowledgedV2 =
+          acknowledgedRecovery
+              && completedTerminalNoCommitRecoveryRequest != null
+              && completedTerminalNoCommitRecoveryResult != null
+              && IntakeTerminalNoCommitRecoveryRequest.SCHEMA_VERSION.equals(
+                  completedTerminalNoCommitRecoveryRequest.schemaVersion())
+              && IntakeTerminalNoCommitRecoveryResult.SCHEMA_VERSION.equals(
+                  completedTerminalNoCommitRecoveryResult.schemaVersion())
+              && authority.equals(completedTerminalNoCommitRecoveryRequest.authority());
+      if (!upgradesUnacknowledgedV2) {
         throw new IllegalArgumentException("terminal-no-commit recovery replay conflicts");
       }
-      return;
     }
     if (start == null
         || !Workflow.getInfo().getWorkflowId().equals(request.workflowId())
@@ -3317,9 +3486,15 @@ public final class IntakeRoomWorkflowImpl implements IntakeRoomWorkflow {
       }
     }
     boolean carryPendingFinalizationRecovery = hasCompletedPendingFinalizationRecoveryCache();
+    boolean carryAcknowledgedTerminalNoCommit =
+        completedTerminalNoCommitRecoveryResult != null
+            && IntakeTerminalNoCommitRecoveryResult.V2_SCHEMA_VERSION.equals(
+                completedTerminalNoCommitRecoveryResult.schemaVersion());
     IntakeRoomCarryState carry =
         new IntakeRoomCarryState(
-            carryPendingFinalizationRecovery
+            carryAcknowledgedTerminalNoCommit
+                ? "intake-room-carry-state.v6"
+                : carryPendingFinalizationRecovery
                 ? "intake-room-carry-state.v5"
                 : completedTerminalNoCommitRecoveryResult != null
                 ? "intake-room-carry-state.v4"

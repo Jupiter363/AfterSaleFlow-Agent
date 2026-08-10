@@ -474,6 +474,45 @@ class JdbcIntakeFormalCommitPortTest {
     }
 
     @Test
+    void pendingPartyRemarkInviteKeepsFormalGateClosedUntilTheNextReadyPhase() {
+        Fixture pending = readyPartyFixture(
+                "party_pending_gate", "READY_PENDING_REMARK_INVITE");
+        insertFixture(pending);
+
+        port.commit(commitCommand(pending.request(), pending));
+
+        assertThat(scalar(
+                        "select event_type from case_timeline_event where case_id = ?",
+                        pending.caseId()))
+                .isEqualTo("TURN_NEEDS_INPUT");
+        assertThat(scalar(
+                        "select event_type from notification_outbox where case_id = ?",
+                        pending.caseId()))
+                .isEqualTo("TURN_NEEDS_INPUT");
+
+        Fixture waiting = readyPartyFixture(
+                "party_waiting_gate", "WAITING_FOR_REMARK");
+        insertFixture(waiting);
+
+        port.commit(commitCommand(waiting.request(), waiting));
+
+        assertThat(scalar(
+                        "select event_type from case_timeline_event where case_id = ?",
+                        waiting.caseId()))
+                .isEqualTo("TURN_READY_TO_CONFIRM");
+
+        Fixture legacyReady = legacyReadyFixture("legacy_ready_gate");
+        insertFixture(legacyReady);
+
+        port.commit(commitCommand(legacyReady.request(), legacyReady));
+
+        assertThat(scalar(
+                        "select event_type from case_timeline_event where case_id = ?",
+                        legacyReady.caseId()))
+                .isEqualTo("TURN_READY_TO_CONFIRM");
+    }
+
+    @Test
     void rehashedRequestCannotChangePersistedSnapshotMetadata() {
         Fixture fixture = fixture("SNAPSHOT_MUTATION_" + SEQUENCE.incrementAndGet());
         insertFixture(fixture);
@@ -677,6 +716,22 @@ class JdbcIntakeFormalCommitPortTest {
     }
 
     private static Fixture fixture(String suffix, ActorRole actorRole) {
+        return fixture(suffix, actorRole, null, false);
+    }
+
+    private static Fixture readyPartyFixture(String suffix, String remarkStatus) {
+        return fixture(suffix, ActorRole.USER, remarkStatus, true);
+    }
+
+    private static Fixture legacyReadyFixture(String suffix) {
+        return fixture(suffix, ActorRole.USER, null, true);
+    }
+
+    private static Fixture fixture(
+            String suffix,
+            ActorRole actorRole,
+            String partyRemarkStatus,
+            boolean readyProposal) {
         String caseId = "CASE_JDBC_" + suffix;
         String tenant = "tenant-jdbc";
         String threadId = "grt.v1." + sha256(suffix).substring(0, 32);
@@ -760,6 +815,9 @@ class JdbcIntakeFormalCommitPortTest {
                 audience,
                 issued.plusSeconds(2),
                 issued.plusSeconds(3));
+        if (partyRemarkStatus != null) {
+            event = withSourceType(event, SourceType.ROOM_MESSAGE);
+        }
         RoomGraphCommand command = new IntakeGraphCommandFactory().create(
                 new IntakeGraphCommandFactory.CommandRequest(
                         commandId,
@@ -783,6 +841,10 @@ class JdbcIntakeFormalCommitPortTest {
         patch.put("schema_version", "intake-dossier.v2");
         patch.putObject("case_story").put("summary", "JDBC integration turn");
         patch.putObject("requested_resolution").put("kind", "REFUND");
+        if (partyRemarkStatus != null) {
+            addPartyIntakeState(
+                    patch, actorRole, partyRemarkStatus, event.messageId());
+        }
         IntakeTurnProposal.ProfileVersions profiles = new IntakeTurnProposal.ProfileVersions(
                 command.graphVersion(),
                 command.checkpointSchemaVersion(),
@@ -808,9 +870,13 @@ class JdbcIntakeFormalCommitPortTest {
                 "The requested resolution is refund.",
                 patch,
                 null,
-                IntakeTurnProposal.Readiness.INCOMPLETE,
-                List.of("requested_resolution_detail"),
-                IntakeTurnProposal.Recommendation.NEED_MORE_INFO,
+                readyProposal
+                        ? IntakeTurnProposal.Readiness.READY_TO_CONFIRM
+                        : IntakeTurnProposal.Readiness.INCOMPLETE,
+                readyProposal ? List.of() : List.of("requested_resolution_detail"),
+                readyProposal
+                        ? IntakeTurnProposal.Recommendation.ACCEPTED
+                        : IntakeTurnProposal.Recommendation.NEED_MORE_INFO,
                 IntakeTurnProposal.KnowledgeAnswerMode.NONE,
                 new java.math.BigDecimal("0.82"),
                 profiles,
@@ -911,6 +977,66 @@ class JdbcIntakeFormalCommitPortTest {
                 authority,
                 new IntakeTurnProposalLoader.LoadedProposal(request.proposalReference(), proposal),
                 stored);
+    }
+
+    private static void addPartyIntakeState(
+            ObjectNode patch,
+            ActorRole actorRole,
+            String remarkStatus,
+            String phaseSourceMessageId) {
+        ObjectNode state = patch.putObject("party_intake_state");
+        state.put("schema_version", "party-intake-state.v1");
+        ObjectNode user = partyIntakeEntry(
+                actorRole == ActorRole.USER,
+                actorRole == ActorRole.USER ? remarkStatus : "NOT_READY",
+                actorRole == ActorRole.USER ? phaseSourceMessageId : "");
+        ObjectNode merchant = partyIntakeEntry(
+                actorRole == ActorRole.MERCHANT,
+                actorRole == ActorRole.MERCHANT ? remarkStatus : "NOT_READY",
+                actorRole == ActorRole.MERCHANT ? phaseSourceMessageId : "");
+        state.set("USER", user);
+        state.set("MERCHANT", merchant);
+        JsonNode current = state.path(actorRole.name());
+        for (String branch :
+                List.of("intake_quality", "missing_information", "handoff_notes", "admission")) {
+            patch.set(branch, current.path(branch).deepCopy());
+        }
+    }
+
+    private static ObjectNode partyIntakeEntry(
+            boolean ready, String remarkStatus, String phaseSourceMessageId) {
+        ObjectNode entry = objectMapper.createObjectNode();
+        ObjectNode quality = entry.putObject("intake_quality");
+        quality.put("score", ready ? 100 : 0);
+        quality.put("threshold", 85);
+        quality.put("ready_for_next_step", ready);
+        ObjectNode breakdown = quality.putObject("score_breakdown");
+        breakdown.put("references", ready ? 15 : 0);
+        breakdown.put("event_story", ready ? 20 : 0);
+        breakdown.put("party_positions", ready ? 20 : 0);
+        breakdown.put("requested_resolution", ready ? 15 : 0);
+        breakdown.put("risk_and_conflicts", ready ? 15 : 0);
+        breakdown.put("next_action_clarity", ready ? 15 : 0);
+        quality.put("improvement_reason", ready ? "" : "等待当前参与方补充案情。");
+        ObjectNode missing = entry.putObject("missing_information");
+        missing.putArray("blocking_gaps");
+        missing.putArray("nice_to_have_gaps");
+        missing.putArray("next_questions");
+        ObjectNode handoff = entry.putObject("handoff_notes");
+        handoff.put("remark_status", remarkStatus);
+        handoff.put("phase_source_message_id", phaseSourceMessageId);
+        handoff.put("latest_remark", "");
+        handoff.putArray("remarks");
+        handoff.put(
+                "instruction",
+                ready
+                        ? "Optional remark phase."
+                        : "当前参与方案情达到阈值后，接待官会询问交接备注。");
+        ObjectNode admission = entry.putObject("admission");
+        admission.put("recommendation", ready ? "ACCEPTED" : "NEED_MORE_INFO");
+        admission.put("reasoning", "");
+        admission.put("confidence", ready ? 0.95d : 0.0d);
+        return entry;
     }
 
     private static IntakeGraphFinalizationRequest requestWith(

@@ -66,6 +66,7 @@ import com.example.dispute.workflow.targete2e.persistence.material.TargetIntakeC
 import com.example.dispute.workflow.targete2e.persistence.material.TargetIntakeCommandMaterialStore.MaterialSnapshot;
 import com.example.dispute.workflow.temporal.room.intake.IntakeCommandExecutionContext;
 import com.example.dispute.workflow.temporal.room.intake.IntakeTargetAgentRunContext;
+import com.example.dispute.workflow.temporal.room.intake.TargetIntakeSourceEventRef;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.temporal.failure.ApplicationFailure;
@@ -330,13 +331,36 @@ public class CaseProcessLedgerActivitiesImpl
     @Transactional
     public ResolveTargetIntakeTerminalNoCommitResult resolveTargetIntakeTerminalNoCommit(
             ResolveTargetIntakeTerminalNoCommit request) {
-        TargetIntakeCommandTerminalNoCommit authority = request.authority();
-        requireTerminalNoCommitEvidence(authority);
-        CaseCommandEntity command = lockedCommand(authority.tenantSurrogate(), authority.commandId());
-        requireTerminalNoCommitCommand(command, authority);
+        TargetIntakeCommandTerminalNoCommit observedAuthority = request.authority();
+        requireTerminalNoCommitEvidence(observedAuthority);
+        CaseCommandEntity command =
+                lockedCommand(observedAuthority.tenantSurrogate(), observedAuthority.commandId());
+        requireTerminalNoCommitCommand(command, observedAuthority);
+        CaseRoomEpochEntity epoch = terminalNoCommitEpoch(observedAuthority);
+        CaseProcessProjectionEntity projection = terminalNoCommitProjection(observedAuthority);
+        if (ResolveTargetIntakeTerminalNoCommit.V2_SCHEMA_VERSION.equals(
+                request.schemaVersion())) {
+            if (command.getCommandStatus() != CommandStatus.ORCHESTRATION_ACCEPTED) {
+                throw permanentFailure(
+                        "TARGET_INTAKE_TERMINAL_NO_COMMIT_COMMAND_CONFLICT",
+                        "v3 authority can only be derived from the locked accepted source");
+            }
+            TargetIntakeCommandTerminalNoCommit authority =
+                    resolveStrictV3Authority(
+                            observedAuthority, epoch, projection, request.observedCaseEvents());
+            ReceiptIdentity receipt = terminalNoCommitReceipt(authority);
+            ParentWorkflowBinding parent = resolvedParentBinding(epoch, projection, authority);
+            return new ResolveTargetIntakeTerminalNoCommitResult(
+                    ResolveTargetIntakeTerminalNoCommitResult.V2_SCHEMA_VERSION,
+                    authority,
+                    receipt.uri(),
+                    receipt.sha256(),
+                    parent.workflowId(),
+                    parent.runId(),
+                    parent.buildId());
+        }
+        TargetIntakeCommandTerminalNoCommit authority = observedAuthority;
         ReceiptIdentity receipt = terminalNoCommitReceipt(authority);
-        CaseRoomEpochEntity epoch = terminalNoCommitEpoch(authority);
-        CaseProcessProjectionEntity projection = terminalNoCommitProjection(authority);
         if (command.getCommandStatus() == CommandStatus.FAILED) {
             requireExactTerminalFailure(command, authority, receipt);
             requireConvergedTerminalCoordinates(epoch, projection, authority);
@@ -348,7 +372,7 @@ public class CaseProcessLedgerActivitiesImpl
             requireSourceTerminalCoordinates(epoch, projection, authority);
         }
         return new ResolveTargetIntakeTerminalNoCommitResult(
-                "resolve-target-intake-terminal-no-commit-result.v1",
+                ResolveTargetIntakeTerminalNoCommitResult.SCHEMA_VERSION,
                 authority,
                 receipt.uri(),
                 receipt.sha256());
@@ -379,6 +403,7 @@ public class CaseProcessLedgerActivitiesImpl
         if (command.getCommandStatus() == CommandStatus.FAILED) {
             requireExactTerminalFailure(command, authority, receipt);
             requireParentBinding(epoch, projection, request);
+            requireInterveningEventLineage(authority);
             requireConvergedTerminalCoordinates(epoch, projection, authority);
             return terminalNoCommitResult(
                     IDEMPOTENT_REPLAY, authority, receipt, epoch, projection);
@@ -391,6 +416,7 @@ public class CaseProcessLedgerActivitiesImpl
 
         requireParentBinding(epoch, projection, request);
         requireSourceTerminalCoordinates(epoch, projection, authority);
+        requireInterveningEventLineage(authority);
         OffsetDateTime terminalAt =
                 OffsetDateTime.ofInstant(authority.terminalAt(), ZoneOffset.UTC);
         int epochUpdated =
@@ -425,7 +451,7 @@ public class CaseProcessLedgerActivitiesImpl
                         projection.getCurrentRoom(),
                         projection.getRoomPhase(),
                         authority.caseCommandSequence(),
-                        authority.lastCaseEventSequence(),
+                        projectionTargetEventSequence(authority),
                         projection.getProjectedDeadlineAt(),
                         request.caseWorkflowId(),
                         request.caseWorkflowRunId(),
@@ -449,7 +475,7 @@ public class CaseProcessLedgerActivitiesImpl
                 authority.newProcessRevision(),
                 authority.newRoomRevision(),
                 authority.caseCommandSequence(),
-                authority.lastCaseEventSequence());
+                projectionTargetEventSequence(authority));
     }
 
     private void requireTerminalNoCommitEvidence(
@@ -666,8 +692,10 @@ public class CaseProcessLedgerActivitiesImpl
         Instant runCompletedAt = run.getCompletedAt() == null
                 ? null
                 : run.getCompletedAt().toInstant();
-        boolean valid = TargetIntakeCommandTerminalNoCommit.SCHEMA_VERSION.equals(
-                        authority.schemaVersion())
+        boolean valid = (TargetIntakeCommandTerminalNoCommit.SCHEMA_VERSION.equals(
+                                authority.schemaVersion())
+                        || TargetIntakeCommandTerminalNoCommit.V3_SCHEMA_VERSION.equals(
+                                authority.schemaVersion()))
                 && storedResult.outcome() == ExecuteAgentRunResult.Outcome.COMPLETED
                 && storedResult.graphResult() != null
                 && authority.logicalRunId().equals(storedResult.agentRunId())
@@ -804,15 +832,145 @@ public class CaseProcessLedgerActivitiesImpl
         return projection;
     }
 
+    private TargetIntakeCommandTerminalNoCommit resolveStrictV3Authority(
+            TargetIntakeCommandTerminalNoCommit observedAuthority,
+            CaseRoomEpochEntity epoch,
+            CaseProcessProjectionEntity projection,
+            List<TargetIntakeSourceEventRef> observedCaseEvents) {
+        if (!TargetIntakeCommandTerminalNoCommit.SCHEMA_VERSION.equals(
+                        observedAuthority.schemaVersion())
+                || !RoomEpochReadiness.isTemporalReady(epoch, projection)
+                || epoch.getProcessRevision() != observedAuthority.expectedProcessRevision()
+                || epoch.getRoomRevision() != observedAuthority.expectedRoomRevision()
+                || projection.getProcessRevision()
+                        != observedAuthority.expectedProcessRevision()
+                || projection.getLastCommandSequence()
+                        != observedAuthority.caseCommandSequence() - 1
+                || projection.getLastCaseEventSequence()
+                        > observedAuthority.expectedLastCaseEventSequence()) {
+            throw permanentFailure(
+                    "TARGET_INTAKE_TERMINAL_NO_COMMIT_SOURCE_STALE",
+                    "strict v3 terminal-no-commit source coordinates are stale");
+        }
+        long expectedProjectionEventSequence = projection.getLastCaseEventSequence();
+        long newProjectionEventSequence = observedAuthority.lastCaseEventSequence();
+        List<TargetIntakeSourceEventRef> interveningEvents =
+                observedCaseEvents.stream()
+                        .filter(
+                                event ->
+                                        event.eventSequence() > expectedProjectionEventSequence
+                                                && event.eventSequence()
+                                                        <= newProjectionEventSequence)
+                        .toList();
+        TargetIntakeCommandTerminalNoCommit resolved;
+        try {
+            resolved =
+                    observedAuthority.withProjectionLineage(
+                            expectedProjectionEventSequence,
+                            newProjectionEventSequence,
+                            interveningEvents);
+        } catch (IllegalArgumentException invalidLineage) {
+            throw permanentFailure(
+                    "TARGET_INTAKE_TERMINAL_NO_COMMIT_EVENT_LINEAGE_INVALID",
+                    "Room observations do not cover the locked projection cursor gap");
+        }
+        requireInterveningEventLineage(resolved);
+        return resolved;
+    }
+
+    private ParentWorkflowBinding resolvedParentBinding(
+            CaseRoomEpochEntity epoch,
+            CaseProcessProjectionEntity projection,
+            TargetIntakeCommandTerminalNoCommit authority) {
+        String workflowId = epoch.getTemporalWorkflowId();
+        String runId = epoch.getTemporalRunId();
+        String buildId = epoch.getTemporalBuildId();
+        if (workflowId == null
+                || workflowId.isBlank()
+                || runId == null
+                || runId.isBlank()
+                || buildId == null
+                || buildId.isBlank()
+                || !workflowId.equals(
+                        CaseProcessWorkflowProtocol.caseWorkflowId(
+                                authority.tenantSurrogate(), authority.caseId()))
+                || !workflowId.equals(projection.getTemporalWorkflowId())
+                || !runId.equals(projection.getTemporalRunId())
+                || !buildId.equals(projection.getTemporalBuildId())
+                || !buildId.equals(authority.caseBuildId())) {
+            throw permanentFailure(
+                    "TARGET_INTAKE_TERMINAL_NO_COMMIT_PARENT_MISMATCH",
+                    "locked CaseProcess binding conflicts with strict v3 authority");
+        }
+        return new ParentWorkflowBinding(workflowId, runId, buildId);
+    }
+
+    private void requireInterveningEventLineage(
+            TargetIntakeCommandTerminalNoCommit authority) {
+        if (!TargetIntakeCommandTerminalNoCommit.V3_SCHEMA_VERSION.equals(
+                authority.schemaVersion())) {
+            return;
+        }
+        long fromSequence = Math.incrementExact(
+                authority.expectedProjectionLastCaseEventSequence());
+        long toSequence = authority.newProjectionLastCaseEventSequence();
+        List<CaseTimelineEventEntity> stored =
+                fromSequence > toSequence
+                        ? List.of()
+                        : eventRepository
+                                .findByCaseIdAndSequenceNoBetweenOrderBySequenceNoAsc(
+                                        authority.caseId(), fromSequence, toSequence);
+        List<TargetIntakeSourceEventRef> expected = authority.interveningCaseEvents();
+        if (stored.size() != expected.size()) {
+            throw permanentFailure(
+                    "TARGET_INTAKE_TERMINAL_NO_COMMIT_EVENT_LINEAGE_INVALID",
+                    "intervening case-event lineage is incomplete");
+        }
+        for (int index = 0; index < expected.size(); index++) {
+            TargetIntakeSourceEventRef reference = expected.get(index);
+            CaseTimelineEventEntity event = stored.get(index);
+            boolean globalProjectionCursor =
+                    TargetIntakeSourceEventRef.INTAKE_PROJECTION_READY.equals(
+                                    reference.eventType())
+                            && event.getRoomId() == null;
+            boolean roomScopeMatches = globalProjectionCursor;
+            if (!globalProjectionCursor) {
+                try {
+                    EventRoomEpoch eventRoom =
+                            roomEpoch(authority.tenantSurrogate(), authority.caseId(), event);
+                    roomScopeMatches =
+                            eventRoom.roomType() == authority.roomType()
+                                    && eventRoom.roomEpoch() == authority.roomEpoch();
+                } catch (RuntimeException invalidRoom) {
+                    roomScopeMatches = false;
+                }
+            }
+            if (!reference.eventId().equals(event.getId())
+                    || reference.eventSequence() != event.getSequenceNo()
+                    || !reference.eventType().equals(event.getEventType())
+                    || !reference.payloadHash().equals(
+                            sha256(event.getEventJson().getBytes(StandardCharsets.UTF_8)))
+                    || !TargetIntakeSourceEventRef.isCursorOnlyEventType(event.getEventType())
+                    || !roomScopeMatches) {
+                throw permanentFailure(
+                        "TARGET_INTAKE_TERMINAL_NO_COMMIT_EVENT_LINEAGE_INVALID",
+                        "intervening case-event lineage conflicts with Room observation");
+            }
+        }
+    }
+
     private static void requireSourceTerminalCoordinates(
             CaseRoomEpochEntity epoch,
             CaseProcessProjectionEntity projection,
             TargetIntakeCommandTerminalNoCommit authority) {
         long expectedLastCaseEventSequence =
-                TargetIntakeCommandTerminalNoCommit.LEGACY_SCHEMA_VERSION.equals(
+                TargetIntakeCommandTerminalNoCommit.V3_SCHEMA_VERSION.equals(
                                 authority.schemaVersion())
-                        ? authority.lastCaseEventSequence()
-                        : authority.expectedLastCaseEventSequence();
+                        ? authority.expectedProjectionLastCaseEventSequence()
+                        : TargetIntakeCommandTerminalNoCommit.LEGACY_SCHEMA_VERSION.equals(
+                                        authority.schemaVersion())
+                                ? authority.lastCaseEventSequence()
+                                : authority.expectedLastCaseEventSequence();
         if (!RoomEpochReadiness.isTemporalReady(epoch, projection)
                 || epoch.getProcessRevision() != authority.expectedProcessRevision()
                 || epoch.getRoomRevision() != authority.expectedRoomRevision()
@@ -834,11 +992,20 @@ public class CaseProcessLedgerActivitiesImpl
                 || epoch.getRoomRevision() < authority.newRoomRevision()
                 || projection.getProcessRevision() < authority.newProcessRevision()
                 || projection.getLastCommandSequence() < authority.caseCommandSequence()
-                || projection.getLastCaseEventSequence() < authority.lastCaseEventSequence()) {
+                || projection.getLastCaseEventSequence()
+                        < projectionTargetEventSequence(authority)) {
             throw permanentFailure(
                     "TARGET_INTAKE_TERMINAL_NO_COMMIT_REPLAY_STALE",
                     "terminal-no-commit replay cannot prove converged coordinates");
         }
+    }
+
+    private static long projectionTargetEventSequence(
+            TargetIntakeCommandTerminalNoCommit authority) {
+        return TargetIntakeCommandTerminalNoCommit.V3_SCHEMA_VERSION.equals(
+                        authority.schemaVersion())
+                ? authority.newProjectionLastCaseEventSequence()
+                : authority.lastCaseEventSequence();
     }
 
     private static void requireParentBinding(
@@ -895,6 +1062,8 @@ public class CaseProcessLedgerActivitiesImpl
     }
 
     private record ReceiptIdentity(String uri, String sha256) {}
+
+    private record ParentWorkflowBinding(String workflowId, String runId, String buildId) {}
 
     private CaseCommandEntity lockedRoutingCommand(RecordCaseCommandRouted request) {
         CaseCommandEntity command = lockedCommand(request.tenantSurrogate(), request.commandId());

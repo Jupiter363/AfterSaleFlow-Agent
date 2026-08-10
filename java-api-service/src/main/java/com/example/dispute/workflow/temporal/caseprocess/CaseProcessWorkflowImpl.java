@@ -566,6 +566,12 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
       return;
     }
     terminalNoCommitInbox.addLast(authority);
+    if (commandManualRecoveryRequired
+        && TargetIntakeCommandTerminalNoCommit.V3_SCHEMA_VERSION.equals(
+            authority.schemaVersion())
+        && !activateAcknowledgedTerminalNoCommitRecovery()) {
+      terminalNoCommitInbox.removeLastOccurrence(authority);
+    }
   }
 
   @Override
@@ -2179,8 +2185,14 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
 
   private boolean processTargetIntakeTerminalNoCommit() {
     TargetIntakeCommandTerminalNoCommit authority = terminalNoCommitInbox.peekFirst();
-    if (authority == null || commandManualRecoveryRequired) {
+    if (authority == null) {
       return false;
+    }
+    if (commandManualRecoveryRequired) {
+      if (!activateAcknowledgedTerminalNoCommitRecovery()) {
+        return false;
+      }
+      authority = terminalNoCommitInbox.peekFirst();
     }
     try {
       requireTargetIntakeTerminalNoCommit(authority);
@@ -2220,6 +2232,38 @@ public class CaseProcessWorkflowImpl implements CaseProcessWorkflow {
       commandManualRecoveryRequired = true;
       return true;
     }
+  }
+
+  private boolean activateAcknowledgedTerminalNoCommitRecovery() {
+    if (!commandManualRecoveryRequired
+        || !"TARGET_INTAKE_TERMINAL_NO_COMMIT_REJECTED".equals(protocolErrorCode)
+        || protocolErrorOrigin != RecoveryErrorOrigin.COMMAND) {
+      return false;
+    }
+    TargetIntakeCommandTerminalNoCommit rejected = terminalNoCommitInbox.peekFirst();
+    if (rejected == null
+        || !TargetIntakeCommandTerminalNoCommit.SCHEMA_VERSION.equals(
+            rejected.schemaVersion())) {
+      return false;
+    }
+    TargetIntakeCommandTerminalNoCommit acknowledged =
+        terminalNoCommitInbox.stream()
+            .filter(
+                candidate ->
+                    TargetIntakeCommandTerminalNoCommit.V3_SCHEMA_VERSION.equals(
+                            candidate.schemaVersion())
+                        && rejected.equals(candidate.asObservedV2Authority()))
+            .findFirst()
+            .orElse(null);
+    if (acknowledged == null) {
+      return false;
+    }
+    terminalNoCommitInbox.removeFirst();
+    terminalNoCommitInbox.removeFirstOccurrence(acknowledged);
+    terminalNoCommitInbox.addFirst(acknowledged);
+    commandManualRecoveryRequired = false;
+    clearRecoveryError(RecoveryErrorOrigin.COMMAND);
+    return true;
   }
 
   private void requireTargetIntakeTerminalNoCommit(

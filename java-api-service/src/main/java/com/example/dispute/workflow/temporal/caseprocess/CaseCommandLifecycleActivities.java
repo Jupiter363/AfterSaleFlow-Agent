@@ -1,9 +1,12 @@
 package com.example.dispute.workflow.temporal.caseprocess;
 
 import com.example.dispute.workflow.contract.v1.ContractTypes.RoomType;
+import com.example.dispute.workflow.temporal.room.intake.TargetIntakeSourceEventRef;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import io.temporal.activity.ActivityInterface;
 import io.temporal.activity.ActivityMethod;
 import java.time.Instant;
+import java.util.List;
 
 @ActivityInterface
 public interface CaseCommandLifecycleActivities {
@@ -199,15 +202,59 @@ public interface CaseCommandLifecycleActivities {
     }
 
     record ResolveTargetIntakeTerminalNoCommit(
-            String schemaVersion, TargetIntakeCommandTerminalNoCommit authority) {
+            String schemaVersion,
+            TargetIntakeCommandTerminalNoCommit authority,
+            @JsonInclude(JsonInclude.Include.NON_NULL)
+                    List<TargetIntakeSourceEventRef> observedCaseEvents) {
+
+        public static final String SCHEMA_VERSION =
+                "resolve-target-intake-terminal-no-commit.v1";
+        public static final String V2_SCHEMA_VERSION =
+                "resolve-target-intake-terminal-no-commit.v2";
+
+        public ResolveTargetIntakeTerminalNoCommit(
+                String schemaVersion, TargetIntakeCommandTerminalNoCommit authority) {
+            this(schemaVersion, authority, null);
+        }
 
         public ResolveTargetIntakeTerminalNoCommit {
-            if (!"resolve-target-intake-terminal-no-commit.v1".equals(schemaVersion)) {
+            boolean v2 = V2_SCHEMA_VERSION.equals(schemaVersion);
+            if (!SCHEMA_VERSION.equals(schemaVersion) && !v2) {
                 throw new IllegalArgumentException(
-                        "schemaVersion must be resolve-target-intake-terminal-no-commit.v1");
+                        "schemaVersion must be resolve-target-intake-terminal-no-commit.v1 or .v2");
             }
             if (authority == null) {
                 throw new IllegalArgumentException("authority must not be null");
+            }
+            if (!v2) {
+                if (observedCaseEvents != null) {
+                    throw new IllegalArgumentException("v1 resolve request must omit observed events");
+                }
+            } else {
+                if (!TargetIntakeCommandTerminalNoCommit.SCHEMA_VERSION.equals(
+                                authority.schemaVersion())
+                        || observedCaseEvents == null) {
+                    throw new IllegalArgumentException(
+                            "v2 resolve request requires strict v2 observed authority");
+                }
+                observedCaseEvents = List.copyOf(observedCaseEvents);
+                long previousSequence = -1;
+                for (TargetIntakeSourceEventRef event : observedCaseEvents) {
+                    if (event == null
+                            || !authority.tenantSurrogate().equals(event.tenantSurrogate())
+                            || !authority.caseId().equals(event.caseId())
+                            || event.roomType() != authority.roomType()
+                            || event.roomEpoch() != authority.roomEpoch()
+                            || event.fencingToken() != authority.fencingToken()
+                            || event.eventSequence() <= previousSequence
+                            || event.eventSequence() > authority.lastCaseEventSequence()
+                            || !TargetIntakeSourceEventRef.isCursorOnlyEventType(
+                                    event.eventType())) {
+                        throw new IllegalArgumentException(
+                                "v2 resolve request observed event lineage is invalid");
+                    }
+                    previousSequence = event.eventSequence();
+                }
             }
         }
     }
@@ -216,12 +263,29 @@ public interface CaseCommandLifecycleActivities {
             String schemaVersion,
             TargetIntakeCommandTerminalNoCommit authority,
             String receiptUri,
-            String receiptSha256) {
+            String receiptSha256,
+            @JsonInclude(JsonInclude.Include.NON_NULL) String caseWorkflowId,
+            @JsonInclude(JsonInclude.Include.NON_NULL) String caseWorkflowRunId,
+            @JsonInclude(JsonInclude.Include.NON_NULL) String caseWorkflowBuildId) {
+
+        public static final String SCHEMA_VERSION =
+                "resolve-target-intake-terminal-no-commit-result.v1";
+        public static final String V2_SCHEMA_VERSION =
+                "resolve-target-intake-terminal-no-commit-result.v2";
+
+        public ResolveTargetIntakeTerminalNoCommitResult(
+                String schemaVersion,
+                TargetIntakeCommandTerminalNoCommit authority,
+                String receiptUri,
+                String receiptSha256) {
+            this(schemaVersion, authority, receiptUri, receiptSha256, null, null, null);
+        }
 
         public ResolveTargetIntakeTerminalNoCommitResult {
-            if (!"resolve-target-intake-terminal-no-commit-result.v1".equals(schemaVersion)) {
+            boolean v2 = V2_SCHEMA_VERSION.equals(schemaVersion);
+            if (!SCHEMA_VERSION.equals(schemaVersion) && !v2) {
                 throw new IllegalArgumentException(
-                        "schemaVersion must be resolve-target-intake-terminal-no-commit-result.v1");
+                        "schemaVersion must be resolve-target-intake-terminal-no-commit-result.v1 or .v2");
             }
             if (authority == null) {
                 throw new IllegalArgumentException("authority must not be null");
@@ -229,6 +293,21 @@ public interface CaseCommandLifecycleActivities {
             requireText(receiptUri, "receiptUri");
             if (receiptSha256 == null || !receiptSha256.matches("[0-9a-f]{64}")) {
                 throw new IllegalArgumentException("receiptSha256 must be a lowercase SHA-256");
+            }
+            if (!v2) {
+                if (caseWorkflowId != null
+                        || caseWorkflowRunId != null
+                        || caseWorkflowBuildId != null) {
+                    throw new IllegalArgumentException("v1 resolve result must omit parent binding");
+                }
+            } else {
+                if (!TargetIntakeCommandTerminalNoCommit.V3_SCHEMA_VERSION.equals(
+                        authority.schemaVersion())) {
+                    throw new IllegalArgumentException("v2 resolve result requires strict v3 authority");
+                }
+                requireText(caseWorkflowId, "caseWorkflowId");
+                requireText(caseWorkflowRunId, "caseWorkflowRunId");
+                requireText(caseWorkflowBuildId, "caseWorkflowBuildId");
             }
         }
     }

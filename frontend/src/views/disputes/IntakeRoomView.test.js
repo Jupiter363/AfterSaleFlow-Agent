@@ -88,6 +88,84 @@ const readyTurnMemory = {
   },
 };
 
+function partyIntakeScoreBreakdown(score) {
+  const limits = {
+    references: 15,
+    event_story: 20,
+    party_positions: 20,
+    requested_resolution: 15,
+    risk_and_conflicts: 15,
+    next_action_clarity: 15,
+  };
+  let remaining = score;
+  return Object.fromEntries(Object.entries(limits).map(([component, maximum]) => {
+    const componentScore = Math.min(remaining, maximum);
+    remaining -= componentScore;
+    return [component, componentScore];
+  }));
+}
+
+function partyIntakeEntry(score, ready, role = "USER") {
+  return {
+    intake_quality: {
+      score,
+      threshold: 85,
+      ready_for_next_step: ready,
+      score_breakdown: partyIntakeScoreBreakdown(score),
+      improvement_reason: ready ? "" : "继续补充本方陈述",
+    },
+    missing_information: {
+      blocking_gaps: ready ? [] : ["本方关键事实"],
+      nice_to_have_gaps: [],
+      next_questions: ready ? [] : ["请继续说明本方关键事实"],
+    },
+    handoff_notes: {
+      remark_status: ready ? "READY_PENDING_REMARK_INVITE" : "NOT_READY",
+      phase_source_message_id: ready ? `MESSAGE_${role}_PHASE_1` : "",
+      latest_remark: "",
+      remarks: [],
+      instruction: ready ? "等待备注邀请" : "继续实体问答",
+    },
+    admission: {
+      recommendation: ready ? "ACCEPTED" : "NEED_MORE_INFO",
+      reasoning: ready ? "本方陈述完整" : "本方陈述尚不完整",
+      confidence: ready ? 0.95 : 0.4,
+    },
+  };
+}
+
+function partyScopedTurnMemory({
+  userScore = 100,
+  userReady = true,
+  merchantScore = 0,
+  merchantReady = false,
+  mirrorRole = "USER",
+  matrixKind = "BILATERAL_FROZEN",
+} = {}) {
+  const memory = structuredClone(readyTurnMemory);
+  const state = {
+    schema_version: "party-intake-state.v1",
+    USER: partyIntakeEntry(userScore, userReady, "USER"),
+    MERCHANT: partyIntakeEntry(merchantScore, merchantReady, "MERCHANT"),
+  };
+  const dossier = memory.case_intake_dossier.dossier;
+  dossier.party_intake_state = state;
+  ["intake_quality", "missing_information", "handoff_notes", "admission"]
+    .forEach((branch) => {
+      dossier[branch] = structuredClone(state[mirrorRole][branch]);
+    });
+  dossier.case_fact_matrix = {
+    schema_version: "case_fact_matrix.v2",
+    matrix_kind: matrixKind,
+  };
+  memory.case_intake_dossier.quality_score = state[mirrorRole].intake_quality.score;
+  memory.case_intake_dossier.ready_for_next_step =
+    state[mirrorRole].intake_quality.ready_for_next_step;
+  memory.case_intake_dossier.admission_recommendation =
+    state[mirrorRole].admission.recommendation;
+  return memory;
+}
+
 function formalTurnMemory(summary, dossierVersion = 1, sourceTurnNo = 1) {
   return {
     turn_no: sourceTurnNo,
@@ -914,6 +992,239 @@ describe("IntakeRoomView", () => {
 
     expect(wrapper.get("[data-dossier-status-rail]").text()).toContain("完善度 0%");
     expect(wrapper.get("[data-dossier-status-rail]").text()).not.toContain("完善度 88%");
+  });
+
+  it("selects independent party completeness when the authenticated role switches", async () => {
+    const scopedDispute = {
+      ...dispute,
+      initiator_id: "user-local",
+      initiator_role: "USER",
+      respondent_id: "merchant-local",
+      respondent_role: "MERCHANT",
+    };
+    const scopedStatus = {
+      initiator_role: "USER",
+      respondent_role: "MERCHANT",
+      initiator_status: "COMPLETED",
+      respondent_status: "OPEN",
+      current_actor_completed: false,
+      can_use_intake: true,
+      can_enter_evidence: false,
+    };
+    const turnMemoryLoader = vi.fn((snapshot) => Promise.resolve(
+      partyScopedTurnMemory({ mirrorRole: snapshot.actor.role }),
+    ));
+    const messagesLoader = vi.fn((snapshot) => Promise.resolve([{
+      id: `MESSAGE_${snapshot.actor.role}`,
+      sequence_no: 1,
+      sender_role: snapshot.actor.role,
+      message_text: `${snapshot.actor.role} scoped intake`,
+    }]));
+    const wrapper = await mountInteractiveView({
+      initialDispute: scopedDispute,
+      initialMessages: null,
+      initialTurnMemory: null,
+      initialIntakeStatus: scopedStatus,
+      messagesLoader,
+      turnMemoryLoader,
+      intakeStatusLoader: vi.fn().mockResolvedValue(scopedStatus),
+      eventStreamer: vi.fn(async () => {}),
+    });
+
+    expect(wrapper.get("[data-dossier-status-rail]").text()).toContain("完善度 100%");
+    expect(wrapper.get("[data-dossier-progress-hint]").text()).toBe("可以进入下一步");
+
+    actor.id = "merchant-local";
+    actor.role = "MERCHANT";
+    await flushPromises();
+
+    expect(wrapper.get("[data-dossier-status-rail]").text()).toContain("完善度 0%");
+    expect(wrapper.get("[data-dossier-status-rail]").text()).not.toContain("完善度 100%");
+    expect(wrapper.get("[data-dossier-progress-hint]").text()).toBe("继续完善案件信息");
+
+    actor.id = "user-local";
+    actor.role = "USER";
+    await wrapper.vm.$nextTick();
+    await vi.waitFor(() => {
+      expect(wrapper.get("[data-dossier-status-rail]").text()).toContain("完善度 100%");
+    });
+    expect(wrapper.get("[data-dossier-progress-hint]").text()).toBe("可以进入下一步");
+  });
+
+  it("shows only the respondent partial score and restores the initiator score", async () => {
+    actor.id = "merchant-local";
+    actor.role = "MERCHANT";
+    const scopedDispute = {
+      ...dispute,
+      initiator_id: "user-local",
+      initiator_role: "USER",
+      respondent_id: "merchant-local",
+      respondent_role: "MERCHANT",
+    };
+    const scopedStatus = {
+      initiator_role: "USER",
+      respondent_role: "MERCHANT",
+      initiator_status: "COMPLETED",
+      respondent_status: "OPEN",
+      current_actor_completed: false,
+      can_use_intake: true,
+      can_enter_evidence: false,
+    };
+    const turnMemoryLoader = vi.fn((snapshot) => Promise.resolve(
+      partyScopedTurnMemory({
+        merchantScore: 47,
+        merchantReady: false,
+        mirrorRole: snapshot.actor.role,
+      }),
+    ));
+    const messagesLoader = vi.fn((snapshot) => Promise.resolve([{
+      id: `MESSAGE_${snapshot.actor.role}`,
+      sequence_no: 1,
+      sender_role: snapshot.actor.role,
+      message_text: `${snapshot.actor.role} scoped intake`,
+    }]));
+    const wrapper = await mountInteractiveView({
+      initialDispute: scopedDispute,
+      initialMessages: null,
+      initialTurnMemory: null,
+      initialIntakeStatus: scopedStatus,
+      messagesLoader,
+      turnMemoryLoader,
+      intakeStatusLoader: vi.fn().mockResolvedValue(scopedStatus),
+      eventStreamer: vi.fn(async () => {}),
+    });
+
+    expect(wrapper.get("[data-dossier-status-rail]").text()).toContain("完善度 47%");
+    expect(wrapper.get("[data-dossier-status-rail]").text()).not.toContain("完善度 100%");
+
+    actor.id = "user-local";
+    actor.role = "USER";
+    await wrapper.vm.$nextTick();
+    await vi.waitFor(() => {
+      expect(wrapper.get("[data-dossier-status-rail]").text()).toContain("完善度 100%");
+    });
+    expect(wrapper.get("[data-dossier-status-rail]").text()).not.toContain("完善度 47%");
+  });
+
+  it("fails closed for malformed, one-sided, foreign, and role-mismatched party state", async () => {
+    actor.id = "merchant-local";
+    actor.role = "MERCHANT";
+    const wrongSchema = partyScopedTurnMemory();
+    wrongSchema.case_intake_dossier.dossier.party_intake_state.schema_version =
+      "party-intake-state.v2";
+    const oneSided = partyScopedTurnMemory();
+    delete oneSided.case_intake_dossier.dossier.party_intake_state.MERCHANT;
+    const foreignRole = partyScopedTurnMemory();
+    foreignRole.case_intake_dossier.dossier.party_intake_state.PLATFORM =
+      partyIntakeEntry(100, true);
+    const malformedQuality = partyScopedTurnMemory();
+    malformedQuality.case_intake_dossier.dossier.party_intake_state.MERCHANT
+      .intake_quality.score = "100";
+    const missingPhaseSource = partyScopedTurnMemory();
+    delete missingPhaseSource.case_intake_dossier.dossier.party_intake_state.MERCHANT
+      .handoff_notes.phase_source_message_id;
+    const readyBelowThreshold = partyScopedTurnMemory({
+      merchantScore: 84,
+      merchantReady: true,
+      mirrorRole: "MERCHANT",
+    });
+    const readyWithBlocker = partyScopedTurnMemory({
+      merchantScore: 100,
+      merchantReady: true,
+      mirrorRole: "MERCHANT",
+    });
+    readyWithBlocker.case_intake_dossier.dossier.party_intake_state.MERCHANT
+      .missing_information.blocking_gaps.push("仍有阻断缺口");
+    const crossRoleRemark = partyScopedTurnMemory({
+      merchantScore: 100,
+      merchantReady: true,
+      mirrorRole: "MERCHANT",
+    });
+    const crossRoleHandoff = crossRoleRemark.case_intake_dossier.dossier
+      .party_intake_state.MERCHANT.handoff_notes;
+    crossRoleHandoff.remark_status = "HAS_REMARKS";
+    crossRoleHandoff.phase_source_message_id = "MESSAGE_MERCHANT_REMARK_1";
+    crossRoleHandoff.latest_remark = "商家备注";
+    crossRoleHandoff.remarks = [{
+      role: "USER",
+      text: "商家备注",
+      source_message_id: "MESSAGE_MERCHANT_REMARK_1",
+      turn_source: "ROOM_MESSAGE",
+    }];
+    const mirrorDrift = partyScopedTurnMemory({
+      merchantScore: 100,
+      merchantReady: true,
+      mirrorRole: "MERCHANT",
+    });
+    mirrorDrift.case_intake_dossier.dossier.handoff_notes.phase_source_message_id =
+      "MESSAGE_FOREIGN_PHASE";
+
+    for (const memory of [
+      wrongSchema,
+      oneSided,
+      foreignRole,
+      malformedQuality,
+      missingPhaseSource,
+      readyBelowThreshold,
+      readyWithBlocker,
+      crossRoleRemark,
+      mirrorDrift,
+    ]) {
+      const wrapper = await mountInteractiveView({
+        initialTurnMemory: memory,
+        initialIntakeStatus: {
+          initiator_role: "USER",
+          respondent_role: "MERCHANT",
+          initiator_status: "COMPLETED",
+          respondent_status: "OPEN",
+          current_actor_completed: false,
+          can_use_intake: true,
+          can_enter_evidence: false,
+        },
+      });
+      expect(wrapper.get("[data-dossier-status-rail]").text()).toContain("完善度 0%");
+      expect(wrapper.get("[data-dossier-progress-hint]").text()).toBe("继续完善案件信息");
+      wrapper.unmount();
+    }
+
+    const mismatchedRole = await mountInteractiveView({
+      initialDispute: {
+        ...dispute,
+        initiator_id: "user-local",
+        initiator_role: "USER",
+        respondent_id: "merchant-local",
+        respondent_role: "USER",
+      },
+      initialTurnMemory: partyScopedTurnMemory(),
+      initialIntakeStatus: {
+        initiator_role: "USER",
+        respondent_role: "USER",
+        initiator_status: "COMPLETED",
+        respondent_status: "OPEN",
+        current_actor_completed: false,
+        can_use_intake: true,
+        can_enter_evidence: false,
+      },
+    });
+    expect(mismatchedRole.get("[data-dossier-status-rail]").text())
+      .toContain("完善度 0%");
+    mismatchedRole.unmount();
+  });
+
+  it("keeps legacy completeness for a proven initiator but never lends it to the respondent", async () => {
+    const wrapper = await mountInteractiveView({
+      initialTurnMemory: structuredClone(readyTurnMemory),
+    });
+
+    expect(wrapper.get("[data-dossier-status-rail]").text()).toContain("完善度 88%");
+    expect(wrapper.get("[data-dossier-progress-hint]").text()).toBe("可以进入下一步");
+
+    actor.id = "merchant-local";
+    actor.role = "MERCHANT";
+    await flushPromises();
+
+    expect(wrapper.get("[data-dossier-status-rail]").text()).toContain("完善度 0%");
+    expect(wrapper.get("[data-dossier-progress-hint]").text()).toBe("继续完善案件信息");
   });
 
   it("creates one opening when a TEMPORAL initiator enters an empty intake room", async () => {
@@ -3736,7 +4047,7 @@ describe("IntakeRoomView", () => {
     );
   });
 
-  it("keeps the legacy v1 rich dossier visible after schema normalization", async () => {
+  it("keeps the legacy v1 dossier visible without lending completeness to the respondent", async () => {
     actor.id = "merchant-local";
     actor.role = "MERCHANT";
     const legacyMemory = structuredClone(readyTurnMemory);
@@ -3760,7 +4071,8 @@ describe("IntakeRoomView", () => {
     expect(wrapper.get("[data-dispute-detail-summary]").text()).toContain("物流显示签收");
     expect(wrapper.get("[data-dispute-detail-claim]").text()).not.toContain("等待接待官整理");
     expect(wrapper.get("[data-verification-gaps]").text()).toContain("签收人身份");
-    expect(wrapper.get("[data-dossier-status-rail]").text()).toContain("完善度 88%");
+    expect(wrapper.get("[data-dossier-status-rail]").text()).toContain("完善度 0%");
+    expect(wrapper.get("[data-dossier-status-rail]").text()).not.toContain("完善度 88%");
     expect(wrapper.get("[data-confirm-admission]").attributes("disabled")).toBeUndefined();
   });
 
@@ -3873,7 +4185,7 @@ describe("IntakeRoomView", () => {
     expect(wrapper.find("[data-case-detail-dossier]").exists()).toBe(true);
     const summaryCard = wrapper.get("[data-case-detail-summary-card]");
     expect(wrapper.find("[data-dossier-status-rail]").exists()).toBe(true);
-    expect(wrapper.get("[data-dossier-status-rail]").text()).toContain("完善度 88%");
+    expect(wrapper.get("[data-dossier-status-rail]").text()).toContain("完善度 0%");
     expect(wrapper.get("[data-dossier-status-rail]").text()).toContain("中风险");
     expect(summaryCard.find("[data-dispute-detail-card]").exists()).toBe(true);
     expect(summaryCard.find("[data-dispute-detail-card]").text()).toContain("争议详情");
@@ -3890,7 +4202,7 @@ describe("IntakeRoomView", () => {
     expect(wrapper.get("[data-verification-gaps]").text()).toContain("物流签收及投递记录");
     expect(wrapper.text()).not.toContain("SIGNED_NOT_RECEIVED");
     expect(wrapper.text()).not.toContain("88/100");
-    expect(wrapper.text()).toContain("可以进入下一步");
+    expect(wrapper.text()).toContain("继续完善案件信息");
     expect(wrapper.find("[data-case-detail-dossier]").exists()).toBe(true);
     expect(wrapper.find("[data-case-detail-meta]").exists()).toBe(false);
     expect(wrapper.find("[data-case-index-strip]").exists()).toBe(true);
@@ -3927,7 +4239,7 @@ describe("IntakeRoomView", () => {
     expect(wrapper.text()).not.toContain("关联引用");
     expect(wrapper.text()).not.toContain("处理判断");
     expect(wrapper.get("[data-case-risk-grade]").text()).toContain("中风险");
-    expect(wrapper.get("[data-dossier-progress-hint]").text()).toBe("可以进入下一步");
+    expect(wrapper.get("[data-dossier-progress-hint]").text()).toBe("继续完善案件信息");
     expect(wrapper.text()).not.toContain("可继续对话纠正");
   });
 

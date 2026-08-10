@@ -280,8 +280,9 @@ public final class JdbcIntakeFormalCommitPort
                         List.of(outboxId),
                         now.toInstant()));
 
-        writeDomainEvent(command, current.roomId(), receipt, eventId, eventSequence, now);
-        writeOutbox(command, receipt, eventId, eventSequence, outboxId, now);
+        writeDomainEvent(
+                command, current.roomId(), dossier, receipt, eventId, eventSequence, now);
+        writeOutbox(command, dossier, receipt, eventId, eventSequence, outboxId, now);
         writeAudit(command, receipt, auditId, now);
         completeOperation(operation, receipt, eventId, now);
         return receipt;
@@ -847,7 +848,12 @@ public final class JdbcIntakeFormalCommitPort
                         "INTAKE_DOSSIER_STALE", "Intake dossier changed while it was locked");
             }
         }
-        return new DossierWrite(version, merged.matrixVersion(), merged.canonicalDossierJson());
+        String eventType = turnEventType(
+                proposal,
+                merged.dossier(),
+                request.threadBinding().registration().actorScope().actorRole());
+        return new DossierWrite(
+                version, merged.matrixVersion(), merged.canonicalDossierJson(), eventType);
     }
 
     /**
@@ -1000,13 +1006,14 @@ public final class JdbcIntakeFormalCommitPort
     private void writeDomainEvent(
             CommitCommand command,
             String roomId,
+            DossierWrite dossier,
             IntakeFinalizationReceipt receipt,
             String eventId,
             long sequence,
             OffsetDateTime now) {
         ObjectNode event = objectMapper.createObjectNode();
         event.put("schema_version", "intake-turn-committed-event.v1");
-        event.put("event_type", turnEventType(command.loadedProposal().proposal()));
+        event.put("event_type", dossier.eventType());
         event.put("operation_key", receipt.operationKey());
         event.put("request_hash", command.request().requestHash());
         event.put("result_hash", receipt.resultHash());
@@ -1041,7 +1048,7 @@ public final class JdbcIntakeFormalCommitPort
                         .addValue("caseId", receipt.caseId())
                         .addValue("sequenceNo", sequence)
                         .addValue("roomId", roomId)
-                        .addValue("eventType", turnEventType(command.loadedProposal().proposal()))
+                        .addValue("eventType", dossier.eventType())
                         .addValue("now", now)
                         .addValue("sourceRefs", sourceRefs)
                         .addValue("eventJson", ContractJson.canonicalString(event))
@@ -1053,6 +1060,7 @@ public final class JdbcIntakeFormalCommitPort
 
     private void writeOutbox(
             CommitCommand command,
+            DossierWrite dossier,
             IntakeFinalizationReceipt receipt,
             String eventId,
             long eventSequence,
@@ -1084,7 +1092,7 @@ public final class JdbcIntakeFormalCommitPort
                         .addValue("id", outboxId)
                         .addValue("caseId", receipt.caseId())
                         .addValue("eventKey", correlationKey(command.request().operationKey()))
-                        .addValue("eventType", turnEventType(command.loadedProposal().proposal()))
+                        .addValue("eventType", dossier.eventType())
                         .addValue("payload", ContractJson.canonicalString(payload))
                         .addValue("now", now));
     }
@@ -1343,10 +1351,25 @@ public final class JdbcIntakeFormalCommitPort
         return (int) value;
     }
 
-    private static String turnEventType(IntakeTurnProposal proposal) {
-        return proposal.readiness() == IntakeTurnProposal.Readiness.READY_TO_CONFIRM
-                ? "TURN_READY_TO_CONFIRM"
-                : "TURN_NEEDS_INPUT";
+    private static String turnEventType(
+            IntakeTurnProposal proposal, JsonNode dossier, ActorRole actorRole) {
+        if (proposal.readiness() != IntakeTurnProposal.Readiness.READY_TO_CONFIRM) {
+            return "TURN_NEEDS_INPUT";
+        }
+        JsonNode partyState = dossier.path("party_intake_state");
+        if (!partyState.isObject()
+                || !"party-intake-state.v1".equals(
+                        partyState.path("schema_version").asText(null))) {
+            return "TURN_READY_TO_CONFIRM";
+        }
+        JsonNode currentHandoff = partyState.path(actorRole.name()).path("handoff_notes");
+        boolean exactCurrentMirror = currentHandoff.isObject()
+                && currentHandoff.equals(dossier.path("handoff_notes"));
+        return exactCurrentMirror
+                        && "READY_PENDING_REMARK_INVITE".equals(
+                                currentHandoff.path("remark_status").asText(null))
+                ? "TURN_NEEDS_INPUT"
+                : "TURN_READY_TO_CONFIRM";
     }
 
     private static String correlationKey(String operationKey) {
@@ -1404,5 +1427,6 @@ public final class JdbcIntakeFormalCommitPort
 
     private record DossierRow(String id, long version, String json) {}
 
-    private record DossierWrite(long version, Long matrixVersion, String scrollSnapshotJson) {}
+    private record DossierWrite(
+            long version, Long matrixVersion, String scrollSnapshotJson, String eventType) {}
 }

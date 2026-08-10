@@ -19,6 +19,17 @@ import java.util.Set;
 public final class IntakeDossierProjectionMerger {
 
     private static final String DOSSIER_SCHEMA_VERSION = "intake-dossier.v2";
+    private static final String PARTY_INTAKE_STATE_SCHEMA_VERSION = "party-intake-state.v1";
+    private static final List<String> PARTY_INTAKE_ROLES = List.of("USER", "MERCHANT");
+    private static final Set<String> PARTY_INTAKE_ENTRY_FIELDS = Set.of(
+            "intake_quality", "missing_information", "handoff_notes", "admission");
+    private static final Map<String, Integer> QUALITY_COMPONENT_MAXIMA = Map.of(
+            "references", 15,
+            "event_story", 20,
+            "party_positions", 20,
+            "requested_resolution", 15,
+            "risk_and_conflicts", 15,
+            "next_action_clarity", 15);
 
     private static final Set<String> DOSSIER_BRANCHES = Set.of(
             "schema_version",
@@ -34,7 +45,8 @@ public final class IntakeDossierProjectionMerger {
             "missing_information",
             "intake_quality",
             "admission",
-            "handoff_notes");
+            "handoff_notes",
+            "party_intake_state");
 
     private static final Set<String> FORBIDDEN_KEYS = Set.of(
             "memory_frame",
@@ -157,6 +169,7 @@ public final class IntakeDossierProjectionMerger {
         });
         rejectForbiddenKeys(patch);
         rejectDerivedMatrixDossierKeys(patch);
+        requirePartyIntakeTransition(current, (ObjectNode) patch, matrixAuthority);
 
         boolean hasPersistedClaim = current.path("claim_resolution").isObject()
                 || current.path("requested_resolution").isObject();
@@ -306,6 +319,7 @@ public final class IntakeDossierProjectionMerger {
         }
 
         normalizeProjectionMetadata(merged, (ObjectNode) patch, proposal);
+        requirePartyIntakeProjection(merged, matrixAuthority);
         requireStableTransition(current, merged);
         int qualityScore = qualityScore(merged, proposal);
         boolean ready = proposal.readiness() == IntakeTurnProposal.Readiness.READY_TO_CONFIRM;
@@ -440,6 +454,328 @@ public final class IntakeDossierProjectionMerger {
                         "dossier patch rebinds a stable fact or source hash");
             }
         });
+    }
+
+    private static void requirePartyIntakeTransition(
+            JsonNode current, ObjectNode patch, MatrixAuthority authority) {
+        JsonNode currentState = current.get("party_intake_state");
+        JsonNode proposedState = patch.get("party_intake_state");
+        if (currentState == null && proposedState == null) {
+            return;
+        }
+        if (authority == null) {
+            throw rejected(
+                    "INTAKE_PARTY_STATE_AUTHORITY_REQUIRED",
+                    "party-scoped Intake state requires current Java actor authority");
+        }
+        if (currentState != null) {
+            validatePartyIntakeState(currentState);
+        }
+        if (proposedState != null) {
+            validatePartyIntakeState(proposedState);
+        }
+
+        String actorRole = authority.actorRole().name();
+        String otherRole = "USER".equals(actorRole) ? "MERCHANT" : "USER";
+        if (currentState != null
+                && proposedState != null
+                && !currentState.path(otherRole).equals(proposedState.path(otherRole))) {
+            throw rejected(
+                    "INTAKE_PARTY_STATE_OTHER_PARTY_DRIFT",
+                    "party-scoped Intake patch changes the non-current party authority");
+        }
+        if (currentState == null
+                && proposedState != null
+                && !defaultPartyIntakeEntry().equals(proposedState.path(otherRole))) {
+            throw rejected(
+                    "INTAKE_PARTY_STATE_LEGACY_MIGRATION_INVALID",
+                    "legacy Intake migration may initialize only the current party entry");
+        }
+        if (proposedState != null) {
+            JsonNode previousActorEntry = currentState == null
+                    ? defaultPartyIntakeEntry()
+                    : currentState.path(actorRole);
+            JsonNode proposedActorEntry = proposedState.path(actorRole);
+            JsonNode previousHandoff = previousActorEntry.path("handoff_notes");
+            JsonNode proposedHandoff = proposedActorEntry.path("handoff_notes");
+            String previousStatus = previousHandoff.path("remark_status").asText("");
+            String proposedStatus = proposedHandoff.path("remark_status").asText("");
+            String previousSource =
+                    previousHandoff.path("phase_source_message_id").asText("");
+            String proposedSource =
+                    proposedHandoff.path("phase_source_message_id").asText("");
+            if (!previousStatus.equals(proposedStatus)) {
+                if (authority.sourceType() != SourceType.ROOM_MESSAGE
+                        || !authority.sourceRef().equals(proposedSource)) {
+                    throw rejected(
+                            "INTAKE_PARTY_STATE_PHASE_SOURCE_INVALID",
+                            "party Intake phase change is not bound to the current room message");
+                }
+            } else if (!previousSource.equals(proposedSource)) {
+                throw rejected(
+                        "INTAKE_PARTY_STATE_PHASE_SOURCE_DRIFT",
+                        "party Intake phase source changed without a phase transition");
+            }
+        }
+    }
+
+    private static void requirePartyIntakeProjection(
+            ObjectNode dossier, MatrixAuthority authority) {
+        JsonNode state = dossier.get("party_intake_state");
+        if (state == null) {
+            return;
+        }
+        if (authority == null) {
+            throw rejected(
+                    "INTAKE_PARTY_STATE_AUTHORITY_REQUIRED",
+                    "party-scoped Intake projection requires current Java actor authority");
+        }
+        validatePartyIntakeState(state);
+        JsonNode actorEntry = state.path(authority.actorRole().name());
+        for (String field : PARTY_INTAKE_ENTRY_FIELDS) {
+            if (!actorEntry.path(field).equals(dossier.path(field))) {
+                throw rejected(
+                        "INTAKE_PARTY_STATE_MIRROR_CONFLICT",
+                        "legacy Intake branch is not the exact current-actor mirror");
+            }
+        }
+    }
+
+    private static void validatePartyIntakeState(JsonNode state) {
+        requireExactObjectFields(
+                state,
+                Set.of("schema_version", "USER", "MERCHANT"),
+                "INTAKE_PARTY_STATE_SCHEMA_INVALID",
+                "party_intake_state must contain exactly schema_version, USER, and MERCHANT");
+        if (!PARTY_INTAKE_STATE_SCHEMA_VERSION.equals(
+                state.path("schema_version").asText(null))) {
+            throw rejected(
+                    "INTAKE_PARTY_STATE_SCHEMA_INVALID",
+                    "party_intake_state schema_version is unsupported");
+        }
+        for (String role : PARTY_INTAKE_ROLES) {
+            validatePartyIntakeEntry(state.path(role), role);
+        }
+    }
+
+    private static void validatePartyIntakeEntry(JsonNode entry, String role) {
+        requireExactObjectFields(
+                entry,
+                PARTY_INTAKE_ENTRY_FIELDS,
+                "INTAKE_PARTY_STATE_ENTRY_INVALID",
+                "party Intake entry must contain exactly the four state branches");
+
+        JsonNode quality = entry.path("intake_quality");
+        requireExactObjectFields(
+                quality,
+                Set.of(
+                        "score",
+                        "threshold",
+                        "ready_for_next_step",
+                        "score_breakdown",
+                        "improvement_reason"),
+                "INTAKE_PARTY_STATE_QUALITY_INVALID",
+                "party Intake quality shape is invalid");
+        JsonNode score = quality.path("score");
+        JsonNode threshold = quality.path("threshold");
+        JsonNode ready = quality.path("ready_for_next_step");
+        JsonNode breakdown = quality.path("score_breakdown");
+        requireExactObjectFields(
+                breakdown,
+                QUALITY_COMPONENT_MAXIMA.keySet(),
+                "INTAKE_PARTY_STATE_QUALITY_INVALID",
+                "party Intake score breakdown shape is invalid");
+        if (!score.isIntegralNumber()
+                || !score.canConvertToInt()
+                || score.intValue() < 0
+                || score.intValue() > 100
+                || !threshold.isIntegralNumber()
+                || threshold.intValue() != 85
+                || !ready.isBoolean()
+                || !quality.path("improvement_reason").isTextual()) {
+            throw rejected(
+                    "INTAKE_PARTY_STATE_QUALITY_INVALID",
+                    "party Intake quality violates the canonical scalar contract");
+        }
+        int breakdownTotal = 0;
+        for (Map.Entry<String, Integer> component : QUALITY_COMPONENT_MAXIMA.entrySet()) {
+            JsonNode value = breakdown.path(component.getKey());
+            if (!value.isIntegralNumber()
+                    || !value.canConvertToInt()
+                    || value.intValue() < 0
+                    || value.intValue() > component.getValue()) {
+                throw rejected(
+                        "INTAKE_PARTY_STATE_QUALITY_INVALID",
+                        "party Intake score component is outside its canonical range");
+            }
+            breakdownTotal += value.intValue();
+        }
+        if (breakdownTotal != score.intValue()) {
+            throw rejected(
+                    "INTAKE_PARTY_STATE_QUALITY_INVALID",
+                    "party Intake score does not equal its canonical breakdown");
+        }
+
+        JsonNode missing = entry.path("missing_information");
+        requireExactObjectFields(
+                missing,
+                Set.of("blocking_gaps", "nice_to_have_gaps", "next_questions"),
+                "INTAKE_PARTY_STATE_MISSING_INVALID",
+                "party Intake missing-information shape is invalid");
+        for (String field : List.of("blocking_gaps", "nice_to_have_gaps", "next_questions")) {
+            JsonNode values = missing.path(field);
+            if (!values.isArray()) {
+                throw rejected(
+                        "INTAKE_PARTY_STATE_MISSING_INVALID",
+                        "party Intake missing-information value is not an array");
+            }
+            values.forEach(value -> {
+                if (!value.isTextual()) {
+                    throw rejected(
+                            "INTAKE_PARTY_STATE_MISSING_INVALID",
+                            "party Intake missing-information item is not text");
+                }
+            });
+        }
+
+        JsonNode handoff = entry.path("handoff_notes");
+        requireExactObjectFields(
+                handoff,
+                Set.of(
+                        "remark_status",
+                        "phase_source_message_id",
+                        "latest_remark",
+                        "remarks",
+                        "instruction"),
+                "INTAKE_PARTY_STATE_HANDOFF_INVALID",
+                "party Intake handoff shape is invalid");
+        Set<String> remarkStatuses = Set.of(
+                "NOT_READY",
+                "READY_PENDING_REMARK_INVITE",
+                "WAITING_FOR_REMARK",
+                "HAS_REMARKS",
+                "NO_EXTRA_REMARKS");
+        if (!handoff.path("remark_status").isTextual()
+                || !remarkStatuses.contains(handoff.path("remark_status").textValue())
+                || !handoff.path("phase_source_message_id").isTextual()
+                || !handoff.path("latest_remark").isTextual()
+                || !handoff.path("instruction").isTextual()
+                || !handoff.path("remarks").isArray()) {
+            throw rejected(
+                    "INTAKE_PARTY_STATE_HANDOFF_INVALID",
+                    "party Intake handoff violates the canonical scalar contract");
+        }
+        Set<String> remarkSourceIds = new HashSet<>();
+        handoff.path("remarks").forEach(remark -> {
+            requireExactObjectFields(
+                    remark,
+                    Set.of("role", "text", "source_message_id", "turn_source"),
+                    "INTAKE_PARTY_STATE_HANDOFF_INVALID",
+                    "party Intake remark shape is invalid");
+            if (!role.equals(remark.path("role").asText(null))
+                    || !remark.path("text").isTextual()
+                    || !remark.path("source_message_id").isTextual()
+                    || !remark.path("turn_source").isTextual()) {
+                throw rejected(
+                    "INTAKE_PARTY_STATE_HANDOFF_INVALID",
+                    "party Intake remark has foreign or malformed authority");
+            }
+            if (!remarkSourceIds.add(remark.path("source_message_id").textValue())) {
+                throw rejected(
+                        "INTAKE_PARTY_STATE_HANDOFF_INVALID",
+                        "party Intake remarks repeat a source message authority");
+            }
+        });
+
+        JsonNode admission = entry.path("admission");
+        requireExactObjectFields(
+                admission,
+                Set.of("recommendation", "reasoning", "confidence"),
+                "INTAKE_PARTY_STATE_ADMISSION_INVALID",
+                "party Intake admission shape is invalid");
+        Set<String> recommendations = Set.of("NEED_MORE_INFO", "ACCEPTED", "NOT_ADMISSIBLE");
+        JsonNode confidence = admission.path("confidence");
+        if (!admission.path("recommendation").isTextual()
+                || !recommendations.contains(admission.path("recommendation").textValue())
+                || !admission.path("reasoning").isTextual()
+                || !confidence.isNumber()
+                || confidence.decimalValue().compareTo(BigDecimal.ZERO) < 0
+                || confidence.decimalValue().compareTo(BigDecimal.ONE) > 0) {
+            throw rejected(
+                    "INTAKE_PARTY_STATE_ADMISSION_INVALID",
+                    "party Intake admission violates the canonical scalar contract");
+        }
+
+        boolean isReady = ready.booleanValue();
+        boolean accepted = "ACCEPTED".equals(admission.path("recommendation").textValue());
+        String remarkStatus = handoff.path("remark_status").textValue();
+        JsonNode remarks = handoff.path("remarks");
+        String latestRemark = handoff.path("latest_remark").textValue();
+        if ((isReady
+                        && (score.intValue() < 85
+                                || missing.path("blocking_gaps").size() > 0
+                                || !accepted
+                                || "NOT_READY".equals(remarkStatus)))
+                || (!isReady && (accepted || !"NOT_READY".equals(remarkStatus)))) {
+            throw rejected(
+                    "INTAKE_PARTY_STATE_OUTCOME_CONFLICT",
+                    "party Intake readiness, handoff, and admission disagree");
+        }
+        boolean canonicalRemarkState = switch (remarkStatus) {
+            case "NOT_READY", "READY_PENDING_REMARK_INVITE", "WAITING_FOR_REMARK" ->
+                latestRemark.isEmpty() && remarks.isEmpty();
+            case "HAS_REMARKS" -> !latestRemark.isBlank()
+                    && !remarks.isEmpty()
+                    && latestRemark.equals(remarks.get(remarks.size() - 1).path("text").asText());
+            case "NO_EXTRA_REMARKS" -> "无额外备注。".equals(latestRemark) && remarks.isEmpty();
+            default -> false;
+        };
+        if (!canonicalRemarkState) {
+            throw rejected(
+                    "INTAKE_PARTY_STATE_HANDOFF_INVALID",
+                    "party Intake remark status does not match its canonical payload");
+        }
+    }
+
+    private static void requireExactObjectFields(
+            JsonNode value,
+            Set<String> expected,
+            String code,
+            String message) {
+        if (!value.isObject()) {
+            throw rejected(code, message);
+        }
+        Set<String> actual = new HashSet<>();
+        value.fieldNames().forEachRemaining(actual::add);
+        if (!actual.equals(expected)) {
+            throw rejected(code, message);
+        }
+    }
+
+    private static ObjectNode defaultPartyIntakeEntry() {
+        ObjectNode entry = JsonNodeFactory.instance.objectNode();
+        ObjectNode quality = entry.putObject("intake_quality");
+        quality.put("score", 0);
+        quality.put("threshold", 85);
+        quality.put("ready_for_next_step", false);
+        ObjectNode breakdown = quality.putObject("score_breakdown");
+        QUALITY_COMPONENT_MAXIMA.keySet().forEach(component -> breakdown.put(component, 0));
+        quality.put("improvement_reason", "等待当前参与方补充案情。");
+        ObjectNode missing = entry.putObject("missing_information");
+        missing.putArray("blocking_gaps");
+        missing.putArray("nice_to_have_gaps");
+        missing.putArray("next_questions");
+        ObjectNode handoff = entry.putObject("handoff_notes");
+        handoff.put("remark_status", "NOT_READY");
+        handoff.put("phase_source_message_id", "");
+        handoff.put("latest_remark", "");
+        handoff.putArray("remarks");
+        handoff.put("instruction", "当前参与方案情达到阈值后，接待官会询问交接备注。");
+        ObjectNode admission = entry.putObject("admission");
+        admission.put("recommendation", "NEED_MORE_INFO");
+        admission.put("reasoning", "");
+        admission.put("confidence", 0.0d);
+        return entry;
     }
 
     private static void normalizeProjectionMetadata(
